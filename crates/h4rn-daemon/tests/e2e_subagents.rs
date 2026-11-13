@@ -18,8 +18,9 @@ use h4rn_daemon::threads::{NewThread, ThreadManager, ThreadManagerOptions};
 use h4rn_harness::{FakeHarness, HarnessEvent};
 use h4rn_mcp::session::McpScope;
 use h4rn_protocol::{
-    ApprovalDecision, ApprovalKind, ApprovalOption, Event, HarnessKind, Item, RuntimeMode,
-    SubagentId, SubagentState, ThreadFilter, ThreadId,
+    AgentState, ApprovalDecision, ApprovalKind, ApprovalOption, AutoResumePolicy, Event,
+    HarnessKind, Item, RuntimeMode, SubagentId, SubagentState, ThreadFilter, ThreadId, TurnStatus,
+    Usage, UsageGroupBy, UsageScope,
 };
 use serde_json::{Value, json};
 use tokio::sync::oneshot;
@@ -86,7 +87,12 @@ async fn boot() -> TestDaemon {
 
 async fn boot_with_catalog(catalog: Arc<StaticHarnessCatalog>) -> TestDaemon {
     let dir = tempfile::tempdir().expect("tempdir");
-    let data_dir = dir.path().to_path_buf();
+    let mut daemon = boot_in(dir.path().to_path_buf(), catalog).await;
+    daemon._dir = Some(dir);
+    daemon
+}
+
+async fn boot_in(data_dir: std::path::PathBuf, catalog: Arc<StaticHarnessCatalog>) -> TestDaemon {
     let config = Config {
         data_dir: data_dir.clone(),
         bind: "127.0.0.1:0".parse().expect("bind"),
@@ -126,7 +132,7 @@ async fn boot_with_catalog(catalog: Arc<StaticHarnessCatalog>) -> TestDaemon {
         data_dir,
         shutdown: Some(shutdown),
         task,
-        _dir: Some(dir),
+        _dir: None,
     }
 }
 
@@ -548,6 +554,331 @@ async fn a_wall_time_budget_interrupts_the_child() {
     );
 
     daemon.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Metering, auto-resume and durability integration (ADR-024, ADR-038).
+// ---------------------------------------------------------------------------
+
+fn catalog_with_child(child: FakeHarness) -> Arc<StaticHarnessCatalog> {
+    let mut catalog = StaticHarnessCatalog::new();
+    catalog.register(Arc::new(FakeHarness::new()));
+    catalog.register(Arc::new(child));
+    Arc::new(catalog)
+}
+
+fn limit_then_resume_child(reset_at: chrono::DateTime<chrono::Utc>) -> FakeHarness {
+    let first = vec![
+        HarnessEvent::Usage {
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Usage::default()
+            },
+        },
+        HarnessEvent::LimitHit {
+            reset_at: Some(reset_at),
+            auto_resume: true,
+        },
+        HarnessEvent::TurnCompleted {
+            status: TurnStatus::Failed,
+            usage: Usage::default(),
+        },
+    ];
+    let second = vec![
+        HarnessEvent::TextDelta {
+            text: "resumed".into(),
+        },
+        HarnessEvent::TurnCompleted {
+            status: TurnStatus::Completed,
+            usage: Usage {
+                input_tokens: 1,
+                output_tokens: 2,
+                ..Usage::default()
+            },
+        },
+    ];
+    FakeHarness::with_session_scripts(vec![first, second]).with_kind(HarnessKind::Codex)
+}
+
+async fn parent_usage(
+    manager: &ThreadManager,
+    parent: &ThreadId,
+    include_children: bool,
+) -> h4rn_protocol::UsageReport {
+    manager
+        .usage_report(h4rn_meter::ReportQuery {
+            scope: UsageScope::Thread,
+            scope_id: Some(parent.as_str().to_owned()),
+            include_children,
+            range: Default::default(),
+            group_by: UsageGroupBy::None,
+            bucket: None,
+        })
+        .await
+        .expect("usage report")
+}
+
+#[tokio::test]
+async fn subagent_usage_is_metered_and_rolls_up_into_the_parent() {
+    let repo = git_repo();
+    let daemon = boot_with_catalog(catalog_with_child(
+        FakeHarness::new().with_kind(HarnessKind::Codex),
+    ))
+    .await;
+    let parent = create_parent(&daemon, repo.path()).await;
+    let hub = HubClient::new(&daemon, &parent);
+
+    let id = subagent_id(
+        &hub.spawn(json!({
+            "task": "reply with pong",
+            "harness": "codex",
+            "budget": {"max_wall_time_secs": 30}
+        }))
+        .await,
+    );
+    let finished = hub
+        .call(
+            "h4rn__get_subagent_result",
+            json!({"subagent_id": id, "wait_secs": 10}),
+        )
+        .await;
+    assert_eq!(
+        finished["structuredContent"]["subagent"]["state"], "completed",
+        "{finished}"
+    );
+
+    let own = parent_usage(&daemon.manager, &parent, false).await;
+    let rolled = parent_usage(&daemon.manager, &parent, true).await;
+    assert_eq!(own.totals.turns, 1, "only the parent's own turn counts");
+    assert_eq!(
+        rolled.totals.turns,
+        own.totals.turns + 1,
+        "the child's turn rolls up into the parent"
+    );
+
+    // The child's row keeps its own thread id and names the parent, so it can
+    // also be reported on its own.
+    let meter = daemon.manager.meter().expect("metering is enabled");
+    let rows = meter
+        .store()
+        .rows(&h4rn_meter::UsageFilter {
+            thread_id: Some(parent.as_str().to_owned()),
+            include_children: true,
+            ..Default::default()
+        })
+        .await
+        .expect("ledger rows");
+    assert!(
+        rows.iter()
+            .any(|row| row.parent_thread_id.as_deref() == Some(parent.as_str())),
+        "a child row must record its parent: {rows:?}"
+    );
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_subagent_limit_follows_auto_resume_and_the_parent_sees_scheduled() {
+    let reset_at = chrono::Utc::now() + chrono::Duration::milliseconds(300);
+    let daemon = boot_with_catalog(catalog_with_child(limit_then_resume_child(reset_at))).await;
+    daemon.manager.set_auto_resume_policy(AutoResumePolicy {
+        failover: false,
+        max_wait_ms: 3_600_000,
+        prompt: "continue after the limit".into(),
+        jitter_ms: 0,
+    });
+    let repo = git_repo();
+    let parent = create_parent(&daemon, repo.path()).await;
+    let hub = HubClient::new(&daemon, &parent);
+
+    let id = subagent_id(
+        &hub.spawn(json!({
+            "task": "hit a usage limit",
+            "harness": "codex",
+            "budget": {"max_wall_time_secs": 120}
+        }))
+        .await,
+    );
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let scheduled = loop {
+        let views = daemon.subagents.list(Some(&parent), true).await;
+        if let Some(view) = views.iter().find(|view| view.subagent_id == id)
+            && view.state == SubagentState::Scheduled
+        {
+            break view.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the parent never saw the child as Scheduled"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert_eq!(scheduled.agent_state, AgentState::Scheduled);
+    assert!(
+        scheduled.result.is_none(),
+        "a scheduled child has no result yet"
+    );
+    assert!(
+        daemon
+            .manager
+            .limits_report()
+            .await
+            .expect("limits")
+            .limits
+            .iter()
+            .any(|limit| limit.thread_id.as_ref() == scheduled.child_thread_id.as_ref()),
+        "the child's limit is recorded in the ledger"
+    );
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let views = daemon.subagents.list(Some(&parent), true).await;
+        if let Some(view) = views.iter().find(|view| view.subagent_id == id)
+            && view.state.is_terminal()
+        {
+            assert_eq!(view.state, SubagentState::Completed, "{view:?}");
+            let result = view.result.as_ref().expect("a completed result");
+            assert!(
+                result.text.contains("resumed"),
+                "the resumed turn's text is the result: {result:?}"
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the child never resumed after its usage limit"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    let own = parent_usage(&daemon.manager, &parent, false).await;
+    let rolled = parent_usage(&daemon.manager, &parent, true).await;
+    assert_eq!(
+        rolled.totals.turns,
+        own.totals.turns + 2,
+        "the limited turn and the resumed turn both roll up"
+    );
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_subagent_token_budget_is_enforced_from_the_metered_ledger() {
+    let child = FakeHarness::with_session_scripts(vec![vec![
+        HarnessEvent::Usage {
+            usage: Usage {
+                input_tokens: 50,
+                output_tokens: 10,
+                ..Usage::default()
+            },
+        },
+        HarnessEvent::TurnCompleted {
+            status: TurnStatus::Completed,
+            usage: Usage::default(),
+        },
+    ]])
+    .with_kind(HarnessKind::Codex);
+    let daemon = boot_with_catalog(catalog_with_child(child)).await;
+    let repo = git_repo();
+    let parent = create_parent(&daemon, repo.path()).await;
+    let hub = HubClient::new(&daemon, &parent);
+
+    let id = subagent_id(
+        &hub.spawn(json!({
+            "task": "spend too many tokens",
+            "harness": "codex",
+            "budget": {"max_tokens": 5, "max_wall_time_secs": 30}
+        }))
+        .await,
+    );
+    let finished = hub
+        .call(
+            "h4rn__get_subagent_result",
+            json!({"subagent_id": id, "wait_secs": 10}),
+        )
+        .await;
+    let view = &finished["structuredContent"]["subagent"];
+    assert_eq!(view["state"], "budget_exceeded", "{view}");
+    assert!(
+        view["result"]["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("token budget")),
+        "{view}"
+    );
+    assert!(
+        view["progress"]["tokens"].as_u64().unwrap_or(0) >= 60,
+        "the meter's count is what the card shows: {view}"
+    );
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn subagent_records_survive_a_daemon_restart() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data_dir = dir.path().to_path_buf();
+
+    let first = boot_in(data_dir.clone(), catalog()).await;
+    let parent = create_parent(&first, dir.path()).await;
+    let hub = HubClient::new(&first, &parent);
+    let id = subagent_id(
+        &hub.spawn(json!({
+            "task": "reply with pong",
+            "harness": "codex",
+            "budget": {"max_wall_time_secs": 30}
+        }))
+        .await,
+    );
+    let finished = hub
+        .call(
+            "h4rn__get_subagent_result",
+            json!({"subagent_id": id, "wait_secs": 10}),
+        )
+        .await;
+    assert_eq!(
+        finished["structuredContent"]["subagent"]["state"], "completed",
+        "{finished}"
+    );
+    first.stop().await;
+
+    // A fresh daemon on the same data directory rebuilds the record, status and
+    // result, and the parent's journal still has the durable Delegated card.
+    let second = boot_in(data_dir, catalog()).await;
+    let views = second.subagents.list(Some(&parent), true).await;
+    assert_eq!(views.len(), 1, "the subagent record survives the restart");
+    assert_eq!(views[0].subagent_id, id);
+    assert_eq!(views[0].state, SubagentState::Completed);
+    let result = views[0].result.as_ref().expect("restored result");
+    assert!(
+        result.text.contains("echo: reply with pong"),
+        "the result is rebuilt: {result:?}"
+    );
+    let fetched = second
+        .subagents
+        .get(&id)
+        .await
+        .expect("get by id after restart");
+    assert_eq!(fetched.state, SubagentState::Completed);
+
+    let snapshot = second
+        .manager
+        .get_thread(&parent, 0)
+        .await
+        .expect("parent projection");
+    assert!(
+        snapshot.events.iter().any(|wire| matches!(
+            &wire.event,
+            Event::ItemCompleted {
+                item: Item::Delegated { subagent_id, .. },
+                ..
+            } if subagent_id == &id
+        )),
+        "the parent keeps its Delegated card across a restart"
+    );
+
+    second.stop().await;
 }
 
 /// Real cross-harness delegation: Claude Code drives the `h4rn__*` tools and a

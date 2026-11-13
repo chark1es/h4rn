@@ -139,6 +139,7 @@ const EMPTY_FILTER: ThreadFilter = {
   harness: null,
   search: null,
   include_snoozed: true,
+  include_children: false,
 };
 
 function createBody(): Omit<Extract<ClientRequest, { type: "create_thread" }>, "type"> {

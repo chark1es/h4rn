@@ -24,6 +24,11 @@ pub enum SubagentState {
     Running,
     /// The child is blocked on an approval the parent inbox is showing.
     AwaitingApproval,
+    /// The child hit a usage limit and is waiting for its auto-resume.
+    ///
+    /// The child thread keeps the daemon's normal auto-resume schedule, so the
+    /// parent card shows a countdown instead of a stalled child.
+    Scheduled,
     /// The child finished and its result is available.
     Completed,
     /// The child failed before producing a result.
@@ -323,5 +328,6 @@ mod tests {
         assert!(SubagentState::BudgetExceeded.is_terminal());
         assert!(!SubagentState::Running.is_terminal());
         assert!(!SubagentState::AwaitingApproval.is_terminal());
+        assert!(!SubagentState::Scheduled.is_terminal());
     }
 }

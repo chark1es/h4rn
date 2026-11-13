@@ -25,6 +25,7 @@ const FILTER: ThreadFilterState = {
 function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
   return {
     thread_id: "t1",
+    parent_thread_id: null,
     host: "host_a",
     harness: "claude_code",
     title: "Refactor the daemon",

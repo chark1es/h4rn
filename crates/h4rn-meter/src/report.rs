@@ -21,6 +21,8 @@ pub struct ReportQuery {
     pub scope: UsageScope,
     /// Thread id or workspace path for those scopes.
     pub scope_id: Option<String>,
+    /// Roll subagent children up into a thread-scoped report.
+    pub include_children: bool,
     /// Half-open time range.
     pub range: UsageRange,
     /// Breakdown.
@@ -99,7 +101,11 @@ pub fn build_report(rows: &[UsageRow], query: &ReportQuery) -> UsageReport {
 fn in_scope(row: &UsageRow, query: &ReportQuery) -> bool {
     match query.scope {
         UsageScope::Thread => match &query.scope_id {
-            Some(thread) => row.thread_id.as_deref() == Some(thread.as_str()),
+            Some(thread) => {
+                row.thread_id.as_deref() == Some(thread.as_str())
+                    || (query.include_children
+                        && row.parent_thread_id.as_deref() == Some(thread.as_str()))
+            }
             None => true,
         },
         UsageScope::Workspace => match &query.scope_id {
@@ -300,6 +306,7 @@ mod tests {
         UsageRow {
             row_id: id.into(),
             thread_id: Some(thread.into()),
+            parent_thread_id: None,
             run_id: Some(format!("run_{id}")),
             workspace: Some("/repo".into()),
             machine: Some("host".into()),
@@ -334,6 +341,7 @@ mod tests {
         ReportQuery {
             scope,
             scope_id: None,
+            include_children: false,
             range: UsageRange::default(),
             group_by,
             bucket: None,
@@ -370,6 +378,41 @@ mod tests {
         assert_eq!(report.totals.runtime_ms, 11_000);
         assert_eq!(report.totals.active_ms, 2_000);
         assert_eq!(report.totals.idle_ms, 9_000);
+    }
+
+    #[test]
+    fn thread_scope_rolls_children_up_only_when_asked() {
+        let parent = row(
+            "p",
+            "t_parent",
+            0,
+            1_000,
+            2,
+            UsageProvenance::SelfMetered,
+            false,
+        );
+        let mut child = row(
+            "c",
+            "t_child",
+            0,
+            1_000,
+            7,
+            UsageProvenance::SelfMetered,
+            false,
+        );
+        child.parent_thread_id = Some("t_parent".into());
+        let rows = vec![parent, child];
+
+        let mut query = query(UsageScope::Thread, UsageGroupBy::None);
+        query.scope_id = Some("t_parent".into());
+        let own = build_report(&rows, &query);
+        assert_eq!(own.totals.turns, 1);
+        assert_eq!(own.totals.output_tokens, 2);
+
+        query.include_children = true;
+        let rolled = build_report(&rows, &query);
+        assert_eq!(rolled.totals.turns, 2);
+        assert_eq!(rolled.totals.output_tokens, 9);
     }
 
     #[test]

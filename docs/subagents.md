@@ -69,10 +69,12 @@ is what "waiting on a child" means.
 
 - `SubagentId` is stable (`sa_` + UUID v7) and stored on the child thread's
   metadata, so the child thread and its journal survive a daemon restart.
-- The supervisor's live record (budget counters, current activity, result) is
-  in memory in this phase: after a restart the child is still a normal thread
-  with `parent_thread_id`, but `list_subagents` does not reconstruct its
-  delegation card. (TODO: rebuild views from thread metadata on startup.)
+- The supervisor's record (budget counters, current activity, result) is
+  persisted to `subagents.db` in the daemon data directory on every mutation
+  and rehydrated before the watcher starts, so a restart rebuilds the
+  `Delegated` card, statuses and results. A child that was running when the
+  daemon stopped is restored as `failed` with an explicit reason; terminal
+  records are restored verbatim.
 - The child thread id is pre-allocated so early harness events can be matched to
   the record even before `create_thread` returns.
 - `ThreadSummary.parent_thread_id` is persisted in the event journal's thread
@@ -122,10 +124,17 @@ The daemon, not the parent model, enforces:
 
 `SubagentProgress` carries turns started/completed, cumulative tokens and
 elapsed milliseconds. Turns are counted from the child's `TurnStarted`; tokens
-come from the child thread's merged usage on each `ThreadUpserted`; the
-wall-clock is refreshed by the supervisor tick. When the child settles, its
-last assistant message, usage and worktree file changes are folded into
-`SubagentResult`.
+are read from the metered ledger (`ThreadManager::metered_tokens`), which is the
+same source of truth as budgeting elsewhere (ADR-024), so a budget is enforced
+against metered usage rather than the thread projection's last report. The
+wall-clock is refreshed by the supervisor tick and excludes time spent paused
+while the child is `scheduled`. When the child settles, its last assistant
+message, usage and worktree file changes are folded into `SubagentResult`.
+
+Child turns are recorded in the ledger with their `parent_thread_id`. A
+`GetUsage`/`ReportQuery` for the parent can pass `include_children = true` to
+roll child usage into the parent's totals; the default reports only the
+parent's own turns.
 
 ## Failure modes
 
@@ -134,6 +143,7 @@ last assistant message, usage and worktree file changes are folded into
 | `starting` | The thread row exists; the harness session has not started. |
 | `running` | The child is working. |
 | `awaiting_approval` | The child is blocked on a hand shown on the parent. |
+| `scheduled` | The child hit a usage limit; auto-resume is armed and the parent sees the wait instead of a failure. |
 | `completed` | The child finished; `result` is available. |
 | `failed` | The child's turn failed or the harness errored. |
 | `cancelled` | The user or parent cancelled it. |

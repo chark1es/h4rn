@@ -3,4 +3,4 @@
 /**
  * Lifecycle state of one subagent.
  */
-export type SubagentState = "starting" | "running" | "awaiting_approval" | "completed" | "failed" | "cancelled" | "budget_exceeded";
+export type SubagentState = "starting" | "running" | "awaiting_approval" | "scheduled" | "completed" | "failed" | "cancelled" | "budget_exceeded";

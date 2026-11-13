@@ -8,9 +8,9 @@ import { MessageAttachments } from "@/features/attachments/MessageAttachments";
 import type { ThreadSummary } from "@/gen";
 import { useSmoothText } from "@/hooks/use-smooth-text";
 import { glyphForAgentState } from "@/lib/agent";
-import { harnessLabel, harnessSeed, machineSeed } from "@/lib/entities";
+import { harnessLabel, harnessSeed, machineSeed, subagentSeed } from "@/lib/entities";
 import { absoluteTime, cost, countdown, duration, tokens, tokensPerSecond } from "@/lib/format";
-import type { MessageItem, StreamTurn, TurnItem } from "@/lib/store/projection";
+import type { DelegatedItem, MessageItem, StreamTurn, TurnItem } from "@/lib/store/projection";
 import { cn } from "@/lib/utils";
 import { ApprovalCard } from "./ApprovalCard";
 import { Markdown } from "./Markdown";
@@ -70,6 +70,28 @@ function LimitItemView({ resetAt, autoResume }: { resetAt: string | null; autoRe
   );
 }
 
+function DelegatedItemView({ item }: { item: DelegatedItem }) {
+  return (
+    <div className="flex items-start gap-2 rounded-md border border-line bg-panel px-3 py-2">
+      <EntityAvatar
+        seed={subagentSeed(item.host, item.threadId ?? item.subagentId, item.subagentId)}
+        kind="subagent"
+        label={item.subagentId}
+        size={16}
+      />
+      <div className="min-w-0 space-y-0.5">
+        <p className="text-compact font-medium text-ink">
+          Delegated to {harnessLabel(item.harness)} · {item.model}
+        </p>
+        <p className="line-clamp-2 text-micro text-ink-muted">{item.task}</p>
+        <p className="font-mono text-micro tabular text-ink-faint">
+          {item.state.replaceAll("_", " ")}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function ErrorItemView({
   message,
   hint,
@@ -117,6 +139,8 @@ function Item({ item, threadId, at }: { item: TurnItem; threadId: string; at: st
       );
     case "limit":
       return <LimitItemView resetAt={item.resetAt} autoResume={item.autoResume} />;
+    case "delegated":
+      return <DelegatedItemView item={item} />;
     case "error":
       return <ErrorItemView message={item.message} hint={item.hint} retryable={item.retryable} />;
   }

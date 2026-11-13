@@ -1,10 +1,15 @@
 import type {
+  AgentState,
   ApprovalDecision,
   ApprovalKind,
   ApprovalOption,
   Attachment,
   Event,
+  HarnessKind,
+  HostId,
   MessageRole,
+  SubagentId,
+  SubagentState,
   ToolCall,
   TurnId,
   TurnStatus,
@@ -52,7 +57,26 @@ export type ErrorItem = {
   retryable: boolean;
 };
 
-export type TurnItem = MessageItem | ToolItem | ApprovalItem | LimitItem | ErrorItem;
+export type DelegatedItem = {
+  kind: "delegated";
+  itemId: string;
+  subagentId: SubagentId;
+  threadId: string | null;
+  task: string;
+  harness: HarnessKind;
+  host: HostId;
+  model: string;
+  state: SubagentState;
+  agentState: AgentState;
+};
+
+export type TurnItem =
+  | MessageItem
+  | ToolItem
+  | ApprovalItem
+  | LimitItem
+  | ErrorItem
+  | DelegatedItem;
 
 export type StreamTurn = {
   id: TurnId;
@@ -142,6 +166,17 @@ function upsertTool(turn: StreamTurn, toolCall: ToolCall): void {
   const id = `tool:${toolCall.tool_call_id}`;
   const index = turn.items.findIndex((item) => item.kind === "tool" && item.itemId === id);
   const item: ToolItem = { kind: "tool", itemId: id, toolCall };
+  if (index >= 0) {
+    turn.items[index] = item;
+  } else {
+    turn.items.push(item);
+  }
+}
+
+function upsertDelegated(turn: StreamTurn, item: DelegatedItem): void {
+  const index = turn.items.findIndex(
+    (candidate) => candidate.kind === "delegated" && candidate.subagentId === item.subagentId,
+  );
   if (index >= 0) {
     turn.items[index] = item;
   } else {
@@ -256,7 +291,47 @@ export function foldEvent(
       }
 
       const turn = ensureTurn(log, turn_id, at);
-      upsertTool(turn, item.tool_call);
+      if (item.kind === "tool_call") {
+        upsertTool(turn, item.tool_call);
+      } else {
+        upsertDelegated(turn, {
+          kind: "delegated",
+          itemId: item.item_id,
+          subagentId: item.subagent_id,
+          threadId: item.thread_id,
+          task: item.task,
+          harness: item.harness,
+          host: item.host,
+          model: item.model,
+          state: item.state,
+          agentState: item.agent_state,
+        });
+      }
+      return log;
+    }
+
+    case "subagent_spawned":
+    case "subagent_updated":
+    case "subagent_finished": {
+      const subagent = event.subagent;
+      for (const turn of log.turns) {
+        const index = turn.items.findIndex(
+          (item) => item.kind === "delegated" && item.subagentId === subagent.subagent_id,
+        );
+        if (index < 0) continue;
+        const current = turn.items[index];
+        if (current?.kind !== "delegated") continue;
+        turn.items[index] = {
+          ...current,
+          threadId: subagent.child_thread_id,
+          task: subagent.task,
+          harness: subagent.harness,
+          host: subagent.host,
+          model: subagent.model,
+          state: subagent.state,
+          agentState: subagent.agent_state,
+        };
+      }
       return log;
     }
 

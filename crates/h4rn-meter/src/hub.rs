@@ -29,6 +29,8 @@ const EVENT_CAPACITY: usize = 256;
 pub struct TurnContext {
     /// Thread id.
     pub thread_id: Option<String>,
+    /// Parent thread when this turn belongs to a subagent child.
+    pub parent_thread_id: Option<String>,
     /// Run id (the turn).
     pub run_id: Option<String>,
     /// Workspace path.
@@ -152,6 +154,7 @@ impl MeterHub {
         let row = UsageRow {
             row_id: format!("usage_{}", uuid::Uuid::now_v7()),
             thread_id: context.thread_id,
+            parent_thread_id: context.parent_thread_id,
             run_id: context.run_id.clone(),
             workspace: context.workspace,
             machine: context.machine,
@@ -340,6 +343,7 @@ impl MeterHub {
             thread_id: matches!(query.scope, UsageScope::Thread)
                 .then(|| query.scope_id.clone())
                 .flatten(),
+            include_children: query.include_children,
             workspace: matches!(query.scope, UsageScope::Workspace)
                 .then(|| query.scope_id.clone())
                 .flatten(),
@@ -359,6 +363,7 @@ impl MeterHub {
             range: Default::default(),
             group_by,
             bucket: None,
+            include_children: false,
         })
         .await
     }
@@ -512,6 +517,7 @@ mod tests {
             .report(ReportQuery {
                 scope: UsageScope::Thread,
                 scope_id: Some(thread_id.as_str().to_owned()),
+                include_children: false,
                 range: Default::default(),
                 group_by: UsageGroupBy::None,
                 bucket: None,

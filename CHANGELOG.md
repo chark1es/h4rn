@@ -96,6 +96,13 @@ All notable changes to h4rn are recorded here. The format follows
 - **Docs and tests**: `docs/subagents.md`, ADR-038/039, unit tests for budgets
   and depth, an MCP-HTTP integration test with `FakeHarness` parent and child,
   and an ignored real Claude Code → Codex delegation test.
+- **Metering, resume and durability**: child turns are metered with
+  `parent_thread_id`, and `GetUsage`/reports accept `include_children` to roll a
+  delegation tree into the parent's totals. Token budgets enforce the ledger's
+  metered totals and wall-clock excludes time paused for a resume. A limit-hit
+  child becomes `scheduled`, arms auto-resume and is mirrored to the parent
+  instead of failing. Supervisor records persist in `subagents.db`, so the
+  delegation card, status and result survive a daemon restart.
 
 ### Phase 5 — metering and auto-resume
 
@@ -134,6 +141,9 @@ All notable changes to h4rn are recorded here. The format follows
   resume-now/failover, lifecycle while scheduled, a FakeHarness
   limit-hit→scheduled→resumed end-to-end test, Postgres sync idempotency and
   aggregate buckets.
+- **Subagent rollup**: ledger rows carry `parent_thread_id`; `GetUsage`'s
+  `include_children` folds a parent's child turns into its totals, and subagent
+  token budgets enforce the same metered counts.
 - **Docs**: [`docs/metering.md`](docs/metering.md) defines every metric, its
   source and the dedupe rule.
 

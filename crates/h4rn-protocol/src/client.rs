@@ -586,6 +586,12 @@ pub enum ClientRequest {
         group_by: crate::usage::UsageGroupBy,
         /// Optional hour/day series.
         bucket: Option<crate::usage::UsageBucket>,
+        /// Include subagent children in a thread-scoped report.
+        ///
+        /// With this set, `scope_id` names a parent thread and the report adds
+        /// every child's turns; without it only the thread's own rows count.
+        #[serde(default)]
+        include_children: bool,
     },
     /// Read known usage limits and the auto-resume policy.
     GetLimits,

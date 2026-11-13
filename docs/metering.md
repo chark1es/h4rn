@@ -118,6 +118,9 @@ Ephemeral server frames (`ServerFrame::UsageEvent`): `UsageTick`,
 
 `GetUsage` supports thread, workspace, machine and global scopes, grouping by
 thread/workspace/machine/harness/model, and optional hour or day buckets.
+Ledger rows carry `parent_thread_id` for subagent child threads; a thread-scoped
+query with `include_children = true` rolls child turns into the parent's totals,
+while the default counts only the parent's own turns.
 
 ## Syncing to connect
 

@@ -448,6 +448,7 @@ export async function loadThreads(): Promise<void> {
         harness: null,
         search: null,
         include_snoozed: true,
+        include_children: false,
       },
     });
     if (response.type !== "threads") return;
@@ -931,6 +932,7 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
   const now = new Date().toISOString();
   const optimistic: ThreadSummary = {
     thread_id: tempId,
+    parent_thread_id: null,
     host: input.host,
     harness: input.harness,
     title,

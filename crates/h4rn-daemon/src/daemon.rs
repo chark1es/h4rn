@@ -299,12 +299,16 @@ impl DaemonBuilder {
 
         // Delegation rides the same hub and namespace as the diagnostic tools;
         // each session's bearer token scopes a call to its own thread.
-        let subagents = Arc::new(SubagentManager::new(
-            Arc::clone(&manager),
-            Arc::clone(&catalog),
-            self.config.data_dir.clone(),
-            self.subagent_options,
-        ));
+        let subagents = Arc::new(
+            SubagentManager::open(
+                Arc::clone(&manager),
+                Arc::clone(&catalog),
+                self.config.data_dir.clone(),
+                self.subagent_options,
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("open the subagent supervisor: {error}"))?,
+        );
         mcp.hub()
             .register_provider(Arc::new(SubagentProvider::new(Arc::clone(&subagents))));
         subagents.start();
@@ -670,6 +674,7 @@ async fn proxy_usage_ingest_loop(
                         let row = h4rn_meter::UsageRow {
                             row_id: format!("proxy_{}_{}", profile.id.as_str(), call.stable_id()),
                             thread_id: None,
+                            parent_thread_id: None,
                             run_id: None,
                             workspace: None,
                             machine: Some(machine.clone()),

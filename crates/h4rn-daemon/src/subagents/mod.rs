@@ -18,9 +18,11 @@
 //! in [`provider`], scoped by the session token to its own thread.
 
 mod provider;
+mod store;
 pub mod worktree;
 
 pub use provider::SubagentProvider;
+use store::{StoredRecord, SubagentStore};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -156,6 +158,7 @@ struct Inner {
     threads: Arc<ThreadManager>,
     catalog: Arc<dyn HarnessCatalog>,
     data_dir: PathBuf,
+    store: SubagentStore,
     options: SubagentOptions,
     records: Mutex<HashMap<String, Record>>,
     events: broadcast::Sender<SubagentEvent>,
@@ -177,15 +180,83 @@ struct Record {
     repo: Option<PathBuf>,
     /// Absolute worktree path, when isolated.
     worktree: Option<PathBuf>,
+    /// Wall-clock time already spent paused on a usage limit.
+    paused: Duration,
+    /// Start of the pause in progress.
+    paused_since: Option<Instant>,
+}
+
+impl Record {
+    /// Active wall-clock time, excluding time paused on a usage limit.
+    fn elapsed(&self, now: Instant) -> Duration {
+        let since_start = now.saturating_duration_since(self.created);
+        let running = self
+            .paused_since
+            .map(|since| now.saturating_duration_since(since))
+            .unwrap_or_default();
+        since_start
+            .saturating_sub(self.paused)
+            .saturating_sub(running)
+    }
+
+    fn stored(&self) -> StoredRecord {
+        StoredRecord {
+            view: self.view.clone(),
+            turns_started: self.turns_started,
+            turns_completed: self.turns_completed,
+            cancel_requested: self.cancel_requested,
+            budget_error: self.budget_error.clone(),
+            last_error: self.last_error.clone(),
+            repo: self.repo.clone(),
+            worktree: self.worktree.clone(),
+            paused_ms: self.paused.as_millis() as u64,
+            paused_since_ms: self
+                .paused_since
+                .map(|since| (Utc::now() - since.elapsed()).timestamp_millis()),
+        }
+    }
 }
 
 impl SubagentManager {
-    /// Creates the supervisor. Call [`Self::start`] once the daemon is ready to
-    /// receive delegation.
-    pub fn new(
+    /// Opens the supervisor and restores records from `subagents.db`.
+    ///
+    /// Call [`Self::start`] once the daemon is ready to receive delegation.
+    /// Restoration happens before the watcher starts, so a rebuilt card cannot
+    /// race a fresh child event.
+    pub async fn open(
         threads: Arc<ThreadManager>,
         catalog: Arc<dyn HarnessCatalog>,
         data_dir: PathBuf,
+        options: SubagentOptions,
+    ) -> Result<Self, SubagentError> {
+        let store = SubagentStore::connect(data_dir.join("subagents.db"))
+            .await
+            .map_err(|error| {
+                SubagentError::Internal(format!("could not open the subagent store: {error}"))
+            })?;
+        let manager = Self::with_store(threads, catalog, data_dir, store, options);
+        manager.inner.restore().await;
+        Ok(manager)
+    }
+
+    /// An in-memory supervisor for tests.
+    pub async fn in_memory(
+        threads: Arc<ThreadManager>,
+        catalog: Arc<dyn HarnessCatalog>,
+        data_dir: PathBuf,
+        options: SubagentOptions,
+    ) -> Result<Self, SubagentError> {
+        let store = SubagentStore::in_memory().await.map_err(|error| {
+            SubagentError::Internal(format!("could not open the subagent store: {error}"))
+        })?;
+        Ok(Self::with_store(threads, catalog, data_dir, store, options))
+    }
+
+    fn with_store(
+        threads: Arc<ThreadManager>,
+        catalog: Arc<dyn HarnessCatalog>,
+        data_dir: PathBuf,
+        store: SubagentStore,
         options: SubagentOptions,
     ) -> Self {
         let (events, _) = broadcast::channel(256);
@@ -194,6 +265,7 @@ impl SubagentManager {
                 threads,
                 catalog,
                 data_dir,
+                store,
                 options,
                 records: Mutex::new(HashMap::new()),
                 events,
@@ -286,7 +358,7 @@ impl SubagentManager {
             .filter(|record| include_finished || !record.view.is_terminal())
             .map(|record| {
                 let mut view = record.view.clone();
-                view.progress.elapsed_ms = now.duration_since(record.created).as_millis() as u64;
+                view.progress.elapsed_ms = record.elapsed(now).as_millis() as u64;
                 view
             })
             .collect();
@@ -299,9 +371,7 @@ impl SubagentManager {
         let records = self.inner.records.lock().await;
         let record = records.get(subagent_id.as_str())?;
         let mut view = record.view.clone();
-        view.progress.elapsed_ms = Instant::now()
-            .saturating_duration_since(record.created)
-            .as_millis() as u64;
+        view.progress.elapsed_ms = record.elapsed(Instant::now()).as_millis() as u64;
         Some(view)
     }
 
@@ -340,6 +410,7 @@ impl SubagentManager {
                 (record.view.child_thread_id.clone(), false)
             }
         };
+        self.inner.persist_id(subagent_id.as_str()).await;
         if terminal {
             return self
                 .get(subagent_id)
@@ -381,6 +452,102 @@ impl SubagentManager {
 impl Inner {
     fn broadcast(&self, view: SubagentView) {
         let _ = self.events.send(SubagentEvent::Updated(view));
+    }
+
+    /// Writes one record through to SQLite, logging rather than failing the
+    /// live update: a transient write error must not strand a running child.
+    async fn persist(&self, record: &Record) {
+        if let Err(error) = self.store.upsert(&record.stored()).await {
+            tracing::warn!(%error, subagent = %record.view.subagent_id, "could not persist a subagent record");
+        }
+    }
+
+    /// Persists one record by id, if it still exists.
+    async fn persist_id(&self, id: &str) {
+        let record = {
+            let records = self.records.lock().await;
+            records.get(id).cloned()
+        };
+        if let Some(record) = record {
+            self.persist(&record).await;
+        }
+    }
+
+    /// Rebuilds the live map from `subagents.db` after a restart.
+    ///
+    /// Finished records keep their status and result verbatim. A record that
+    /// was still running cannot be running any more: a daemon restart drops
+    /// harness sessions, so it is folded into `Failed` with an explicit reason
+    /// instead of leaving a phantom `Running` card.
+    async fn restore(&self) {
+        let stored = match self.store.load().await {
+            Ok(stored) => stored,
+            Err(error) => {
+                tracing::warn!(%error, "could not restore subagent records");
+                return;
+            }
+        };
+        let now = Instant::now();
+        let now_ms = Utc::now().timestamp_millis();
+        let mut restored = Vec::with_capacity(stored.len());
+        for stored in stored {
+            let elapsed = (now_ms - stored.view.created_at.timestamp_millis()).max(0) as u64;
+            let created = now
+                .checked_sub(Duration::from_millis(elapsed))
+                .unwrap_or(now);
+            let paused_since = stored.paused_since_ms.and_then(|ms| {
+                let age = (now_ms - ms).max(0) as u64;
+                now.checked_sub(Duration::from_millis(age))
+            });
+            let mut record = Record {
+                view: stored.view,
+                created,
+                turns_started: stored.turns_started,
+                turns_completed: stored.turns_completed,
+                cancel_requested: stored.cancel_requested,
+                budget_error: stored.budget_error,
+                last_error: stored.last_error,
+                finalizing: false,
+                repo: stored.repo,
+                worktree: stored.worktree,
+                paused: Duration::from_millis(stored.paused_ms),
+                paused_since,
+            };
+            if !record.view.is_terminal() {
+                let scheduled = match record.view.child_thread_id.as_ref() {
+                    Some(child) => self
+                        .threads
+                        .thread_summary(child)
+                        .await
+                        .is_some_and(|summary| summary.agent_state == AgentState::Scheduled),
+                    None => false,
+                };
+                if scheduled {
+                    record.view.state = SubagentState::Scheduled;
+                    record.view.agent_state = AgentState::Scheduled;
+                } else {
+                    let child = record.view.child_thread_id.clone();
+                    let mut result = self.collect_result(child.as_ref()).await;
+                    result.error = Some(
+                        "the daemon restarted while the subagent was running; the child thread kept its transcript"
+                            .into(),
+                    );
+                    record.view.state = SubagentState::Failed;
+                    record.view.agent_state = AgentState::Error;
+                    record.view.result = Some(result);
+                    record.view.finished_at = Some(Utc::now());
+                }
+            }
+            restored.push(record);
+        }
+        let mut records = self.records.lock().await;
+        for record in &restored {
+            records.insert(record.view.subagent_id.as_str().to_owned(), record.clone());
+        }
+        drop(records);
+        for record in &restored {
+            self.persist(record).await;
+        }
     }
 
     /// Looks up the subagent that owns `child`.
@@ -524,9 +691,12 @@ impl Inner {
                     finalizing: false,
                     repo,
                     worktree: worktree_dir,
+                    paused: Duration::ZERO,
+                    paused_since: None,
                 },
             );
         }
+        self.persist_id(subagent_id.as_str()).await;
 
         let created = self
             .threads
@@ -549,6 +719,7 @@ impl Inner {
             Ok(created) => created,
             Err(error) => {
                 let record = self.records.lock().await.remove(subagent_id.as_str());
+                let _ = self.store.remove(subagent_id.as_str()).await;
                 if let Some(record) = record
                     && let (Some(repo), Some(worktree)) = (&record.repo, &record.worktree)
                 {
@@ -571,6 +742,7 @@ impl Inner {
             }
             (record.view.clone(), record.view.is_terminal())
         };
+        self.persist_id(subagent_id.as_str()).await;
 
         // The child thread exists now; deliver the delegation row to the parent
         // and finish the durable half of the spawn.
@@ -661,6 +833,7 @@ impl Inner {
                         });
                     (record.view.clone(), exceeded)
                 };
+                self.persist_id(&id).await;
                 self.broadcast(view);
                 if let Some(max) = exceeded {
                     self.exceed(&id, format!("turn budget of {max} turns exceeded"))
@@ -683,6 +856,7 @@ impl Inner {
                     record.view.progress.tokens = summary.usage.total_tokens();
                     record.view.state = match summary.agent_state {
                         AgentState::AwaitingApproval => SubagentState::AwaitingApproval,
+                        AgentState::Scheduled => SubagentState::Scheduled,
                         _ => SubagentState::Running,
                     };
                     let exceeded = record
@@ -695,7 +869,12 @@ impl Inner {
                         .map(|max| format!("token budget of {max} tokens exceeded"));
                     (record.view.clone(), exceeded)
                 };
+                let exceeded_now = self.refresh_tokens_for(&id).await;
+                self.persist_id(&id).await;
                 self.broadcast(view);
+                if let Some(reason) = exceeded_now {
+                    self.exceed(&id, reason).await;
+                }
                 if let Some(reason) = exceeded {
                     self.exceed(&id, reason).await;
                 }
@@ -738,6 +917,7 @@ impl Inner {
                 record.view.progress.current = Some(format!("tool: {}", tool_call.name));
                 let view = record.view.clone();
                 drop(records);
+                self.persist_id(&id).await;
                 self.broadcast(view);
             }
             Event::Error {
@@ -752,6 +932,8 @@ impl Inner {
                 if let Some(record) = records.get_mut(&id) {
                     record.last_error = Some(message);
                 }
+                drop(records);
+                self.persist_id(&id).await;
             }
             Event::TurnCompleted {
                 thread_id, status, ..
@@ -766,6 +948,26 @@ impl Inner {
                         record.view.progress.turns_completed = record.turns_completed;
                     }
                 }
+                self.refresh_tokens_for(&id).await;
+                // A turn that ends because a usage limit fired is not the end
+                // of the child: the thread's auto-resume schedule will start a
+                // new turn. Report `Scheduled` instead of a premature failure.
+                let scheduled = {
+                    let records = self.records.lock().await;
+                    records
+                        .get(&id)
+                        .is_some_and(|record| record.view.state == SubagentState::Scheduled)
+                } || self
+                    .threads
+                    .thread_summary(&thread_id)
+                    .await
+                    .is_some_and(|summary| summary.agent_state == AgentState::Scheduled);
+                if scheduled {
+                    self.update_state(&id, SubagentState::Scheduled, AgentState::Scheduled)
+                        .await;
+                    return;
+                }
+                self.persist_id(&id).await;
                 self.finalize(&id, status).await;
             }
             _ => {}
@@ -784,6 +986,7 @@ impl Inner {
         record.view.agent_state = agent_state;
         let view = record.view.clone();
         drop(records);
+        self.persist_id(id).await;
         self.broadcast(view);
     }
 
@@ -808,6 +1011,7 @@ impl Inner {
         if terminal {
             return;
         }
+        self.persist_id(id).await;
         match child {
             Some(child) => {
                 if self.threads.interrupt(&child).await.is_err() {
@@ -818,34 +1022,101 @@ impl Inner {
         }
     }
 
-    /// Refreshes elapsed counters and enforces the wall-clock budget.
+    /// Replaces the cached token count with the ledger's, when it has one.
+    ///
+    /// The ledger is the source of truth for usage (ADR-024), so a budget is
+    /// enforced against metered tokens rather than only the last harness
+    /// report carried on the thread projection. Returns the overrun reason the
+    /// first time the budget is crossed.
+    async fn refresh_tokens_for(&self, id: &str) -> Option<String> {
+        let child = {
+            let records = self.records.lock().await;
+            records.get(id)?.view.child_thread_id.clone()
+        };
+        let child = child?;
+        let tokens = self.threads.metered_tokens(&child).await?;
+        let mut records = self.records.lock().await;
+        let record = records.get_mut(id)?;
+        record.view.progress.tokens = record.view.progress.tokens.max(tokens);
+        let max = record.view.budget.max_tokens?;
+        (record.view.progress.tokens > max && record.budget_error.is_none()).then(|| {
+            record.budget_error = Some(format!("token budget of {max} tokens exceeded"));
+            format!("token budget of {max} tokens exceeded")
+        })
+    }
+
+    /// Refreshes elapsed counters and enforces the wall-clock and token
+    /// budgets. Time spent waiting for an auto-resume does not count against
+    /// the wall-clock budget, because the child cannot make progress then.
     async fn tick(&self) {
         let now = Instant::now();
+        let snapshot: Vec<(String, Option<ThreadId>)> = {
+            let records = self.records.lock().await;
+            records
+                .iter()
+                .filter(|(_, record)| !record.view.is_terminal())
+                .map(|(id, record)| (id.clone(), record.view.child_thread_id.clone()))
+                .collect()
+        };
+        let mut metered = Vec::with_capacity(snapshot.len());
+        for (id, child) in snapshot {
+            let tokens = match child {
+                Some(child) => self.threads.metered_tokens(&child).await,
+                None => None,
+            };
+            metered.push((id, tokens));
+        }
+
         let mut updates = Vec::new();
         let mut exceeded = Vec::new();
         {
             let mut records = self.records.lock().await;
-            for (id, record) in records.iter_mut() {
+            for (id, tokens) in metered {
+                let Some(record) = records.get_mut(&id) else {
+                    continue;
+                };
                 if record.view.is_terminal() {
                     continue;
                 }
-                let elapsed = now.saturating_duration_since(record.created);
+                if let Some(tokens) = tokens {
+                    record.view.progress.tokens = record.view.progress.tokens.max(tokens);
+                    if let Some(max) = record.view.budget.max_tokens
+                        && record.view.progress.tokens > max
+                        && record.budget_error.is_none()
+                    {
+                        let reason = format!("token budget of {max} tokens exceeded");
+                        record.budget_error = Some(reason.clone());
+                        exceeded.push((id.clone(), reason));
+                    }
+                }
+                if record.view.state == SubagentState::Scheduled {
+                    record.paused_since.get_or_insert(now);
+                } else if let Some(since) = record.paused_since.take() {
+                    record.paused = record
+                        .paused
+                        .saturating_add(now.saturating_duration_since(since));
+                }
+                let elapsed = record.elapsed(now);
                 record.view.progress.elapsed_ms = elapsed.as_millis() as u64;
                 if let Some(max) = record.view.budget.max_wall_time_secs
                     && elapsed.as_secs() > max
                     && record.budget_error.is_none()
                 {
-                    record.budget_error = Some(format!("wall-time budget of {max}s exceeded"));
-                    exceeded.push(id.clone());
+                    let reason = format!("wall-time budget of {max}s exceeded");
+                    record.budget_error = Some(reason.clone());
+                    exceeded.push((id.clone(), reason));
                 }
                 updates.push(record.view.clone());
             }
         }
+        for (id, _) in &exceeded {
+            self.persist_id(id).await;
+        }
         for view in updates {
             self.broadcast(view);
         }
-        for id in exceeded {
-            self.exceed(&id, "wall-time budget exceeded".into()).await;
+        for (id, reason) in exceeded {
+            self.exceed(&id, reason).await;
         }
     }
 
@@ -945,6 +1216,7 @@ impl Inner {
         {
             tracing::warn!(%error, "could not append the subagent finish row");
         }
+        self.persist_id(id).await;
     }
 
     async fn collect_result(&self, child: Option<&ThreadId>) -> SubagentResult {

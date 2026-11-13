@@ -655,7 +655,14 @@ group_by: UsageGroupBy,
 /**
  * Optional hour/day series.
  */
-bucket: UsageBucket | null, } | { "type": "get_limits" } | { "type": "list_resets" } | { "type": "cancel_resume", 
+bucket: UsageBucket | null, 
+/**
+ * Include subagent children in a thread-scoped report.
+ *
+ * With this set, `scope_id` names a parent thread and the report adds
+ * every child's turns; without it only the thread's own rows count.
+ */
+include_children: boolean, } | { "type": "get_limits" } | { "type": "list_resets" } | { "type": "cancel_resume", 
 /**
  * Thread whose schedule is cleared.
  */

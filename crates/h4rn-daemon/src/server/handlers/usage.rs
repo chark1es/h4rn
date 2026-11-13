@@ -35,6 +35,7 @@ pub(super) async fn handle(
             range,
             group_by,
             bucket,
+            include_children,
         } => {
             if matches!(scope, UsageScope::Thread | UsageScope::Workspace) && scope_id.is_none() {
                 Err(ProtoError::new(
@@ -51,6 +52,7 @@ pub(super) async fn handle(
                         range,
                         group_by,
                         bucket,
+                        include_children,
                     })
                     .await
                     .map(|report| ResponseBody::UsageReport { report })

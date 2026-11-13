@@ -167,12 +167,68 @@ describe("foldEvent", () => {
     });
   });
 
+  it("records a delegated item and follows its subagent updates", () => {
+    let log = foldEvent(createThreadLog(), {
+      type: "item_completed",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      item: {
+        kind: "delegated",
+        item_id: "delegated_sa_1",
+        subagent_id: "sa_1",
+        thread_id: null,
+        task: "Reply with exactly: pong",
+        harness: "codex",
+        host: "host_a",
+        model: "gpt-5",
+        state: "starting",
+        agent_state: "thinking",
+      },
+    });
+    log = foldEvent(log, {
+      type: "subagent_updated",
+      parent_thread_id: "t1",
+      subagent: {
+        subagent_id: "sa_1",
+        parent_thread_id: "t1",
+        child_thread_id: "thr_child",
+        task: "Reply with exactly: pong",
+        harness: "codex",
+        host: "host_a",
+        model: "gpt-5",
+        isolation: "shared",
+        workspace_path: "/work/h4rn",
+        branch: null,
+        depth: 1,
+        state: "running",
+        agent_state: "thinking",
+        progress: { turns_started: 1, turns_completed: 0, tokens: 0, elapsed_ms: 12, current: null },
+        budget: { max_turns: 20, max_wall_time_secs: 900, max_tokens: 50000 },
+        context: { kind: "none" },
+        credential: { label: "shared", shared_with_parent: true },
+        created_at: "2026-01-01T00:00:00.000Z",
+        started_at: "2026-01-01T00:00:01.000Z",
+        finished_at: null,
+        result: null,
+      },
+    });
+
+    expect(log.turns[0]?.items).toHaveLength(1);
+    expect(log.turns[0]?.items[0]).toMatchObject({
+      kind: "delegated",
+      subagentId: "sa_1",
+      threadId: "thr_child",
+      state: "running",
+    });
+  });
+
   it("records an approval request and its pending state", () => {
     const log = foldEvent(createThreadLog(), {
       type: "approval_requested",
       thread_id: "t1",
       turn_id: "turn_1",
       approval_id: "appr_1",
+      subagent_id: null,
       kind: "command",
       prompt: "Run the tests?",
       options: [{ id: "yes", label: "Go" }],
@@ -192,6 +248,7 @@ describe("foldEvent", () => {
       thread_id: "t1",
       turn_id: "turn_1",
       approval_id: "appr_1",
+      subagent_id: null,
       kind: "question",
       prompt: "Which branch?",
       options: [

@@ -1208,6 +1208,7 @@ async fn thread_usage(client: &mut Client, thread_id: &ThreadId) -> h4rn_protoco
         .request(ClientRequest::GetUsage {
             scope: UsageScope::Thread,
             scope_id: Some(thread_id.as_str().to_owned()),
+            include_children: false,
             range: UsageRange::default(),
             group_by: UsageGroupBy::None,
             bucket: None,

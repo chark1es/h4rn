@@ -43,6 +43,11 @@ pub struct UsageRow {
     pub row_id: String,
     /// Thread the turn belonged to.
     pub thread_id: Option<String>,
+    /// Parent thread when this row belongs to a subagent child.
+    ///
+    /// Thread-scoped reports roll children up through this column; the row is
+    /// still attributed to the child for its own report.
+    pub parent_thread_id: Option<String>,
     /// Run within the thread.
     pub run_id: Option<String>,
     /// Workspace path.
@@ -144,6 +149,8 @@ pub struct UsageFilter {
     pub until: Option<DateTime<Utc>>,
     /// One thread.
     pub thread_id: Option<String>,
+    /// Also match rows whose parent is [`Self::thread_id`].
+    pub include_children: bool,
     /// One workspace.
     pub workspace: Option<String>,
     /// One machine.
@@ -190,11 +197,36 @@ impl MeterStore {
         Ok(store)
     }
 
+    /// Adds a column to an existing database created before it existed.
+    async fn ensure_column(
+        &self,
+        table: &str,
+        column: &str,
+        definition: &str,
+    ) -> Result<(), StoreError> {
+        let existing: Vec<String> = sqlx::query(&format!("PRAGMA table_info({table})"))
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .filter_map(|row| row.try_get::<String, _>("name").ok())
+            .collect();
+        if existing.iter().any(|name| name == column) {
+            return Ok(());
+        }
+        sqlx::query(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+        ))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn ensure_schema(&self) -> Result<(), StoreError> {
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS meter_usage (
                 row_id                 TEXT PRIMARY KEY,
                 thread_id              TEXT,
+                parent_thread_id       TEXT,
                 run_id                 TEXT,
                 workspace              TEXT,
                 machine                TEXT,
@@ -227,9 +259,17 @@ impl MeterStore {
         )
         .execute(&self.pool)
         .await?;
+        self.ensure_column("meter_usage", "parent_thread_id", "TEXT")
+            .await?;
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS meter_usage_thread_idx
              ON meter_usage (thread_id, started_at)",
+        )
+        .execute(&self.pool)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS meter_usage_parent_idx
+             ON meter_usage (parent_thread_id, started_at)",
         )
         .execute(&self.pool)
         .await?;
@@ -296,14 +336,16 @@ impl MeterStore {
         };
         let result = sqlx::query(
             "INSERT OR IGNORE INTO meter_usage
-             (row_id, thread_id, run_id, workspace, machine, account, harness, model, provider,
-              credential, source, correlation_id, tokens_in, tokens_out, tokens_cached_read,
-              tokens_cached_creation, cost_micros, cost_source, price_table, ttft_ms, tps,
-              generation_ms, wall_ms, started_at, completed_at, ts, raw_json, deduped, synced)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+             (row_id, thread_id, parent_thread_id, run_id, workspace, machine, account, harness,
+              model, provider, credential, source, correlation_id, tokens_in, tokens_out,
+              tokens_cached_read, tokens_cached_creation, cost_micros, cost_source, price_table,
+              ttft_ms, tps, generation_ms, wall_ms, started_at, completed_at, ts, raw_json,
+              deduped, synced)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(&row.row_id)
         .bind(&row.thread_id)
+        .bind(&row.parent_thread_id)
         .bind(&row.run_id)
         .bind(&row.workspace)
         .bind(&row.machine)
@@ -373,7 +415,7 @@ impl MeterStore {
             "SELECT * FROM meter_usage
              WHERE (? IS NULL OR started_at >= ?)
                AND (? IS NULL OR started_at < ?)
-               AND (? IS NULL OR thread_id = ?)
+               AND (? IS NULL OR thread_id = ? OR (? = 1 AND parent_thread_id = ?))
                AND (? IS NULL OR workspace = ?)
                AND (? IS NULL OR machine = ?)
              ORDER BY started_at ASC",
@@ -383,6 +425,8 @@ impl MeterStore {
         .bind(filter.until.map(|value| value.to_rfc3339()))
         .bind(filter.until.map(|value| value.to_rfc3339()))
         .bind(&filter.thread_id)
+        .bind(&filter.thread_id)
+        .bind(i64::from(filter.include_children))
         .bind(&filter.thread_id)
         .bind(&filter.workspace)
         .bind(&filter.workspace)
@@ -541,6 +585,7 @@ fn row_from_sql(row: &sqlx::sqlite::SqliteRow) -> Result<UsageRow, StoreError> {
     Ok(UsageRow {
         row_id: row.try_get("row_id")?,
         thread_id: row.try_get("thread_id")?,
+        parent_thread_id: row.try_get("parent_thread_id")?,
         run_id: row.try_get("run_id")?,
         workspace: row.try_get("workspace")?,
         machine: row.try_get("machine")?,
@@ -720,6 +765,7 @@ mod tests {
         UsageRow {
             row_id: row_id.into(),
             thread_id: Some("th_1".into()),
+            parent_thread_id: None,
             run_id: Some("run_1".into()),
             workspace: Some("/repo".into()),
             machine: Some("host".into()),
@@ -766,6 +812,37 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(store.all_rows().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_child_rows_parent_is_persisted_and_filterable() {
+        let store = MeterStore::in_memory().await.unwrap();
+        let mut child = row("child_1", UsageProvenance::SelfMetered);
+        child.thread_id = Some("th_child".into());
+        child.parent_thread_id = Some("th_parent".into());
+        store.insert_row(&child).await.unwrap();
+
+        let stored = store.all_rows().await.unwrap();
+        assert_eq!(stored[0].parent_thread_id.as_deref(), Some("th_parent"));
+
+        let only_parent = store
+            .rows(&UsageFilter {
+                thread_id: Some("th_parent".into()),
+                ..UsageFilter::default()
+            })
+            .await
+            .unwrap();
+        assert!(only_parent.is_empty());
+        let rolled_up = store
+            .rows(&UsageFilter {
+                thread_id: Some("th_parent".into()),
+                include_children: true,
+                ..UsageFilter::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(rolled_up.len(), 1);
+        assert_eq!(rolled_up[0].row_id, "child_1");
     }
 
     #[tokio::test]

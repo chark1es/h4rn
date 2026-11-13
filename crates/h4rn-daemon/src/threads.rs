@@ -1228,6 +1228,32 @@ impl ThreadManager {
             .map_err(|error| ManagerError::Internal(error.to_string()))
     }
 
+    /// Metered token total for one thread, from the ledger when available.
+    ///
+    /// Budget enforcement asks the ledger rather than the thread projection
+    /// because the ledger is the source of truth for usage (ADR-024); the
+    /// projection only caches what the harness last reported.
+    pub async fn metered_tokens(&self, thread_id: &ThreadId) -> Option<u64> {
+        let meter = self.meter()?;
+        let report = meter
+            .report(h4rn_meter::ReportQuery {
+                scope: h4rn_protocol::UsageScope::Thread,
+                scope_id: Some(thread_id.as_str().to_owned()),
+                include_children: false,
+                range: Default::default(),
+                group_by: h4rn_protocol::UsageGroupBy::None,
+                bucket: None,
+            })
+            .await
+            .ok()?;
+        Some(
+            report
+                .totals
+                .input_tokens
+                .saturating_add(report.totals.output_tokens),
+        )
+    }
+
     /// Known limits plus the auto-resume policy.
     pub async fn limits_report(&self) -> Result<h4rn_protocol::LimitsReport, ManagerError> {
         let meter = self
@@ -2008,6 +2034,11 @@ impl Inner {
                     if let Some(meter) = self.meter.get() {
                         let context = TurnContext {
                             thread_id: Some(record.meta.thread_id.as_str().to_owned()),
+                            parent_thread_id: record
+                                .meta
+                                .parent_thread_id
+                                .as_ref()
+                                .map(|parent| parent.as_str().to_owned()),
                             run_id: Some(turn_id.as_str().to_owned()),
                             workspace: Some(record.meta.workspace_path.clone()),
                             machine: Some(self.local_host.as_str().to_owned()),

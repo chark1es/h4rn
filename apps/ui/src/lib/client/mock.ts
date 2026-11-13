@@ -224,6 +224,7 @@ function historyFor(thread: ThreadSummary): Event[] {
         thread_id: thread.thread_id,
         turn_id: turnId,
         approval_id: "ap_a_1",
+        subagent_id: null,
         kind: "command",
         prompt:
           "Run `CI=1 pnpm test --filter auth --repeat 3` on atlas to confirm the race before editing tests/setup.ts.",
@@ -355,6 +356,7 @@ function summary(input: {
 }): ThreadSummary {
   return {
     thread_id: input.id,
+    parent_thread_id: null,
     host: input.host,
     harness: input.harness,
     title: input.title,
@@ -789,6 +791,7 @@ class MockDaemon {
         const now = Date.now();
         const thread: ThreadSummary = {
           thread_id: id,
+          parent_thread_id: null,
           host: body.host,
           harness: body.harness,
           title: body.prompt.split("\n")[0]?.slice(0, 56) || "New thread",
