@@ -3,6 +3,8 @@ import type { AgentState } from "./AgentState";
 import type { ApprovalKind } from "./ApprovalKind";
 import type { ApprovalOption } from "./ApprovalOption";
 import type { DeviceId } from "./DeviceId";
+import type { ForgeChecks } from "./ForgeChecks";
+import type { ForgeRepoRef } from "./ForgeRepoRef";
 import type { FsChangeKind } from "./FsChangeKind";
 import type { FsSearchMatch } from "./FsSearchMatch";
 import type { Item } from "./Item";
@@ -197,4 +199,16 @@ done: boolean,
 /**
  * True when the daemon hit its result cap.
  */
-truncated: boolean, } | { "type": "transport_status" } & TransportStatus;
+truncated: boolean, } | { "type": "forge_checks_updated", 
+/**
+ * Repository.
+ */
+repo: ForgeRepoRef, 
+/**
+ * PR number.
+ */
+number: number, 
+/**
+ * New snapshot, including the aggregate state.
+ */
+checks: ForgeChecks, } | { "type": "transport_status" } & TransportStatus;

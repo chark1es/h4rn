@@ -33,6 +33,7 @@ mod blob;
 mod client;
 mod common;
 pub mod connect;
+pub mod forge;
 mod fs;
 mod ids;
 mod proxy;
@@ -51,6 +52,7 @@ pub use common::{
     ToolCallStatus, Topic, TurnStatus, Usage, WorktreeRequest,
 };
 pub use connect::*;
+pub use forge::*;
 pub use fs::{
     DiffAgainst, FileEntry, FileEntryKind, FsChangeKind, FsCreateKind, FsDeleteResult, FsDiff,
     FsFileContent, FsListing, FsSearchBatch, FsSearchMatch, FsTurnChanges, FsTurnFile,

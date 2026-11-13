@@ -1684,6 +1684,7 @@ dependencies = [
  "grep-searcher",
  "h4rn-connect",
  "h4rn-core",
+ "h4rn-forge",
  "h4rn-harness",
  "h4rn-protocol",
  "h4rn-proxy",
@@ -1718,7 +1719,17 @@ dependencies = [
 name = "h4rn-forge"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "chrono",
  "h4rn-protocol",
+ "reqwest 0.13.5",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "url",
+ "wiremock",
 ]
 
 [[package]]

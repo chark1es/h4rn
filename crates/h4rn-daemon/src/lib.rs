@@ -25,6 +25,7 @@ pub mod cli;
 pub mod config;
 pub mod daemon;
 pub mod doctor;
+pub mod forge;
 pub mod fs;
 pub mod harnesses;
 pub mod hosts;
