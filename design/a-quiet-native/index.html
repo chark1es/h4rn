@@ -198,26 +198,82 @@ body.still *, body.still *::before, body.still *::after{ animation-play-state: p
 /* ───────────── Desktop shell ───────────── */
 #stage{ position:fixed; inset:0; }
 .app{ display:flex; height:100%; width:100%; background:var(--bg); }
-.side{ width:212px; flex:none; background:var(--bg-side); border-right:1px solid var(--line); display:flex; flex-direction:column; padding:10px 8px 8px; gap:2px; }
-.side-top{ display:flex; align-items:center; justify-content:space-between; height:32px; padding:0 4px 0 8px; margin-bottom:4px; }
+.side{ width:var(--side-w,288px); flex:none; background:var(--bg-side); border-right:1px solid var(--line); display:flex; flex-direction:column; min-height:0; position:relative; }
+.side-hd{ display:flex; flex-direction:column; gap:8px; padding:10px 8px 10px; flex:none; }
+.side-top{ display:flex; align-items:center; gap:2px; height:32px; padding:0 0 0 8px; }
+.side-top .grow{ flex:1; }
 .word{ font-weight:600; font-size:14px; letter-spacing:-0.01em; }
-.side-search{ display:flex; align-items:center; gap:8px; height:28px; padding:0 8px; border-radius:6px; color:var(--fg-3); background:var(--bg); box-shadow: inset 0 0 0 1px var(--line); margin-bottom:10px; }
+.side-search{ display:flex; align-items:center; gap:8px; height:28px; padding:0 8px; border-radius:6px; color:var(--fg-3); background:var(--bg); box-shadow: inset 0 0 0 1px var(--line); width:100%; }
 .side-search span:first-of-type{ flex:1; }
+.side-search input{ flex:1; min-width:0; border:0; background:transparent; height:100%; }
+.side-search input::placeholder{ color:var(--fg-3); }
+.side-search input:focus-visible{ outline:none; }
+.side-search:focus-within{ box-shadow: inset 0 0 0 1px var(--focus), 0 0 0 3px color-mix(in oklch, var(--focus) 25%, transparent); }
+.side .seg button{ padding:0 6px; }
 .nav{ display:flex; align-items:center; gap:9px; height:28px; padding:0 8px; border-radius:6px; color:var(--fg-2); font-weight:500; transition: background var(--dur-1); }
 .nav:hover{ background:var(--hover); color:var(--fg); }
 .nav[aria-current="page"]{ background:var(--fill-2); color:var(--fg); }
 :root[data-theme="dark"] .nav[aria-current="page"]{ background:var(--sel); }
-.nav .lbl{ flex:1; }
-.nav .ct{ color:var(--fg-3); font-weight:400; }
-.nav .ct.you{ color:var(--accent-tx); font-weight:600; }
-.side-h{ font-size:12px; color:var(--fg-3); font-weight:500; padding:16px 8px 4px; display:flex; justify-content:space-between; align-items:center; }
+.nav .lbl{ flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.nav .ct{ color:var(--fg-3); font-weight:400; font-size:12px; }
+.nav.sub{ padding-left:33px; font-weight:400; height:26px; }
+.side-h{ font-size:12px; color:var(--fg-3); font-weight:500; padding:16px 8px 4px; display:flex; justify-content:space-between; align-items:center; height:auto; }
+.side-h .ibtn.sm{ width:22px; height:22px; margin:-4px -4px -4px 0; }
+.setnav{ display:flex; flex-direction:column; gap:2px; }
 .host{ display:flex; align-items:center; gap:8px; height:28px; padding:0 8px; border-radius:6px; color:var(--fg-2); }
-.host:hover{ background:var(--hover); }
+.host:hover{ background:var(--hover); color:var(--fg); }
 .host .lbl{ flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .host.sub{ padding-left:22px; }
 .host .meta{ font-size:12px; color:var(--fg-3); }
-.side-foot{ margin-top:auto; display:flex; flex-direction:column; gap:2px; }
-.conn{ display:flex; align-items:center; gap:8px; padding:6px 8px 2px; font-size:12px; color:var(--fg-3); }
+
+/* project groups: the thread list, one level deep */
+.side-list{ flex:1; overflow:auto; min-height:0; padding:2px 8px 12px; }
+.pg + .pg{ margin-top:12px; }
+.pg-h{ display:flex; align-items:center; gap:2px; position:relative; }
+.pg-tog{ flex:1; min-width:0; display:flex; align-items:center; gap:8px; height:28px; padding:0 8px 0 10px; border-radius:6px; color:var(--fg-2); transition: background var(--dur-1); }
+.pg-tog:hover{ background:var(--hover); }
+.pg-tog .nm{ font-weight:600; white-space:nowrap; }
+.pg-h.act .nm{ color:var(--fg); }
+.pg-tog .hn{ font-size:12px; color:var(--fg-3); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
+.pg-tog .grow{ flex:1; }
+.pg-tog .ct{ font-size:12px; color:var(--fg-3); }
+.pg-tog .chev{ color:var(--fg-3); flex:none; transition: transform var(--dur-2) var(--ease-out); }
+.pg-tog[aria-expanded="false"] .chev{ transform: rotate(-90deg); }
+.pg-h .add{ width:24px; height:24px; position:absolute; right:26px; opacity:0; background:var(--bg-side); transition: opacity var(--dur-1); }
+.pg-h:hover .add, .pg-h:focus-within .add{ opacity:1; }
+.pg-h .add:hover{ background:var(--hover); }
+.pmono{ width:16px; height:16px; border-radius:4px; display:inline-grid; place-items:center; flex:none; background:var(--fill-2); color:var(--fg-2); font:600 10px/1 var(--font); }
+:root[data-theme="dark"] .pmono{ background:var(--line-2); color:var(--fg); }
+.side .rows{ padding:2px 0 0; display:flex; flex-direction:column; gap:1px; }
+.side .row{ padding:7px 10px 8px; }
+.side .row-st{ width:16px; }
+.side .row + .row::before{ display:none; }
+.side .row:hover{ background:var(--hover); }
+.side .row.sel{ background:var(--fill-2); }
+:root[data-theme="dark"] .side .row.sel{ background:var(--fill-2); }
+.side .snoozed{ display:flex; align-items:center; gap:8px; width:100%; height:32px; padding:0 10px; margin-top:12px; border-radius:6px; border:0; color:var(--fg-2); font-size:13px; }
+.side .snoozed:hover{ background:var(--hover); }
+.side .banner{ margin:0 8px 8px; }
+.side-list .side-empty{ padding:14px 10px; }
+
+/* footer: secondary destinations live here, not in a second column */
+.side-ft{ flex:none; display:flex; align-items:center; gap:2px; height:44px; padding:0 8px; border-top:1px solid var(--line); }
+.hostbtn{ flex:1; min-width:0; display:inline-flex; align-items:center; gap:8px; height:28px; padding:0 8px; border-radius:6px; color:var(--fg-2); font-size:12px; white-space:nowrap; }
+.hostbtn:hover, .hostbtn.on{ background:var(--hover); color:var(--fg); }
+.ibtn.wide{ width:auto; padding:0 7px 0 6px; gap:4px; display:inline-flex; }
+.ibtn .n{ font-size:12px; color:var(--fg-3); }
+.hostpop{ left:8px; right:8px; bottom:50px; padding:6px; z-index:15; }
+.hp-h{ display:flex; justify-content:space-between; align-items:baseline; padding:6px 8px 6px; font-weight:600; }
+.hp-h .faint{ font-size:12px; font-weight:400; }
+.hp-conn{ font-size:12px; color:var(--fg-3); padding:6px 8px 4px; }
+.hp-sep{ height:1px; background:var(--line); margin:6px 2px; }
+
+/* resize handles */
+.rz{ position:absolute; top:0; bottom:0; width:8px; z-index:6; cursor:col-resize; touch-action:none; }
+.side > .rz{ right:-4px; } .rp > .rz{ left:-4px; }
+.rz::after{ content:""; position:absolute; top:0; bottom:0; left:3.5px; width:1px; background:transparent; transition: background var(--dur-1) var(--ease-out); }
+.rz:hover::after, .rz.drag::after, .rz:focus-visible::after{ background:var(--focus); left:3px; width:2px; }
+.rz:focus-visible{ outline:none; }
 
 .pane{ width:328px; flex:none; border-right:1px solid var(--line); display:flex; flex-direction:column; min-height:0; background:var(--bg); }
 .pane-head{ display:flex; align-items:center; gap:4px; height:52px; padding:0 10px 0 16px; flex:none; }
@@ -251,7 +307,8 @@ body.still *, body.still *::before, body.still *::after{ animation-play-state: p
 /* thread detail */
 .th-head{ display:flex; align-items:center; gap:12px; padding:10px 12px 10px 24px; min-height:60px; border-bottom:1px solid var(--line); flex:none; }
 .main{ container-type:inline-size; }
-@container (max-width: 640px){ .main .prov .opt, .main .prov .br{ display:none; } .usage-foot .opt{ display:none; } }
+@container (max-width: 820px){ .main .prov .opt{ display:none; } }
+@container (max-width: 640px){ .main .prov .br{ display:none; } .usage-foot .opt{ display:none; } }
 .th-titles{ flex:1; min-width:0; }
 .th-titles h1{ margin:0; font-size:15px; line-height:20px; font-weight:600; letter-spacing:-0.01em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .prov{ display:flex; align-items:center; gap:6px; font-size:12px; color:var(--fg-2); margin-top:3px; white-space:nowrap; overflow:hidden; }
@@ -394,7 +451,7 @@ table.tbl{ width:100%; border-collapse:collapse; font-size:13px; }
 .banner.err .ic{ color:var(--danger); }
 .empty{ display:flex; flex-direction:column; align-items:flex-start; gap:10px; padding:28px 22px; color:var(--fg-2); }
 .empty h3{ margin:0; color:var(--fg); font-size:14px; font-weight:600; }
-.empty p{ margin:0; max-width:34ch; line-height:19px; }
+.empty p{ margin:0; max-width:34ch; line-height:19px; text-wrap:pretty; }
 .center-empty{ flex:1; display:grid; place-items:center; }
 .center-empty .box{ width:420px; }
 
@@ -413,7 +470,7 @@ table.tbl{ width:100%; border-collapse:collapse; font-size:13px; }
 .pal-i{ display:flex; align-items:center; gap:10px; height:34px; padding:0 10px; border-radius:8px; color:var(--fg); width:100%; }
 .pal-i .ic{ color:var(--fg-2); }
 .pal-i .grow{ flex:1; }
-.pal-i .h{ color:var(--fg-3); font-size:12px; }
+.pal-i .h{ color:var(--fg-3); font-size:12px; margin-right:6px; }
 .pal-i[aria-selected="true"]{ background:var(--sel); }
 .pal-foot{ display:flex; gap:16px; height:36px; align-items:center; padding:0 16px; border-top:1px solid var(--line); font-size:12px; color:var(--fg-3); }
 .pop{ position:absolute; z-index:15; background:var(--bg-raised); border-radius:12px; box-shadow: var(--sh-pop), inset 0 0 0 1px var(--line); padding:14px; }
@@ -516,6 +573,114 @@ table.tbl{ width:100%; border-collapse:collapse; font-size:13px; }
 .code-big{ font: 500 22px/28px var(--mono); letter-spacing:.06em; }
 .preview{ border-radius:8px; box-shadow: inset 0 0 0 1px var(--line); background:var(--bg-sunk); font: 12px/20px var(--mono); padding:8px 0; margin-top:10px; }
 .preview .ln .n{ width:28px; }
+
+/* ───────────── Main header: view cluster ───────────── */
+.th-head.bare{ padding-left:12px; }
+.hd-l{ display:flex; align-items:center; gap:2px; flex:none; }
+.hd-l .vsep{ margin:0 4px 0 6px; }
+.ibtn{ position:relative; }
+.pip{ width:6px; height:6px; border-radius:50%; background:var(--accent); display:inline-block; flex:none; }
+.ibtn > .pip{ position:absolute; top:4px; right:4px; width:7px; height:7px; box-shadow: 0 0 0 2px var(--bg); }
+.viewseg button{ height:24px; padding:0 10px; }
+.ws-title{ display:flex; align-items:center; gap:8px; }
+.tchip{ display:inline-flex; align-items:center; gap:8px; height:28px; padding:0 10px 0 9px; border-radius:6px; background:var(--bg-raised); box-shadow: inset 0 0 0 1px var(--line-2); font-weight:500; max-width:340px; min-width:0; flex:0 1 auto; transition: background var(--dur-1); }
+.tchip:hover{ background:var(--hover); }
+.tchip .t{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
+.tchip .s{ color:var(--accent-tx); white-space:nowrap; font-size:12px; }
+.crumb{ display:flex; align-items:center; gap:2px; font-size:12px; color:var(--fg-3); margin-bottom:4px; }
+.crumb a:hover{ color:var(--fg); }
+.crumb .sep{ margin:0 4px; }
+.scope{ display:flex; align-items:center; gap:10px; padding:8px 16px; border-bottom:1px solid var(--line); font-size:12px; color:var(--fg-2); background:var(--bg-sunk); flex:none; white-space:nowrap; }
+.scope b{ font-weight:500; color:var(--fg); }
+.scope > span:nth-child(2){ overflow:hidden; text-overflow:ellipsis; min-width:0; }
+.scope .grow{ flex:1; }
+.etabs-note{ font-size:12px; align-self:center; padding-right:8px; }
+.term{ height:300px; }
+
+/* ───────────── Right panel ───────────── */
+.rp{ width:var(--rp-w,400px); flex:none; border-left:1px solid var(--line); display:flex; flex-direction:column; min-height:0; background:var(--bg); position:relative; }
+.rp-head{ display:flex; align-items:stretch; gap:18px; height:60px; padding:0 10px 0 16px; border-bottom:1px solid var(--line); flex:none; }
+.rp-head .grow{ flex:1; }
+.rp-head > .ibtn{ align-self:center; }
+.rp-tab{ position:relative; display:flex; align-items:center; gap:6px; color:var(--fg-2); font-weight:500; transition: color var(--dur-1); }
+.rp-tab:hover{ color:var(--fg); }
+.rp-tab[aria-selected="true"]{ color:var(--fg); }
+.rp-tab[aria-selected="true"]::after{ content:""; position:absolute; left:0; right:0; bottom:-1px; height:2px; border-radius:1px; background:var(--fg); }
+.rp-tab .c{ color:var(--fg-3); font-weight:400; }
+.rp-bar{ display:flex; align-items:center; gap:6px; height:44px; padding:0 12px; border-bottom:1px solid var(--line); flex:none; }
+.rp-bar .grow{ flex:1; }
+.rp-bar .seg button{ height:24px; padding:0 9px; }
+.rp-bar .scope{ all:unset; }
+.rp-bar .btn.scope{ height:26px; padding:0 8px; display:inline-flex; align-items:center; gap:4px; border-radius:6px; color:var(--fg-2); font-weight:500; cursor:pointer; }
+.rp-bar .btn.scope:hover{ background:var(--hover); color:var(--fg); }
+.pm{ font-size:12px; white-space:nowrap; }
+.rp-body{ flex:1; overflow:auto; min-height:0; }
+.rp-by{ display:flex; align-items:center; gap:7px; padding:12px 16px 6px; font-size:12px; color:var(--fg-2); }
+.flist{ padding:0 8px 10px; }
+.fr{ display:flex; align-items:center; gap:8px; width:100%; height:30px; padding:0 8px; border-radius:6px; font-size:12px; color:var(--fg-3); }
+.fr:hover{ background:var(--hover); } .fr.sel{ background:var(--sel); }
+.fr .p{ font-family:var(--mono); flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--fg); }
+.fr .p span{ color:var(--fg-3); }
+.rp-note{ margin:4px 16px 16px; font-size:12px; color:var(--fg-3); line-height:17px; }
+.dfile{ border-top:1px solid var(--line); }
+.dfile-h{ position:sticky; top:0; z-index:1; display:flex; align-items:center; gap:8px; height:36px; padding:0 6px 0 16px; background:var(--bg); border-bottom:1px solid var(--line); font-size:12px; }
+.dfile-h .p{ color:var(--fg); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dfile-h .grow{ flex:1; }
+.rp .hunk{ border-top:0; }
+.rp .hunk .hh{ padding:6px 16px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.rp .ln .n{ width:34px; }
+.rp .ln .cx, .ph-diff .ln .cx{ white-space:pre-wrap; overflow-wrap:anywhere; min-width:0; flex:1; padding-right:12px; }
+.rp-foot{ flex:none; display:flex; align-items:center; gap:6px; padding:10px 12px; border-top:1px solid var(--line); }
+.rp-foot .grow{ flex:1; }
+.rp .tree{ padding:12px 12px 16px 16px; }
+.rp .empty p{ max-width:40ch; }
+.filter{ display:flex; align-items:center; gap:8px; flex:1; height:28px; padding:0 8px; border-radius:6px; color:var(--fg-3); background:var(--bg-raised); box-shadow: inset 0 0 0 1px var(--line-2); }
+.filter input{ flex:1; min-width:0; border:0; background:transparent; }
+.filter input::placeholder{ color:var(--fg-3); }
+.filter input:focus-visible{ outline:none; }
+.filter:focus-within{ box-shadow: inset 0 0 0 1px var(--focus), 0 0 0 3px color-mix(in oklch, var(--focus) 25%, transparent); }
+.agentchg{ flex:none; display:flex; align-items:center; gap:10px; width:100%; padding:10px 12px 10px 16px; border-top:1px solid var(--line); text-align:left; transition: background var(--dur-1); }
+.agentchg:hover{ background:var(--hover); }
+.agentchg .grow{ flex:1; min-width:0; display:flex; flex-direction:column; gap:2px; }
+.agentchg .t{ font-weight:600; } .agentchg .s{ font-size:12px; color:var(--fg-3); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.fnode .gs.t-ok{ color:var(--ok); }
+
+/* ───────────── Phone: project groups + panel sheet ───────────── */
+.ph-pg-h{ display:flex; align-items:center; gap:10px; width:100%; height:40px; padding:10px 20px 0; font-size:15px; color:var(--fg-2); }
+.ph-pg-h .pmono{ width:20px; height:20px; border-radius:5px; font-size:11px; }
+.ph-pg-h .nm{ font-weight:600; }
+.ph-pg-h .hn{ font-size:14px; color:var(--fg-3); }
+.ph-pg-h .grow{ flex:1; }
+.ph-pg-h .ct{ font-size:14px; color:var(--fg-3); }
+.ph-pg-h .chev{ color:var(--fg-3); transition: transform var(--dur-2) var(--ease-out); }
+.ph-pg-h[aria-expanded="false"] .chev{ transform: rotate(-90deg); }
+.ph-pg .ph-row .row-st{ width:20px; }
+.ph-pg .ph-row::after{ left:52px; }
+.ph-pg .ph-row:last-child::after{ display:none; }
+.ph-row.snz{ min-height:52px; align-items:center; margin-top:8px; border-top:1px solid var(--line); }
+.ph-row.snz::after{ display:none; }
+.ph-chg{ display:flex; align-items:center; gap:10px; min-height:48px; padding:0 14px; margin:4px 0 14px; border-radius:12px; box-shadow: inset 0 0 0 1px var(--line); font-size:15px; font-weight:500; }
+.ph-chg .pm{ font-size:14px; }
+.ph-chg .grow{ flex:1; }
+.ph-sheet.large{ top:54px; display:flex; flex-direction:column; padding:8px 0 0; }
+.ph-sheet.large .ph-body{ padding-bottom:34px; }
+.ph-sh-nav{ display:flex; align-items:center; height:44px; padding:0 8px; flex:none; }
+.ph-sh-nav .ttl{ flex:1; text-align:center; font-size:17px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.ph-sh-nav .navbtn{ min-width:64px; height:44px; display:inline-flex; align-items:center; justify-content:flex-end; padding:0 12px; color:var(--accent-tx); font-size:17px; }
+.ph-seg .seg .pip{ margin-left:2px; }
+.ph-sum{ display:flex; align-items:center; gap:10px; padding:6px 16px 14px; }
+.ph-sum .pm{ font-size:14px; }
+.ph-sum .grow{ flex:1; }
+.nav.parent{ color:var(--fg); }
+.ph-group .pm{ font-size:13px; }
+.ph-diff{ margin:0 16px 22px; border-radius:12px; overflow:hidden; box-shadow: inset 0 0 0 1px var(--line); }
+.ph-diff .hunk{ border-top:0; font-size:12px; line-height:18px; }
+.ph-diff .ln .n{ width:30px; padding-right:8px; }
+.ph-diff .hh{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; padding:6px 12px; }
+.ph-node.kid{ padding-left:36px; }
+.ph-node.sel{ background:var(--accent-soft); }
+:root[data-theme="dark"] .ph-node.sel{ background: color-mix(in oklch, var(--accent-soft) 70%, var(--fill)); }
+.ph .btn.sm{ text-decoration:none; }
 
 /* ───────────── Phone ───────────── */
 body.frame-phone{ background: var(--bg-side); }
@@ -650,6 +815,7 @@ const P = {
   arrow:'<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
   share:'<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/>',
   qr:'<rect width="5" height="5" x="3" y="3" rx="1"/><rect width="5" height="5" x="16" y="3" rx="1"/><rect width="5" height="5" x="3" y="16" rx="1"/><path d="M21 16h-3a2 2 0 0 0-2 2v3"/><path d="M21 21v.01"/><path d="M12 7v3a2 2 0 0 1-2 2H7"/><path d="M3 12h.01"/><path d="M12 3h.01"/><path d="M12 16v.01"/><path d="M16 12h1"/><path d="M21 12v.01"/><path d="M12 21v-1"/>',
+  pleft:'<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/>',
   pause:'<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>',
 };
 const ic = (n, s=16, cls='') => `<svg class="i ${s!==16?'s'+s:''} ${cls}" viewBox="0 0 24 24" aria-hidden="true">${P[n]||''}</svg>`;
@@ -688,31 +854,56 @@ const PAIR_EXP = NOW.getTime() + 9*60*1000 + 41*1000;
 function hms(ms, secs=true){ ms=Math.max(0,ms); const s=Math.floor(ms/1000), h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=s%60; return secs ? (h?`${h}h ${String(m).padStart(2,'0')}m ${String(x).padStart(2,'0')}s`:`${m}:${String(x).padStart(2,'0')}`) : `${h}h ${m}m`; }
 
 /* ───────────── Data ───────────── */
-const THREADS = {
-  working: [
-    { id:'auth', st:'you', title:'Fix flaky auth test', meta:'atlas · Claude Code', status:'Needs approval', tone:'you', time:'2m' },
-    { id:'relay', st:'run', title:'Ship relay retry with backoff', meta:'orion · Codex', status:'Running · 61 tok/s', time:'18m' },
-    { id:'deps', st:'queued', title:'Audit dependency tree', meta:'Ubuntu-24.04 · OpenCode', status:'Queued', time:'4m' },
-    { id:'redis', st:'limited', title:'Migrate session store to Redis', meta:'orion · Codex', status:'Resumes 14:32', tone:'warn', time:'1h' },
-    { id:'wsl', st:'offline', title:'Parse WSL distro hosts', meta:'buildbox · Codex', status:'Host unreachable', tone:'danger', time:'3h' },
-    { id:'copy', st:'run', title:'Draft pairing screen copy', meta:'orion · Antigravity', status:'Thinking', time:'6m' },
-  ],
-  done: [
-    { id:'tpl', st:'done', title:'Update PR template', meta:'orion · OpenCode', status:'Unread', time:'1h', ack:true },
-    { id:'xterm', st:'done', title:'Bump xterm to 5.5 and fix resize', meta:'atlas · Claude Code', status:'Unread', time:'3h', ack:true },
-    { id:'idx', st:'limitstop', title:'Index usage events by harness', meta:'atlas · Claude Code', status:'Limited · needs you', tone:'warn', time:'5h', ack:false },
-  ],
-  settled: [
-    { id:'s1', st:'settled', title:'Add DPoP proof to device pairing', meta:'atlas · Claude Code', status:'Settled', time:'Tue' },
-    { id:'s2', st:'settled', title:'Rename harness instance ids', meta:'orion · Codex', status:'Settled', time:'Tue' },
-    { id:'s3', st:'settled', title:'Write CLIProxyAPI probe tests', meta:'atlas · Claude Code', status:'Settled', time:'Mon' },
-    { id:'s4', st:'settled', title:'Fix terminal paste on Android', meta:'orion · Antigravity', status:'Settled', time:'Mon' },
-    { id:'s5', st:'settled', title:'Document OrbitID device grant', meta:'Ubuntu-24.04 · OpenCode', status:'Settled', time:'Nov 9' },
-    { id:'s6', st:'settled', title:'Stream backpressure for relay', meta:'atlas · Codex', status:'Settled', time:'Nov 8' },
-    { id:'s7', st:'settled', title:'Golden tests for blobatar seeds', meta:'atlas · Claude Code', status:'Settled', time:'Nov 7' },
-  ]
+/* A project is a workspace: one folder on one host. The same repo on two hosts is two projects. */
+const PROJ = {
+  api:    { name:'api',    host:'atlas',        path:'~/code/api' },
+  relay:  { name:'relay',  host:'orion',        path:'~/src/relay' },
+  apiO:   { name:'api',    host:'orion',        path:'~/src/api' },
+  app:    { name:'app',    host:'atlas',        path:'~/code/h4rn-app' },
+  infra:  { name:'infra',  host:'Ubuntu-24.04', path:'~/infra' },
+  daemon: { name:'daemon', host:'buildbox',     path:'/srv/h4rn-daemon' },
 };
-const COUNTS = { working:6, done:3, settled:14 };
+const HOSTB = { atlas:B.atlas, orion:B.orion, 'Ubuntu-24.04':B.ubuntu, buildbox:B.buildbox };
+const HARNB = (h, host, s=14) => (({'Claude Code@atlas':B.claude, 'Codex@orion':B.codex, 'Codex@atlas':B.codexA, 'OpenCode@Ubuntu-24.04':B.opencode, 'Antigravity@orion':B.anti})[h+'@'+host] || (z=>blob(`harness:${host}:${h}`,'harness',z,h)))(s);
+const MODEL = { 'Claude Code':'claude-sonnet-5-5', Codex:'gpt-5.1-codex', OpenCode:'claude-haiku-5-5', Antigravity:'gemini-3-pro' };
+const mono = s => `${s[0].toUpperCase()}`;
+const TH = [
+  { id:'auth', lc:'working', p:'api', st:'you', title:'Fix flaky auth test', h:'Claude Code', status:'Needs approval', tone:'you', time:'2m', br:'h4rn/fix-flaky-auth' },
+  { id:'refresh', lc:'working', p:'api', st:'run', title:'Add jitter to token refresh', h:'Claude Code', status:'Running · 48 tok/s', time:'9m', br:'h4rn/refresh-jitter',
+    ask:'Token refresh stampedes at the top of the hour. Add jitter, bounded to ±20%.',
+    said:'Refresh is scheduled straight from the token’s <code>exp</code> claim with no spread, so every client wakes at once. I’m adding a seeded jitter in <code>refresh.ts</code> and a test that checks the bound' },
+  { id:'relay', lc:'working', p:'relay', st:'run', title:'Ship relay retry with backoff', h:'Codex', status:'Running · 61 tok/s', time:'18m', br:'h4rn/relay-retry',
+    ask:'Relay reconnects hammer the server after a deploy. Add retry with capped exponential backoff and full jitter.',
+    said:'The reconnect loop retried immediately on every close code. <code>Backoff</code> now lives in <code>backoff.rs</code>, and <code>retry.rs</code> waits between attempts. Updating the reconnect tests for close code 1012 next' },
+  { id:'copy', lc:'working', p:'relay', st:'run', title:'Draft relay status copy', h:'Antigravity', status:'Thinking', time:'6m', br:'h4rn/relay-copy',
+    ask:'Write the status strings the app shows while the relay reconnects. Short, no exclamation marks.',
+    said:'Reading the current strings in <code>status.rs</code> so the new ones match their tone' },
+  { id:'redis', lc:'working', p:'apiO', st:'limited', title:'Migrate session store to Redis', h:'Codex', status:'Resumes 14:32', tone:'warn', time:'1h', br:'h4rn/redis-sessions',
+    ask:'Move the session store from Postgres to Redis behind the existing SessionStore trait.',
+    said:'The Redis store and its tests are in place. Codex hit its 5-hour limit at 09:32, so the turn is paused here.' },
+  { id:'pin', lc:'working', p:'infra', st:'run', title:'Pin toolchain versions', h:'OpenCode', status:'Running', time:'12m', br:'h4rn/pin-toolchain',
+    ask:'Pin the Rust and Node toolchains so CI and the WSL build agree.', said:'Adding <code>rust-toolchain.toml</code> and a <code>.node-version</code>, then checking the CI image reads both' },
+  { id:'deps', lc:'working', p:'infra', st:'queued', title:'Audit dependency tree', h:'OpenCode', status:'Queued', time:'4m', br:'h4rn/audit-deps',
+    ask:'List direct dependencies with no release in 12 months and anything pulled in twice at different majors.', said:'' },
+  { id:'wsl', lc:'working', p:'daemon', st:'offline', title:'Parse WSL distro hosts', h:'Codex', status:'Host unreachable', tone:'danger', time:'3h', br:'h4rn/wsl-hosts',
+    ask:'Parse <code>wsl.exe -l -v</code> output into host records, one per distro.', said:'Reading the UTF-16 output from wsl.exe and splitting it by distro' },
+  { id:'idx', lc:'done', p:'api', st:'limitstop', title:'Index usage events by harness', h:'Claude Code', status:'Limited · needs you', tone:'warn', time:'5h', ack:false, br:'h4rn/usage-index',
+    ask:'Add an index on usage_events(harness, ts) and backfill it.', said:'The migration is written. Claude Code hit its weekly limit before the backfill finished, and this provider gives no reset time, so it won’t resume by itself.' },
+  { id:'xterm', lc:'done', p:'app', st:'done', title:'Bump xterm to 5.5 and fix resize', h:'Claude Code', status:'Unread', time:'3h', ack:true, br:'h4rn/xterm-5-5' },
+  { id:'tpl', lc:'done', p:'relay', st:'done', title:'Update PR template', h:'Codex', status:'Unread', time:'1h', ack:true, br:'h4rn/pr-template',
+    ask:'Add a “Where it ran” section to the PR template.', said:'Done. The template now asks for host, harness and model, and links the thread.' },
+  { id:'s1', lc:'settled', p:'api', st:'settled', title:'Add DPoP proof to device pairing', h:'Claude Code', status:'Settled', time:'Tue' },
+  { id:'s3', lc:'settled', p:'api', st:'settled', title:'Write CLIProxyAPI probe tests', h:'Claude Code', status:'Settled', time:'Mon' },
+  { id:'s2', lc:'settled', p:'relay', st:'settled', title:'Rename harness instance ids', h:'Codex', status:'Settled', time:'Tue' },
+  { id:'s6', lc:'settled', p:'relay', st:'settled', title:'Stream backpressure for relay', h:'Codex', status:'Settled', time:'Nov 8' },
+  { id:'s4', lc:'settled', p:'app', st:'settled', title:'Fix terminal paste on Android', h:'Claude Code', status:'Settled', time:'Mon' },
+  { id:'s7', lc:'settled', p:'app', st:'settled', title:'Golden tests for blobatar seeds', h:'Claude Code', status:'Settled', time:'Nov 7' },
+  { id:'s5', lc:'settled', p:'infra', st:'settled', title:'Document OrbitID device grant', h:'OpenCode', status:'Settled', time:'Nov 9' },
+];
+const TBY = Object.fromEntries(TH.map(t=>[t.id,t]));
+const COUNTS = { working:8, done:3, settled:14 };
+const hostOf = t => PROJ[t.p].host;
+const ANY_YOU = () => TH.some(t=>t.st==='you');
 function stGlyph(st){
   switch(st){
     case 'you': return `<span class="dot you" aria-hidden="true"></span>`;
@@ -730,76 +921,136 @@ function stGlyph(st){
 }
 
 /* ───────────── State ───────────── */
-const S = { screen:'inbox', theme:'light', frame:'desktop', tab:'working', palette:false, approved:false, chartTable:false, prPop:true };
+const S = { screen:'inbox', theme:'light', approved:false, chartTable:false, prPop:true, sideW:288, rpW:400 };
+const base = () => ({ view:'thread', panel:null, term:false, side:true, sel:'auth', tab:'working', closed:{ infra:true } });
+Object.assign(S, base());
 
-/* ───────────── Desktop building blocks ───────────── */
-function sidebar(active, o={}){
-  const n = (id, icon, label, ct='', you=false) => `<a href="#" class="nav" data-go="${id}" ${active===id?'aria-current="page"':''}>${ic(icon)}<span class="lbl">${label}</span>${ct?`<span class="ct ${you?'you':''} num">${ct}</span>`:''}</a>`;
-  return `<nav class="side" aria-label="Main">
-    <div class="side-top"><span class="word">h4rn</span><button class="ibtn" title="New thread ⌘⇧N" aria-label="New thread">${ic('compose')}</button></div>
-    <button class="side-search" data-act="palette">${ic('search',14)}<span>Search or run</span><span class="kbd">⌘K</span></button>
-    ${n('inbox','inbox','Inbox',o.empty?'':'2',true)}
-    ${n('pr','pr','Pull requests','3')}
-    ${n('ide','code','Editor')}
-    ${n('library','plug','MCP & skills')}
-    ${n('usage','chart','Usage')}
-    <div class="side-h"><span>Hosts</span><span class="num">3 of 4</span></div>
-    <a href="#" class="host" data-go="set-hosts">${B.atlas()}<span class="lbl">atlas</span><span class="dot on" aria-label="online"></span></a>
-    <a href="#" class="host sub" data-go="set-hosts">${B.ubuntu(14)}<span class="lbl">Ubuntu-24.04</span><span class="dot on" aria-label="online"></span></a>
-    <a href="#" class="host" data-go="set-hosts">${B.orion()}<span class="lbl">orion</span><span class="dot on" aria-label="online"></span></a>
-    <a href="#" class="host" data-go="set-hosts">${B.buildbox()}<span class="lbl" style="color:var(--fg-3)">buildbox</span><span class="meta">3h</span></a>
-    <div class="side-foot">
-      ${n('set-hosts','gear','Settings')}
-      <div class="conn"><span class="dot on"></span><span>Direct · atlas 12 ms</span></div>
-    </div>
-  </nav>`;
-}
+/* ───────────── Sidebar (the only left column) ───────────── */
 function threadRow(t, sel){
-  return `<button class="row ${sel?'sel':''} ${t.st==='settled'?'dim':''}" data-thread="${t.id}">
+  const act = t.lc==='done' && (sel || t.ack===false);
+  return `<button class="row ${sel?'sel':''} ${t.st==='settled'?'dim':''}" data-thread="${t.id}" ${sel?'aria-current="true"':''}>
     <span class="row-st">${stGlyph(t.st)}</span>
     <span class="row-main">
       <span class="row-l1"><span class="row-title">${t.title}</span><span class="row-time num">${t.time}</span></span>
-      <span class="row-l2"><span class="row-meta">${t.meta}</span><span class="row-status ${t.tone||''}">${t.status}</span></span>
-      ${t.ack!==undefined && S.tab==='done' ? `<span class="row-act">${t.ack?`<span class="btn secondary">Acknowledge <span class="kbd">A</span></span>`:`<span class="btn secondary">${ic('play',12)} Resume now</span><span class="btn ghost">Acknowledge</span>`}</span>`:''}
+      <span class="row-l2"><span class="row-meta">${t.h}</span><span class="row-status ${t.tone||''}">${t.status}</span></span>
+      ${act ? `<span class="row-act">${t.ack?`<span class="btn secondary">Acknowledge <span class="kbd">A</span></span>`:`<span class="btn secondary">${ic('play',12)} Resume now</span><span class="btn ghost">Acknowledge</span>`}</span>`:''}
     </span>
   </button>`;
 }
-function inboxPane(opts={}){
-  const tab = opts.tab || S.tab;
-  const seg = ['working','done','settled'].map(k=>`<button role="tab" aria-selected="${tab===k}" data-tab="${k}">${k[0].toUpperCase()+k.slice(1)} <span class="c num">${opts.loading?'—':(opts.empty?0:COUNTS[k])}</span></button>`).join('');
-  let body = '';
-  if(opts.loading){
-    body = `<div class="rows" aria-busy="true" aria-label="Loading threads">${Array.from({length:7},(_,i)=>`<div class="row" style="pointer-events:none"><span class="row-st"><span class="skel" style="width:10px;height:10px;border-radius:50%"></span></span><span class="row-main" style="gap:8px;padding-top:2px"><span class="skel" style="height:11px;width:${[72,58,80,64,70,52,66][i]}%"></span><span class="skel" style="height:9px;width:${[44,50,38,46,40,48,36][i]}%"></span></span></div>`).join('')}</div>`;
-  } else if(opts.empty){
-    body = `<div class="empty"><h3>No threads yet</h3><p>Threads you start on a paired host show up here. Anything running, queued, or waiting on you stays in Working until it finishes.</p><button class="btn secondary">${ic('compose',14)} New thread <span class="kbd">⌘⇧N</span></button></div>`;
-  } else {
-    const list = THREADS[tab];
-    body = (opts.banner||'') + `<div class="rows">${list.map((t,i)=>threadRow(t, opts.sel ? t.id===opts.sel : (tab==='working'&&i===0))).join('')}</div>`;
-  }
-  return `<section class="pane" aria-label="Threads">
-    <div class="pane-head"><h2>Inbox</h2><button class="ibtn" aria-label="Filter">${ic('filter')}</button><button class="ibtn" aria-label="New thread">${ic('compose')}</button></div>
-    <div class="pane-sub"><div class="seg" role="tablist" aria-label="Thread state">${seg}</div></div>
-    <div class="scroll">${body}</div>
-    ${opts.loading||opts.empty?'':`<button class="snoozed">${ic('clock',14)}<span>Snoozed</span><span class="faint num">2</span>${ic('cr',14)}</button>`}
-  </section>`;
+function projGroups(sel){
+  const list = TH.filter(t=>t.lc===S.tab);
+  const order = [...new Set(list.map(t=>t.p))];
+  return order.map(pk=>{
+    const p = PROJ[pk], ts = list.filter(t=>t.p===pk), open = !S.closed[pk];
+    const you = ts.some(t=>t.st==='you');
+    return `<section class="pg" aria-label="${p.name} on ${p.host}">
+      <div class="pg-h ${ts.some(t=>t.id===sel)?'act':''}">
+        <button class="pg-tog" data-proj="${pk}" aria-expanded="${open}">
+          <span class="pmono" aria-hidden="true">${mono(p.name)}</span><span class="nm">${p.name}</span><span class="hn">${p.host}</span><span class="grow"></span>
+          ${open?'':`${you?'<span class="dot you" role="img" aria-label="needs you"></span>':''}<span class="ct num">${ts.length}</span>`}${ic('cd',12,'chev')}
+        </button>
+        <button class="ibtn add" aria-label="New thread in ${p.name} on ${p.host}" title="New thread in ${p.name}">${ic('plus',14)}</button>
+      </div>
+      ${open?`<div class="rows">${ts.map(t=>threadRow(t, t.id===sel)).join('')}</div>`:''}
+    </section>`;
+  }).join('');
 }
-function threadHead(opts={}){
-  const st = opts.state || `${orb('run')} Running`;
-  return `<header class="th-head">
-    <div class="th-titles"><h1>${opts.title||'Fix flaky auth test'}</h1>
-      <div class="prov">${B.atlas(14)} atlas <span class="sep">/</span> ${B.claude(14)} Claude Code <span class="opt"><span class="sep">/</span> claude-sonnet-5-5</span> <span class="br"><span class="sep">/</span> ${ic('branch',12)} <span class="mono" style="font-size:11.5px">h4rn/fix-flaky-auth</span></span></div>
+function segTabs(o={}){
+  return `<div class="seg" role="tablist" aria-label="Thread state">${['working','done','settled'].map(k=>`<button role="tab" aria-selected="${S.tab===k}" data-tab="${k}">${k[0].toUpperCase()+k.slice(1)} <span class="c num">${o.loading?'—':COUNTS[k]}</span></button>`).join('')}</div>`;
+}
+function sideFoot(o={}){
+  const d = o.dest||null;
+  const f = (id,icon,label,key,n='') => `<button class="ibtn ${n?'wide':''} ${d===id?'on':''}" data-go="${id}" title="${label}  ${key}" aria-label="${label}${n?`, ${n} open`:''}" ${d===id?'aria-current="page"':''}>${ic(icon)}${n?`<span class="n num">${n}</span>`:''}</button>`;
+  const st = o.loading ? `${orb('queued')}<span>Connecting…</span>`
+    : o.offline ? `<span class="faint">${ic('wifioff',14)}</span><span>Offline</span>`
+    : o.empty ? `<span class="dot on"></span><span>atlas</span>`
+    : `<span class="dot on"></span><span>3 of 4 hosts</span>`;
+  return `<div class="side-ft">
+    <button class="hostbtn ${o.pop?'on':''}" aria-haspopup="menu" aria-expanded="${!!o.pop}" title="Hosts and connection">${st}${ic('cd',12,'faint')}</button>
+    ${f('pr','pr','Pull requests','G P', o.empty||o.loading?'':'3')}${f('library','plug','MCP & skills','G M')}${f('usage','chart','Usage','G U')}${f('set-hosts','gear','Settings','⌘,')}
+  </div>`;
+}
+function hostsPop(){
+  const h = (b, name, right, sub=false, dim=false) => `<a href="#" class="host ${sub?'sub':''}" data-go="set-hosts">${b}<span class="lbl" ${dim?'style="color:var(--fg-3)"':''}>${name}</span>${right}</a>`;
+  return `<div class="pop hostpop" role="menu" aria-label="Hosts">
+    <div class="hp-h"><span>Hosts</span><span class="faint num">3 of 4 online</span></div>
+    ${h(B.atlas(),'atlas','<span class="meta num">12 ms</span><span class="dot on" aria-label="online"></span>')}
+    ${h(B.ubuntu(14),'Ubuntu-24.04','<span class="meta num">18 ms</span><span class="dot on" aria-label="online"></span>',true)}
+    ${h(B.orion(),'orion','<span class="meta num">42 ms</span><span class="dot on" aria-label="online"></span>')}
+    ${h(B.buildbox(),'buildbox',`<span class="meta t-danger" style="display:inline-flex;gap:4px;align-items:center">${ic('wifioff',12)} 3h</span>`,false,true)}
+    <div class="hp-conn">Direct to atlas · relay for buildbox</div>
+    <div class="hp-sep"></div>
+    <a href="#" class="nav" data-go="set-devices">${ic('qr')}<span class="lbl">Pair a device…</span></a>
+    <a href="#" class="nav" data-go="set-hosts">${ic('server')}<span class="lbl">Manage hosts</span></a>
+  </div>`;
+}
+function sidebar(o={}){
+  const sel = o.sel===undefined ? S.sel : o.sel;
+  const skRow = (a,b) => `<div class="row" style="pointer-events:none"><span class="row-st"><span class="skel" style="width:10px;height:10px;border-radius:50%"></span></span><span class="row-main" style="gap:8px;padding-top:3px"><span class="skel" style="height:10px;width:${a}%"></span><span class="skel" style="height:8px;width:${b}%"></span></span></div>`;
+  const skHead = w => `<div class="pg-h" style="pointer-events:none"><span class="pg-tog"><span class="skel" style="width:16px;height:16px;border-radius:4px"></span><span class="skel" style="height:10px;width:${w}px"></span></span></div>`;
+  let list;
+  if(o.loading) list = `<div aria-busy="true" aria-label="Loading projects"><section class="pg">${skHead(64)}<div class="rows">${skRow(78,34)}${skRow(62,40)}</div></section><section class="pg">${skHead(48)}<div class="rows">${skRow(70,30)}${skRow(56,36)}</div></section><section class="pg">${skHead(72)}<div class="rows">${skRow(66,38)}</div></section></div>`;
+  else if(o.empty) list = `<div class="empty side-empty"><h3>No projects yet</h3><p>A project is a folder on one of your hosts. Every thread you start there is listed under it.</p><button class="btn secondary">${ic('folder',14)} Add a project…</button></div>`;
+  else list = projGroups(sel)
+    + (S.tab==='working' ? `<button class="snoozed">${ic('clock',14)}<span>Snoozed</span><span class="faint num">2</span>${ic('cr',14)}</button>` : '')
+    + (S.tab==='settled' ? `<button class="snoozed"><span>Showing 7 of 14</span><span class="t-accent">Show older</span></button>` : '');
+  return `<nav class="side" aria-label="Threads" style="--side-w:${S.sideW}px">
+    <div class="side-hd">
+      <div class="side-top"><span class="word">h4rn</span><span class="grow"></span>
+        <button class="ibtn" data-act="side" title="Hide sidebar  ⌘B" aria-label="Hide sidebar">${ic('pleft')}</button>
+        <button class="ibtn" title="New thread  ⌘⇧N" aria-label="New thread">${ic('compose')}</button></div>
+      <button class="side-search" data-act="palette">${ic('search',14)}<span>Search or run</span><span class="kbd">⌘K</span></button>
+      ${o.empty?'':segTabs(o)}
     </div>
-    <div class="th-state">${st}</div>
-    <div class="th-actions">
-      <button class="ibtn ${opts.tool==='term'?'on':''}" data-go="terminal" title="Terminal  T" aria-label="Terminal">${ic('term')}</button>
-      <button class="ibtn ${opts.tool==='sub'?'on':''}" data-go="subagents" title="Subagents  ⌘J" aria-label="Subagents">${ic('tree')}</button>
-      <button class="ibtn" data-go="ide" title="Changes  D" aria-label="Changes">${ic('diff')}</button>
-      <span class="vsep"></span>
-      ${opts.noStop?'':`<button class="btn secondary">${ic('stop',14)} Stop</button>`}
-      <button class="ibtn" aria-label="More">${ic('more')}</button>
-    </div>
+    ${o.banner||''}
+    <div class="side-list">${list}</div>
+    ${o.pop||''}
+    ${sideFoot(o)}
+    <div class="rz" data-rz="side" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" aria-valuenow="${S.sideW}" aria-valuemin="240" aria-valuemax="420" tabindex="0"></div>
+  </nav>`;
+}
+
+/* ───────────── Main: thread header ───────────── */
+function provLine(t){
+  const host = hostOf(t);
+  return `${HOSTB[host](14)} ${host} <span class="sep">/</span> ${HARNB(t.h,host)} ${t.h} <span class="opt"><span class="sep">/</span> ${MODEL[t.h]}</span> ${t.br?`<span class="br"><span class="sep">/</span> ${ic('branch',12)} <span class="mono" style="font-size:11.5px">${t.br}</span></span>`:''}`;
+}
+function headState(t){
+  const g = (cls, icon, txt) => `<span class="${cls}" style="display:inline-flex;gap:7px;align-items:center">${ic(icon,14)} ${txt}</span>`;
+  switch(t.st){
+    case 'you': case 'run': return `${orb('run')} Running`;
+    case 'queued': return `${orb('queued')} Queued`;
+    case 'limited': return g('t-warn','clock','Resumes 14:32');
+    case 'limitstop': return g('t-warn','pause','Limited');
+    case 'offline': return g('t-danger','wifioff','Host unreachable');
+    case 'done': return `${ic('ccheck',14)} Done · ${t.time} ago`;
+    case 'settled': return g('faint','check','Settled');
+  }
+  return '';
+}
+function sideReveal(){
+  if(S.side) return '';
+  const you = ANY_YOU();
+  return `<div class="hd-l"><button class="ibtn" data-act="side" title="Show sidebar  ⌘B" aria-label="Show sidebar${you?'. 1 thread needs you':''}">${ic('pleft')}${you?'<span class="pip" aria-hidden="true"></span>':''}</button><button class="ibtn" aria-label="New thread" title="New thread  ⌘⇧N">${ic('compose')}</button><span class="vsep"></span></div>`;
+}
+function viewCluster(){
+  return `<div class="seg inline viewseg" role="tablist" aria-label="View" title="Switch view  ⌘E"><button role="tab" aria-selected="${S.view==='thread'}" data-act="view-thread">Thread</button><button role="tab" aria-selected="${S.view==='ide'}" data-act="view-ide">IDE</button></div>
+    <button class="ibtn ${S.term?'on':''}" data-act="term" title="Terminal  T" aria-label="Terminal" aria-pressed="${S.term}">${ic('term')}</button>
+    <button class="ibtn ${S.panel?'on':''}" data-act="panel" title="Right panel  ⌘⌥B" aria-label="Right panel" aria-pressed="${!!S.panel}">${ic('pright')}</button>`;
+}
+function threadHead(t, o={}){
+  const acts = o.actions!==undefined ? o.actions
+    : t.lc==='done' ? `<button class="btn secondary">Snooze</button><button class="btn primary">Acknowledge <span class="kbd">A</span></button><button class="ibtn" aria-label="More">${ic('more')}</button>`
+    : t.lc==='settled' ? `<button class="btn secondary">Un-settle</button><button class="ibtn" aria-label="More">${ic('more')}</button>`
+    : `${o.noStop||t.st==='offline'||t.st==='limited'?'':`<button class="btn secondary">${ic('stop',14)} Stop</button>`}<button class="ibtn" aria-label="More">${ic('more')}</button>`;
+  return `<header class="th-head ${S.side?'':'bare'}">${sideReveal()}
+    <div class="th-titles"><h1>${t.title}</h1><div class="prov">${provLine(t)}</div></div>
+    <div class="th-state">${o.state||headState(t)}</div>
+    <div class="th-actions">${acts}<span class="vsep"></span>${viewCluster()}</div>
   </header>`;
 }
+
+/* ───────────── Main: stream ───────────── */
 const TOOL_OUT = {
   read:`  1  import { describe, it, expect, beforeAll, vi } from "vitest";
   2  import { createPool } from "../db/pool";
@@ -812,6 +1063,24 @@ const TOOL_OUT = {
 src/db/pool.ts:28              const openedAt = Date.now();
 tests/setup.ts:9               beforeAll(() => vi.useFakeTimers());`,
 };
+const HUNK_SETUP = `<div class="hunk">
+  <div class="hh">@@ -6,9 +6,17 @@ import { vi, beforeAll } from "vitest";</div>
+  <div class="ln d"><span class="n">9</span><span class="sg">−</span><span class="cx">beforeAll(() =&gt; vi.useFakeTimers());</span></div>
+  <div class="ln a"><span class="n">9</span><span class="sg">+</span><span class="cx">export const clock = vi.useFakeTimers({ now: new Date("2026-01-01T00:00:00Z") });</span></div>
+  <div class="ln a"><span class="n">10</span><span class="sg">+</span><span class="cx">beforeAll(() =&gt; createPool({ now: () =&gt; clock.now() }));</span></div>
+  <div class="ln"><span class="n">11</span><span class="sg"> </span><span class="cx">afterEach(() =&gt; vi.clearAllTimers());</span></div>
+</div>`;
+const HUNK_SESSION = `<div class="hunk">
+  <div class="hh">@@ -44,6 +44,13 @@ describe("verifySession", () =&gt; {</div>
+  <div class="ln"><span class="n">45</span><span class="sg"> </span><span class="cx"></span></div>
+  <div class="ln a"><span class="n">46</span><span class="sg">+</span><span class="cx">  // Regression: the pool used to read Date.now() at import time.</span></div>
+  <div class="ln a"><span class="n">47</span><span class="sg">+</span><span class="cx">  it("is still valid at the 30 s boundary", async () =&gt; {</span></div>
+  <div class="ln a"><span class="n">48</span><span class="sg">+</span><span class="cx">    clock.advanceTimersByTime(29_999);</span></div>
+  <div class="ln a"><span class="n">49</span><span class="sg">+</span><span class="cx">    expect(await verifySession("t_9f2")).not.toBeNull();</span></div>
+  <div class="ln a"><span class="n">50</span><span class="sg">+</span><span class="cx">    clock.advanceTimersByTime(1);</span></div>
+  <div class="ln a"><span class="n">51</span><span class="sg">+</span><span class="cx">    expect(await verifySession("t_9f2")).toBeNull();</span></div>
+  <div class="ln a"><span class="n">52</span><span class="sg">+</span><span class="cx">  });</span></div>
+</div>`;
 function streamMain(opts={}){
   return `<div class="stream"><div class="col">
     <div class="turn you-msg">
@@ -837,21 +1106,45 @@ function streamMain(opts={}){
         <div class="tool-out"></div>
       </div>
       <div class="changes">
-        <div class="ch-head"><span class="t">2 files changed</span><span class="num"><span class="add">+18</span>&nbsp; <span class="del">−4</span></span><button class="btn ghost" data-go="ide">Review</button></div>
+        <div class="ch-head"><span class="t">2 files changed</span><span class="num"><span class="add">+18</span>&nbsp; <span class="del">−4</span></span><button class="btn ghost" data-act="open-changes" title="Open in the Changes panel  D">Review</button></div>
         <div class="ch-file"><span class="p"><span>tests/</span>setup.ts</span><span class="num"><span class="add">+12</span> <span class="del">−4</span></span></div>
-        <div class="hunk">
-          <div class="hh">@@ -6,9 +6,17 @@ import { vi, beforeAll } from "vitest";</div>
-          <div class="ln d"><span class="n">9</span><span class="sg">−</span><span class="cx">beforeAll(() =&gt; vi.useFakeTimers());</span></div>
-          <div class="ln a"><span class="n">9</span><span class="sg">+</span><span class="cx">export const clock = vi.useFakeTimers({ now: new Date("2026-01-01T00:00:00Z") });</span></div>
-          <div class="ln a"><span class="n">10</span><span class="sg">+</span><span class="cx">beforeAll(() =&gt; createPool({ now: () =&gt; clock.now() }));</span></div>
-          <div class="ln"><span class="n">11</span><span class="sg"> </span><span class="cx">afterEach(() =&gt; vi.clearAllTimers());</span></div>
-        </div>
+        ${HUNK_SETUP}
         <div class="ch-file"><span class="p"><span>src/auth/</span>session.test.ts</span><span class="num"><span class="add">+6</span></span></div>
       </div>
-      <div class="sub-row">${orb('run')}<span class="t"><span class="faint">Delegated</span> Reproduce CI failure</span><span class="faint" style="font-size:12px">${B.orion(14)} orion · Codex · 0:31</span><button class="btn ghost" data-go="subagents" style="height:24px">Open</button></div>
+      <div class="sub-row">${orb('held')}<span class="t"><span class="faint">Delegated</span> Reproduce CI failure</span><span class="faint" style="font-size:12px">${B.orion(14)} orion · Codex · 0:31</span><button class="btn ghost" data-act="open-subagents" style="height:24px">Open</button></div>
       <p class="prose">While Codex reproduces the failure on orion: the pool now takes its clock from the test context instead of reading <code>Date.now()</code> at import, and the new regression test advances the clock by 30 s and checks the session is still valid at the boundary. I’ll run the auth suite three times once the repro confirms the race<span class="caret"></span></p>
       <div class="live-line">${orb('run')}<span>Writing · 61 tok/s</span></div>
     </div>
+  </div></div>`;
+}
+function xtermStream(){
+  return `<div class="stream"><div class="col">
+    <div class="turn you-msg"><div class="bubble">Bump xterm to 5.5. The terminal reflows wrong when the phone is the smallest viewer; fix that too.</div><div class="you-meta"><span>09:11</span></div></div>
+    <div class="turn"><div class="ag-head">${B.claude(14)} <b>Claude Code</b> <span>on atlas</span> · <span>09:12</span></div>
+      <div class="tools"><button class="tool"><span class="st">${ic('check',14)}</span><span class="verb">Edit</span><span class="tgt">apps/ui/package.json</span><span class="m"><span class="add">+2</span> <span class="del">−2</span></span>${ic('cr',14,'chev')}</button>
+      <button class="tool"><span class="st">${ic('check',14)}</span><span class="verb">Edit</span><span class="tgt">apps/ui/src/terminal/fit.ts</span><span class="m"><span class="add">+31</span> <span class="del">−9</span></span>${ic('cr',14,'chev')}</button>
+      <button class="tool"><span class="st">${ic('check',14)}</span><span class="verb">Run</span><span class="tgt">bun test terminal</span><span class="m">14 passed · 3.1 s</span>${ic('cr',14,'chev')}</button></div>
+      <p class="prose">Done. xterm is on 5.5.0. Resize now takes the minimum column count across attached viewers and sends one <code>resize</code> frame per change instead of one per viewer, so the phone and desktop no longer fight over the PTY size.</p>
+      <p class="prose">I didn’t touch the key bar. Worth checking on a real Android keyboard before merging.</p>
+      <div class="changes"><div class="ch-head"><span class="t">3 files changed</span><span><span class="add">+41</span>&nbsp; <span class="del">−13</span></span><button class="btn ghost" data-act="open-changes">Review</button></div></div>
+      <div class="live-line">${ic('ccheck',14)}<span>Finished 09:19 · 7m 02s · 22.1k tokens · $0.51 est.</span></div>
+    </div>
+  </div></div>`;
+}
+function miniStream(t){
+  const host = hostOf(t);
+  const rate = (t.status.match(/(\d+ tok\/s)/)||[])[1];
+  const live = t.st==='run' ? `<div class="live-line">${orb('run')}<span>${rate?`Writing · ${rate}`:'Thinking'}</span></div>`
+    : t.st==='queued' ? `<div class="live-line">${orb('queued')}<span>Queued behind Pin toolchain versions on ${host}</span></div>`
+    : t.st==='limited' ? `<div class="live-line t-warn">${ic('clock',14)}<span>Paused by a usage limit · resumes 14:32 with its saved context</span></div>`
+    : t.st==='limitstop' ? `<div class="live-line t-warn">${ic('pause',14)}<span>Stopped by a usage limit · no reset time reported</span></div>`
+    : t.st==='offline' ? `<div class="live-line t-danger">${ic('wifioff',14)}<span>${host} stopped answering at 09:14</span></div>`
+    : t.st==='done' ? `<div class="live-line">${ic('ccheck',14)}<span>Finished</span></div>` : '';
+  const ask = t.ask || `${t.title}.`;
+  return `<div class="stream"><div class="col">
+    <div class="turn you-msg"><div class="bubble">${ask}</div><div class="you-meta"><span>11:58</span></div></div>
+    ${t.said||t.st!=='queued' ? `<div class="turn"><div class="ag-head">${HARNB(t.h,host)} <b>${t.h}</b> <span>on ${host}</span> · <span class="num">11:59</span></div>
+      ${t.said?`<p class="prose">${t.said}${t.st==='run'?'<span class="caret"></span>':''}</p>`:''}${live}</div>` : `<div class="turn">${live}</div>`}
   </div></div>`;
 }
 function askCard(phone=false){
@@ -866,89 +1159,15 @@ function askCard(phone=false){
 function composer(opts={}){
   return `<div class="composer">
     <textarea aria-label="Reply" placeholder="${opts.ph||'Reply to Claude Code on atlas'}" ${opts.disabled?'disabled':''}></textarea>
-    <div class="comp-f"><button class="ibtn" aria-label="Attach" ${opts.disabled?'disabled':''}>${ic('clip')}</button><button class="ibtn" aria-label="Mention">${ic('at')}</button><span class="grow"></span><button class="model">claude-sonnet-5-5 ${ic('cd',12)}</button><button class="send" aria-label="Send">${ic('up',16)}</button></div>
+    <div class="comp-f"><button class="ibtn" aria-label="Attach" ${opts.disabled?'disabled':''}>${ic('clip')}</button><button class="ibtn" aria-label="Mention">${ic('at')}</button><span class="grow"></span><button class="model">${opts.model||'claude-sonnet-5-5'} ${ic('cd',12)}</button><button class="send" aria-label="Send">${ic('up',16)}</button></div>
   </div>`;
 }
 const usageFoot = `<div class="usage-foot num"><span>18.4k tokens</span><span>$0.42 est.</span><span>61 tok/s</span><span class="opt">TTFT 0.8 s</span><span class="opt">4m 12s active</span><span class="grow"></span><span><span class="ctxbar"><i style="width:41%"></i></span>41% context</span></div>`;
 
-function threadDetail(opts={}){
-  return `<main class="main" aria-label="Thread">
-    ${threadHead(opts)}
-    ${streamMain(opts)}
-    <div class="dock"><div class="col">${opts.noAsk?'':askCard()}${composer()}${usageFoot}</div></div>
-  </main>`;
-}
-
-/* ───────────── Screens: desktop ───────────── */
-function scrInbox(){
-  return `<div class="app">${sidebar('inbox')}${inboxPane()}${threadDetail()}</div>`;
-}
-function scrDone(){
-  S.tab='done';
-  return `<div class="app">${sidebar('inbox')}${inboxPane({tab:'done', sel:'xterm'})}
-  <main class="main"><header class="th-head"><div class="th-titles"><h1>Bump xterm to 5.5 and fix resize</h1><div class="prov">${B.atlas(14)} atlas <span class="sep">/</span> ${B.claude(14)} Claude Code <span class="sep">/</span> claude-sonnet-5-5 <span class="sep">/</span> <span class="br">${ic('branch',12)} <span class="mono" style="font-size:11.5px">h4rn/xterm-5-5</span></span></div></div>
-  <div class="th-state">${ic('ccheck',14)} Done · 3h ago</div><div class="th-actions"><span class="vsep"></span><button class="btn secondary">Snooze</button><button class="btn primary">Acknowledge <span class="kbd">A</span></button><button class="ibtn">${ic('more')}</button></div></header>
-  <div class="stream"><div class="col">
-    <div class="turn you-msg"><div class="bubble">Bump xterm to 5.5. The terminal reflows wrong when the phone is the smallest viewer; fix that too.</div><div class="you-meta"><span>09:11</span></div></div>
-    <div class="turn"><div class="ag-head">${B.claude(14)} <b>Claude Code</b> <span>on atlas</span> · <span>09:12</span></div>
-      <div class="tools"><button class="tool"><span class="st">${ic('check',14)}</span><span class="verb">Edit</span><span class="tgt">apps/ui/package.json</span><span class="m"><span class="add">+2</span> <span class="del">−2</span></span>${ic('cr',14,'chev')}</button>
-      <button class="tool"><span class="st">${ic('check',14)}</span><span class="verb">Edit</span><span class="tgt">apps/ui/src/terminal/fit.ts</span><span class="m"><span class="add">+31</span> <span class="del">−9</span></span>${ic('cr',14,'chev')}</button>
-      <button class="tool"><span class="st">${ic('check',14)}</span><span class="verb">Run</span><span class="tgt">bun test terminal</span><span class="m">14 passed · 3.1 s</span>${ic('cr',14,'chev')}</button></div>
-      <p class="prose">Done. xterm is on 5.5.0. Resize now takes the minimum column count across attached viewers and sends one <code>resize</code> frame per change instead of one per viewer, so the phone and desktop no longer fight over the PTY size.</p>
-      <p class="prose">I didn’t touch the key bar. Worth checking on a real Android keyboard before merging.</p>
-      <div class="changes"><div class="ch-head"><span class="t">3 files changed</span><span><span class="add">+41</span>&nbsp; <span class="del">−13</span></span><button class="btn ghost">Review</button></div></div>
-      <div class="live-line">${ic('ccheck',14)}<span>Finished 09:19 · 7m 02s · 22.1k tokens · $0.51 est.</span></div>
-    </div>
-  </div></div>
-  <div class="dock"><div class="col">${composer()}</div></div></main></div>`;
-}
-function scrSubagents(){
-  return `<div class="app">${sidebar('inbox')}${inboxPane()}
-  <main class="main">${threadHead({tool:'sub'})}${streamMain()}<div class="dock"><div class="col">${askCard()}${composer()}${usageFoot}</div></div></main>
-  <aside class="insp" aria-label="Subagents">
-    <div class="insp-head"><h2 style="margin:0;font-size:14px;font-weight:600;flex:1">Subagents</h2><button class="btn ghost">${ic('plus',14)} Delegate</button><button class="ibtn" data-go="inbox" aria-label="Close">${ic('x')}</button></div>
-    <div class="scroll"><div class="tree">
-      <div class="node parent">
-        <span class="gl">${orb('run')}</span>
-        <div class="bd"><div class="t"><span>Fix flaky auth test</span><span class="faint num" style="font-size:12px">4:12</span></div>
-        <div class="w">${B.atlas(14)} atlas · ${B.claude(12)} Claude Code</div>
-        <div class="s num">Running · 18.4k tokens</div></div>
-      </div>
-      <div class="kids"><div class="node">
-        <span class="gl" style="color:var(--fg-2)">${ic('ccheck',14)}</span>
-        <div class="bd"><div class="t"><span>Audit test helpers</span><span class="faint num" style="font-size:12px">1:48</span></div>
-        <div class="w">${B.sub('a1')} atlas · Codex</div>
-        <div class="s num">Done · 6.2k tokens · native resume</div></div>
-      </div>
-      <div class="node sel">
-        <span class="gl">${orb('held')}</span>
-        <div class="bd"><div class="t"><span>Reproduce CI failure</span><span class="faint num" style="font-size:12px">0:31</span></div>
-        <div class="w">${B.sub('r2')} ${B.orion(14)} orion · ${B.codex(12)} Codex</div>
-        <div class="s num"><span class="t-accent" style="font-weight:500">Needs approval</span> · turn 3 of 20 · 2.1k tokens</div>
-        <div class="prog" aria-label="Budget used 15%"><i style="width:15%"></i></div></div>
-      </div>
-      <div class="node">
-        <span class="gl t-danger">${ic('cx',14)}</span>
-        <div class="bd"><div class="t"><span style="color:var(--fg-2)">Check clock skew on buildbox</span><span class="faint num" style="font-size:12px">0:04</span></div>
-        <div class="w">${B.sub('c3')} buildbox · Codex</div>
-        <div class="s">Couldn’t start: buildbox is offline</div></div>
-      </div></div>
-    </div>
-    <div class="insp-sec"><h3>Reproduce CI failure</h3>
-      <dl class="kv">
-        <dt>Runs on</dt><dd>orion · Codex 0.98.2</dd>
-        <dt>Model</dt><dd>gpt-5.1-codex</dd>
-        <dt>Context</dt><dd>Summary handoff · 1.2k tokens</dd>
-        <dt>Budget</dt><dd class="num">20 turns · 15 min · 50k tokens</dd>
-        <dt>Approvals</dt><dd>Inherited from parent</dd>
-        <dt>Credential</dt><dd>${ic('key',12)} Stored on orion</dd>
-      </dl>
-      <div style="display:flex;gap:6px;margin-top:14px"><button class="btn secondary">Open thread</button><button class="btn ghost">Cancel subagent</button></div>
-    </div></div>
-  </aside></div>`;
-}
-function scrTerminal(){
-  const out = `<span class="d">~/code/api</span> <span class="p">h4rn/fix-flaky-auth</span>
+/* terminal drawer: lives in the main area, under the composer, in both views */
+function termDrawer(t){
+  const p = PROJ[t.p];
+  const out = `<span class="d">${p.path}</span> <span class="p">${t.br||''}</span>
 <span class="p">$</span> CI=1 pnpm vitest run --project auth --repeat 3
 
  <span class="d">RUN  v3.2.4 /home/dev/code/api</span>
@@ -963,82 +1182,213 @@ function scrTerminal(){
       <span class="d">Tests</span>  <span class="g">45 passed</span> (45)
    <span class="d">Duration</span>  2.84s
 
-<span class="d">~/code/api</span> <span class="p">h4rn/fix-flaky-auth</span>
-<span class="p">$</span> git diff --stat
- src/auth/session.test.ts |  6 ++++++
- tests/setup.ts           | 16 ++++++++++++----
- 2 files changed, 18 insertions(+), 4 deletions(-)
-
-<span class="d">~/code/api</span> <span class="p">h4rn/fix-flaky-auth</span>
+<span class="d">${p.path}</span> <span class="p">${t.br||''}</span>
 <span class="p">$</span> <span class="term-cur"></span>`;
-  return `<div class="app">${sidebar('inbox')}${inboxPane()}
-  <main class="main">${threadHead({tool:'term', noStop:false})}
-    ${streamMain()}
-    <section class="term" aria-label="Terminal">
-      <div class="term-head">
-        <button class="ttab" aria-selected="true">${ic('term',14)} zsh <span class="faint">atlas</span></button>
-        <button class="ttab" aria-selected="false">pnpm dev <span class="faint">atlas</span></button>
-        <button class="ibtn" aria-label="New terminal">${ic('plus',14)}</button>
-        <span style="flex:1"></span>
-        <span class="faint" style="font-size:12px;margin-right:8px">~/code/api · 132 × 16 · 2 viewers</span>
-        <button class="ibtn" aria-label="Split">${ic('pright',14)}</button>
-        <button class="ibtn" data-go="inbox" aria-label="Close terminal">${ic('x',14)}</button>
-      </div>
-      <div class="term-body" tabindex="0" aria-label="Terminal output">${out}</div>
-    </section>
-  </main></div>`;
-}
-function scrIDE(){
-  const tree = [
-    [0,'folder','api',''],[1,'folder','src',''],[2,'folder','auth',''],[3,'file','refresh.ts',''],[3,'file','session.test.ts','M','sel'],[3,'file','session.ts',''],[3,'file','token.ts',''],[2,'folder','db',''],[3,'file','pool.ts',''],[1,'folder','tests',''],[2,'file','setup.ts','M'],[1,'file','package.json',''],[1,'file','vitest.config.ts',''],
-  ].map(([d,i,n,g,sel])=>`<div class="fnode ${sel||''}" style="--d:${d}">${ic(i==='folder'?'cd':'file',i==='folder'?12:14)}<span class="grow">${n}</span>${g?`<span class="gs t-warn">${g}</span>`:''}</div>`).join('');
-  const L = (n, cls, sg, html) => `<div class="ln ${cls}"><span class="n">${n}</span><span class="sg">${sg}</span><span class="cx">${html}</span></div>`;
-  const code = [
-    L(36,'',' ','<span class="sk">describe</span>(<span class="ss">"verifySession"</span>, () =&gt; {'),
-    L(37,'',' ','  <span class="sk">beforeEach</span>(<span class="sk">async</span> () =&gt; {'),
-    L(38,'',' ','    <span class="sk">await</span> <span class="sf">seedSession</span>({ token: <span class="ss">"t_9f2"</span>, ttl: <span class="ss">30_000</span> });'),
-    L(39,'',' ','  });'),
-    L(40,'',' ',''),
-    L(41,'',' ','  <span class="sf">it</span>(<span class="ss">"returns the session before expiry"</span>, <span class="sk">async</span> () =&gt; {'),
-    L(42,'',' ','    <span class="sk">const</span> session = <span class="sk">await</span> <span class="sf">verifySession</span>(<span class="ss">"t_9f2"</span>);'),
-    L(43,'',' ','    <span class="sf">expect</span>(session).<span class="sf">toMatchObject</span>({ token: <span class="ss">"t_9f2"</span> });'),
-    L(44,'',' ','  });'),
-    L(45,'',' ',''),
-    L(46,'a','+','  <span class="sc">// Regression: the pool used to read Date.now() at import time.</span>'),
-    L(47,'a','+','  <span class="sf">it</span>(<span class="ss">"is still valid at the 30 s boundary"</span>, <span class="sk">async</span> () =&gt; {'),
-    L(48,'a','+','    clock.<span class="sf">advanceTimersByTime</span>(<span class="ss">29_999</span>);'),
-    L(49,'a','+','    <span class="sf">expect</span>(<span class="sk">await</span> <span class="sf">verifySession</span>(<span class="ss">"t_9f2"</span>)).<span class="sf">not</span>.<span class="sf">toBeNull</span>();'),
-    L(50,'a','+','    clock.<span class="sf">advanceTimersByTime</span>(<span class="ss">1</span>);'),
-    L(51,'a','+','    <span class="sf">expect</span>(<span class="sk">await</span> <span class="sf">verifySession</span>(<span class="ss">"t_9f2"</span>)).<span class="sf">toBeNull</span>();'),
-    L(52,'a','+','  });'),
-    L(53,'',' ',''),
-    L(54,'',' ','  <span class="sf">it</span>(<span class="ss">"rejects an unknown token"</span>, <span class="sk">async</span> () =&gt; {'),
-    L(55,'d','−','    <span class="sf">expect</span>(<span class="sk">await</span> <span class="sf">verifySession</span>(<span class="ss">"nope"</span>)).<span class="sf">toBe</span>(<span class="sk">null</span>);'),
-    L(55,'a','+','    <span class="sf">expect</span>(<span class="sk">await</span> <span class="sf">verifySession</span>(<span class="ss">"nope"</span>)).<span class="sf">toBeNull</span>();'),
-    L(56,'',' ','  });'),
-    L(57,'',' ','});'),
-  ].join('');
-  return `<div class="app">${sidebar('ide')}
-  <aside class="ftree" aria-label="Files">
-    <div class="pane-head"><h2>api</h2><span class="faint" style="font-size:12px">atlas</span><button class="ibtn" aria-label="Search files">${ic('search')}</button></div>
-    <div class="scroll" style="padding-bottom:8px">${tree}</div>
-    <div style="border-top:1px solid var(--line);padding:12px 14px 14px">
-      <div style="display:flex;justify-content:space-between;align-items:baseline"><span style="font-weight:600">Agent changes</span><span class="num" style="font-size:12px"><span class="add">+18</span> <span class="del">−4</span></span></div>
-      <div class="faint" style="font-size:12px;margin:2px 0 8px">Fix flaky auth test · Claude Code</div>
-      <div class="fnode" style="margin:0 -10px">${ic('file',14)}<span class="grow">tests/setup.ts</span><span class="num" style="font-size:12px"><span class="add">+12</span> <span class="del">−4</span></span></div>
-      <div class="fnode sel" style="margin:0 -10px">${ic('file',14)}<span class="grow">session.test.ts</span><span class="num" style="font-size:12px"><span class="add">+6</span></span></div>
+  return `<section class="term" aria-label="Terminal">
+    <div class="term-head">
+      <button class="ttab" aria-selected="true">${ic('term',14)} zsh <span class="faint">${p.host}</span></button>
+      <button class="ttab" aria-selected="false">pnpm dev <span class="faint">${p.host}</span></button>
+      <button class="ibtn" aria-label="New terminal">${ic('plus',14)}</button>
+      <span style="flex:1"></span>
+      <span class="faint" style="font-size:12px;margin-right:8px">${p.path} · 132 × 14 · 2 viewers</span>
+      <button class="ibtn" aria-label="Split">${ic('pright',14)}</button>
+      <button class="ibtn" data-act="term" aria-label="Close terminal" title="Close  T">${ic('x',14)}</button>
     </div>
-  </aside>
-  <main class="main" aria-label="Editor">
-    <div class="etabs"><button class="etab" aria-selected="true">session.test.ts <span class="dirty" title="Unsaved"></span></button><button class="etab">setup.ts</button><button class="etab">pool.ts</button><span style="flex:1"></span></div>
-    <div class="ebar"><span class="mono" style="font-size:12px;color:var(--fg)">src/auth/session.test.ts</span><span class="grow"></span>
+    <div class="term-body" tabindex="0" aria-label="Terminal output">${out}</div>
+  </section>`;
+}
+function threadMain(t, o={}){
+  const host = hostOf(t);
+  const stream = o.stream || (t.id==='auth' ? streamMain(o) : t.id==='xterm' ? xtermStream() : miniStream(t));
+  const dock = o.dock !== undefined ? o.dock : (t.id==='auth'&&!o.noAsk ? askCard() : '') + composer({ph:`Reply to ${t.h} on ${host}`, model:MODEL[t.h]}) + (t.id==='auth' ? usageFoot : '');
+  return `<main class="main" aria-label="Thread">${threadHead(t,o)}${o.below||''}${stream}
+    <div class="dock"><div class="col">${dock}</div></div>
+    ${S.term?termDrawer(t):''}
+  </main>`;
+}
+
+/* ───────────── Right panel (one, collapsible, tabbed) ───────────── */
+const CHG = {
+  auth:  { since:'12:03', turns:3, files:[ {d:'tests/', f:'setup.ts', a:12, r:4, hunk:HUNK_SETUP}, {d:'src/auth/', f:'session.test.ts', a:6, r:0, hunk:HUNK_SESSION} ] },
+  relay: { since:'11:58', turns:2, files:[ {d:'src/', f:'retry.rs', a:9, r:3}, {d:'src/', f:'backoff.rs', a:54, r:0, isNew:true}, {d:'tests/', f:'reconnect.rs', a:22, r:3} ] },
+  refresh: { since:'12:13', turns:1, files:[ {d:'src/auth/', f:'refresh.ts', a:14, r:2} ] },
+  redis: { since:'08:41', turns:4, files:[ {d:'src/session/', f:'redis.rs', a:118, r:0, isNew:true}, {d:'src/session/', f:'mod.rs', a:6, r:2} ] },
+  xterm: { since:'09:12', turns:1, files:[ {d:'apps/ui/', f:'package.json', a:2, r:2}, {d:'apps/ui/src/terminal/', f:'fit.ts', a:31, r:9}, {d:'apps/ui/src/terminal/', f:'fit.test.ts', a:8, r:2} ] },
+};
+const sumA = c => c.files.reduce((a,f)=>a+f.a,0), sumR = c => c.files.reduce((a,f)=>a+f.r,0);
+const pm = (a,r) => `<span class="num pm"><span class="add">+${a}</span>${r?` <span class="del">−${r}</span>`:''}</span>`;
+function changesTab(t){
+  const c = CHG[t.id], host = hostOf(t);
+  if(!c) return `<div class="rp-body"><div class="empty"><h3>No changes yet</h3><p>Files ${t.h} edits in this thread show up here, grouped by turn, with a diff against HEAD one click away.</p></div></div>`;
+  const ide = S.view==='ide';
+  const bar = `<div class="rp-bar"><div class="seg inline" role="tablist" aria-label="Compare"><button role="tab" aria-selected="true">vs agent</button><button role="tab" aria-selected="false">vs HEAD</button></div><button class="btn ghost scope">All ${c.turns} turns ${ic('cd',12)}</button><span class="grow"></span>${pm(sumA(c),sumR(c))}</div>`;
+  const by = `<div class="rp-by">${HARNB(t.h,host)}<span>${t.h} on ${host} · ${c.files.length} files since ${c.since}</span></div>`;
+  const list = `<div class="flist" role="list">${c.files.map((f,i)=>`<button class="fr ${ide&&i===0?'sel':''}" role="listitem" ${ide?'':'data-act="view-ide"'}>${ic('file',14)}<span class="p"><span>${f.d}</span>${f.f}</span>${f.isNew?'<span class="badge ok" style="height:18px">New</span>':''}${pm(f.a,f.r)}</button>`).join('')}</div>`;
+  const diffs = ide ? `<p class="rp-note">Files open in the editor, compared with the agent’s starting point. Pick a turn above to narrow it.</p>`
+    : c.files.map(f=>`<div class="dfile"><div class="dfile-h"><span class="p mono"><span class="faint">${f.d}</span>${f.f}</span><span class="grow"></span>${pm(f.a,f.r)}<button class="ibtn" data-act="view-ide" aria-label="Open ${f.f} in the IDE" title="Open in IDE">${ic('code',14)}</button></div>${f.hunk||`<div class="hunk"><div class="hh">Collapsed · ${f.a+f.r} lines</div></div>`}</div>`).join('');
+  return `${bar}<div class="rp-body">${by}${list}${diffs}</div>
+    <div class="rp-foot"><button class="btn ghost">Revert all…</button><span class="grow"></span>${ide
+      ? `<button class="btn secondary" data-act="view-thread">Back to thread <span class="kbd">⌘E</span></button>`
+      : `<button class="btn secondary" data-act="view-ide">${ic('code',14)} Open in IDE <span class="kbd">⌘E</span></button>`}</div>`;
+}
+const GEN_TREE = p => [[0,'folder',p.name],[1,'folder','src'],[1,'folder','tests'],[1,'file','README.md'],[1,'file','Cargo.toml']];
+function treeHTML(rows){
+  return rows.map(([d,i,n,g,sel])=>`<div class="fnode ${sel||''}" style="--d:${d}">${ic(i==='folder'?'cd':'file',i==='folder'?12:14)}<span class="grow">${n}</span>${g?`<span class="gs ${g==='A'?'t-ok':'t-warn'}">${g}</span>`:''}</div>`).join('');
+}
+function filesTab(t){
+  const p = PROJ[t.p], ws = WS[t.p], c = CHG[t.id];
+  return `<div class="rp-bar"><label class="filter">${ic('search',14)}<input placeholder="Filter ${p.name}" aria-label="Filter files"><span class="kbd">⌘P</span></label></div>
+    <div class="rp-body" style="padding:6px 0 8px">${treeHTML(ws?ws.tree:GEN_TREE(p))}</div>
+    ${c?`<button class="agentchg" data-ptab="changes"><span class="grow"><span class="t">Agent changes</span><span class="s">${t.title} · ${t.h}</span></span>${pm(sumA(c),sumR(c))}${ic('cr',14,'faint')}</button>`:''}`;
+}
+function subagentsTab(t){
+  if(t.id!=='auth') return `<div class="rp-bar"><span class="faint" style="font-size:12px">No subagents</span><span class="grow"></span><button class="btn ghost">${ic('plus',14)} Delegate</button></div><div class="rp-body"><div class="empty"><h3>Nothing delegated</h3><p>When ${t.h} hands work to a subagent, it shows here with where it runs, its budget, and what it’s waiting on.</p></div></div>`;
+  return `<div class="rp-bar"><span class="faint" style="font-size:12px">3 subagents · 1 waiting on you</span><span class="grow"></span><button class="btn ghost">${ic('plus',14)} Delegate</button></div>
+  <div class="rp-body"><div class="tree">
+    <div class="node parent">
+      <span class="gl">${orb('run')}</span>
+      <div class="bd"><div class="t"><span>Fix flaky auth test</span><span class="faint num" style="font-size:12px">4:12</span></div>
+      <div class="w">${B.atlas(14)} atlas · ${B.claude(12)} Claude Code</div>
+      <div class="s num">Running · 18.4k tokens</div></div>
+    </div>
+    <div class="kids"><div class="node">
+      <span class="gl" style="color:var(--fg-2)">${ic('ccheck',14)}</span>
+      <div class="bd"><div class="t"><span>Audit test helpers</span><span class="faint num" style="font-size:12px">1:48</span></div>
+      <div class="w">${B.sub('a1')} atlas · Codex</div>
+      <div class="s num">Done · 6.2k tokens · native resume</div></div>
+    </div>
+    <div class="node sel">
+      <span class="gl">${orb('held')}</span>
+      <div class="bd"><div class="t"><span>Reproduce CI failure</span><span class="faint num" style="font-size:12px">0:31</span></div>
+      <div class="w">${B.sub('r2')} ${B.orion(14)} orion · ${B.codex(12)} Codex</div>
+      <div class="s num"><span class="t-accent" style="font-weight:500">Needs approval</span> · turn 3 of 20 · 2.1k tokens</div>
+      <div class="prog" aria-label="Budget used 15%"><i style="width:15%"></i></div></div>
+    </div>
+    <div class="node">
+      <span class="gl t-danger">${ic('cx',14)}</span>
+      <div class="bd"><div class="t"><span style="color:var(--fg-2)">Check clock skew on buildbox</span><span class="faint num" style="font-size:12px">0:04</span></div>
+      <div class="w">${B.sub('c3')} buildbox · Codex</div>
+      <div class="s">Couldn’t start: buildbox is offline</div></div>
+    </div></div>
+  </div>
+  <div class="insp-sec"><h3>Reproduce CI failure</h3>
+    <dl class="kv">
+      <dt>Runs on</dt><dd>orion · Codex 0.98.2</dd>
+      <dt>Model</dt><dd>gpt-5.1-codex</dd>
+      <dt>Context</dt><dd>Summary handoff · 1.2k tokens</dd>
+      <dt>Budget</dt><dd class="num">20 turns · 15 min · 50k tokens</dd>
+      <dt>Approvals</dt><dd>Inherited from parent</dd>
+      <dt>Credential</dt><dd>${ic('key',12)} Stored on orion</dd>
+    </dl>
+    <div style="display:flex;gap:6px;margin-top:14px"><button class="btn secondary">Open thread</button><button class="btn ghost">Cancel subagent</button></div>
+  </div></div>`;
+}
+function rightPanel(t){
+  const c = CHG[t.id];
+  const tab = (id,label,n,pip) => `<button class="rp-tab" role="tab" aria-selected="${S.panel===id}" data-ptab="${id}">${label}${n?` <span class="c num">${n}</span>`:''}${pip?'<span class="pip" role="img" aria-label="needs you"></span>':''}</button>`;
+  const body = S.panel==='files' ? filesTab(t) : S.panel==='subagents' ? subagentsTab(t) : changesTab(t);
+  return `<aside class="rp" aria-label="Thread panel" style="--rp-w:${S.rpW}px">
+    <div class="rp-head" role="tablist" aria-label="Panel">${tab('changes','Changes',c?c.files.length:'')}${tab('files','Files')}${tab('subagents','Subagents',t.id==='auth'?3:'',t.id==='auth')}<span class="grow"></span><button class="ibtn" data-act="panel" title="Close panel  ⌘⌥B" aria-label="Close panel">${ic('x')}</button></div>
+    ${body}
+    <div class="rz" data-rz="rp" role="separator" aria-orientation="vertical" aria-label="Resize panel" aria-valuenow="${S.rpW}" aria-valuemin="320" aria-valuemax="640" tabindex="0"></div>
+  </aside>`;
+}
+
+/* ───────────── IDE view (main area, per project) ───────────── */
+const L = (n, cls, sg, html) => `<div class="ln ${cls}"><span class="n">${n}</span><span class="sg">${sg}</span><span class="cx">${html}</span></div>`;
+const WS = {
+  api: {
+    tree: [[0,'folder','api'],[1,'folder','src'],[2,'folder','auth'],[3,'file','refresh.ts'],[3,'file','session.test.ts','M','sel'],[3,'file','session.ts'],[3,'file','token.ts'],[2,'folder','db'],[3,'file','pool.ts'],[1,'folder','tests'],[2,'file','setup.ts','M'],[1,'file','package.json'],[1,'file','vitest.config.ts']],
+    tabs: [['session.test.ts',true],['setup.ts'],['pool.ts']], path:'src/auth/session.test.ts', since:'12:03', a:6, r:1, ln:'Ln 49, Col 31', lang:'TypeScript', note:'',
+    code: [
+      L(36,'',' ','<span class="sk">describe</span>(<span class="ss">"verifySession"</span>, () =&gt; {'),
+      L(37,'',' ','  <span class="sk">beforeEach</span>(<span class="sk">async</span> () =&gt; {'),
+      L(38,'',' ','    <span class="sk">await</span> <span class="sf">seedSession</span>({ token: <span class="ss">"t_9f2"</span>, ttl: <span class="ss">30_000</span> });'),
+      L(39,'',' ','  });'),
+      L(40,'',' ',''),
+      L(41,'',' ','  <span class="sf">it</span>(<span class="ss">"returns the session before expiry"</span>, <span class="sk">async</span> () =&gt; {'),
+      L(42,'',' ','    <span class="sk">const</span> session = <span class="sk">await</span> <span class="sf">verifySession</span>(<span class="ss">"t_9f2"</span>);'),
+      L(43,'',' ','    <span class="sf">expect</span>(session).<span class="sf">toMatchObject</span>({ token: <span class="ss">"t_9f2"</span> });'),
+      L(44,'',' ','  });'),
+      L(45,'',' ',''),
+      L(46,'a','+','  <span class="sc">// Regression: the pool used to read Date.now() at import time.</span>'),
+      L(47,'a','+','  <span class="sf">it</span>(<span class="ss">"is still valid at the 30 s boundary"</span>, <span class="sk">async</span> () =&gt; {'),
+      L(48,'a','+','    clock.<span class="sf">advanceTimersByTime</span>(<span class="ss">29_999</span>);'),
+      L(49,'a','+','    <span class="sf">expect</span>(<span class="sk">await</span> <span class="sf">verifySession</span>(<span class="ss">"t_9f2"</span>)).<span class="sf">not</span>.<span class="sf">toBeNull</span>();'),
+      L(50,'a','+','    clock.<span class="sf">advanceTimersByTime</span>(<span class="ss">1</span>);'),
+      L(51,'a','+','    <span class="sf">expect</span>(<span class="sk">await</span> <span class="sf">verifySession</span>(<span class="ss">"t_9f2"</span>)).<span class="sf">toBeNull</span>();'),
+      L(52,'a','+','  });'),
+      L(53,'',' ',''),
+      L(54,'',' ','  <span class="sf">it</span>(<span class="ss">"rejects an unknown token"</span>, <span class="sk">async</span> () =&gt; {'),
+      L(55,'d','−','    <span class="sf">expect</span>(<span class="sk">await</span> <span class="sf">verifySession</span>(<span class="ss">"nope"</span>)).<span class="sf">toBe</span>(<span class="sk">null</span>);'),
+      L(55,'a','+','    <span class="sf">expect</span>(<span class="sk">await</span> <span class="sf">verifySession</span>(<span class="ss">"nope"</span>)).<span class="sf">toBeNull</span>();'),
+      L(56,'',' ','  });'),
+      L(57,'',' ','});'),
+    ].join(''),
+  },
+  relay: {
+    tree: [[0,'folder','relay'],[1,'folder','src'],[2,'file','backoff.rs','A'],[2,'file','conn.rs'],[2,'file','lib.rs'],[2,'file','retry.rs','M','sel'],[2,'file','status.rs'],[1,'folder','tests'],[2,'file','reconnect.rs','M'],[1,'file','Cargo.toml'],[1,'file','Cargo.lock']],
+    tabs: [['retry.rs'],['backoff.rs'],['lib.rs']], path:'src/retry.rs', since:'11:58', a:9, r:3, ln:'Ln 14, Col 9', lang:'Rust', note:'Restored 3 tabs',
+    code: [
+      L(1,'',' ','<span class="sk">use</span> crate::backoff::Backoff;'),
+      L(2,'',' ','<span class="sk">use</span> crate::conn::{Conn, RelayConfig, RelayError};'),
+      L(3,'',' ','<span class="sk">use</span> std::time::Duration;'),
+      L(4,'',' ',''),
+      L(5,'',' ','<span class="sc">/// Opens a relay connection, waiting between failed attempts.</span>'),
+      L(6,'',' ','<span class="sk">pub async fn</span> <span class="sf">connect_with_retry</span>(cfg: &amp;RelayConfig) -&gt; Result&lt;Conn, RelayError&gt; {'),
+      L(7,'a','+','    <span class="sk">let mut</span> backoff = Backoff::<span class="sf">new</span>(Duration::<span class="sf">from_millis</span>(<span class="ss">250</span>), Duration::<span class="sf">from_secs</span>(<span class="ss">30</span>));'),
+      L(8,'',' ','    <span class="sk">loop</span> {'),
+      L(9,'',' ','        <span class="sk">match</span> Conn::<span class="sf">open</span>(cfg).<span class="sk">await</span> {'),
+      L(10,'',' ','            Ok(conn) =&gt; <span class="sk">return</span> Ok(conn),'),
+      L(11,'d','−','            Err(e) <span class="sk">if</span> e.<span class="sf">is_retryable</span>() =&gt; <span class="sk">continue</span>,'),
+      L(11,'a','+','            Err(e) <span class="sk">if</span> e.<span class="sf">is_retryable</span>() =&gt; {'),
+      L(12,'a','+','                <span class="sk">let</span> wait = backoff.<span class="sf">next_delay</span>();'),
+      L(13,'a','+','                tracing::<span class="sf">warn!</span>(?e, ?wait, <span class="ss">"relay connect failed, retrying"</span>);'),
+      L(14,'a','+','                tokio::time::<span class="sf">sleep</span>(wait).<span class="sk">await</span>;'),
+      L(15,'a','+','            }'),
+      L(16,'',' ','            Err(e) =&gt; <span class="sk">return</span> Err(e),'),
+      L(17,'',' ','        }'),
+      L(18,'',' ','    }'),
+      L(19,'',' ','}'),
+      L(20,'',' ',''),
+      L(21,'d','−','<span class="sc">// TODO: back off instead of spinning.</span>'),
+      L(21,'',' ','<span class="sk">#[cfg(test)]</span>'),
+      L(22,'',' ','<span class="sk">mod</span> tests;'),
+    ].join(''),
+  },
+};
+function ideMain(t){
+  const p = PROJ[t.p], ws = WS[t.p], host = p.host, c = CHG[t.id];
+  const head = `<header class="th-head ${S.side?'':'bare'}">${sideReveal()}
+    <div class="th-titles"><h1 class="ws-title"><span class="pmono" aria-hidden="true">${mono(p.name)}</span>${p.name}</h1>
+      <div class="prov">${HOSTB[host](14)} ${host} <span class="sep">/</span> <span class="mono" style="font-size:11.5px">${p.path}</span></div></div>
+    <button class="tchip" data-act="view-thread" title="Back to the thread  ⌘E">${stGlyph(t.st)}<span class="t">${t.title}</span>${t.st==='you'?'<span class="s">Needs approval</span>':''}</button>
+    <div class="th-actions"><span class="vsep"></span>${viewCluster()}</div>
+  </header>`;
+  if(!ws) return `<main class="main" aria-label="IDE">${head}
+    <div class="center-empty"><div class="box" style="width:400px">
+      <h2 style="margin:0 0 6px;font-size:17px;font-weight:600;letter-spacing:-0.01em">No files open in ${p.name}</h2>
+      <p class="muted" style="margin:0 0 16px;line-height:19px">Pick a file in Files, or press <span class="kbd">⌘P</span> to open one by name. Tabs you open stay with ${p.name} on ${host}, so they’re here when you come back.</p>
+      <button class="btn secondary" data-ptab="files">${ic('folder',14)} Show files</button>
+    </div></div>${S.term?termDrawer(t):''}</main>`;
+  const live = t.st==='run';
+  return `<main class="main" aria-label="IDE">${head}
+    <div class="etabs" role="tablist">${ws.tabs.map(([n,d],i)=>`<button class="etab" role="tab" aria-selected="${i===0}">${n}${d?' <span class="dirty" title="Unsaved"></span>':''}</button>`).join('')}<span style="flex:1"></span><span class="faint etabs-note">${ws.note||''}</span></div>
+    <div class="ebar"><span class="mono" style="font-size:12px;color:var(--fg)">${ws.path}</span><span class="grow"></span>
       <div class="seg inline" role="tablist"><button role="tab" aria-selected="false">Edit</button><button role="tab" aria-selected="false">vs HEAD</button><button role="tab" aria-selected="true">vs agent</button></div>
       <button class="btn ghost">${ic('hand',14)} Hand to agent</button>
     </div>
-    <div style="display:flex;align-items:center;gap:10px;padding:8px 16px;border-bottom:1px solid var(--line);font-size:12px;color:var(--fg-2);background:var(--bg-sunk)">${B.claude(14)} Changes by Claude Code in <b style="font-weight:500;color:var(--fg)">Fix flaky auth test</b> since 12:03 <span class="grow" style="flex:1"></span><span class="num"><span class="add">+6</span> <span class="del">−1</span></span><button class="btn ghost" style="height:24px">Revert file</button><button class="btn secondary" style="height:24px">Accept</button></div>
-    <div class="code">${code}</div>
-    <div class="statusbar"><span>${ic('branch',12)} h4rn/fix-flaky-auth</span><span>atlas</span><span class="grow"></span><span>Ln 49, Col 31</span><span>Spaces: 2</span><span>UTF-8</span><span>TypeScript</span></div>
-  </main></div>`;
+    <div class="scope">${HARNB(t.h,host)}<span>Changes by ${t.h} in <b>${t.title}</b> since ${ws.since}</span>${live?`<span class="faint" style="display:inline-flex;gap:6px;align-items:center">· ${orb('run')} still writing</span>`:''}<span class="grow"></span>${pm(ws.a,ws.r)}<button class="btn ghost" style="height:24px">Revert file</button><button class="btn secondary" style="height:24px" ${live?'disabled title="Available when the turn ends"':''}>Accept</button></div>
+    <div class="code">${ws.code}</div>
+    ${S.term?termDrawer(t):''}
+    <div class="statusbar"><span>${ic('branch',12)} ${t.br}</span><span>${host}</span><span class="grow"></span><span>${ws.ln}</span><span>Spaces: ${ws.lang==='Rust'?4:2}</span><span>UTF-8</span><span>${ws.lang}</span></div>
+  </main>`;
+}
+
+/* ───────────── The shell ───────────── */
+function shell(){
+  const t = TBY[S.sel] || TBY.auth;
+  return `<div class="app">${S.side?sidebar():''}${S.view==='ide'?ideMain(t):threadMain(t)}${S.panel?rightPanel(t):''}</div>`;
 }
 function scrLibrary(){
   const srv = [
@@ -1049,14 +1399,9 @@ function scrLibrary(){
     ['github','stdio','4 targets','needs credential'],
   ];
   const hm = h => h==='healthy'?`<span class="health">${ic('ccheck',12)} Healthy</span>`:h==='error'?`<span class="health t-danger">${ic('cx',12)} Error</span>`:`<span class="health t-warn">${ic('key',12)} Needs credential</span>`;
-  const rows = srv.map(([n,t,s,h,sel,shared])=>`<button class="mrow ${sel||''}"><span style="padding-top:1px;color:var(--fg-2)">${ic(shared?'share':'plug',16)}</span><span class="grow"><span class="t">${n}<span class="faint" style="font-weight:400;font-size:12px">${t}</span></span><span class="s">${s}</span></span>${hm(h)}</button>`).join('');
-  const T = (host, hb, harness, hh, mech, on, note='', extra='') => `<tr class="hov"><td><span class="cell-id">${hb} ${host}</span></td><td><span class="cell-id">${hh} ${harness}</span></td><td class="muted">${mech}</td><td>${note}</td><td class="r" style="padding-right:0"><span class="switch" role="switch" aria-checked="${on}" ${extra}></span></td></tr>`;
-  return `<div class="app">${sidebar('library')}
-  <section class="pane" aria-label="Library">
-    <div class="pane-head"><h2>MCP & skills</h2><button class="ibtn" aria-label="Add">${ic('plus')}</button></div>
-    <div class="pane-sub"><div class="seg" role="tablist"><button role="tab" aria-selected="true">MCP servers <span class="c">5</span></button><button role="tab" aria-selected="false">Skills <span class="c">9</span></button></div></div>
-    <div class="scroll"><div class="rows">${rows}</div></div>
-  </section>
+    const T = (host, hb, harness, hh, mech, on, note='', extra='') => `<tr class="hov"><td><span class="cell-id">${hb} ${host}</span></td><td><span class="cell-id">${hh} ${harness}</span></td><td class="muted">${mech}</td><td>${note}</td><td class="r" style="padding-right:0"><span class="switch" role="switch" aria-checked="${on}" ${extra}></span></td></tr>`;
+  const nested = srv.map(([n,t,sub,h,sel,shared])=>`<a href="#" class="nav sub" data-go="library" ${sel?'aria-current="page"':''}><span class="lbl">${n}</span>${h==='healthy'?`<span class="faint" title="Healthy" aria-label="healthy">${ic('ccheck',12)}</span>`:h==='error'?`<span class="t-danger" aria-label="error">${ic('cx',12)}</span>`:`<span class="t-warn" aria-label="needs credential">${ic('key',12)}</span>`}</a>`).join('');
+  return `<div class="app">${settingsSide('library', nested)}
   <main class="main"><div class="page"><div class="wrap" style="max-width:860px">
     <div style="display:flex;align-items:flex-start;gap:16px;margin-bottom:22px">
       <div style="flex:1"><h1 style="margin:0;font-size:20px;line-height:26px;font-weight:600;letter-spacing:-0.015em">playwright</h1>
@@ -1096,7 +1441,7 @@ const SERIES = [
 function scrUsage(){
   const stat = (l, v, unit, d, sp) => `<div class="stat"><div class="l"><span>${l}</span></div><div class="v num">${v}${unit?`<small>${unit}</small>`:''}</div><div class="d num"><span>${d}</span>${sp?spark(sp):''}</div></div>`;
   const total = SERIES.map(s=>s.v.reduce((a,b)=>a+b,0));
-  return `<div class="app">${sidebar('usage')}
+  return `<div class="app">${sidebar({sel:null, dest:'usage'})}
   <main class="main"><header class="page-head"><h1>Usage</h1><span class="grow"></span>
     <div class="seg inline" role="tablist"><button role="tab" aria-selected="false">Today</button><button role="tab" aria-selected="true">14 days</button><button role="tab" aria-selected="false">30 days</button></div>
     <button class="btn secondary">All hosts ${ic('cd',12)}</button><button class="btn secondary">All harnesses ${ic('cd',12)}</button></header>
@@ -1186,14 +1531,9 @@ function scrPR(){
     ['#476','Audit dependency tree','All checks passed',''],
     ['#471','Pin blobatar to 2.7.0','Merged',''],
   ];
-  return `<div class="app">${sidebar('pr')}
-  <section class="pane" aria-label="Pull requests">
-    <div class="pane-head"><h2>Pull requests</h2><button class="ibtn">${ic('filter')}</button></div>
-    <div class="pane-sub"><div class="seg"><button aria-selected="true">Open <span class="c">3</span></button><button aria-selected="false">Mine <span class="c">2</span></button><button aria-selected="false">Review <span class="c">1</span></button></div></div>
-    <div class="scroll"><div class="rows">${prs.map(([n,t,s,tone,sel])=>`<button class="row ${sel||''}"><span class="row-st" style="color:var(--fg-2)">${ic('pr',14)}</span><span class="row-main"><span class="row-l1"><span class="row-title">${t}</span><span class="row-time">${n}</span></span><span class="row-l2"><span class="row-meta">dev/api</span><span class="row-status ${tone}">${s}</span></span></span></button>`).join('')}</div></div>
-  </section>
+  return `<div class="app">${sidebar({sel:null, dest:'pr'})}
   <main class="main"><header class="page-head" style="height:auto;padding:14px 16px 14px 32px;align-items:flex-start">
-    <div style="flex:1;min-width:0"><h1 style="font-size:17px;line-height:22px">Fix flaky auth test <span class="faint" style="font-weight:400">#482</span></h1>
+    <div style="flex:1;min-width:0"><div class="crumb"><a href="#" data-go="pr">Pull requests</a><span class="sep">/</span><span>3 open</span><span class="sep">/</span><span class="mono" style="font-size:11.5px">dev/api</span></div><h1 style="font-size:17px;line-height:22px">Fix flaky auth test <span class="faint" style="font-weight:400">#482</span></h1>
     <div class="muted" style="font-size:12px;margin-top:4px;display:flex;gap:6px;align-items:center"><span class="badge ok" style="height:18px">Open</span> <span class="mono" style="font-size:11.5px">h4rn/fix-flaky-auth</span> → <span class="mono" style="font-size:11.5px">main</span> · 3 commits · opened by you 40m ago · dev/api on GitHub</div></div>
     <button class="btn secondary">${ic('ext',14)} Open on GitHub</button></header>
   <div class="page"><div class="pr-cols">
@@ -1233,24 +1573,34 @@ function scrPR(){
         <div class="chk">${blob('user:u_ty','harness',16)}<span class="grow">tyler-o</span><span class="faint" style="font-size:12px">Pending</span></div>
       </div>
       <div class="side-sec" style="border:0"><h3><span>Linked thread</span></h3>
-        <div class="chk">${orb('run')}<span class="grow">Fix flaky auth test</span><span class="faint" style="font-size:12px">atlas</span></div>
+        <a href="#" class="chk" data-thread="auth"><span class="dot you" aria-label="needs you"></span><span class="grow">Fix flaky auth test</span><span class="faint" style="font-size:12px">api · atlas</span></a>
       </div>
     </aside>
   </div></div></main></div>`;
 }
-function settingsPane(active){
-  const it = (id, icon, label) => `<a href="#" class="nav" data-go="${id}" ${active===id?'aria-current="page"':''}>${ic(icon)}<span class="lbl">${label}</span></a>`;
-  return `<section class="pane" style="width:240px;background:var(--bg)"><div class="pane-head"><h2>Settings</h2></div>
-    <div style="padding:0 8px;display:flex;flex-direction:column;gap:2px">
-    ${it('set-general','gear','General')}${it('set-appearance','sun','Appearance')}${it('set-notif','bell','Notifications')}${it('set-keys','cmd','Shortcuts')}
-    <div class="side-h" style="padding-top:18px">Machines</div>
-    ${it('set-hosts','server','Hosts')}${it('set-devices','phone','Devices')}${it('set-providers','layers','Providers')}
-    <div class="side-h" style="padding-top:18px">Account</div>
-    ${it('set-account','user','Account & relay')}</div></section>`;
+/* Settings take over the one sidebar instead of adding a second column (Esc or ‹ returns to threads). */
+function settingsSide(active, nested=''){
+  const it = (id, icon, label, extra='') => `<a href="#" class="nav" data-go="${id}" ${active===id?'aria-current="page"':''}>${ic(icon)}<span class="lbl">${label}</span>${extra}</a>`;
+  return `<nav class="side" aria-label="Settings" style="--side-w:${S.sideW}px">
+    <div class="side-hd">
+      <div class="side-top" style="padding-left:0"><a href="#" class="ibtn" data-go="inbox" title="Back to threads  Esc" aria-label="Back to threads">${ic('cl')}</a><span class="word">Settings</span><span class="grow"></span></div>
+      <label class="side-search">${ic('search',14)}<input placeholder="Search settings" aria-label="Search settings"></label>
+    </div>
+    <div class="side-list setnav">
+      ${it('set-general','gear','General')}${it('set-appearance','sun','Appearance')}${it('set-notif','bell','Notifications')}${it('set-keys','cmd','Shortcuts')}
+      <div class="side-h">Machines</div>
+      ${it('set-hosts','server','Hosts','<span class="ct num">4</span>')}${it('set-devices','phone','Devices','<span class="ct num">4</span>')}${it('set-providers','layers','Providers')}
+      <div class="side-h"><span>Tools</span><button class="ibtn sm" aria-label="Add MCP server" title="Add MCP server">${ic('plus',14)}</button></div>
+      ${active==='library'?`<a href="#" class="nav parent" data-go="library">${ic('plug')}<span class="lbl">MCP servers</span><span class="ct num">5</span></a>${nested}`:it('library','plug','MCP servers','<span class="ct num">5</span>')}${it('skills','blocks','Skills','<span class="ct num">9</span>')}
+      <div class="side-h">Account</div>
+      ${it('set-account','user','Account & relay')}
+    </div>
+    ${sideFoot({dest:'set-hosts'})}
+  </nav>`;
 }
 function scrHosts(){
   const H = (b, name, kind, conn, pres, harn, lat, cls='', sub=false) => `<tr class="hov ${cls}"><td style="${sub?'padding-left:24px':''}"><span class="cell-id">${b} <span style="font-weight:500">${name}</span></span></td><td class="muted">${kind}</td><td class="muted">${conn}</td><td>${pres}</td><td class="muted">${harn}</td><td class="r num muted">${lat}</td><td class="r" style="padding-right:0"><button class="ibtn">${ic('more')}</button></td></tr>`;
-  return `<div class="app">${sidebar('set-hosts')}${settingsPane('set-hosts')}
+  return `<div class="app">${settingsSide('set-hosts')}
   <main class="main"><div class="page"><div class="form" style="max-width:880px">
     <div style="display:flex;align-items:flex-start;gap:12px"><div style="flex:1"><h1>Hosts</h1><p class="lead">Machines that run agents. WSL distros are separate hosts with their own harnesses, credentials and settings.</p></div><button class="btn secondary">Add host</button><button class="btn primary" data-go="set-devices">${ic('qr',14)} Pair a device</button></div>
     <table class="tbl" style="margin-bottom:36px"><thead><tr><th>Host</th><th>System</th><th>Connection</th><th>Presence</th><th>Harnesses</th><th class="r">Latency</th><th></th></tr></thead><tbody>
@@ -1278,7 +1628,7 @@ function qrSVG(seed='pair:7K4Q2M9P'){
 }
 function scrDevices(){
   const sc = (on, label, sub='') => `<label style="display:flex;gap:10px;align-items:flex-start;padding:6px 0"><span class="check ${on?'on':''}">${on?ic('check',12):''}</span><span><span style="font-weight:500">${label}</span>${sub?`<span class="faint" style="display:block;font-size:12px">${sub}</span>`:''}</span></label>`;
-  return `<div class="app">${sidebar('set-hosts')}${settingsPane('set-devices')}
+  return `<div class="app">${settingsSide('set-devices')}
   <main class="main"><div class="page"><div class="form" style="max-width:840px">
     <h1>Devices</h1><p class="lead">Phones and computers that can reach your hosts. Each device gets its own scopes, and you can revoke one without touching the others.</p>
     <div class="group"><h2>Pair a device <span class="grow"></span><span class="faint num" style="font-size:12px;font-weight:400">Expires in <span data-countdown="pair">9:41</span></span></h2>
@@ -1308,7 +1658,7 @@ function scrDevices(){
 function scrProviders(){
   const pr = (ok, k, v) => `<span class="${ok===1?'t-ok':ok===2?'faint':'t-warn'}">${ic(ok===1?'ccheck':ok===2?'cdot':'warn',14)}</span><span class="k">${k}</span><span class="v">${v}</span>`;
   const O = (b, name, on, model, path) => `<div class="field"><div class="lab" style="display:flex;gap:10px;align-items:center;width:180px">${b}<div class="t">${name}</div></div><div class="ctl"><span class="switch" role="switch" aria-checked="${on}" aria-label="Route ${name} through CLIProxyAPI"></span><span style="width:160px" class="${on?'':'faint'}">${on?model:'Own credential'}</span><span class="mono faint" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px">${path}</span></div></div>`;
-  return `<div class="app">${sidebar('set-hosts')}${settingsPane('set-providers')}
+  return `<div class="app">${settingsSide('set-providers')}
   <main class="main"><div class="page"><div class="form">
     <div style="display:flex;align-items:flex-start;gap:12px"><div style="flex:1"><h1>CLIProxyAPI on atlas</h1><p class="lead">Routes harnesses on atlas through one endpoint with several credentials. Keys stay on atlas; this app only sees whether they exist.</p></div><button class="btn secondary">atlas ${ic('cd',12)}</button></div>
     <div class="group"><h2>Connection</h2>
@@ -1345,25 +1695,33 @@ function scrProviders(){
   </div></div></main></div>`;
 }
 function scrPalette(){
-  const I = (icn, label, hint, sel=false, right='') => `<button class="pal-i" ${sel?'aria-selected="true"':''}><span class="ic">${icn}</span><span class="grow">${label}</span>${right}${hint?`<span class="h">${hint}</span>`:''}</button>`;
+  const I = (icn, label, hint, sel=false, right='') => `<button class="pal-i" ${sel?'aria-selected="true"':''}><span class="ic">${icn}</span><span class="grow">${label}</span>${hint?`<span class="h">${hint}</span>`:''}${right}</button>`;
   const K = (...k) => k.map(x=>`<span class="kbd">${x}</span>`).join(' ');
-  return scrInbox().replace(/<\/div>$/, '') + `<div class="scrim" data-act="closepal"></div>
+  return shell().replace(/<\/div>$/, '') + `<div class="scrim" data-act="closepal"></div>
   <div class="palette" role="dialog" aria-label="Command palette">
-    <div class="pal-in">${ic('search',18)}<input autofocus placeholder="Search threads, hosts, files, or commands" aria-label="Command"><span class="pal-ctx">${orb('run')} Fix flaky auth test</span></div>
+    <div class="pal-in">${ic('search',18)}<input autofocus placeholder="Search threads, projects, files, or commands" aria-label="Command"><span class="pal-ctx">${orb('run')} Fix flaky auth test</span></div>
     <div class="pal-list" role="listbox">
       <div class="pal-g">This thread</div>
       ${I(ic('shield'),'Approve pending command on orion','',true,K('⌘','↵'))}
       ${I(ic('x'),'Deny pending command','',false,K('⌘','⌫'))}
-      ${I(ic('term'),'Open terminal','',false,K('T'))}
+      ${I(ic('diff'),'Show changes','',false,K('D'))}
       ${I(ic('tree'),'Show subagents','',false,K('⌘','J'))}
       ${I(ic('stop'),'Interrupt turn','',false,K('⌘','.'))}
+      <div class="pal-g">View</div>
+      ${I(ic('code'),'Open api in the IDE','atlas',false,K('⌘','E'))}
+      ${I(ic('pright'),'Toggle right panel','',false,K('⌘','⌥','B'))}
+      ${I(ic('term'),'Toggle terminal','',false,K('T'))}
+      ${I(ic('pleft'),'Hide sidebar','',false,K('⌘','B'))}
       <div class="pal-g">Threads</div>
-      ${I(orb('run'),'Ship relay retry with backoff','orion · Codex')}
-      ${I(`<span class="t-warn">${ic('clock',14)}</span>`,'Migrate session store to Redis','Resumes 14:32')}
-      ${I(ic('compose'),'New thread…','',false,K('⌘','⇧','N'))}
+      ${I(orb('run'),'Ship relay retry with backoff','relay · orion')}
+      ${I(ic('compose'),'New thread in api…','atlas',false,K('⌘','⇧','N'))}
       <div class="pal-g">Go to</div>
+      ${I(ic('pr'),'Pull requests','',false,K('G','P'))}
+      ${I(ic('plug'),'MCP & skills','',false,K('G','M'))}
       ${I(ic('chart'),'Usage','',false,K('G','U'))}
+      ${I(ic('server'),'Hosts','',false,K('G','H'))}
       ${I(ic('qr'),'Pair a device…','')}
+      ${I(ic('gear'),'Settings','',false,K('⌘',','))}
     </div>
     <div class="pal-foot"><span>${K('↑','↓')} Move</span><span>${K('↵')} Run</span><span>${K('Esc')} Close</span><span style="flex:1"></span><span>Searches atlas, Ubuntu-24.04 and orion</span></div>
   </div></div>`;
@@ -1371,18 +1729,18 @@ function scrPalette(){
 
 /* states */
 function scrEmpty(){
-  return `<div class="app">${sidebar('inbox',{empty:true})}${inboxPane({empty:true})}
+  return `<div class="app">${sidebar({empty:true, sel:null})}
   <main class="main"><div class="center-empty"><div class="box">
     <h2 style="margin:0 0 6px;font-size:17px;font-weight:600;letter-spacing:-0.01em">Start a thread</h2>
-    <p class="muted" style="margin:0 0 18px;line-height:19px">Pick where it runs. The agent works in a worktree on that host, and you can supervise it from any paired device.</p>
+    <p class="muted" style="margin:0 0 18px;line-height:19px">Pick where it runs. The folder becomes a project in the sidebar, and every thread you start there is grouped under it.</p>
     <div style="display:flex;gap:8px;margin-bottom:10px"><button class="btn secondary">${B.atlas(14)} atlas ${ic('cd',12)}</button><button class="btn secondary">${B.claude(14)} Claude Code ${ic('cd',12)}</button><button class="btn secondary"><span class="mono" style="font-size:11.5px">~/code/api</span> ${ic('cd',12)}</button></div>
     ${composer({ph:'Describe the task for Claude Code on atlas'})}
-    <p class="faint" style="font-size:12px;margin:12px 0 0">No host yet? <a href="#" class="t-accent" data-go="set-devices">Pair a device</a> or run <span class="mono">h4rn host</span> on the machine.</p>
+    <p class="faint" style="font-size:12px;margin:12px 0 0">Another machine? <a href="#" class="t-accent" data-go="set-devices">Pair a device</a> or run <span class="mono">h4rn host</span> on it.</p>
   </div></div></main></div>`;
 }
 function scrLoading(){
   const sk = (w,h=10,mb=10) => `<div class="skel" style="width:${w};height:${h}px;margin-bottom:${mb}px"></div>`;
-  return `<div class="app">${sidebar('inbox')}${inboxPane({loading:true})}
+  return `<div class="app">${sidebar({loading:true, sel:null})}
   <main class="main" aria-busy="true" aria-label="Loading thread">
     <header class="th-head"><div class="th-titles">${sk('240px',12,8)}${sk('360px',9,0)}</div><div class="th-state faint" style="font-weight:400">Connecting to atlas…</div></header>
     <div class="stream"><div class="col" style="padding-top:28px">
@@ -1395,21 +1753,21 @@ function scrLoading(){
   </main></div>`;
 }
 function scrOffline(){
-  const banner = `<div class="banner">${ic('wifioff',14)}<span class="grow"><b>Offline</b> · threads as of 12:04</span><button class="btn ghost" style="height:24px">Reconnect</button></div>`;
-  return `<div class="app">${sidebar('inbox')}${inboxPane({banner})}
-  <main class="main">${threadHead({state:`<span class="faint">${ic('wifioff',14)}</span> Last seen running`, noStop:true})}
-    <div class="banner" style="margin:12px auto 0;max-width:656px;width:calc(100% - 64px)">${ic('alert',14)}<span class="grow"><b>atlas is unreachable from this device.</b> The turn may still be running there. You’re reading the stream as of 12:04.</span></div>
-    ${streamMain().replace('<span class="caret"></span>','…').replace(/<div class="live-line">[\s\S]*?<\/div>/,'<div class="live-line">'+ic('pause',14)+'<span>Stream paused at 12:04 · will catch up on reconnect</span></div>')}
-    <div class="dock"><div class="col">
-      <div class="ask" style="opacity:.75"><div class="ask-h">${ic('shield',16)}<span class="t">Codex on orion wants to run a command</span></div><div class="cmd" style="margin-top:8px">CI=1 pnpm vitest run --project auth --repeat 20</div><div class="ask-f"><span class="faint grow" style="font-size:12px">Reconnect to approve or deny. Nothing runs until you do.</span><button class="btn secondary" disabled>Deny</button><button class="btn primary" disabled>Approve</button></div></div>
-      ${composer({ph:'Your reply is saved as a draft and sends when atlas reconnects'})}
-    </div></div>
-  </main></div>`;
+  const banner = `<div class="banner">${ic('wifioff',14)}<span class="grow"><b>Offline</b> · as of 12:04</span><button class="btn ghost" style="height:24px">Reconnect</button></div>`;
+  const t = TBY.auth;
+  return `<div class="app">${sidebar({banner, offline:true})}
+  ${threadMain(t, {
+    state:`<span class="faint">${ic('wifioff',14)}</span> Last seen running`, noStop:true,
+    below:`<div class="banner" style="margin:12px auto 0;max-width:656px;width:calc(100% - 64px)">${ic('alert',14)}<span class="grow"><b>atlas is unreachable from this device.</b> The turn may still be running there. You’re reading the stream as of 12:04.</span></div>`,
+    stream: streamMain().replace('<span class="caret"></span>','…').replace(/<div class="live-line">[\s\S]*?<\/div>/,'<div class="live-line">'+ic('pause',14)+'<span>Stream paused at 12:04 · will catch up on reconnect</span></div>'),
+    dock:`<div class="ask" style="opacity:.75"><div class="ask-h">${ic('shield',16)}<span class="t">Codex on orion wants to run a command</span></div><div class="cmd" style="margin-top:8px">CI=1 pnpm vitest run --project auth --repeat 20</div><div class="ask-f"><span class="faint grow" style="font-size:12px">Reconnect to approve or deny. Nothing runs until you do.</span><button class="btn secondary" disabled>Deny</button><button class="btn primary" disabled>Approve</button></div></div>${composer({ph:'Your reply is saved as a draft and sends when atlas reconnects'})}`
+  })}</div>`;
 }
 function scrError(){
   const banner = `<div class="banner err"><span class="ic">${ic('alert',14)}</span><span class="grow"><b>Couldn’t reach buildbox.</b> Showing 3 of 4 hosts.</span><button class="btn ghost" style="height:24px">Retry</button></div>`;
-  return `<div class="app">${sidebar('inbox')}${inboxPane({banner, sel:'wsl'})}
-  <main class="main"><header class="th-head"><div class="th-titles"><h1>Parse WSL distro hosts</h1><div class="prov">${B.buildbox(14)} buildbox <span class="sep">/</span> ${blob('harness:m_0b9d:codex','harness',14)} Codex <span class="sep">/</span> gpt-5.1-codex</div></div><div class="th-state t-danger">${ic('wifioff',14)} Host unreachable</div></header>
+  const t = TBY.wsl;
+  return `<div class="app">${sidebar({banner, sel:'wsl', pop:hostsPop()})}
+  <main class="main">${threadHead(t,{actions:`<button class="ibtn" aria-label="More">${ic('more')}</button>`})}
     <div class="center-empty"><div class="box" style="width:460px">
       <span class="t-danger">${ic('alert',22)}</span>
       <h2 style="margin:10px 0 6px;font-size:17px;font-weight:600;letter-spacing:-0.01em">This thread couldn’t be loaded</h2>
@@ -1427,30 +1785,40 @@ function phTabs(active){
   return `<nav class="ph-tabbar" aria-label="Main">${t('p-inbox','inbox','Inbox','2')}${t('p-pr','pr','PRs')}${t('p-usage','chart','Usage')}${t('p-pairing','server','Hosts')}${t('p-more','gear','Settings')}</nav>`;
 }
 function phone(inner){ return `<div class="device"><div class="ph">${inner}</div><div class="home"></div></div>`; }
+function phRow(t){
+  return `<a href="#" class="ph-row" data-go="${t.id==='auth'?'p-thread':''}"><span class="row-st">${stGlyph(t.st)}</span><span class="row-main"><span class="row-l1"><span class="row-title">${t.title}</span><span class="row-time num">${t.time}</span></span><span class="row-l2"><span class="row-meta">${t.h}</span><span class="row-status ${t.tone||''}">${t.status}</span></span></span></a>`;
+}
 function pInbox(){
-  const rows = THREADS.working.map(t=>`<a href="#" class="ph-row" data-go="${t.id==='auth'?'p-thread':''}"><span class="row-st">${stGlyph(t.st)}</span><span class="row-main"><span class="row-l1"><span class="row-title">${t.title}</span><span class="row-time num">${t.time}</span></span><span class="row-l2"><span class="row-meta">${t.meta}</span><span class="row-status ${t.tone||''}">${t.status}</span></span></span></a>`).join('');
+  const list = TH.filter(t=>t.lc==='working');
+  const order = [...new Set(list.map(t=>t.p))];
+  const groups = order.map(pk=>{
+    const p = PROJ[pk], ts = list.filter(t=>t.p===pk), open = !S.closed[pk], you = ts.some(t=>t.st==='you');
+    return `<section class="ph-pg" aria-label="${p.name} on ${p.host}">
+      <button class="ph-pg-h" data-proj="${pk}" aria-expanded="${open}"><span class="pmono" aria-hidden="true">${mono(p.name)}</span><span class="nm">${p.name}</span><span class="hn">${p.host}</span><span class="grow"></span>${open?'':`${you?'<span class="dot you"></span>':''}<span class="ct num">${ts.length}</span>`}${ic('cd',16,'chev')}</button>
+      ${open?ts.map(phRow).join(''):''}
+    </section>`;
+  }).join('');
   return phone(`${phStatus()}
-    <div class="ph-nav"><button class="navbtn">${ic('filter',22)}</button><span class="ttl"></span><button class="navbtn" aria-label="New thread">${ic('compose',22)}</button></div>
+    <div class="ph-nav"><button class="navbtn" aria-label="Filter">${ic('filter',22)}</button><span class="ttl"></span><button class="navbtn" aria-label="New thread">${ic('compose',22)}</button></div>
     <div class="ph-lt">Inbox</div>
-    <div class="ph-seg"><div class="seg" role="tablist"><button aria-selected="true">Working <span class="c">6</span></button><button aria-selected="false">Done <span class="c">3</span></button><button aria-selected="false">Settled</button></div></div>
-    <div class="ph-body">${rows}
-      <a href="#" class="ph-row" style="min-height:52px;align-items:center"><span class="row-st faint">${ic('clock',16)}</span><span class="grow" style="flex:1">Snoozed</span><span class="faint num">2</span><span class="faint">${ic('cr',16)}</span></a>
+    <div class="ph-seg"><div class="seg" role="tablist"><button aria-selected="true">Working <span class="c">8</span></button><button aria-selected="false">Done <span class="c">3</span></button><button aria-selected="false">Settled</button></div></div>
+    <div class="ph-body">${groups}
+      <a href="#" class="ph-row snz"><span class="row-st faint">${ic('clock',16)}</span><span class="grow" style="flex:1">Snoozed</span><span class="faint num">2</span><span class="faint">${ic('cr',16)}</span></a>
       <div style="height:16px"></div>
     </div>
     ${phTabs('p-inbox')}`);
 }
 function pThreadBody(){
-  return `<div class="ph-nav"><a href="#" class="navbtn" data-go="p-inbox">${ic('cl',24)}Inbox</a><span class="ttl"></span><button class="navbtn" aria-label="Terminal" data-go="p-terminal">${ic('term',22)}</button><button class="navbtn" aria-label="More">${ic('more',22)}</button></div>
+  return `<div class="ph-nav"><a href="#" class="navbtn" data-go="p-inbox">${ic('cl',24)}Inbox</a><span class="ttl"></span><button class="navbtn" aria-label="Terminal" data-go="p-terminal">${ic('term',22)}</button><button class="navbtn" aria-label="Changes and subagents" data-go="p-changes">${ic('diff',22)}</button><button class="navbtn" aria-label="More">${ic('more',22)}</button></div>
     <div style="padding:0 20px 10px;border-bottom:1px solid var(--line)"><div style="font-size:20px;line-height:26px;font-weight:600;letter-spacing:-0.015em">Fix flaky auth test</div>
       <div class="muted" style="font-size:14px;margin-top:4px;display:flex;align-items:center;gap:6px">${B.atlas(16)} atlas · ${B.claude(14)} Claude Code <span style="flex:1"></span>${orb('run')} <span style="font-weight:500">Running</span></div></div>
     <div class="ph-body tail"><div class="ph-stream">
       <div class="turn you-msg" style="margin:12px 0 22px"><div class="bubble">The auth test fails on CI only. Fix it and add a regression test that pins the clock.</div><div class="you-meta" style="font-size:13px">12:02</div></div>
       <div class="ag-head" style="font-size:13px">${B.claude(14)} <b>Claude Code</b> · 12:03</div>
       <p class="prose"><code>createPool()</code> reads <code>Date.now()</code> at import, before the fake clock is installed, so the first lookup races the timer on slow CI runners.</p>
+      <a href="#" class="ph-chg" data-go="p-changes"><span class="grow">2 files changed</span>${pm(18,4)}${ic('cr',16,'faint')}</a>
       <div class="tools" style="font-size:15px">
-        <div class="tool" style="height:36px;font-size:14px"><span class="st">${ic('check',14)}</span><span class="verb">Edit</span><span class="tgt">tests/setup.ts</span><span class="m"><span class="add">+12</span> <span class="del">−4</span></span></div>
-        <div class="tool" style="height:36px;font-size:14px"><span class="st">${ic('check',14)}</span><span class="verb">Edit</span><span class="tgt">session.test.ts</span><span class="m"><span class="add">+6</span></span></div>
-        <div class="tool" style="height:36px;font-size:14px"><span class="st">${orb('held')}</span><span class="verb">Agent</span><span class="tgt" style="font-family:var(--font);font-size:14px">Reproduce CI failure · orion</span></div>
+        <a href="#" class="tool" style="height:44px;font-size:14px" data-go="p-subagents"><span class="st">${orb('held')}</span><span class="verb">Agent</span><span class="tgt" style="font-family:var(--font);font-size:14px">Reproduce CI failure · orion</span>${ic('cr',16,'faint')}</a>
       </div>
       <p class="prose">While Codex reproduces it on orion, the regression test advances the clock by 30 s and checks the session at the boundary<span class="caret"></span></p>
     </div></div>`;
@@ -1483,6 +1851,40 @@ function pApproval(){
       </div>
       <div style="display:flex;gap:12px;padding:0 16px"><button class="btn secondary" style="flex:1">Deny</button><button class="btn primary" style="flex:1">Approve</button></div>
     </div>`);
+}
+/* Phone: the desktop right panel becomes one sheet with a segmented control */
+function phPanel(seg, body){
+  return phone(`${phStatus()}${pThreadBody()}
+    <div class="ph-dock"><div class="ph-comp"><div class="in"><span>Reply to Claude Code</span></div></div></div>
+    <div class="scrim"></div>
+    <div class="ph-sheet large" role="dialog" aria-label="Changes and subagents">
+      <div class="grab"></div>
+      <div class="ph-sh-nav"><span style="width:64px"></span><span class="ttl">Fix flaky auth test</span><a href="#" class="navbtn" data-go="p-thread" style="font-weight:600">Done</a></div>
+      <div class="ph-seg"><div class="seg" role="tablist"><button role="tab" aria-selected="${seg==='c'}" data-go="p-changes">Changes <span class="c">2</span></button><button role="tab" aria-selected="${seg==='s'}" data-go="p-subagents">Subagents <span class="c">3</span><span class="pip" role="img" aria-label="needs you"></span></button></div></div>
+      <div class="ph-body">${body}</div>
+    </div>`);
+}
+function pChanges(){
+  const fileRow = (d,f,a,r,chev=true) => `<div class="ph-li"><span class="faint">${ic('file',18)}</span><span class="grow mono" style="font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span class="faint">${d}</span>${f}</span>${pm(a,r)}${chev?`<span class="faint">${ic('cr',16)}</span>`:''}</div>`;
+  return phPanel('c', `
+    <div class="ph-sum"><button class="btn secondary sm">All 3 turns ${ic('cd',14)}</button><span class="grow"></span>${pm(18,4)}</div>
+    <div class="ph-gh" style="display:flex;align-items:center;gap:6px">${B.claude(14)} Claude Code on atlas · since 12:03</div>
+    <div class="ph-group">${fileRow('tests/','setup.ts',12,4)}${fileRow('src/auth/','session.test.ts',6,0)}</div>
+    <div class="ph-gh mono" style="font-size:13px">tests/setup.ts</div>
+    <div class="ph-diff">${HUNK_SETUP}</div>
+    <p class="faint" style="font-size:13px;line-height:18px;padding:0 32px;margin:-6px 0 24px">Tap a file for its full diff. Editing files is a desktop task; from here you can hand a change back to the agent.</p>`);
+}
+function pSubagents(){
+  const n = (gl, title, where, line, extra='', kid=false, sel=false) => `<div class="ph-li ph-node ${kid?'kid':''} ${sel?'sel':''}" style="align-items:flex-start"><span style="padding-top:3px;width:16px;display:grid;place-items:center">${gl}</span><div class="grow"><div style="font-weight:500">${title}</div><div class="s" style="display:flex;align-items:center;gap:5px">${where}</div><div class="s">${line}</div>${extra}</div></div>`;
+  return phPanel('s', `
+    <div class="ph-gh">3 subagents · 1 waiting on you</div>
+    <div class="ph-group">
+      ${n(orb('run'),'Fix flaky auth test',`${B.atlas(14)} atlas · Claude Code`,'Running · 18.4k tokens')}
+      ${n(orb('held'),'Reproduce CI failure',`${B.sub('r2')} ${B.orion(14)} orion · Codex`,'<span class="t-accent" style="font-weight:500">Needs approval</span> · turn 3 of 20',`<div style="display:flex;gap:10px;margin-top:10px"><a href="#" class="btn secondary sm" style="flex:1" data-go="p-approval">Details</a><a href="#" class="btn primary sm" style="flex:1" data-go="p-approval">Review</a></div>`,true,true)}
+      ${n(`<span style="color:var(--fg-2)">${ic('ccheck',16)}</span>`,'Audit test helpers',`${B.sub('a1')} atlas · Codex`,'Done · 6.2k tokens','',true)}
+      ${n(`<span class="t-danger">${ic('cx',16)}</span>`,'<span style="color:var(--fg-2)">Check clock skew on buildbox</span>',`${B.sub('c3')} buildbox · Codex`,'Couldn’t start: buildbox is offline','',true)}
+    </div>
+    <p class="faint" style="font-size:13px;line-height:18px;padding:0 32px;margin:-8px 0 24px">A subagent’s approval always comes to its parent thread, so it also shows above the composer.</p>`);
 }
 function pTerminal(){
   return phone(`${phStatus()}
@@ -1564,49 +1966,53 @@ function pUsage(){
 }
 
 /* ───────────── Registry ───────────── */
+/* An entry is [id, label, fn] or [id, label, preset]: presets render the shell with that state. */
 const SCREENS = [
   ['Desktop', [
-    ['inbox','Inbox · Working + thread', scrInbox],
-    ['inbox-done','Inbox · Done', scrDone],
-    ['subagents','Thread · subagents', scrSubagents],
-    ['terminal','Thread · terminal', scrTerminal],
-    ['ide','Editor · diff vs agent', scrIDE],
-    ['library','MCP servers & skills', scrLibrary],
+    ['inbox','Thread · Working', {}],
+    ['inbox-done','Thread · Done', {tab:'done', sel:'xterm'}],
+    ['panel-changes','Right panel · Changes', {panel:'changes'}],
+    ['subagents','Right panel · Subagents', {panel:'subagents'}],
+    ['terminal','Thread · terminal drawer', {term:true}],
+    ['ide','IDE · api on atlas', {view:'ide', panel:'files'}],
+    ['ide-switch','IDE · switched to relay on orion', {view:'ide', panel:'changes', sel:'relay'}],
+    ['sidebar-collapsed','Sidebar collapsed', {side:false}],
+    ['library','Settings · MCP servers', scrLibrary],
     ['usage','Usage & limits', scrUsage],
     ['pr','Pull request', scrPR],
     ['set-hosts','Settings · hosts', scrHosts],
     ['set-devices','Settings · devices + pairing', scrDevices],
     ['set-providers','Settings · CLIProxyAPI', scrProviders],
     ['palette','Command palette', scrPalette],
-    ['state-empty','State · empty', scrEmpty],
+    ['state-empty','State · no projects', scrEmpty],
     ['state-loading','State · loading', scrLoading],
     ['state-offline','State · offline', scrOffline],
-    ['state-error','State · error', scrError],
+    ['state-error','State · error + hosts menu', scrError],
   ]],
   ['Phone', [
-    ['p-inbox','Phone · inbox', pInbox],
+    ['p-inbox','Phone · inbox by project', pInbox],
     ['p-thread','Phone · thread', pThread],
     ['p-approval','Phone · approval', pApproval],
+    ['p-changes','Phone · changes sheet', pChanges],
+    ['p-subagents','Phone · subagents sheet', pSubagents],
     ['p-terminal','Phone · terminal', pTerminal],
     ['p-pairing','Phone · pairing', pPairing],
     ['p-usage','Phone · usage', pUsage],
   ]],
 ];
-const FLAT = Object.fromEntries(SCREENS.flatMap(([g,l])=>l.map(([id,lab,fn])=>[id,{lab,fn,phone:g==='Phone'}])));
-const ALIAS = { 'set-general':'set-hosts','set-appearance':'set-hosts','set-notif':'set-hosts','set-keys':'set-hosts','set-account':'set-hosts', 'p-pr':'p-inbox','p-more':'p-pairing' };
-const PHONE_MAP = { inbox:'p-inbox', 'inbox-done':'p-inbox', subagents:'p-thread', terminal:'p-terminal', usage:'p-usage', 'set-devices':'p-pairing', palette:'p-inbox' };
-const DESK_MAP = { 'p-inbox':'inbox','p-thread':'inbox','p-approval':'inbox','p-terminal':'terminal','p-pairing':'set-devices','p-usage':'usage' };
+const FLAT = Object.fromEntries(SCREENS.flatMap(([g,l])=>l.map(([id,lab,x])=>[id,{lab, fn: typeof x==='function'?x:shell, preset: typeof x==='function'?null:x, phone:g==='Phone'}])));
+const ALIAS = { 'set-general':'set-hosts','set-appearance':'set-hosts','set-notif':'set-hosts','set-keys':'set-hosts','set-account':'set-hosts','skills':'library', 'p-pr':'p-inbox','p-more':'p-pairing' };
+const PHONE_MAP = { inbox:'p-inbox', 'inbox-done':'p-inbox', 'panel-changes':'p-changes', subagents:'p-subagents', terminal:'p-terminal', usage:'p-usage', 'set-devices':'p-pairing', palette:'p-inbox', 'sidebar-collapsed':'p-thread', ide:'p-changes', 'ide-switch':'p-inbox' };
+const DESK_MAP = { 'p-inbox':'inbox','p-thread':'inbox','p-approval':'inbox','p-changes':'panel-changes','p-subagents':'subagents','p-terminal':'terminal','p-pairing':'set-devices','p-usage':'usage' };
 
 /* ───────────── Render + interactions ───────────── */
 const stage = document.getElementById('stage');
 function render(){
   const id = FLAT[S.screen] ? S.screen : 'inbox';
   const sc = FLAT[id];
-  if(id!=='inbox-done' && !S._keepTab) S.tab = S.tab || 'working';
   document.documentElement.dataset.theme = S.theme;
   document.body.classList.toggle('frame-phone', sc.phone);
   stage.innerHTML = sc.fn();
-  if(id==='inbox-done') S.tab='working';
   document.getElementById('pick').value = id;
   document.getElementById('tgTheme').innerHTML = ic(S.theme==='dark'?'sun':'moon',14);
   document.getElementById('tgFrame').innerHTML = ic(sc.phone?'monitor':'phone',14);
@@ -1614,8 +2020,14 @@ function render(){
   document.querySelectorAll('.stream, .ph-body.tail').forEach(e=>e.scrollTop=e.scrollHeight);
   const u = new URLSearchParams(location.hash.slice(1)); u.set('s',id); u.set('t',S.theme); history.replaceState(null,'','#'+u.toString());
 }
-const KG = { '⌘':P.cmd, '↵':'<polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/>', '⌫':'<path d="M10 5a2 2 0 0 0-1.344.519l-6.328 5.74a1 1 0 0 0 0 1.481l6.328 5.741A2 2 0 0 0 10 19h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z"/><path d="m12 9 6 6"/><path d="m18 9-6 6"/>', '⇧':'<path d="M9 18v-6H5l7-7 7 7h-4v6H9z"/>', '↑':'<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>', '↓':'<path d="M12 5v14"/><path d="m19 12-7 7-7-7"/>' };
-function glyphKbd(){ document.querySelectorAll('.kbd').forEach(k=>{ if(k.dataset.g) return; k.dataset.g=1; k.innerHTML = [...k.textContent].map(c=>KG[c]?`<svg viewBox="0 0 24 24" aria-hidden="true">${KG[c]}</svg>`:c).join(''); k.setAttribute('aria-label', k.textContent.replace('⌘','Command ').replace('↵','Return').replace('⌫','Backspace').replace('⇧','Shift ')); }); }
+function go(id){
+  id = ALIAS[id] || id; if(!FLAT[id]) return;
+  S.screen = id; Object.assign(S, base(), FLAT[id].preset || {}); render();
+}
+const onShell = () => !!FLAT[S.screen]?.preset;
+function toShell(){ if(!onShell()){ const keep = { sel:S.sel, tab:S.tab }; go('inbox'); Object.assign(S, keep); } }
+const KG = { '⌘':P.cmd, '⌥':'<path d="M3 5h6l6 14h6"/><path d="M14 5h7"/>', '↵':'<polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/>', '⌫':'<path d="M10 5a2 2 0 0 0-1.344.519l-6.328 5.74a1 1 0 0 0 0 1.481l6.328 5.741A2 2 0 0 0 10 19h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z"/><path d="m12 9 6 6"/><path d="m18 9-6 6"/>', '⇧':'<path d="M9 18v-6H5l7-7 7 7h-4v6H9z"/>', '↑':'<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>', '↓':'<path d="M12 5v14"/><path d="m19 12-7 7-7-7"/>' };
+function glyphKbd(){ document.querySelectorAll('.kbd').forEach(k=>{ if(k.dataset.g) return; k.dataset.g=1; const raw=k.textContent; k.innerHTML = [...raw].map(c=>KG[c]?`<svg viewBox="0 0 24 24" aria-hidden="true">${KG[c]}</svg>`:c).join(''); k.setAttribute('aria-label', raw.replace('⌘','Command ').replace('⌥','Option ').replace('↵','Return').replace('⌫','Backspace').replace('⇧','Shift ')); }); }
 function tick(){
   const n = nowMs();
   document.querySelectorAll('[data-countdown="resume"]').forEach(e=>e.textContent = hms(RESUME_AT-n));
@@ -1625,16 +2037,28 @@ function tick(){
 setInterval(tick, 1000);
 const pick = document.getElementById('pick');
 pick.innerHTML = SCREENS.map(([g,l])=>`<optgroup label="${g}">${l.map(([id,lab])=>`<option value="${id}">${lab}</option>`).join('')}</optgroup>`).join('');
-pick.onchange = () => { S.screen = pick.value; render(); };
+pick.onchange = () => go(pick.value);
 document.getElementById('tgTheme').onclick = () => { S.theme = S.theme==='dark'?'light':'dark'; render(); };
-document.getElementById('tgFrame').onclick = () => { const ph = FLAT[S.screen]?.phone; S.screen = ph ? (DESK_MAP[S.screen]||'inbox') : (PHONE_MAP[S.screen]||'p-inbox'); render(); };
+document.getElementById('tgFrame').onclick = () => { const ph = FLAT[S.screen]?.phone; go(ph ? (DESK_MAP[S.screen]||'inbox') : (PHONE_MAP[S.screen]||'p-inbox')); };
+function setView(v){ toShell(); S.view = v; if(v==='ide' && !S.panel) S.panel = 'files'; render(); }
 document.addEventListener('click', e=>{
-  const go = e.target.closest('[data-go]'); const act = e.target.closest('[data-act]'); const tab = e.target.closest('[data-tab]'); const tool = e.target.closest('.tool');
-  if(go && go.dataset.go){ e.preventDefault(); const g = ALIAS[go.dataset.go] || go.dataset.go; if(FLAT[g]){ S.screen=g; render(); } return; }
-  if(tab){ S.tab = tab.dataset.tab; if(S.screen!=='inbox') S.screen='inbox'; render(); return; }
-  if(act){ const a=act.dataset.act;
-    if(a==='palette'){ S.screen='palette'; render(); }
-    if(a==='closepal'){ S.screen='inbox'; render(); }
+  const el = s => e.target.closest(s);
+  const goEl = el('[data-go]'), act = el('[data-act]'), tab = el('[data-tab]'), row = el('[data-thread]'), proj = el('[data-proj]'), ptab = el('[data-ptab]'), tool = el('.tool');
+  if(proj){ e.preventDefault(); const k=proj.dataset.proj; S.closed[k] = !S.closed[k]; render(); return; }
+  if(row){ e.preventDefault(); S.sel = row.dataset.thread; toShell(); render(); return; }
+  if(ptab){ e.preventDefault(); toShell(); S.panel = ptab.dataset.ptab; render(); return; }
+  if(goEl && goEl.dataset.go){ e.preventDefault(); go(goEl.dataset.go); return; }
+  if(tab){ S.tab = tab.dataset.tab; render(); return; }
+  if(act){ e.preventDefault(); const a = act.dataset.act;
+    if(a==='palette') go('palette');
+    if(a==='closepal') go('inbox');
+    if(a==='side'){ toShell(); S.side = !S.side; render(); }
+    if(a==='panel'){ toShell(); S.panel = S.panel ? null : (S.view==='ide'?'files':'changes'); render(); }
+    if(a==='term'){ toShell(); S.term = !S.term; render(); }
+    if(a==='view-ide') setView('ide');
+    if(a==='view-thread') setView('thread');
+    if(a==='open-changes'){ S.panel='changes'; render(); }
+    if(a==='open-subagents'){ S.panel='subagents'; render(); }
     if(a==='approve'){ const c=act.closest('.ask'); c.classList.add('gone'); document.getElementById('live').textContent='Approved. Codex is running the command on orion.'; setTimeout(()=>{ S.approved=true; render(); }, 200); }
     if(a==='deny'){ document.getElementById('live').textContent='Denied. The subagent stopped; the parent keeps running.'; }
     if(a==='undo'){ S.approved=false; render(); }
@@ -1643,19 +2067,40 @@ document.addEventListener('click', e=>{
   if(tool && tool.hasAttribute('aria-expanded')){ tool.setAttribute('aria-expanded', tool.getAttribute('aria-expanded')!=='true'); }
 });
 document.addEventListener('keydown', e=>{
-  if((e.metaKey||e.ctrlKey) && e.key.toLowerCase()==='k'){ e.preventDefault(); S.screen = S.screen==='palette'?'inbox':'palette'; render(); }
-  if(e.key==='Escape' && S.screen==='palette'){ S.screen='inbox'; render(); }
-  if((e.metaKey||e.ctrlKey) && e.shiftKey && e.key.toLowerCase()==='l'){ e.preventDefault(); S.theme = S.theme==='dark'?'light':'dark'; render(); }
+  const mod = e.metaKey || e.ctrlKey, typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
+  const rz = e.target.closest && e.target.closest('.rz');
+  if(rz && (e.key==='ArrowLeft'||e.key==='ArrowRight')){ e.preventDefault(); const side = rz.dataset.rz==='side', d = (e.key==='ArrowRight'?16:-16)*(side?1:-1);
+    if(side) S.sideW = Math.max(240, Math.min(420, S.sideW+d)); else S.rpW = Math.max(320, Math.min(640, S.rpW+d));
+    rz.parentElement.style.setProperty(side?'--side-w':'--rp-w', (side?S.sideW:S.rpW)+'px'); rz.setAttribute('aria-valuenow', side?S.sideW:S.rpW); return; }
+  if(mod && e.code==='KeyK'){ e.preventDefault(); go(S.screen==='palette'?'inbox':'palette'); return; }
+  if(e.key==='Escape' && S.screen==='palette'){ go('inbox'); return; }
+  if(mod && e.shiftKey && e.code==='KeyL'){ e.preventDefault(); S.theme = S.theme==='dark'?'light':'dark'; render(); return; }
+  if(FLAT[S.screen]?.phone) return;
+  if(mod && e.altKey && e.code==='KeyB'){ e.preventDefault(); toShell(); S.panel = S.panel ? null : (S.view==='ide'?'files':'changes'); render(); return; }
+  if(mod && e.code==='KeyB'){ e.preventDefault(); toShell(); S.side = !S.side; render(); return; }
+  if(mod && e.code==='KeyE'){ e.preventDefault(); setView(S.view==='ide'?'thread':'ide'); return; }
+  if(mod && e.code==='KeyJ'){ e.preventDefault(); toShell(); S.panel = 'subagents'; render(); return; }
+  if(!mod && !typing && e.code==='KeyD'){ toShell(); S.panel = 'changes'; render(); return; }
+  if(!mod && !typing && e.code==='KeyT'){ toShell(); S.term = !S.term; render(); return; }
+});
+document.addEventListener('pointerdown', e=>{
+  const h = e.target.closest('.rz'); if(!h) return;
+  e.preventDefault();
+  const side = h.dataset.rz==='side', pane = h.parentElement, x0 = e.clientX, w0 = pane.getBoundingClientRect().width;
+  h.classList.add('drag'); h.setPointerCapture(e.pointerId);
+  const mv = ev => { const dx = ev.clientX - x0; const w = Math.round(side ? Math.max(240, Math.min(420, w0+dx)) : Math.max(320, Math.min(640, w0-dx)));
+    pane.style.setProperty(side?'--side-w':'--rp-w', w+'px'); h.setAttribute('aria-valuenow', w); if(side) S.sideW = w; else S.rpW = w; };
+  const up = () => { h.classList.remove('drag'); h.removeEventListener('pointermove', mv); h.removeEventListener('pointerup', up); };
+  h.addEventListener('pointermove', mv); h.addEventListener('pointerup', up);
 });
 window.addEventListener('resize', ()=>drawChart());
 (function init(){
   const u = new URLSearchParams(location.hash.slice(1));
-  if(u.get('s')) S.screen = u.get('s');
   S.theme = u.get('t') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
   if(u.get('ui')==='0') document.body.classList.add('shot');
   if(u.get('still')==='1') document.body.classList.add('still');
   document.fonts?.ready.then(()=>drawChart());
-  render();
+  go(u.get('s') || 'inbox');
 })();
 </script>
 </body>

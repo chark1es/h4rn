@@ -1,7 +1,7 @@
 ---
 name: h4rn — Quiet native
 description: Direction A for the h4rn redesign. A calm, system-native control surface for coding agents across machines.
-status: proposal (prototype at design/a-quiet-native/index.html)
+status: approved visual language · Layout v2 (one sidebar, one right panel) · prototype at design/a-quiet-native/index.html
 colors:
   light:
     bg: "oklch(0.995 0.0015 260)"
@@ -126,7 +126,7 @@ This is a redesign. The current h4rn look, with its prompt-book metaphor, amber 
 
 ## Why it looks like this (10 points)
 
-1. **The old look sold a metaphor. This one sells the work.** The stage-manager costume (cues, standby, a black rail) made you learn theatre to read an inbox. Here, structure comes from the platform's own patterns: sidebar, list, detail, inspector, sheet, tab bar. A fluent Mac, Windows or iOS user can tell where everything is before they notice the styling.
+1. **The old look sold a metaphor. This one sells the work.** The stage-manager costume (cues, standby, a black rail) made you learn theatre to read an inbox. Here, structure comes from the platform's own patterns: one sidebar, the detail, one inspector, sheet, tab bar. A fluent Mac, Windows or iOS user can tell where everything is before they notice the styling.
 2. **One accent, and it only ever means "you".** Agents running, queued or done stay neutral. Approvals, needs-you dots, focus and the primary button are blue. That makes colour a sorting tool and not decoration, and a screen with no blue on it is a screen that needs nothing from you.
 3. **Status colours are semantic and rare.** Amber marks a limit or a pause (time is involved). Red marks failure or an unreachable host. Green appears only as a pass or a healthy dot. Each one is always paired with a word or glyph, never shown as colour alone.
 4. **Hairlines, not boxes.** Panes are divided by 1 px lines and a single tonal step (sidebar vs content). The only bordered objects are the things that really are objects: a change set, a composer, an approval request, a resume card. There is no card-in-card anywhere.
@@ -203,9 +203,70 @@ Charts use a categorical order validated with the dataviz validator (CVD ΔE ≥
 ## Space, radius, elevation
 
 - 4 px base. Component internals use 6, 8, 10 or 12. Groups are separated by 16, 24 or 32. Page sections use 36–48. Headings have more space above than below.
-- Desktop shell: sidebar 212, list 328, detail flexible (min 540), inspector 356, terminal panel 340 high. The prose column is `max-width: 720px`.
+- Desktop shell (Layout v2): sidebar 288 (resizable 240–420), main flexible (min 560), right panel 400 (resizable 320–640, closed by default), terminal drawer 300 high. The prose column is `max-width: 720px`. See **Layout**.
 - Radii follow a fixed scale: 4, 6, 8, 12, 14, plus full rounding for switches, dots and avatars. A radius above 14 px on a working surface is decoration.
 - Elevation is declared once, either as a border or a shadow, never both, with one exception: the approval card and popovers combine a hairline with a soft `pop` shadow, because they really do sit above the page. The palette and phone sheets use `dialog` plus a scrim. Rows, panes and buttons never cast shadows.
+
+## Layout
+
+Three columns at most, and only one of them is on the left.
+
+```
+┌────────────────────┬──────────────────────────────────────┬────────────────────────┐
+│ sidebar            │ main                                 │ right panel            │
+├────────────────────┼──────────────────────────────────────┼────────────────────────┤
+│ h4rn            ▢ ✎│ Title      Thread|IDE  >_  ▢         │ Changes Files Subagents│
+│ Search or run    ⌘K│ provenance                           │                        │
+│Working Done Settled │                                      │ vs agent|vs HEAD  turns│
+│ ▣ api  atlas      ⌄│ stream  ─or─  IDE editor             │ file list              │
+│   ● Fix flaky…   2m│                                      │ stacked diffs          │
+│   ◌ Add jitter…  9m│ approval card                        │   ─or─ Files tree      │
+│ ▣ relay  orion    ⌄│ composer                             │   ─or─ Subagents       │
+│   …                │ ─ terminal drawer (optional) ─       │                        │
+│ ● 3 of 4 hosts ⑂3 ⚙│                                      │ Revert all… Open in IDE│
+└────────────────────┴──────────────────────────────────────┴────────────────────────┘
+```
+
+**Panel rules**
+
+1. **One left column, always the sidebar.** Nothing else docks on the left: not a second list, not a settings nav, not a file tree. Destinations that used to have their own list column either take over the sidebar (Settings, including MCP servers and Skills, swap the thread list for a settings nav with a back button) or render their list in the main area (Pull requests).
+2. **The main area shows one thing:** the selected thread, the selected thread's project in the IDE, or a page (Usage, a pull request, a settings page). The Thread | IDE toggle sits in the same place in both views.
+3. **One right panel, scoped to the selected thread.** Tabs: **Changes** (agent diff, by turn, or vs HEAD), **Files** (the thread's workspace tree), **Subagents** (tree + details). It is closed by default; its open/closed state, width and last tab are remembered per window, and its content follows whatever thread is selected. It never holds a second thread, a terminal, or app navigation.
+4. **The terminal is a drawer in the main area**, under the composer, so an approval card is never pushed off screen by it. It belongs to the thread's worktree and appears in both views.
+5. **Only blue can survive a collapse.** Hiding the sidebar leaves a show-sidebar button in the main header; if any thread needs you, that button carries the accent pip. A collapsed project group shows its thread count and the accent dot. The Subagents tab shows the accent dot when a child is waiting on an approval.
+6. **Resizing** uses an 8 px hit area on the shared hairline. On hover, drag or keyboard focus the hairline turns into a 2 px `focus` line. Arrow keys move it 16 px. Widths persist per window. The main area never goes below 560 px; past that the right panel closes before the sidebar does.
+
+**Sidebar anatomy (top to bottom).** Wordmark, hide-sidebar and new-thread buttons · "Search or run ⌘K" · the Working / Done / Settled segmented control · project groups · the Snoozed row (Working only) · the footer.
+
+**Project groups.** A project is a workspace: one folder on one host. The same repository on two hosts is two projects. Each group header has a 16 px neutral monogram (no colour, because colour belongs to blobatars and to "you"), the name at 13/600 in `fg-2` (`fg` when the selected thread is in it), and the host in `fg-3` whenever your projects span more than one host, which includes WSL distros. A chevron on the right collapses the group, and a `+` that appears on hover starts a thread in that project. Groups appear in the order of their most urgent thread, then by recent activity. Rows inside a group keep the approved row anatomy, and line 2 drops the host because the header above it already shows it.
+
+**Why a segmented control and not T3's stacked sections.** h4rn's lifecycle is a filter on attention, not a shelf. With Working / Done / Settled as a segment, the project grouping stays one level deep, and each project appears once on screen instead of once per section. Done stays a visible debt with its own count. Snoozed is the last row of Working (a sheet or popover on click), and Settled pages older threads behind "Show older".
+
+**Footer.** `● 3 of 4 hosts ▾` opens the hosts menu (presence, latency, route, Pair a device…, Manage hosts), followed by icon buttons for Pull requests (with the open count), MCP & skills, Usage and Settings. Each has a tooltip with its shortcut and a palette entry. This replaces the old nav list and the Hosts group.
+
+**IDE view.** ⌘E switches the main area to the IDE for the **selected thread's project**: editor tabs, path bar with `Edit | vs HEAD | vs agent`, the scope strip ("Changes by Claude Code in *Fix flaky auth test* since 12:03 · Revert file · Accept"), the code view, and the status bar. The file tree lives in the right panel's **Files** tab, not in a second left column. Selecting a thread in another project switches the IDE to that project's workspace and restores its open tabs ("Restored 3 tabs" appears quietly at the end of the tab strip). Tabs are kept per project. The header names the workspace (monogram, host, path) and carries a **thread chip** with the state glyph and title ("Needs approval" in accent when it applies). Clicking the chip, or pressing ⌘E, returns to the thread. The thread's context stays reachable in three places: the chip, the scope strip, and the Changes tab, which in IDE view collapses to a file list because the editor shows the diff. While the agent is still writing a file, the strip says so and Accept waits until the turn ends. A thread without a workspace shows "No files open in *project*" with ⌘P and Show files.
+
+### Shortcuts
+
+| Keys | Action |
+|---|---|
+| ⌘K | Search or run (palette) |
+| ⌘B | Show / hide sidebar |
+| ⌘E | Thread ↔ IDE |
+| ⌘⌥B | Show / hide right panel (opens to the last tab; Files in IDE view) |
+| D | Right panel → Changes |
+| ⌘J | Right panel → Subagents |
+| ⌘P | Open file in the selected thread's project (IDE) |
+| T | Terminal drawer |
+| ⌘⇧N | New thread (project picker; the `+` on a group skips it) |
+| ⌘↵ / ⌘⌫ | Approve / deny the pending request |
+| A | Acknowledge (Done) |
+| ⌘. | Interrupt turn |
+| G P · G M · G U · G H | Pull requests · MCP & skills · Usage · Hosts |
+| ⌘, | Settings |
+| Esc | Close palette / leave Settings |
+
+Single-letter keys only fire when focus is not in a text field.
 
 ## Motion
 
@@ -223,13 +284,13 @@ Charts use a categorical order validated with the dataviz validator (CVD ΔE ≥
 
 ## Components
 
-**Sidebar.** The wordmark "h4rn" is set in 14/600 text, with no logo block. Below it: compose, a "Search or run ⌘K" field, five destinations (Inbox, Pull requests, Editor, MCP & skills, Usage) with counts, a Hosts group (blobatar, name, presence dot, WSL distros indented under their Windows host, offline hosts showing last-seen), and Settings plus the connection line at the bottom. Only the Inbox count can be blue, and only when something needs you.
+**Sidebar.** The only left column (see **Layout**). The wordmark "h4rn" is set in 14/600 text, with no logo block. Hide-sidebar and new-thread buttons sit beside it, then "Search or run ⌘K", the Working / Done / Settled segment, the thread list grouped by project, and a 44 px footer with the hosts menu and the secondary destinations. On `bg-side`, the selected row uses `fill-2`. Rows have no hairlines in the sidebar, because the group headers carry the rhythm.
 
-**Thread row.** The row has two lines. Line 1 has a state slot (14 px), the title (13/500), and the relative time. Line 2 has "host · harness" and the status word on the right. States: blue dot for needs you, orb for running, breathing orb for queued, amber clock for scheduled resume, amber pause for limited needing you, red wifi-off for host unreachable, check-circle for done, faint check for settled (with a dimmed title). Done rows add an inline `Acknowledge (A)` action. Separators are inset hairlines that disappear around hovered or selected rows.
+**Thread row.** The row has two lines. Line 1 has a state slot (14 px glyph in a 16 px column, aligned under the project monogram), the title (13/500), and the relative time. Line 2 has the harness and the status word on the right. The host comes from the group header; anywhere a row appears outside a group (palette, PR linked thread) it reads "project · host". States: blue dot for needs you, orb for running, breathing orb for queued, amber clock for scheduled resume, amber pause for limited needing you, red wifi-off for host unreachable, check-circle for done, faint check for settled (with a dimmed title). In the sidebar, Done rows add an inline `Acknowledge (A)` action when selected, and a limited-needs-you row always shows `Resume now`. In standalone lists, separators are inset hairlines that disappear around hovered or selected rows.
 
 **Segmented control.** Used for Working / Done / Settled, MCP / Skills, ranges, and diff mode. It has a 2 px inset track and a raised thumb. Counts are shown in `fg-3`.
 
-**Thread header.** Title (15/600), one provenance line, the state (orb or glyph plus a word), icon buttons for Terminal, Subagents and Changes, a secondary Stop button, and overflow. Below 640 px the model and branch drop from the provenance line first.
+**Thread header.** Title (15/600), one provenance line, the state (orb or glyph plus a word), then the view-specific actions (Stop and overflow; Snooze and Acknowledge on Done; Un-settle on Settled), a hairline divider, and the fixed view cluster: `Thread | IDE` segment, Terminal, and Right panel. The cluster is always at the right edge, so it doesn't move between views. When the sidebar is hidden, show-sidebar and new-thread buttons lead the header. Below 820 px of main width the model drops from the provenance line, and below 640 px the branch drops too.
 
 **Stream.** User messages are a right-aligned `fill` bubble with attachments and time beneath. Agent turns start with a small header (harness blobatar, "Claude Code on atlas · 12:03") and no bubble. Tool calls are 28 px rows (status glyph, verb, mono target, measured result) that expand into a bounded mono output well. A change set is the one bordered block in the stream: a header with totals and Review, file rows, and the first hunk inline. A delegated subagent appears as one bordered row that links into the tree. The live tail ends with a caret and a quiet "Writing · 61 tok/s" line.
 
@@ -237,37 +298,43 @@ Charts use a categorical order validated with the dataviz validator (CVD ΔE ≥
 
 **Composer + usage line.** A 12 px-radius field that names its target ("Reply to Claude Code on atlas"), with attach, mention, a model menu, and a send button that turns blue only when there is something to send. Underneath is one 11.5 px line: tokens · cost est. · tok/s · TTFT · active time, plus a context bar on the right. Cost is always labelled as an estimate.
 
-**Inspector: Subagents.** A real tree. The parent sits at the top, and children hang off 1 px elbow connectors. Each node shows state, title, elapsed time, a "host · harness" line with blobatars, a state/turn/token line, and a 3 px budget bar while running. Failed or cancelled children stay in the tree with their reason. The selected node expands into a key/value block (runs on, model, context handoff, budget, approvals, credential location).
+**Right panel.** 60 px header aligned with the thread header's hairline, holding text tabs with a 2 px `fg` underline (not accent) and counts in `fg-3`, plus a close button. Under it is a 44 px tool bar per tab, a scrolling body, and an optional footer.
+- *Changes:* `vs agent | vs HEAD` segment, a turn scope menu ("All 3 turns ▾": all turns, latest turn, turn n, branch vs base), and totals. Then a "Claude Code on atlas · 2 files since 12:03" line, the file list (mono path with a dimmed directory, `New` badge, +/−), and stacked diffs with sticky file headers whose long lines wrap. The footer has Revert all… and Open in IDE ⌘E. In IDE view the diffs fold away and the file list opens files in the editor.
+- *Files:* filter field (⌘P), the workspace tree with git markers (`M` in `warn`, `A` in `ok`), and an "Agent changes" row pinned to the bottom that jumps to Changes.
+- *Subagents:* the tree and details below. Empty states name what will appear there.
 
-**Terminal panel.** A bottom panel inside the thread on a `bg-sunk` ground, following the theme rather than being a forced black terminal. It has session tabs, the size and viewer count, split and close controls. Prompts and branch names use `accent-tx`, passes and failures use `ok` and `danger`, and dim output uses `fg-3`.
+**Subagents tab.** A real tree. The parent sits at the top, and children hang off 1 px elbow connectors. Each node shows state, title, elapsed time, a "host · harness" line with blobatars, a state/turn/token line, and a 3 px budget bar while running. Failed or cancelled children stay in the tree with their reason. The selected node expands into a key/value block (runs on, model, context handoff, budget, approvals, credential location).
 
-**Editor.** File tree with git markers and an "Agent changes" group pinned at the bottom, document tabs with a dirty dot, a path bar with a `Edit | vs HEAD | vs agent` segmented control and "Hand to agent", a scope strip that says whose changes these are and since when (with Revert file / Accept), and a code view with full-width diff bands and a sign column. The status bar is 26 px and neutral.
+**Terminal drawer.** A 300 px bottom drawer in the main area, under the composer on a `bg-sunk` ground, following the theme rather than being a forced black terminal. It has session tabs, the size and viewer count, split and close controls. Prompts and branch names use `accent-tx`, passes and failures use `ok` and `danger`, and dim output uses `fg-3`.
 
-**MCP & skills.** List and detail. The list shows health as a glyph plus word, transport, target summary, and a share glyph for servers defined on another machine. The detail starts with a credential row showing "Stored on atlas" / "Stored on orion" badges (key icon, never a value). The core is a **Where it runs** table: host, harness, delivery mechanism, status, switch. Unsupported targets stay in the table, disabled, with the reason. Conflicts are an amber-soft inline block with a single Resolve action. A "Shared with you" section names the host it comes from and the transport path.
+**IDE view.** Described under **Layout**. The file tree is the right panel's Files tab. Document tabs have a dirty dot, a path bar with a `Edit | vs HEAD | vs agent` segmented control and "Hand to agent", a scope strip that says whose changes these are and since when (with Revert file / Accept), and a code view with full-width diff bands and a sign column. The status bar is 26 px and neutral.
+
+**MCP & skills.** Lives in Settings under *Tools*. The sidebar's settings nav lists the servers under "MCP servers" with a health glyph each (check, red x, amber key), and the main area shows the selected server. The detail starts with a credential row showing "Stored on atlas" / "Stored on orion" badges (key icon, never a value). The core is a **Where it runs** table: host, harness, delivery mechanism, status, switch. Unsupported targets stay in the table, disabled, with the reason. Conflicts are an amber-soft inline block with a single Resolve action. A "Shared with you" section names the host it comes from and the transport path.
 
 **Usage.** The auto-resume card comes first because it's the only thing that might need you. It shows a live countdown, Fail over…, Cancel auto-resume, and Resume now. Next is a six-column stat strip separated by hairlines, where each changing number carries a 56 px sparkline of real history. This is not the hero-metric template: there are no big tiles and no accent. Then the stacked bar chart with legend totals and a table toggle, active vs idle as one proportion bar with both numbers in text, limit meters (red at 100% plus "Limited", amber at 78%, neutral otherwise) with reset times, and a per-model table with right-aligned tabular numbers where an unknown price shows "—" instead of $0.00.
 
-**Pull request.** Header (title, number, state badge, `head → base`, commits, author, Open on GitHub), text tabs with a 2 px underline in `fg` (not accent), a conversation with review comments that quote their diff context, and per-comment Reply / Hand to agent buttons. Hand to agent opens a popover: this thread or a new thread, a note that the agent won't push without approval, and send. The right column shows checks (glyph, name, required, duration, View log, Re-run failed), reviewers, and the linked thread.
+**Pull request.** No list column: the main area shows the PR with a breadcrumb ("Pull requests / 3 open / dev/api") that opens the list page. The sidebar keeps the thread list. Header (title, number, state badge, `head → base`, commits, author, Open on GitHub), text tabs with a 2 px underline in `fg` (not accent), a conversation with review comments that quote their diff context, and per-comment Reply / Hand to agent buttons. Hand to agent opens a popover: this thread or a new thread, a note that the agent won't push without approval, and send. The right column shows checks (glyph, name, required, duration, View log, Re-run failed), reviewers, and the linked thread (a link that selects it in the sidebar).
 
-**Settings.** A second-level nav (General, Appearance, Notifications, Shortcuts / Hosts, Devices, Providers / Account & relay) and a 760–880 px form column made of label/control rows separated by hairlines.
+**Settings.** Takes over the sidebar instead of adding a column. It has a back button with "Settings" as the title, "Search settings", and nav groups (General, Appearance, Notifications, Shortcuts / *Machines*: Hosts, Devices, Providers / *Tools*: MCP servers, Skills / *Account*: Account & relay). Esc or ‹ returns to the threads. The footer stays the same. The main area is a 760–880 px form column made of label/control rows separated by hairlines.
 - *Hosts:* a table with WSL distros indented under their Windows host as separate rows. Host detail lists harnesses with version, state, credential source, and Restart/Start.
 - *Devices:* a pair panel with the QR code (on white in both themes so it scans), an 8-character code, a live expiry countdown, scope checkboxes, Copy link and New code. A paired-devices table offers per-device Revoke.
 - *Providers (CLIProxyAPI):* base URL and Probe, the probe results as glyph + key + value, two separate secret rows (management key, access key), a models table with aliases and a custom alias badge, per-harness override switches (off means keep the harness's own credential) with the exact config path and a redacted preview diff, a verified test request, and "Apply and restart" that names the turn it will interrupt.
 
-**Command palette.** 620 px, 14 px radius, `dialog` shadow over a scrim. It has a context chip for the focused thread. The "This thread" group comes first (approve, deny, terminal, subagents, interrupt), then Threads, then Go to. Every row shows its shortcut, and the footer explains the keys and which hosts are being searched.
+**Command palette.** 620 px, 14 px radius, `dialog` shadow over a scrim. It has a context chip for the focused thread. The "This thread" group comes first (approve, deny, changes, subagents, interrupt). Next is View (open *project* in the IDE, right panel, terminal, sidebar), then Threads and New thread in *project*, then Go to (Pull requests, MCP & skills, Usage, Hosts, Pair a device, Settings). Secondary destinations are always reachable here. Every row shows its shortcut, and the footer explains the keys and which hosts are being searched.
 
 **States.**
-- *Empty:* the list teaches what lands where and offers one action. The detail pane becomes "Start a thread" with host, harness and folder pickers and a composer.
-- *Loading:* layout-shaped skeletons, tab counts shown as "—", and "Connecting to atlas…" in the header. No spinners.
-- *Offline:* a neutral banner ("Offline · threads as of 12:04 · Reconnect"), the thread stays readable with "Stream paused at 12:04", the approval is visible but disabled with a reason, and the composer saves a draft.
-- *Error:* partial failure is stated as such ("Couldn't reach buildbox. Showing 3 of 4 hosts. Retry"). A thread that can't load gets a centred message that names the host, says whether the run may still be active, offers Retry and Open host, and has a Details disclosure (route, last event, status, correlation ID, Copy diagnostics).
+- *Empty (no projects):* the sidebar hides the lifecycle segment and says "No projects yet" with what a project is and "Add a project…". The footer shows the one host. The main area becomes "Start a thread" with host, harness and folder pickers and a composer; the folder becomes the first project.
+- *Loading:* layout-shaped skeletons (project headers with monogram blocks, two-line rows), segment counts shown as "—", the footer shows a queued orb with "Connecting…", and the header says "Connecting to atlas…". No spinners.
+- *Offline:* a neutral banner at the top of the sidebar list ("Offline · as of 12:04 · Reconnect"), the footer reads "Offline", the thread stays readable with "Stream paused at 12:04", the approval is visible but disabled with a reason, and the composer saves a draft.
+- *Error:* partial failure is stated as such in the sidebar ("Couldn't reach buildbox. Showing 3 of 4 hosts. Retry"), and the hosts menu shows the unreachable host in `danger` with its last-seen time. A thread that can't load gets a centred message that names the host, says whether the run may still be active, offers Retry and Open host, and has a Details disclosure (route, last event, status, correlation ID, Copy diagnostics).
 
 ### Phone
 
 - **Shell.** Status-bar safe area, a nav bar with 44 px targets, a large title on top-level screens, and a 5-item tab bar (Inbox with badge, PRs, Usage, Hosts, Settings) with 24 px icons and 11 px labels. Compose lives in the nav bar, not in a floating button.
-- **Inbox.** A segmented control under the large title, 66 px rows (title 16/500, "host · harness" with the status word on one line), and Snoozed as a row that opens a sheet.
-- **Thread.** A pushed screen with a "‹ Inbox" back button, a 20/600 title, and a provenance + state line. The stream sticks to the live tail. A compact approval card sits above the composer with Details / Review (44 px). The usage line sits under the composer.
+- **Inbox.** A segmented control under the large title, then the same project groups as desktop: a 40 px header (20 px monogram, name 15/600, host in `fg-3`, chevron), 66 px rows (title 16/500, harness and status word on line 2), and Snoozed as a row that opens a sheet.
+- **Thread.** A pushed screen with a "‹ Inbox" back button, Terminal, Changes and More in the nav bar, a 20/600 title, and a provenance + state line. The "2 files changed" card and the delegated-subagent row open the panel sheet. The stream sticks to the live tail. A compact approval card sits above the composer with Details / Review (44 px). The usage line sits under the composer.
 - **Approval.** A bottom sheet with a grabber: who and where, the full command wrapping at word boundaries, a grouped list (folder, worktree, asked, "Always allow in this thread" switch), and Deny | Approve as two 44 px buttons in the bottom third.
+- **Changes / Subagents (the right panel on phone).** One large-detent sheet over the thread, with a `Changes | Subagents` segment (the accent dot shows when a child waits on you) and Done. Changes shows the scope menu and totals, the file list as a grouped inset list, and the first file's diff with wrapped lines; tapping a file pushes its full diff. Subagents shows the tree as a grouped list with children indented, and the waiting child highlighted in `accent-soft` with Details / Review (44 px). Files and the IDE are desktop-only on phone, and the sheet says so.
 - **Terminal.** A full screen with the host, cwd and grid size, a "Sized to this phone" note, and a scrollable 44 px key bar (Esc, Tab, Ctrl latched, arrows, Paste).
 - **Pairing.** A consent screen: host identity (56 px blobatar), how the connection is made, signed-in identity, a grouped list of scope switches ("View threads" is locked on), included WSL hosts, a line saying credentials stay on the host, the expiry countdown, and a full-width "Pair this phone".
 - **Usage.** The paused-thread card first, with its countdown as the largest number on screen. Then a 2×2 stat group, one chart at a time behind a segmented control, and limit meters.
@@ -294,4 +361,17 @@ Charts use a categorical order validated with the dataviz validator (CVD ΔE ≥
 
 1. Accent hue: 258° blue is the most "native" choice. A greener or more indigo accent would be more ownable, but would weaken the "Blue means you" rule's familiarity with the OS.
 2. Should the terminal follow the theme (as prototyped) or stay dark in both, as before?
-3. Should the desktop sidebar's Hosts group stay permanently visible, or collapse once there are more than about 6 hosts?
+3. Resolved by Layout v2: hosts moved from the sidebar into the footer's hosts menu. Still open: should a pinned-projects section sit above the groups once someone has more than about 8 projects?
+4. Should "Done" auto-collapse project groups that only hold acknowledged-soon threads, or is the segment count enough?
+
+## Layout v2 (Nov 13, 2026)
+
+The owner asked for T3 Code's single left panel: one left panel, one collapsible right panel, and an IDE view that follows the selected thread's project. The visual language (tokens, type, hairlines, blue means you, orb and blobatar rules) is unchanged. Only the frame moved.
+
+- **Merged nav and inbox into one sidebar.** Two left columns (212 + 328) became one 288 px column. Threads are grouped by project, and the project is the unit the IDE opens, so grouping and IDE switching use the same key. A project is a folder on a host, so a repo checked out on atlas and orion is two groups with the host shown subtly. That keeps "where it runs" honest at the group level instead of repeating the host on every row.
+- **Kept h4rn's lifecycle as a segment instead of T3's stacked Active / Working / Snoozed / Settled sections.** h4rn has a Done state that T3 lacks, and stacking three sections under project folders would show each project up to three times. The segment keeps one level of grouping.
+- **Moved secondary destinations to the footer, the palette and Settings.** Pull requests, Usage, MCP & skills and Settings are a click or two keys away, and none of them claims a column. Settings (with MCP servers and Skills inside it) temporarily takes over the sidebar, as T3's settings route does. Hosts and devices became a footer menu that still shows presence at a glance.
+- **Put the file tree in the right panel.** In IDE view the tree is the Files tab. A narrow tree pane inside the main area would have recreated the two-left-columns look the owner rejected, and the same Files tab also serves thread view, so the tree has one home. ⌘P makes the tree optional.
+- **Scoped the right panel to the thread.** Changes, Files and Subagents all answer "what has this thread touched or spawned?". The terminal stays a bottom drawer (as in T3) because it is interactive, wide, and belongs under the conversation, not beside it.
+- **Mapped the right panel to one sheet on phone** (Changes | Subagents) rather than two pushed screens. The thread stays one swipe away and the pattern matches the approval sheet.
+- **Kept attention from hiding.** The accent survives every collapse: the pip on the show-sidebar button, the dot on a collapsed project group, the dot on the Subagents tab, and the "Needs approval" thread chip in IDE view.
