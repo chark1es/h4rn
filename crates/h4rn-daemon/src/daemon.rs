@@ -83,6 +83,14 @@ impl DaemonBuilder {
             Some(catalog) => catalog,
             None => {
                 let mut catalog = StaticHarnessCatalog::new();
+                for harness in h4rn_harness::registry::builtin_adapters() {
+                    catalog.register(harness);
+                }
+                // The fake adapter is available to the UI e2e through an
+                // explicit environment switch and never in a normal daemon.
+                if std::env::var("H4RN_FAKE_HARNESS").as_deref() == Ok("1") {
+                    catalog.register(Arc::new(h4rn_harness::FakeHarness::new()));
+                }
                 for harness in self.extra_harnesses {
                     catalog.register(harness);
                 }

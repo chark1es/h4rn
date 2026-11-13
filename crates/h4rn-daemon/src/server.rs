@@ -26,8 +26,8 @@ use axum::routing::get;
 use axum::{Router, serve};
 use futures::{SinkExt, StreamExt};
 use h4rn_protocol::{
-    BinaryFrame, ClientFrame, ClientRequest, Event, PROTOCOL_VERSION, ProtoError, ProtoErrorCode,
-    ResponseBody, ServerFrame, Topic,
+    BinaryFrame, ClientFrame, ClientRequest, DeviceId, Event, PROTOCOL_VERSION, ProtoError,
+    ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame, Topic,
 };
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -116,6 +116,7 @@ struct Connection {
     topics: Arc<RwLock<Vec<Topic>>>,
     ready: Arc<AtomicBool>,
     last_seq: Arc<AtomicU64>,
+    device_id: Option<DeviceId>,
     tx: mpsc::Sender<Outbound>,
 }
 
@@ -153,6 +154,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         topics,
         ready,
         last_seq,
+        device_id: None,
         tx: tx.clone(),
     };
 
@@ -255,6 +257,7 @@ impl Connection {
                 } else {
                     self.hello_done = true;
                     self.ready.store(true, Ordering::Relaxed);
+                    self.device_id = Some(device.device_id.clone());
                     *self
                         .topics
                         .write()
@@ -286,7 +289,10 @@ impl Connection {
                     events: snapshot
                         .events
                         .into_iter()
-                        .map(|event| event.event)
+                        .map(|event| SeqEvent {
+                            seq: event.seq,
+                            event: event.event,
+                        })
                         .collect(),
                     next_seq: snapshot.next_seq,
                 })
@@ -298,6 +304,8 @@ impl Connection {
                 model,
                 prompt,
                 attachments: _,
+                runtime_mode,
+                worktree,
             } => {
                 let request = crate::threads::NewThread {
                     host,
@@ -305,17 +313,17 @@ impl Connection {
                     workspace_path,
                     model,
                     prompt,
+                    runtime_mode,
+                    worktree,
                 };
-                // The protocol has no dedicated CreateThread response yet, so
-                // the new thread's summary is returned in `ResponseBody::Thread`.
                 self.state
                     .manager
                     .create_thread(request)
                     .await
-                    .map(|summary| ResponseBody::Thread {
-                        summary,
-                        events: Vec::new(),
-                        next_seq: 0,
+                    .map(|created| ResponseBody::ThreadCreated {
+                        thread_id: created.thread_id,
+                        turn_id: created.turn_id,
+                        summary: created.summary,
                     })
                     .map_err(crate::threads::ManagerError::into_proto)
             }
@@ -328,7 +336,11 @@ impl Connection {
                 .manager
                 .send_message(&thread_id, text)
                 .await
-                .map(|()| ResponseBody::Ack)
+                .map(|accepted| ResponseBody::MessageAccepted {
+                    thread_id: accepted.thread_id,
+                    turn_id: accepted.turn_id,
+                    seq: accepted.seq,
+                })
                 .map_err(crate::threads::ManagerError::into_proto),
             ClientRequest::Interrupt { thread_id } => self
                 .state
@@ -341,10 +353,17 @@ impl Connection {
                 thread_id,
                 approval_id,
                 decision,
+                option_id,
             } => self
                 .state
                 .manager
-                .respond_approval(&thread_id, &approval_id, decision)
+                .respond_approval(
+                    &thread_id,
+                    &approval_id,
+                    decision,
+                    option_id,
+                    self.device_id.clone(),
+                )
                 .await
                 .map(|()| ResponseBody::Ack)
                 .map_err(crate::threads::ManagerError::into_proto),
@@ -366,12 +385,44 @@ impl Connection {
                 .await
                 .map(|_| ResponseBody::Ack)
                 .map_err(crate::threads::ManagerError::into_proto),
-            ClientRequest::Subscribe { topics } => {
+            ClientRequest::Subscribe { topics, since_seq } => {
                 *self
                     .topics
                     .write()
                     .unwrap_or_else(|poisoned| poisoned.into_inner()) = topics;
-                Ok(ResponseBody::Ack)
+                match since_seq {
+                    None => {
+                        self.ready.store(true, Ordering::Relaxed);
+                        Ok(ResponseBody::Ack)
+                    }
+                    Some(since) => {
+                        // Hold the manager's append lock across read + enqueue
+                        // + ready so no event falls between replay and live.
+                        let guard = self.state.manager.lock_append().await;
+                        let replay = self.state.manager.replay_global_since(since).await;
+                        if let Ok(events) = &replay {
+                            for event in events {
+                                let frame = ServerFrame::Event {
+                                    seq: event.seq,
+                                    event: event.event.clone(),
+                                };
+                                if let Ok(text) = serde_json::to_string(&frame)
+                                    && self.send(Outbound::Text(text)).await.is_err()
+                                {
+                                    break;
+                                }
+                            }
+                            if let Some(last) = events.last() {
+                                self.last_seq.store(last.seq, Ordering::Relaxed);
+                            }
+                            self.ready.store(true, Ordering::Relaxed);
+                        }
+                        drop(guard);
+                        replay
+                            .map(|_| ResponseBody::Ack)
+                            .map_err(crate::threads::ManagerError::into_proto)
+                    }
+                }
             }
             other => Err(not_implemented(&other)),
         };
@@ -516,16 +567,11 @@ fn error_frame(id: u64, error: ProtoError) -> String {
 
 /// Names a request that this phase intentionally does not implement.
 ///
-/// The protocol error enum has no `not_implemented` code yet, so these use
-/// `Unsupported` with a `not_implemented:` message prefix (see the hand-off
-/// notes); unknown later-phase requests never reach a handler.
+/// These are part of the wire contract but no code path serves them yet, so
+/// they report [`ProtoErrorCode::NotImplemented`] rather than `Unsupported`
+/// (which is reserved for unknown protocol versions and capabilities).
 fn not_implemented(request: &ClientRequest) -> ProtoError {
-    let name = request_name(request);
-    ProtoError::new(
-        ProtoErrorCode::Unsupported,
-        format!("not_implemented: {name} is not implemented in this daemon"),
-        format!("Upgrade the daemon when {name} ships; no state was changed"),
-    )
+    ProtoError::not_implemented(request_name(request))
 }
 
 fn request_name(request: &ClientRequest) -> &'static str {
@@ -613,8 +659,8 @@ mod tests {
         let request = ClientRequest::McpList;
         assert_eq!(request_name(&request), "mcp_list");
         let error = not_implemented(&request);
-        assert_eq!(error.code, ProtoErrorCode::Unsupported);
-        assert!(error.message.contains("not_implemented"));
+        assert_eq!(error.code, ProtoErrorCode::NotImplemented);
+        assert!(error.message.contains("not implemented"));
         assert!(error.hint.unwrap().contains("mcp_list"));
     }
 }

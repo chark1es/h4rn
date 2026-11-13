@@ -5,6 +5,52 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### Phase 1c — protocol gaps closed
+
+- Added `ProtoErrorCode::NotImplemented` and replaced the daemon's
+  `Unsupported`-plus-message-prefix workaround.
+- `CreateThread` now returns `thread_created` (`thread_id`, `turn_id`, summary) and
+  `SendMessage` returns `message_accepted` (`thread_id`, `turn_id`, `seq`), so the UI reconciles
+  optimistic rows without guessing.
+- Every thread-scoped event carries `thread_id` (and `turn_id` where applicable);
+  `ItemCompleted` nests its `item`. The UI no longer infers ownership from the last event.
+- `RespondApproval` carries the selected `ApprovalOption.id`, and the daemon broadcasts
+  `approval_resolved` with the option and answering device; every UI resolves from the stream.
+- Documented `Event.seq` as a durable, daemon-global cursor. `Thread.events` is now
+  `SeqEvent[]`, `Subscribe` accepts `since_seq`, and the client resumes a gap-free global replay
+  across reconnects (ADR-003 note).
+- `CreateThread` accepts `runtime_mode` (`approval_required`, `auto_accept_edits`,
+  `full_access`) and optional `worktree`; the Claude adapter maps runtime mode to
+  `--permission-mode`. Worktree creation returns `not_implemented` for now.
+- Added `AgentState::Queued`, `Scheduled` and `Unreachable`, with matching UI labels and glyphs.
+- The daemon resolves harnesses through `h4rn_harness::registry::builtin_adapters()`, injects
+  `FakeHarness` only under `H4RN_FAKE_HARNESS=1`, persists `session_id` for `--resume`, reports
+  real `last_turn` usage, and surfaces `stderr_tail` on crashes.
+- Added a real Claude Code daemon e2e (`crates/h4rn-daemon/tests/e2e_claude.rs`, ignored by
+  default) and a Playwright UI e2e driving `h4rnd serve` with the fake harness.
+
+### Phase 1d — desktop shell
+
+- `apps/desktop`: Tauri v2 shell that starts the bundled `h4rnd` daemon as a sidecar when
+  `127.0.0.1:47800/healthz` is not answering, reads its access token with `h4rnd token`, and
+  loads the UI with `?daemon=<ws_url>&token=<token>`. The token never reaches a log.
+- Windows WSL hosts: `daemon_endpoints()` lists `wsl.exe -l -q` distributions (UTF-16 output
+  decoded) and, when one is activated, starts
+  `wsl.exe -d <distro> -- h4rnd serve --bind 127.0.0.1:47801`, reachable through WSL2
+  localhost forwarding.
+- Narrow IPC surface (ADR-001): `daemon_endpoints`, `open_external` (http/https/mailto only),
+  and keychain `get`/`set`/`delete` through the OS credential store (ADR-016). Capabilities
+  grant only core APIs and scoped link opening.
+- Window remembers size and position (`tauri-plugin-window-state`), opens at 1440x900 with a
+  960x600 minimum, keeps the native title bar, follows the system light/dark theme, and stays
+  hidden until a daemon endpoint is chosen.
+- Bundles: MSI + NSIS on Windows, DMG/APP on macOS, AppImage/DEB on Linux; `h4rnd` ships as an
+  `externalBin` sidecar. On exit the shell stops only the daemon it spawned.
+- `scripts/desktop-build-windows.sh` mirrors the repo to a Windows-local path, builds
+  `h4rnd.exe` and the Tauri sidecar, runs `cargo fmt --check` and `cargo clippy -D warnings`,
+  produces the installers, and verifies the packaged app end-to-end (sidecar health check,
+  window screenshot, clean teardown).
+
 ### Added
 
 - Cargo workspace (edition 2024, resolver 3) with pinned dependency versions and

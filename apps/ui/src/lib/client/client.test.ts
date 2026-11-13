@@ -148,6 +148,8 @@ function createBody(): Omit<Extract<ClientRequest, { type: "create_thread" }>, "
     model: "opus",
     prompt: "hello",
     attachments: [],
+    runtime_mode: "approval_required",
+    worktree: null,
   };
 }
 
@@ -252,6 +254,22 @@ describe("H4rnClient", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("resumes the subscription from the last applied sequence", async () => {
+    const { client, transports } = harness();
+
+    client.start();
+    await settle();
+
+    transports[0]?.emit(5, { type: "agent_state_changed", thread_id: "t1", state: "thinking" });
+    transports[0]?.drop();
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await settle();
+
+    const subscribe = transports[1]?.sent.find((frame) => frame.body.type === "subscribe");
+    expect(subscribe?.body).toMatchObject({ type: "subscribe", since_seq: 5 });
   });
 
   it("goes offline after exhausting reconnect attempts", async () => {

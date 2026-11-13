@@ -21,13 +21,13 @@ use chrono::{DateTime, Utc};
 use futures::stream::BoxStream;
 use h4rn_protocol::{
     AgentState, ApprovalDecision, ApprovalKind, ApprovalOption, AttachmentId, HarnessKind,
-    ToolCall, TurnStatus, Usage,
+    RuntimeMode, ToolCall, TurnStatus, Usage,
 };
 use serde::{Deserialize, Serialize};
 
 mod claude_code;
 mod fake;
-mod registry;
+pub mod registry;
 
 pub use claude_code::{
     ClaudeCodeHarness, ClaudeCodeSession, ClaudeStreamParser, ENV_MCP_AUTH_TOKEN,
@@ -68,6 +68,8 @@ pub struct SessionSpec {
     pub workspace: PathBuf,
     /// Model slug.
     pub model: String,
+    /// Permission autonomy chosen when the thread was created.
+    pub runtime_mode: RuntimeMode,
     /// Harness session to resume, when resuming.
     pub resume_id: Option<String>,
     /// The single h4rn MCP hub endpoint injected into the session.
@@ -202,10 +204,14 @@ pub trait HarnessSession: Send {
     async fn interrupt(&mut self) -> Result<(), HarnessError>;
 
     /// Answers an approval request raised by the harness.
+    ///
+    /// `option_id` is the selected [`ApprovalOption`] when the hand is a
+    /// question; adapters that only know approve/deny may ignore it.
     async fn respond_approval(
         &mut self,
         approval_id: &str,
         decision: ApprovalDecision,
+        option_id: Option<&str>,
     ) -> Result<(), HarnessError>;
 
     /// Returns the normalized event stream.

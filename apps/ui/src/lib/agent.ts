@@ -19,6 +19,12 @@ export function agentStateLabel(state: AgentState): string {
   switch (state) {
     case "idle":
       return "Idle";
+    case "queued":
+      return "Queued";
+    case "scheduled":
+      return "Auto-resume scheduled";
+    case "unreachable":
+      return "Host unreachable";
     case "thinking":
       return "Thinking";
     case "searching":
@@ -42,6 +48,12 @@ export function agentStateLabel(state: AgentState): string {
 
 export function glyphForAgentState(state: AgentState, toolName?: string): AgentGlyphSpec {
   switch (state) {
+    case "queued":
+      return { kind: "orb", state: "breathing", speed: 0.35, paused: true, label: "Queued" };
+    case "scheduled":
+      return { kind: "orb", state: "breathing", speed: 0.3, label: "Auto-resume scheduled" };
+    case "unreachable":
+      return { kind: "offline", label: "Host unreachable" };
     case "thinking":
       return { kind: "orb", state: "working", speed: 0.9, label: "Thinking" };
     case "searching":
@@ -84,8 +96,17 @@ export function glyphForThread(
   hostOnline: boolean,
   toolName?: string,
 ): AgentGlyphSpec {
+  if (summary.agent_state === "unreachable") {
+    return { kind: "offline", label: "Host unreachable" };
+  }
   if (!hostOnline && summary.tab === "working" && summary.agent_state !== "done") {
     return { kind: "offline", label: "Host unreachable" };
+  }
+  if (summary.agent_state === "scheduled") {
+    return { kind: "orb", state: "breathing", speed: 0.3, label: "Auto-resume scheduled" };
+  }
+  if (summary.agent_state === "queued") {
+    return { kind: "orb", state: "breathing", speed: 0.35, paused: true, label: "Queued" };
   }
   if (summary.tab === "settled") {
     return { kind: "check", label: "Settled", dim: true };

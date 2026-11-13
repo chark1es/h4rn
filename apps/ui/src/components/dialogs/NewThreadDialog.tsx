@@ -14,7 +14,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import type { HarnessKind, HostId } from "@/gen";
+import type { HarnessKind, HostId, RuntimeMode } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { HARNESS_LABELS, HARNESS_SLUGS } from "@/lib/entities";
 import { closeNewThread, createThread, useApp } from "@/lib/store/appStore";
@@ -64,6 +64,7 @@ export function NewThreadDialog() {
   const [harness, setHarness] = useState<HarnessKind>("claude_code");
   const [model, setModel] = useState(DEFAULT_MODELS.claude_code);
   const [workspace, setWorkspace] = useState("~/code");
+  const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("approval_required");
   const [prompt, setPrompt] = useState("");
   const [starting, setStarting] = useState(false);
 
@@ -91,6 +92,7 @@ export function NewThreadDialog() {
       workspacePath: workspace.trim() || "~/code",
       model,
       prompt: prompt.trim(),
+      runtimeMode,
     });
     setStarting(false);
     if (ok) {
@@ -187,15 +189,15 @@ export function NewThreadDialog() {
             <FieldLabel htmlFor="new-thread-mode">Mode</FieldLabel>
             <select
               id="new-thread-mode"
-              disabled
-              className="h-11 w-full rounded-sm border border-line bg-panel px-2 text-compact text-ink-faint md:h-[30px]"
-              value="approval"
+              className="h-11 w-full rounded-sm border border-control-border bg-raised px-2 text-compact text-ink outline-none focus-visible:border-cue focus-visible:ring-2 focus-visible:ring-cue/40 md:h-[30px]"
+              value={runtimeMode}
+              onChange={(event) => setRuntimeMode(event.target.value as RuntimeMode)}
             >
-              <option value="approval">Approval required</option>
+              <option value="approval_required">Approval required</option>
+              <option value="auto_accept_edits">Auto-accept edits</option>
+              <option value="full_access">Full access</option>
             </select>
-            <span className="text-micro text-ink-faint">
-              Runtime mode arrives when the daemon accepts it.
-            </span>
+            <span className="text-micro text-ink-faint">Fixed for the life of the thread.</span>
           </div>
 
           <div className="flex flex-col gap-1">

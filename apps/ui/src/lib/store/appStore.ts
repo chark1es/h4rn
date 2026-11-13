@@ -6,9 +6,11 @@ import type {
   HostId,
   HostSummary,
   ProtoError,
+  RuntimeMode,
   ThreadId,
   ThreadSummary,
   ThreadTab,
+  WorktreeRequest,
 } from "@/gen";
 import type { H4rnClient } from "@/lib/client/client";
 import { createClientFromEnv, readBootConfig } from "@/lib/client/config";
@@ -71,7 +73,6 @@ export type AppState = {
   threadsError: ProtoError | null;
   lastSyncAt: number | null;
   serverVersion: string | null;
-  lastEventThread: ThreadId | null;
   pendingCreates: PendingCreate[];
   pendingActions: Record<ThreadId, string | undefined>;
   toasts: Toast[];
@@ -109,7 +110,6 @@ function createInitialState(): AppState {
     threadsError: null,
     lastSyncAt: null,
     serverVersion: null,
-    lastEventThread: null,
     pendingCreates: [],
     pendingActions: {},
     toasts: [],
@@ -497,10 +497,19 @@ export async function loadThread(threadId: ThreadId, sinceSeq = 0): Promise<void
     if (response.type !== "thread") return;
 
     let log = getState().logs[threadId] ?? createThreadLog();
-    for (const event of response.events) {
-      log = foldEvent(log, event, { threadHint: threadId });
+    for (const { seq, event } of response.events) {
+      // The global replay may already have applied an event while this
+      // request was in flight; sequence numbers make the load idempotent.
+      if (seq <= log.nextSeq) continue;
+      log = foldEvent(log, event);
+      log = { ...log, nextSeq: seq };
     }
-    log = { ...log, loading: false, loaded: true, nextSeq: response.next_seq };
+    log = {
+      ...log,
+      loading: false,
+      loaded: true,
+      nextSeq: Math.max(log.nextSeq, response.next_seq),
+    };
 
     const current = getState();
     setState({
@@ -550,34 +559,6 @@ function omitKey<T>(record: Record<string, T>, key: string): Record<string, T> {
   return next;
 }
 
-function ownThreadForItem(state: AppState, event: EventEnvelope["event"]): ThreadId | null {
-  if (event.type !== "item_completed") return null;
-  if (event.kind === "message") {
-    for (const [threadId, log] of Object.entries(state.logs)) {
-      if (
-        log.turns.some((turn) =>
-          turn.items.some((item) => item.kind === "message" && item.itemId === event.item_id),
-        )
-      ) {
-        return threadId;
-      }
-    }
-    return null;
-  }
-  for (const [threadId, log] of Object.entries(state.logs)) {
-    if (
-      log.turns.some((turn) =>
-        turn.items.some(
-          (item) => item.kind === "tool" && item.itemId === `tool:${event.tool_call.tool_call_id}`,
-        ),
-      )
-    ) {
-      return threadId;
-    }
-  }
-  return null;
-}
-
 function applyEvent(state: AppState, envelope: EventEnvelope): AppState {
   const { event } = envelope;
 
@@ -596,8 +577,10 @@ function applyEvent(state: AppState, envelope: EventEnvelope): AppState {
       if (consumed) {
         threads = { ...threads };
         logs = { ...logs };
+        const optimisticLog = logs[consumed.tempId];
         delete threads[consumed.tempId];
         delete logs[consumed.tempId];
+        if (optimisticLog) logs[summary.thread_id] = optimisticLog;
         pendingCreates = pendingCreates.filter((pending) => pending.tempId !== consumed.tempId);
         if (ui.route.kind === "thread" && ui.route.threadId === consumed.tempId) {
           ui = {
@@ -618,18 +601,25 @@ function applyEvent(state: AppState, envelope: EventEnvelope): AppState {
     };
   }
 
-  const threadId =
-    "thread_id" in event && event.thread_id
-      ? event.thread_id
-      : (ownThreadForItem(state, event) ??
-        (event.type === "item_completed" ? state.lastEventThread : null));
-
+  // Every thread-scoped event names its thread; there is no "last event"
+  // ownership inference left to go wrong on a busy daemon.
+  const threadId = "thread_id" in event ? event.thread_id : null;
   if (!threadId) {
     return state;
   }
 
   const currentLog = state.logs[threadId] ?? createThreadLog();
-  const log = foldEvent(currentLog, event, { threadHint: threadId });
+  // Do not materialise a partial transcript for a thread that was never
+  // loaded: `ensureThread` asks for its full history and the sequence numbers
+  // keep that load idempotent.
+  const folded =
+    currentLog.loaded || currentLog.loading
+      ? {
+          ...foldEvent(currentLog, event),
+          nextSeq: Math.max(currentLog.nextSeq, envelope.seq),
+        }
+      : null;
+
   const summary = state.threads[threadId];
   let nextSummary = summary;
 
@@ -663,8 +653,7 @@ function applyEvent(state: AppState, envelope: EventEnvelope): AppState {
   return {
     ...state,
     threads: nextSummary ? { ...state.threads, [threadId]: nextSummary } : state.threads,
-    logs: { ...state.logs, [threadId]: log },
-    lastEventThread: threadId,
+    logs: folded ? { ...state.logs, [threadId]: folded } : state.logs,
   };
 }
 
@@ -762,6 +751,7 @@ export async function respondApproval(
   threadId: ThreadId,
   approvalId: string,
   decision: ApprovalDecision,
+  optionId?: string | null,
 ): Promise<void> {
   const state = getState();
   const log = state.logs[threadId];
@@ -781,29 +771,15 @@ export async function respondApproval(
   });
 
   try {
+    // The daemon broadcasts `approval_resolved` once the harness accepted the
+    // answer, so every client (including this one) resolves from the stream.
     await getClient().request({
       type: "respond_approval",
       thread_id: threadId,
       approval_id: approvalId,
       decision,
+      option_id: optionId ?? null,
     });
-    const current = getState();
-    const currentLog = current.logs[threadId];
-    if (currentLog) {
-      setState({
-        ...current,
-        logs: {
-          ...current.logs,
-          [threadId]: {
-            ...currentLog,
-            approvals: {
-              ...currentLog.approvals,
-              [approvalId]: { status: "resolved", decision },
-            },
-          },
-        },
-      });
-    }
   } catch (error) {
     const proto = toProtoError(error);
     const current = getState();
@@ -903,7 +879,44 @@ export type CreateThreadInput = {
   workspacePath: string;
   model: string;
   prompt: string;
+  runtimeMode?: RuntimeMode;
+  worktree?: WorktreeRequest | null;
 };
+
+/**
+ * Replaces the optimistic row with the ids the daemon returned.
+ *
+ * The response may arrive after `thread_upserted` already reconciled the row,
+ * so every step tolerates a missing temp entry.
+ */
+function reconcileCreatedThread(
+  tempId: ThreadId,
+  threadId: ThreadId,
+  summary: ThreadSummary,
+): void {
+  const state = getState();
+  const tempLog = state.logs[tempId];
+  const existingLog = state.logs[threadId];
+  const threads = omitKey(state.threads, tempId);
+  threads[threadId] = summary;
+  const logs = omitKey(state.logs, tempId);
+  logs[threadId] = tempLog
+    ? { ...tempLog, loaded: true, loading: false }
+    : (existingLog ?? { ...createThreadLog(), loaded: true });
+  const pendingCreates = state.pendingCreates.filter((pending) => pending.tempId !== tempId);
+
+  let ui = state.ui;
+  if (ui.route.kind === "thread" && ui.route.threadId === tempId) {
+    ui = {
+      ...ui,
+      route: { kind: "thread", threadId },
+      selectedThreadId: threadId,
+    };
+    replaceRoute(ui.route);
+  }
+
+  setState({ ...state, threads, logs, pendingCreates, ui });
+}
 
 export async function createThread(input: CreateThreadInput): Promise<boolean> {
   const state = getState();
@@ -942,7 +955,7 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
   navigate({ kind: "thread", threadId: tempId });
 
   try {
-    await getClient().request({
+    const response = await getClient().request({
       type: "create_thread",
       host: input.host,
       harness: input.harness,
@@ -950,7 +963,12 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
       model: input.model,
       prompt: input.prompt,
       attachments: [],
+      runtime_mode: input.runtimeMode ?? "approval_required",
+      worktree: input.worktree ?? null,
     });
+    if (response.type === "thread_created") {
+      reconcileCreatedThread(tempId, response.thread_id, response.summary);
+    }
     return true;
   } catch (error) {
     const proto = toProtoError(error);

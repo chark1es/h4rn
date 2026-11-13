@@ -180,6 +180,31 @@ impl ThreadState {
             .is_some_and(|manual| manual.tab == ThreadTab::Working && manual.pinned)
     }
 
+    /// The best agent state after a temporarily unreachable host returns.
+    fn restored_agent_state(&self) -> AgentState {
+        match &self.phase {
+            Phase::Queued => AgentState::Queued,
+            Phase::Running => AgentState::Thinking,
+            Phase::AwaitingApproval => AgentState::AwaitingApproval,
+            Phase::Completed { status } => match status {
+                TurnStatus::Completed => AgentState::Done,
+                TurnStatus::Failed | TurnStatus::Interrupted => AgentState::Error,
+            },
+            Phase::RateLimited => {
+                if self
+                    .usage_limit
+                    .as_ref()
+                    .is_some_and(|limit| limit.auto_resume)
+                {
+                    AgentState::Scheduled
+                } else {
+                    AgentState::RateLimited
+                }
+            }
+            Phase::Idle => AgentState::Idle,
+        }
+    }
+
     /// Applies one event.
     pub fn apply(mut self, event: &ThreadEvent) -> Self {
         let at = event.at();
@@ -189,7 +214,7 @@ impl ThreadState {
         match event {
             ThreadEvent::TurnQueued { at } => {
                 self.phase = Phase::Queued;
-                self.agent_state = AgentState::Idle;
+                self.agent_state = AgentState::Queued;
                 self.acknowledged = false;
                 self.pending_failure = false;
                 self.last_activity = *at;
@@ -259,7 +284,11 @@ impl ThreadState {
                 at,
             } => {
                 self.phase = Phase::RateLimited;
-                self.agent_state = AgentState::RateLimited;
+                self.agent_state = if *auto_resume {
+                    AgentState::Scheduled
+                } else {
+                    AgentState::RateLimited
+                };
                 self.usage_limit = Some(UsageLimit {
                     reset_at: *reset_at,
                     auto_resume: *auto_resume,
@@ -272,19 +301,22 @@ impl ThreadState {
                 if let Some(limit) = &mut self.usage_limit {
                     limit.auto_resume = *auto_resume;
                 }
+                if matches!(self.phase, Phase::RateLimited) {
+                    self.agent_state = if *auto_resume {
+                        AgentState::Scheduled
+                    } else {
+                        AgentState::RateLimited
+                    };
+                }
             }
             ThreadEvent::HostLost { at } => {
                 self.host_unreachable = true;
-                self.agent_state = AgentState::Error;
+                self.agent_state = AgentState::Unreachable;
                 self.last_activity = *at;
             }
             ThreadEvent::HostRestored { .. } => {
                 self.host_unreachable = false;
-                if matches!(self.phase, Phase::Running | Phase::Queued) {
-                    self.agent_state = AgentState::Thinking;
-                } else if matches!(self.phase, Phase::Completed { .. }) {
-                    self.agent_state = AgentState::Done;
-                }
+                self.agent_state = self.restored_agent_state();
             }
             ThreadEvent::FailureRaised { at } => {
                 self.pending_failure = true;
@@ -769,6 +801,7 @@ mod tests {
     fn queued_and_running_are_working() {
         let queued = state_after(&[ThreadEvent::TurnQueued { at: at(1) }]);
         assert_eq!(queued.phase, Phase::Queued);
+        assert_eq!(queued.agent_state, AgentState::Queued);
         assert_eq!(tab(&queued, at(1)), ThreadTab::Working);
 
         let running = queued.apply(&ThreadEvent::TurnStarted { at: at(2) });
@@ -1091,7 +1124,7 @@ mod tests {
             auto_resume: true,
             at: at(1),
         });
-        assert_eq!(armed.agent_state, AgentState::RateLimited);
+        assert_eq!(armed.agent_state, AgentState::Scheduled);
         assert_eq!(tab(&armed, at(2)), ThreadTab::Working);
 
         let manual = ThreadState::new(at(0)).apply(&ThreadEvent::UsageLimitHit {
@@ -1117,13 +1150,47 @@ mod tests {
             ThreadEvent::HostLost { at: at(3) },
         ]);
         assert!(lost.host_unreachable);
-        assert_eq!(lost.agent_state, AgentState::Error);
+        assert_eq!(lost.agent_state, AgentState::Unreachable);
         assert_eq!(tab(&lost, at(4)), ThreadTab::Working);
         assert!(needs_attention(&lost, at(4), &settings()));
 
         let restored = lost.apply(&ThreadEvent::HostRestored { at: at(5) });
         assert!(!restored.host_unreachable);
+        assert_eq!(restored.agent_state, AgentState::Thinking);
         assert_eq!(tab(&restored, at(5)), ThreadTab::Working);
+    }
+
+    #[test]
+    fn cancelling_auto_resume_returns_to_rate_limited() {
+        let armed = ThreadState::new(at(0)).apply(&ThreadEvent::UsageLimitHit {
+            reset_at: Some(at(100)),
+            auto_resume: true,
+            at: at(1),
+        });
+        let cancelled = armed.apply(&ThreadEvent::LimitAutoResumeSet {
+            auto_resume: false,
+            at: at(2),
+        });
+        assert_eq!(cancelled.agent_state, AgentState::RateLimited);
+    }
+
+    #[test]
+    fn host_restore_restores_the_phase_specific_agent_state() {
+        let idle = ThreadState::new(at(0))
+            .apply(&ThreadEvent::HostLost { at: at(1) })
+            .apply(&ThreadEvent::HostRestored { at: at(2) });
+        assert_eq!(idle.agent_state, AgentState::Idle);
+
+        let done = state_after(&[
+            ThreadEvent::TurnStarted { at: at(1) },
+            ThreadEvent::TurnCompleted {
+                status: TurnStatus::Completed,
+                at: at(2),
+            },
+            ThreadEvent::HostLost { at: at(3) },
+            ThreadEvent::HostRestored { at: at(4) },
+        ]);
+        assert_eq!(done.agent_state, AgentState::Done);
     }
 
     #[test]

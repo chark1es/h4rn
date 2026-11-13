@@ -14,7 +14,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use h4rn_core::{EventStore, SqliteEventStore, StoreError, ThreadEvent};
-use h4rn_protocol::{Event, HarnessKind, HostId, ThreadId, Usage};
+use h4rn_protocol::{Event, HarnessKind, HostId, RuntimeMode, ThreadId, Usage, WorktreeRequest};
 use serde_json::json;
 use sqlx::{Row, SqlitePool};
 
@@ -33,6 +33,10 @@ pub struct ThreadMeta {
     pub workspace_path: String,
     /// Model slug.
     pub model: String,
+    /// Permission autonomy chosen at creation.
+    pub runtime_mode: RuntimeMode,
+    /// Worktree intent recorded at creation.
+    pub worktree: Option<WorktreeRequest>,
     /// Creation time, used as the initial lifecycle clock.
     pub created_at: DateTime<Utc>,
     /// Cumulative usage.
@@ -104,6 +108,12 @@ pub trait Journal: Send + Sync {
         after: u64,
     ) -> Result<Vec<WireEvent>, JournalError>;
 
+    /// Projected events across every thread with `seq > after`, in order.
+    ///
+    /// This is the global replay a reconnecting subscriber asks for; the
+    /// caller holds the append lock so the result is a gap-free prefix.
+    async fn read_wire_since_global(&self, after: u64) -> Result<Vec<WireEvent>, JournalError>;
+
     /// The domain log for one thread, used to rebuild lifecycle state.
     async fn read_domain(&self, thread_id: &ThreadId) -> Result<Vec<ThreadEvent>, JournalError>;
 }
@@ -151,11 +161,24 @@ impl SqliteJournal {
                 model          TEXT NOT NULL,
                 created_at     TEXT NOT NULL,
                 usage_json     TEXT NOT NULL,
-                resume_id      TEXT
+                resume_id      TEXT,
+                runtime_mode   TEXT NOT NULL DEFAULT 'approval_required',
+                worktree_json  TEXT
             )",
         )
         .execute(&self.pool)
         .await?;
+
+        // `CREATE TABLE IF NOT EXISTS` cannot add columns to a database written
+        // by an older daemon, so migrate the two Phase 1c fields explicitly.
+        self.ensure_column(
+            "daemon_threads",
+            "runtime_mode",
+            "TEXT NOT NULL DEFAULT 'approval_required'",
+        )
+        .await?;
+        self.ensure_column("daemon_threads", "worktree_json", "TEXT")
+            .await?;
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS daemon_wire_events (
@@ -177,6 +200,29 @@ impl SqliteJournal {
 
         Ok(())
     }
+
+    async fn ensure_column(
+        &self,
+        table: &str,
+        column: &str,
+        definition: &str,
+    ) -> Result<(), JournalError> {
+        let rows = sqlx::query(&format!("PRAGMA table_info({table})"))
+            .fetch_all(&self.pool)
+            .await?;
+        let exists = rows.iter().any(|row| {
+            row.try_get::<String, _>("name")
+                .is_ok_and(|name| name == column)
+        });
+        if !exists {
+            sqlx::query(&format!(
+                "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+            ))
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -185,10 +231,13 @@ impl Journal for SqliteJournal {
         let usage_json = serde_json::to_string(&meta.usage)?;
         let harness = serde_json::to_string(&meta.harness)?;
         let harness = harness.trim_matches('"').to_owned();
+        let runtime_mode = serde_json::to_string(&meta.runtime_mode)?;
+        let runtime_mode = runtime_mode.trim_matches('"').to_owned();
+        let worktree_json = serde_json::to_string(&meta.worktree)?;
         sqlx::query(
             "INSERT INTO daemon_threads
-                (thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(thread_id) DO UPDATE SET
                 host = excluded.host,
                 harness = excluded.harness,
@@ -196,7 +245,9 @@ impl Journal for SqliteJournal {
                 workspace_path = excluded.workspace_path,
                 model = excluded.model,
                 usage_json = excluded.usage_json,
-                resume_id = excluded.resume_id",
+                resume_id = excluded.resume_id,
+                runtime_mode = excluded.runtime_mode,
+                worktree_json = excluded.worktree_json",
         )
         .bind(meta.thread_id.as_str())
         .bind(meta.host.as_str())
@@ -207,6 +258,8 @@ impl Journal for SqliteJournal {
         .bind(meta.created_at.to_rfc3339())
         .bind(usage_json)
         .bind(meta.resume_id.as_deref())
+        .bind(runtime_mode)
+        .bind(worktree_json)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -214,7 +267,7 @@ impl Journal for SqliteJournal {
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id
+            "SELECT thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json
              FROM daemon_threads ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -227,6 +280,8 @@ impl Journal for SqliteJournal {
             let harness: String = row.try_get("harness")?;
             let usage_json: String = row.try_get("usage_json")?;
             let created_at: String = row.try_get("created_at")?;
+            let runtime_mode: String = row.try_get("runtime_mode")?;
+            let worktree_json: Option<String> = row.try_get("worktree_json")?;
             let created_at = DateTime::parse_from_rfc3339(&created_at)
                 .map(|value| value.with_timezone(&Utc))
                 .unwrap_or_else(|_| Utc::now());
@@ -238,6 +293,11 @@ impl Journal for SqliteJournal {
                 title: row.try_get("title")?,
                 workspace_path: row.try_get("workspace_path")?,
                 model: row.try_get("model")?,
+                runtime_mode: serde_json::from_str(&format!("\"{runtime_mode}\""))
+                    .unwrap_or_default(),
+                worktree: worktree_json
+                    .and_then(|json| serde_json::from_str(&json).ok())
+                    .flatten(),
                 created_at,
                 usage: serde_json::from_str(&usage_json).unwrap_or_default(),
                 resume_id: row.try_get("resume_id")?,
@@ -311,6 +371,29 @@ impl Journal for SqliteJournal {
         Ok(events)
     }
 
+    async fn read_wire_since_global(&self, after: u64) -> Result<Vec<WireEvent>, JournalError> {
+        let rows = sqlx::query(
+            "SELECT seq, thread_id, event_json FROM daemon_wire_events
+             WHERE seq > ? ORDER BY seq ASC",
+        )
+        .bind(after as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut events = Vec::with_capacity(rows.len());
+        for row in rows {
+            let seq: i64 = row.try_get("seq")?;
+            let thread_id: String = row.try_get("thread_id")?;
+            let event_json: String = row.try_get("event_json")?;
+            events.push(WireEvent {
+                seq: seq as u64,
+                thread_id: ThreadId::new(thread_id),
+                event: serde_json::from_str(&event_json)?,
+            });
+        }
+        Ok(events)
+    }
+
     async fn read_domain(&self, thread_id: &ThreadId) -> Result<Vec<ThreadEvent>, JournalError> {
         Ok(self
             .store
@@ -332,6 +415,8 @@ pub fn thread_meta_json(meta: &ThreadMeta) -> serde_json::Value {
         "workspace_path": meta.workspace_path,
         "model": meta.model,
         "created_at": meta.created_at,
+        "runtime_mode": meta.runtime_mode,
+        "worktree": meta.worktree,
         "usage": meta.usage,
         "resume_id": meta.resume_id,
     })
@@ -350,6 +435,8 @@ mod tests {
             title: "first prompt".into(),
             workspace_path: "/tmp/work".into(),
             model: "test-model".into(),
+            runtime_mode: RuntimeMode::ApprovalRequired,
+            worktree: None,
             created_at: Utc::now(),
             usage: Usage::default(),
             resume_id: None,
@@ -446,6 +533,30 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn global_replay_spans_threads_in_sequence_order() {
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let one = meta("th_one");
+        let two = meta("th_two");
+        journal
+            .append(
+                &one,
+                &[ThreadEvent::TurnQueued { at: Utc::now() }],
+                &[Event::ThreadUpserted(summary())],
+            )
+            .await
+            .unwrap();
+        journal
+            .append_wire(&two.thread_id, &[Event::ThreadUpserted(summary())])
+            .await
+            .unwrap();
+
+        let replayed = journal.read_wire_since_global(1).await.unwrap();
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].seq, 2);
+        assert_eq!(replayed[0].thread_id, two.thread_id);
     }
 
     #[tokio::test]

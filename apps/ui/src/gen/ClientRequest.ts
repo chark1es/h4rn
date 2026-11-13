@@ -4,10 +4,12 @@ import type { AttachmentId } from "./AttachmentId";
 import type { DeviceInfo } from "./DeviceInfo";
 import type { HarnessKind } from "./HarnessKind";
 import type { HostId } from "./HostId";
+import type { RuntimeMode } from "./RuntimeMode";
 import type { ThreadFilter } from "./ThreadFilter";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadTab } from "./ThreadTab";
 import type { Topic } from "./Topic";
+import type { WorktreeRequest } from "./WorktreeRequest";
 
 /**
  * Everything a client can ask a daemon to do.
@@ -61,7 +63,15 @@ prompt: string,
 /**
  * Attachments uploaded before this request.
  */
-attachments: Array<AttachmentId>, } | { "type": "send_message", 
+attachments: Array<AttachmentId>, 
+/**
+ * Permission autonomy for the whole thread.
+ */
+runtime_mode: RuntimeMode, 
+/**
+ * Run in an isolated git worktree, optionally naming the branch.
+ */
+worktree: WorktreeRequest | null, } | { "type": "send_message", 
 /**
  * Thread to append to.
  */
@@ -89,7 +99,11 @@ approval_id: string,
 /**
  * User decision.
  */
-decision: ApprovalDecision, } | { "type": "set_thread_tab", 
+decision: ApprovalDecision, 
+/**
+ * Selected [`crate::ApprovalOption`] id, when answering a question.
+ */
+option_id: string | null, } | { "type": "set_thread_tab", 
 /**
  * Thread to move.
  */
@@ -113,7 +127,15 @@ until: string | null, } | { "type": "subscribe",
 /**
  * Topics to subscribe to.
  */
-topics: Array<Topic>, } | { "type": "terminal_open", 
+topics: Array<Topic>, 
+/**
+ * Replay daemon-global events after this sequence before going live.
+ *
+ * `None` starts at the live edge. The daemon reads the journal while
+ * holding its append lock, so the replay is a gap-free prefix of the
+ * stream that follows.
+ */
+since_seq: number | null, } | { "type": "terminal_open", 
 /**
  * Owning thread.
  */

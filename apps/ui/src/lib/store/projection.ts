@@ -4,7 +4,6 @@ import type {
   ApprovalOption,
   Event,
   MessageRole,
-  ThreadId,
   ToolCall,
   TurnId,
   TurnStatus,
@@ -150,14 +149,13 @@ function upsertTool(turn: StreamTurn, toolCall: ToolCall): void {
 /**
  * Fold one protocol event into a thread log.
  *
- * `threadHint` is supplied for batched responses (`get_thread`) because
- * `item_completed` has no thread id on the wire; the caller resolves live
- * item ids before calling.
+ * Every thread-scoped event names its thread and turn, so no ownership is
+ * inferred from "the last event we saw".
  */
 export function foldEvent(
   source: ThreadLog,
   event: Event,
-  options: { threadHint?: ThreadId; at?: string } = {},
+  options: { at?: string } = {},
 ): ThreadLog {
   if (event.type === "thread_upserted") return source;
 
@@ -204,24 +202,25 @@ export function foldEvent(
     }
 
     case "item_completed": {
-      if (event.kind === "message") {
-        if (event.role === "user") {
-          if (messageExists(log, event.item_id)) return log;
+      const { item, turn_id } = event;
+      if (item.kind === "message") {
+        if (item.role === "user") {
+          if (messageExists(log, item.item_id)) return log;
           const pendingIndex = log.pending.findIndex(
-            (message) => message.text.trim() === event.text.trim(),
+            (message) => message.text.trim() === item.text.trim(),
           );
           if (pendingIndex >= 0) log.pending.splice(pendingIndex, 1);
-          log.pending = log.pending.filter((message) => message.id !== event.item_id);
+          log.pending = log.pending.filter((message) => message.id !== item.item_id);
           log.turns.push({
-            id: `cue:user:${event.item_id}`,
+            id: `cue:user:${item.item_id}`,
             startedAt: at,
             status: "completed",
             items: [
               {
                 kind: "message",
-                itemId: event.item_id,
+                itemId: item.item_id,
                 role: "user",
-                text: event.text,
+                text: item.text,
                 streaming: false,
               },
             ],
@@ -230,55 +229,28 @@ export function foldEvent(
           return log;
         }
 
-        for (const turn of log.turns) {
-          const item = turn.items.find(
-            (candidate): candidate is MessageItem =>
-              candidate.kind === "message" && candidate.itemId === event.item_id,
-          );
-          if (item) {
-            item.text = event.text;
-            item.streaming = false;
-            turn.status = turn.status === "running" ? "running" : turn.status;
-            return log;
-          }
+        const turn = ensureTurn(log, turn_id, at);
+        const existing = turn.items.find(
+          (candidate): candidate is MessageItem =>
+            candidate.kind === "message" && candidate.itemId === item.item_id,
+        );
+        if (existing) {
+          existing.text = item.text;
+          existing.streaming = false;
+        } else {
+          turn.items.push({
+            kind: "message",
+            itemId: item.item_id,
+            role: item.role,
+            text: item.text,
+            streaming: false,
+          });
         }
-        const turn = latestRunningTurn(log);
-        const target =
-          turn ??
-          (() => {
-            const created: StreamTurn = {
-              id: `cue:item:${event.item_id}`,
-              startedAt: at,
-              status: "running",
-              items: [],
-              usage: null,
-            };
-            log.turns.push(created);
-            return created;
-          })();
-        target.items.push({
-          kind: "message",
-          itemId: event.item_id,
-          role: event.role,
-          text: event.text,
-          streaming: false,
-        });
         return log;
       }
 
-      const tool = event.tool_call;
-      for (const turn of log.turns) {
-        if (
-          turn.items.some(
-            (item) => item.kind === "tool" && item.itemId === `tool:${tool.tool_call_id}`,
-          )
-        ) {
-          upsertTool(turn, tool);
-          return log;
-        }
-      }
-      const turn = latestRunningTurn(log);
-      if (turn) upsertTool(turn, tool);
+      const turn = ensureTurn(log, turn_id, at);
+      upsertTool(turn, item.tool_call);
       return log;
     }
 
@@ -302,6 +274,14 @@ export function foldEvent(
         });
       }
       log.approvals[event.approval_id] = log.approvals[event.approval_id] ?? { status: "pending" };
+      return log;
+    }
+
+    case "approval_resolved": {
+      log.approvals[event.approval_id] = {
+        ...log.approvals[event.approval_id],
+        status: "resolved",
+      };
       return log;
     }
 
@@ -330,7 +310,6 @@ export function foldEvent(
     }
 
     case "error": {
-      if (!event.thread_id && !options.threadHint) return log;
       const turn = latestRunningTurn(log);
       if (!turn) return log;
       turn.items.push({

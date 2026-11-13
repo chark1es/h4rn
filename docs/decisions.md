@@ -54,6 +54,15 @@ tradeoff is real complexity: two stores, a sync protocol, and projection rebuild
 once and buys correct resume, audit and multi-device consistency that a mutable-state design
 cannot retrofit.
 
+**Phase 1c note — the sequence is global, not per thread.** `ServerFrame::Event.seq` is a
+durable, daemon-global, monotonically increasing number shared by every thread. `GetThread`
+returns its events as `SeqEvent { seq, event }` and `Subscribe` accepts an optional `since_seq`;
+a reconnecting client passes the last sequence it applied and the daemon replays every thread's
+gap while holding its append lock, so replay is a prefix with no hole between the journal and
+live frames. Keeping one global order is what lets a single socket resume all threads at once;
+the alternative (per-thread cursors) would multiply resume state by thread count and still leave
+cross-thread ordering unspecified.
+
 ## ADR-004: Thread tabs are Working / Done / Settled
 
 **Status:** Accepted

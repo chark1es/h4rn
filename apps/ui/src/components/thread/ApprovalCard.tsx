@@ -61,8 +61,10 @@ export function ApprovalCard({
             <p className="text-micro font-semibold tracking-wide text-cue-ink uppercase">
               {KIND_LABEL[approvalKind]}
             </p>
-            {resolved && state?.decision ? (
-              <span className="text-micro text-standby-ink">{DECISION_WORD[state.decision]}</span>
+            {resolved ? (
+              <span className="text-micro text-standby-ink">
+                {state?.decision ? DECISION_WORD[state.decision] : "Resolved"}
+              </span>
             ) : null}
             {status === "sending" ? (
               <span className="text-micro text-cue-ink/80">Sending…</span>
@@ -77,13 +79,15 @@ export function ApprovalCard({
           {options.length > 0 ? (
             <div className="flex flex-wrap gap-1.5 pt-0.5">
               {options.map((option) => (
-                <span
+                <Button
                   key={option.id}
-                  title="Question options are not in the protocol yet; Go approves the request."
-                  className="rounded-sm border border-cue/30 bg-raised/60 px-1.5 py-0.5 text-micro text-ink-muted"
+                  size="sm"
+                  variant="secondary"
+                  disabled={status === "sending"}
+                  onClick={() => void respondApproval(threadId, approvalId, "approve", option.id)}
                 >
                   {option.label}
-                </span>
+                </Button>
               ))}
             </div>
           ) : null}

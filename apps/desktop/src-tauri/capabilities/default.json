@@ -1,12 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the h4rn desktop shell.",
+  "description": "The minimum capability set for the h4rn desktop shell: core APIs plus opening allowlisted web links. Daemon access, keychain reads and writes, and deep-link registration are Rust commands and side-channels, never ambient webview permissions.",
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "opener:default",
-    "dialog:default",
-    "deep-link:default"
+    "opener:allow-open-url",
+    "opener:allow-default-urls"
   ]
 }

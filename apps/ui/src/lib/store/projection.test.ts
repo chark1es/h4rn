@@ -73,10 +73,14 @@ describe("foldEvent", () => {
     });
     log = foldEvent(log, {
       type: "item_completed",
-      kind: "message",
-      item_id: "item_1",
-      role: "assistant",
-      text: "final text",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      item: {
+        kind: "message",
+        item_id: "item_1",
+        role: "assistant",
+        text: "final text",
+      },
     });
 
     expect(log.turns[0]?.items[0]).toMatchObject({
@@ -97,10 +101,14 @@ describe("foldEvent", () => {
 
     const next = foldEvent(log, {
       type: "item_completed",
-      kind: "message",
-      item_id: "server_1",
-      role: "user",
-      text: "ship it",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      item: {
+        kind: "message",
+        item_id: "server_1",
+        role: "user",
+        text: "ship it",
+      },
     });
 
     expect(next.pending).toHaveLength(0);
@@ -113,10 +121,14 @@ describe("foldEvent", () => {
   it("ignores a duplicate completed user message", () => {
     const event = {
       type: "item_completed" as const,
-      kind: "message" as const,
-      item_id: "server_1",
-      role: "user" as const,
-      text: "ship it",
+      thread_id: "t1" as const,
+      turn_id: "turn_1" as const,
+      item: {
+        kind: "message" as const,
+        item_id: "server_1",
+        role: "user" as const,
+        text: "ship it",
+      },
     };
     let log = foldEvent(createThreadLog(), event);
     log = foldEvent(log, event);
@@ -168,6 +180,30 @@ describe("foldEvent", () => {
       approvalId: "appr_1",
       prompt: "Run the tests?",
     });
+  });
+
+  it("resolves an approval from the event stream", () => {
+    let log = foldEvent(createThreadLog(), {
+      type: "approval_requested",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      approval_id: "appr_1",
+      kind: "question",
+      prompt: "Which branch?",
+      options: [
+        { id: "main", label: "main" },
+        { id: "dev", label: "dev" },
+      ],
+    });
+    log = foldEvent(log, {
+      type: "approval_resolved",
+      thread_id: "t1",
+      approval_id: "appr_1",
+      option_id: "dev",
+      by_device: "device_1",
+    });
+
+    expect(log.approvals.appr_1).toEqual({ status: "resolved" });
   });
 
   it("closes the turn and stops streaming on turn_completed", () => {

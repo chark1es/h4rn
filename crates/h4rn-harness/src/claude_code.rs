@@ -54,7 +54,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use async_trait::async_trait;
 use base64::Engine as _;
 use futures::stream::{BoxStream, StreamExt};
-use h4rn_protocol::{AgentState, ApprovalDecision, HarnessKind, TurnStatus};
+use h4rn_protocol::{AgentState, ApprovalDecision, HarnessKind, RuntimeMode, TurnStatus};
 use serde_json::json;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
@@ -211,7 +211,7 @@ impl Harness for ClaudeCodeHarness {
             command.arg("--mcp-config").arg(config.path());
             command.arg("--strict-mcp-config");
         }
-        if let Some(mode) = permission_mode(&spec.env_overrides) {
+        if let Some(mode) = permission_mode(&spec.env_overrides, spec.runtime_mode) {
             command.args(["--permission-mode", &mode]);
         }
         if let Some(tool) = spec
@@ -478,6 +478,7 @@ impl HarnessSession for ClaudeCodeSession {
         &mut self,
         _approval_id: &str,
         _decision: ApprovalDecision,
+        _option_id: Option<&str>,
     ) -> Result<(), HarnessError> {
         Err(HarnessError::Unsupported {
             harness: self.kind,
@@ -806,12 +807,24 @@ fn resolved_media_type(attachment: &AttachmentRef) -> String {
     .to_string()
 }
 
-fn permission_mode(env: &BTreeMap<String, String>) -> Option<String> {
-    let requested = env.get(ENV_PERMISSION_MODE)?;
+fn permission_mode(env: &BTreeMap<String, String>, runtime_mode: RuntimeMode) -> Option<String> {
+    let requested = match env.get(ENV_PERMISSION_MODE) {
+        Some(requested) => requested,
+        None => return Some(mode_for_runtime(runtime_mode).to_string()),
+    };
     PERMISSION_MODES
         .iter()
         .find(|mode| mode.eq_ignore_ascii_case(requested.trim()))
         .map(|mode| (*mode).to_string())
+}
+
+/// The Claude `--permission-mode` value for a thread's autonomy setting.
+fn mode_for_runtime(runtime_mode: RuntimeMode) -> &'static str {
+    match runtime_mode {
+        RuntimeMode::ApprovalRequired => "default",
+        RuntimeMode::AutoAcceptEdits => "acceptEdits",
+        RuntimeMode::FullAccess => "bypassPermissions",
+    }
 }
 
 fn write_mcp_config(
@@ -1078,8 +1091,28 @@ mod tests {
     fn permission_modes_are_validated() {
         let mut env = BTreeMap::new();
         env.insert(ENV_PERMISSION_MODE.into(), "acceptedits".into());
-        assert_eq!(permission_mode(&env).as_deref(), Some("acceptEdits"));
+        assert_eq!(
+            permission_mode(&env, RuntimeMode::ApprovalRequired).as_deref(),
+            Some("acceptEdits")
+        );
         env.insert(ENV_PERMISSION_MODE.into(), "definitely-not-a-mode".into());
-        assert_eq!(permission_mode(&env), None);
+        assert_eq!(permission_mode(&env, RuntimeMode::ApprovalRequired), None);
+    }
+
+    #[test]
+    fn runtime_modes_map_to_claude_permission_modes() {
+        let env = BTreeMap::new();
+        assert_eq!(
+            permission_mode(&env, RuntimeMode::ApprovalRequired).as_deref(),
+            Some("default")
+        );
+        assert_eq!(
+            permission_mode(&env, RuntimeMode::AutoAcceptEdits).as_deref(),
+            Some("acceptEdits")
+        );
+        assert_eq!(
+            permission_mode(&env, RuntimeMode::FullAccess).as_deref(),
+            Some("bypassPermissions")
+        );
     }
 }

@@ -9,12 +9,19 @@ export type BootConfig = {
   mock: boolean;
   scenario: string;
   token: string | null;
+  daemonUrl: string | null;
   theme: "light" | "dark" | "system" | null;
 };
 
 export function readBootConfig(): BootConfig {
   if (typeof window === "undefined") {
-    return { mock: false, scenario: "default", token: null, theme: null };
+    return {
+      mock: false,
+      scenario: "default",
+      token: null,
+      daemonUrl: null,
+      theme: null,
+    };
   }
 
   const params = new URLSearchParams(window.location.search);
@@ -23,11 +30,29 @@ export function readBootConfig(): BootConfig {
     mock: params.get("mock") === "1",
     scenario: params.get("scenario") ?? "default",
     token: params.get("token") ?? readStoredToken(),
+    daemonUrl: readDaemonUrl(params.get("daemon")),
     theme:
       queryTheme === "light" || queryTheme === "dark" || queryTheme === "system"
         ? queryTheme
         : null,
   };
+}
+
+/**
+ * Resolves a `?daemon=` override.
+ *
+ * Only absolute `ws://` and `wss://` URLs are accepted so a malformed query
+ * cannot silently point the app at a different scheme.
+ */
+function readDaemonUrl(value: string | null): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol === "ws:" || url.protocol === "wss:") return url.toString();
+  } catch {
+    // Fall through to the default daemon URL.
+  }
+  return null;
 }
 
 function readStoredToken(): string | null {
@@ -44,7 +69,7 @@ export function createClientFromEnv(): H4rnClient {
   if (config.mock) {
     const transportFactory: TransportFactory = () => createMockTransport(config.scenario);
     const options: ClientOptions = {
-      url: DEFAULT_WS_URL,
+      url: config.daemonUrl ?? DEFAULT_WS_URL,
       token: "mock",
       transportLabel: "mock",
       transportFactory,
@@ -55,7 +80,7 @@ export function createClientFromEnv(): H4rnClient {
   }
 
   return new H4rnClient({
-    url: DEFAULT_WS_URL,
+    url: config.daemonUrl ?? DEFAULT_WS_URL,
     token: config.token,
     transportLabel: "direct",
   });

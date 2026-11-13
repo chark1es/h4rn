@@ -1,0 +1,5 @@
+# Tauri sidecars are build outputs. scripts/desktop-build-windows.sh (and the
+# equivalent macOS/Linux packaging step) place h4rnd-<target-triple>[.exe] here
+# before `tauri build`; cargo check creates an empty placeholder.
+*
+!.gitignore

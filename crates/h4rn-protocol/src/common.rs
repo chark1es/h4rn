@@ -54,6 +54,12 @@ pub enum ThreadTab {
 pub enum AgentState {
     /// Alive but not working; an explicit "Keep in Working" pin or queued.
     Idle,
+    /// A turn is queued behind another run (alive, not working).
+    Queued,
+    /// Auto-resume is armed and waiting for the provider's reset clock.
+    Scheduled,
+    /// The host running the thread is unreachable.
+    Unreachable,
     /// Model reasoning.
     Thinking,
     /// Web search, grep or glob.
@@ -72,6 +78,54 @@ pub enum AgentState {
     Error,
     /// The last turn completed.
     Done,
+}
+
+/// How much autonomy a harness session is granted (ADR-005).
+///
+/// The daemon maps this to the harness's own permission switch; the Claude Code
+/// adapter uses `--permission-mode`. It is fixed for the life of a thread.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeMode {
+    /// Every command, edit and network action needs an approval.
+    #[default]
+    ApprovalRequired,
+    /// File edits are accepted; commands and network access still ask.
+    AutoAcceptEdits,
+    /// No approvals; the harness may run unattended.
+    FullAccess,
+}
+
+/// Whether to run the thread in an isolated worktree.
+///
+/// `true` asks the daemon to generate a branch name, while a string names the
+/// branch explicitly. Serialised untagged so the wire value is a bare JSON
+/// boolean or string.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(untagged)]
+pub enum WorktreeRequest {
+    /// Create a worktree on a daemon-generated branch.
+    Generated(bool),
+    /// Create a worktree checked out from this branch name.
+    Named(String),
+}
+
+impl WorktreeRequest {
+    /// The branch name to use, or `None` when the daemon must generate one.
+    pub fn branch(&self) -> Option<&str> {
+        match self {
+            Self::Generated(_) => None,
+            Self::Named(branch) => Some(branch),
+        }
+    }
+
+    /// Whether the request actually asks for a worktree.
+    pub fn is_requested(&self) -> bool {
+        match self {
+            Self::Generated(requested) => *requested,
+            Self::Named(_) => true,
+        }
+    }
 }
 
 /// How a turn finished.

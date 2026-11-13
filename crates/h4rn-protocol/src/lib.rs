@@ -16,6 +16,15 @@
 //! - 64-bit counters are serialised as JSON numbers and typed as `number` in
 //!   TypeScript. Every value h4rn counts (tokens, cost, sequence) is far below
 //!   `Number.MAX_SAFE_INTEGER`.
+//!
+//! # Resume sequence (ADR-003)
+//!
+//! [`ServerFrame::Event::seq`] is a durable, daemon-global, monotonically
+//! increasing sequence number shared by every thread. It is allocated by the
+//! SQLite journal and survives a daemon restart. Clients persist the last value
+//! they applied and send it back as [`ClientRequest::Subscribe::since_seq`]
+//! (global replay) or [`ClientRequest::GetThread::since_seq`] (one thread), so a
+//! reconnect can never skip an event.
 
 #![deny(missing_docs)]
 
@@ -31,11 +40,11 @@ pub use binary::{
 pub use client::{ClientFrame, ClientRequest};
 pub use common::{
     AgentState, ApprovalDecision, ApprovalKind, ApprovalOption, DeviceInfo, HarnessKind,
-    HostSummary, Item, MessageRole, ThreadFilter, ThreadSummary, ThreadTab, ToolCall,
-    ToolCallStatus, Topic, TurnStatus, Usage,
+    HostSummary, Item, MessageRole, RuntimeMode, ThreadFilter, ThreadSummary, ThreadTab, ToolCall,
+    ToolCallStatus, Topic, TurnStatus, Usage, WorktreeRequest,
 };
 pub use ids::{AttachmentId, AttachmentIdError, DeviceId, HostId, SubagentId, ThreadId, TurnId};
-pub use server::{Event, ProtoError, ProtoErrorCode, ResponseBody, ServerFrame};
+pub use server::{Event, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame};
 
 /// Version of the wire protocol implemented by this crate.
 ///

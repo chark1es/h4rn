@@ -166,11 +166,17 @@ impl HarnessSession for FakeSession {
         &mut self,
         approval_id: &str,
         decision: ApprovalDecision,
+        option_id: Option<&str>,
     ) -> Result<(), HarnessError> {
         send(
             &self.sender,
             HarnessEvent::TextDelta {
-                text: format!("approval {approval_id}: {decision:?}"),
+                text: match option_id {
+                    Some(option) => {
+                        format!("approval {approval_id}: {decision:?} ({option})")
+                    }
+                    None => format!("approval {approval_id}: {decision:?}"),
+                },
             },
         );
         Ok(())
@@ -214,6 +220,7 @@ pub fn test_spec() -> SessionSpec {
     SessionSpec {
         workspace: PathBuf::from("/tmp/h4rn-workspace"),
         model: "test-model".into(),
+        runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
         resume_id: None,
         mcp_endpoint: Some("http://127.0.0.1:9100/mcp".into()),
         env_overrides: BTreeMap::new(),
@@ -304,7 +311,7 @@ mod tests {
         let _ = events.next().await;
 
         session
-            .respond_approval("approval-1", ApprovalDecision::Approve)
+            .respond_approval("approval-1", ApprovalDecision::Approve, Some("opt_allow"))
             .await
             .unwrap();
         assert!(matches!(

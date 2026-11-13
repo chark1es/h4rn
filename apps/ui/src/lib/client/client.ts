@@ -19,7 +19,11 @@ export type ResponseOf<T extends ClientRequest["type"]> = T extends "hello"
       ? Extract<ResponseBody, { type: "threads" }>
       : T extends "get_thread"
         ? Extract<ResponseBody, { type: "thread" }>
-        : Extract<ResponseBody, { type: "ack" }>;
+        : T extends "create_thread"
+          ? Extract<ResponseBody, { type: "thread_created" }>
+          : T extends "send_message"
+            ? Extract<ResponseBody, { type: "message_accepted" }>
+            : Extract<ResponseBody, { type: "ack" }>;
 
 type Pending = {
   id: number;
@@ -65,6 +69,9 @@ export class H4rnClient {
   private transport: Transport | null = null;
   private frameId = 0;
   private lastSeq = 0;
+  /** Events between socket open and the subscribe reply, sorted on flush. */
+  private replaying = false;
+  private replayBuffer: EventEnvelope[] = [];
   private attempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -230,7 +237,10 @@ export class H4rnClient {
     const handlers: TransportHandlers = {
       onOpen: () => {
         this.socketOpen = true;
-        this.lastSeq = 0;
+        // Keep `lastSeq` across reconnects so the subscribe replay resumes
+        // exactly where the previous socket stopped.
+        this.replaying = true;
+        this.replayBuffer = [];
         void this.performHello();
       },
       onMessage: (data) => this.handleMessage(data),
@@ -299,9 +309,21 @@ export class H4rnClient {
       this.startPing();
 
       try {
-        await this.request({ type: "subscribe", topics: ["all"] }, { timeoutMs: 6_000 });
+        // On the first connection `lastSeq` is 0, so start at the live edge;
+        // after a reconnect ask for the gap and let the daemon replay it
+        // before going live (ADR-003).
+        await this.request(
+          {
+            type: "subscribe",
+            topics: ["all"],
+            since_seq: this.lastSeq > 0 ? this.lastSeq : null,
+          },
+          { timeoutMs: 6_000 },
+        );
       } catch {
         // Subscriptions are best-effort; list and detail requests still work.
+      } finally {
+        this.flushReplay();
       }
 
       const ready: ReadyInfo = {
@@ -364,9 +386,28 @@ export class H4rnClient {
 
     if (frame.kind === "event") {
       if (frame.seq <= this.lastSeq) return;
+      if (this.replaying) {
+        // Hold replay frames until the subscribe reply marks the gap closed,
+        // then deliver them in sequence order.
+        this.replayBuffer.push({ seq: frame.seq, event: frame.event });
+        return;
+      }
       this.lastSeq = frame.seq;
       for (const listener of this.eventListeners) {
         listener({ seq: frame.seq, event: frame.event });
+      }
+    }
+  }
+
+  private flushReplay(): void {
+    if (!this.replaying) return;
+    this.replaying = false;
+    const pending = this.replayBuffer.splice(0).sort((left, right) => left.seq - right.seq);
+    for (const envelope of pending) {
+      if (envelope.seq <= this.lastSeq) continue;
+      this.lastSeq = envelope.seq;
+      for (const listener of this.eventListeners) {
+        listener(envelope);
       }
     }
   }

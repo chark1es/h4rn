@@ -27,9 +27,9 @@ use h4rn_core::{
 };
 use h4rn_harness::{HarnessEvent, HarnessInstall, HarnessSession, SessionSpec, UserInput};
 use h4rn_protocol::{
-    AgentState, ApprovalDecision, ApprovalKind, Event, HarnessKind, HostId, Item, MessageRole,
-    ProtoError, ProtoErrorCode, ThreadFilter, ThreadId, ThreadSummary, ThreadTab, ToolCallStatus,
-    TurnId, TurnStatus, Usage,
+    AgentState, ApprovalDecision, ApprovalKind, DeviceId, Event, HarnessKind, HostId, Item,
+    MessageRole, ProtoError, ProtoErrorCode, RuntimeMode, ThreadFilter, ThreadId, ThreadSummary,
+    ThreadTab, ToolCallStatus, TurnId, TurnStatus, Usage, WorktreeRequest,
 };
 use tokio::sync::{Mutex, broadcast};
 use tokio::task::JoinHandle;
@@ -71,6 +71,34 @@ pub struct NewThread {
     pub model: String,
     /// First user prompt.
     pub prompt: String,
+    /// Permission autonomy for the whole thread.
+    pub runtime_mode: RuntimeMode,
+    /// Worktree creation intent.
+    pub worktree: Option<WorktreeRequest>,
+}
+
+/// Result of creating a thread: the row, its first turn and the last sequence.
+#[derive(Clone, Debug)]
+pub struct CreatedThread {
+    /// New thread id.
+    pub thread_id: ThreadId,
+    /// Turn enqueued for the first prompt.
+    pub turn_id: TurnId,
+    /// Current projection.
+    pub summary: ThreadSummary,
+    /// Last durable sequence written for the create.
+    pub seq: u64,
+}
+
+/// Result of appending a user message.
+#[derive(Clone, Debug)]
+pub struct AcceptedMessage {
+    /// Thread that accepted the message.
+    pub thread_id: ThreadId,
+    /// Turn the message belongs to.
+    pub turn_id: TurnId,
+    /// Last durable sequence written for the message.
+    pub seq: u64,
 }
 
 /// A thread snapshot with the events a client has not seen.
@@ -99,6 +127,9 @@ pub enum ManagerError {
     /// The request needs a later phase or another host.
     #[error("{0}")]
     Unsupported(String),
+    /// The request is part of the contract but not implemented by this build.
+    #[error("{0}")]
+    NotImplemented(String),
     /// An internal failure.
     #[error("{0}")]
     Internal(String),
@@ -128,6 +159,11 @@ impl ManagerError {
                 message,
                 "This daemon build cannot serve that request yet",
             ),
+            Self::NotImplemented(message) => ProtoError::new(
+                ProtoErrorCode::NotImplemented,
+                message,
+                "Upgrade the daemon when this feature ships; no state was changed",
+            ),
             Self::Internal(message) => {
                 ProtoError::new(ProtoErrorCode::Internal, message, "Retry the request")
             }
@@ -147,7 +183,7 @@ struct Inner {
     local_host: HostId,
     options: ThreadManagerOptions,
     events: broadcast::Sender<WireEvent>,
-    emit_lock: Mutex<()>,
+    emit_lock: Arc<Mutex<()>>,
     threads: Mutex<HashMap<String, ThreadHandle>>,
     ticker: std::sync::Mutex<Option<JoinHandle<()>>>,
     closed: AtomicBool,
@@ -268,7 +304,7 @@ impl ThreadManager {
                 local_host,
                 options,
                 events,
-                emit_lock: Mutex::new(()),
+                emit_lock: Arc::new(Mutex::new(())),
                 threads: Mutex::new(HashMap::new()),
                 ticker: std::sync::Mutex::new(None),
                 closed: AtomicBool::new(false),
@@ -281,6 +317,28 @@ impl ThreadManager {
     /// Subscribes to the live projected event stream.
     pub fn subscribe(&self) -> broadcast::Receiver<WireEvent> {
         self.inner.events.subscribe()
+    }
+
+    /// Acquires the append lock so a global replay is a gap-free prefix.
+    ///
+    /// While the guard is held no event can be appended; the caller reads the
+    /// journal, queues the replay, and marks the connection ready before
+    /// releasing it.
+    pub async fn lock_append(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.inner.emit_lock).lock_owned().await
+    }
+
+    /// Projected events for every thread with `seq > after`.
+    ///
+    /// The caller must hold [`ThreadManager::lock_append`] for gap-free
+    /// semantics; this method does not take the lock itself so it can be used
+    /// from inside a replay already holding it.
+    pub async fn replay_global_since(&self, after: u64) -> Result<Vec<WireEvent>, ManagerError> {
+        self.inner
+            .journal
+            .read_wire_since_global(after)
+            .await
+            .map_err(|error| ManagerError::Internal(error.to_string()))
     }
 
     /// Starts the background placement ticker.
@@ -317,7 +375,7 @@ impl ThreadManager {
     ///
     /// Returns as soon as the thread row and the turn start are durable; harness
     /// output follows as events.
-    pub async fn create_thread(&self, request: NewThread) -> Result<ThreadSummary, ManagerError> {
+    pub async fn create_thread(&self, request: NewThread) -> Result<CreatedThread, ManagerError> {
         if !self.inner.harnesses.get(request.harness).is_some() {
             return Err(ManagerError::Unsupported(format!(
                 "no {:?} adapter is available in this daemon build",
@@ -337,6 +395,17 @@ impl ThreadManager {
                 "workspace_path must be an absolute path on the host".into(),
             ));
         }
+        if request
+            .worktree
+            .as_ref()
+            .is_some_and(WorktreeRequest::is_requested)
+        {
+            // The intent is recorded on the CreateThread request so the wire
+            // contract is stable, but this phase does not create worktrees.
+            return Err(ManagerError::NotImplemented(
+                "worktree creation is not implemented in this daemon".into(),
+            ));
+        }
 
         let now = Utc::now();
         let thread_id = ThreadId::new_uuid_v7();
@@ -347,6 +416,8 @@ impl ThreadManager {
             title: title_from_prompt(&request.prompt, &request.workspace_path),
             workspace_path: request.workspace_path,
             model: request.model,
+            runtime_mode: request.runtime_mode,
+            worktree: request.worktree,
             created_at: now,
             usage: Usage::default(),
             resume_id: None,
@@ -375,20 +446,24 @@ impl ThreadManager {
             ThreadEvent::TurnStarted { at: now },
         ];
         let wire = vec![
-            Event::ItemCompleted(Item::Message {
-                item_id: user_item_id(&turn_id),
-                role: MessageRole::User,
-                text: request.prompt.clone(),
-            }),
+            Event::ItemCompleted {
+                thread_id: thread_id.clone(),
+                turn_id: turn_id.clone(),
+                item: Item::Message {
+                    item_id: user_item_id(&turn_id),
+                    role: MessageRole::User,
+                    text: request.prompt.clone(),
+                },
+            },
             Event::TurnStarted {
                 thread_id: thread_id.clone(),
-                turn_id,
+                turn_id: turn_id.clone(),
                 started_at: now,
             },
         ];
 
         let handle: ThreadHandle = Arc::new(Mutex::new(record));
-        let summary = {
+        let (summary, seq) = {
             let mut record = handle.lock().await;
             self.inner.emit(&mut record, domain, wire).await?
         };
@@ -405,7 +480,12 @@ impl ThreadManager {
                 attachments: Vec::new(),
             }),
         );
-        Ok(summary)
+        Ok(CreatedThread {
+            thread_id,
+            turn_id,
+            summary,
+            seq,
+        })
     }
 
     /// Appends a user message and starts or queues its turn.
@@ -413,7 +493,7 @@ impl ThreadManager {
         &self,
         thread_id: &ThreadId,
         text: String,
-    ) -> Result<(), ManagerError> {
+    ) -> Result<AcceptedMessage, ManagerError> {
         let handle = self.inner.handle(thread_id).await?;
         let mut record = handle.lock().await;
         if record.closed {
@@ -423,7 +503,7 @@ impl ThreadManager {
         }
 
         let now = Utc::now();
-        if record.active.is_some() {
+        if let Some(active_turn_id) = record.active.as_ref().map(|active| active.turn_id.clone()) {
             // A turn is running: the message waits its turn, and the thread
             // stays Working. `MessageReceived` records the user activity.
             record.queued.push_back(UserInput {
@@ -434,13 +514,21 @@ impl ThreadManager {
                 source: h4rn_core::MessageSource::User,
                 at: now,
             }];
-            let wire = vec![Event::ItemCompleted(Item::Message {
-                item_id: fresh_item_id("user"),
-                role: MessageRole::User,
-                text,
-            })];
-            self.inner.emit(&mut record, domain, wire).await?;
-            return Ok(());
+            let wire = vec![Event::ItemCompleted {
+                thread_id: thread_id.clone(),
+                turn_id: active_turn_id.clone(),
+                item: Item::Message {
+                    item_id: fresh_item_id("user"),
+                    role: MessageRole::User,
+                    text,
+                },
+            }];
+            let (_, seq) = self.inner.emit(&mut record, domain, wire).await?;
+            return Ok(AcceptedMessage {
+                thread_id: thread_id.clone(),
+                turn_id: active_turn_id,
+                seq,
+            });
         }
 
         let (turn_id, _) = record.begin_turn(now);
@@ -453,18 +541,22 @@ impl ThreadManager {
             ThreadEvent::TurnStarted { at: now },
         ];
         let wire = vec![
-            Event::ItemCompleted(Item::Message {
-                item_id: user_item_id(&turn_id),
-                role: MessageRole::User,
-                text: text.clone(),
-            }),
+            Event::ItemCompleted {
+                thread_id: thread_id.clone(),
+                turn_id: turn_id.clone(),
+                item: Item::Message {
+                    item_id: user_item_id(&turn_id),
+                    role: MessageRole::User,
+                    text: text.clone(),
+                },
+            },
             Event::TurnStarted {
                 thread_id: thread_id.clone(),
-                turn_id,
+                turn_id: turn_id.clone(),
                 started_at: now,
             },
         ];
-        self.inner.emit(&mut record, domain, wire).await?;
+        let (_, seq) = self.inner.emit(&mut record, domain, wire).await?;
 
         let input = UserInput {
             text,
@@ -477,7 +569,11 @@ impl ThreadManager {
             drop(record);
             self.inner.spawn_session(handle, Some(input));
         }
-        Ok(())
+        Ok(AcceptedMessage {
+            thread_id: thread_id.clone(),
+            turn_id,
+            seq,
+        })
     }
 
     /// Interrupts the running turn.
@@ -506,6 +602,8 @@ impl ThreadManager {
         thread_id: &ThreadId,
         approval_id: &str,
         decision: ApprovalDecision,
+        option_id: Option<String>,
+        by_device: Option<DeviceId>,
     ) -> Result<(), ManagerError> {
         let handle = self.inner.handle(thread_id).await?;
         let mut record = handle.lock().await;
@@ -517,7 +615,11 @@ impl ThreadManager {
         let kind = pending.kind;
 
         let response = match record.session.as_mut() {
-            Some(session) => Some(session.respond_approval(approval_id, decision).await),
+            Some(session) => Some(
+                session
+                    .respond_approval(approval_id, decision, option_id.as_deref())
+                    .await,
+            ),
             None => None,
         };
 
@@ -543,7 +645,13 @@ impl ThreadManager {
                 } else {
                     vec![ThreadEvent::ApprovalResolved { at: now }]
                 };
-                self.inner.emit(&mut record, domain, Vec::new()).await?;
+                let wire = vec![Event::ApprovalResolved {
+                    thread_id: thread_id.clone(),
+                    approval_id: approval_id.to_owned(),
+                    option_id,
+                    by_device,
+                }];
+                self.inner.emit(&mut record, domain, wire).await?;
                 Ok(())
             }
         }
@@ -563,7 +671,10 @@ impl ThreadManager {
             pinned,
             at: Utc::now(),
         }];
-        self.inner.emit(&mut record, domain, Vec::new()).await
+        self.inner
+            .emit(&mut record, domain, Vec::new())
+            .await
+            .map(|(summary, _)| summary)
     }
 
     /// Snoozes a thread until `until`, or wakes it when `None`.
@@ -578,7 +689,10 @@ impl ThreadManager {
             until,
             at: Utc::now(),
         }];
-        self.inner.emit(&mut record, domain, Vec::new()).await
+        self.inner
+            .emit(&mut record, domain, Vec::new())
+            .await
+            .map(|(summary, _)| summary)
     }
 
     /// Returns a thread projection and the events after `since_seq`.
@@ -718,7 +832,7 @@ impl Inner {
         record: &mut ThreadRecord,
         domain: Vec<ThreadEvent>,
         mut wire: Vec<Event>,
-    ) -> Result<ThreadSummary, ManagerError> {
+    ) -> Result<(ThreadSummary, u64), ManagerError> {
         for event in &domain {
             record.state = record.state.clone().apply(event);
         }
@@ -733,7 +847,8 @@ impl Inner {
             .await
             .map_err(|error| ManagerError::Internal(error.to_string()))?;
         self.broadcast(&record.meta.thread_id, &wire, &seqs);
-        Ok(summary)
+        let seq = seqs.last().copied().unwrap_or(0);
+        Ok((summary, seq))
     }
 
     fn broadcast(&self, thread_id: &ThreadId, wire: &[Event], seqs: &[u64]) {
@@ -825,6 +940,7 @@ impl Inner {
             let spec = SessionSpec {
                 workspace: std::path::PathBuf::from(&record.meta.workspace_path),
                 model: record.meta.model.clone(),
+                runtime_mode: record.meta.runtime_mode,
                 resume_id: record.meta.resume_id.clone(),
                 mcp_endpoint: None,
                 env_overrides: std::collections::BTreeMap::new(),
@@ -955,6 +1071,18 @@ impl Inner {
             let mut wire = Vec::new();
             let mut completed = false;
 
+            // `SessionStarted` normally carries the native id, but keep the
+            // defaulted accessor in sync too so an adapter that only reports
+            // it through `session_id` is still resumable after a restart.
+            if record.meta.resume_id.is_none()
+                && let Some(session_id) = record
+                    .session
+                    .as_ref()
+                    .and_then(|session| session.session_id())
+            {
+                record.meta.resume_id = Some(session_id);
+            }
+
             match event {
                 HarnessEvent::SessionStarted { session_id } => {
                     record.meta.resume_id = Some(session_id);
@@ -1061,14 +1189,37 @@ impl Inner {
                     } else {
                         usage
                     };
+                    // Fill gaps from the adapter's own turn report when the
+                    // event carried no accounting (Claude reports it once).
+                    let usage = if usage.total_tokens() == 0
+                        && usage.cost_micros == 0
+                        && usage.duration_ms == 0
+                    {
+                        record
+                            .session
+                            .as_ref()
+                            .and_then(|session| session.last_turn())
+                            .map(|report| Usage {
+                                cost_micros: report.cost_micros,
+                                duration_ms: report.duration_ms,
+                                ..Usage::default()
+                            })
+                            .unwrap_or(usage)
+                    } else {
+                        usage
+                    };
                     record.meta.usage.merge(&usage);
                     domain.push(ThreadEvent::TurnCompleted { status, at: now });
                     if !text.is_empty() {
-                        wire.push(Event::ItemCompleted(Item::Message {
-                            item_id,
-                            role: MessageRole::Assistant,
-                            text,
-                        }));
+                        wire.push(Event::ItemCompleted {
+                            thread_id: thread_id.clone(),
+                            turn_id: turn_id.clone(),
+                            item: Item::Message {
+                                item_id,
+                                role: MessageRole::Assistant,
+                                text,
+                            },
+                        });
                     }
                     wire.push(Event::TurnCompleted {
                         thread_id: thread_id.clone(),
@@ -1101,17 +1252,27 @@ impl Inner {
         }
 
         let mut record = handle.lock().await;
+        let stderr_tail = record
+            .session
+            .as_ref()
+            .map(|session| session.stderr_tail())
+            .unwrap_or_default();
         record.session = None;
         record.pump = None;
         if record.active.is_some() {
             let now = Utc::now();
             record.active = None;
             let turn_id = record.turn_id_for_event();
+            let hint = if stderr_tail.trim().is_empty() {
+                "Send the message again to resume".to_owned()
+            } else {
+                format!("Send the message again to resume. Harness stderr: {stderr_tail}")
+            };
             let wire = vec![
                 Event::Error {
                     thread_id: Some(record.meta.thread_id.clone()),
                     message: "the harness session ended before the turn completed".into(),
-                    hint: Some("Send the message again to resume".into()),
+                    hint: Some(hint),
                     retryable: true,
                 },
                 Event::TurnCompleted {

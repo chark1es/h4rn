@@ -3,4 +3,4 @@
 /**
  * Machine-readable protocol error classes.
  */
-export type ProtoErrorCode = "invalid_request" | "unauthorized" | "forbidden" | "not_found" | "conflict" | "unsupported" | "rate_limited" | "internal";
+export type ProtoErrorCode = "invalid_request" | "unauthorized" | "forbidden" | "not_found" | "conflict" | "unsupported" | "not_implemented" | "rate_limited" | "internal";

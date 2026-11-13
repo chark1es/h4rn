@@ -2,6 +2,7 @@
 import type { AgentState } from "./AgentState";
 import type { ApprovalKind } from "./ApprovalKind";
 import type { ApprovalOption } from "./ApprovalOption";
+import type { DeviceId } from "./DeviceId";
 import type { Item } from "./Item";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadSummary } from "./ThreadSummary";
@@ -45,7 +46,19 @@ item_id: string,
 /**
  * Text chunk.
  */
-text: string, } | { "type": "item_completed" } & Item | { "type": "tool_call", 
+text: string, } | { "type": "item_completed", 
+/**
+ * Thread.
+ */
+thread_id: ThreadId, 
+/**
+ * Turn the item belongs to.
+ */
+turn_id: TurnId, 
+/**
+ * The completed item.
+ */
+item: Item, } | { "type": "tool_call", 
 /**
  * Thread.
  */
@@ -81,7 +94,23 @@ prompt: string,
 /**
  * Selectable answers, when the hand is a question.
  */
-options: Array<ApprovalOption>, } | { "type": "turn_completed", 
+options: Array<ApprovalOption>, } | { "type": "approval_resolved", 
+/**
+ * Thread.
+ */
+thread_id: ThreadId, 
+/**
+ * Approval that was answered.
+ */
+approval_id: string, 
+/**
+ * Selected option id, when the hand was a question.
+ */
+option_id: string | null, 
+/**
+ * Device that answered, when the daemon knows it.
+ */
+by_device: DeviceId | null, } | { "type": "turn_completed", 
 /**
  * Thread.
  */

@@ -6,4 +6,4 @@
  * This is the exact set of states the design system maps; the UI owns the
  * table that turns each value into an orb mode or a static glyph.
  */
-export type AgentState = "idle" | "thinking" | "searching" | "reading" | "editing" | "running_tool" | "awaiting_approval" | "rate_limited" | "error" | "done";
+export type AgentState = "idle" | "queued" | "scheduled" | "unreachable" | "thinking" | "searching" | "reading" | "editing" | "running_tool" | "awaiting_approval" | "rate_limited" | "error" | "done";

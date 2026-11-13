@@ -7,6 +7,7 @@ import type {
   Item,
   ProtoError,
   ResponseBody,
+  SeqEvent,
   ServerFrame,
   ThreadSummary,
   ToolCall,
@@ -19,6 +20,7 @@ import type { Transport, TransportHandlers } from "./types";
 type MockThread = {
   summary: ThreadSummary;
   events: Event[];
+  wire: SeqEvent[];
 };
 
 type MockApproval = {
@@ -40,12 +42,22 @@ function messageItem(itemId: string, role: "user" | "assistant" | "system", text
   return { kind: "message", item_id: itemId, role, text };
 }
 
-function userMessage(itemId: string, text: string): Event {
-  return { type: "item_completed", ...messageItem(itemId, "user", text) };
+function userMessage(threadId: string, turnId: string, itemId: string, text: string): Event {
+  return {
+    type: "item_completed",
+    thread_id: threadId,
+    turn_id: turnId,
+    item: messageItem(itemId, "user", text),
+  };
 }
 
-function assistantMessage(itemId: string, text: string): Event {
-  return { type: "item_completed", ...messageItem(itemId, "assistant", text) };
+function assistantMessage(threadId: string, turnId: string, itemId: string, text: string): Event {
+  return {
+    type: "item_completed",
+    thread_id: threadId,
+    turn_id: turnId,
+    item: messageItem(itemId, "assistant", text),
+  };
 }
 
 function toolCall(
@@ -82,7 +94,10 @@ const continuedText = [
 
 function historyFor(thread: ThreadSummary): Event[] {
   const events: Event[] = [];
+  const turnId = `turn_${thread.thread_id}_1`;
   const user = userMessage(
+    thread.thread_id,
+    turnId,
     `msg_${thread.thread_id}_u0`,
     thread.thread_id === "thr_a"
       ? "The auth test fails on CI only. Fix it and add a regression test that pins the clock. Do not change the public API."
@@ -92,7 +107,6 @@ function historyFor(thread: ThreadSummary): Event[] {
   );
   events.push(user);
 
-  const turnId = `turn_${thread.thread_id}_1`;
   events.push({
     type: "turn_started",
     thread_id: thread.thread_id,
@@ -103,6 +117,8 @@ function historyFor(thread: ThreadSummary): Event[] {
   if (thread.thread_id === "thr_a") {
     events.push(
       assistantMessage(
+        thread.thread_id,
+        turnId,
         `msg_${thread.thread_id}_a0`,
         "I'll reproduce the CI-only failure first, then pin the clock in the setup hook.",
       ),
@@ -131,6 +147,8 @@ function historyFor(thread: ThreadSummary): Event[] {
         }),
       },
       assistantMessage(
+        thread.thread_id,
+        turnId,
         `msg_${thread.thread_id}_a1`,
         "The assertion is not the problem. The pool opens on a real timer before the setup hook installs the fake clock, so the first lookup races the timer advance on slower CI hardware.",
       ),
@@ -152,6 +170,8 @@ function historyFor(thread: ThreadSummary): Event[] {
   if (thread.thread_id === "thr_b") {
     events.push(
       assistantMessage(
+        thread.thread_id,
+        turnId,
         `msg_${thread.thread_id}_a0`,
         "Starting with the session layer: the socket owns the transport, so backoff belongs one level up.",
       ),
@@ -210,6 +230,8 @@ function historyFor(thread: ThreadSummary): Event[] {
 
   events.push(
     assistantMessage(
+      thread.thread_id,
+      turnId,
       `msg_${thread.thread_id}_a0`,
       thread.tab === "working"
         ? "I'm reading the relevant files before proposing a change. The workspace is clean and no tool has written anything yet."
@@ -437,7 +459,7 @@ function buildThreads(scenario: string): Map<string, MockThread> {
   ];
 
   for (const thread of seeds) {
-    map.set(thread.thread_id, { summary: thread, events: historyFor(thread) });
+    map.set(thread.thread_id, { summary: thread, events: historyFor(thread), wire: [] });
   }
   return map;
 }
@@ -497,6 +519,12 @@ class MockDaemon {
   ) {
     this.hosts = buildHosts(scenario);
     this.threads = buildThreads(scenario);
+    for (const entry of this.threads.values()) {
+      entry.wire = entry.events.map((event) => {
+        this.seq += 1;
+        return { seq: this.seq, event };
+      });
+    }
   }
 
   dispose(): void {
@@ -568,8 +596,8 @@ class MockDaemon {
         this.ok(frame.id, {
           type: "thread",
           summary: entry.summary,
-          events: body.since_seq > 0 ? [] : entry.events,
-          next_seq: this.seq + 1,
+          events: entry.wire.filter((record) => record.seq > body.since_seq),
+          next_seq: entry.wire.at(-1)?.seq ?? body.since_seq,
         });
         if (body.thread_id === "thr_b") this.startLiveStream(body.thread_id);
         return;
@@ -579,6 +607,7 @@ class MockDaemon {
         return;
       case "create_thread": {
         const id = `thr_new_${++this.created}`;
+        const turnId = uid("turn");
         const now = Date.now();
         const thread: ThreadSummary = {
           thread_id: id,
@@ -591,15 +620,20 @@ class MockDaemon {
           pinned: false,
           snoozed_until: null,
           last_activity: new Date(now).toISOString(),
-          agent_state: "thinking",
+          agent_state: "queued",
           usage: usage(0, 0, 0, 0),
           needs_attention: false,
           unread: false,
         };
-        this.threads.set(id, { summary: thread, events: [] });
-        this.ok(frame.id, { type: "ack" });
+        this.threads.set(id, { summary: thread, events: [], wire: [] });
+        this.ok(frame.id, {
+          type: "thread_created",
+          thread_id: id,
+          turn_id: turnId,
+          summary: thread,
+        });
         this.later(260, () => this.emit(id, { type: "thread_upserted", ...thread }));
-        this.later(520, () => this.runTurn(id, body.prompt));
+        this.later(520, () => this.runTurn(id, body.prompt, turnId));
         return;
       }
       case "send_message": {
@@ -613,7 +647,13 @@ class MockDaemon {
           );
           return;
         }
-        this.ok(frame.id, { type: "ack" });
+        const turnId = uid("turn");
+        this.ok(frame.id, {
+          type: "message_accepted",
+          thread_id: body.thread_id,
+          turn_id: turnId,
+          seq: this.seq + 1,
+        });
         entry.summary = {
           ...entry.summary,
           tab: "working",
@@ -624,7 +664,7 @@ class MockDaemon {
         this.later(120, () =>
           this.emit(body.thread_id, { type: "thread_upserted", ...entry.summary }),
         );
-        this.later(380, () => this.runTurn(body.thread_id, body.text));
+        this.later(380, () => this.runTurn(body.thread_id, body.text, turnId));
         return;
       }
       case "respond_approval": {
@@ -632,6 +672,15 @@ class MockDaemon {
         this.ok(frame.id, { type: "ack" });
         if (!approval) return;
         this.approvals.delete(body.approval_id);
+        this.later(60, () =>
+          this.emit(body.thread_id, {
+            type: "approval_resolved",
+            thread_id: body.thread_id,
+            approval_id: body.approval_id,
+            option_id: body.option_id ?? null,
+            by_device: "mock-device",
+          }),
+        );
         if (body.decision !== "approve") {
           this.later(180, () => this.finishApproval(approval, false));
           return;
@@ -705,11 +754,10 @@ class MockDaemon {
     }
   }
 
-  private runTurn(threadId: string, prompt: string): void {
+  private runTurn(threadId: string, prompt: string, turnId: string): void {
     const entry = this.threads.get(threadId);
     if (!entry || this.disposed) return;
 
-    const turnId = uid("turn");
     const itemId = uid("msg");
     entry.summary = {
       ...entry.summary,
@@ -726,7 +774,7 @@ class MockDaemon {
       turn_id: turnId,
       started_at: iso(),
     });
-    this.emit(threadId, userMessage(uid("msg"), prompt));
+    this.emit(threadId, userMessage(threadId, turnId, uid("msg"), prompt));
 
     const reply =
       "\n\nI'll start by mapping the relevant files, then make the smallest change that explains the failure. " +
@@ -735,7 +783,7 @@ class MockDaemon {
     const tick = () => {
       if (this.disposed) return;
       if (offset >= reply.length) {
-        this.emit(threadId, assistantMessage(itemId, reply));
+        this.emit(threadId, assistantMessage(threadId, turnId, itemId, reply));
         this.emit(threadId, {
           type: "tool_call",
           thread_id: threadId,
@@ -821,7 +869,7 @@ class MockDaemon {
       if (this.disposed) return;
       ticks += 1;
       if (offset >= text.length) {
-        this.emit(threadId, assistantMessage(itemId, text));
+        this.emit(threadId, assistantMessage(threadId, turn.turn_id, itemId, text));
         this.emit(threadId, {
           type: "agent_state_changed",
           thread_id: threadId,
@@ -939,7 +987,10 @@ class MockDaemon {
     const tick = () => {
       if (this.disposed) return;
       if (offset >= text.length) {
-        this.emit(approval.threadId, assistantMessage(itemId, text));
+        this.emit(
+          approval.threadId,
+          assistantMessage(approval.threadId, approval.turnId, itemId, text),
+        );
         this.emit(approval.threadId, {
           type: "turn_completed",
           thread_id: approval.threadId,
@@ -978,8 +1029,13 @@ class MockDaemon {
 
   private emit(threadId: string, event: Event): void {
     if (this.disposed) return;
+    const seq = this.seq + 1;
+    this.seq = seq;
     const entry = this.threads.get(threadId);
-    if (entry) entry.events.push(event);
+    if (entry) {
+      entry.events.push(event);
+      entry.wire.push({ seq, event });
+    }
     if (event.type === "approval_requested") {
       this.approvals.set(event.approval_id, {
         threadId,
@@ -987,12 +1043,11 @@ class MockDaemon {
         turnId: event.turn_id,
       });
     }
-    this.sendEvent(event);
+    this.sendEvent(seq, event);
   }
 
-  private sendEvent(event: Event): void {
-    this.seq += 1;
-    const frame: ServerFrame = { kind: "event", seq: this.seq, event };
+  private sendEvent(seq: number, event: Event): void {
+    const frame: ServerFrame = { kind: "event", seq, event };
     this.handlers.onMessage(JSON.stringify(frame));
   }
 

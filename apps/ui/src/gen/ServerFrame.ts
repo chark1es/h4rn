@@ -16,8 +16,10 @@ id: number,
  */
 result: { Ok : ResponseBody } | { Err : ProtoError }, } | { "kind": "event", 
 /**
- * Monotonic per-connection sequence number. Clients resume with the
- * last sequence they applied.
+ * Durable, daemon-global monotonically increasing sequence number.
+ *
+ * The value survives daemon restarts and is shared by every thread, so
+ * a client resumes by passing the last value it applied (ADR-003).
  */
 seq: number, 
 /**

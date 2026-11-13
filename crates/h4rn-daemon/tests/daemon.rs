@@ -280,11 +280,13 @@ async fn create_with_host(
             model: "fake-model".into(),
             prompt: prompt.into(),
             attachments: Vec::new(),
+            runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
+            worktree: None,
         })
         .await
         .expect("create thread");
     match result {
-        ResponseBody::Thread { summary, .. } => summary,
+        ResponseBody::ThreadCreated { summary, .. } => summary,
         other => panic!("unexpected CreateThread response: {other:?}"),
     }
 }
@@ -438,15 +440,15 @@ async fn reconnecting_with_since_seq_replays_without_gaps() {
             // The replay response orders events by global sequence; verify the
             // content we care about is present.
             let has_delta = events.iter().any(|event| {
-                matches!(event, Event::MessageDelta { text, .. } if text.contains("replay me"))
+                matches!(&event.event, Event::MessageDelta { text, .. } if text.contains("replay me"))
             });
             let has_completed = events
                 .iter()
-                .any(|event| matches!(event, Event::TurnCompleted { .. }));
+                .any(|event| matches!(event.event, Event::TurnCompleted { .. }));
             assert!(
                 events
                     .iter()
-                    .any(|event| matches!(event, Event::ThreadUpserted(_))),
+                    .any(|event| matches!(event.event, Event::ThreadUpserted(_))),
                 "the snapshot event must replay too"
             );
             (next_seq, has_delta, has_completed)
@@ -475,14 +477,14 @@ async fn reconnecting_with_since_seq_replays_without_gaps() {
             // as the ticker's Done transition) may legitimately appear.
             assert!(
                 !events.iter().any(|event| {
-                    matches!(event, Event::MessageDelta { text, .. } if text.contains("replay me"))
+                    matches!(&event.event, Event::MessageDelta { text, .. } if text.contains("replay me"))
                 }),
                 "seen deltas must not replay"
             );
             assert!(
                 !events
                     .iter()
-                    .any(|event| matches!(event, Event::TurnCompleted { .. })),
+                    .any(|event| matches!(event.event, Event::TurnCompleted { .. })),
                 "the seen turn completion must not replay"
             );
             assert!(next_seq >= last_seq);
@@ -635,8 +637,8 @@ async fn unimplemented_requests_and_bad_hello_have_clear_errors() {
         .request(ClientRequest::McpList)
         .await
         .expect_err("McpList is phase 4");
-    assert_eq!(error.code, ProtoErrorCode::Unsupported);
-    assert!(error.message.contains("not_implemented"));
+    assert_eq!(error.code, ProtoErrorCode::NotImplemented);
+    assert!(error.message.contains("not implemented"));
     assert!(error.hint.unwrap_or_default().contains("mcp_list"));
 
     // A fresh connection with a newer protocol major is rejected and stays
@@ -764,6 +766,7 @@ async fn approvals_are_answered_through_the_stream() {
             thread_id,
             approval_id: "appr_1".into(),
             decision: ApprovalDecision::Approve,
+            option_id: None,
         })
         .await
         .expect("respond approval");
@@ -781,6 +784,7 @@ async fn subscribe_without_threads_suppresses_thread_events() {
     client
         .request(ClientRequest::Subscribe {
             topics: vec![Topic::Usage],
+            since_seq: None,
         })
         .await
         .expect("subscribe");
@@ -963,12 +967,12 @@ async fn restored_threads_replay_after_a_daemon_restart() {
             assert!(
                 events
                     .iter()
-                    .any(|event| matches!(event, Event::MessageDelta { .. }))
+                    .any(|event| matches!(event.event, Event::MessageDelta { .. }))
             );
             assert!(
                 events
                     .iter()
-                    .any(|event| matches!(event, Event::TurnCompleted { .. }))
+                    .any(|event| matches!(event.event, Event::TurnCompleted { .. }))
             );
         }
         other => panic!("unexpected get response: {other:?}"),
@@ -977,4 +981,78 @@ async fn restored_threads_replay_after_a_daemon_restart() {
     second_daemon.stop().await;
     // Keep the original tempdir alive until both daemons have stopped.
     drop(dir);
+}
+
+#[tokio::test]
+async fn create_and_send_report_durable_ids_and_worktrees_are_not_implemented() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+
+    let error = client
+        .request(ClientRequest::CreateThread {
+            host: host.clone(),
+            harness: HarnessKind::ClaudeCode,
+            workspace_path: "/tmp/h4rn-workspace".into(),
+            model: "fake-model".into(),
+            prompt: "needs a worktree".into(),
+            attachments: Vec::new(),
+            runtime_mode: h4rn_protocol::RuntimeMode::FullAccess,
+            worktree: Some(h4rn_protocol::WorktreeRequest::Generated(true)),
+        })
+        .await
+        .expect_err("worktree creation is phase 2");
+    assert_eq!(error.code, ProtoErrorCode::NotImplemented);
+    assert!(error.message.contains("worktree"));
+
+    let created = client
+        .request(ClientRequest::CreateThread {
+            host,
+            harness: HarnessKind::ClaudeCode,
+            workspace_path: "/tmp/h4rn-workspace".into(),
+            model: "fake-model".into(),
+            prompt: "report ids".into(),
+            attachments: Vec::new(),
+            runtime_mode: h4rn_protocol::RuntimeMode::FullAccess,
+            worktree: None,
+        })
+        .await
+        .expect("create thread");
+    let (thread_id, first_turn_id) = match created {
+        ResponseBody::ThreadCreated {
+            thread_id,
+            turn_id,
+            summary,
+        } => {
+            assert_eq!(summary.thread_id, thread_id);
+            (thread_id, turn_id)
+        }
+        other => panic!("unexpected create response: {other:?}"),
+    };
+
+    client.wait_for_turn_completed().await;
+
+    let accepted = client
+        .request(ClientRequest::SendMessage {
+            thread_id: thread_id.clone(),
+            text: "second turn".into(),
+            attachments: Vec::new(),
+        })
+        .await
+        .expect("send message");
+    match accepted {
+        ResponseBody::MessageAccepted {
+            thread_id: accepted_thread,
+            turn_id: accepted_turn,
+            seq,
+        } => {
+            assert_eq!(accepted_thread, thread_id);
+            assert_ne!(accepted_turn, first_turn_id, "the next turn gets a new id");
+            assert!(seq > 0);
+        }
+        other => panic!("unexpected send response: {other:?}"),
+    }
+
+    daemon.stop().await;
 }

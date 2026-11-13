@@ -22,15 +22,27 @@ pub enum ServerFrame {
         /// Success payload or a typed protocol error.
         result: Result<ResponseBody, ProtoError>,
     },
-    /// An event on the ordered thread stream.
+    /// An event on the daemon-global ordered stream.
     Event {
-        /// Monotonic per-connection sequence number. Clients resume with the
-        /// last sequence they applied.
+        /// Durable, daemon-global monotonically increasing sequence number.
+        ///
+        /// The value survives daemon restarts and is shared by every thread, so
+        /// a client resumes by passing the last value it applied (ADR-003).
         #[ts(type = "number")]
         seq: u64,
         /// The event itself.
         event: Event,
     },
+}
+
+/// One durable event with its daemon-global sequence number.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+pub struct SeqEvent {
+    /// Durable daemon-global sequence.
+    #[ts(type = "number")]
+    pub seq: u64,
+    /// The projected event.
+    pub event: Event,
 }
 
 /// Successful response payloads.
@@ -62,11 +74,33 @@ pub enum ResponseBody {
     Thread {
         /// Current projection.
         summary: ThreadSummary,
-        /// Events the client has not seen.
-        events: Vec<Event>,
+        /// Events the client has not seen, each with its durable sequence.
+        events: Vec<SeqEvent>,
         /// Next sequence the client should ask for.
         #[ts(type = "number")]
         next_seq: u64,
+    },
+    /// A thread was created and its first turn is durable.
+    ///
+    /// The client uses these ids to reconcile the optimistic row it rendered
+    /// before the round trip, without waiting for `thread_upserted`.
+    ThreadCreated {
+        /// New thread id.
+        thread_id: ThreadId,
+        /// Turn enqueued for the first prompt.
+        turn_id: TurnId,
+        /// Current projection of the new thread.
+        summary: ThreadSummary,
+    },
+    /// A user message was appended to a thread.
+    MessageAccepted {
+        /// Thread that accepted the message.
+        thread_id: ThreadId,
+        /// Turn the message belongs to (the running turn when it was queued).
+        turn_id: TurnId,
+        /// Durable daemon-global sequence of the last event written for it.
+        #[ts(type = "number")]
+        seq: u64,
     },
     /// A request with no payload completed successfully.
     Ack,
@@ -113,6 +147,15 @@ impl ProtoError {
             format!("Upgrade the daemon when {phase} ships, or use the CLI"),
         )
     }
+
+    /// The standard response for a request this daemon build does not implement.
+    pub fn not_implemented(feature: &str) -> Self {
+        Self::new(
+            ProtoErrorCode::NotImplemented,
+            format!("{feature} is not implemented in this daemon"),
+            format!("Upgrade the daemon when {feature} ships; no state was changed"),
+        )
+    }
 }
 
 /// Machine-readable protocol error classes.
@@ -129,8 +172,13 @@ pub enum ProtoErrorCode {
     NotFound,
     /// The request conflicts with current state.
     Conflict,
-    /// The feature has not shipped in this daemon.
+    /// The feature has not shipped in this daemon at all.
     Unsupported,
+    /// The feature is part of the contract but not implemented by this build.
+    ///
+    /// Unlike [`Self::Unsupported`], this names a known phase gap rather than
+    /// an unknown protocol version or capability.
+    NotImplemented,
     /// The daemon or an upstream is rate limited.
     RateLimited,
     /// An internal failure; retryable at the client's discretion.
@@ -168,7 +216,14 @@ pub enum Event {
         text: String,
     },
     /// A stream item finished and can be committed to the transcript.
-    ItemCompleted(Item),
+    ItemCompleted {
+        /// Thread.
+        thread_id: ThreadId,
+        /// Turn the item belongs to.
+        turn_id: TurnId,
+        /// The completed item.
+        item: Item,
+    },
     /// A tool call changed state.
     ToolCall {
         /// Thread.
@@ -192,6 +247,21 @@ pub enum Event {
         prompt: String,
         /// Selectable answers, when the hand is a question.
         options: Vec<ApprovalOption>,
+    },
+    /// An approval or question was answered.
+    ///
+    /// The daemon emits this after the harness accepted the answer, so every
+    /// client can resolve the cue from the stream instead of trusting the
+    /// device that pressed Go/Hold.
+    ApprovalResolved {
+        /// Thread.
+        thread_id: ThreadId,
+        /// Approval that was answered.
+        approval_id: String,
+        /// Selected option id, when the hand was a question.
+        option_id: Option<String>,
+        /// Device that answered, when the daemon knows it.
+        by_device: Option<DeviceId>,
     },
     /// A turn finished.
     TurnCompleted {

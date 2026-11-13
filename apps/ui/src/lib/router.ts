@@ -44,7 +44,9 @@ export function pushRoute(route: Route): void {
   if (typeof window === "undefined") return;
   const path = routePath(route);
   if (window.location.pathname === path) return;
-  window.history.pushState({}, "", path);
+  // Keep boot parameters such as `?token=` and `?daemon=` across navigation;
+  // the desktop shell and the e2e harness both rely on them.
+  window.history.pushState({}, "", `${path}${window.location.search}`);
 }
 
 /** Rewrite the current entry, e.g. when a temp thread id resolves to the real one. */
@@ -52,5 +54,5 @@ export function replaceRoute(route: Route): void {
   if (typeof window === "undefined") return;
   const path = routePath(route);
   if (window.location.pathname === path) return;
-  window.history.replaceState({}, "", path);
+  window.history.replaceState({}, "", `${path}${window.location.search}`);
 }

@@ -26,6 +26,7 @@ async fn real_claude_code_round_trip() {
     let spec = SessionSpec {
         workspace: workspace.path().to_path_buf(),
         model: "default".into(),
+        runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
         resume_id: None,
         mcp_endpoint: None,
         env_overrides: Default::default(),

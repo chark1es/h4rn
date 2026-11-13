@@ -4,7 +4,10 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::common::{ApprovalDecision, DeviceInfo, HarnessKind, ThreadFilter, ThreadTab, Topic};
+use crate::common::{
+    ApprovalDecision, DeviceInfo, HarnessKind, RuntimeMode, ThreadFilter, ThreadTab, Topic,
+    WorktreeRequest,
+};
 use crate::ids::{AttachmentId, HostId, ThreadId};
 
 /// One request sent by a client.
@@ -67,6 +70,12 @@ pub enum ClientRequest {
         prompt: String,
         /// Attachments uploaded before this request.
         attachments: Vec<AttachmentId>,
+        /// Permission autonomy for the whole thread.
+        #[serde(default)]
+        runtime_mode: RuntimeMode,
+        /// Run in an isolated git worktree, optionally naming the branch.
+        #[serde(default)]
+        worktree: Option<WorktreeRequest>,
     },
     /// Append a user message to an existing thread.
     SendMessage {
@@ -90,6 +99,9 @@ pub enum ClientRequest {
         approval_id: String,
         /// User decision.
         decision: ApprovalDecision,
+        /// Selected [`crate::ApprovalOption`] id, when answering a question.
+        #[serde(default)]
+        option_id: Option<String>,
     },
     /// Move a thread by hand. The override sticks until the next turn starts.
     SetThreadTab {
@@ -111,6 +123,14 @@ pub enum ClientRequest {
     Subscribe {
         /// Topics to subscribe to.
         topics: Vec<Topic>,
+        /// Replay daemon-global events after this sequence before going live.
+        ///
+        /// `None` starts at the live edge. The daemon reads the journal while
+        /// holding its append lock, so the replay is a gap-free prefix of the
+        /// stream that follows.
+        #[serde(default)]
+        #[ts(type = "number | null")]
+        since_seq: Option<u64>,
     },
     // ------------------------------------------------------------------
     // TODO(phase 2+): terminal, filesystem, MCP, skills, proxy, usage and
