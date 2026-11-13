@@ -1,4 +1,11 @@
-import type { DeviceInfo, Event, HostSummary, ProtoError, ServerFrame } from "@/gen";
+import type {
+  DeviceInfo,
+  Event,
+  HostSummary,
+  ProtoError,
+  ServerFrame,
+  TransportStatus,
+} from "@/gen";
 
 /**
  * Connection state shown by the status bar and the offline banner.
@@ -46,6 +53,11 @@ export type TransportHandlers = {
   onBinary?: (data: ArrayBuffer) => void;
   onClose: (frame: { code: number; reason: string; wasClean: boolean }) => void;
   onError: (message: string) => void;
+  /**
+   * Multipath state from the secure transport. Optional so the plain
+   * WebSocket and mock transports stay unchanged.
+   */
+  onTransportStatus?: (status: TransportStatus) => void;
 };
 
 /** One socket attempt. Reconnection is owned by `H4rnClient`, not the transport. */

@@ -1,0 +1,30 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_securetransport_free: (a: number, b: number) => void;
+export const connect: (a: number, b: number) => [number, number, number];
+export const generate_identity: () => [number, number, number, number];
+export const parse_pairing: (a: number, b: number) => [number, number, number, number];
+export const securetransport_close: (a: number, b: number) => void;
+export const securetransport_on_closed: (a: number, b: any) => void;
+export const securetransport_on_frame: (a: number, b: any) => void;
+export const securetransport_on_packet: (a: number, b: any) => void;
+export const securetransport_on_status: (a: number, b: any) => void;
+export const securetransport_on_ticket: (a: number, b: any) => void;
+export const securetransport_path_closed: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+export const securetransport_path_open: (a: number, b: number, c: number) => [number, number];
+export const securetransport_receive: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+export const securetransport_resume_token_hex: (a: number) => [number, number];
+export const securetransport_send: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+export const securetransport_start: (a: number, b: number) => [number, number];
+export const securetransport_status_json: (a: number) => [number, number];
+export const securetransport_tick: (a: number, b: number) => void;
+export const transport_version: () => number;
+export const __wbindgen_exn_store: (a: number) => void;
+export const __externref_table_alloc: () => number;
+export const __wbindgen_externrefs: WebAssembly.Table;
+export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __externref_table_dealloc: (a: number) => void;
+export const __wbindgen_start: () => void;

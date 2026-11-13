@@ -37,6 +37,7 @@ mod fs;
 mod ids;
 mod server;
 mod terminal;
+mod transport;
 
 pub use binary::{
     BINARY_HEADER_LEN, BINARY_MAGIC, BINARY_VERSION, BinaryFrame, BinaryFrameError, BinaryKind,
@@ -60,6 +61,10 @@ pub use ids::{
 pub use server::{Event, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame};
 pub use terminal::{
     CREDIT_MAX_BYTES, CREDIT_MAX_CHUNKS, TerminalExit, TerminalExitNotice, TerminalInfo,
+};
+pub use transport::{
+    TransportPathKind, TransportPathState, TransportPathStatus, TransportSessionState,
+    TransportStatus,
 };
 
 /// Version of the wire protocol implemented by this crate.

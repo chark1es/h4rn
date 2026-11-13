@@ -1,5 +1,6 @@
 import { H4rnClient } from "./client";
 import { createMockTransport } from "./mock";
+import { createSecureTransportFactory, hasStoredSecurity } from "./secure";
 import type { ClientOptions, TransportFactory } from "./types";
 
 export const DEFAULT_WS_URL = "ws://127.0.0.1:47800/ws";
@@ -11,6 +12,12 @@ export type BootConfig = {
   token: string | null;
   daemonUrl: string | null;
   theme: "light" | "dark" | "system" | null;
+  /** Use the Noise/multipath transport instead of plaintext `/ws`. */
+  secure: boolean;
+  /** Raw `h4rn://pair?...` URI from `?pair=`. */
+  pairing: string | null;
+  /** Optional relay standby endpoint from `?relay=`. */
+  relay: string | null;
 };
 
 export function readBootConfig(): BootConfig {
@@ -21,11 +28,15 @@ export function readBootConfig(): BootConfig {
       token: null,
       daemonUrl: null,
       theme: null,
+      secure: false,
+      pairing: null,
+      relay: null,
     };
   }
 
   const params = new URLSearchParams(window.location.search);
   const queryTheme = params.get("theme");
+  const pairing = params.get("pair");
   return {
     mock: params.get("mock") === "1",
     scenario: params.get("scenario") ?? "default",
@@ -35,6 +46,11 @@ export function readBootConfig(): BootConfig {
       queryTheme === "light" || queryTheme === "dark" || queryTheme === "system"
         ? queryTheme
         : null,
+    // A pairing link or a previously pinned daemon selects Noise. Plain
+    // `?daemon=` stays on the loopback WebSocket for backwards compatibility.
+    secure: Boolean(pairing) || params.get("secure") === "1" || hasStoredSecurity(),
+    pairing,
+    relay: params.get("relay"),
   };
 }
 
@@ -77,6 +93,20 @@ export function createClientFromEnv(): H4rnClient {
       reconnect: { baseMs: 300, maxMs: 4_000, jitter: 0.2, maxAttempts: 8 },
     };
     return new H4rnClient(options);
+  }
+
+  if (config.secure) {
+    return new H4rnClient({
+      url: config.daemonUrl ?? DEFAULT_WS_URL,
+      token: null,
+      transportLabel: "encrypted",
+      transportFactory: createSecureTransportFactory({
+        pairing: config.pairing,
+        relay: config.relay,
+      }),
+      requestTimeoutMs: 10_000,
+      reconnect: { baseMs: 400, maxMs: 8_000, jitter: 0.2, maxAttempts: 10 },
+    });
   }
 
   return new H4rnClient({

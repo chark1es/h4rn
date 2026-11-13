@@ -9,6 +9,7 @@ import type { Item } from "./Item";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadSummary } from "./ThreadSummary";
 import type { ToolCall } from "./ToolCall";
+import type { TransportStatus } from "./TransportStatus";
 import type { TurnId } from "./TurnId";
 import type { TurnStatus } from "./TurnStatus";
 import type { Usage } from "./Usage";
@@ -196,4 +197,4 @@ done: boolean,
 /**
  * True when the daemon hit its result cap.
  */
-truncated: boolean, };
+truncated: boolean, } | { "type": "transport_status" } & TransportStatus;

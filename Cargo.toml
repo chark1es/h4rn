@@ -36,15 +36,26 @@ blake3 = "1.8.7"
 chrono = { version = "0.4.45", features = ["clock", "serde"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 dirs = "7.0.0"
+ed25519-dalek = { version = "2.2.0", default-features = false, features = [
+    "alloc",
+    "zeroize",
+] }
 futures = "0.3.34"
+getrandom = "0.3.4"
 hex = "0.4.3"
+js-sys = "0.3.81"
 keyring = "4.2.0"
 portable-pty = "0.9.0"
 rand = "0.9.5"
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-snow = "0.10.0"
+snow = { version = "0.10.0", default-features = false, features = [
+    "use-blake2",
+    "use-chacha20poly1305",
+    "use-curve25519",
+    "use-getrandom",
+] }
 sqlx = { version = "0.8.6", default-features = false, features = [
     "chrono",
     "macros",
@@ -72,11 +83,15 @@ tower-http = { version = "0.6.11", features = ["cors", "fs", "trace", "limit"] }
 toml = "0.8.23"
 openidconnect = { version = "3.5.0", default-features = false, features = ["reqwest", "rustls-tls"] }
 chacha20poly1305 = "0.10.1"
-ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
 
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 ts-rs = { version = "11.1.0", features = ["chrono-impl", "serde-json-impl"] }
-uuid = { version = "1.29.2", features = ["serde", "v7"] }
+uuid = { version = "1.29.2", features = ["serde", "v7", "js"] }
+wasm-bindgen = "0.2.104"
+wasm-bindgen-test = "0.3.54"
+x25519-dalek = { version = "2.0.1", default-features = false, features = [
+    "static_secrets",
+] }
 
 # Added by the Claude Code adapter (Phase 1b).
 base64 = "0.22.1"

@@ -432,6 +432,13 @@ pub enum Event {
         /// True when the daemon hit its result cap.
         truncated: bool,
     },
+    /// The client's multipath transport changed state (ADR-009).
+    ///
+    /// The daemon never emits this: the client owns path selection and
+    /// synthesises the event locally so the status bar can show which path is
+    /// carrying the session, its RTT, and that the session is encrypted. Like
+    /// [`Event::FsChanged`], it is transient and carries no durable sequence.
+    TransportStatus(crate::transport::TransportStatus),
 }
 
 #[cfg(test)]

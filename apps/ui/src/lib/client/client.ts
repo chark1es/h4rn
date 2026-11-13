@@ -6,6 +6,7 @@ import type {
   ResponseBody,
   ServerFrame,
   TerminalExitNotice,
+  TransportStatus,
 } from "@/gen";
 
 import { H4rnRequestError, protoError } from "./errors";
@@ -330,6 +331,7 @@ export class H4rnClient {
       onMessage: (data) => this.handleMessage(data),
       onBinary: (data) => this.handleBinary(data),
       onClose: (frame) => this.handleClose(frame.code, frame.reason),
+      onTransportStatus: (status) => this.handleTransportStatus(status),
       onError: (message) => {
         this.patchSnapshot({
           error: protoError(
@@ -437,6 +439,15 @@ export class H4rnClient {
       });
       this.transport?.close();
     }
+  }
+
+  /** Surfaces the active secure path (and its RTT) in the status bar. */
+  private handleTransportStatus(status: TransportStatus): void {
+    const active = status.active;
+    this.patchSnapshot({
+      transport: active?.kind ?? "encrypted",
+      latencyMs: active?.rtt_ms ?? null,
+    });
   }
 
   private handleBinary(data: ArrayBuffer): void {
