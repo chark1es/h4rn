@@ -21,6 +21,7 @@ import type { ProxyProfilePatch } from "./ProxyProfilePatch";
 import type { RuntimeMode } from "./RuntimeMode";
 import type { SkillConflictResolution } from "./SkillConflictResolution";
 import type { SkillSource } from "./SkillSource";
+import type { SubagentRequest } from "./SubagentRequest";
 import type { TerminalId } from "./TerminalId";
 import type { ThreadFilter } from "./ThreadFilter";
 import type { ThreadId } from "./ThreadId";
@@ -809,4 +810,8 @@ thread_id: ThreadId | null,
 /**
  * Creation target when `thread_id` is absent.
  */
-target: ForgeAgentTarget | null, };
+target: ForgeAgentTarget | null, } | { "type": "subagent", 
+/**
+ * Operation to perform.
+ */
+request: SubagentRequest, };

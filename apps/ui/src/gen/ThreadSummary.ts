@@ -15,6 +15,13 @@ export type ThreadSummary = {
  */
 thread_id: ThreadId, 
 /**
+ * Thread that delegated this one, when this is a subagent.
+ *
+ * Child threads are hidden from the top-level list unless the filter asks
+ * for them; the subagent panel reads the tree through this field.
+ */
+parent_thread_id: ThreadId | null, 
+/**
  * Host running the thread.
  */
 host: HostId, 

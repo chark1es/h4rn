@@ -23,6 +23,7 @@ use crate::remote::{
     ConnectClient, RemoteState, TailscaleMode, advertised_addresses, pairing::read_direct_pairing,
 };
 use crate::server::{self, AppState};
+use crate::subagents::{SubagentManager, SubagentOptions, SubagentProvider};
 use crate::supervisor::ProcessSupervisor;
 use crate::terminal::{FileAudit, TerminalManager};
 use crate::threads::{McpSessionProvider, ThreadManager, ThreadManagerOptions};
@@ -38,6 +39,7 @@ pub struct DaemonBuilder {
     secure: Option<Arc<SecureService>>,
     mcp: Option<Arc<McpService>>,
     mcp_gate: Option<Arc<dyn h4rn_mcp::sharing::ConfirmationGate>>,
+    subagent_options: SubagentOptions,
 }
 
 impl DaemonBuilder {
@@ -53,6 +55,7 @@ impl DaemonBuilder {
             secure: None,
             mcp: None,
             mcp_gate: None,
+            subagent_options: SubagentOptions::default(),
         }
     }
 
@@ -113,6 +116,12 @@ impl DaemonBuilder {
     /// Replaces the process supervisor (diagnostics and tests).
     pub fn with_supervisor(mut self, supervisor: Arc<ProcessSupervisor>) -> Self {
         self.supervisor = supervisor;
+        self
+    }
+
+    /// Overrides subagent policy (nesting depth, default budgets, tick).
+    pub fn with_subagent_options(mut self, options: SubagentOptions) -> Self {
+        self.subagent_options = options;
         self
     }
 
@@ -278,9 +287,22 @@ impl DaemonBuilder {
         // `None` and a session starts without MCP rather than with a bogus URL.
         manager.set_mcp_provider(Arc::clone(&mcp) as Arc<dyn McpSessionProvider>);
 
+        // Delegation rides the same hub and namespace as the diagnostic tools;
+        // each session's bearer token scopes a call to its own thread.
+        let subagents = Arc::new(SubagentManager::new(
+            Arc::clone(&manager),
+            Arc::clone(&catalog),
+            self.config.data_dir.clone(),
+            self.subagent_options,
+        ));
+        mcp.hub()
+            .register_provider(Arc::new(SubagentProvider::new(Arc::clone(&subagents))));
+        subagents.start();
+
         Ok(Daemon {
             config: self.config,
             manager,
+            subagents,
             hosts,
             terminals,
             blobs,
@@ -301,6 +323,7 @@ impl DaemonBuilder {
 pub struct Daemon {
     config: Config,
     manager: Arc<ThreadManager>,
+    subagents: Arc<SubagentManager>,
     hosts: Arc<HostInventory>,
     terminals: Arc<TerminalManager>,
     blobs: Arc<BlobStore>,
@@ -329,6 +352,11 @@ impl Daemon {
     /// Thread manager handle (tests and diagnostics).
     pub fn manager(&self) -> Arc<ThreadManager> {
         Arc::clone(&self.manager)
+    }
+
+    /// Subagent supervisor handle (tests and diagnostics).
+    pub fn subagents(&self) -> Arc<SubagentManager> {
+        Arc::clone(&self.subagents)
     }
 
     /// Terminal manager handle (tests and diagnostics).
@@ -410,6 +438,7 @@ impl Daemon {
         let config = self.config.clone();
         let state = AppState {
             manager: Arc::clone(&self.manager),
+            subagents: Arc::clone(&self.subagents),
             hosts,
             terminals: Arc::clone(&self.terminals),
             blobs: Arc::clone(&self.blobs),
@@ -450,6 +479,7 @@ impl Daemon {
             listeners,
             addrs,
             manager: self.manager,
+            subagents: self.subagents,
             terminals: self.terminals,
             forge: self.forge,
             mcp: self.mcp,
@@ -466,6 +496,7 @@ pub struct BoundDaemon {
     listeners: Vec<TcpListener>,
     addrs: Vec<SocketAddr>,
     manager: Arc<ThreadManager>,
+    subagents: Arc<SubagentManager>,
     terminals: Arc<TerminalManager>,
     forge: Arc<ForgeService>,
     mcp: Arc<McpService>,
@@ -490,6 +521,11 @@ impl BoundDaemon {
         Arc::clone(&self.manager)
     }
 
+    /// Subagent supervisor for in-process tests and diagnostics.
+    pub fn subagents(&self) -> Arc<SubagentManager> {
+        Arc::clone(&self.subagents)
+    }
+
     /// MCP hub service for in-process tests and diagnostics.
     pub fn mcp(&self) -> Arc<McpService> {
         Arc::clone(&self.mcp)
@@ -506,6 +542,7 @@ impl BoundDaemon {
             listeners,
             addrs,
             manager,
+            subagents,
             terminals,
             forge,
             mcp,
@@ -528,6 +565,7 @@ impl BoundDaemon {
         }
         forge.shutdown();
         mcp.shutdown().await;
+        subagents.shutdown().await;
         manager.shutdown().await;
         terminals.shutdown().await;
         supervisor.shutdown().await;

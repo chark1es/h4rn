@@ -30,8 +30,9 @@ use h4rn_harness::{
 };
 use h4rn_protocol::{
     AgentState, ApprovalDecision, ApprovalKind, Attachment, AttachmentId, DeviceId, Event,
-    HarnessKind, HostId, Item, MessageRole, ProtoError, ProtoErrorCode, RuntimeMode, ThreadFilter,
-    ThreadId, ThreadSummary, ThreadTab, ToolCallStatus, TurnId, TurnStatus, Usage, WorktreeRequest,
+    HarnessKind, HostId, Item, MessageRole, ProtoError, ProtoErrorCode, RuntimeMode, SubagentId,
+    ThreadFilter, ThreadId, ThreadSummary, ThreadTab, ToolCallStatus, TurnId, TurnStatus, Usage,
+    WorktreeRequest,
 };
 use tokio::sync::{Mutex, broadcast};
 use tokio::task::JoinHandle;
@@ -83,6 +84,13 @@ impl Default for ThreadManagerOptions {
 /// A request to create a thread (the protocol fields without the wire id).
 #[derive(Clone, Debug)]
 pub struct NewThread {
+    /// Thread id to use. Subagents pre-allocate it so their records can be
+    /// inserted before the first child event races past.
+    pub thread_id: Option<ThreadId>,
+    /// Thread that delegated this one, when it is a subagent child.
+    pub parent_thread_id: Option<ThreadId>,
+    /// Subagent record this child belongs to.
+    pub subagent_id: Option<SubagentId>,
     /// Host that runs the harness.
     pub host: HostId,
     /// Harness adapter.
@@ -244,6 +252,30 @@ struct ActiveTurn {
 
 struct PendingApproval {
     kind: ApprovalKind,
+    /// Where this approval is mirrored when a subagent raised it.
+    forward: Option<ForwardedApproval>,
+}
+
+/// A mirrored approval that lets the parent inbox and the child session answer
+/// each other.
+#[derive(Clone, Debug)]
+struct ForwardedApproval {
+    /// The thread on the other side of the mirror.
+    thread_id: ThreadId,
+    /// The approval id that thread's UI or session uses.
+    approval_id: String,
+}
+
+/// One child approval on its way to the parent's inbox.
+struct ForwardedRequest {
+    parent_thread_id: ThreadId,
+    parent_approval_id: String,
+    child_thread_id: ThreadId,
+    child_approval_id: String,
+    subagent_id: Option<SubagentId>,
+    kind: ApprovalKind,
+    prompt: String,
+    options: Vec<h4rn_protocol::ApprovalOption>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -275,6 +307,7 @@ impl ThreadRecord {
         let tab = tab_for(&self.state, now, settings);
         ThreadSummary {
             thread_id: self.meta.thread_id.clone(),
+            parent_thread_id: self.meta.parent_thread_id.clone(),
             host: self.meta.host.clone(),
             harness: self.meta.harness,
             title: self.meta.title.clone(),
@@ -369,6 +402,132 @@ impl ThreadManager {
         let _ = self.inner.mcp.set(provider);
     }
 
+    /// Durable metadata for one thread, cloned for callers outside the manager.
+    pub async fn thread_meta(&self, thread_id: &ThreadId) -> Option<ThreadMeta> {
+        let handle = self.inner.handle(thread_id).await.ok()?;
+        let record = handle.lock().await;
+        Some(record.meta.clone())
+    }
+
+    /// Current projection of one thread.
+    pub async fn thread_summary(&self, thread_id: &ThreadId) -> Option<ThreadSummary> {
+        let handle = self.inner.handle(thread_id).await.ok()?;
+        let record = handle.lock().await;
+        Some(record.summary(&self.inner.options.settings))
+    }
+
+    /// The turn a thread would attach a new item to.
+    pub async fn thread_turn_id(&self, thread_id: &ThreadId) -> Option<TurnId> {
+        let handle = self.inner.handle(thread_id).await.ok()?;
+        let record = handle.lock().await;
+        Some(record.turn_id_for_event())
+    }
+
+    /// Appends projected events to one thread without a lifecycle transition.
+    ///
+    /// Subagent delegation uses this for its durable spawn/finish rows: they
+    /// belong in the parent's log but do not change the parent's tab.
+    pub async fn append_wire_only(
+        &self,
+        thread_id: &ThreadId,
+        wire: Vec<Event>,
+    ) -> Result<u64, ManagerError> {
+        if wire.is_empty() {
+            return Ok(0);
+        }
+        let handle = self.inner.handle(thread_id).await?;
+        let record = handle.lock().await;
+        let _guard = self.inner.emit_lock.lock().await;
+        let seqs = self
+            .inner
+            .journal
+            .append_wire(&record.meta.thread_id, &wire)
+            .await
+            .map_err(|error| ManagerError::Internal(error.to_string()))?;
+        self.inner.broadcast(&record.meta.thread_id, &wire, &seqs);
+        Ok(seqs.last().copied().unwrap_or(0))
+    }
+
+    /// Drops approvals that a finished child leaves behind.
+    ///
+    /// Both sides of the mirror are cleared: the parent's forwarded hand and
+    /// any hand still pending on the child's own thread. Without this a
+    /// cancelled or completed child leaves an answerable-looking cue that no
+    /// session can ever resolve.
+    pub async fn clear_approvals_for_child(
+        &self,
+        parent_thread_id: &ThreadId,
+        child_thread_id: &ThreadId,
+    ) -> Result<(), ManagerError> {
+        let parent = self.inner.handle(parent_thread_id).await?;
+        {
+            let mut record = parent.lock().await;
+            let pending: Vec<(String, ApprovalKind)> = record
+                .pending_approvals
+                .iter()
+                .filter(|(_, pending)| {
+                    pending
+                        .forward
+                        .as_ref()
+                        .is_some_and(|forward| &forward.thread_id == child_thread_id)
+                })
+                .map(|(approval_id, pending)| (approval_id.clone(), pending.kind))
+                .collect();
+            if !pending.is_empty() {
+                let now = Utc::now();
+                let mut domain = Vec::new();
+                let mut wire = Vec::new();
+                for (approval_id, kind) in pending {
+                    record.pending_approvals.remove(&approval_id);
+                    domain.push(if kind == ApprovalKind::Question {
+                        ThreadEvent::QuestionAnswered { at: now }
+                    } else {
+                        ThreadEvent::ApprovalResolved { at: now }
+                    });
+                    wire.push(Event::ApprovalResolved {
+                        thread_id: parent_thread_id.clone(),
+                        approval_id,
+                        option_id: None,
+                        by_device: None,
+                    });
+                }
+                self.inner.emit(&mut record, domain, wire).await?;
+            }
+        }
+
+        let Ok(child) = self.inner.handle(child_thread_id).await else {
+            return Ok(());
+        };
+        let mut record = child.lock().await;
+        let pending: Vec<(String, ApprovalKind)> = record
+            .pending_approvals
+            .iter()
+            .map(|(approval_id, pending)| (approval_id.clone(), pending.kind))
+            .collect();
+        if pending.is_empty() {
+            return Ok(());
+        }
+        let now = Utc::now();
+        let mut domain = Vec::new();
+        let mut wire = Vec::new();
+        for (approval_id, kind) in pending {
+            record.pending_approvals.remove(&approval_id);
+            domain.push(if kind == ApprovalKind::Question {
+                ThreadEvent::QuestionAnswered { at: now }
+            } else {
+                ThreadEvent::ApprovalResolved { at: now }
+            });
+            wire.push(Event::ApprovalResolved {
+                thread_id: child_thread_id.clone(),
+                approval_id,
+                option_id: None,
+                by_device: None,
+            });
+        }
+        self.inner.emit(&mut record, domain, wire).await?;
+        Ok(())
+    }
+
     /// Acquires the append lock so a global replay is a gap-free prefix.
     ///
     /// While the guard is held no event can be appended; the caller reads the
@@ -458,7 +617,10 @@ impl ThreadManager {
         }
 
         let now = Utc::now();
-        let thread_id = ThreadId::new_uuid_v7();
+        let thread_id = request
+            .thread_id
+            .clone()
+            .unwrap_or_else(ThreadId::new_uuid_v7);
         let resolved_attachments = self
             .inner
             .resolve_attachments(&thread_id, &request.attachments)
@@ -466,6 +628,8 @@ impl ThreadManager {
         let harness_attachments = harness_refs(&resolved_attachments);
         let meta = ThreadMeta {
             thread_id: thread_id.clone(),
+            parent_thread_id: request.parent_thread_id.clone(),
+            subagent_id: request.subagent_id.clone(),
             host: request.host,
             harness: request.harness,
             title: title_from_prompt(&request.prompt, &request.workspace_path),
@@ -661,6 +825,10 @@ impl ThreadManager {
     }
 
     /// Answers a pending approval or question.
+    ///
+    /// Approvals raised by a subagent are mirrored onto its parent. Answering
+    /// either the parent's namespaced id or the child's own id reaches the same
+    /// harness session and resolves both cues.
     pub async fn respond_approval(
         &self,
         thread_id: &ThreadId,
@@ -670,18 +838,43 @@ impl ThreadManager {
         by_device: Option<DeviceId>,
     ) -> Result<(), ManagerError> {
         let handle = self.inner.handle(thread_id).await?;
-        let mut record = handle.lock().await;
-        let Some(pending) = record.pending_approvals.remove(approval_id) else {
-            return Err(ManagerError::NotFound(format!(
-                "approval {approval_id} is not pending on thread {thread_id}"
-            )));
+        let (pending, is_child) = {
+            let mut record = handle.lock().await;
+            let Some(pending) = record.pending_approvals.remove(approval_id) else {
+                return Err(ManagerError::NotFound(format!(
+                    "approval {approval_id} is not pending on thread {thread_id}"
+                )));
+            };
+            (pending, record.meta.parent_thread_id.is_some())
         };
-        let kind = pending.kind;
 
-        let response = match record.session.as_mut() {
+        // Which record owns the live harness session, and which approval ids
+        // does each side of the mirror use?
+        let (target_thread, target_approval, mirror) = if is_child {
+            (
+                thread_id.clone(),
+                approval_id.to_owned(),
+                pending
+                    .forward
+                    .as_ref()
+                    .map(|forward| (forward.thread_id.clone(), forward.approval_id.clone())),
+            )
+        } else if let Some(forward) = &pending.forward {
+            (
+                forward.thread_id.clone(),
+                forward.approval_id.clone(),
+                Some((thread_id.clone(), approval_id.to_owned())),
+            )
+        } else {
+            (thread_id.clone(), approval_id.to_owned(), None)
+        };
+
+        let target = self.inner.handle(&target_thread).await?;
+        let mut target_record = target.lock().await;
+        let response = match target_record.session.as_mut() {
             Some(session) => Some(
                 session
-                    .respond_approval(approval_id, decision, option_id.as_deref())
+                    .respond_approval(&target_approval, decision, option_id.as_deref())
                     .await,
             ),
             None => None,
@@ -689,20 +882,26 @@ impl ThreadManager {
 
         match response {
             None => {
+                drop(target_record);
+                let mut record = handle.lock().await;
                 record
                     .pending_approvals
                     .insert(approval_id.to_owned(), pending);
                 Err(ManagerError::Conflict(format!(
-                    "thread {thread_id} lost its harness session"
+                    "thread {target_thread} lost its harness session"
                 )))
             }
             Some(Err(error)) => {
+                drop(target_record);
+                let mut record = handle.lock().await;
                 record
                     .pending_approvals
                     .insert(approval_id.to_owned(), pending);
                 Err(ManagerError::Internal(error.to_string()))
             }
             Some(Ok(())) => {
+                target_record.pending_approvals.remove(&target_approval);
+                let kind = pending.kind;
                 let now = Utc::now();
                 let domain = if kind == ApprovalKind::Question {
                     vec![ThreadEvent::QuestionAnswered { at: now }]
@@ -710,12 +909,31 @@ impl ThreadManager {
                     vec![ThreadEvent::ApprovalResolved { at: now }]
                 };
                 let wire = vec![Event::ApprovalResolved {
-                    thread_id: thread_id.clone(),
-                    approval_id: approval_id.to_owned(),
-                    option_id,
-                    by_device,
+                    thread_id: target_thread.clone(),
+                    approval_id: target_approval,
+                    option_id: option_id.clone(),
+                    by_device: by_device.clone(),
                 }];
-                self.inner.emit(&mut record, domain, wire).await?;
+                self.inner.emit(&mut target_record, domain, wire).await?;
+                drop(target_record);
+
+                if let Some((mirror_thread, mirror_approval)) = mirror {
+                    let mirror_handle = self.inner.handle(&mirror_thread).await?;
+                    let mut mirror_record = mirror_handle.lock().await;
+                    mirror_record.pending_approvals.remove(&mirror_approval);
+                    let domain = if kind == ApprovalKind::Question {
+                        vec![ThreadEvent::QuestionAnswered { at: now }]
+                    } else {
+                        vec![ThreadEvent::ApprovalResolved { at: now }]
+                    };
+                    let wire = vec![Event::ApprovalResolved {
+                        thread_id: mirror_thread,
+                        approval_id: mirror_approval,
+                        option_id,
+                        by_device,
+                    }];
+                    let _ = self.inner.emit(&mut mirror_record, domain, wire).await;
+                }
                 Ok(())
             }
         }
@@ -827,6 +1045,9 @@ impl ThreadManager {
             drop(record);
 
             if snoozed && !filter.include_snoozed {
+                continue;
+            }
+            if !filter.include_children && summary.parent_thread_id.is_some() {
                 continue;
             }
             if !filter.tabs.is_empty() && !filter.tabs.contains(&summary.tab) {
@@ -941,6 +1162,47 @@ impl Inner {
             .get(thread_id.as_str())
             .cloned()
             .ok_or_else(|| ManagerError::NotFound(format!("thread {thread_id} does not exist")))
+    }
+
+    /// Mirrors a child approval onto the parent thread's inbox.
+    ///
+    /// The parent's entry keeps a pointer back to the child so either side can
+    /// answer; see [`ThreadManager::respond_approval`]. A missing parent (the
+    /// parent was deleted, which the current daemon does not do) is ignored so
+    /// the child can still proceed.
+    async fn forward_approval(&self, request: ForwardedRequest) {
+        let Ok(parent) = self.handle(&request.parent_thread_id).await else {
+            return;
+        };
+        let mut record = parent.lock().await;
+        record.pending_approvals.insert(
+            request.parent_approval_id.clone(),
+            PendingApproval {
+                kind: request.kind,
+                forward: Some(ForwardedApproval {
+                    thread_id: request.child_thread_id.clone(),
+                    approval_id: request.child_approval_id,
+                }),
+            },
+        );
+        let now = Utc::now();
+        let domain = if request.kind == ApprovalKind::Question {
+            vec![ThreadEvent::QuestionAsked { at: now }]
+        } else {
+            vec![ThreadEvent::ApprovalRequested { at: now }]
+        };
+        let wire = vec![Event::ApprovalRequested {
+            thread_id: request.parent_thread_id,
+            turn_id: record.turn_id_for_event(),
+            approval_id: request.parent_approval_id,
+            subagent_id: request.subagent_id,
+            kind: request.kind,
+            prompt: format!("[Subagent] {}", request.prompt),
+            options: request.options,
+        }];
+        if let Err(error) = self.emit(&mut record, domain, wire).await {
+            tracing::warn!(%error, "could not mirror a subagent approval onto its parent");
+        }
     }
 
     /// Applies `domain` to the lifecycle state, appends both logs, broadcasts,
@@ -1214,6 +1476,7 @@ impl Inner {
             let mut domain = Vec::new();
             let mut wire = Vec::new();
             let mut completed = false;
+            let mut forward_approval: Option<ForwardedRequest> = None;
 
             // `SessionStarted` normally carries the native id, but keep the
             // defaulted accessor in sync too so an adapter that only reports
@@ -1311,9 +1574,19 @@ impl Inner {
                     options,
                 } => {
                     let turn_id = record.turn_id_for_event();
-                    record
-                        .pending_approvals
-                        .insert(approval_id.clone(), PendingApproval { kind });
+                    let parent_thread_id = record.meta.parent_thread_id.clone();
+                    let subagent_id = record.meta.subagent_id.clone();
+                    let parent_approval_id = format!("sa:{approval_id}");
+                    record.pending_approvals.insert(
+                        approval_id.clone(),
+                        PendingApproval {
+                            kind,
+                            forward: parent_thread_id.as_ref().map(|parent| ForwardedApproval {
+                                thread_id: parent.clone(),
+                                approval_id: parent_approval_id.clone(),
+                            }),
+                        },
+                    );
                     if kind == ApprovalKind::Question {
                         domain.push(ThreadEvent::QuestionAsked { at: now });
                     } else {
@@ -1322,11 +1595,24 @@ impl Inner {
                     wire.push(Event::ApprovalRequested {
                         thread_id: thread_id.clone(),
                         turn_id,
-                        approval_id,
+                        approval_id: approval_id.clone(),
+                        subagent_id,
                         kind,
-                        prompt,
-                        options,
+                        prompt: prompt.clone(),
+                        options: options.clone(),
                     });
+                    if let Some(parent_thread_id) = parent_thread_id {
+                        forward_approval = Some(ForwardedRequest {
+                            parent_thread_id,
+                            parent_approval_id,
+                            child_thread_id: thread_id.clone(),
+                            child_approval_id: approval_id,
+                            subagent_id: record.meta.subagent_id.clone(),
+                            kind,
+                            prompt,
+                            options,
+                        });
+                    }
                 }
                 HarnessEvent::Usage { usage } => {
                     if let Some(active) = record.active.as_mut() {
@@ -1425,6 +1711,10 @@ impl Inner {
                 tracing::error!(thread_id = %thread_id, %error, "failed to append harness event");
             }
             drop(record);
+
+            if let Some(forwarded) = forward_approval {
+                self.forward_approval(forwarded).await;
+            }
 
             if completed {
                 self.advance_queue(handle.clone()).await;

@@ -164,8 +164,13 @@ pub enum HubEvent {
 /// Where a qualified tool lives.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ToolSource {
-    /// An in-process provider, by namespace.
-    Provider(String),
+    /// An in-process provider, by namespace and registration index.
+    Provider {
+        /// Namespace the provider exposes tools under.
+        namespace: String,
+        /// Position in that namespace's provider list.
+        index: usize,
+    },
     /// A configured upstream server, by name.
     Upstream(String),
 }
@@ -292,31 +297,32 @@ impl McpHub {
     }
 
     /// A stable snapshot of the registered providers.
-    fn provider_snapshot(&self) -> Vec<(String, Arc<dyn ToolProvider>)> {
+    fn provider_snapshot(&self) -> Vec<(String, usize, Arc<dyn ToolProvider>)> {
         let providers = self
             .providers
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut snapshot: Vec<(String, Arc<dyn ToolProvider>)> = providers
+        let mut snapshot: Vec<(String, usize, Arc<dyn ToolProvider>)> = providers
             .namespaces()
-            .map(|namespace| {
-                (
-                    namespace.to_owned(),
-                    providers
-                        .get(namespace)
-                        .expect("namespace came from the map"),
-                )
+            .flat_map(|namespace| {
+                providers
+                    .for_namespace(namespace)
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(index, provider)| (namespace.to_owned(), index, provider))
             })
             .collect();
-        snapshot.sort_by(|left, right| left.0.cmp(&right.0));
+        snapshot.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
         snapshot
     }
 
-    fn provider(&self, namespace: &str) -> Option<Arc<dyn ToolProvider>> {
+    fn provider(&self, namespace: &str, index: usize) -> Option<Arc<dyn ToolProvider>> {
         self.providers
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(namespace)
+            .for_namespace(namespace)
+            .into_iter()
+            .nth(index)
     }
 
     /// This machine's id.
@@ -921,7 +927,7 @@ impl McpHub {
     pub async fn resolved_tools(&self, scope: &McpScope) -> Result<Vec<ResolvedTool>, HubError> {
         let mut used = BTreeSet::new();
         let mut tools = Vec::new();
-        for (namespace, provider) in self.provider_snapshot() {
+        for (namespace, index, provider) in self.provider_snapshot() {
             for definition in provider.list_tools(scope).await {
                 if !names::tool_name_is_addressable(&definition.name) {
                     continue;
@@ -936,7 +942,10 @@ impl McpHub {
                     server: namespace.clone(),
                     tool: definition.name.clone(),
                     definition,
-                    source: ToolSource::Provider(namespace.clone()),
+                    source: ToolSource::Provider {
+                        namespace: namespace.clone(),
+                        index,
+                    },
                 });
             }
         }
@@ -1010,9 +1019,9 @@ impl McpHub {
             )));
         }
         let result = match &tool.source {
-            ToolSource::Provider(namespace) => {
+            ToolSource::Provider { namespace, index } => {
                 let provider = self
-                    .provider(namespace)
+                    .provider(namespace, *index)
                     .ok_or_else(|| HubError::NotFound(namespace.clone()))?;
                 match provider.call_tool(&tool.tool, arguments, context).await {
                     Ok(result) => Ok(result),
@@ -1050,8 +1059,7 @@ impl McpHub {
         scope: &McpScope,
     ) -> Result<Vec<crate::types::ResourceDefinition>, HubError> {
         let mut resources = Vec::new();
-        for (namespace, provider) in self.provider_snapshot() {
-            let _ = namespace;
+        for (_namespace, _index, provider) in self.provider_snapshot() {
             resources.extend(provider.list_resources(scope).await);
         }
         for record in self.visible_records(scope).await? {
@@ -1083,8 +1091,7 @@ impl McpHub {
                 .await
                 .map_err(HubError::Upstream);
         }
-        for (namespace, provider) in self.provider_snapshot() {
-            let _ = namespace;
+        for (_namespace, _index, provider) in self.provider_snapshot() {
             if let Ok(contents) = provider.read_resource(uri, scope).await {
                 return Ok(contents);
             }
@@ -1098,8 +1105,7 @@ impl McpHub {
         scope: &McpScope,
     ) -> Result<Vec<crate::types::PromptDefinition>, HubError> {
         let mut prompts = Vec::new();
-        for (namespace, provider) in self.provider_snapshot() {
-            let _ = namespace;
+        for (_namespace, _index, provider) in self.provider_snapshot() {
             prompts.extend(provider.list_prompts(scope).await);
         }
         for record in self.visible_records(scope).await? {
@@ -1132,8 +1138,7 @@ impl McpHub {
                 .await
                 .map_err(HubError::Upstream);
         }
-        for (namespace, provider) in self.provider_snapshot() {
-            let _ = namespace;
+        for (_namespace, _index, provider) in self.provider_snapshot() {
             if let Ok(messages) = provider.get_prompt(name, arguments, scope).await {
                 return Ok(messages);
             }

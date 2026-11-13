@@ -64,6 +64,8 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 pub struct AppState {
     /// Thread manager and live sessions.
     pub manager: Arc<ThreadManager>,
+    /// Delegated child threads and their budgets (ADR-038).
+    pub subagents: Arc<crate::subagents::SubagentManager>,
     /// Host inventory.
     pub hosts: Arc<HostInventory>,
     /// Daemon-owned PTY terminals.
@@ -622,6 +624,9 @@ impl Connection {
                     worktree,
                 } => {
                     let request = crate::threads::NewThread {
+                        thread_id: None,
+                        parent_thread_id: None,
+                        subagent_id: None,
                         host,
                         harness,
                         workspace_path: workspace_path.clone(),

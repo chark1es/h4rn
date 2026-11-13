@@ -717,6 +717,14 @@ pub enum ClientRequest {
         /// Creation target when `thread_id` is absent.
         target: Option<crate::forge::ForgeAgentTarget>,
     },
+    /// One cross-harness subagent operation (ADR-038).
+    ///
+    /// Like [`ClientRequest::Mcp`], every operation rides this single envelope
+    /// so the delegation surface grows without new top-level discriminants.
+    Subagent {
+        /// Operation to perform.
+        request: crate::subagents::SubagentRequest,
+    },
 }
 
 #[cfg(test)]

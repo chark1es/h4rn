@@ -206,9 +206,13 @@ pub trait ToolProvider: Send + Sync {
 }
 
 /// The set of registered providers, keyed by namespace.
+///
+/// Several providers may share one namespace: Phase 4 registers both the
+/// diagnostic `h4rn` tool set and the subagent tool set under `h4rn`, so the
+/// registry holds a list per namespace instead of replacing on collision.
 #[derive(Default, Clone)]
 pub struct ProviderRegistry {
-    providers: BTreeMap<String, Arc<dyn ToolProvider>>,
+    providers: BTreeMap<String, Vec<Arc<dyn ToolProvider>>>,
 }
 
 impl ProviderRegistry {
@@ -217,16 +221,25 @@ impl ProviderRegistry {
         Self::default()
     }
 
-    /// Registers a provider. A duplicate namespace replaces the previous
-    /// provider, which is what hot-reloading a tool set needs.
+    /// Registers a provider at the end of its namespace's list.
     pub fn register(&mut self, provider: Arc<dyn ToolProvider>) {
         self.providers
-            .insert(provider.namespace().to_owned(), provider);
+            .entry(provider.namespace().to_owned())
+            .or_default()
+            .push(provider);
     }
 
-    /// Looks a provider up by namespace.
+    /// Looks up the first provider registered under a namespace.
     pub fn get(&self, namespace: &str) -> Option<Arc<dyn ToolProvider>> {
-        self.providers.get(namespace).cloned()
+        self.providers
+            .get(namespace)
+            .and_then(|providers| providers.first())
+            .cloned()
+    }
+
+    /// Every provider registered under one namespace, in registration order.
+    pub fn for_namespace(&self, namespace: &str) -> Vec<Arc<dyn ToolProvider>> {
+        self.providers.get(namespace).cloned().unwrap_or_default()
     }
 
     /// Every namespace, in deterministic order.
@@ -234,22 +247,22 @@ impl ProviderRegistry {
         self.providers.keys().map(String::as_str)
     }
 
-    /// Every provider, in deterministic order.
+    /// Every provider, for every namespace, in deterministic order.
     pub fn providers(&self) -> impl Iterator<Item = &Arc<dyn ToolProvider>> {
-        self.providers.values()
+        self.providers.values().flatten()
     }
 
-    /// Whether a namespace is already registered.
+    /// Whether a namespace has at least one provider.
     pub fn contains(&self, namespace: &str) -> bool {
         self.providers.contains_key(namespace)
     }
 
-    /// Number of registered providers.
+    /// Number of distinct namespaces.
     pub fn len(&self) -> usize {
         self.providers.len()
     }
 
-    /// Whether the registry is empty.
+    /// Whether the registry has no providers.
     pub fn is_empty(&self) -> bool {
         self.providers.is_empty()
     }
@@ -415,11 +428,12 @@ mod tests {
     }
 
     #[test]
-    fn registry_rejects_duplicate_namespaces_by_replacing() {
+    fn registry_keeps_providers_that_share_a_namespace() {
         let mut registry = ProviderRegistry::new();
         registry.register(Arc::new(EchoProvider::new("1")));
         registry.register(Arc::new(EchoProvider::new("2")));
         assert_eq!(registry.len(), 1);
+        assert_eq!(registry.for_namespace("h4rn").len(), 2);
         assert!(registry.contains("h4rn"));
     }
 }

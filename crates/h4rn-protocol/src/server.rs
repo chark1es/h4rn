@@ -9,7 +9,8 @@ use crate::common::{
     AgentState, ApprovalKind, ApprovalOption, HostSummary, Item, ThreadSummary, ToolCall,
     TurnStatus, Usage,
 };
-use crate::ids::{DeviceId, ThreadId, TurnId};
+use crate::ids::{DeviceId, SubagentId, ThreadId, TurnId};
+use crate::subagents::SubagentView;
 use crate::terminal::{TerminalExitNotice, TerminalInfo};
 
 /// One frame sent by the daemon.
@@ -372,6 +373,16 @@ pub enum ResponseBody {
         /// Flattened result.
         result: crate::mcp::McpTestCallResult,
     },
+    /// Subagent children of one parent (or the whole daemon).
+    Subagents {
+        /// Matching subagents, newest first.
+        subagents: Vec<SubagentView>,
+    },
+    /// One subagent after a spawn or a cancel.
+    Subagent {
+        /// Current view.
+        subagent: SubagentView,
+    },
     /// A request with no payload completed successfully.
     Ack,
 }
@@ -511,6 +522,12 @@ pub enum Event {
         turn_id: TurnId,
         /// Opaque approval id.
         approval_id: String,
+        /// Subagent that raised the hand, when it belongs to one.
+        ///
+        /// The approval is emitted on the parent thread with a namespaced
+        /// approval id; this names the child so the UI can attribute it.
+        #[serde(default)]
+        subagent_id: Option<SubagentId>,
         /// What kind of hand is raised.
         kind: ApprovalKind,
         /// What the harness wants to do.
@@ -674,6 +691,37 @@ pub enum Event {
         error: Option<String>,
         /// When the call returned.
         at: DateTime<Utc>,
+    },
+    /// A parent thread spawned a subagent (ADR-039).
+    ///
+    /// Durable: appended to the **parent's** log so a reconnecting client can
+    /// rebuild the delegation tree even if the spawn response was lost.
+    SubagentSpawned {
+        /// Thread that delegated the work.
+        parent_thread_id: ThreadId,
+        /// The new child.
+        subagent: SubagentView,
+    },
+    /// A subagent changed state or progress.
+    ///
+    /// Transient like [`Event::McpServerStatus`]: budget counters and orb state
+    /// change without a client turn, so this carries the current durable
+    /// sequence instead of consuming one.
+    SubagentUpdated {
+        /// Thread that delegated the work.
+        parent_thread_id: ThreadId,
+        /// Current view.
+        subagent: SubagentView,
+    },
+    /// A subagent reached a terminal state.
+    ///
+    /// Durable, like [`Event::SubagentSpawned`], and written to the parent's
+    /// log with the child thread id in the view.
+    SubagentFinished {
+        /// Thread that delegated the work.
+        parent_thread_id: ThreadId,
+        /// Final view, including the result.
+        subagent: SubagentView,
     },
 }
 

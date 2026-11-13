@@ -34,6 +34,7 @@ pub mod mcp;
 pub mod remote;
 pub mod secrets;
 pub mod server;
+pub mod subagents;
 pub mod supervisor;
 pub mod terminal;
 pub mod threads;

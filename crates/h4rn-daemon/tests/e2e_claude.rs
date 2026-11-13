@@ -155,6 +155,9 @@ async fn real_claude_daemon_round_trip_and_resume() {
 
     let created = manager
         .create_thread(NewThread {
+            thread_id: None,
+            parent_thread_id: None,
+            subagent_id: None,
             host,
             harness: HarnessKind::ClaudeCode,
             workspace_path: repo.path().display().to_string(),

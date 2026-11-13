@@ -14,7 +14,9 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use h4rn_core::{EventStore, SqliteEventStore, StoreError, ThreadEvent};
-use h4rn_protocol::{Event, HarnessKind, HostId, RuntimeMode, ThreadId, Usage, WorktreeRequest};
+use h4rn_protocol::{
+    Event, HarnessKind, HostId, RuntimeMode, SubagentId, ThreadId, Usage, WorktreeRequest,
+};
 use serde_json::json;
 use sqlx::{Row, SqlitePool};
 
@@ -23,6 +25,10 @@ use sqlx::{Row, SqlitePool};
 pub struct ThreadMeta {
     /// Thread id.
     pub thread_id: ThreadId,
+    /// Thread that delegated this one, when this is a subagent child.
+    pub parent_thread_id: Option<ThreadId>,
+    /// Subagent record this child belongs to, when it is one.
+    pub subagent_id: Option<SubagentId>,
     /// Host running the harness.
     pub host: HostId,
     /// Harness adapter.
@@ -163,7 +169,9 @@ impl SqliteJournal {
                 usage_json     TEXT NOT NULL,
                 resume_id      TEXT,
                 runtime_mode   TEXT NOT NULL DEFAULT 'approval_required',
-                worktree_json  TEXT
+                worktree_json  TEXT,
+                parent_thread_id TEXT,
+                subagent_id    TEXT
             )",
         )
         .execute(&self.pool)
@@ -178,6 +186,10 @@ impl SqliteJournal {
         )
         .await?;
         self.ensure_column("daemon_threads", "worktree_json", "TEXT")
+            .await?;
+        self.ensure_column("daemon_threads", "parent_thread_id", "TEXT")
+            .await?;
+        self.ensure_column("daemon_threads", "subagent_id", "TEXT")
             .await?;
 
         sqlx::query(
@@ -236,8 +248,8 @@ impl Journal for SqliteJournal {
         let worktree_json = serde_json::to_string(&meta.worktree)?;
         sqlx::query(
             "INSERT INTO daemon_threads
-                (thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json, parent_thread_id, subagent_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(thread_id) DO UPDATE SET
                 host = excluded.host,
                 harness = excluded.harness,
@@ -247,7 +259,9 @@ impl Journal for SqliteJournal {
                 usage_json = excluded.usage_json,
                 resume_id = excluded.resume_id,
                 runtime_mode = excluded.runtime_mode,
-                worktree_json = excluded.worktree_json",
+                worktree_json = excluded.worktree_json,
+                parent_thread_id = excluded.parent_thread_id,
+                subagent_id = excluded.subagent_id",
         )
         .bind(meta.thread_id.as_str())
         .bind(meta.host.as_str())
@@ -260,6 +274,8 @@ impl Journal for SqliteJournal {
         .bind(meta.resume_id.as_deref())
         .bind(runtime_mode)
         .bind(worktree_json)
+        .bind(meta.parent_thread_id.as_ref().map(ThreadId::as_str))
+        .bind(meta.subagent_id.as_ref().map(SubagentId::as_str))
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -267,7 +283,7 @@ impl Journal for SqliteJournal {
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json
+            "SELECT thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json, parent_thread_id, subagent_id
              FROM daemon_threads ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -287,6 +303,12 @@ impl Journal for SqliteJournal {
                 .unwrap_or_else(|_| Utc::now());
             metas.push(ThreadMeta {
                 thread_id: ThreadId::new(thread_id),
+                parent_thread_id: row
+                    .try_get::<Option<String>, _>("parent_thread_id")?
+                    .map(ThreadId::new),
+                subagent_id: row
+                    .try_get::<Option<String>, _>("subagent_id")?
+                    .map(SubagentId::new),
                 host: HostId::new(host),
                 harness: serde_json::from_str(&format!("\"{harness}\""))
                     .unwrap_or(HarnessKind::ClaudeCode),
@@ -409,6 +431,8 @@ impl Journal for SqliteJournal {
 pub fn thread_meta_json(meta: &ThreadMeta) -> serde_json::Value {
     json!({
         "thread_id": meta.thread_id,
+        "parent_thread_id": meta.parent_thread_id,
+        "subagent_id": meta.subagent_id,
         "host": meta.host,
         "harness": meta.harness,
         "title": meta.title,
@@ -430,6 +454,8 @@ mod tests {
     fn meta(thread_id: &str) -> ThreadMeta {
         ThreadMeta {
             thread_id: ThreadId::new(thread_id),
+            parent_thread_id: None,
+            subagent_id: None,
             host: HostId::new("host_test"),
             harness: HarnessKind::ClaudeCode,
             title: "first prompt".into(),
@@ -446,6 +472,7 @@ mod tests {
     fn summary() -> ThreadSummary {
         ThreadSummary {
             thread_id: ThreadId::new("th_one"),
+            parent_thread_id: None,
             host: HostId::new("host_test"),
             harness: HarnessKind::ClaudeCode,
             title: "first prompt".into(),

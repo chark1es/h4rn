@@ -38,6 +38,7 @@ import type { SkillImportPreview } from "./SkillImportPreview";
 import type { SkillInventory } from "./SkillInventory";
 import type { SkillSummary } from "./SkillSummary";
 import type { SkillSyncStatus } from "./SkillSyncStatus";
+import type { SubagentView } from "./SubagentView";
 import type { TerminalInfo } from "./TerminalInfo";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadSummary } from "./ThreadSummary";
@@ -324,4 +325,12 @@ tools: Array<McpToolInfo>, } | { "type": "mcp_call",
 /**
  * Flattened result.
  */
-result: McpTestCallResult, } | { "type": "ack" };
+result: McpTestCallResult, } | { "type": "subagents", 
+/**
+ * Matching subagents, newest first.
+ */
+subagents: Array<SubagentView>, } | { "type": "subagent", 
+/**
+ * Current view.
+ */
+subagent: SubagentView, } | { "type": "ack" };

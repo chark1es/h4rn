@@ -26,4 +26,12 @@ search: string | null,
 /**
  * Include snoozed threads in the result set.
  */
-include_snoozed: boolean, };
+include_snoozed: boolean, 
+/**
+ * Include subagent child threads in the result set.
+ *
+ * Child rows are hidden by default so the top-level list and inbox stay
+ * about the user's own conversations; opening a parent asks for them
+ * explicitly.
+ */
+include_children: boolean, };
