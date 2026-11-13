@@ -5,6 +5,38 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### Phase 6 — forges
+
+- **Provider-agnostic forge layer** (`h4rn-forge`): one `Forge` trait with
+  GitHub (REST, plus GraphQL review threads and a REST fallback), GitLab REST
+  v4, and a shared Gitea/Forgejo API v1 client. Normalised PRs, diffs, review
+  threads (path/line/side/resolved), general comments, checks/pipelines and
+  review state live in `h4rn-protocol::forge`.
+- **Repository detection** from ssh, scp-like and https git remotes, with
+  credential redaction, nested GitLab namespaces, and explicit
+  `forge-hosts.json` mappings for GitHub Enterprise, self-hosted GitLab,
+  Gitea/Forgejo and ssh aliases; unknown hosts are never guessed.
+- **Accounts and auth**: least-privilege PATs validated before storage, GitHub
+  OAuth device flow (`H4RN_GITHUB_CLIENT_ID`), and explicit ask-then-import from
+  `gh auth token` / `glab auth status --show-token`. Tokens live in the OS
+  keychain or the encrypted-file fallback; they never reach the wire, logs or
+  audit.
+- **Daemon wiring** for `ForgeListAccounts`, `AddAccount`, `RemoveAccount`,
+  `DetectRepo`, `ListPrs`, `GetPr`, `GetPrDiff`, `ListPrComments`, `ListChecks`,
+  `Reply`, `Comment`, `OpenPr` and `HandPrToAgent`; PR writes are recorded in
+  `forge-audit.jsonl`.
+- **Checks polling** with backoff (`H4RN_FORGE_POLL_SECS`) and a transient
+  `forges_checks_updated` event, per-account request budgets
+  (`H4RN_FORGE_RPM`), `retry-after`/`x-ratelimit-reset` handling, GitHub ETag
+  revalidation and bounded pagination.
+- **Agent handoff** (`pr_context_for_agent`): unresolved threads, failing
+  checks and diff stats rendered as compact markdown for a new or existing
+  thread.
+- **Docs and tests**: `docs/forges.md` (setup, scopes, self-hosted URLs,
+  capability matrix), wiremock coverage for all three API shapes, a real Docker
+  Gitea/Forgejo run via `scripts/test-forges.sh`, and an ignored read-only live
+  GitHub test.
+
 ### Phase 3 — connect
 
 - **Relay service** (`h4rn-connect`): axum + Postgres, self-hostable image and compose stack

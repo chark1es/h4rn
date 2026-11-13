@@ -205,6 +205,72 @@ pub enum ResponseBody {
         /// Metadata and the binary stream id to collect.
         download: BlobDownload,
     },
+    /// Configured forge accounts and per-forge capabilities.
+    ForgeAccounts {
+        /// Accounts on this daemon.
+        accounts: Vec<crate::forge::ForgeAccount>,
+        /// Capability rows, one per supported forge.
+        capabilities: Vec<crate::forge::ForgeCapabilityEntry>,
+    },
+    /// A forge account was validated and stored.
+    ForgeAccount {
+        /// Public account metadata (never the token).
+        account: crate::forge::ForgeAccount,
+    },
+    /// Forge repositories detected in a workspace.
+    ForgeRepos {
+        /// Detected remotes, preferred remote first.
+        repos: Vec<crate::forge::ForgeRemote>,
+    },
+    /// One page of pull requests.
+    ForgePrs {
+        /// Matching PRs.
+        prs: Vec<crate::forge::ForgePrSummary>,
+        /// Page number returned.
+        page: u32,
+        /// Another page exists.
+        has_more: bool,
+    },
+    /// One pull request.
+    ForgePr {
+        /// Detail.
+        pr: crate::forge::ForgePullRequest,
+    },
+    /// One page of a pull request diff.
+    ForgeDiff {
+        /// Files and pagination state.
+        diff: crate::forge::ForgeDiffPage,
+    },
+    /// PR comments, review threads and reviews.
+    ForgeComments {
+        /// Conversation page.
+        page: crate::forge::ForgeCommentPage,
+    },
+    /// PR checks and their aggregate state.
+    ForgeChecks {
+        /// Checks snapshot.
+        checks: crate::forge::ForgeChecks,
+    },
+    /// A general comment was posted.
+    ForgeCommentPosted {
+        /// The new comment.
+        comment: crate::forge::ForgeComment,
+    },
+    /// A review-thread reply was posted.
+    ForgeReviewCommentPosted {
+        /// The new review comment.
+        comment: crate::forge::ForgeReviewComment,
+    },
+    /// A pull request was opened.
+    ForgePrOpened {
+        /// The new PR.
+        pr: crate::forge::ForgePullRequest,
+    },
+    /// A PR context block was handed to a thread.
+    ForgeHandoff {
+        /// Thread, turn and the exact markdown sent.
+        handoff: crate::forge::ForgeHandoff,
+    },
     /// A request with no payload completed successfully.
     Ack,
 }
@@ -431,6 +497,20 @@ pub enum Event {
         done: bool,
         /// True when the daemon hit its result cap.
         truncated: bool,
+    },
+    /// A watched pull request's checks changed.
+    ///
+    /// Produced by the daemon's backoff poller rather than by the forge's own
+    /// webhooks, so it is transient: it carries the current durable sequence
+    /// number and is never journaled. Clients refresh the checks tab when they
+    /// see it.
+    ForgeChecksUpdated {
+        /// Repository.
+        repo: crate::forge::ForgeRepoRef,
+        /// PR number.
+        number: u32,
+        /// New snapshot, including the aggregate state.
+        checks: crate::forge::ForgeChecks,
     },
     /// The client's multipath transport changed state (ADR-009).
     ///

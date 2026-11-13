@@ -4,6 +4,11 @@ import type { AttachmentId } from "./AttachmentId";
 import type { BlobRange } from "./BlobRange";
 import type { DeviceInfo } from "./DeviceInfo";
 import type { DiffAgainst } from "./DiffAgainst";
+import type { ForgeAgentTarget } from "./ForgeAgentTarget";
+import type { ForgeCredentialSource } from "./ForgeCredentialSource";
+import type { ForgeKind } from "./ForgeKind";
+import type { ForgePrFilter } from "./ForgePrFilter";
+import type { ForgeRepoRef } from "./ForgeRepoRef";
 import type { FsCreateKind } from "./FsCreateKind";
 import type { HarnessKind } from "./HarnessKind";
 import type { HostId } from "./HostId";
@@ -480,23 +485,155 @@ since: string | null,
 /**
  * Optional host filter.
  */
-host: HostId | null, } | { "type": "forge_list_prs", 
+host: HostId | null, } | { "type": "forge_list_accounts" } | { "type": "forge_add_account", 
 /**
- * Host that owns the forge credentials.
+ * Forge implementation.
  */
-host: HostId, 
+forge: ForgeKind, 
 /**
- * `owner/name`.
+ * Public web base URL (`https://github.com`, `https://ghe.example.com`).
  */
-repository: string, } | { "type": "forge_create_pr", 
+base_url: string, 
 /**
- * Host that owns the forge credentials.
+ * Personal access token or OAuth access token.
  */
-host: HostId, 
+token: string, 
 /**
- * `owner/name`.
+ * Login to record; the daemon discovers it when omitted.
  */
-repository: string, 
+username: string | null, 
+/**
+ * Where the token came from.
+ */
+source: ForgeCredentialSource, } | { "type": "forge_remove_account", 
+/**
+ * Account to remove.
+ */
+account_id: string, } | { "type": "forge_detect_repo", 
+/**
+ * Absolute workspace path on this host.
+ */
+workspace: string, } | { "type": "forge_list_prs", 
+/**
+ * Account to use; the daemon picks the only matching one when omitted.
+ */
+account_id: string | null, 
+/**
+ * Repository to query.
+ */
+repo: ForgeRepoRef, 
+/**
+ * Which PRs to return.
+ */
+filter: ForgePrFilter, 
+/**
+ * Page number, starting at 1.
+ */
+page: number, } | { "type": "forge_get_pr", 
+/**
+ * Account to use.
+ */
+account_id: string | null, 
+/**
+ * Repository.
+ */
+repo: ForgeRepoRef, 
+/**
+ * PR number.
+ */
+number: number, } | { "type": "forge_get_pr_diff", 
+/**
+ * Account to use.
+ */
+account_id: string | null, 
+/**
+ * Repository.
+ */
+repo: ForgeRepoRef, 
+/**
+ * PR number.
+ */
+number: number, 
+/**
+ * Page number, starting at 1.
+ */
+page: number, 
+/**
+ * Files per page; the daemon clamps it.
+ */
+per_page: number | null, } | { "type": "forge_list_pr_comments", 
+/**
+ * Account to use.
+ */
+account_id: string | null, 
+/**
+ * Repository.
+ */
+repo: ForgeRepoRef, 
+/**
+ * PR number.
+ */
+number: number, } | { "type": "forge_list_checks", 
+/**
+ * Account to use.
+ */
+account_id: string | null, 
+/**
+ * Repository.
+ */
+repo: ForgeRepoRef, 
+/**
+ * PR number.
+ */
+number: number, } | { "type": "forge_reply", 
+/**
+ * Account to use.
+ */
+account_id: string | null, 
+/**
+ * Repository.
+ */
+repo: ForgeRepoRef, 
+/**
+ * PR number.
+ */
+number: number, 
+/**
+ * Thread or discussion id, when replying to a review thread.
+ */
+thread_id: string | null, 
+/**
+ * Comment being replied to.
+ */
+comment_id: string, 
+/**
+ * Markdown body.
+ */
+body: string, } | { "type": "forge_comment", 
+/**
+ * Account to use.
+ */
+account_id: string | null, 
+/**
+ * Repository.
+ */
+repo: ForgeRepoRef, 
+/**
+ * PR number.
+ */
+number: number, 
+/**
+ * Markdown body.
+ */
+body: string, } | { "type": "forge_open_pr", 
+/**
+ * Thread whose branch becomes the PR head.
+ */
+thread_id: ThreadId, 
+/**
+ * Explicit repository; detected from the workspace when omitted.
+ */
+repo: ForgeRepoRef | null, 
 /**
  * PR title.
  */
@@ -506,10 +643,26 @@ title: string,
  */
 body: string, 
 /**
- * Source branch.
- */
-head: string, 
-/**
  * Target branch.
  */
-base: string, };
+base: string, } | { "type": "forge_hand_pr_to_agent", 
+/**
+ * Account to use.
+ */
+account_id: string | null, 
+/**
+ * Repository.
+ */
+repo: ForgeRepoRef, 
+/**
+ * PR number.
+ */
+number: number, 
+/**
+ * Existing thread to update.
+ */
+thread_id: ThreadId | null, 
+/**
+ * Creation target when `thread_id` is absent.
+ */
+target: ForgeAgentTarget | null, };

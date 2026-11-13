@@ -93,6 +93,21 @@ impl Config {
         self.data_dir.join(crate::remote::audit::AUDIT_FILE)
     }
 
+    /// Path of the public forge-account metadata (no tokens).
+    pub fn forge_accounts_path(&self) -> PathBuf {
+        self.data_dir.join(crate::forge::ACCOUNTS_FILE)
+    }
+
+    /// Path of custom forge host mappings.
+    pub fn forge_hosts_path(&self) -> PathBuf {
+        self.data_dir.join(crate::forge::HOSTS_FILE)
+    }
+
+    /// Path of the local forge write audit trail.
+    pub fn forge_audit_path(&self) -> PathBuf {
+        self.data_dir.join(crate::forge::AUDIT_FILE)
+    }
+
     /// Directory holding content-addressed attachment blobs (ADR-008).
     pub fn blob_dir(&self) -> PathBuf {
         self.data_dir.join("blobs")

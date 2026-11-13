@@ -3,6 +3,17 @@ import type { BlobDownload } from "./BlobDownload";
 import type { BlobInfo } from "./BlobInfo";
 import type { DeviceId } from "./DeviceId";
 import type { FileEntry } from "./FileEntry";
+import type { ForgeAccount } from "./ForgeAccount";
+import type { ForgeCapabilityEntry } from "./ForgeCapabilityEntry";
+import type { ForgeChecks } from "./ForgeChecks";
+import type { ForgeComment } from "./ForgeComment";
+import type { ForgeCommentPage } from "./ForgeCommentPage";
+import type { ForgeDiffPage } from "./ForgeDiffPage";
+import type { ForgeHandoff } from "./ForgeHandoff";
+import type { ForgePrSummary } from "./ForgePrSummary";
+import type { ForgePullRequest } from "./ForgePullRequest";
+import type { ForgeRemote } from "./ForgeRemote";
+import type { ForgeReviewComment } from "./ForgeReviewComment";
 import type { FsDeleteResult } from "./FsDeleteResult";
 import type { FsDiff } from "./FsDiff";
 import type { FsFileContent } from "./FsFileContent";
@@ -161,4 +172,64 @@ upload: UploadState, } | { "type": "blob",
 /**
  * Metadata and the binary stream id to collect.
  */
-download: BlobDownload, } | { "type": "ack" };
+download: BlobDownload, } | { "type": "forge_accounts", 
+/**
+ * Accounts on this daemon.
+ */
+accounts: Array<ForgeAccount>, 
+/**
+ * Capability rows, one per supported forge.
+ */
+capabilities: Array<ForgeCapabilityEntry>, } | { "type": "forge_account", 
+/**
+ * Public account metadata (never the token).
+ */
+account: ForgeAccount, } | { "type": "forge_repos", 
+/**
+ * Detected remotes, preferred remote first.
+ */
+repos: Array<ForgeRemote>, } | { "type": "forge_prs", 
+/**
+ * Matching PRs.
+ */
+prs: Array<ForgePrSummary>, 
+/**
+ * Page number returned.
+ */
+page: number, 
+/**
+ * Another page exists.
+ */
+has_more: boolean, } | { "type": "forge_pr", 
+/**
+ * Detail.
+ */
+pr: ForgePullRequest, } | { "type": "forge_diff", 
+/**
+ * Files and pagination state.
+ */
+diff: ForgeDiffPage, } | { "type": "forge_comments", 
+/**
+ * Conversation page.
+ */
+page: ForgeCommentPage, } | { "type": "forge_checks", 
+/**
+ * Checks snapshot.
+ */
+checks: ForgeChecks, } | { "type": "forge_comment_posted", 
+/**
+ * The new comment.
+ */
+comment: ForgeComment, } | { "type": "forge_review_comment_posted", 
+/**
+ * The new review comment.
+ */
+comment: ForgeReviewComment, } | { "type": "forge_pr_opened", 
+/**
+ * The new PR.
+ */
+pr: ForgePullRequest, } | { "type": "forge_handoff", 
+/**
+ * Thread, turn and the exact markdown sent.
+ */
+handoff: ForgeHandoff, } | { "type": "ack" };

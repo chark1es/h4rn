@@ -13,6 +13,7 @@ use tokio::net::TcpListener;
 use crate::auth::TokenStore;
 use crate::blobs::{AttachmentResolver, BlobStore};
 use crate::config::Config;
+use crate::forge::ForgeService;
 use crate::fs::FsService;
 use crate::harnesses::{HarnessCatalog, StaticHarnessCatalog};
 use crate::hosts::HostInventory;
@@ -170,6 +171,9 @@ impl DaemonBuilder {
         }
         manager.set_snapshot_store(fs.snapshots());
 
+        let forge = ForgeService::open(&self.config.data_dir)
+            .map_err(|error| anyhow::anyhow!("open the forge service: {error}"))?;
+
         let tokens = TokenStore::new(&self.config.data_dir);
         // Provision on first serve so a client has a token to read.
         let _ = tokens.load_or_create()?;
@@ -216,6 +220,7 @@ impl DaemonBuilder {
             blobs,
             tokens,
             fs,
+            forge,
             secure,
             remote,
             supervisor: self.supervisor,
@@ -232,6 +237,7 @@ pub struct Daemon {
     blobs: Arc<BlobStore>,
     tokens: TokenStore,
     fs: Arc<FsService>,
+    forge: Arc<ForgeService>,
     secure: Option<Arc<SecureService>>,
     remote: Option<Arc<RemoteState>>,
     supervisor: Arc<ProcessSupervisor>,
@@ -313,6 +319,7 @@ impl Daemon {
             blobs: Arc::clone(&self.blobs),
             tokens: self.tokens,
             fs: self.fs,
+            forge: Arc::clone(&self.forge),
             secure: secure.clone(),
             remote: remote.as_ref().map(|remote| Arc::clone(&remote.audit)),
             started: std::time::Instant::now(),
@@ -345,6 +352,7 @@ impl Daemon {
             addrs,
             manager: self.manager,
             terminals: self.terminals,
+            forge: self.forge,
             supervisor: self.supervisor,
             data_dir: self.config.data_dir,
             remote_tasks,
@@ -359,6 +367,7 @@ pub struct BoundDaemon {
     addrs: Vec<SocketAddr>,
     manager: Arc<ThreadManager>,
     terminals: Arc<TerminalManager>,
+    forge: Arc<ForgeService>,
     supervisor: Arc<ProcessSupervisor>,
     data_dir: PathBuf,
     remote_tasks: Vec<tokio::task::JoinHandle<()>>,
@@ -392,6 +401,7 @@ impl BoundDaemon {
             addrs,
             manager,
             terminals,
+            forge,
             supervisor,
             data_dir,
             remote_tasks,
@@ -409,6 +419,7 @@ impl BoundDaemon {
         for task in remote_tasks {
             task.abort();
         }
+        forge.shutdown();
         manager.shutdown().await;
         terminals.shutdown().await;
         supervisor.shutdown().await;

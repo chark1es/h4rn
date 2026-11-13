@@ -428,27 +428,154 @@ pub enum ClientRequest {
         /// Optional host filter.
         host: Option<HostId>,
     },
-    /// TODO(phase 7): list pull requests for a repository.
-    ForgeListPrs {
-        /// Host that owns the forge credentials.
-        host: HostId,
-        /// `owner/name`.
-        repository: String,
+    // ------------------------------------------------------------------
+    // Forge (pull request) operations. Credentials stay in the daemon's
+    // secret store; every request names an account or lets the daemon pick
+    // the only matching one.
+    // ------------------------------------------------------------------
+    /// List configured forge accounts and their capabilities.
+    ForgeListAccounts,
+    /// Add a forge account from a token the user just supplied.
+    ///
+    /// The daemon validates the token against the forge before storing it, so
+    /// a typo is reported here rather than on the first PR fetch. `token` is
+    /// never echoed back in a response, an event or an audit entry.
+    ForgeAddAccount {
+        /// Forge implementation.
+        forge: crate::forge::ForgeKind,
+        /// Public web base URL (`https://github.com`, `https://ghe.example.com`).
+        base_url: String,
+        /// Personal access token or OAuth access token.
+        token: String,
+        /// Login to record; the daemon discovers it when omitted.
+        username: Option<String>,
+        /// Where the token came from.
+        source: crate::forge::ForgeCredentialSource,
     },
-    /// TODO(phase 7): open a pull request.
-    ForgeCreatePr {
-        /// Host that owns the forge credentials.
-        host: HostId,
-        /// `owner/name`.
-        repository: String,
+    /// Remove a forge account and its stored token.
+    ForgeRemoveAccount {
+        /// Account to remove.
+        account_id: String,
+    },
+    /// Detect the forge, owner and repository from a workspace's git remotes.
+    ForgeDetectRepo {
+        /// Absolute workspace path on this host.
+        workspace: String,
+    },
+    /// List pull requests for one repository.
+    ForgeListPrs {
+        /// Account to use; the daemon picks the only matching one when omitted.
+        account_id: Option<String>,
+        /// Repository to query.
+        repo: crate::forge::ForgeRepoRef,
+        /// Which PRs to return.
+        filter: crate::forge::ForgePrFilter,
+        /// Page number, starting at 1.
+        page: u32,
+    },
+    /// Fetch one pull request's detail.
+    ForgeGetPr {
+        /// Account to use.
+        account_id: Option<String>,
+        /// Repository.
+        repo: crate::forge::ForgeRepoRef,
+        /// PR number.
+        number: u32,
+    },
+    /// Fetch one page of a pull request's diff.
+    ForgeGetPrDiff {
+        /// Account to use.
+        account_id: Option<String>,
+        /// Repository.
+        repo: crate::forge::ForgeRepoRef,
+        /// PR number.
+        number: u32,
+        /// Page number, starting at 1.
+        page: u32,
+        /// Files per page; the daemon clamps it.
+        per_page: Option<u32>,
+    },
+    /// List general comments, inline review threads and reviews.
+    ForgeListPrComments {
+        /// Account to use.
+        account_id: Option<String>,
+        /// Repository.
+        repo: crate::forge::ForgeRepoRef,
+        /// PR number.
+        number: u32,
+    },
+    /// List checks, jobs or commit statuses for the PR's head commit.
+    ForgeListChecks {
+        /// Account to use.
+        account_id: Option<String>,
+        /// Repository.
+        repo: crate::forge::ForgeRepoRef,
+        /// PR number.
+        number: u32,
+    },
+    /// Reply in an existing review thread, or to a general comment.
+    ///
+    /// `thread_id` is the normalised thread/discussion id from
+    /// `ForgeListPrComments`; forges without nested replies post a general
+    /// comment instead and say so in their capabilities.
+    ForgeReply {
+        /// Account to use.
+        account_id: Option<String>,
+        /// Repository.
+        repo: crate::forge::ForgeRepoRef,
+        /// PR number.
+        number: u32,
+        /// Thread or discussion id, when replying to a review thread.
+        thread_id: Option<String>,
+        /// Comment being replied to.
+        comment_id: String,
+        /// Markdown body.
+        body: String,
+    },
+    /// Create a general PR comment.
+    ForgeComment {
+        /// Account to use.
+        account_id: Option<String>,
+        /// Repository.
+        repo: crate::forge::ForgeRepoRef,
+        /// PR number.
+        number: u32,
+        /// Markdown body.
+        body: String,
+    },
+    /// Open a pull request from a thread's branch.
+    ///
+    /// The daemon resolves the thread's workspace, detects its forge remote,
+    /// pushes the branch when the remote does not already have it, then asks
+    /// the forge to open the PR. The caller owns title and body generation.
+    ForgeOpenPr {
+        /// Thread whose branch becomes the PR head.
+        thread_id: ThreadId,
+        /// Explicit repository; detected from the workspace when omitted.
+        repo: Option<crate::forge::ForgeRepoRef>,
         /// PR title.
         title: String,
         /// PR body.
         body: String,
-        /// Source branch.
-        head: String,
         /// Target branch.
         base: String,
+    },
+    /// Hand a pull request's unresolved threads and failing checks to an agent.
+    ///
+    /// With `thread_id` the daemon appends the context as a user message and
+    /// starts a turn. Without one it creates a thread from `target` and sends
+    /// the same context as the first prompt.
+    ForgeHandPrToAgent {
+        /// Account to use.
+        account_id: Option<String>,
+        /// Repository.
+        repo: crate::forge::ForgeRepoRef,
+        /// PR number.
+        number: u32,
+        /// Existing thread to update.
+        thread_id: Option<ThreadId>,
+        /// Creation target when `thread_id` is absent.
+        target: Option<crate::forge::ForgeAgentTarget>,
     },
 }
 
