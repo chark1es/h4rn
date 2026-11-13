@@ -166,28 +166,135 @@ pub enum ClientRequest {
         /// Terminal stream id.
         terminal_id: String,
     },
-    /// TODO(phase 3): list a directory on a host.
+    /// List one directory lazily, respecting `.gitignore`.
+    ///
+    /// `workspace` is a canonical workspace root the daemon has authorised;
+    /// `path` is relative to it and may be empty for the root.
     FsList {
         /// Host that owns the filesystem.
         host: HostId,
-        /// Absolute directory path.
+        /// Canonical workspace root.
+        workspace: String,
+        /// Workspace-relative directory path.
         path: String,
     },
-    /// TODO(phase 3): read a file from a host.
+    /// Read one file as text, with encoding detection and an etag.
     FsRead {
         /// Host that owns the filesystem.
         host: HostId,
-        /// Absolute file path.
+        /// Canonical workspace root.
+        workspace: String,
+        /// Workspace-relative file path.
         path: String,
     },
-    /// TODO(phase 3): write a file on a host.
+    /// Write one file, refusing to overwrite a version the client did not see.
     FsWrite {
         /// Host that owns the filesystem.
         host: HostId,
-        /// Absolute file path.
+        /// Canonical workspace root.
+        workspace: String,
+        /// Workspace-relative file path.
         path: String,
-        /// Full replacement contents.
-        contents: String,
+        /// Full replacement content.
+        content: String,
+        /// Etag the edit was based on; `None` writes only when the file is new.
+        base_etag: Option<String>,
+    },
+    /// Create an empty file or a directory.
+    FsCreate {
+        /// Host that owns the filesystem.
+        host: HostId,
+        /// Canonical workspace root.
+        workspace: String,
+        /// Workspace-relative path to create.
+        path: String,
+        /// File or directory.
+        kind: crate::fs::FsCreateKind,
+    },
+    /// Rename or move a path inside the workspace.
+    FsRename {
+        /// Host that owns the filesystem.
+        host: HostId,
+        /// Canonical workspace root.
+        workspace: String,
+        /// Current workspace-relative path.
+        from: String,
+        /// New workspace-relative path.
+        to: String,
+    },
+    /// Move a path into the daemon's trash directory.
+    FsDelete {
+        /// Host that owns the filesystem.
+        host: HostId,
+        /// Canonical workspace root.
+        workspace: String,
+        /// Workspace-relative path.
+        path: String,
+    },
+    /// Restore a previously deleted path from the trash directory.
+    FsRestore {
+        /// Host that owns the filesystem.
+        host: HostId,
+        /// Canonical workspace root.
+        workspace: String,
+        /// Trash id returned by `FsDelete`.
+        trash_id: String,
+    },
+    /// Search the workspace, streaming results as `fs_search_batch` events.
+    FsSearch {
+        /// Host that owns the filesystem.
+        host: HostId,
+        /// Canonical workspace root.
+        workspace: String,
+        /// Text or regular expression to find.
+        query: String,
+        /// Treat `query` as a regular expression.
+        regex: bool,
+        /// Match case exactly.
+        case_sensitive: bool,
+        /// Optional glob filter such as `*.ts` or `src/**`.
+        glob: Option<String>,
+        /// Result cap; the daemon clamps it.
+        max_results: Option<u32>,
+    },
+    /// Subscribe this connection to filesystem changes in one workspace.
+    ///
+    /// An empty `paths` list watches the whole tree. Changes arrive as
+    /// transient `fs_changed` events.
+    FsWatch {
+        /// Host that owns the filesystem.
+        host: HostId,
+        /// Canonical workspace root.
+        workspace: String,
+        /// Workspace-relative files or directories to report.
+        paths: Vec<String>,
+    },
+    /// Stop sending filesystem changes for this connection.
+    FsUnwatch {
+        /// Canonical workspace root.
+        workspace: String,
+    },
+    /// Compare one file against `HEAD` or one agent turn's pre-turn snapshot.
+    FsDiff {
+        /// Host that owns the filesystem.
+        host: HostId,
+        /// Canonical workspace root.
+        workspace: String,
+        /// Workspace-relative file path.
+        path: String,
+        /// Which scope to compare against.
+        against: crate::fs::DiffAgainst,
+    },
+    /// List the files one agent turn touched, with line counts.
+    FsTurnChanges {
+        /// Host that owns the filesystem.
+        host: HostId,
+        /// Canonical workspace root.
+        workspace: String,
+        /// Thread that owns the turn.
+        thread_id: ThreadId,
+        /// Turn whose pre-turn snapshots are the base.
+        turn_id: crate::ids::TurnId,
     },
     /// TODO(phase 4): list MCP servers.
     McpList,

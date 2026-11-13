@@ -51,12 +51,7 @@ const ITEMS: RailItem[] = [
     route: { kind: "placeholder", surface: "usage", path: "/usage" },
     key: "usage",
   },
-  {
-    label: "IDE",
-    icon: Code2Icon,
-    route: { kind: "placeholder", surface: "ide", path: "/ide" },
-    key: "ide",
-  },
+  { label: "IDE", icon: Code2Icon, route: { kind: "ide" }, key: "ide" },
   {
     label: "Pull requests",
     icon: GitPullRequestIcon,
@@ -69,6 +64,7 @@ function itemsActive(route: Route, key: string): boolean {
   if (route.kind === "inbox") return key === "inbox";
   if (route.kind === "thread") return key === "inbox";
   if (route.kind === "hosts") return key === "hosts";
+  if (route.kind === "ide") return key === "ide";
   if (route.kind === "placeholder") {
     return route.path.startsWith(`/${key === "pulls" ? "pulls" : key}`);
   }

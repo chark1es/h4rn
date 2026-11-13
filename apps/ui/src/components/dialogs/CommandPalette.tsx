@@ -240,12 +240,7 @@ export function CommandPalette() {
             Usage &amp; limits
             <CommandShortcut>G U</CommandShortcut>
           </CommandItem>
-          <CommandItem
-            value="ide editor"
-            onSelect={() =>
-              close(() => navigate({ kind: "placeholder", surface: "ide", path: "/ide" }))
-            }
-          >
+          <CommandItem value="ide editor" onSelect={() => close(() => navigate({ kind: "ide" }))}>
             <Code2Icon aria-hidden />
             IDE
             <CommandShortcut>G E</CommandShortcut>

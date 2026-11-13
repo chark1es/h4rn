@@ -2,6 +2,7 @@ export type Route =
   | { kind: "inbox" }
   | { kind: "thread"; threadId: string }
   | { kind: "hosts" }
+  | { kind: "ide" }
   | { kind: "placeholder"; surface: string; path: string };
 
 const PLACEHOLDER_TITLES: Record<string, string> = {
@@ -16,6 +17,7 @@ export function parseRoute(pathname: string): Route {
   const path = pathname.replace(/\/+$/, "") || "/";
   if (path === "/") return { kind: "inbox" };
   if (path === "/hosts") return { kind: "hosts" };
+  if (path === "/ide") return { kind: "ide" };
   const thread = /^\/t\/([^/]+)$/.exec(path);
   if (thread?.[1]) return { kind: "thread", threadId: decodeURIComponent(thread[1]) };
   const key = path.slice(1).split("/")[0] ?? "";
@@ -30,6 +32,8 @@ export function routePath(route: Route): string {
       return `/t/${encodeURIComponent(route.threadId)}`;
     case "hosts":
       return "/hosts";
+    case "ide":
+      return "/ide";
     case "placeholder":
       return route.path;
   }

@@ -71,3 +71,9 @@ uuid = { version = "1.29.2", features = ["serde", "v7"] }
 # Added by the Claude Code adapter (Phase 1b).
 base64 = "0.22.1"
 libc = "0.2.191"
+
+# Added by IDE mode (Phase 2): filesystem walk, search and watching.
+grep-regex = "0.1.13"
+grep-searcher = "0.1.15"
+ignore = "0.4.23"
+notify = "8.2.0"

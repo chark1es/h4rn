@@ -31,6 +31,7 @@
 mod binary;
 mod client;
 mod common;
+mod fs;
 mod ids;
 mod server;
 
@@ -42,6 +43,11 @@ pub use common::{
     AgentState, ApprovalDecision, ApprovalKind, ApprovalOption, DeviceInfo, HarnessKind,
     HostSummary, Item, MessageRole, RuntimeMode, ThreadFilter, ThreadSummary, ThreadTab, ToolCall,
     ToolCallStatus, Topic, TurnStatus, Usage, WorktreeRequest,
+};
+pub use fs::{
+    DiffAgainst, FileEntry, FileEntryKind, FsChangeKind, FsCreateKind, FsDeleteResult, FsDiff,
+    FsFileContent, FsListing, FsSearchBatch, FsSearchMatch, FsTurnChanges, FsTurnFile,
+    FsWriteConflict, FsWriteResult, GitFileStatus,
 };
 pub use ids::{AttachmentId, AttachmentIdError, DeviceId, HostId, SubagentId, ThreadId, TurnId};
 pub use server::{Event, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame};

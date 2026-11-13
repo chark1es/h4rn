@@ -187,6 +187,8 @@ struct Inner {
     threads: Mutex<HashMap<String, ThreadHandle>>,
     ticker: std::sync::Mutex<Option<JoinHandle<()>>>,
     closed: AtomicBool,
+    /// Pre-turn file snapshots for "diff vs agent changes" (IDE mode).
+    snapshots: std::sync::OnceLock<Arc<crate::fs::SnapshotStore>>,
 }
 
 type ThreadHandle = Arc<Mutex<ThreadRecord>>;
@@ -308,6 +310,7 @@ impl ThreadManager {
                 threads: Mutex::new(HashMap::new()),
                 ticker: std::sync::Mutex::new(None),
                 closed: AtomicBool::new(false),
+                snapshots: std::sync::OnceLock::new(),
             }),
         };
         manager.inner.restore().await?;
@@ -720,6 +723,34 @@ impl ThreadManager {
         })
     }
 
+    /// Installs the snapshot store used to record pre-turn file content.
+    ///
+    /// Called once by the daemon builder; later calls are ignored so the pump
+    /// never observes two stores.
+    pub fn set_snapshot_store(&self, store: Arc<crate::fs::SnapshotStore>) {
+        let _ = self.inner.snapshots.set(store);
+    }
+
+    /// Every distinct workspace path any thread has used.
+    ///
+    /// The filesystem service authorises these roots so IDE mode can open the
+    /// repositories the user already has threads for, and nothing else.
+    pub async fn workspace_paths(&self) -> Vec<String> {
+        let handles: Vec<ThreadHandle> = {
+            let threads = self.inner.threads.lock().await;
+            threads.values().cloned().collect()
+        };
+        let mut paths = Vec::new();
+        for handle in handles {
+            let record = handle.lock().await;
+            let workspace = record.meta.workspace_path.clone();
+            if !workspace.is_empty() && !paths.contains(&workspace) {
+                paths.push(workspace);
+            }
+        }
+        paths
+    }
+
     /// Lists thread projections with the protocol filter applied.
     pub async fn list_threads(&self, filter: &ThreadFilter) -> Vec<ThreadSummary> {
         let handles: Vec<ThreadHandle> = {
@@ -1110,9 +1141,44 @@ impl Inner {
                     let turn_id = record.turn_id_for_event();
                     wire.push(Event::ToolCall {
                         thread_id: thread_id.clone(),
-                        turn_id,
+                        turn_id: turn_id.clone(),
                         tool_call: tool_call.clone(),
                     });
+                    // IDE mode's "diff vs agent changes": the first time a turn
+                    // reports a file tool, capture the bytes it is about to
+                    // change. The first observation wins, so the diff base is
+                    // the pre-turn state even after several edits.
+                    if tool_call.status == ToolCallStatus::Running
+                        && let Some(store) = self.snapshots.get()
+                    {
+                        let mut paths = tool_call_file_paths(tool_call.input.as_ref());
+                        if let Some(session) = record.session.as_ref() {
+                            paths.extend(session.touched_paths());
+                        }
+                        paths.sort();
+                        paths.dedup();
+                        if !paths.is_empty() {
+                            let workspace = std::path::PathBuf::from(&record.meta.workspace_path);
+                            match store.capture(
+                                &workspace,
+                                &record.meta.thread_id,
+                                &turn_id,
+                                &paths,
+                            ) {
+                                Ok(0) => {}
+                                Ok(count) => tracing::debug!(
+                                    thread_id = %thread_id,
+                                    count,
+                                    "captured pre-turn file snapshots"
+                                ),
+                                Err(error) => tracing::warn!(
+                                    thread_id = %thread_id,
+                                    %error,
+                                    "pre-turn snapshot capture failed"
+                                ),
+                            }
+                        }
+                    }
                     let desired = match tool_call.status {
                         ToolCallStatus::Running => AgentState::RunningTool,
                         ToolCallStatus::Completed => AgentState::Thinking,
@@ -1387,6 +1453,49 @@ fn fresh_item_id(role: &str) -> String {
         .strip_prefix("th_")
         .unwrap_or_else(|| id.as_str());
     format!("item_{role}_{suffix}")
+}
+
+/// File paths a tool call names, for pre-turn snapshot capture.
+///
+/// Harnesses spell the field differently (`file_path`, `path`, `filePath`, a
+/// `files` array, or `notebook_path`); this checks the shapes h4rn's adapters
+/// emit and ignores anything else. Snapshot capture is best-effort, so a
+/// missed spelling costs a diff base, not correctness.
+fn tool_call_file_paths(input: Option<&serde_json::Value>) -> Vec<String> {
+    let Some(serde_json::Value::Object(map)) = input else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    for key in [
+        "file_path",
+        "filePath",
+        "path",
+        "filename",
+        "notebook_path",
+        "notebookPath",
+    ] {
+        if let Some(serde_json::Value::String(value)) = map.get(key) {
+            paths.push(value.clone());
+        }
+    }
+    for key in ["files", "paths", "file_paths"] {
+        if let Some(serde_json::Value::Array(items)) = map.get(key) {
+            for item in items {
+                match item {
+                    serde_json::Value::String(value) => paths.push(value.clone()),
+                    serde_json::Value::Object(entry) => {
+                        for inner in ["file_path", "filePath", "path"] {
+                            if let Some(serde_json::Value::String(value)) = entry.get(inner) {
+                                paths.push(value.clone());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    paths
 }
 
 fn title_from_prompt(prompt: &str, workspace: &str) -> String {
