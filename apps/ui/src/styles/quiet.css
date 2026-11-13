@@ -15,6 +15,11 @@
   background: var(--bg);
 }
 
+/* Real devices: keep the shell clear of the notch and home indicator. */
+.q-ph {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
 .q-muted {
   color: var(--fg-2);
 }
@@ -202,6 +207,17 @@
   text-align: center;
   display: inline-block;
   letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.q-kbd-glyph {
+  width: 11px;
+  height: 11px;
+  vertical-align: -1.5px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .q-seg {
@@ -616,6 +632,27 @@
   height: 1px;
   background: var(--line);
 }
+.q-rows .q-inbox-vrow {
+  position: absolute;
+  top: 0;
+  left: 6px;
+  right: 6px;
+}
+.q-rows [data-index]:not(:first-child) > .q-row::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 34px;
+  right: 10px;
+  height: 1px;
+  background: var(--line);
+}
+.q-rows [data-index]:not(:first-child) > .q-row.sel::before,
+.q-rows [data-index]:not(:first-child) > .q-row:hover::before,
+.q-rows [data-index]:has(> .q-row.sel) + [data-index] > .q-row::before,
+.q-rows [data-index]:has(> .q-row:hover) + [data-index] > .q-row::before {
+  opacity: 0;
+}
 .q-row.sel::before,
 .q-row.sel + .q-row::before,
 .q-row:hover::before,
@@ -660,6 +697,11 @@
   font-size: 12px;
   color: var(--fg-3);
   flex: none;
+}
+.q-row:hover .q-row-time,
+.q-row.sel .q-row-time,
+.q-row:has(.q-row-more:focus-visible) .q-row-time {
+  visibility: hidden;
 }
 .q-row-meta {
   flex: 1;
@@ -753,6 +795,12 @@
   align-items: center;
   gap: 4px;
 }
+@container (max-width: 640px) {
+  .q-prov .opt,
+  .q-prov .br {
+    display: none;
+  }
+}
 .q-th-state {
   display: flex;
   align-items: center;
@@ -786,6 +834,20 @@
 .q-stream .q-col {
   padding-top: 28px;
   padding-bottom: 20px;
+}
+.q-stream .q-col-v {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.q-stream .q-receipt {
+  padding-top: 0;
+  padding-bottom: 12px;
+}
+.q-vrow {
+  position: absolute;
+  top: 0;
+  left: 32px;
+  right: 32px;
 }
 .q-turn {
   margin-bottom: 28px;
@@ -1139,6 +1201,9 @@
 .q-composer textarea::placeholder {
   color: var(--fg-3);
 }
+.q-composer textarea:focus-visible {
+  outline: none;
+}
 .q-composer:focus-within {
   box-shadow:
     inset 0 0 0 1px var(--focus),
@@ -1292,6 +1357,19 @@
   flex: 1;
   min-width: 0;
 }
+.q-node .prog {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--fill-2);
+  margin-top: 8px;
+  overflow: hidden;
+}
+.q-node .prog i {
+  display: block;
+  height: 100%;
+  background: var(--fg-2);
+  border-radius: 2px;
+}
 .q-node .t {
   font-weight: 500;
   display: flex;
@@ -1367,6 +1445,9 @@
   display: flex;
   flex-direction: column;
   background: var(--bg-sunk);
+}
+.q-main.q-term-open > .q-dock {
+  display: none;
 }
 .q-term-head {
   display: flex;
@@ -1642,10 +1723,12 @@
 .q-palette {
   position: fixed;
   transform: none;
-  z-index: 21;
+  translate: none;
+  z-index: 51;
   left: 50%;
   top: 96px;
   width: 620px;
+  max-width: none;
   margin-left: -310px;
   border-radius: 14px;
   background: var(--bg-raised);
@@ -1913,9 +1996,14 @@
   flex: none;
 }
 .q-ttab-wrap:hover .q-ttab-x,
-.q-ttab-wrap:focus-within .q-ttab-x,
-.q-etab[aria-selected="true"] + .q-ttab-x {
+.q-ttab-wrap:focus-within .q-ttab-x {
   opacity: 1;
+}
+/* The dirty dot and the close control share the same slot: the dot marks
+   unsaved changes at rest, the × takes its place on hover or focus. */
+.q-ttab-wrap:hover .q-etab .dirty,
+.q-ttab-wrap:focus-within .q-etab .dirty {
+  display: none;
 }
 .q-code > .cm-editor {
   height: 100%;
@@ -2044,6 +2132,9 @@
   background: var(--warn-dot);
 }
 .q-meter.full i {
+  background: var(--danger);
+}
+.q-meter.danger i {
   background: var(--danger);
 }
 .q-split {
@@ -2374,6 +2465,11 @@
   .q-rows {
     padding: 0 0 16px;
   }
+  .q-snoozed {
+    min-height: 66px;
+    padding: 0 20px;
+    font-size: 16px;
+  }
   .q-row {
     min-height: 66px;
     padding: 12px 20px 13px;
@@ -2393,6 +2489,14 @@
     height: 22px;
   }
   .q-row + .q-row::before {
+    left: 46px;
+    right: 0;
+  }
+  .q-rows .q-inbox-vrow {
+    left: 0;
+    right: 0;
+  }
+  .q-rows [data-index]:not(:first-child) > .q-row::before {
     left: 46px;
     right: 0;
   }
@@ -2437,6 +2541,14 @@
     margin-top: 4px;
     min-width: 0;
   }
+  .q-ph-th-meta > span:not(.grow) {
+    flex: none;
+    white-space: nowrap;
+  }
+  .q-ph-th-meta > span:not(.grow) {
+    flex: none;
+    white-space: nowrap;
+  }
   .q-ph-th-meta .q-th-state {
     font-size: 14px;
     padding-right: 0;
@@ -2465,11 +2577,23 @@
   .q-stream .q-col {
     padding: 8px 0 20px;
   }
+  .q-stream .q-col-v {
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+  .q-stream .q-receipt {
+    padding: 0 0 12px;
+  }
+  .q-vrow {
+    left: 0;
+    right: 0;
+  }
   .q-bubble {
     font-size: 16px;
     line-height: 23px;
   }
-  .q-prose {
+  .q-prose,
+  .stream-prose {
     font-size: 16px;
     line-height: 24px;
   }
@@ -2478,7 +2602,7 @@
     font-size: 14px;
   }
   .q-dock {
-    padding: 8px 12px 34px;
+    padding: 8px 12px max(34px, env(safe-area-inset-bottom, 0px));
     border-top: 1px solid var(--line);
     display: flex;
     flex-direction: column;
@@ -2566,12 +2690,12 @@
 
 /* Phone tab bar */
 .q-ph-tabbar {
-  height: 84px;
+  height: calc(84px + env(safe-area-inset-bottom, 0px));
   flex: none;
   display: flex;
   border-top: 1px solid var(--line);
   background: color-mix(in oklch, var(--bg-side) 92%, transparent);
-  padding: 6px 4px 0;
+  padding: 6px 4px env(safe-area-inset-bottom, 0px);
 }
 .q-ph-tab {
   flex: 1;
@@ -2624,6 +2748,12 @@
   color: var(--accent-tx);
   font-size: 17px;
   padding: 0 8px;
+}
+.q-ph-back-glyph {
+  font-size: 24px;
+  line-height: 1;
+  margin: -2px 1px 0 -4px;
+  font-weight: 400;
 }
 .q-ph-nav .ttl {
   font-size: 17px;
@@ -2831,7 +2961,7 @@
   background: var(--bg-raised);
   border-radius: 14px 14px 0 0;
   box-shadow: var(--sh-dlg);
-  padding: 8px 0 34px;
+  padding: 8px 0 max(34px, env(safe-area-inset-bottom, 0px));
   animation: q-rise var(--dur-3) var(--ease-out);
 }
 .dark .q-ph-sheet {

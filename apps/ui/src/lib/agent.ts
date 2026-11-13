@@ -99,7 +99,7 @@ export function glyphForThread(
     return { kind: "offline", label: "Host unreachable" };
   }
   if (summary.agent_state === "scheduled") {
-    return { kind: "orb", state: "breathing", speed: 0.3, label: "Auto-resume scheduled" };
+    return { kind: "limit", label: "Auto-resume scheduled" };
   }
   if (summary.agent_state === "queued") {
     return { kind: "orb", state: "breathing", speed: 0.35, paused: true, label: "Queued" };
@@ -110,7 +110,7 @@ export function glyphForThread(
   if (summary.agent_state === "rate_limited") {
     return summary.needs_attention
       ? { kind: summary.tab === "done" ? "pause" : "limit", label: "Limited · needs you" }
-      : { kind: "orb", state: "breathing", speed: 0.3, label: "Limited" };
+      : { kind: "limit", label: "Limited" };
   }
   if (summary.agent_state === "done") {
     return { kind: "check", label: summary.unread ? "Done · unread" : "Done" };

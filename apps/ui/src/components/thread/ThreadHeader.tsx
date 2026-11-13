@@ -1,5 +1,4 @@
 import {
-  ArrowLeftIcon,
   CircleSlash2Icon,
   ExternalLinkIcon,
   FileDiffIcon,
@@ -8,8 +7,8 @@ import {
   PinIcon,
   Share2Icon,
   SquareIcon,
-  SquareTerminalIcon,
   SunMoonIcon,
+  TerminalIcon,
 } from "lucide-react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
@@ -27,8 +26,9 @@ import type { HostSummary, ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { glyphForThread } from "@/lib/agent";
 import { harnessLabel, harnessSeed, machineSeed } from "@/lib/entities";
-import { absoluteDateTime } from "@/lib/format";
+import { absoluteDateTime, relativeAge } from "@/lib/format";
 import {
+  acknowledgeThread,
   interruptThread,
   navigate,
   pushToast,
@@ -64,10 +64,14 @@ export function ThreadHeader({
   // the daemon can no longer confirm.
   const glyph =
     stale && working
-      ? { kind: "offline" as const, label: "Last seen running" }
+      ? { kind: "offline" as const, label: "Host unreachable" }
       : glyphForThread(summary, hostOnline);
   const isPhone = useIsPhone();
   const hostName = host?.name ?? summary.host;
+  const stateLabel =
+    summary.tab === "done" && summary.agent_state === "done"
+      ? `Done · ${relativeAge(summary.last_activity)}`
+      : glyph.label;
 
   const threadMenu = (
     <DropdownMenu>
@@ -118,13 +122,13 @@ export function ThreadHeader({
         <DropdownMenuItem onSelect={toggleTheme}>
           <SunMoonIcon aria-hidden />
           Toggle theme
-          <span className="ml-auto text-micro text-ink-faint">
+          <span className="ml-auto text-small text-fg-3">
             {MOD} {SHIFT} L
           </span>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem disabled>
-          <span className="text-micro">Started {absoluteDateTime(summary.last_activity)}</span>
+          <span className="text-small">Started {absoluteDateTime(summary.last_activity)}</span>
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -135,7 +139,9 @@ export function ThreadHeader({
       <>
         <div className="q-ph-nav">
           <button type="button" className="navbtn" aria-label="Back to inbox" onClick={onBack}>
-            <ArrowLeftIcon className="q-icon s20" strokeWidth={1.5} aria-hidden />
+            <span aria-hidden className="q-ph-back-glyph">
+              ‹
+            </span>
             Inbox
           </button>
           <span className="ttl" />
@@ -148,7 +154,7 @@ export function ThreadHeader({
                 aria-pressed={terminalOpen}
                 onClick={onToggleTerminal}
               >
-                <SquareTerminalIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
+                <TerminalIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
               </button>
             ) : null}
             {threadMenu}
@@ -175,7 +181,7 @@ export function ThreadHeader({
             <span className="grow" />
             <span className={cn("q-th-state", summary.needs_attention && "q-accent")}>
               <AgentGlyph glyph={glyph} size={14} />
-              <span>{glyph.label}</span>
+              <span>{stateLabel}</span>
             </span>
           </div>
         </div>
@@ -217,7 +223,7 @@ export function ThreadHeader({
 
       <div className={cn("q-th-state", summary.needs_attention && "q-accent")}>
         <AgentGlyph glyph={glyph} size={14} />
-        <span>{glyph.label}</span>
+        <span>{stateLabel}</span>
       </div>
 
       <div className="q-th-actions">
@@ -230,7 +236,7 @@ export function ThreadHeader({
             title="Terminal · T"
             onClick={onToggleTerminal}
           >
-            <SquareTerminalIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+            <TerminalIcon className="q-icon" strokeWidth={1.5} aria-hidden />
           </button>
         ) : null}
         {onToggleSubagents ? (
@@ -239,7 +245,7 @@ export function ThreadHeader({
             className={cn("q-ibtn", subagentsOpen && "on")}
             aria-label="Toggle subagents"
             aria-pressed={subagentsOpen}
-            title="Subagents · ⌘ J"
+            title={`Subagents · ${MOD} J`}
             onClick={onToggleSubagents}
           >
             <ListTreeIcon className="q-icon" strokeWidth={1.5} aria-hidden />
@@ -265,6 +271,27 @@ export function ThreadHeader({
             <SquareIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             Stop
           </button>
+        ) : null}
+
+        {summary.tab === "done" ? (
+          <>
+            <button
+              type="button"
+              className="q-btn secondary"
+              onClick={() =>
+                void snoozeThread(summary.thread_id, new Date(Date.now() + 3_600_000).toISOString())
+              }
+            >
+              Snooze
+            </button>
+            <button
+              type="button"
+              className="q-btn primary"
+              onClick={() => void acknowledgeThread(summary.thread_id)}
+            >
+              Acknowledge <span className="q-kbd">A</span>
+            </button>
+          </>
         ) : null}
 
         {threadMenu}

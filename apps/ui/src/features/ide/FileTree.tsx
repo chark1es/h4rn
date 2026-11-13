@@ -290,7 +290,7 @@ export function FileTree({
                 key={file.path}
                 type="button"
                 onClick={() => onOpenAgent(file.path)}
-                className="q-fnode"
+                className={cn("q-fnode", file.path === activePath && "sel")}
                 style={{ margin: "0 -10px", width: "calc(100% + 20px)" }}
                 title={`Open ${file.path} diff vs agent changes`}
               >

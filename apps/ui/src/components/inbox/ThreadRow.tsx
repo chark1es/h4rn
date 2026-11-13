@@ -13,7 +13,7 @@ import {
 import type { HostSummary, ThreadSummary } from "@/gen";
 import { agentStateLabel, glyphForThread } from "@/lib/agent";
 import { harnessLabel } from "@/lib/entities";
-import { relativeAge, tokensPerSecond } from "@/lib/format";
+import { absoluteTime, relativeAge, tokensPerSecond } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 type ThreadRowProps = {
@@ -21,6 +21,8 @@ type ThreadRowProps = {
   host: HostSummary | undefined;
   index: number;
   selected: boolean;
+  tabStop?: boolean;
+  resumeAt?: string | null;
   now: number;
   onOpen: () => void;
   onAcknowledge: () => void;
@@ -75,6 +77,8 @@ export function ThreadRow({
   thread,
   host,
   selected,
+  tabStop = false,
+  resumeAt = null,
   now,
   onOpen,
   onAcknowledge,
@@ -86,6 +90,8 @@ export function ThreadRow({
   const hostOnline = host?.online ?? false;
   const glyph = glyphForThread(thread, hostOnline);
   const status = statusFor(thread);
+  const limited = thread.agent_state === "scheduled" || thread.agent_state === "rate_limited";
+  const statusText = resumeAt && limited ? `Resumes ${absoluteTime(resumeAt)}` : status.text;
   const isDone = thread.tab === "done";
   const isSettled = thread.tab === "settled";
   const needsResume = isDone && thread.needs_attention;
@@ -96,7 +102,7 @@ export function ThreadRow({
     <div
       role="option"
       aria-selected={selected}
-      tabIndex={-1}
+      tabIndex={tabStop ? 0 : -1}
       data-thread-id={thread.thread_id}
       className={cn("q-row", selected && "sel", isSettled && "dim")}
       onClick={onOpen}
@@ -119,7 +125,7 @@ export function ThreadRow({
           <span className="q-row-meta">
             {host?.name ?? thread.host} · {harnessLabel(thread.harness)}
           </span>
-          <span className={cn("q-row-status", status.tone)}>{status.text}</span>
+          <span className={cn("q-row-status", status.tone)}>{statusText}</span>
         </span>
         {isDone ? (
           <span className="q-row-act">
@@ -169,6 +175,7 @@ export function ThreadRow({
             type="button"
             aria-label={`Actions for ${thread.title}`}
             className="q-ibtn q-row-more"
+            tabIndex={-1}
             onClick={stop}
           >
             <MoreHorizontalIcon className="q-icon" strokeWidth={1.5} />
@@ -182,14 +189,14 @@ export function ThreadRow({
           {isDone ? (
             <DropdownMenuItem onSelect={onAcknowledge}>
               Acknowledge
-              <span className="ml-auto text-micro text-ink-faint">A</span>
+              <span className="ml-auto text-small text-fg-3">A</span>
             </DropdownMenuItem>
           ) : null}
           {isSettled ? <DropdownMenuItem onSelect={onReopen}>Reopen</DropdownMenuItem> : null}
           {!isSettled ? <DropdownMenuItem onSelect={onSettle}>Settle now</DropdownMenuItem> : null}
           <DropdownMenuItem onSelect={onPin}>
             {thread.pinned ? "Unpin from Working" : "Keep in Working"}
-            <span className="ml-auto text-micro text-ink-faint">P</span>
+            <span className="ml-auto text-small text-fg-3">P</span>
           </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem onSelect={() => onSnooze(snoozeUntil(1))}>

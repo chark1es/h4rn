@@ -88,7 +88,7 @@ export function PhoneApprovalSheet({
               {hostName}
             </div>
             <div className="s">
-              {harness} · subagent of {thread.title}
+              {harness} · {thread.title}
             </div>
           </div>
         </div>

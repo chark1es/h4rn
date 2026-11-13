@@ -19,7 +19,7 @@ import {
 import { useMemo } from "react";
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
-import { ALT, ENTER, MOD, SHIFT } from "@/components/common/Kbd";
+import { ALT, ENTER, KeyGlyphs, MOD, SHIFT } from "@/components/common/Kbd";
 import {
   CommandDialog,
   CommandEmpty,
@@ -63,9 +63,10 @@ export function CommandPalette() {
   const recent = useMemo(
     () =>
       Object.values(threads)
+        .filter((thread) => thread.thread_id !== currentId)
         .sort((a, b) => Date.parse(b.last_activity) - Date.parse(a.last_activity))
-        .slice(0, 6),
-    [threads],
+        .slice(0, 3),
+    [threads, currentId],
   );
 
   const close = (action: () => void) => {
@@ -110,7 +111,83 @@ export function CommandPalette() {
           No commands match that. Try a thread title, a host name, or a command.
         </CommandEmpty>
 
+        {current ? (
+          <CommandGroup heading={`This thread · ${current.title}`}>
+            {current.needs_attention || current.agent_state === "awaiting_approval" ? (
+              <CommandItem
+                value="approve pending action go"
+                onSelect={() =>
+                  close(() =>
+                    document
+                      .querySelector<HTMLButtonElement>('[data-approval-action="approve"]')
+                      ?.click(),
+                  )
+                }
+              >
+                <ShieldCheckIcon aria-hidden />
+                Approve pending action
+                <CommandShortcut>
+                  {MOD} {ENTER}
+                </CommandShortcut>
+              </CommandItem>
+            ) : null}
+            <CommandItem
+              value="pin keep working"
+              onSelect={() => close(() => void togglePin(current.thread_id))}
+            >
+              <PinIcon aria-hidden />
+              {current.pinned ? "Unpin from Working" : "Keep in Working"}
+              <CommandShortcut>P</CommandShortcut>
+            </CommandItem>
+            <CommandItem
+              value="acknowledge done"
+              onSelect={() => close(() => void acknowledgeThread(current.thread_id))}
+            >
+              <CheckIcon aria-hidden />
+              Acknowledge
+              <CommandShortcut>A</CommandShortcut>
+            </CommandItem>
+            <CommandItem
+              value="settle now archive"
+              onSelect={() => close(() => void setThreadTab(current.thread_id, "settled"))}
+            >
+              <InboxIcon aria-hidden />
+              Settle now
+              <CommandShortcut>{SHIFT} S</CommandShortcut>
+            </CommandItem>
+            {current.tab === "working" ? (
+              <CommandItem
+                value="interrupt turn stop"
+                onSelect={() => close(() => void interruptThread(current.thread_id))}
+              >
+                <SquareIcon aria-hidden />
+                Interrupt turn
+                <CommandShortcut>{MOD} .</CommandShortcut>
+              </CommandItem>
+            ) : null}
+          </CommandGroup>
+        ) : null}
+
+        <CommandSeparator />
         <CommandGroup heading="Threads">
+          {recent.map((thread) => (
+            <CommandItem
+              key={thread.thread_id}
+              value={`${thread.title} ${thread.host} ${harnessLabel(thread.harness)}`}
+              onSelect={() => close(() => openThread(thread.thread_id))}
+            >
+              <EntityAvatar
+                seed={machineSeed(thread.host)}
+                kind="machine"
+                label={hosts[thread.host]?.name ?? thread.host}
+                size={14}
+              />
+              <span className="min-w-0 truncate">{thread.title}</span>
+              <span className="ml-auto shrink-0 text-small text-fg-3">
+                {hosts[thread.host]?.name ?? thread.host} · {harnessLabel(thread.harness)}
+              </span>
+            </CommandItem>
+          ))}
           <CommandItem value="new thread start" onSelect={() => close(openNewThread)}>
             <PlusIcon aria-hidden />
             New thread…
@@ -144,92 +221,6 @@ export function CommandPalette() {
             <CommandShortcut>{ALT} 3</CommandShortcut>
           </CommandItem>
         </CommandGroup>
-
-        {recent.length > 0 ? (
-          <>
-            <CommandSeparator />
-            <CommandGroup heading="Recent threads">
-              {recent.map((thread) => (
-                <CommandItem
-                  key={thread.thread_id}
-                  value={`${thread.title} ${thread.host} ${harnessLabel(thread.harness)}`}
-                  onSelect={() => close(() => openThread(thread.thread_id))}
-                >
-                  <EntityAvatar
-                    seed={machineSeed(thread.host)}
-                    kind="machine"
-                    label={hosts[thread.host]?.name ?? thread.host}
-                    size={14}
-                  />
-                  <span className="min-w-0 truncate">{thread.title}</span>
-                  <span className="ml-auto shrink-0 text-micro text-ink-faint">
-                    {hosts[thread.host]?.name ?? thread.host} · {harnessLabel(thread.harness)}
-                  </span>
-                </CommandItem>
-              ))}
-            </CommandGroup>
-          </>
-        ) : null}
-
-        {current ? (
-          <>
-            <CommandSeparator />
-            <CommandGroup heading={`This thread · ${current.title}`}>
-              {current.needs_attention || current.agent_state === "awaiting_approval" ? (
-                <CommandItem
-                  value="approve pending action go"
-                  onSelect={() =>
-                    close(() =>
-                      document
-                        .querySelector<HTMLButtonElement>('[data-approval-action="approve"]')
-                        ?.click(),
-                    )
-                  }
-                >
-                  <ShieldCheckIcon aria-hidden />
-                  Approve pending action
-                  <CommandShortcut>
-                    {MOD} {ENTER}
-                  </CommandShortcut>
-                </CommandItem>
-              ) : null}
-              <CommandItem
-                value="pin keep working"
-                onSelect={() => close(() => void togglePin(current.thread_id))}
-              >
-                <PinIcon aria-hidden />
-                {current.pinned ? "Unpin from Working" : "Keep in Working"}
-                <CommandShortcut>P</CommandShortcut>
-              </CommandItem>
-              <CommandItem
-                value="acknowledge done"
-                onSelect={() => close(() => void acknowledgeThread(current.thread_id))}
-              >
-                <CheckIcon aria-hidden />
-                Acknowledge
-                <CommandShortcut>A</CommandShortcut>
-              </CommandItem>
-              <CommandItem
-                value="settle now archive"
-                onSelect={() => close(() => void setThreadTab(current.thread_id, "settled"))}
-              >
-                <InboxIcon aria-hidden />
-                Settle now
-                <CommandShortcut>{SHIFT} S</CommandShortcut>
-              </CommandItem>
-              {current.tab === "working" ? (
-                <CommandItem
-                  value="interrupt turn stop"
-                  onSelect={() => close(() => void interruptThread(current.thread_id))}
-                >
-                  <SquareIcon aria-hidden />
-                  Interrupt turn
-                  <CommandShortcut>{MOD} .</CommandShortcut>
-                </CommandItem>
-              ) : null}
-            </CommandGroup>
-          </>
-        ) : null}
 
         <CommandSeparator />
         <CommandGroup heading="Go to">
@@ -334,10 +325,19 @@ export function CommandPalette() {
       </CommandList>
       <CommandFooter>
         <span>
-          <span className="q-kbd">↑</span> <span className="q-kbd">↓</span> Move
+          <span className="q-kbd">
+            <KeyGlyphs value="↑" />
+          </span>{" "}
+          <span className="q-kbd">
+            <KeyGlyphs value="↓" />
+          </span>{" "}
+          Move
         </span>
         <span>
-          <span className="q-kbd">↵</span> Run
+          <span className="q-kbd">
+            <KeyGlyphs value="↵" />
+          </span>{" "}
+          Run
         </span>
         <span>
           <span className="q-kbd">Esc</span> Close

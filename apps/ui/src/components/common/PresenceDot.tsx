@@ -6,7 +6,7 @@ export function PresenceDot({ online, className }: { online: boolean; className?
       aria-hidden
       className={cn(
         "inline-block size-1.5 shrink-0 rounded-full",
-        online ? "bg-standby" : "bg-ink-faint/60",
+        online ? "bg-ok" : "bg-fg-3/60",
         className,
       )}
     />

@@ -2,7 +2,6 @@ import { RefreshCwIcon, WifiOffIcon } from "lucide-react";
 
 import { absoluteTime } from "@/lib/format";
 import { getClient, useApp } from "@/lib/store/appStore";
-import { cn } from "@/lib/utils";
 
 export function OfflineBanner({ inline = false }: { inline?: boolean }) {
   const status = useApp((state) => state.connection.status);
@@ -18,7 +17,7 @@ export function OfflineBanner({ inline = false }: { inline?: boolean }) {
   return (
     <div
       role="status"
-      className={cn("q-banner", status === "offline" && "err")}
+      className="q-banner"
       style={inline ? { flex: "none", margin: "0 12px 8px" } : { flex: "none", marginTop: 8 }}
       title={error ? `${error.message}${error.hint ? ` ${error.hint}` : ""}` : undefined}
     >

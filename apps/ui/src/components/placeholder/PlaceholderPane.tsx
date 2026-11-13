@@ -51,7 +51,7 @@ export function PlaceholderPane({ surface }: { surface: string }) {
   };
 
   return (
-    <main className="flex h-full min-h-0 flex-1 flex-col bg-paper">
+    <main className="flex h-full min-h-0 flex-1 flex-col bg-bg">
       <header className="flex h-12 shrink-0 items-center justify-between border-b border-line px-4">
         <h1 className="text-headline">{entry.title}</h1>
         <Button variant="secondary" size="sm" onClick={() => navigate({ kind: "inbox" })}>

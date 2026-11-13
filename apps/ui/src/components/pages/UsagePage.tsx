@@ -190,7 +190,7 @@ function PhoneDayChart() {
             style={{
               flex: 1,
               display: "flex",
-              flexDirection: "column-reverse",
+              flexDirection: "column",
               alignItems: "stretch",
               gap: 0,
             }}
@@ -227,9 +227,19 @@ function PhoneDayChart() {
         <span>Oct 30</span>
         <span>Today</span>
       </div>
-      <div className="q-legend" style={{ marginTop: 10, gap: 12, fontSize: 12 }}>
+      <div
+        className="q-legend"
+        style={{
+          marginTop: 10,
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          columnGap: 12,
+          rowGap: 6,
+          fontSize: 12,
+        }}
+      >
         {SERIES.map((series) => (
-          <span key={series.key}>
+          <span key={series.key} style={{ minWidth: 0 }}>
             <i style={{ background: series.color }} />
             {series.key}
           </span>
@@ -289,7 +299,7 @@ function DayChart() {
             <div
               style={{
                 display: "flex",
-                flexDirection: "column-reverse",
+                flexDirection: "column",
                 alignItems: "stretch",
                 width: 20,
                 gap: 0,

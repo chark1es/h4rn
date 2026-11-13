@@ -79,10 +79,6 @@ export function latency(ms: number | null): string {
   return ms === null ? "—" : `${Math.round(ms)} ms`;
 }
 
-export function cueNumber(index: number): string {
-  return (index + 1).toString().padStart(2, "0");
-}
-
 export function elapsedSince(iso: string, now = Date.now()): string {
   const then = Date.parse(iso);
   if (!Number.isFinite(then)) return "—";

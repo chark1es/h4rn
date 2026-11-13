@@ -19,13 +19,13 @@ import {
 } from "@/lib/store/appStore";
 import type { ApprovalItem, StreamTurn } from "@/lib/store/projection";
 import { cn } from "@/lib/utils";
+import { ApprovalCard } from "./ApprovalCard";
 import { Composer } from "./Composer";
 import { PhoneApprovalSheet, PhoneApprovalSummary } from "./PhoneApproval";
-import { StandbyBar } from "./StandbyBar";
 import { ThreadHeader } from "./ThreadHeader";
 import { ThreadStream, ThreadStreamSkeleton } from "./ThreadStream";
 
-function HeaderSkeleton() {
+function HeaderSkeleton({ hostName }: { hostName?: string | undefined }) {
   return (
     <header className="q-th-head">
       <div className="q-th-titles">
@@ -33,7 +33,7 @@ function HeaderSkeleton() {
         <div className="q-skel" style={{ width: 360, height: 9 }} />
       </div>
       <div className="q-th-state q-faint" style={{ fontWeight: 400 }}>
-        Connecting…
+        Connecting{hostName ? ` to ${hostName}` : ""}…
       </div>
     </header>
   );
@@ -98,6 +98,7 @@ function UsageFooter({ turns, fallback }: { turns: StreamTurn[]; fallback: Usage
 
 export function ThreadPane({ threadId }: { threadId: string }) {
   const summary = useApp((state) => state.threads[threadId]);
+  const hosts = useApp((state) => state.hosts);
   const host = useApp((state) => state.hosts[summary?.host ?? ""]);
   const log = useApp((state) => state.logs[threadId]);
   const threadError = useApp((state) => state.threadErrors[threadId]);
@@ -118,7 +119,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
   if (!summary && !log && !threadError) {
     return (
       <main className="q-main" aria-busy="true" aria-label="Loading thread">
-        <HeaderSkeleton />
+        <HeaderSkeleton hostName={Object.values(hosts)[0]?.name} />
         <ThreadStreamSkeleton />
         <div className="q-dock">
           <div className="q-col">
@@ -189,7 +190,11 @@ export function ThreadPane({ threadId }: { threadId: string }) {
 
   const main = (
     <main
-      className={cn("q-main", isPhone && terminalOpen && "q-phone-term")}
+      className={cn(
+        "q-main",
+        terminalOpen && "q-term-open",
+        isPhone && terminalOpen && "q-phone-term",
+      )}
       aria-label={summary.title}
     >
       <ThreadHeader
@@ -345,30 +350,32 @@ export function ThreadPane({ threadId }: { threadId: string }) {
         />
       ) : null}
 
-      <div className="q-dock">
-        <div className="q-col">
-          {isPhone ? (
-            <>
-              {firstApproval ? (
-                <PhoneApprovalSummary
-                  thread={summary}
-                  hostName={hostName}
-                  approval={firstApproval}
-                  onReview={() => setApprovalSheetOpen(true)}
-                />
-              ) : null}
-              <Composer summary={summary} />
-              <UsageFooter turns={turns} fallback={summary.usage} />
-            </>
-          ) : (
-            <>
-              <StandbyBar threadId={threadId} />
-              <Composer summary={summary} />
-              <UsageFooter turns={turns} fallback={summary.usage} />
-            </>
-          )}
+      {!threadError || loaded ? (
+        <div className="q-dock">
+          <div className="q-col">
+            {isPhone ? (
+              <>
+                {firstApproval ? (
+                  <PhoneApprovalSummary
+                    thread={summary}
+                    hostName={hostName}
+                    approval={firstApproval}
+                    onReview={() => setApprovalSheetOpen(true)}
+                  />
+                ) : null}
+                <Composer summary={summary} />
+                <UsageFooter turns={turns} fallback={summary.usage} />
+              </>
+            ) : (
+              <>
+                <ApprovalCard threadId={threadId} />
+                <Composer summary={summary} />
+                <UsageFooter turns={turns} fallback={summary.usage} />
+              </>
+            )}
+          </div>
         </div>
-      </div>
+      ) : null}
 
       {isPhone && approvalSheetOpen && firstApproval ? (
         <PhoneApprovalSheet

@@ -91,8 +91,9 @@ export class TerminalController {
     // terminal is the smallest view any desktop viewer can be squeezed to.
     const compact = window.matchMedia?.("(max-width: 639px)").matches ?? false;
     const term = new Terminal({
-      fontFamily: '"Geist Mono Variable", ui-monospace, SFMono-Regular, monospace',
-      fontSize: compact ? 13.5 : 12.5,
+      fontFamily:
+        '"Geist Mono Variable", "DejaVu Sans Mono", ui-monospace, SFMono-Regular, monospace',
+      fontSize: compact ? 12 : 12.5,
       lineHeight: compact ? 1.5 : 1.25,
       letterSpacing: 0,
       cursorBlink: !options.reducedMotion,

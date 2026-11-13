@@ -2,6 +2,8 @@ import {
   BellIcon,
   CheckIcon,
   ChevronDownIcon,
+  CircleCheckIcon,
+  CircleDotIcon,
   CommandIcon,
   CopyIcon,
   KeyRoundIcon,
@@ -23,6 +25,7 @@ import {
 import type * as React from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
+import { ENTER, KeyGlyphs, MOD, SHIFT } from "@/components/common/Kbd";
 import type { HarnessKind } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { harnessSeed, machineSeed } from "@/lib/entities";
@@ -271,14 +274,14 @@ function HostsForm() {
           {rows.map((row) => (
             <tr key={row.id} className="hov">
               <td>
-                <span className="q-cell-id">
+                <span className="q-cell-id" style={{ paddingLeft: row.sub ? 16 : 0 }}>
                   <EntityAvatar
                     seed={machineSeed(row.id)}
                     kind="machine"
                     label={row.name}
                     size={row.sub ? 16 : 18}
                   />
-                  <span style={{ paddingLeft: row.sub ? 18 : 0, fontWeight: 500 }}>{row.name}</span>
+                  <span style={{ fontWeight: 500 }}>{row.name}</span>
                 </span>
               </td>
               <td className="q-muted">{row.system}</td>
@@ -540,9 +543,9 @@ function Probe({ status, label, value }: { status: 1 | 2 | 3; label: string; val
     <>
       <span className={status === 1 ? "q-ok" : status === 2 ? "q-faint" : "q-warn"}>
         {status === 1 ? (
-          <CheckIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+          <CircleCheckIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
         ) : status === 2 ? (
-          <span className="q-dot" aria-hidden />
+          <CircleDotIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
         ) : (
           <span aria-hidden>!</span>
         )}
@@ -971,12 +974,12 @@ function NotificationsForm() {
 
 function ShortcutsForm() {
   const rows = [
-    { label: "New thread", keys: "⌘ ⇧ N" },
-    { label: "Search or run", keys: "⌘ K" },
+    { label: "New thread", keys: `${MOD} ${SHIFT} N` },
+    { label: "Search or run", keys: `${MOD} K` },
     { label: "Open terminal", keys: "T" },
-    { label: "Show subagents", keys: "⌘ J" },
-    { label: "Interrupt turn", keys: "⌘ ." },
-    { label: "Send message", keys: "↵" },
+    { label: "Show subagents", keys: `${MOD} J` },
+    { label: "Interrupt turn", keys: `${MOD} .` },
+    { label: "Send message", keys: ENTER },
     { label: "Settle thread", keys: "S" },
   ];
   return (
@@ -995,7 +998,7 @@ function ShortcutsForm() {
             <div className="ctl" style={{ flex: "none" }}>
               {row.keys.split(" ").map((key) => (
                 <span className="q-kbd" key={`${row.label}-${key}`}>
-                  {key}
+                  <KeyGlyphs value={key} />
                 </span>
               ))}
             </div>

@@ -8,6 +8,11 @@
   min-height: 0;
 }
 
+/* Tailwind preflight leaves buttons UA-centred; the prototype inherits. */
+button {
+  text-align: inherit;
+}
+
 /* Browser surfaces belong to the system: scrollbars, caret, selection. */
 * {
   scrollbar-width: thin;
@@ -31,7 +36,7 @@
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--ink-faint);
+  background: var(--fg-3);
   border: 3px solid transparent;
   background-clip: content-box;
 }
@@ -117,7 +122,7 @@
     margin: 0;
     padding-left: 0.75rem;
     border-left: 2px solid var(--line);
-    color: var(--ink-muted);
+    color: var(--fg-2);
   }
 
   .stream-prose hr {
@@ -140,7 +145,7 @@
   }
 
   .stream-prose th {
-    background: var(--panel);
+    background: var(--bg-side);
     font-weight: 600;
   }
 
@@ -172,7 +177,7 @@
   }
 
   .shiki {
-    color: var(--ink);
+    color: var(--fg);
   }
 
   /* Radix state animation utilities used by the shadcn skins. */

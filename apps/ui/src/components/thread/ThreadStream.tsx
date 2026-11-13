@@ -1,14 +1,17 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { CircleCheckIcon } from "lucide-react";
 import { useEffect, useMemo, useRef } from "react";
 
 import { MessageAttachments } from "@/features/attachments/MessageAttachments";
 import type { ThreadSummary } from "@/gen";
+import { useIsPhone } from "@/hooks/use-media-query";
+import { absoluteTime, cost, duration, tokens } from "@/lib/format";
 import type { PendingMessage, StreamTurn } from "@/lib/store/projection";
 import { cn } from "@/lib/utils";
 import { TurnBlock } from "./TurnBlock";
 
 type Row =
-  | { kind: "turn"; turn: StreamTurn; cue: number; key: string }
+  | { kind: "turn"; turn: StreamTurn; key: string }
   | { kind: "pending"; message: PendingMessage; key: string };
 
 function PendingTurn({ message }: { message: PendingMessage }) {
@@ -40,13 +43,13 @@ export function ThreadStream({
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const atBottom = useRef(true);
-  const focusCue = useRef(0);
+  const focusTurn = useRef(0);
+  const isPhone = useIsPhone();
 
   const rows = useMemo<Row[]>(() => {
-    const next: Row[] = turns.map((turn, index) => ({
+    const next: Row[] = turns.map((turn) => ({
       kind: "turn",
       turn,
-      cue: index,
       key: turn.id,
     }));
     for (const message of pending) {
@@ -60,6 +63,8 @@ export function ThreadStream({
     getScrollElement: () => scrollRef.current,
     estimateSize: () => 160,
     overscan: 4,
+    paddingStart: isPhone ? 8 : 28,
+    paddingEnd: 20,
     getItemKey: (index) => rows[index]?.key ?? index,
   });
 
@@ -84,7 +89,7 @@ export function ThreadStream({
     if (!atBottom.current || rows.length === 0) return;
     const id = requestAnimationFrame(() => {
       virtualizer.scrollToIndex(rows.length - 1, { align: "end" });
-      focusCue.current = Math.max(0, turns.length - 1);
+      focusTurn.current = Math.max(0, turns.length - 1);
     });
     return () => cancelAnimationFrame(id);
   }, [signature, rows.length, turns.length, virtualizer]);
@@ -92,12 +97,12 @@ export function ThreadStream({
   useEffect(() => {
     const handler = (event: Event) => {
       const direction = (event as CustomEvent<{ direction: number }>).detail?.direction ?? 0;
-      const next = Math.max(0, Math.min(turns.length - 1, focusCue.current + direction));
-      focusCue.current = next;
+      const next = Math.max(0, Math.min(turns.length - 1, focusTurn.current + direction));
+      focusTurn.current = next;
       virtualizer.scrollToIndex(next, { align: "start" });
     };
-    window.addEventListener("h4rn:cue", handler);
-    return () => window.removeEventListener("h4rn:cue", handler);
+    window.addEventListener("h4rn:turn", handler);
+    return () => window.removeEventListener("h4rn:turn", handler);
   }, [turns.length, virtualizer]);
 
   return (
@@ -111,7 +116,10 @@ export function ThreadStream({
       aria-label="Thread stream"
       role="log"
     >
-      <div className="q-col" style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+      <div
+        className="q-col q-col-v"
+        style={{ height: virtualizer.getTotalSize(), position: "relative" }}
+      >
         {virtualizer.getVirtualItems().map((item) => {
           const row = rows[item.index];
           if (!row) return null;
@@ -120,11 +128,8 @@ export function ThreadStream({
               key={item.key}
               ref={virtualizer.measureElement}
               data-index={item.index}
+              className="q-vrow"
               style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                width: "100%",
                 transform: `translateY(${item.start}px)`,
               }}
             >
@@ -143,6 +148,18 @@ export function ThreadStream({
           );
         })}
       </div>
+      {summary.tab === "done" && summary.agent_state === "done" ? (
+        <div className="q-col q-receipt">
+          <div className="q-live-line">
+            <CircleCheckIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+            <span>
+              Finished {absoluteTime(summary.last_activity)} · {duration(summary.usage.duration_ms)}{" "}
+              · {tokens(summary.usage.input_tokens + summary.usage.output_tokens)} tokens ·{" "}
+              {cost(summary.usage.cost_micros)} est.
+            </span>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -157,8 +174,22 @@ export function ThreadStreamSkeleton() {
         <div className="q-skel" style={{ width: 240, height: 12, marginBottom: 10 }} />
         <div className="q-skel" style={{ width: "92%", height: 10, marginBottom: 10 }} />
         <div className="q-skel" style={{ width: "84%", height: 10, marginBottom: 10 }} />
-        <div className="q-skel" style={{ width: "66%", height: 10, marginBottom: 22 }} />
+        <div className="q-skel" style={{ width: "66%", height: 10, marginBottom: 14 }} />
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          <span
+            className="q-skel"
+            style={{ width: 14, height: 14, borderRadius: 4, flex: "none" }}
+          />
+          <span className="q-skel" style={{ width: "54%", height: 11 }} />
+        </div>
         <div className="q-skel" style={{ width: "100%", height: 76, marginBottom: 22 }} />
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          <span
+            className="q-skel"
+            style={{ width: 14, height: 14, borderRadius: 4, flex: "none" }}
+          />
+          <span className="q-skel" style={{ width: "42%", height: 11 }} />
+        </div>
         <div className="q-skel" style={{ width: "88%", height: 10, marginBottom: 10 }} />
         <div className="q-skel" style={{ width: "72%", height: 10 }} />
       </div>

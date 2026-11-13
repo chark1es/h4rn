@@ -4,15 +4,15 @@ import {
   ChevronRightIcon,
   CircleAlertIcon,
   ClockIcon,
+  ListFilterIcon,
   SearchIcon,
-  SlidersHorizontalIcon,
   SquarePenIcon,
   XIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
-import { MOD, SHIFT } from "@/components/common/Kbd";
+import { KeyGlyphs, MOD, SHIFT } from "@/components/common/Kbd";
 import { OfflineBanner } from "@/components/shell/OfflineBanner";
 import {
   DropdownMenu,
@@ -36,6 +36,7 @@ import {
   openThread,
   setFilter,
   setQuery,
+  setSelectedThread,
   setTab,
   setThreadTab,
   setUi,
@@ -62,15 +63,27 @@ const EMPTY_COPY: Record<ThreadTab, { title: string; description: string }> = {
   },
 };
 
-function ThreadRowSkeleton() {
+const SKELETON_WIDTHS: Array<[string, string]> = [
+  ["78%", "42%"],
+  ["62%", "54%"],
+  ["88%", "38%"],
+  ["71%", "48%"],
+  ["58%", "56%"],
+  ["83%", "44%"],
+  ["66%", "36%"],
+];
+
+function ThreadRowSkeleton({ index = 0 }: { index?: number }) {
+  const [title, meta] =
+    SKELETON_WIDTHS[index % SKELETON_WIDTHS.length] ?? (["78%", "42%"] as const);
   return (
     <div className="q-row" style={{ pointerEvents: "none" }}>
       <span className="q-row-st">
         <span className="q-skel" style={{ width: 10, height: 10, borderRadius: "50%" }} />
       </span>
       <span className="q-row-main" style={{ gap: 8, paddingTop: 2 }}>
-        <span className="q-skel" style={{ height: 11, width: "72%" }} />
-        <span className="q-skel" style={{ height: 9, width: "44%" }} />
+        <span className="q-skel" style={{ height: 11, width: title }} />
+        <span className="q-skel" style={{ height: 9, width: meta }} />
       </span>
     </div>
   );
@@ -106,7 +119,7 @@ function FilterPopover({
           aria-label="Filter threads"
           title="Filter threads"
         >
-          <SlidersHorizontalIcon
+          <ListFilterIcon
             className={phone ? "q-icon s22" : "q-icon"}
             strokeWidth={1.5}
             aria-hidden
@@ -288,6 +301,8 @@ export function InboxPane() {
     getScrollElement: () => scrollRef.current,
     estimateSize: () => (isPhone ? 66 : 52),
     overscan: 8,
+    paddingStart: isPhone ? 0 : 2,
+    paddingEnd: isPhone ? 16 : 8,
     getItemKey: (index) => visible[index]?.thread_id ?? index,
   });
 
@@ -295,6 +310,35 @@ export function InboxPane() {
     const index = visible.findIndex((thread) => thread.thread_id === selectedId);
     if (index >= 0) virtualizer.scrollToIndex(index, { align: "auto" });
   }, [selectedId, visible, virtualizer]);
+
+  // Resume times live on limit items in the loaded log, when the wire has them.
+  const resumeFor = (threadId: string): string | null => {
+    const log = state.logs[threadId];
+    if (!log) return null;
+    for (let turnIndex = log.turns.length - 1; turnIndex >= 0; turnIndex -= 1) {
+      const items = log.turns[turnIndex]?.items ?? [];
+      for (let itemIndex = items.length - 1; itemIndex >= 0; itemIndex -= 1) {
+        const item = items[itemIndex];
+        if (item?.kind === "limit" && item.resetAt) return item.resetAt;
+      }
+    }
+    return null;
+  };
+
+  // Roving tabindex: Tab enters on the selected row, arrows walk the list.
+  const moveSelection = (delta: number) => {
+    if (visible.length === 0) return;
+    const current = visible.findIndex((thread) => thread.thread_id === selectedId);
+    const start = current < 0 ? 0 : current;
+    const next = visible[Math.max(0, Math.min(visible.length - 1, start + delta))];
+    if (!next) return;
+    setSelectedThread(next.thread_id);
+    requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLElement>(`[data-thread-id="${CSS.escape(next.thread_id)}"]`)
+        ?.focus();
+    });
+  };
 
   const hasFilter =
     filter.host !== null || filter.harness !== null || filter.needsAttention || filter.unread;
@@ -422,7 +466,7 @@ export function InboxPane() {
         </div>
       ) : null}
 
-      <OfflineBanner inline />
+      {error ? null : <OfflineBanner inline />}
 
       {error ? (
         <div className="q-banner err" style={{ margin: "0 12px 8px" }}>
@@ -447,8 +491,8 @@ export function InboxPane() {
       <div ref={scrollRef} className="q-scroll">
         {loading && Object.keys(threads).length === 0 ? (
           <div className="q-rows" role="status" aria-busy="true" aria-label="Loading threads">
-            {["a", "b", "c", "d", "e", "f", "g"].map((key) => (
-              <ThreadRowSkeleton key={key} />
+            {["a", "b", "c", "d", "e", "f", "g"].map((key, index) => (
+              <ThreadRowSkeleton key={key} index={index} />
             ))}
           </div>
         ) : allEmpty ? (
@@ -474,7 +518,7 @@ export function InboxPane() {
                 <SquarePenIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                 New thread{" "}
                 <span className="q-kbd">
-                  {MOD} {SHIFT} N
+                  <KeyGlyphs value={`${MOD} ${SHIFT} N`} />
                 </span>
               </button>
             </div>
@@ -505,7 +549,22 @@ export function InboxPane() {
             className="q-rows"
             role="listbox"
             aria-label={`${TAB_LABELS[tab]} threads`}
-            style={{ height: virtualizer.getTotalSize(), position: "relative" }}
+            style={{ height: virtualizer.getTotalSize(), position: "relative", padding: 0 }}
+            onKeyDown={(event) => {
+              if (event.key === "ArrowDown") {
+                event.preventDefault();
+                moveSelection(1);
+              } else if (event.key === "ArrowUp") {
+                event.preventDefault();
+                moveSelection(-1);
+              } else if (event.key === "Home") {
+                event.preventDefault();
+                moveSelection(-visible.length);
+              } else if (event.key === "End") {
+                event.preventDefault();
+                moveSelection(visible.length);
+              }
+            }}
           >
             {virtualizer.getVirtualItems().map((item) => {
               const thread = visible[item.index];
@@ -515,11 +574,8 @@ export function InboxPane() {
                   key={item.key}
                   ref={virtualizer.measureElement}
                   data-index={item.index}
+                  className="q-inbox-vrow"
                   style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    width: "100%",
                     transform: `translateY(${item.start}px)`,
                   }}
                 >
@@ -528,6 +584,8 @@ export function InboxPane() {
                     host={hosts[thread.host]}
                     index={item.index}
                     selected={selectedId === thread.thread_id}
+                    tabStop={selectedId ? selectedId === thread.thread_id : item.index === 0}
+                    resumeAt={resumeFor(thread.thread_id)}
                     now={now}
                     onOpen={() => openThread(thread.thread_id)}
                     onAcknowledge={() => void acknowledgeThread(thread.thread_id)}

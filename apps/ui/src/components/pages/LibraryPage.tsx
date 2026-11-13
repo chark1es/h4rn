@@ -1,8 +1,8 @@
 import {
-  BlocksIcon,
   CheckCircle2Icon,
   KeyRoundIcon,
   MoreHorizontalIcon,
+  PlugIcon,
   PlusIcon,
   RefreshCwIcon,
   Share2Icon,
@@ -106,7 +106,7 @@ export function LibraryPage() {
                   {server.shared ? (
                     <Share2Icon className="q-icon" strokeWidth={1.5} aria-hidden />
                   ) : (
-                    <BlocksIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+                    <PlugIcon className="q-icon" strokeWidth={1.5} aria-hidden />
                   )}
                 </span>
                 <span className="grow">

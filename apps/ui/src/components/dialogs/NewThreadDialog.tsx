@@ -150,7 +150,7 @@ export function NewThreadDialog() {
                   setModel(DEFAULT_MODELS[nextHarness]);
                 }
               }}
-              className="h-7 w-full rounded-[6px] border-0 bg-raised px-2 text-[12.5px] text-ink shadow-[inset_0_0_0_1px_var(--line-2)] outline-none focus-visible:shadow-[inset_0_0_0_1px_var(--accent)]"
+              className="h-7 w-full rounded-[6px] border-0 bg-bg-raised px-2 text-[12.5px] text-fg shadow-[inset_0_0_0_1px_var(--line-2)] outline-none focus-visible:shadow-[inset_0_0_0_1px_var(--accent)]"
             >
               {onlineHosts.length === 0 ? <option value="">No online hosts</option> : null}
               {onlineHosts.map((option) => (
@@ -171,7 +171,7 @@ export function NewThreadDialog() {
                 setHarness(next);
                 setModel(DEFAULT_MODELS[next]);
               }}
-              className="h-7 w-full rounded-[6px] border-0 bg-raised px-2 text-[12.5px] text-ink shadow-[inset_0_0_0_1px_var(--line-2)] outline-none focus-visible:shadow-[inset_0_0_0_1px_var(--accent)]"
+              className="h-7 w-full rounded-[6px] border-0 bg-bg-raised px-2 text-[12.5px] text-fg shadow-[inset_0_0_0_1px_var(--line-2)] outline-none focus-visible:shadow-[inset_0_0_0_1px_var(--accent)]"
             >
               {harnessChoices.map((option) => (
                 <option key={option} value={option}>
@@ -203,7 +203,7 @@ export function NewThreadDialog() {
             <FieldLabel htmlFor="new-thread-mode">Mode</FieldLabel>
             <select
               id="new-thread-mode"
-              className="h-7 w-full rounded-[6px] border-0 bg-raised px-2 text-[12.5px] text-ink shadow-[inset_0_0_0_1px_var(--line-2)] outline-none focus-visible:shadow-[inset_0_0_0_1px_var(--accent)]"
+              className="h-7 w-full rounded-[6px] border-0 bg-bg-raised px-2 text-[12.5px] text-fg shadow-[inset_0_0_0_1px_var(--line-2)] outline-none focus-visible:shadow-[inset_0_0_0_1px_var(--accent)]"
               value={runtimeMode}
               onChange={(event) => setRuntimeMode(event.target.value as RuntimeMode)}
             >
@@ -211,7 +211,7 @@ export function NewThreadDialog() {
               <option value="auto_accept_edits">Auto-accept edits</option>
               <option value="full_access">Full access</option>
             </select>
-            <span className="text-micro text-ink-faint">Fixed for the life of the thread.</span>
+            <span className="text-small text-fg-3">Fixed for the life of the thread.</span>
           </div>
 
           <div className="flex flex-col gap-1">
@@ -225,7 +225,7 @@ export function NewThreadDialog() {
               className="font-mono"
               placeholder="~/code/api"
             />
-            <span className="flex items-center gap-1 text-micro text-ink-faint">
+            <span className="flex items-center gap-1 text-small text-fg-3">
               <GitBranchIcon className="size-3" aria-hidden />
               The worktree is chosen by the harness for now.
             </span>
@@ -246,7 +246,7 @@ export function NewThreadDialog() {
               onClick={attachments.openPicker}
               aria-label="Attach files"
               title={offline ? "Reconnect to attach files." : "Attach files (Ctrl/Cmd U)"}
-              className="flex h-8 items-center gap-1 rounded-sm px-1.5 text-micro text-ink-muted transition-colors duration-[var(--dur-instant)] hover:bg-panel hover:text-ink focus-visible:ring-2 focus-visible:ring-cue/40 focus-visible:outline-none"
+              className="flex h-8 items-center gap-1 rounded-sm px-1.5 text-small text-fg-2 transition-colors duration-[var(--dur-instant)] hover:bg-bg-side hover:text-fg focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none"
             >
               <PaperclipIcon className="size-3.5" aria-hidden />
               {attachments.attachments.length > 0
@@ -267,7 +267,7 @@ export function NewThreadDialog() {
           />
 
           {attachments.tasks.length > 0 ? (
-            <div className="rounded-sm border border-line">
+            <div className="rounded-md border border-line">
               <AttachmentTray
                 tasks={attachments.tasks}
                 onRemove={attachments.remove}
@@ -302,11 +302,11 @@ export function NewThreadDialog() {
           />
         </div>
 
-        <p className="rounded-sm border border-line bg-panel px-2.5 py-1.5 text-micro text-ink-muted">
+        <p className="rounded-sm border border-line bg-bg-side px-2.5 py-1.5 text-small text-fg-2">
           {selectedHost ? (
             <>
               Starts <span className="font-mono">{HARNESS_SLUGS[harness]}</span> on{" "}
-              <span className="font-medium text-ink">{selectedHost.name}</span> in{" "}
+              <span className="font-medium text-fg">{selectedHost.name}</span> in{" "}
               <span className="font-mono">{workspace || "~/code"}</span>.
             </>
           ) : (
@@ -315,7 +315,7 @@ export function NewThreadDialog() {
         </p>
 
         <DialogFooter className="items-center sm:justify-between">
-          <span className="hidden items-center gap-1 text-micro text-ink-faint sm:flex">
+          <span className="hidden items-center gap-1 text-small text-fg-3 sm:flex">
             <Kbd>
               {MOD} {ENTER}
             </Kbd>{" "}

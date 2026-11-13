@@ -9,7 +9,7 @@ function Command({ className, ...props }: React.ComponentProps<typeof CommandPri
   return (
     <CommandPrimitive
       data-slot="command"
-      className={cn("flex h-full w-full flex-col overflow-hidden bg-raised text-ink", className)}
+      className={cn("flex h-full w-full flex-col overflow-hidden bg-bg-raised text-fg", className)}
       {...props}
     />
   );
@@ -55,7 +55,7 @@ function CommandInput({
       <CommandPrimitive.Input
         data-slot="command-input"
         className={cn(
-          "h-full w-full min-w-0 border-0 bg-transparent text-[15px] text-ink outline-none placeholder:text-ink-faint disabled:cursor-not-allowed disabled:opacity-50",
+          "h-full w-full min-w-0 border-0 bg-transparent text-[15px] text-fg outline-none placeholder:text-fg-3 disabled:cursor-not-allowed disabled:opacity-50",
           className,
         )}
         {...props}
@@ -79,7 +79,7 @@ function CommandEmpty({ ...props }: React.ComponentProps<typeof CommandPrimitive
   return (
     <CommandPrimitive.Empty
       data-slot="command-empty"
-      className="py-6 text-center text-[12.5px] text-ink-muted"
+      className="py-6 text-center text-[12.5px] text-fg-2"
       {...props}
     />
   );
@@ -92,7 +92,7 @@ function CommandGroup({
   return (
     <CommandPrimitive.Group
       data-slot="command-group"
-      className={cn("overflow-hidden text-ink", className)}
+      className={cn("overflow-hidden text-fg", className)}
       {...props}
     />
   );

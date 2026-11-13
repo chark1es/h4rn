@@ -19,7 +19,7 @@ export function HostsPane() {
   });
 
   return (
-    <main className="flex h-full min-h-0 flex-1 flex-col bg-paper">
+    <main className="flex h-full min-h-0 flex-1 flex-col bg-bg">
       <header className="flex h-12 shrink-0 items-center justify-between border-b border-line px-4">
         <h1 className="text-headline">Hosts</h1>
         <Button variant="secondary" size="sm" disabled title="Pairing arrives in Phase 2">
@@ -35,7 +35,7 @@ export function HostsPane() {
               {["a", "b", "c", "d"].map((key) => (
                 <div
                   key={key}
-                  className="h-16 animate-pulse rounded-md border border-line bg-panel"
+                  className="h-16 animate-pulse rounded-md border border-line bg-bg-side"
                 />
               ))}
             </div>
@@ -51,7 +51,7 @@ export function HostsPane() {
               }
             />
           ) : (
-            <ul className="divide-y divide-line rounded-md border border-line bg-raised">
+            <ul className="divide-y divide-line rounded-md border border-line bg-bg-raised">
               {list.map((host) => (
                 <li key={host.host_id} className="flex items-center gap-3 px-3 py-3">
                   <EntityAvatar
@@ -62,13 +62,13 @@ export function HostsPane() {
                     decorative={false}
                   />
                   <div className="min-w-0 flex-1">
-                    <p className="flex items-center gap-1.5 text-compact font-medium text-ink">
+                    <p className="flex items-center gap-1.5 text-compact font-medium text-fg">
                       {host.name}
                       {host.platform.startsWith("wsl:") ? (
                         <Badge variant="outline">WSL</Badge>
                       ) : null}
                     </p>
-                    <p className="text-micro text-ink-muted">
+                    <p className="text-small text-fg-2">
                       {hostPlatformLabel(host.platform)} ·{" "}
                       {host.online
                         ? "online"
@@ -82,11 +82,11 @@ export function HostsPane() {
                       </Badge>
                     ))}
                   </div>
-                  <span className="flex w-16 items-center justify-end gap-1.5 text-micro text-ink-muted">
+                  <span className="flex w-16 items-center justify-end gap-1.5 text-small text-fg-2">
                     <PresenceDot online={host.online} />
                     {host.online ? "online" : "offline"}
                   </span>
-                  <span className="ml-1 font-mono text-micro tabular text-ink-faint">
+                  <span className="ml-1 text-small tabular text-fg-3">
                     {host.online ? relativeAge(host.last_seen ?? "", now) : "—"}
                   </span>
                 </li>
@@ -94,7 +94,7 @@ export function HostsPane() {
             </ul>
           )}
 
-          <p className="mt-4 text-micro leading-relaxed text-ink-muted">
+          <p className="mt-4 text-small leading-relaxed text-fg-2">
             Presence is a dot plus a word. A WSL distribution is its own host, so pairing the
             Windows host does not grant the distribution.
           </p>

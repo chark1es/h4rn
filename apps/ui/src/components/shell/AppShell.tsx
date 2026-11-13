@@ -1,5 +1,6 @@
-import { CommandIcon, PlusIcon } from "lucide-react";
+import { PlusIcon } from "lucide-react";
 import type * as React from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { CommandPalette } from "@/components/dialogs/CommandPalette";
 import { NewThreadDialog } from "@/components/dialogs/NewThreadDialog";
@@ -17,35 +18,152 @@ import { Toasts } from "@/components/shell/Toasts";
 import { ThreadPane } from "@/components/thread/ThreadPane";
 import { IdePane } from "@/features/ide/IdePane";
 import { useIsPhone, useIsWide } from "@/hooks/use-media-query";
-import { openNewThread, setUi, useApp } from "@/lib/store/appStore";
+import { HARNESS_LABELS, harnessLabel } from "@/lib/entities";
+import { createThread, useApp } from "@/lib/store/appStore";
+
+const START_MODELS: Record<string, string> = {
+  claude_code: "claude-sonnet-5-5",
+  codex: "gpt-5.1-codex",
+  opencode: "claude-sonnet-5-5",
+  antigravity: "gemini-4-argon-medium",
+};
 
 function InboxDetailEmpty() {
-  const count = useApp((state) => Object.keys(state.threads).length);
+  const hosts = useApp((state) => state.hosts);
+  const onlineHosts = useMemo(
+    () =>
+      Object.values(hosts)
+        .filter((host) => host.online)
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [hosts],
+  );
+  const [host, setHost] = useState("");
+  const [harness, setHarness] = useState("claude_code");
+  const [workspace, setWorkspace] = useState("~/code");
+  const [prompt, setPrompt] = useState("");
+  const [starting, setStarting] = useState(false);
+
+  useEffect(() => {
+    if (host || onlineHosts.length === 0) return;
+    setHost(onlineHosts[0]?.host_id ?? "");
+  }, [host, onlineHosts]);
+
+  const selectedHost = hosts[host];
+  const harnessChoices = selectedHost?.harnesses.length
+    ? selectedHost.harnesses
+    : (Object.keys(HARNESS_LABELS) as Array<keyof typeof HARNESS_LABELS>);
+  const hostName = selectedHost?.name ?? "a host";
+
+  const submit = async () => {
+    if (!host || starting || !prompt.trim()) return;
+    setStarting(true);
+    const ok = await createThread({
+      host,
+      harness: harness as never,
+      workspacePath: workspace.trim() || "~/code",
+      model: START_MODELS[harness] ?? "claude-sonnet-5-5",
+      prompt: prompt.trim(),
+      runtimeMode: "approval_required",
+    });
+    setStarting(false);
+    if (ok) setPrompt("");
+  };
+
   return (
     <main className="q-main">
       <div className="q-center-empty">
-        <div className="q-empty" style={{ width: 420, alignItems: "flex-start", padding: 0 }}>
-          <h3 style={{ fontSize: 17, lineHeight: "24px" }}>
-            {count === 0 ? "No thread is open" : "Choose a thread"}
-          </h3>
+        <div className="q-empty" style={{ width: 520, alignItems: "flex-start", padding: 0 }}>
+          <h3 style={{ fontSize: 17, lineHeight: "24px" }}>Start a thread</h3>
           <p style={{ margin: 0 }}>
-            The stream, tool calls and approvals live here. Opening a thread replaces this pane and
-            keeps the list in place.
+            Pick where it runs. The agent works in a worktree on that host, and you can supervise it
+            from any paired device.
           </p>
-          <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-            <button type="button" className="q-btn primary" onClick={openNewThread}>
-              <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-              New thread
-            </button>
-            <button
-              type="button"
+          <div style={{ display: "flex", gap: 8, margin: "8px 0 10px", flexWrap: "wrap" }}>
+            <select
+              aria-label="Host"
               className="q-btn secondary"
-              onClick={() => setUi({ paletteOpen: true })}
+              style={{ height: 34, borderRadius: 8, fontSize: 13.5 }}
+              value={host}
+              onChange={(event) => {
+                const nextHost = hosts[event.target.value];
+                setHost(event.target.value);
+                const nextHarness = nextHost?.harnesses[0];
+                if (nextHarness) setHarness(nextHarness);
+              }}
             >
-              <CommandIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-              Commands
-            </button>
+              {onlineHosts.length === 0 ? <option value="">No online hosts</option> : null}
+              {onlineHosts.map((option) => (
+                <option key={option.host_id} value={option.host_id}>
+                  {option.name}
+                </option>
+              ))}
+            </select>
+            <select
+              aria-label="Harness"
+              className="q-btn secondary"
+              style={{ height: 34, borderRadius: 8, fontSize: 13.5 }}
+              value={harness}
+              onChange={(event) => setHarness(event.target.value)}
+            >
+              {harnessChoices.map((option) => (
+                <option key={option} value={option}>
+                  {HARNESS_LABELS[option]}
+                </option>
+              ))}
+            </select>
+            <input
+              aria-label="Workspace folder"
+              className="q-btn secondary"
+              style={{
+                height: 34,
+                borderRadius: 8,
+                fontSize: 12,
+                width: 190,
+                textAlign: "left",
+                fontFamily: "var(--mono)",
+              }}
+              value={workspace}
+              onChange={(event) => setWorkspace(event.target.value)}
+              placeholder="~/code/api"
+            />
           </div>
+          <div className="q-composer" style={{ width: "100%" }}>
+            <textarea
+              aria-label="Describe the task"
+              rows={3}
+              placeholder={`Describe the task for ${harnessLabel(harness as never)} on ${hostName}`}
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                  event.preventDefault();
+                  void submit();
+                }
+              }}
+            />
+            <div className="q-comp-f">
+              <span className="grow" />
+              <button
+                type="button"
+                className={`q-send${prompt.trim() && host ? " ready" : ""}`}
+                disabled={!host || !prompt.trim() || starting}
+                onClick={() => void submit()}
+                aria-label="Start thread"
+              >
+                <PlusIcon className="q-icon" strokeWidth={2} aria-hidden />
+              </button>
+            </div>
+          </div>
+          <p className="q-faint" style={{ fontSize: 12, margin: "12px 0 0" }}>
+            {onlineHosts.length === 0 ? (
+              <>
+                No host yet? Pair a device in Settings or run{" "}
+                <span className="q-mono">h4rn host</span> on the machine.
+              </>
+            ) : (
+              <>Everything after Start is visible in the stream.</>
+            )}
+          </p>
         </div>
       </div>
     </main>
@@ -89,7 +207,7 @@ export function AppShell() {
 
   if (isPhone) {
     return (
-      <div className="q-app" style={{ flexDirection: "column", height: "100%", minHeight: 0 }}>
+      <div className="q-app q-ph" style={{ flexDirection: "column", height: "100%", minHeight: 0 }}>
         {surface ? <OfflineBanner /> : null}
         <div
           className="q-ph-content"

@@ -1,7 +1,7 @@
 import "@xterm/xterm/css/xterm.css";
 import "./terminal.css";
 
-import { ChevronLeftIcon, PlusIcon, SearchIcon, SquareTerminalIcon, XIcon } from "lucide-react";
+import { ChevronLeftIcon, PlusIcon, SearchIcon, TerminalIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
@@ -126,11 +126,7 @@ export function TerminalPanel({
                     title={tab.title}
                   >
                     {index === 0 ? (
-                      <SquareTerminalIcon
-                        className="q-icon s14 q-faint"
-                        strokeWidth={1.5}
-                        aria-hidden
-                      />
+                      <TerminalIcon className="q-icon s14 q-faint" strokeWidth={1.5} aria-hidden />
                     ) : null}
                     {tab.title}
                     <span className="q-faint">{hostName}</span>
@@ -220,7 +216,7 @@ export function TerminalPanel({
             padding: "0 24px",
           }}
         >
-          <SquareTerminalIcon className="q-icon s20 q-faint" strokeWidth={1.5} aria-hidden />
+          <TerminalIcon className="q-icon s20 q-faint" strokeWidth={1.5} aria-hidden />
           <p style={{ margin: 0, fontWeight: 500 }}>No terminal is open</p>
           <p className="q-faint" style={{ margin: 0, maxWidth: "48ch", fontSize: 12 }}>
             Start a shell in <span className="q-mono">{cwd}</span>. It runs on {host} and keeps

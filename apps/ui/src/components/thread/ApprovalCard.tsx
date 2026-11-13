@@ -1,6 +1,6 @@
-import { ShieldCheckIcon } from "lucide-react";
+import { ChevronDownIcon, ShieldCheckIcon } from "lucide-react";
 
-import { BACKSPACE, ENTER, MOD } from "@/components/common/Kbd";
+import { BACKSPACE, ENTER, KeyGlyphs, MOD } from "@/components/common/Kbd";
 import type { ApprovalKind } from "@/gen";
 import { harnessLabel } from "@/lib/entities";
 import { respondApproval, useApp } from "@/lib/store/appStore";
@@ -13,7 +13,7 @@ const KIND_LABEL: Record<ApprovalKind, string> = {
   question: "answer a question",
 };
 
-export function StandbyBar({ threadId }: { threadId: string }) {
+export function ApprovalCard({ threadId }: { threadId: string }) {
   const log = useApp((state) => state.logs[threadId]);
   const summary = useApp((state) => state.threads[threadId]);
   const hosts = useApp((state) => state.hosts);
@@ -82,7 +82,7 @@ export function StandbyBar({ threadId }: { threadId: string }) {
           </span>
         ) : (
           <button type="button" className="q-btn ghost" disabled title="Not available yet">
-            Always allow <span aria-hidden>›</span>
+            Always allow <ChevronDownIcon className="q-icon s12" strokeWidth={1.75} aria-hidden />
           </button>
         )}
         <span className="grow" />
@@ -94,7 +94,7 @@ export function StandbyBar({ threadId }: { threadId: string }) {
         >
           Deny{" "}
           <span className="q-kbd">
-            {MOD} {BACKSPACE}
+            <KeyGlyphs value={`${MOD} ${BACKSPACE}`} />
           </span>
         </button>
         <button
@@ -105,7 +105,7 @@ export function StandbyBar({ threadId }: { threadId: string }) {
         >
           Approve{" "}
           <span className="q-kbd">
-            {MOD} {ENTER}
+            <KeyGlyphs value={`${MOD} ${ENTER}`} />
           </span>
         </button>
       </div>

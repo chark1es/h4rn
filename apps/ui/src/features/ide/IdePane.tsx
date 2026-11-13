@@ -2,6 +2,7 @@ import {
   Code2Icon,
   FileCodeIcon,
   GitBranchIcon,
+  HandIcon,
   Loader2Icon,
   PanelLeftIcon,
   SaveIcon,
@@ -28,7 +29,7 @@ import type { ThreadId, ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { toProtoError } from "@/lib/client/errors";
 import { harnessLabel } from "@/lib/entities";
-import { ensureThread, navigate, pushToast, useApp } from "@/lib/store/appStore";
+import { ensureThread, navigate, openNewThread, pushToast, useApp } from "@/lib/store/appStore";
 import type { ThreadLog } from "@/lib/store/projection";
 import { cn } from "@/lib/utils";
 import { CodeEditor, type CursorPosition } from "./CodeEditor";
@@ -390,6 +391,18 @@ export function IdePane() {
             {active?.path ?? workspace.path}
           </span>
           <span className="grow" />
+          {!isPhone && active ? (
+            <button
+              type="button"
+              className="q-btn ghost"
+              style={{ height: 24 }}
+              onClick={openNewThread}
+              title="Start a thread with this file in context"
+            >
+              <HandIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+              Hand to agent
+            </button>
+          ) : null}
           {!isPhone ? (
             <div className="q-seg inline" role="tablist" aria-label="Editor mode">
               <button
@@ -502,6 +515,9 @@ export function IdePane() {
                 host={workspace.host}
                 harness={workspace.harness}
                 changeTitle={workspace.threadTitle}
+                changeAt={
+                  workspace.threadId ? (threads[workspace.threadId]?.last_activity ?? null) : null
+                }
                 onSelectFile={(path) => void session.openDiff(path, state.diffMode)}
                 onOpenFile={(path) => {
                   session.openFile(path);
@@ -661,7 +677,7 @@ export function IdePane() {
             </DialogDescription>
           </DialogHeader>
           {state.conflict ? (
-            <div className="max-h-64 overflow-auto rounded-sm border border-line bg-panel font-mono text-[10px] leading-4">
+            <div className="max-h-64 overflow-auto rounded-md border border-line bg-bg-side font-mono text-[10px] leading-4">
               {computeDiff(state.conflict.theirs, state.conflict.mine)
                 .slice(0, 80)
                 .map((line) => (
@@ -669,11 +685,11 @@ export function IdePane() {
                     key={`${line.kind}-${line.oldLine}-${line.newLine}`}
                     className={cn(
                       "flex gap-2 px-2",
-                      line.kind === "added" && "bg-standby-tint text-standby-ink",
-                      line.kind === "removed" && "bg-strike-tint text-strike-ink",
+                      line.kind === "added" && "bg-ok-soft text-ok",
+                      line.kind === "removed" && "bg-danger-soft text-danger",
                     )}
                   >
-                    <span className="w-4 shrink-0 text-ink-faint">
+                    <span className="w-4 shrink-0 text-fg-3">
                       {line.kind === "added" ? "+" : line.kind === "removed" ? "−" : " "}
                     </span>
                     <span className="whitespace-pre-wrap">{line.text || " "}</span>

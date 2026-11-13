@@ -1,10 +1,10 @@
 import type { LucideIcon } from "lucide-react";
 import {
-  BlocksIcon,
   ChartNoAxesColumnIcon,
-  Code2Icon,
+  CodeIcon,
   GitPullRequestIcon,
   InboxIcon,
+  PlugIcon,
   SearchIcon,
   SettingsIcon,
   SquarePenIcon,
@@ -12,6 +12,7 @@ import {
 import { useState } from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
+import { KeyGlyphs, MOD, SHIFT } from "@/components/common/Kbd";
 import { useNow } from "@/hooks/use-now";
 import { harnessLabel, machineSeed } from "@/lib/entities";
 import { relativeAge } from "@/lib/format";
@@ -35,11 +36,11 @@ const NAV_ITEMS: Array<{
     route: { kind: "placeholder", surface: "pulls", path: "/pulls" },
     count: "3",
   },
-  { key: "ide", label: "Editor", icon: Code2Icon, route: { kind: "ide" } },
+  { key: "ide", label: "Editor", icon: CodeIcon, route: { kind: "ide" } },
   {
     key: "library",
     label: "MCP & skills",
-    icon: BlocksIcon,
+    icon: PlugIcon,
     route: { kind: "placeholder", surface: "library", path: "/library" },
   },
   {
@@ -151,7 +152,7 @@ export function Sidebar() {
         <button
           type="button"
           className="q-ibtn"
-          title="New thread ⌘⇧N"
+          title={`New thread ${MOD} ${SHIFT} N`}
           aria-label="New thread"
           onClick={openNewThread}
         >
@@ -162,7 +163,9 @@ export function Sidebar() {
       <button type="button" className="q-side-search" onClick={() => setUi({ paletteOpen: true })}>
         <SearchIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
         <span>Search or run</span>
-        <span className="q-kbd">⌘K</span>
+        <span className="q-kbd">
+          <KeyGlyphs value={`${MOD}K`} />
+        </span>
       </button>
 
       {NAV_ITEMS.map((item) => {

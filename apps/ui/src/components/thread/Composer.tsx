@@ -319,7 +319,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
                 <span className="font-mono">{summary.model}</span>
               </DropdownMenuItem>
               <DropdownMenuSeparator />
-              <p className="px-2 py-1.5 text-micro leading-relaxed text-ink-faint">
+              <p className="px-2 py-1.5 text-small leading-relaxed text-fg-3">
                 Harness and model are fixed for a thread. Start a new thread to change them.
               </p>
             </DropdownMenuContent>
@@ -329,15 +329,10 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
         </div>
       </fieldset>
 
-      {attachments.blockedReason || attachments.attachments.length > 0 ? (
+      {attachments.attachments.length > 0 ? (
         <div className="q-usage-foot">
-          {attachments.blockedReason ? (
-            <span className="q-danger">{attachments.blockedReason}</span>
-          ) : null}
           <span className="grow" />
-          {attachments.attachments.length > 0 ? (
-            <span className="q-num">{attachments.attachments.length} attached</span>
-          ) : null}
+          <span className="q-num">{attachments.attachments.length} attached</span>
         </div>
       ) : null}
     </>

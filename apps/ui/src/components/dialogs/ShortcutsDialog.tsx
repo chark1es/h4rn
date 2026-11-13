@@ -41,7 +41,7 @@ const GROUPS: Array<{ title: string; rows: Array<[string, string]> }> = [
       ["Deny / Hold", `${MOD} ${BACKSPACE}`],
       ["Interrupt turn", `${MOD} .`],
       ["Settle now", `${SHIFT} S`],
-      ["Previous / next cue", "[ / ]"],
+      ["Previous / next message", "[ / ]"],
       ["Terminal / Diff / Files", "T / D / F"],
     ],
   },

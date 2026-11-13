@@ -762,6 +762,8 @@ class MockDaemon {
   private nextTerminal = 0;
   private readonly failLists: boolean;
   private readonly failThread: boolean;
+  /** Keep the skeleton screens up while still publishing cached hosts. */
+  private readonly holdLists: boolean;
 
   constructor(
     private readonly handlers: TransportHandlers,
@@ -774,6 +776,7 @@ class MockDaemon {
     // the partial-host banner and the thread error state are both visible.
     this.failLists = scenario === "error" && this.attempt > 0;
     this.failThread = scenario === "error";
+    this.holdLists = scenario === "loading";
     this.blobs.set(DEMO_IMAGE_ID, {
       bytes: DEMO_IMAGE_BYTES,
       name: DEMO_IMAGE_NAME,
@@ -893,11 +896,11 @@ class MockDaemon {
         "",
         " RUN  v3.2.4 /home/dev/code/api",
         "",
-        " ✓ src/auth/token.test.ts (12 tests) 84ms",
-        " ✓ src/auth/refresh.test.ts (6 tests) 96ms",
-        " ✓ src/auth/session.test.ts (9 tests) 212ms  run 1 of 3",
-        " ✓ src/auth/session.test.ts (9 tests) 207ms  run 2 of 3",
-        " ✓ src/auth/session.test.ts (9 tests) 219ms  run 3 of 3",
+        " ok src/auth/token.test.ts (12 tests) 84ms",
+        " ok src/auth/refresh.test.ts (6 tests) 96ms",
+        " ok src/auth/session.test.ts (9 tests) 212ms  run 1 of 3",
+        " ok src/auth/session.test.ts (9 tests) 207ms  run 2 of 3",
+        " ok src/auth/session.test.ts (9 tests) 219ms  run 3 of 3",
         "",
         " Test Files  5 passed (5)",
         "      Tests  45 passed (45)",
@@ -928,6 +931,14 @@ class MockDaemon {
 
   private handle(frame: ClientFrame): void {
     const { body } = frame;
+    if (
+      this.holdLists &&
+      body.type !== "hello" &&
+      body.type !== "list_hosts" &&
+      body.type !== "subscribe"
+    ) {
+      return;
+    }
     switch (body.type) {
       case "hello":
         this.ok(frame.id, {
@@ -942,6 +953,7 @@ class MockDaemon {
         this.ok(frame.id, { type: "hosts", hosts: this.hosts });
         return;
       case "list_threads": {
+        if (this.holdLists) return;
         if (this.failLists) {
           this.err(frame.id, "unsupported", "Couldn’t reach buildbox.", "Showing 3 of 4 hosts.");
           return;
@@ -1771,9 +1783,8 @@ export function createMockTransport(scenario: string, attempt = 0): Transport {
   return {
     kind: "mock",
     connect(handlers) {
-      // The loading scenario stays in the handshake so the skeleton screens
-      // render without a daemon ever answering.
-      if (scenario === "loading") return;
+      // The loading scenario opens the handshake so cached hosts can paint, but
+      // it never answers list_threads, which keeps the skeleton screens up.
       daemon = new MockDaemon(handlers, scenario, attempt);
       openTimer = setTimeout(() => {
         openTimer = null;

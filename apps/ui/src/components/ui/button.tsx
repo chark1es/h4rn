@@ -11,8 +11,8 @@ const buttonVariants = cva(
       variant: {
         default: "bg-[var(--accent)] text-[var(--accent-fg)] hover:bg-[var(--accent-hi)]",
         secondary:
-          "bg-[var(--bg-raised)] text-ink shadow-[inset_0_0_0_1px_var(--line-2),0_1px_0_oklch(0.2_0.01_260/0.04)] hover:bg-[var(--hover)]",
-        ghost: "text-[var(--fg-2)] hover:bg-[var(--hover)] hover:text-ink",
+          "bg-[var(--bg-raised)] text-fg shadow-[inset_0_0_0_1px_var(--line-2),0_1px_0_oklch(0.2_0.01_260/0.04)] hover:bg-[var(--hover)]",
+        ghost: "text-[var(--fg-2)] hover:bg-[var(--hover)] hover:text-fg",
         destructive:
           "bg-[var(--bg-raised)] text-[var(--danger)] shadow-[inset_0_0_0_1px_var(--line-2)] hover:bg-[var(--danger-soft)]",
         link: "text-[var(--accent-tx)] underline-offset-4 hover:underline",

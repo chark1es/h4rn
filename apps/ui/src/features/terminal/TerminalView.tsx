@@ -1,4 +1,4 @@
-import { CircleAlertIcon, LoaderCircleIcon, RefreshCwIcon, WifiOffIcon } from "lucide-react";
+import { CircleAlertIcon, RefreshCwIcon, WifiOffIcon } from "lucide-react";
 import { type ButtonHTMLAttributes, useCallback, useEffect, useRef, useState } from "react";
 
 import type { H4rnClient } from "@/lib/client/client";
@@ -137,23 +137,28 @@ export function TerminalView({
         />
 
         {showOpening ? (
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 bg-stage/80 text-micro text-stage-ink-muted">
-            <LoaderCircleIcon className="size-3.5 animate-spin" aria-hidden />
+          <div
+            className="pointer-events-none absolute inset-0 flex items-center justify-center text-[12px] text-[var(--fg-3)]"
+            style={{ background: "color-mix(in oklch, var(--bg-sunk) 85%, transparent)" }}
+          >
             Opening shell…
           </div>
         ) : null}
 
         {showError || showOffline ? (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-stage px-6 text-center">
+          <div
+            className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center"
+            style={{ background: "var(--bg-sunk)", color: "var(--fg)" }}
+          >
             {showOffline ? (
-              <WifiOffIcon className="size-5 text-stage-ink-muted" aria-hidden />
+              <WifiOffIcon className="size-5 text-[var(--fg-3)]" aria-hidden />
             ) : (
-              <CircleAlertIcon className="size-5 text-strike" aria-hidden />
+              <CircleAlertIcon className="size-5 text-[var(--danger)]" aria-hidden />
             )}
-            <p className="text-compact font-medium text-stage-ink">
+            <p className="text-[13px] font-medium text-[var(--fg)]">
               {showOffline ? "The daemon is offline." : status.message}
             </p>
-            <p className="max-w-[46ch] text-micro text-stage-ink-muted">
+            <p className="max-w-[46ch] text-[12px] text-[var(--fg-2)]">
               {status.hint ??
                 (showOffline
                   ? "Reconnect and the terminal will open on its own."
@@ -161,7 +166,7 @@ export function TerminalView({
             </p>
             <button
               type="button"
-              className="mt-1 inline-flex h-7 items-center gap-1.5 rounded-sm border border-white/20 px-2.5 text-micro font-medium text-stage-ink transition-colors hover:bg-white/10"
+              className="mt-1 inline-flex h-7 items-center gap-1.5 rounded-md border border-[var(--line-2)] px-2.5 text-[12px] font-medium text-[var(--fg)] transition-colors hover:bg-[var(--hover)]"
               onClick={() => {
                 if (showOffline) client.reconnectNow();
                 setAttempt((value) => value + 1);
@@ -204,7 +209,7 @@ export function TerminalView({
       </div>
 
       {status.phase === "exited" ? (
-        <div className="flex h-8 shrink-0 items-center justify-center border-t border-white/10 bg-stage text-micro text-stage-ink-muted">
+        <div className="flex h-8 shrink-0 items-center justify-center border-t border-[var(--line)] bg-[var(--bg-sunk)] text-[12px] text-[var(--fg-3)]">
           {status.message ?? "Process exited."}
         </div>
       ) : null}

@@ -22,6 +22,8 @@ const EXECUTABLE =
 
 const DESKTOP = { width: 1440, height: 900 };
 const PHONE = { width: 390, height: 844 };
+/** The narrowest phone we promise to support. */
+const PHONE_SMALL = { width: 360, height: 780 };
 
 /** @param {string} path @param {string} theme */
 const url = (path, theme) => `${BASE}${path}${path.includes("?") ? "&" : "?"}mock=1&theme=${theme}`;
@@ -120,6 +122,13 @@ const SHOTS = [
       await open("src/db/pool.ts");
       const tab = page.getByRole("tab", { name: /session\.test\.ts/ }).first();
       if (await tab.count()) await tab.click();
+      // The reference document has an unsaved edit, so the tab shows a dirty
+      // dot. Leave a trailing space in the buffer to capture the same state.
+      await page.getByRole("tab", { name: "Edit" }).click();
+      await page.waitForTimeout(400);
+      await page.locator(".q-code .cm-content").first().click();
+      await page.keyboard.press("Control+End");
+      await page.keyboard.type(" ");
       await page.getByRole("tab", { name: "vs agent" }).click();
       await page.waitForTimeout(700);
     },
@@ -189,7 +198,8 @@ const SHOTS = [
     device: "desktop",
     path: "/t/thr_a?scenario=loading",
     wait: '[aria-label="Loading thread"]',
-    settle: 600,
+    // The mock opens the handshake, publishes cached hosts, then holds lists.
+    settle: 1800,
   },
   {
     name: "state-offline",
@@ -203,7 +213,9 @@ const SHOTS = [
     device: "desktop",
     path: "/t/thr_e?scenario=error",
     wait: "text=This thread couldn’t be loaded",
-    settle: 500,
+    // The list reload fails after the simulated relay drop (~1.2 s), which is
+    // when the inbox banner appears.
+    settle: 2200,
   },
   {
     name: "p-inbox",
@@ -262,33 +274,35 @@ const selected = only?.length ? SHOTS.filter((shot) => only.includes(shot.name))
 
 let failures = 0;
 for (const shot of selected) {
-  const size = shot.device === "phone" ? PHONE : DESKTOP;
-  const sizeName = shot.device === "phone" ? "390" : "1440";
-  for (const theme of ["light", "dark"]) {
-    const context = await browser.newContext({
-      viewport: size,
-      deviceScaleFactor: 1,
-      colorScheme: theme,
-    });
-    const page = await context.newPage();
-    const file = `${OUT}${shot.name}-${sizeName}-${theme}.png`;
-    try {
-      await page.goto(url(shot.path, theme), { waitUntil: "domcontentloaded" });
-      if (typeof shot.wait === "string") {
-        await page.locator(shot.wait).first().waitFor({ timeout: 15_000 });
-      } else {
-        await shot.wait();
+  const sizes = shot.device === "phone" ? [PHONE, PHONE_SMALL] : [DESKTOP];
+  for (const size of sizes) {
+    const sizeName = String(size.width);
+    for (const theme of ["light", "dark"]) {
+      const context = await browser.newContext({
+        viewport: size,
+        deviceScaleFactor: 1,
+        colorScheme: theme,
+      });
+      const page = await context.newPage();
+      const file = `${OUT}${shot.name}-${sizeName}-${theme}.png`;
+      try {
+        await page.goto(url(shot.path, theme), { waitUntil: "domcontentloaded" });
+        if (typeof shot.wait === "string") {
+          await page.locator(shot.wait).first().waitFor({ timeout: 15_000 });
+        } else {
+          await shot.wait();
+        }
+        await page.waitForTimeout(shot.settle ?? 700);
+        if (shot.action) await shot.action(page);
+        await page.screenshot({ path: file, animations: "disabled" });
+        console.log(`ok  ${file}`);
+      } catch (error) {
+        failures += 1;
+        console.error(`FAIL ${file}: ${error instanceof Error ? error.message : error}`);
+        await page.screenshot({ path: file, animations: "disabled" }).catch(() => undefined);
+      } finally {
+        await context.close();
       }
-      await page.waitForTimeout(shot.settle ?? 700);
-      if (shot.action) await shot.action(page);
-      await page.screenshot({ path: file, animations: "disabled" });
-      console.log(`ok  ${file}`);
-    } catch (error) {
-      failures += 1;
-      console.error(`FAIL ${file}: ${error instanceof Error ? error.message : error}`);
-      await page.screenshot({ path: file, animations: "disabled" }).catch(() => undefined);
-    } finally {
-      await context.close();
     }
   }
 }

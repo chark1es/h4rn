@@ -1,16 +1,17 @@
 import {
   CheckCircle2Icon,
+  CircleXIcon,
   ExternalLinkIcon,
   GitPullRequestIcon,
   HandIcon,
+  ListFilterIcon,
   MessageSquareIcon,
   MessageSquareTextIcon,
-  SlidersHorizontalIcon,
-  TriangleAlertIcon,
 } from "lucide-react";
 import { useState } from "react";
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
+import { ENTER, KeyGlyphs, MOD } from "@/components/common/Kbd";
 import { glyphForAgentState } from "@/lib/agent";
 import { harnessSeed, userSeed } from "@/lib/entities";
 
@@ -40,7 +41,7 @@ export function PullRequestsPage() {
         <div className="q-pane-head">
           <h2>Pull requests</h2>
           <button type="button" className="q-ibtn" aria-label="Filter">
-            <SlidersHorizontalIcon className="q-icon" aria-hidden />
+            <ListFilterIcon className="q-icon" aria-hidden />
           </button>
         </div>
         <div className="q-pane-sub">
@@ -235,7 +236,10 @@ export function PullRequestsPage() {
                           Cancel
                         </button>
                         <button type="button" className="q-btn primary">
-                          Send to Claude Code <span className="q-kbd">⌘↵</span>
+                          Send to Claude Code{" "}
+                          <span className="q-kbd">
+                            <KeyGlyphs value={`${MOD}${ENTER}`} />
+                          </span>
                         </button>
                       </div>
                     </div>
@@ -287,7 +291,7 @@ export function PullRequestsPage() {
                       {check.ok ? (
                         <CheckCircle2Icon className="q-icon s14" aria-hidden />
                       ) : (
-                        <TriangleAlertIcon className="q-icon s14" aria-hidden />
+                        <CircleXIcon className="q-icon s14" aria-hidden />
                       )}
                     </span>
                     <span className="grow">

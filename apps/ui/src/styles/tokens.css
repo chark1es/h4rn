@@ -36,6 +36,7 @@
   --warn-soft: oklch(0.968 0.03 80);
   --ok: oklch(0.49 0.12 150);
   --ok-dot: oklch(0.64 0.15 150);
+  --ok-soft: color-mix(in oklch, var(--ok) 12%, var(--bg));
   --danger: oklch(0.52 0.19 27);
   --danger-soft: oklch(0.966 0.02 25);
   --add-bg: oklch(0.966 0.028 150);
@@ -87,32 +88,6 @@
   --border: var(--line);
   --input: var(--line-2);
   --ring: var(--focus);
-
-  /*
-   * Legacy semantic aliases. These exist only so untouched surfaces keep the
-   * new palette while they are ported; they resolve to Quiet-native values.
-   */
-  --paper: var(--bg);
-  --panel: var(--bg-side);
-  --raised: var(--bg-raised);
-  --ink: var(--fg);
-  --ink-muted: var(--fg-2);
-  --ink-faint: var(--fg-3);
-  --control-border: var(--line-2);
-  --stage: var(--bg-side);
-  --stage-ink: var(--fg);
-  --stage-ink-muted: var(--fg-2);
-  --cue: var(--accent);
-  --cue-ink: var(--accent-tx);
-  --cue-tint: var(--accent-soft);
-  --standby: var(--ok);
-  --standby-ink: var(--ok);
-  --standby-tint: color-mix(in oklch, var(--ok) 12%, var(--bg));
-  --strike: var(--danger);
-  --strike-ink: var(--danger);
-  --strike-tint: var(--danger-soft);
-  --prompt: var(--accent-tx);
-  --prompt-tint: var(--accent-soft);
 }
 
 .dark {
@@ -235,6 +210,7 @@
   --color-warn-dot: var(--warn-dot);
   --color-warn-soft: var(--warn-soft);
   --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
   --color-ok-dot: var(--ok-dot);
   --color-danger: var(--danger);
   --color-danger-soft: var(--danger-soft);
@@ -260,28 +236,6 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
-
-  --color-paper: var(--paper);
-  --color-panel: var(--panel);
-  --color-raised: var(--raised);
-  --color-ink: var(--ink);
-  --color-ink-muted: var(--ink-muted);
-  --color-ink-faint: var(--ink-faint);
-  --color-control-border: var(--control-border);
-  --color-stage: var(--stage);
-  --color-stage-ink: var(--stage-ink);
-  --color-stage-ink-muted: var(--stage-ink-muted);
-  --color-cue: var(--cue);
-  --color-cue-ink: var(--cue-ink);
-  --color-cue-tint: var(--cue-tint);
-  --color-standby: var(--standby);
-  --color-standby-ink: var(--standby-ink);
-  --color-standby-tint: var(--standby-tint);
-  --color-strike: var(--strike);
-  --color-strike-ink: var(--strike-ink);
-  --color-strike-tint: var(--strike-tint);
-  --color-prompt: var(--prompt);
-  --color-prompt-tint: var(--prompt-tint);
 
   --font-sans: var(--font);
   --font-mono: var(--mono);
@@ -400,7 +354,7 @@
     line-height: 18px;
   }
 
-  .text-micro {
+  .text-small {
     font-size: 12px;
     line-height: 16px;
   }

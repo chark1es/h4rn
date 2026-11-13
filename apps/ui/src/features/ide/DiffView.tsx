@@ -5,6 +5,7 @@ import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import type { FsDiff, FsTurnChanges, HarnessKind, HostId, ProtoError } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { harnessLabel, harnessSeed } from "@/lib/entities";
+import { absoluteTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { collapseDiff, computeDiff, diffStats } from "./diff";
 
@@ -18,6 +19,7 @@ type DiffViewProps = {
   host: HostId | null;
   harness: HarnessKind | null;
   changeTitle: string | null;
+  changeAt?: string | null;
   onSelectFile: (path: string) => void;
   onOpenFile: (path: string) => void;
   onRevert: (path: string, content: string) => void;
@@ -109,6 +111,7 @@ export function DiffView({
   host,
   harness,
   changeTitle,
+  changeAt = null,
   onSelectFile,
   onOpenFile,
   onRevert,
@@ -260,6 +263,7 @@ export function DiffView({
           <span>
             Changes by {harnessLabel(harness)} in{" "}
             <b style={{ fontWeight: 500, color: "var(--fg)" }}>{changeTitle ?? "this turn"}</b>
+            {changeAt ? <> since {absoluteTime(changeAt)}</> : null}
           </span>
           <span className="grow" />
           <span className="q-num">

@@ -31,7 +31,7 @@ function DropdownMenuContent({
         data-slot="dropdown-menu-content"
         sideOffset={sideOffset}
         className={cn(
-          "z-50 min-w-32 overflow-hidden rounded-md border border-line bg-raised p-1 text-ink shadow-[var(--shadow-overlay-low)] data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95",
+          "z-50 min-w-32 overflow-hidden rounded-md border border-line bg-bg-raised p-1 text-fg shadow-[var(--shadow-overlay-low)] data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95",
           className,
         )}
         {...props}
@@ -59,7 +59,7 @@ function DropdownMenuItem({
       data-inset={inset}
       data-variant={variant}
       className={cn(
-        "relative flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 text-compact outline-none select-none data-[disabled]:pointer-events-none data-[inset]:pl-8 data-[variant=destructive]:text-strike-ink data-[variant=destructive]:focus:bg-strike-tint data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 [&_svg]:shrink-0",
+        "relative flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 text-compact outline-none select-none data-[disabled]:pointer-events-none data-[inset]:pl-8 data-[variant=destructive]:text-danger data-[variant=destructive]:focus:bg-danger-soft data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 [&_svg]:shrink-0",
         className,
       )}
       {...props}
@@ -134,7 +134,7 @@ function DropdownMenuLabel({
     <DropdownMenuPrimitive.Label
       data-slot="dropdown-menu-label"
       data-inset={inset}
-      className={cn("px-2 py-1.5 text-label text-ink-faint data-[inset]:pl-8", className)}
+      className={cn("px-2 py-1.5 text-label text-fg-3 data-[inset]:pl-8", className)}
       {...props}
     />
   );
@@ -157,7 +157,7 @@ function DropdownMenuShortcut({ className, ...props }: React.ComponentProps<"spa
   return (
     <span
       data-slot="dropdown-menu-shortcut"
-      className={cn("ml-auto text-micro tracking-widest text-ink-faint", className)}
+      className={cn("ml-auto text-small tracking-widest text-fg-3", className)}
       {...props}
     />
   );
@@ -180,7 +180,7 @@ function DropdownMenuSubTrigger({
       data-slot="dropdown-menu-sub-trigger"
       data-inset={inset}
       className={cn(
-        "flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 text-compact outline-none select-none data-[inset]:pl-8 data-[state=open]:bg-panel",
+        "flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 text-compact outline-none select-none data-[inset]:pl-8 data-[state=open]:bg-bg-side",
         className,
       )}
       {...props}
@@ -199,7 +199,7 @@ function DropdownMenuSubContent({
     <DropdownMenuPrimitive.SubContent
       data-slot="dropdown-menu-sub-content"
       className={cn(
-        "z-50 min-w-32 overflow-hidden rounded-md border border-line bg-raised p-1 text-ink shadow-[var(--shadow-overlay-low)]",
+        "z-50 min-w-32 overflow-hidden rounded-md border border-line bg-bg-raised p-1 text-fg shadow-[var(--shadow-overlay-low)]",
         className,
       )}
       {...props}

@@ -3,8 +3,8 @@ import { CheckIcon, CircleXIcon, KeyRoundIcon, PlusIcon, XIcon } from "lucide-re
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { readBootConfig } from "@/lib/client/config";
-import { harnessSeed, machineSeed } from "@/lib/entities";
-import { useApp } from "@/lib/store/appStore";
+import { harnessSeed, machineSeed, subagentSeed } from "@/lib/entities";
+import { openNewThread, pushToast, useApp } from "@/lib/store/appStore";
 
 /**
  * Static Phase 3 shell. The wire protocol does not expose subagent runs yet, so
@@ -25,7 +25,7 @@ export function SubagentsInspector({
     <aside className="q-insp" aria-label="Subagents">
       <div className="q-insp-head">
         <h2 style={{ margin: 0, fontSize: 14, fontWeight: 600, flex: 1 }}>Subagents</h2>
-        <button type="button" className="q-btn ghost" disabled title="Delegation arrives later">
+        <button type="button" className="q-btn ghost" onClick={openNewThread}>
           <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           Delegate
         </button>
@@ -83,7 +83,12 @@ export function SubagentsInspector({
                       </span>
                     </div>
                     <div className="w">
-                      <EntityAvatar seed="sub:a1" kind="harness" label="subagent" size={14} />
+                      <EntityAvatar
+                        seed={subagentSeed("atlas", "thr_a", "a1")}
+                        kind="subagent"
+                        label="subagent"
+                        size={14}
+                      />
                       atlas · Codex
                     </div>
                     <div className="s q-num">Done · 6.2k tokens · native resume</div>
@@ -104,7 +109,12 @@ export function SubagentsInspector({
                       </span>
                     </div>
                     <div className="w">
-                      <EntityAvatar seed="sub:r2" kind="harness" label="subagent" size={14} />
+                      <EntityAvatar
+                        seed={subagentSeed("orion", "thr_a", "r2")}
+                        kind="subagent"
+                        label="subagent"
+                        size={14}
+                      />
                       <EntityAvatar
                         seed={machineSeed("orion")}
                         kind="machine"
@@ -150,7 +160,12 @@ export function SubagentsInspector({
                       </span>
                     </div>
                     <div className="w">
-                      <EntityAvatar seed="sub:c3" kind="harness" label="subagent" size={14} />
+                      <EntityAvatar
+                        seed={subagentSeed("buildbox", "thr_a", "c3")}
+                        kind="subagent"
+                        label="subagent"
+                        size={14}
+                      />
                       buildbox · Codex
                     </div>
                     <div className="s">Couldn’t start: buildbox is offline</div>
@@ -172,16 +187,34 @@ export function SubagentsInspector({
                 <dt>Approvals</dt>
                 <dd>Inherited from parent</dd>
                 <dt>Credential</dt>
-                <dd>
+                <dd style={{ display: "flex", alignItems: "center", gap: 4 }}>
                   <KeyRoundIcon className="q-icon s12" strokeWidth={1.5} aria-hidden /> Stored on
                   orion
                 </dd>
               </dl>
               <div style={{ display: "flex", gap: 6, marginTop: 14 }}>
-                <button type="button" className="q-btn secondary" disabled>
+                <button
+                  type="button"
+                  className="q-btn secondary"
+                  onClick={() =>
+                    pushToast({
+                      title: "Subagent threads arrive with the wire protocol.",
+                      variant: "info",
+                    })
+                  }
+                >
                   Open thread
                 </button>
-                <button type="button" className="q-btn ghost" disabled>
+                <button
+                  type="button"
+                  className="q-btn ghost"
+                  onClick={() =>
+                    pushToast({
+                      title: "Subagent control arrives with the wire protocol.",
+                      variant: "info",
+                    })
+                  }
+                >
                   Cancel subagent
                 </button>
               </div>

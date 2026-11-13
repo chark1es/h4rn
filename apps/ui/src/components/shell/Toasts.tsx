@@ -40,7 +40,7 @@ export function Toasts() {
             <p
               className={cn(
                 "text-[13px] font-medium",
-                toast.variant === "error" ? "text-[var(--danger)]" : "text-ink",
+                toast.variant === "error" ? "text-[var(--danger)]" : "text-fg",
               )}
             >
               {toast.title}

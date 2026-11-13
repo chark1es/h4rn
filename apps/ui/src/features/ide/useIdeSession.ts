@@ -812,19 +812,19 @@ export function gitBadge(status: GitFileStatus | null): { letter: string; tone: 
   if (!status) return null;
   switch (status) {
     case "modified":
-      return { letter: "M", tone: "text-cue-ink" };
+      return { letter: "M", tone: "text-accent-tx" };
     case "added":
-      return { letter: "A", tone: "text-standby-ink" };
+      return { letter: "A", tone: "text-ok" };
     case "untracked":
-      return { letter: "U", tone: "text-ink-faint" };
+      return { letter: "U", tone: "text-fg-3" };
     case "deleted":
-      return { letter: "D", tone: "text-strike-ink" };
+      return { letter: "D", tone: "text-danger" };
     case "renamed":
-      return { letter: "R", tone: "text-prompt" };
+      return { letter: "R", tone: "text-accent-tx" };
     case "conflicted":
-      return { letter: "!", tone: "text-strike-ink" };
+      return { letter: "!", tone: "text-danger" };
     case "type_changed":
-      return { letter: "T", tone: "text-cue-ink" };
+      return { letter: "T", tone: "text-accent-tx" };
   }
 }
 
