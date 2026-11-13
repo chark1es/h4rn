@@ -5,6 +5,37 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### Phase 2 — more harnesses, terminal, attachments and IDE mode
+
+- **Codex adapter** (`h4rn-harness/src/codex.rs`): long-lived `codex app-server` sessions over
+  newline-delimited JSON-RPC with `initialize`, `thread/start`/`thread/resume`, `turn/start`,
+  server-initiated approvals, MCP injection through the thread config, provider/base-URL
+  overrides, interrupt and process-group shutdown.
+- **OpenCode adapter** (`h4rn-harness/src/opencode.rs`): HTTP + SSE sessions against the local
+  `opencode` server, model/provider config via `OPENCODE_CONFIG_CONTENT`, permission rules per
+  runtime mode, approvals, MCP registration and prompt file parts.
+- **Antigravity adapter + ACP client** (`h4rn-harness/src/antigravity.rs`, `acp/`): Agent Client
+  Protocol over stdio for Google Antigravity, with capability negotiation, streaming
+  updates, permission requests, image/resource prompt content, usage mapping and session
+  resume.
+- **PTY terminal** (`h4rn-vt`, `h4rn-daemon/src/terminal/`, `apps/ui/src/features/terminal`):
+  daemon-owned PTYs with credit-based binary output framing, resize/ack flow control,
+  ANSI screen snapshots on attach, multiple viewers per terminal, and an xterm.js pane that
+  survives reconnects.
+- **Attachments** (`h4rn-protocol/src/blob.rs`, `h4rn-daemon/src/blobs/`,
+  `h4rn-harness/src/attachments.rs`, `apps/ui/src/features/attachments`): BLAKE3
+  content-addressed blob store with chunked streaming upload, resume, range downloads,
+  thumbnails, dedupe and refcount GC; composer tray, picker, lightbox and transcript
+  rendering; a shared per-harness delivery matrix (Claude native image blocks, Codex
+  `localImage` paths, OpenCode `file://` image parts, ACP image blocks when negotiated,
+  `@path` mentions otherwise).
+- **IDE mode** (`h4rn-protocol/src/fs.rs`, `h4rn-daemon/src/fs/`, `apps/ui/src/features/ide`):
+  workspace-scoped file tree, editor tabs, search, file watching, create/rename/trash/restore
+  and git diffs backed by a daemon-side fs/git service with etag write-conflict detection.
+- The daemon now routes both binary stream types — PTY input and blob upload chunks — over
+  one WebSocket, and the UI client dispatches both while keeping transient fs events out of
+  the durable event cursor.
+
 ### Phase 1c — protocol gaps closed
 
 - Added `ProtoErrorCode::NotImplemented` and replaced the daemon's
