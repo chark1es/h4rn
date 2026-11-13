@@ -1,11 +1,12 @@
 import { FileDiffIcon, FileTextIcon, Loader2Icon, TriangleAlertIcon } from "lucide-react";
-import { useMemo } from "react";
+import { type ReactNode, useMemo } from "react";
 
-import type { FsDiff, FsTurnChanges, ProtoError } from "@/gen";
+import { EntityAvatar } from "@/components/agent/EntityAvatar";
+import type { FsDiff, FsTurnChanges, HarnessKind, HostId, ProtoError } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
+import { harnessLabel, harnessSeed } from "@/lib/entities";
 import { cn } from "@/lib/utils";
 import { collapseDiff, computeDiff, diffStats } from "./diff";
-import { diffStatsLabel } from "./format";
 
 type DiffViewProps = {
   path: string | null;
@@ -14,10 +15,89 @@ type DiffViewProps = {
   loading: boolean;
   error: ProtoError | null;
   changes: FsTurnChanges | null;
-  onMode: (mode: "head" | "agent") => void;
+  host: HostId | null;
+  harness: HarnessKind | null;
+  changeTitle: string | null;
   onSelectFile: (path: string) => void;
   onOpenFile: (path: string) => void;
+  onRevert: (path: string, content: string) => void;
 };
+
+const KEYWORDS = new Set([
+  "as",
+  "async",
+  "await",
+  "break",
+  "case",
+  "catch",
+  "class",
+  "const",
+  "continue",
+  "default",
+  "delete",
+  "do",
+  "else",
+  "export",
+  "extends",
+  "finally",
+  "for",
+  "from",
+  "function",
+  "if",
+  "implements",
+  "import",
+  "in",
+  "instanceof",
+  "interface",
+  "let",
+  "new",
+  "null",
+  "of",
+  "return",
+  "static",
+  "throw",
+  "true",
+  "false",
+  "try",
+  "type",
+  "typeof",
+  "undefined",
+  "var",
+  "void",
+  "while",
+]);
+
+const TOKEN =
+  /(\/\/[^\n]*)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|\b(\d[\d_]*(?:\.\d+)?)\b|\b([A-Za-z_$][\w$]*)\b(?=\s*\()|\b([A-Za-z_$][\w$]*)\b/g;
+
+/** A small TypeScript tokenizer; the prototype's code pane is not plain text. */
+function highlight(text: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  let last = 0;
+  let key = 0;
+  for (const match of text.matchAll(TOKEN)) {
+    const index = match.index ?? 0;
+    if (index > last) nodes.push(text.slice(last, index));
+    const [token, comment, string, , call, identifier] = match;
+    let className: string | undefined;
+    if (comment) className = "q-sc";
+    else if (string) className = "q-ss";
+    else if (call) className = KEYWORDS.has(call) ? "q-sk" : "q-sf";
+    else if (identifier) className = KEYWORDS.has(identifier) ? "q-sk" : undefined;
+    nodes.push(
+      className ? (
+        <span key={`t${key++}`} className={className}>
+          {token}
+        </span>
+      ) : (
+        token
+      ),
+    );
+    last = index + token.length;
+  }
+  if (last < text.length) nodes.push(text.slice(last));
+  return nodes;
+}
 
 export function DiffView({
   path,
@@ -26,193 +106,239 @@ export function DiffView({
   loading,
   error,
   changes,
-  onMode,
+  host,
+  harness,
+  changeTitle,
   onSelectFile,
   onOpenFile,
+  onRevert,
 }: DiffViewProps) {
   const isPhone = useIsPhone();
   const rows = useMemo(() => {
     if (!diff) return [];
     let offset = 0;
-    return collapseDiff(computeDiff(diff.before ?? "", diff.after ?? "")).map((row) => {
+    const context = mode === "agent" ? 10 : 3;
+    return collapseDiff(computeDiff(diff.before ?? "", diff.after ?? ""), context).map((row) => {
       const key = `${row.kind}-${offset}`;
       offset += row.kind === "skip" ? row.count : 1;
       return { key, row };
     });
-  }, [diff]);
+  }, [diff, mode]);
   const stats = useMemo(
     () => diffStats(computeDiff(diff?.before ?? "", diff?.after ?? "")),
     [diff],
   );
   const files = changes?.files ?? [];
+  const fileChange = files.find((file) => file.path === path);
+  const added = fileChange?.added ?? stats.added;
+  const removed = fileChange?.removed ?? stats.removed;
 
-  return (
-    <section aria-label="Diff" className="flex min-h-0 flex-1 flex-col bg-paper">
-      <header className="flex shrink-0 flex-col gap-2 border-b border-line px-3 py-2">
-        <div className="flex items-center justify-between gap-2">
-          <div
-            className="flex items-center gap-0.5 rounded-sm border border-line p-0.5"
-            role="tablist"
+  if (loading) {
+    return (
+      <div className="q-center-empty" role="status" aria-label="Loading diff" style={{ flex: 1 }}>
+        <div className="q-empty" style={{ padding: 0 }}>
+          <p style={{ margin: 0, display: "flex", alignItems: "center", gap: 8 }}>
+            <Loader2Icon className="q-icon s14 animate-spin" aria-hidden />
+            Loading diff…
+          </p>
+        </div>
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="q-scroll" style={{ flex: 1, padding: 16 }}>
+        <div style={{ fontSize: 12, color: "var(--fg-2)" }}>
+          <p
+            style={{
+              margin: 0,
+              fontWeight: 500,
+              color: "var(--fg)",
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+            }}
           >
-            <button
-              type="button"
-              role="tab"
-              aria-selected={mode === "head"}
-              onClick={() => onMode("head")}
-              className={cn(
-                "h-6 rounded-[2px] px-2 font-mono text-[10px] transition-colors",
-                mode === "head" ? "bg-cue-tint text-cue-ink" : "text-ink-muted hover:text-ink",
-              )}
-            >
-              HEAD
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={mode === "agent"}
-              onClick={() => onMode("agent")}
-              className={cn(
-                "h-6 rounded-[2px] px-2 font-mono text-[10px] transition-colors",
-                mode === "agent" ? "bg-cue-tint text-cue-ink" : "text-ink-muted hover:text-ink",
-              )}
-            >
-              Agent changes
-            </button>
-          </div>
-          <span className="font-mono text-[10px] text-ink-faint">
-            <span className="text-standby-ink">+{stats.added}</span>{" "}
-            <span className="text-strike-ink">−{stats.removed}</span>
-          </span>
-        </div>
-
-        {isPhone && mode === "agent" && files.length > 0 ? (
-          <label className="flex items-center gap-2 text-micro text-ink-muted">
-            File
-            <select
-              value={path ?? ""}
-              onChange={(event) => onSelectFile(event.target.value)}
-              className="h-8 min-w-0 flex-1 rounded-sm border border-control-border bg-raised px-2 font-mono text-[11px] text-ink"
-            >
-              {files.map((file) => (
-                <option key={file.path} value={file.path}>
-                  {file.path} (+{file.added} −{file.removed})
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : (
-          <div className="flex items-center gap-2">
-            <FileDiffIcon className="size-3.5 shrink-0 text-ink-faint" aria-hidden />
-            <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink">
-              {path ?? "Pick a file"}
-            </span>
-            {diff ? (
-              <span className="shrink-0 font-mono text-[10px] text-ink-faint">{diff.label}</span>
-            ) : null}
-          </div>
-        )}
-      </header>
-
-      {loading ? (
-        <div className="flex flex-1 items-center justify-center gap-2 text-compact text-ink-muted">
-          <Loader2Icon className="size-4 animate-spin" aria-hidden />
-          Loading diff…
-        </div>
-      ) : error ? (
-        <div className="m-3 rounded-sm border border-line bg-raised p-3 text-compact">
-          <p className="flex items-center gap-1.5 font-medium text-ink">
-            <TriangleAlertIcon className="size-3.5 text-strike-ink" aria-hidden />
+            <TriangleAlertIcon
+              className="q-icon s14"
+              style={{ color: "var(--danger)" }}
+              aria-hidden
+            />
             The diff did not load.
           </p>
-          <p className="mt-1 text-ink-muted">{error.message}</p>
-          {error.hint ? <p className="mt-1 text-ink-faint">{error.hint}</p> : null}
+          <p style={{ margin: "4px 0 0" }}>{error.message}</p>
+          {error.hint ? (
+            <p style={{ margin: "4px 0 0", color: "var(--fg-3)" }}>{error.hint}</p>
+          ) : null}
         </div>
-      ) : !diff ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
-          <FileTextIcon className="size-7 text-ink-faint" aria-hidden />
-          <p className="text-compact text-ink-muted">Open a file to compare it.</p>
+      </div>
+    );
+  }
+  if (!diff) {
+    return (
+      <div className="q-center-empty" style={{ flex: 1 }}>
+        <div className="q-empty" style={{ padding: 0 }}>
+          <FileTextIcon className="q-icon s18 q-faint" aria-hidden />
+          <h3 style={{ fontSize: 13.5 }}>Open a file to compare it.</h3>
         </div>
-      ) : diff.binary ? (
-        <div className="m-3 rounded-sm border border-line bg-raised p-3 text-compact text-ink-muted">
+      </div>
+    );
+  }
+  if (diff.binary) {
+    return (
+      <div className="q-scroll" style={{ flex: 1, padding: 16 }}>
+        <p className="q-faint" style={{ margin: 0, fontSize: 12 }}>
           Both sides are binary, so there is no text diff to show.
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <section aria-label="Diff" className="q-main" style={{ flex: 1, minHeight: 0 }}>
+      {isPhone && mode === "agent" && files.length > 0 ? (
+        <label
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "0 16px",
+            height: 40,
+            borderBottom: "1px solid var(--line)",
+            fontSize: 12,
+            color: "var(--fg-2)",
+          }}
+        >
+          <FileDiffIcon className="q-icon s14 q-faint" aria-hidden />
+          <select
+            value={path ?? ""}
+            onChange={(event) => onSelectFile(event.target.value)}
+            className="q-mono"
+            style={{
+              flex: 1,
+              minWidth: 0,
+              height: 26,
+              border: "1px solid var(--control-line)",
+              borderRadius: 6,
+              background: "var(--bg-raised)",
+              color: "var(--fg)",
+              fontSize: 11,
+              padding: "0 6px",
+            }}
+          >
+            {files.map((file) => (
+              <option key={file.path} value={file.path}>
+                {file.path} (+{file.added} −{file.removed})
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+      {diff.note ? (
+        <p
+          style={{
+            margin: 0,
+            flex: "none",
+            borderBottom: "1px solid var(--line)",
+            background: "var(--accent-soft)",
+            color: "var(--accent)",
+            padding: "5px 16px",
+            fontSize: 12,
+          }}
+        >
+          {diff.note}
+        </p>
+      ) : null}
+      {mode === "agent" && harness && host ? (
+        <div className="q-change-banner">
+          <EntityAvatar
+            seed={harnessSeed(host, harness)}
+            kind="harness"
+            label={harnessLabel(harness)}
+            size={14}
+          />
+          <span>
+            Changes by {harnessLabel(harness)} in{" "}
+            <b style={{ fontWeight: 500, color: "var(--fg)" }}>{changeTitle ?? "this turn"}</b>
+          </span>
+          <span className="grow" />
+          <span className="q-num">
+            <span className="q-add">+{added}</span> <span className="q-del">−{removed}</span>
+          </span>
+          {diff.before !== null && path ? (
+            <button
+              type="button"
+              className="q-btn ghost"
+              style={{ height: 24 }}
+              onClick={() => onRevert(path, diff.before ?? "")}
+            >
+              Revert file
+            </button>
+          ) : null}
+          {path ? (
+            <button
+              type="button"
+              className="q-btn secondary"
+              style={{ height: 24 }}
+              onClick={() => onOpenFile(path)}
+            >
+              Accept
+            </button>
+          ) : null}
         </div>
-      ) : (
-        <>
-          {diff.note ? (
-            <p className="shrink-0 border-b border-line bg-cue-tint px-3 py-1.5 text-micro text-cue-ink">
-              {diff.note}
-            </p>
-          ) : null}
-          <div className="min-h-0 flex-1 overflow-auto font-mono text-[11px] leading-5">
-            {rows.map(({ key, row }) =>
-              row.kind === "skip" ? (
-                <div
-                  key={key}
-                  className="flex h-5 items-center gap-2 border-y border-line bg-panel px-3 text-[10px] text-ink-faint"
-                >
-                  <span aria-hidden>⋯</span>
-                  {row.count} unchanged {row.count === 1 ? "line" : "lines"}
-                </div>
-              ) : (
-                <div
-                  key={key}
-                  className={cn(
-                    "grid min-w-full grid-cols-[44px_44px_16px_1fr] items-start",
-                    row.kind === "added" && "bg-standby-tint",
-                    row.kind === "removed" && "bg-strike-tint",
-                  )}
-                >
-                  <span className="select-none border-r border-line/60 px-1 text-right text-ink-faint">
-                    {row.oldLine ?? ""}
-                  </span>
-                  <span className="select-none border-r border-line/60 px-1 text-right text-ink-faint">
-                    {row.newLine ?? ""}
-                  </span>
-                  <span
-                    className={cn(
-                      "select-none text-center",
-                      row.kind === "added"
-                        ? "text-standby-ink"
-                        : row.kind === "removed"
-                          ? "text-strike-ink"
-                          : "text-transparent",
-                    )}
-                    aria-hidden
-                  >
-                    {row.kind === "added" ? "+" : row.kind === "removed" ? "−" : " "}
-                  </span>
-                  <span
-                    className={cn(
-                      "pr-3",
-                      isPhone ? "whitespace-pre-wrap break-words" : "whitespace-pre",
-                      row.kind === "added" && "text-standby-ink",
-                      row.kind === "removed" && "text-strike-ink",
-                    )}
-                  >
-                    {row.text || " "}
-                  </span>
-                </div>
-              ),
-            )}
-          </div>
-          {mode === "agent" ? (
-            <footer className="flex shrink-0 items-center justify-between gap-2 border-t border-line bg-panel px-3 py-1.5">
-              <span className="font-mono text-[10px] text-ink-faint">
-                {changes?.files.length ?? 0} files · {diffStatsLabel(changes)}
+      ) : null}
+      <div
+        className="q-hunk"
+        style={{
+          flex: 1,
+          minHeight: 0,
+          borderTop: 0,
+          font: "12.5px/20px var(--mono)",
+          background: "var(--bg-sunk)",
+          padding: "8px 0",
+        }}
+      >
+        {rows.map(({ key, row }, index) =>
+          row.kind === "skip" ? (
+            index === 0 ? null : (
+              <div
+                key={key}
+                className="hh"
+                style={{
+                  color: "var(--fg-3)",
+                  padding: "2px 16px",
+                  background: "var(--bg)",
+                  borderTop: "1px solid var(--line)",
+                  borderBottom: "1px solid var(--line)",
+                  font: "11.5px/20px var(--mono)",
+                }}
+              >
+                ⋯ {row.count} unchanged {row.count === 1 ? "line" : "lines"}
+              </div>
+            )
+          ) : (
+            <div
+              key={key}
+              className={cn("q-ln", row.kind === "added" && "a", row.kind === "removed" && "d")}
+            >
+              <span className="n">{row.newLine ?? row.oldLine ?? ""}</span>
+              <span className="sg" aria-hidden>
+                {row.kind === "added" ? "+" : row.kind === "removed" ? "−" : " "}
               </span>
-              {path ? (
-                <button
-                  type="button"
-                  onClick={() => onOpenFile(path)}
-                  className="h-6 rounded-sm px-1.5 text-micro text-prompt hover:bg-raised"
-                >
-                  Open file
-                </button>
-              ) : null}
-            </footer>
-          ) : null}
-        </>
-      )}
+              <span
+                className="q-cx"
+                style={
+                  isPhone
+                    ? { whiteSpace: "pre-wrap", wordBreak: "break-word", paddingRight: 16 }
+                    : undefined
+                }
+              >
+                {row.text ? highlight(row.text) : " "}
+              </span>
+            </div>
+          ),
+        )}
+      </div>
     </section>
   );
 }

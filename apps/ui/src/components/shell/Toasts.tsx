@@ -11,33 +11,42 @@ export function Toasts() {
     <section
       aria-live="polite"
       aria-label="Notifications"
-      className="pointer-events-none fixed right-3 bottom-10 z-50 flex w-[min(360px,calc(100vw-1.5rem))] flex-col gap-2"
+      className="pointer-events-none fixed right-3 bottom-10 z-50 flex w-[min(380px,calc(100vw-1.5rem))] flex-col gap-2"
     >
       {toasts.slice(-3).map((toast) => (
         <div
           key={toast.id}
           role={toast.variant === "error" ? "alert" : "status"}
           className={cn(
-            "pointer-events-auto flex items-start gap-2 rounded-md border bg-raised px-3 py-2 shadow-[var(--shadow-overlay-low)]",
-            toast.variant === "error" ? "border-strike/40" : "border-line",
+            "pointer-events-auto flex items-start gap-2.5 rounded-[10px] bg-[var(--bg-raised)] px-3 py-2.5 shadow-[var(--sh-pop),inset_0_0_0_1px_var(--line)]",
+            toast.variant === "error" &&
+              "shadow-[var(--sh-pop),inset_0_0_0_1px_color-mix(in_oklch,var(--danger)_35%,var(--line))]",
           )}
         >
           {toast.variant === "error" ? (
-            <CircleAlertIcon className="mt-0.5 size-4 shrink-0 text-strike-ink" aria-hidden />
+            <CircleAlertIcon
+              className="mt-0.5 size-[15px] shrink-0 text-[var(--danger)]"
+              strokeWidth={1.5}
+              aria-hidden
+            />
           ) : (
-            <InfoIcon className="mt-0.5 size-4 shrink-0 text-ink-muted" aria-hidden />
+            <InfoIcon
+              className="mt-0.5 size-[15px] shrink-0 text-[var(--fg-2)]"
+              strokeWidth={1.5}
+              aria-hidden
+            />
           )}
           <div className="min-w-0 flex-1">
             <p
               className={cn(
-                "text-compact font-medium",
-                toast.variant === "error" ? "text-strike-ink" : "text-ink",
+                "text-[13px] font-medium",
+                toast.variant === "error" ? "text-[var(--danger)]" : "text-ink",
               )}
             >
               {toast.title}
             </p>
             {toast.description ? (
-              <p className="mt-0.5 text-micro leading-relaxed text-ink-muted">
+              <p className="mt-0.5 text-[12px] leading-[17px] text-[var(--fg-2)]">
                 {toast.description}
               </p>
             ) : null}
@@ -45,10 +54,11 @@ export function Toasts() {
           <button
             type="button"
             aria-label="Dismiss"
-            className="flex size-5 shrink-0 items-center justify-center rounded-sm text-ink-faint hover:text-ink"
+            className="q-ibtn"
+            style={{ width: 22, height: 22 }}
             onClick={() => dismissToast(toast.id)}
           >
-            <XIcon className="size-3.5" />
+            <XIcon className="q-icon s14" strokeWidth={1.5} />
           </button>
         </div>
       ))}

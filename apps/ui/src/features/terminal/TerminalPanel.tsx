@@ -1,9 +1,12 @@
 import "@xterm/xterm/css/xterm.css";
 import "./terminal.css";
 
-import { PlusIcon, SearchIcon, SquareTerminalIcon, XIcon } from "lucide-react";
+import { ChevronLeftIcon, PlusIcon, SearchIcon, SquareTerminalIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
+import { EntityAvatar } from "@/components/agent/EntityAvatar";
+import { useIsPhone } from "@/hooks/use-media-query";
+import { machineSeed } from "@/lib/entities";
 import { getClient, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 
@@ -12,15 +15,14 @@ import type { TerminalController } from "./terminal-controller";
 
 type Tab = { key: string; title: string };
 
-function labelFor(cwd: string): string {
-  const parts = cwd.split("/").filter(Boolean);
-  return parts[parts.length - 1] ?? "terminal";
-}
-
 function shortTitle(title: string): string {
   if (!title.startsWith("/")) return title;
   const parts = title.split("/").filter(Boolean);
   return parts[parts.length - 1] ?? title;
+}
+
+function shortPath(path: string): string {
+  return path.replace(/^\/(?:home|Users)\/[^/]+/, "~");
 }
 
 export function TerminalPanel({
@@ -38,11 +40,14 @@ export function TerminalPanel({
   onClose: () => void;
 }) {
   const client = getClient();
+  const isPhone = useIsPhone();
   const online = useApp((state) => state.connection.status === "online");
-  const [tabs, setTabs] = useState<Tab[]>(() => [{ key: "tab-1", title: labelFor(cwd) }]);
+  const hostName = useApp((state) => state.hosts[host]?.name ?? host);
+  const [tabs, setTabs] = useState<Tab[]>(() => [{ key: "tab-1", title: "zsh" }]);
   const [activeKey, setActiveKey] = useState<string>("tab-1");
   const [searchOpen, setSearchOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [dimensions, setDimensions] = useState({ cols: 0, rows: 0 });
   const nextKey = useRef(1);
   const controllers = useRef(new Map<string, TerminalController>());
   const searchRef = useRef<HTMLInputElement>(null);
@@ -54,7 +59,7 @@ export function TerminalPanel({
   const addTab = () => {
     nextKey.current += 1;
     const key = `tab-${nextKey.current}`;
-    setTabs((current) => [...current, { key, title: labelFor(cwd) }]);
+    setTabs((current) => [...current, { key, title: "zsh" }]);
     setActiveKey(key);
   };
 
@@ -81,143 +86,172 @@ export function TerminalPanel({
   };
 
   return (
-    <section
-      aria-label="Terminal panel"
-      className={cn(
-        "flex h-[44dvh] max-h-[460px] min-h-[200px] w-full min-w-0 shrink-0 flex-col overflow-hidden border-t border-line bg-stage text-stage-ink sm:h-[38dvh]",
-        hidden && "hidden",
-      )}
-    >
-      <div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-white/10 px-2">
-        <SquareTerminalIcon className="size-3.5 shrink-0 text-stage-ink-muted" aria-hidden />
-        <span className="shrink-0 text-micro font-medium tracking-wide text-stage-ink-muted uppercase">
-          Terminal
-        </span>
+    <section aria-label="Terminal panel" className={cn("q-term", hidden && "hidden")}>
+      {isPhone ? (
+        <>
+          <div className="q-ph-nav">
+            <button type="button" className="navbtn" aria-label="Back to thread" onClick={onClose}>
+              <ChevronLeftIcon className="q-icon s24" strokeWidth={1.5} aria-hidden />
+              Thread
+            </button>
+            <span className="ttl">Terminal</span>
+            <button type="button" className="navbtn" aria-label="New terminal" onClick={addTab}>
+              <PlusIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
+            </button>
+          </div>
+          <div className="q-ph-term-meta">
+            <EntityAvatar seed={machineSeed(host)} kind="machine" label={hostName} size={14} />
+            <span>{hostName}</span>
+            <span className="q-sep">·</span>
+            <span className="q-mono">{shortPath(cwd)}</span>
+            <span className="grow" />
+            <span className="q-num">
+              {dimensions.cols || "—"} × {dimensions.rows || "—"}
+            </span>
+          </div>
+        </>
+      ) : (
+        <div className="q-term-head">
+          <div className="q-ttabs">
+            {tabs.map((tab, index) => {
+              const active = tab.key === activeKey;
+              return (
+                <div key={tab.key} className="q-ttab-wrap">
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={active}
+                    className="q-ttab"
+                    onClick={() => setActiveKey(tab.key)}
+                    title={tab.title}
+                  >
+                    {index === 0 ? (
+                      <SquareTerminalIcon
+                        className="q-icon s14 q-faint"
+                        strokeWidth={1.5}
+                        aria-hidden
+                      />
+                    ) : null}
+                    {tab.title}
+                    <span className="q-faint">{hostName}</span>
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`Close ${tab.title}`}
+                    className="q-ttab-x"
+                    onClick={() => closeTab(tab.key)}
+                  >
+                    <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                  </button>
+                </div>
+              );
+            })}
+            <button type="button" aria-label="New terminal" className="q-ibtn" onClick={addTab}>
+              <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+            </button>
+          </div>
 
-        <div className="ml-1 flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">
-          {tabs.map((tab) => {
-            const active = tab.key === activeKey;
-            return (
-              <div
-                key={tab.key}
-                className={cn(
-                  "flex h-6 shrink-0 items-center rounded-sm border border-transparent",
-                  active
-                    ? "border-white/15 bg-white/10 text-stage-ink"
-                    : "text-stage-ink-muted hover:bg-white/5",
-                )}
-              >
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={active}
-                  className="max-w-[150px] truncate px-2 text-micro"
-                  onClick={() => setActiveKey(tab.key)}
-                  title={tab.title}
-                >
-                  {tab.title}
-                </button>
-                <button
-                  type="button"
-                  aria-label={`Close ${tab.title}`}
-                  className="mr-1 inline-flex size-4 items-center justify-center rounded-sm text-stage-ink-muted transition-colors hover:bg-white/10 hover:text-stage-ink"
-                  onClick={() => closeTab(tab.key)}
-                >
-                  <XIcon className="size-3" aria-hidden />
-                </button>
-              </div>
-            );
-          })}
-        </div>
+          {searchOpen ? (
+            <input
+              ref={searchRef}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  runSearch(event.shiftKey);
+                } else if (event.key === "Escape") {
+                  setSearchOpen(false);
+                }
+              }}
+              placeholder="Find in terminal"
+              aria-label="Find in terminal"
+              className="q-input"
+              style={{ width: 144, height: 24, flex: "none" }}
+            />
+          ) : null}
 
-        {searchOpen ? (
-          <input
-            ref={searchRef}
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                runSearch(event.shiftKey);
-              } else if (event.key === "Escape") {
-                setSearchOpen(false);
-              }
-            }}
-            placeholder="Find in terminal"
-            aria-label="Find in terminal"
-            className="h-6 w-36 shrink-0 rounded-sm border border-white/15 bg-black/30 px-2 text-micro text-stage-ink placeholder:text-stage-ink-muted focus:border-cue/60 focus:outline-none"
-          />
-        ) : null}
-
-        <span
-          className={cn(
-            "hidden shrink-0 items-center gap-1.5 px-1 text-micro sm:flex",
-            online ? "text-standby" : "text-strike",
-          )}
-          title={online ? "Daemon connected" : "Daemon offline"}
-        >
+          <span className="q-term-meta q-faint q-mono">
+            {shortPath(cwd)} ·{" "}
+            <span className="q-num">
+              {dimensions.cols || "—"} × {dimensions.rows || "—"}
+            </span>
+          </span>
           <span
-            className={cn("size-1.5 rounded-full", online ? "bg-standby" : "bg-strike")}
-            aria-hidden
-          />
-          {online ? "live" : "offline"}
-        </span>
+            className={cn("q-health", online ? "q-ok" : "q-danger")}
+            title={online ? "Daemon connected" : "Daemon offline"}
+            style={{ flex: "none", marginRight: 4, fontSize: 11 }}
+          >
+            <span className={cn("q-dot", online ? "on" : "off")} aria-hidden />
+            {online ? "live" : "offline"}
+          </span>
 
-        <button
-          type="button"
-          aria-label="Find in terminal"
-          aria-pressed={searchOpen}
-          className={cn(
-            "inline-flex size-6 shrink-0 items-center justify-center rounded-sm text-stage-ink-muted transition-colors hover:bg-white/10 hover:text-stage-ink",
-            searchOpen && "bg-white/10 text-stage-ink",
-          )}
-          onClick={() => setSearchOpen((value) => !value)}
-        >
-          <SearchIcon className="size-3.5" aria-hidden />
-        </button>
-        <button
-          type="button"
-          aria-label="New terminal"
-          className="inline-flex size-6 shrink-0 items-center justify-center rounded-sm text-stage-ink-muted transition-colors hover:bg-white/10 hover:text-stage-ink"
-          onClick={addTab}
-        >
-          <PlusIcon className="size-3.5" aria-hidden />
-        </button>
-        <button
-          type="button"
-          aria-label="Close terminal panel"
-          className="inline-flex size-6 shrink-0 items-center justify-center rounded-sm text-stage-ink-muted transition-colors hover:bg-white/10 hover:text-stage-ink"
-          onClick={onClose}
-        >
-          <XIcon className="size-3.5" aria-hidden />
-        </button>
-      </div>
-
-      {tabs.length === 0 ? (
-        <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 bg-stage px-6 text-center">
-          <SquareTerminalIcon className="size-5 text-stage-ink-muted" aria-hidden />
-          <p className="text-compact font-medium text-stage-ink">No terminal is open.</p>
-          <p className="max-w-[48ch] text-micro text-stage-ink-muted">
-            Start a shell in <span className="font-mono">{cwd}</span>. It runs on {host} and keeps
-            running when this panel closes.
-          </p>
           <button
             type="button"
-            className="mt-1 inline-flex h-7 items-center gap-1.5 rounded-sm border border-white/20 px-2.5 text-micro font-medium text-stage-ink transition-colors hover:bg-white/10"
-            onClick={addTab}
+            aria-label="Find in terminal"
+            aria-pressed={searchOpen}
+            className={cn("q-ibtn", searchOpen && "on")}
+            onClick={() => setSearchOpen((value) => !value)}
           >
-            <PlusIcon className="size-3" aria-hidden />
+            <SearchIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+          </button>
+          <button
+            type="button"
+            aria-label="Close terminal panel"
+            className="q-ibtn"
+            onClick={onClose}
+          >
+            <XIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+          </button>
+        </div>
+      )}
+
+      {tabs.length === 0 ? (
+        <div
+          style={{
+            display: "flex",
+            flex: 1,
+            minHeight: 0,
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 8,
+            textAlign: "center",
+            padding: "0 24px",
+          }}
+        >
+          <SquareTerminalIcon className="q-icon s20 q-faint" strokeWidth={1.5} aria-hidden />
+          <p style={{ margin: 0, fontWeight: 500 }}>No terminal is open</p>
+          <p className="q-faint" style={{ margin: 0, maxWidth: "48ch", fontSize: 12 }}>
+            Start a shell in <span className="q-mono">{cwd}</span>. It runs on {host} and keeps
+            running when this panel closes.
+          </p>
+          <button type="button" className="q-btn secondary" onClick={addTab}>
+            <PlusIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
             New terminal
           </button>
         </div>
       ) : (
-        <div className="relative flex min-h-0 flex-1 flex-col">
+        <div
+          style={{
+            position: "relative",
+            display: "flex",
+            flex: 1,
+            minHeight: 0,
+            flexDirection: "column",
+          }}
+        >
           {tabs.map((tab) => {
             const active = tab.key === activeKey;
             return (
               <div
                 key={tab.key}
-                className={cn("min-h-0 flex-1 flex-col", active ? "flex" : "hidden")}
+                style={{
+                  minHeight: 0,
+                  flex: 1,
+                  display: active ? "flex" : "none",
+                  flexDirection: "column",
+                }}
               >
                 <TerminalView
                   client={client}
@@ -225,6 +259,9 @@ export function TerminalPanel({
                   host={host}
                   cwd={cwd}
                   active={active && !hidden}
+                  onDimensions={(next) => {
+                    if (active) setDimensions(next);
+                  }}
                   onTitle={(title) =>
                     setTabs((current) =>
                       current.map((entry) =>

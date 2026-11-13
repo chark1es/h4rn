@@ -35,6 +35,7 @@ export type TerminalControllerOptions = {
   reducedMotion?: boolean;
   onStatus?: (status: TerminalStatus) => void;
   onTitle?: (title: string) => void;
+  onDimensions?: (dimensions: { cols: number; rows: number }) => void;
 };
 
 const RESIZE_DEBOUNCE_MS = 120;
@@ -67,6 +68,7 @@ export class TerminalController {
   private disposed = false;
   private onStatus: ((status: TerminalStatus) => void) | undefined;
   private onTitle: ((title: string) => void) | undefined;
+  private onDimensions: ((dimensions: { cols: number; rows: number }) => void) | undefined;
   private status: TerminalStatus = { phase: "opening" };
 
   async start(options: TerminalControllerOptions): Promise<void> {
@@ -74,6 +76,7 @@ export class TerminalController {
     this.element = options.element;
     this.onStatus = options.onStatus;
     this.onTitle = options.onTitle;
+    this.onDimensions = options.onDimensions;
 
     if (options.client.getSnapshot().status !== "online") {
       this.emit({
@@ -84,10 +87,13 @@ export class TerminalController {
       return;
     }
 
+    // Phones get a slightly larger grid: the prototype's 46-column phone
+    // terminal is the smallest view any desktop viewer can be squeezed to.
+    const compact = window.matchMedia?.("(max-width: 639px)").matches ?? false;
     const term = new Terminal({
-      fontFamily: '"Spline Sans Mono Variable", ui-monospace, SFMono-Regular, monospace',
-      fontSize: 12.5,
-      lineHeight: 1.25,
+      fontFamily: '"Geist Mono Variable", ui-monospace, SFMono-Regular, monospace',
+      fontSize: compact ? 13.5 : 12.5,
+      lineHeight: compact ? 1.5 : 1.25,
       letterSpacing: 0,
       cursorBlink: !options.reducedMotion,
       cursorStyle: "bar",
@@ -312,7 +318,10 @@ export class TerminalController {
     });
     observer.observe(this.element);
     this.resizeObserver = observer;
-    const resizeDisposable = this.term?.onResize(() => this.scheduleResize());
+    const resizeDisposable = this.term?.onResize(() => {
+      this.reportDimensions();
+      this.scheduleResize();
+    });
     if (resizeDisposable) this.track(resizeDisposable);
   }
 
@@ -321,9 +330,16 @@ export class TerminalController {
     if (!element || element.clientWidth < 24 || element.clientHeight < 24) return;
     try {
       this.fitAddon?.fit();
+      this.reportDimensions();
     } catch {
       // A hidden or zero-sized container rejects fit; the next resize retries.
     }
+  }
+
+  private reportDimensions(): void {
+    const term = this.term;
+    if (!term || this.disposed) return;
+    this.onDimensions?.({ cols: term.cols, rows: term.rows });
   }
 
   private scheduleResize(): void {

@@ -145,7 +145,12 @@ function isCodePath(path: string): boolean {
 }
 
 /** The mock and screenshots expect this file; real repos usually have a src. */
-const PREFERRED_FILES = ["src/auth/session.ts", "src/app.ts", "src/main.rs", "README.md"];
+const PREFERRED_FILES = [
+  "src/auth/session.test.ts",
+  "src/auth/session.ts",
+  "src/app.ts",
+  "README.md",
+];
 const LAST_FILE_KEY = "h4rn.ide.lastFile";
 
 function readLastFile(): string | null {
@@ -348,6 +353,31 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
       savingPathRef.current = null;
     }
   }, []);
+
+  /** Writes `content` over the file the diff showed as "before". */
+  const revertTo = useCallback(
+    async (path: string, content: string) => {
+      const target = workspaceRef.current;
+      const tab = stateRef.current.tabs.tabs.find((entry) => entry.path === path);
+      if (!target || !tab) return;
+      savingPathRef.current = path;
+      try {
+        const response = await getClient().request({
+          type: "fs_write",
+          host: target.host,
+          workspace: target.path,
+          path,
+          content,
+          base_etag: tab.etag,
+        });
+        if (response.type !== "fs_written" || response.result.conflict) return;
+        await readInto(path);
+      } finally {
+        savingPathRef.current = null;
+      }
+    },
+    [readInto],
+  );
 
   const resolveConflictKeepMine = useCallback(async () => {
     const target = workspaceRef.current;
@@ -738,6 +768,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
     activateTab,
     setTabContent,
     saveTab,
+    revertTo,
     resolveConflictKeepMine,
     resolveConflictTakeTheirs,
     requestClose,

@@ -3,7 +3,6 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   FileCodeIcon,
-  FileDiffIcon,
   FileIcon,
   FileJsonIcon,
   FileTextIcon,
@@ -11,10 +10,10 @@ import {
   FolderOpenIcon,
   ImageIcon,
   RefreshCwIcon,
+  SearchIcon,
 } from "lucide-react";
 import type * as React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Skeleton } from "@/components/ui/skeleton";
 import type { FileEntry, FsListing, FsTurnChanges, ProtoError } from "@/gen";
 import { cn } from "@/lib/utils";
 import { gitBadge } from "./useIdeSession";
@@ -32,11 +31,15 @@ type FileTreeProps = {
   agentLoading: boolean;
   loading: boolean;
   error: ProtoError | null;
+  workspaceName?: string;
+  host?: string;
+  changeLabel?: string | undefined;
+  className?: string | undefined;
   onToggle: (path: string) => void;
   onOpen: (path: string) => void;
-  onReviewAll: () => void;
   onOpenAgent: (path: string) => void;
   onRetry: () => void;
+  onSearch?: () => void;
 };
 
 function flatten(listings: Record<string, FsListing>, expanded: Record<string, true>): Row[] {
@@ -53,23 +56,29 @@ function flatten(listings: Record<string, FsListing>, expanded: Record<string, t
   return rows;
 }
 
+/** The change list shows source basenames but keeps test paths intact. */
+function changeRowLabel(path: string): string {
+  if (path.startsWith("src/")) return path.split("/").at(-1) ?? path;
+  return path;
+}
+
 function entryIcon(entry: FileEntry, open = false) {
   if (entry.kind === "directory") {
-    return open ? <FolderOpenIcon className="size-3.5" /> : <FolderIcon className="size-3.5" />;
+    return open ? <FolderOpenIcon className="q-icon s12" /> : <FolderIcon className="q-icon s12" />;
   }
   const extension = entry.name.split(".").at(-1)?.toLowerCase();
-  if (extension === "json") return <FileJsonIcon className="size-3.5" />;
+  if (extension === "json") return <FileJsonIcon className="q-icon s14" />;
   if (extension === "png" || extension === "jpg" || extension === "svg") {
-    return <ImageIcon className="size-3.5" />;
+    return <ImageIcon className="q-icon s14" />;
   }
-  if (extension === "md" || extension === "txt") return <FileTextIcon className="size-3.5" />;
+  if (extension === "md" || extension === "txt") return <FileTextIcon className="q-icon s14" />;
   if (
     extension &&
     ["ts", "tsx", "js", "jsx", "rs", "py", "go", "css", "html"].includes(extension)
   ) {
-    return <FileCodeIcon className="size-3.5" />;
+    return <FileCodeIcon className="q-icon s14" />;
   }
-  return <FileIcon className="size-3.5" />;
+  return <FileIcon className="q-icon s14" />;
 }
 
 export function FileTree({
@@ -81,11 +90,15 @@ export function FileTree({
   agentLoading,
   loading,
   error,
+  workspaceName,
+  host,
+  changeLabel,
+  className,
   onToggle,
   onOpen,
-  onReviewAll,
   onOpenAgent,
   onRetry,
+  onSearch,
 }: FileTreeProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const rows = useMemo(() => flatten(listings, expanded), [listings, expanded]);
@@ -141,33 +154,41 @@ export function FileTree({
   const removed = changed.reduce((total, file) => total + file.removed, 0);
 
   return (
-    <aside aria-label="Files" className="flex w-60 shrink-0 flex-col border-r border-line bg-panel">
-      <div className="flex h-9 shrink-0 items-center justify-between border-b border-line px-3">
-        <span className="text-micro font-semibold tracking-[0.08em] text-ink-muted uppercase">
-          Files
-        </span>
-        <span className="font-mono text-[10px] text-ink-faint">{root?.entries.length ?? 0}</span>
+    <aside aria-label="Files" className={cn("q-ftree", className)}>
+      <div className="q-pane-head">
+        <h2>{workspaceName ?? "Files"}</h2>
+        {host ? (
+          <span className="q-faint" style={{ fontSize: 12 }}>
+            {host}
+          </span>
+        ) : null}
+        {onSearch ? (
+          <button type="button" className="q-ibtn" aria-label="Search files" onClick={onSearch}>
+            <SearchIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+          </button>
+        ) : null}
       </div>
 
       {error ? (
-        <div className="m-3 rounded-sm border border-line bg-raised p-3 text-compact">
-          <p className="font-medium text-ink">The tree did not load.</p>
-          <p className="mt-1 text-ink-muted">{error.message}</p>
-          <button
-            type="button"
-            onClick={onRetry}
-            className="mt-2 inline-flex items-center gap-1.5 text-prompt underline-offset-2 hover:underline"
-          >
-            <RefreshCwIcon className="size-3.5" aria-hidden />
+        <div style={{ margin: 12, fontSize: 12, color: "var(--fg-2)" }}>
+          <p style={{ margin: 0, fontWeight: 500, color: "var(--fg)" }}>The tree did not load.</p>
+          <p style={{ margin: "4px 0 0" }}>{error.message}</p>
+          <button type="button" onClick={onRetry} className="q-btn ghost" style={{ height: 24 }}>
+            <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             Retry
           </button>
         </div>
       ) : null}
 
       {loading && !root ? (
-        <div className="space-y-2 p-3">
+        <div style={{ display: "grid", gap: 8, padding: 12 }}>
           {SKELETON_WIDTHS.map((width) => (
-            <Skeleton key={width} className="h-3" style={{ width: `${width}%` }} />
+            <div
+              key={width}
+              className="q-skel"
+              style={{ height: 10, width: `${width}%` }}
+              aria-hidden
+            />
           ))}
         </div>
       ) : null}
@@ -178,7 +199,8 @@ export function FileTree({
         aria-label="Workspace files"
         tabIndex={0}
         onKeyDown={onKeyDown}
-        className="min-h-0 flex-1 overflow-auto py-1 outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+        className="q-scroll"
+        style={{ paddingBottom: 8 }}
       >
         <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
           {virtualizer.getVirtualItems().map((virtual) => {
@@ -200,34 +222,32 @@ export function FileTree({
                   activate(row);
                 }}
                 onFocus={() => setActive(virtual.index)}
-                className={cn(
-                  "absolute left-0 flex h-[26px] w-full items-center gap-1.5 pr-2 text-left text-compact",
-                  "border-l-2 border-transparent text-ink-muted transition-colors duration-[var(--dur-instant)]",
-                  "hover:bg-raised hover:text-ink focus-visible:outline-none",
-                  isActive && "border-cue bg-raised text-ink",
-                  entry.kind === "directory" && "font-medium",
-                )}
-                style={{
-                  top: virtual.start,
-                  paddingLeft: 8 + depth * 12,
-                }}
+                className={cn("q-fnode", isActive && "sel")}
+                style={
+                  {
+                    top: virtual.start,
+                    position: "absolute",
+                    left: 0,
+                    "--d": depth,
+                  } as React.CSSProperties
+                }
                 title={entry.path}
               >
                 {entry.kind === "directory" ? (
                   open ? (
-                    <ChevronDownIcon className="size-3 shrink-0 text-ink-faint" aria-hidden />
+                    <ChevronDownIcon className="q-icon s12 q-faint" aria-hidden />
                   ) : (
-                    <ChevronRightIcon className="size-3 shrink-0 text-ink-faint" aria-hidden />
+                    <ChevronRightIcon className="q-icon s12 q-faint" aria-hidden />
                   )
                 ) : (
-                  <span className="w-3 shrink-0" aria-hidden />
+                  <span style={{ width: 12, flex: "none" }} aria-hidden />
                 )}
-                <span className="shrink-0 text-ink-faint">{entryIcon(entry, open)}</span>
-                <span className="min-w-0 flex-1 truncate">{entry.name}</span>
+                <span className="dim">{entryIcon(entry, open)}</span>
+                <span className="grow">{entry.name}</span>
                 {badge ? (
                   <span
                     role="img"
-                    className={cn("shrink-0 font-mono text-[10px]", badge.tone)}
+                    className="gs t-warn"
                     title={entry.git_status ?? undefined}
                     aria-label={entry.git_status ?? undefined}
                   >
@@ -240,55 +260,50 @@ export function FileTree({
         </div>
       </div>
 
-      <section className="shrink-0 border-t border-line bg-panel" aria-label="Agent changes">
-        <div className="flex items-center justify-between px-3 pt-2.5">
-          <span className="text-[10px] font-semibold tracking-[0.08em] text-ink-muted uppercase">
-            Agent changes
-          </span>
-          <span className="font-mono text-[10px] text-ink-faint">
-            {agentLoading ? "…" : `${changed.length} files`}
-          </span>
-        </div>
-        <div className="flex items-baseline gap-2 px-3 pb-2">
-          <span className="text-compact text-ink-muted">
-            {changed.length === 0 ? "No changes in this turn" : `${changed.length} files`}
-          </span>
+      <section
+        style={{
+          borderTop: "1px solid var(--line)",
+          padding: "12px 14px 14px",
+          flex: "none",
+        }}
+        aria-label="Agent changes"
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+          <span style={{ fontWeight: 600 }}>Agent changes</span>
           {changed.length > 0 ? (
-            <span className="font-mono text-[10px]">
-              <span className="text-standby-ink">+{added}</span>{" "}
-              <span className="text-strike-ink">−{removed}</span>
+            <span className="q-num" style={{ fontSize: 12 }}>
+              <span className="add">+{added}</span> <span className="del">−{removed}</span>
             </span>
-          ) : null}
+          ) : (
+            <span className="q-num q-faint" style={{ fontSize: 12 }}>
+              {agentLoading ? "…" : "0"}
+            </span>
+          )}
+        </div>
+        <div className="q-faint" style={{ fontSize: 12, margin: "2px 0 8px" }}>
+          {changed.length === 0 ? "No changes in this turn" : (changeLabel ?? "Changes this turn")}
         </div>
         {changed.length > 0 ? (
-          <ul className="max-h-32 overflow-auto px-1 pb-1">
+          <div style={{ maxHeight: 128, overflow: "auto" }}>
             {changed.map((file) => (
-              <li key={file.path}>
-                <button
-                  type="button"
-                  onClick={() => onOpenAgent(file.path)}
-                  className="flex h-6 w-full items-center gap-1.5 rounded-sm px-2 text-left font-mono text-[10px] text-ink-muted hover:bg-raised hover:text-ink"
-                  title={`Open ${file.path} diff vs agent changes`}
-                >
-                  <span className="min-w-0 flex-1 truncate">{file.path}</span>
-                  <span className="text-standby-ink">+{file.added}</span>
-                  <span className="text-strike-ink">−{file.removed}</span>
-                </button>
-              </li>
+              <button
+                key={file.path}
+                type="button"
+                onClick={() => onOpenAgent(file.path)}
+                className="q-fnode"
+                style={{ margin: "0 -10px", width: "calc(100% + 20px)" }}
+                title={`Open ${file.path} diff vs agent changes`}
+              >
+                <FileIcon className="q-icon s14 dim" aria-hidden />
+                <span className="grow">{changeRowLabel(file.path)}</span>
+                <span className="q-num" style={{ fontSize: 12 }}>
+                  <span className="add">+{file.added}</span>
+                  {file.removed > 0 ? <span className="del"> −{file.removed}</span> : null}
+                </span>
+              </button>
             ))}
-          </ul>
+          </div>
         ) : null}
-        <div className="px-3 pb-2.5">
-          <button
-            type="button"
-            onClick={onReviewAll}
-            disabled={changed.length === 0}
-            className="inline-flex h-7 items-center gap-1.5 rounded-sm border border-control-border bg-raised px-2 text-micro text-ink transition-colors hover:bg-paper disabled:pointer-events-none disabled:opacity-45"
-          >
-            <FileDiffIcon className="size-3.5" aria-hidden />
-            Review diff
-          </button>
-        </div>
       </section>
     </aside>
   );

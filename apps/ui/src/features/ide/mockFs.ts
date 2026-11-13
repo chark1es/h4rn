@@ -30,271 +30,268 @@ type MockHooks = {
 
 const IGNORED = ["node_modules/", "dist/", ".env"];
 
+/**
+ * The atlas api repository at HEAD. The screenshot IDE shows an auth suite
+ * mid-edit, so the tree, the change set and the test diff all come from the
+ * same small repo.
+ */
 const HEAD_FILES: Record<string, string> = {
   "package.json": `{
   "name": "@atlas/api",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx src/server.ts",
     "test": "vitest run",
-    "lint": "biome check ."
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "hono": "4.6.3",
-    "zod": "3.23.8"
+    "pg": "8.13.1"
   },
   "devDependencies": {
-    "vitest": "2.1.1",
-    "typescript": "5.6.2"
+    "typescript": "5.6.2",
+    "vitest": "2.1.1"
   }
 }
 `,
-  "tsconfig.json": `{
-  "compilerOptions": {
-    "strict": true,
-    "noUncheckedIndexedAccess": true,
-    "module": "ESNext",
-    "target": "ES2022",
-    "moduleResolution": "bundler"
+  "vitest.config.ts": `import { defineConfig } from "vitest/config";
+
+export default defineConfig({
+  test: {
+    setupFiles: ["tests/setup.ts"],
+    pool: "forks",
   },
-  "include": ["src", "tests"]
-}
-`,
-  "README.md": `# atlas api
-
-Session verification, login and the database pool for the atlas control plane.
-
-## Working agreements
-
-- Every write is optimistic: read the file, keep its etag, send it back.
-- Tests pin the clock with \`vi.useFakeTimers()\` before the pool opens.
-- Do not commit generated bindings by hand.
-
-\`\`\`bash
-pnpm dev
-pnpm test --filter auth
-\`\`\`
-`,
-  ".gitignore": `node_modules
-dist
-.env
-coverage
-`,
-  "docs/testing.md": `# Testing
-
-The auth suite is the canary. If it flakes, the fake clock is installed after
-the pool opens somewhere; find the module-scoped \`connect()\` and make it lazy.
-`,
-  "src/server.ts": `import { app } from "./app";
-
-const port = Number(process.env.PORT ?? 4780);
-app.listen({ port });
-`,
-  "src/app.ts": `import { Hono } from "hono";
-import { login } from "./routes/login";
-
-export const app = new Hono();
-app.post("/login", login);
-`,
-  "src/routes/login.ts": `import type { Context } from "hono";
-import { verifySession } from "../auth/session";
-
-export async function login(context: Context) {
-  const body = await context.req.json<{ token?: string }>();
-  const session = await verifySession(body.token ?? "");
-  if (!session) return context.json({ error: "unauthorized" }, 401);
-  return context.json({ session });
-}
-`,
-  "src/auth/auth.ts": `import { db } from "../lib/db";
-
-export type User = { id: string; email: string };
-
-export async function findUser(email: string): Promise<User | null> {
-  return db.user.findByEmail(email);
-}
-`,
-  "src/auth/session.ts": `import { db } from "../lib/db";
-
-export async function verifySession(token: string) {
-  const now = Date.now();
-  if (!token) return null;
-
-  const session = await db.session.find(token);
-  if (!session) return null;
-  return session;
-}
-`,
-  "src/lib/db.ts": `type Session = { token: string; userId: string; expiresAt: number };
-
-export const db = {
-  session: {
-    async find(token: string): Promise<Session | null> {
-      return null;
-    },
-  },
-  user: {
-    async findByEmail(email: string) {
-      return null;
-    },
-  },
-};
-`,
-  "tests/auth.test.ts": `import { beforeEach, expect, it, vi } from "vitest";
-import { verifySession } from "../src/auth/session";
-
-beforeEach(() => {
-  vi.useFakeTimers();
-});
-
-it("rejects an empty token", async () => {
-  expect(await verifySession("")).toBeNull();
 });
 `,
-};
+  "src/auth/token.ts": `import { randomBytes } from "node:crypto";
 
-const AGENT_FILES: Record<string, string> = {
-  ...HEAD_FILES,
-  "src/routes/login.ts": `import type { Context } from "hono";
-import { verifySession } from "../auth/session";
+import { db } from "../db/pool";
 
-// New: the login route returns the session's expiry so the client can schedule
-// a refresh instead of discovering an expired token on the next request.
-export async function login(context: Context) {
-  const body = await context.req.json<{ token?: string }>();
-  const session = await verifySession(body.token ?? "");
-  if (!session) return context.json({ error: "unauthorized" }, 401);
-  return context.json({
-    session: { userId: session.userId },
-    expiresAt: session.expiresAt,
+export function mintToken(): string {
+  return \`t_\${randomBytes(2).toString("hex").slice(0, 3)}\`;
+}
+
+export async function findSession(token: string) {
+  return db.session.find(token);
+}
+
+export async function seedSession(input: { token: string; ttl: number }) {
+  await db.session.insert({
+    token: input.token,
+    userId: \`user_\${input.token.slice(2)}\`,
+    expiresAt: Date.now() + input.ttl,
   });
 }
 `,
-  "src/auth/auth.ts": `import { db } from "../lib/db";
+  "src/auth/session.ts": `import { db } from "../db/pool";
 
-export type User = { id: string; email: string };
+export const CLOCK_SKEW_MS = 30_000;
 
-export async function findUser(email: string): Promise<User | null> {
-  return db.user.findByEmail(email);
-}
-
-// Keep the refresh path in one place so both login and middleware agree.
-export async function refreshSession(token: string) {
+export async function verifySession(token: string) {
+  if (!token) return null;
   const session = await db.session.find(token);
   if (!session) return null;
   if (session.expiresAt <= Date.now()) return null;
   return session;
 }
 `,
-  "src/auth/session.ts": `import { db } from "../lib/db";
+  "src/auth/refresh.ts": `import { verifySession } from "./session";
 
-const CLOCK_SKEW_MS = 30_000;
-
-function expired(expiresAt: number, now: number): boolean {
-  return expiresAt - CLOCK_SKEW_MS <= now;
-}
-
-export async function verifySession(token: string) {
-  const now = Date.now();
-  if (!token) return null;
-
-  const session = await db.session.find(token);
+export async function refresh(token: string) {
+  const session = await verifySession(token);
   if (!session) return null;
-  if (expired(session.expiresAt, now)) return null;
-  return session;
+  return { ...session, expiresAt: Date.now() + 30_000 };
 }
 `,
-  "tests/auth.test.ts": `import { beforeEach, expect, it, vi } from "vitest";
-import { verifySession } from "../src/auth/session";
+  "src/db/pool.ts": `import { Pool } from "pg";
 
-beforeEach(() => {
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+export const db = {
+  session: {
+    async find(token: string) {
+      const { rows } = await pool.query("select * from sessions where token = $1", [token]);
+      return rows[0] ?? null;
+    },
+    async insert(session: { token: string; userId: string; expiresAt: number }) {
+      await pool.query(
+        "insert into sessions (token, user_id, expires_at) values ($1, $2, $3)",
+        [session.token, session.userId, session.expiresAt],
+      );
+    },
+    async deleteMany() {
+      await pool.query("delete from sessions");
+    },
+  },
+};
+`,
+  "tests/setup.ts": `import { afterAll, beforeAll, vi } from "vitest";
+
+import { db } from "../src/db/pool";
+
+beforeAll(async () => {
   vi.useFakeTimers();
-  vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+  await db.session.deleteMany();
 });
 
-it("rejects an empty token", async () => {
-  expect(await verifySession("")).toBeNull();
-});
-
-it("rejects an expired session at the skew boundary", async () => {
-  vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
-  expect(await verifySession("expired-token")).toBeNull();
+afterAll(() => {
+  vi.useRealTimers();
 });
 `,
+  "src/auth/session.test.ts": [
+    `import { beforeEach, describe, expect, it, vi } from "vitest";`,
+    ``,
+    `import { findSession, mintToken, seedSession } from "../auth/token";`,
+    `import { verifySession } from "../auth/session";`,
+    `import { db } from "../db/pool";`,
+    ``,
+    `const clock = vi.useFakeTimers({ now: new Date("2026-03-04T12:00:00Z") });`,
+    ``,
+    `const LIVE = {`,
+    `  token: "t_9f2",`,
+    `  userId: "user_9f2",`,
+    `  expiresAt: Date.now() + 30_000,`,
+    `};`,
+    ``,
+    `beforeEach(async () => {`,
+    `  vi.setSystemTime(new Date("2026-03-04T12:00:00Z"));`,
+    `  await db.session.deleteMany();`,
+    `  await seedSession(LIVE);`,
+    `});`,
+    ``,
+    `describe("token helpers", () => {`,
+    `  it("mints an opaque token", () => {`,
+    `    expect(mintToken()).toMatch(/^t_[0-9a-f]{3}$/);`,
+    `  });`,
+    ``,
+    `  it("pins the token to the session", async () => {`,
+    `    const session = await findSession("t_9f2");`,
+    `    expect(session?.userId).toBe("user_9f2");`,
+    `  });`,
+    ``,
+    `  it("rejects a token without a session", async () => {`,
+    `    expect(await findSession("t_none")).toBeNull();`,
+    `  });`,
+    `});`,
+    ``,
+    `describe("verifySession", () => {`,
+    `  beforeEach(async () => {`,
+    `    await seedSession({ token: "t_9f2", ttl: 30_000 });`,
+    `  });`,
+    ``,
+    `  it("returns the session before expiry", async () => {`,
+    `    const session = await verifySession("t_9f2");`,
+    `    expect(session).toMatchObject({ token: "t_9f2" });`,
+    `  });`,
+    ``,
+    `  it("rejects an unknown token", async () => {`,
+    `    expect(await verifySession("nope")).toBe(null);`,
+    `  });`,
+    `});`,
+    ``,
+  ].join("\n"),
 };
 
-/** Changes the agent's turn made, relative to `AGENT_FILES` (pre-turn). */
-const TURN_CHANGES = ["src/auth/session.ts", "tests/auth.test.ts", "src/routes/login.ts"];
+/** The pre-turn snapshot: HEAD plus the seed the agent started from. */
+const AGENT_FILES: Record<string, string> = { ...HEAD_FILES };
 
 /**
- * The working tree after the turn: pre-turn snapshot plus the agent's edits.
- * Seeding from this (rather than `AGENT_FILES`) keeps the turn diff and the
- * status-bar counts meaningful.
+ * The working tree after the turn. The regression test below is the hunk the
+ * IDE screenshot shows, with real line numbers and real added/removed rows.
  */
 const TURN_AFTER: Record<string, string> = {
-  "src/auth/session.ts": `import { db } from "../lib/db";
+  "tests/setup.ts": `import { afterAll, beforeAll, beforeEach, vi } from "vitest";
 
-const CLOCK_SKEW_MS = 30_000;
+import { db } from "../src/db/pool";
 
-function expired(expiresAt: number, now: number): boolean {
-  return expiresAt - CLOCK_SKEW_MS <= now;
-}
-
-export async function verifySession(token: string) {
-  const now = Date.now();
-  if (!token) return null;
-
-  const session = await db.session.find(token);
-  if (!session) return null;
-  // A token inside the skew window is treated as already expired.
-  if (expired(session.expiresAt, now)) return null;
-  return { ...session, verifiedAt: now };
-}
-`,
-  "src/routes/login.ts": `import type { Context } from "hono";
-import { verifySession } from "../auth/session";
-
-// New: the login route returns the session's expiry so the client can schedule
-// a refresh instead of discovering an expired token on the next request.
-export async function login(context: Context) {
-  const body = await context.req.json<{ token?: string }>();
-  const session = await verifySession(body.token ?? "");
-  if (!session) return context.json({ error: "unauthorized" }, 401);
-  return context.json({
-    session: { userId: session.userId },
-    expiresAt: session.expiresAt,
-    verifiedAt: session.verifiedAt,
-  });
-}
-`,
-  "tests/auth.test.ts": `import { beforeEach, expect, it, vi } from "vitest";
-import { verifySession } from "../src/auth/session";
-
-beforeEach(() => {
+beforeAll(async () => {
   vi.useFakeTimers();
-  vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
+  vi.setSystemTime(new Date("2026-03-04T12:00:00Z"));
 });
 
-it("rejects an empty token", async () => {
-  expect(await verifySession("")).toBeNull();
+beforeEach(async () => {
+  await db.session.deleteMany();
+  await db.session.insert({
+    token: "t_seed",
+    userId: "user_seed",
+    expiresAt: Date.now() + 30_000,
+  });
 });
 
-it("rejects an expired session at the skew boundary", async () => {
-  vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
-  expect(await verifySession("expired-token")).toBeNull();
-});
-
-it("stamps the verification time on a live session", async () => {
-  const session = await verifySession("live-token");
-  expect(session?.verifiedAt).toBe(Date.now());
+afterAll(() => {
+  vi.useRealTimers();
 });
 `,
+  "src/auth/session.test.ts": [
+    `import { beforeEach, describe, expect, it, vi } from "vitest";`,
+    ``,
+    `import { findSession, mintToken, seedSession } from "../auth/token";`,
+    `import { verifySession } from "../auth/session";`,
+    `import { db } from "../db/pool";`,
+    ``,
+    `const clock = vi.useFakeTimers({ now: new Date("2026-03-04T12:00:00Z") });`,
+    ``,
+    `const LIVE = {`,
+    `  token: "t_9f2",`,
+    `  userId: "user_9f2",`,
+    `  expiresAt: Date.now() + 30_000,`,
+    `};`,
+    ``,
+    `beforeEach(async () => {`,
+    `  vi.setSystemTime(new Date("2026-03-04T12:00:00Z"));`,
+    `  await db.session.deleteMany();`,
+    `  await seedSession(LIVE);`,
+    `});`,
+    ``,
+    `describe("token helpers", () => {`,
+    `  it("mints an opaque token", () => {`,
+    `    expect(mintToken()).toMatch(/^t_[0-9a-f]{3}$/);`,
+    `  });`,
+    ``,
+    `  it("pins the token to the session", async () => {`,
+    `    const session = await findSession("t_9f2");`,
+    `    expect(session?.userId).toBe("user_9f2");`,
+    `  });`,
+    ``,
+    `  it("rejects a token without a session", async () => {`,
+    `    expect(await findSession("t_none")).toBeNull();`,
+    `  });`,
+    `});`,
+    ``,
+    `describe("verifySession", () => {`,
+    `  beforeEach(async () => {`,
+    `    await seedSession({ token: "t_9f2", ttl: 30_000 });`,
+    `  });`,
+    ``,
+    `  it("returns the session before expiry", async () => {`,
+    `    const session = await verifySession("t_9f2");`,
+    `    expect(session).toMatchObject({ token: "t_9f2" });`,
+    `  });`,
+    ``,
+    `  // Regression: the pool used to read Date.now() at import time.`,
+    `  it("is still valid at the 30 s boundary", async () => {`,
+    `    clock.advanceTimersByTime(29_999);`,
+    `    expect(await verifySession("t_9f2")).not.toBeNull();`,
+    `    clock.advanceTimersByTime(1);`,
+    `    expect(await verifySession("t_9f2")).toBeNull();`,
+    `  });`,
+    ``,
+    `  it("rejects an unknown token", async () => {`,
+    `    expect(await verifySession("nope")).toBeNull();`,
+    `  });`,
+    `});`,
+    ``,
+  ].join("\n"),
 };
+
+/** The change set the prototype's IDE footer shows. */
+const TURN_CHANGES = [
+  { path: "tests/setup.ts", added: 12, removed: 3 },
+  { path: "src/auth/session.test.ts", added: 6, removed: 1 },
+];
 
 const WORKTREE_FILES: Record<string, string> = { ...AGENT_FILES, ...TURN_AFTER };
 
-const BINARY = new Set(["assets/logo.png"]);
+const BINARY = new Set<string>();
 
 function etag(text: string): string {
   // FNV-1a, stable and short; the real daemon uses BLAKE3.
@@ -304,16 +301,6 @@ function etag(text: string): string {
     hash = Math.imul(hash, 0x01000193);
   }
   return (hash >>> 0).toString(16).padStart(8, "0");
-}
-
-function lineDelta(before: string, after: string): { added: number; removed: number } {
-  const a = new Set(before.split("\n"));
-  const b = new Set(after.split("\n"));
-  let added = 0;
-  let removed = 0;
-  for (const line of b) if (!a.has(line) && line !== "") added += 1;
-  for (const line of a) if (!b.has(line) && line !== "") removed += 1;
-  return { added, removed };
 }
 
 function join(parent: string, name: string): string {
@@ -327,7 +314,6 @@ export class MockFs {
 
   constructor(private readonly workspace: string) {
     for (const [path, content] of Object.entries(WORKTREE_FILES)) this.files.set(path, content);
-    this.files.set("assets/logo.png", "");
   }
 
   private current(path: string): string | null {
@@ -370,17 +356,13 @@ export class MockFs {
       }
     }
     for (const name of directories) {
-      const child = join(path, name);
-      const dirty = [...this.files.keys()]
-        .filter((filePath) => filePath.startsWith(`${child}/`))
-        .some((filePath) => this.statusOf(filePath) !== null);
       entries.push({
         name,
-        path: child,
+        path: join(path, name),
         kind: "directory",
         size_bytes: 0,
         modified_at: new Date().toISOString(),
-        git_status: dirty ? "modified" : null,
+        git_status: null,
       });
     }
     entries.sort((left, right) => {
@@ -664,7 +646,7 @@ export class MockFs {
     return {
       path,
       against,
-      label: "Turn 4 · Codex",
+      label: "Turn 4 · Claude Code",
       before,
       after,
       binary: BINARY.has(path),
@@ -677,8 +659,7 @@ export class MockFs {
       thread_id: threadId,
       turn_id: turnId,
       note: null,
-      files: TURN_CHANGES.map((path) => {
-        const { added, removed } = lineDelta(AGENT_FILES[path] ?? "", this.current(path) ?? "");
+      files: TURN_CHANGES.map(({ path, added, removed }) => {
         return {
           path,
           added,

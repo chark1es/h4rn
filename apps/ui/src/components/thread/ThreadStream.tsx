@@ -1,7 +1,6 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 
-import { Skeleton } from "@/components/ui/skeleton";
 import { MessageAttachments } from "@/features/attachments/MessageAttachments";
 import type { ThreadSummary } from "@/gen";
 import type { PendingMessage, StreamTurn } from "@/lib/store/projection";
@@ -14,26 +13,11 @@ type Row =
 
 function PendingTurn({ message }: { message: PendingMessage }) {
   return (
-    <div className="grid grid-cols-[32px_minmax(0,1fr)] gap-2 pr-3 pl-1 sm:grid-cols-[48px_minmax(0,1fr)] sm:gap-3 sm:pr-6 sm:pl-2">
-      <div className="flex flex-col items-end pt-0.5">
-        <span className="font-mono text-micro tabular text-ink-faint">··</span>
-      </div>
-      <div className="flex flex-col items-end gap-1 pb-4">
-        <div className="flex items-center gap-2 text-micro text-ink-faint">
-          <span className="font-medium text-ink-muted">You</span>
-          <span>{message.sending ? "Sending…" : "Sent"}</span>
-        </div>
-        {message.text ? (
-          <div
-            className={cn(
-              "max-w-[68ch] rounded-md border border-line bg-panel px-3 py-2 text-compact leading-relaxed whitespace-pre-wrap text-ink",
-              message.sending && "opacity-70",
-            )}
-          >
-            {message.text}
-          </div>
-        ) : null}
-        <MessageAttachments attachments={message.attachments} align="end" />
+    <div className={cn("q-turn q-you-msg", message.sending && "q-faint")}>
+      {message.text ? <div className="q-bubble">{message.text}</div> : null}
+      <MessageAttachments attachments={message.attachments} align="end" />
+      <div className="q-you-meta">
+        <span>{message.sending ? "Sending…" : "Sent"}</span>
       </div>
     </div>
   );
@@ -45,16 +29,18 @@ export function ThreadStream({
   turns,
   pending,
   onRetry,
+  staleAt = null,
 }: {
   threadId: string;
   summary: ThreadSummary;
   turns: StreamTurn[];
   pending: PendingMessage[];
   onRetry: () => void;
+  staleAt?: number | null;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const atBottom = useRef(true);
-  const [focusCue, setFocusCue] = useState(0);
+  const focusCue = useRef(0);
 
   const rows = useMemo<Row[]>(() => {
     const next: Row[] = turns.map((turn, index) => ({
@@ -98,7 +84,7 @@ export function ThreadStream({
     if (!atBottom.current || rows.length === 0) return;
     const id = requestAnimationFrame(() => {
       virtualizer.scrollToIndex(rows.length - 1, { align: "end" });
-      setFocusCue(Math.max(0, turns.length - 1));
+      focusCue.current = Math.max(0, turns.length - 1);
     });
     return () => cancelAnimationFrame(id);
   }, [signature, rows.length, turns.length, virtualizer]);
@@ -106,11 +92,9 @@ export function ThreadStream({
   useEffect(() => {
     const handler = (event: Event) => {
       const direction = (event as CustomEvent<{ direction: number }>).detail?.direction ?? 0;
-      setFocusCue((current) => {
-        const next = Math.max(0, Math.min(turns.length - 1, current + direction));
-        virtualizer.scrollToIndex(next, { align: "start" });
-        return next;
-      });
+      const next = Math.max(0, Math.min(turns.length - 1, focusCue.current + direction));
+      focusCue.current = next;
+      virtualizer.scrollToIndex(next, { align: "start" });
     };
     window.addEventListener("h4rn:cue", handler);
     return () => window.removeEventListener("h4rn:cue", handler);
@@ -119,7 +103,7 @@ export function ThreadStream({
   return (
     <div
       ref={scrollRef}
-      className="min-h-0 flex-1 overflow-y-auto overscroll-contain"
+      className="q-stream"
       onScroll={(event) => {
         const element = event.currentTarget;
         atBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 160;
@@ -127,10 +111,7 @@ export function ThreadStream({
       aria-label="Thread stream"
       role="log"
     >
-      <div
-        className="mx-auto w-full max-w-[760px] pt-4"
-        style={{ height: virtualizer.getTotalSize(), position: "relative" }}
-      >
+      <div className="q-col" style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
         {virtualizer.getVirtualItems().map((item) => {
           const row = rows[item.index];
           if (!row) return null;
@@ -150,11 +131,10 @@ export function ThreadStream({
               {row.kind === "turn" ? (
                 <TurnBlock
                   turn={row.turn}
-                  index={row.cue}
                   threadId={threadId}
                   summary={summary}
-                  current={row.cue === focusCue}
                   onRetry={onRetry}
+                  staleAt={item.index === rows.length - 1 ? staleAt : null}
                 />
               ) : (
                 <PendingTurn message={row.message} />
@@ -169,30 +149,18 @@ export function ThreadStream({
 
 export function ThreadStreamSkeleton() {
   return (
-    <div
-      className="min-h-0 flex-1 overflow-hidden"
-      role="status"
-      aria-busy="true"
-      aria-label="Loading thread"
-    >
-      <div className="mx-auto w-full max-w-[760px] space-y-4 px-4 py-4">
-        <div className="flex items-center gap-2">
-          <Skeleton className="size-4 rounded-full" />
-          <Skeleton className="h-3 w-28" />
+    <div className="q-stream" role="status" aria-busy="true" aria-label="Loading thread">
+      <div className="q-col">
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 32 }}>
+          <div className="q-skel" style={{ width: "58%", height: 62, borderRadius: 14 }} />
         </div>
-        <div className="space-y-2">
-          <Skeleton className="h-3 w-11/12" />
-          <Skeleton className="h-3 w-10/12" />
-          <Skeleton className="h-3 w-7/12" />
-        </div>
-        <div className="space-y-1.5 rounded-sm border border-line p-2">
-          <Skeleton className="h-2.5 w-24" />
-          <Skeleton className="h-2.5 w-40" />
-        </div>
-        <div className="space-y-2">
-          <Skeleton className="h-3 w-9/12" />
-          <Skeleton className="h-3 w-6/12" />
-        </div>
+        <div className="q-skel" style={{ width: 240, height: 12, marginBottom: 10 }} />
+        <div className="q-skel" style={{ width: "92%", height: 10, marginBottom: 10 }} />
+        <div className="q-skel" style={{ width: "84%", height: 10, marginBottom: 10 }} />
+        <div className="q-skel" style={{ width: "66%", height: 10, marginBottom: 22 }} />
+        <div className="q-skel" style={{ width: "100%", height: 76, marginBottom: 22 }} />
+        <div className="q-skel" style={{ width: "88%", height: 10, marginBottom: 10 }} />
+        <div className="q-skel" style={{ width: "72%", height: 10 }} />
       </div>
     </div>
   );

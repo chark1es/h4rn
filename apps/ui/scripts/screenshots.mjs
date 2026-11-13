@@ -1,14 +1,16 @@
 /**
- * Capture the Phase 1b and Phase 2 (IDE) surfaces in mock mode.
+ * Capture the Quiet native surfaces in mock mode.
  *
  * Usage: node scripts/screenshots.mjs [baseURL]
  *
  * Requires `bun run dev` and a Playwright Chromium in ~/.cache/ms-playwright.
  * Override the binary with H4RN_CHROMIUM.
+ *
+ * The shot list mirrors design/a-quiet-native/shots one for one. Desktop
+ * screenshots are 1440×900, phone screenshots are 390×844, and every screen is
+ * captured in light and dark.
  */
-import { mkdir, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright-core";
 
@@ -21,80 +23,154 @@ const EXECUTABLE =
 const DESKTOP = { width: 1440, height: 900 };
 const PHONE = { width: 390, height: 844 };
 
-const FIXTURE_NAME = "reconnect-trace.svg";
-const FIXTURE_DIR = join(tmpdir(), "h4rn-attachments");
-const FIXTURE = join(FIXTURE_DIR, FIXTURE_NAME);
-
-/** Small deterministic image so the composer chip and transcript preview have content. */
-const FIXTURE_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="720" height="420" viewBox="0 0 720 420">
-  <rect width="720" height="420" fill="#f1e8d6"/>
-  <rect width="720" height="34" fill="#e3d8c0"/>
-  <text x="360" y="21" text-anchor="middle" font-family="ui-monospace, monospace" font-size="12" fill="#6b5f4c">relay/reconnect.ts — retry trace</text>
-  <rect x="0" y="34" width="180" height="386" fill="#eae0cc"/>
-  <text x="16" y="64" font-family="ui-monospace, monospace" font-size="11" fill="#7a6c56">src</text>
-  <text x="24" y="88" font-family="ui-monospace, monospace" font-size="11" fill="#9a5b14">reconnect.ts</text>
-  <text x="24" y="108" font-family="ui-monospace, monospace" font-size="11" fill="#6b5f4c">backoff.ts</text>
-  <rect x="180" y="34" width="540" height="386" fill="#f6efe2"/>
-  <text x="200" y="68" font-family="ui-monospace, monospace" font-size="12" fill="#6b5f4c">attempt 1 · 250 ms</text>
-  <text x="200" y="96" font-family="ui-monospace, monospace" font-size="12" fill="#9a3f3a">  close 1011 · retry after jitter</text>
-  <text x="200" y="128" font-family="ui-monospace, monospace" font-size="12" fill="#6b5f4c">attempt 2 · 610 ms</text>
-  <text x="200" y="156" font-family="ui-monospace, monospace" font-size="12" fill="#3f6a45">  resumed at seq 4182 · no replay</text>
-  <text x="200" y="188" font-family="ui-monospace, monospace" font-size="12" fill="#6b5f4c">attempt 3 · 1.4 s</text>
-  <text x="200" y="216" font-family="ui-monospace, monospace" font-size="12" fill="#3f6a45">  stream caught up · events 4183–4201</text>
-  <rect x="200" y="254" width="470" height="84" rx="4" fill="#e6f0e3" stroke="#9bb59a"/>
-  <text x="214" y="278" font-family="ui-monospace, monospace" font-size="12" fill="#3f6a45">PASS  relay/reconnect.test.ts</text>
-  <text x="214" y="300" font-family="ui-monospace, monospace" font-size="11" fill="#5c7a58">resume does not replay applied events</text>
-  <text x="214" y="320" font-family="ui-monospace, monospace" font-size="11" fill="#5c7a58">18 tests · 1.9 s</text>
-</svg>`;
-
 /** @param {string} path @param {string} theme */
 const url = (path, theme) => `${BASE}${path}${path.includes("?") ? "&" : "?"}mock=1&theme=${theme}`;
 
+/** @param {import("playwright-core").Page} page */
+const openTerminal = async (page) => {
+  await page.getByRole("button", { name: "Toggle terminal" }).click();
+  const panel = page.locator('[aria-label="Terminal panel"]');
+  await panel.waitFor({ state: "visible" });
+  await panel.locator(".xterm-screen").first().waitFor({ state: "visible" });
+  // The panel mounts before the attach response; input is dropped until the
+  // stream id arrives, so give the mock session a beat to finish opening.
+  await page.waitForTimeout(700);
+  await panel.locator(".terminal-surface").click();
+  await page.keyboard.type("CI=1 pnpm vitest run --project auth --repeat 3");
+  await page.keyboard.press("Enter");
+  await page.waitForTimeout(900);
+};
+
+/**
+ * Each shot lists the design reference it ports. `device` decides the viewport
+ * so a desktop screen is never captured at phone width (or the reverse).
+ * @type {Array<{
+ *   name: string;
+ *   device: "desktop" | "phone";
+ *   path: string;
+ *   wait: string | (() => Promise<void>);
+ *   settle?: number;
+ *   action?: (page: import("playwright-core").Page) => Promise<void>;
+ * }>}
+ */
 const SHOTS = [
   {
-    name: "empty",
-    path: "/?scenario=empty",
-    wait: "text=No threads yet.",
-  },
-  {
     name: "inbox",
-    path: "/",
-    wait: "text=Fix the flaky auth test",
-  },
-  {
-    name: "thread-stream",
-    path: "/t/thr_b",
-    wait: '[aria-label="Thread stream"]',
-    settle: 3200,
-  },
-  {
-    name: "thread-approval",
+    device: "desktop",
     path: "/t/thr_a",
     wait: '[aria-label="Thread stream"]',
   },
   {
-    name: "terminal",
-    path: "/t/thr_b",
+    name: "inbox-done",
+    device: "desktop",
+    path: "/t/thr_h",
     wait: '[aria-label="Thread stream"]',
-    settle: 2200,
     action: async (page) => {
-      await page.getByRole("button", { name: "Toggle terminal" }).click();
-      const panel = page.locator('[aria-label="Terminal panel"]');
-      await panel.waitFor({ state: "visible" });
-      await panel.locator(".xterm-screen").first().waitFor({ state: "visible" });
-      // The panel mounts before the attach response; input is dropped until the
-      // stream id arrives, so give the mock session a beat to finish opening.
-      await page.waitForTimeout(700);
-      await panel.locator(".terminal-surface").click();
-      await page.keyboard.type("ls");
-      await page.keyboard.press("Enter");
-      await page.waitForTimeout(900);
+      await page.getByRole("tab", { name: /Done/ }).click();
+      await page.waitForTimeout(400);
     },
   },
   {
+    name: "subagents",
+    device: "desktop",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      await page.getByRole("button", { name: "Toggle subagents" }).click();
+      await page.getByRole("complementary", { name: "Subagents" }).waitFor();
+      await page.waitForTimeout(400);
+    },
+  },
+  {
+    name: "terminal",
+    device: "desktop",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: openTerminal,
+  },
+  {
+    name: "ide",
+    device: "desktop",
+    path: "/ide",
+    wait: '[aria-label="IDE"]',
+    settle: 1600,
+    action: async (page) => {
+      const tree = page.getByRole("tree", { name: "Workspace files" });
+      const expand = async (path) => {
+        const node = tree.locator(`button[title="${path}"]`).first();
+        if (!(await node.count())) return;
+        if ((await node.getAttribute("aria-expanded")) === "false") {
+          await node.click();
+          await page.waitForTimeout(250);
+        }
+      };
+      const open = async (path) => {
+        const node = tree.locator(`button[title="${path}"]`).first();
+        if (await node.count()) {
+          await node.click();
+          await page.waitForTimeout(250);
+        }
+      };
+      await expand("src");
+      await expand("src/auth");
+      await open("src/auth/session.test.ts");
+      await expand("tests");
+      await open("tests/setup.ts");
+      await expand("src/db");
+      await open("src/db/pool.ts");
+      const tab = page.getByRole("tab", { name: /session\.test\.ts/ }).first();
+      if (await tab.count()) await tab.click();
+      await page.getByRole("tab", { name: "vs agent" }).click();
+      await page.waitForTimeout(700);
+    },
+  },
+  {
+    name: "library",
+    device: "desktop",
+    path: "/library",
+    wait: "text=playwright",
+    settle: 1200,
+  },
+  {
+    name: "usage",
+    device: "desktop",
+    path: "/usage",
+    wait: "text=Tokens per day by harness",
+    settle: 1200,
+  },
+  {
+    name: "pr",
+    device: "desktop",
+    path: "/pulls",
+    wait: "text=Fix flaky auth test",
+    settle: 1200,
+  },
+  {
+    name: "set-hosts",
+    device: "desktop",
+    path: "/settings/hosts",
+    wait: "text=Machines that run agents",
+    settle: 1200,
+  },
+  {
+    name: "set-devices",
+    device: "desktop",
+    path: "/settings/devices",
+    wait: "text=Pair a device",
+    settle: 1200,
+  },
+  {
+    name: "set-providers",
+    device: "desktop",
+    path: "/settings/providers",
+    wait: "text=CLIProxyAPI on atlas",
+    settle: 1200,
+  },
+  {
     name: "palette",
-    path: "/",
-    wait: "text=Fix the flaky auth test",
+    device: "desktop",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
     action: async (page) => {
       await page.keyboard.press("Control+k");
       await page.getByRole("dialog").waitFor({ state: "visible" });
@@ -102,64 +178,83 @@ const SHOTS = [
     },
   },
   {
-    name: "ide",
-    path: "/ide",
-    wait: '[aria-label="IDE"]',
-    settle: 1600,
+    name: "state-empty",
+    device: "desktop",
+    path: "/?scenario=empty",
+    wait: "text=No threads yet",
+    settle: 500,
   },
   {
-    name: "ide-diff",
-    path: "/ide",
-    wait: '[aria-label="IDE"]',
-    settle: 1600,
-    action: async (page) => {
-      await page.getByRole("button", { name: "Toggle diff" }).click();
-      await page.locator('section[aria-label="Diff"]').waitFor({ timeout: 10_000 });
-      await page.waitForTimeout(500);
-    },
+    name: "state-loading",
+    device: "desktop",
+    path: "/t/thr_a?scenario=loading",
+    wait: '[aria-label="Loading thread"]',
+    settle: 600,
   },
   {
-    name: "ide-search",
-    path: "/ide",
-    wait: '[aria-label="IDE"]',
-    settle: 1600,
-    action: async (page) => {
-      await page.getByRole("button", { name: "Search workspace" }).click();
-      const input = page.getByLabel("Find in workspace");
-      await input.waitFor({ timeout: 10_000 });
-      await input.fill("verifySession");
-      await input.press("Enter");
-      await page.waitForTimeout(600);
-    },
+    name: "state-offline",
+    device: "desktop",
+    path: "/t/thr_a?scenario=offline",
+    wait: "text=atlas is unreachable from this device",
+    settle: 500,
   },
   {
-    name: "attachments-composer",
+    name: "state-error",
+    device: "desktop",
+    path: "/t/thr_e?scenario=error",
+    wait: "text=This thread couldn’t be loaded",
+    settle: 500,
+  },
+  {
+    name: "p-inbox",
+    device: "phone",
+    path: "/",
+    wait: "text=Fix flaky auth test",
+  },
+  {
+    name: "p-thread",
+    device: "phone",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+  },
+  {
+    name: "p-approval",
+    device: "phone",
     path: "/t/thr_a",
     wait: '[aria-label="Thread stream"]',
     action: async (page) => {
-      await page.locator('input[type="file"]').setInputFiles(FIXTURE);
-      await page.getByText(FIXTURE_NAME).first().waitFor({ timeout: 15_000 });
-      await page.waitForTimeout(600);
+      await page.getByRole("button", { name: "Review" }).click();
+      await page.getByRole("dialog", { name: "Approve command" }).waitFor();
+      await page.waitForTimeout(450);
     },
   },
   {
-    name: "attachments-lightbox",
+    name: "p-terminal",
+    device: "phone",
     path: "/t/thr_a",
     wait: '[aria-label="Thread stream"]',
-    action: async (page) => {
-      await page.getByRole("button", { name: "Open auth-race.svg" }).click();
-      await page.getByRole("dialog").waitFor({ state: "visible" });
-      await page.waitForTimeout(500);
-    },
+    action: openTerminal,
+  },
+  {
+    name: "p-pairing",
+    device: "phone",
+    path: "/pairing",
+    wait: "text=Pair with atlas",
+    settle: 500,
+  },
+  {
+    name: "p-usage",
+    device: "phone",
+    path: "/usage",
+    wait: "text=Migrate session store is paused",
+    settle: 1200,
   },
 ];
 
 const browser = await chromium.launch({ executablePath: EXECUTABLE, args: ["--no-sandbox"] });
 await mkdir(OUT, { recursive: true });
-await mkdir(FIXTURE_DIR, { recursive: true });
-await writeFile(FIXTURE, FIXTURE_SVG);
 
-// H4RN_SHOTS=ide,ide-diff re-captures a subset while iterating on one screen.
+// H4RN_SHOTS=inbox,ide re-captures a subset while iterating on one screen.
 const only = process.env.H4RN_SHOTS?.split(",")
   .map((name) => name.trim())
   .filter(Boolean);
@@ -167,32 +262,33 @@ const selected = only?.length ? SHOTS.filter((shot) => only.includes(shot.name))
 
 let failures = 0;
 for (const shot of selected) {
-  for (const [sizeName, size] of [
-    ["1440", DESKTOP],
-    ["390", PHONE],
-  ]) {
-    for (const theme of ["light", "dark"]) {
-      const context = await browser.newContext({
-        viewport: size,
-        deviceScaleFactor: 1,
-        colorScheme: theme,
-      });
-      const page = await context.newPage();
-      const file = `${OUT}${shot.name}-${sizeName}-${theme}.png`;
-      try {
-        await page.goto(url(shot.path, theme), { waitUntil: "domcontentloaded" });
+  const size = shot.device === "phone" ? PHONE : DESKTOP;
+  const sizeName = shot.device === "phone" ? "390" : "1440";
+  for (const theme of ["light", "dark"]) {
+    const context = await browser.newContext({
+      viewport: size,
+      deviceScaleFactor: 1,
+      colorScheme: theme,
+    });
+    const page = await context.newPage();
+    const file = `${OUT}${shot.name}-${sizeName}-${theme}.png`;
+    try {
+      await page.goto(url(shot.path, theme), { waitUntil: "domcontentloaded" });
+      if (typeof shot.wait === "string") {
         await page.locator(shot.wait).first().waitFor({ timeout: 15_000 });
-        await page.waitForTimeout(shot.settle ?? 700);
-        if (shot.action) await shot.action(page);
-        await page.screenshot({ path: file, animations: "disabled" });
-        console.log(`ok  ${file}`);
-      } catch (error) {
-        failures += 1;
-        console.error(`FAIL ${file}: ${error instanceof Error ? error.message : error}`);
-        await page.screenshot({ path: file, animations: "disabled" }).catch(() => undefined);
-      } finally {
-        await context.close();
+      } else {
+        await shot.wait();
       }
+      await page.waitForTimeout(shot.settle ?? 700);
+      if (shot.action) await shot.action(page);
+      await page.screenshot({ path: file, animations: "disabled" });
+      console.log(`ok  ${file}`);
+    } catch (error) {
+      failures += 1;
+      console.error(`FAIL ${file}: ${error instanceof Error ? error.message : error}`);
+      await page.screenshot({ path: file, animations: "disabled" }).catch(() => undefined);
+    } finally {
+      await context.close();
     }
   }
 }

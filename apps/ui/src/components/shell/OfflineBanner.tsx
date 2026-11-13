@@ -1,56 +1,52 @@
 import { RefreshCwIcon, WifiOffIcon } from "lucide-react";
+
 import { absoluteTime } from "@/lib/format";
 import { getClient, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 
-export function OfflineBanner() {
+export function OfflineBanner({ inline = false }: { inline?: boolean }) {
   const status = useApp((state) => state.connection.status);
   const attempt = useApp((state) => state.connection.attempt);
   const error = useApp((state) => state.connection.error);
   const lastSyncAt = useApp((state) => state.lastSyncAt);
 
-  if (status === "online") return null;
+  // The first handshake is represented by the skeleton screens, not a banner.
+  if (status === "online" || status === "connecting") return null;
 
-  const cached =
-    lastSyncAt !== null
-      ? ` Showing cached data from ${absoluteTime(new Date(lastSyncAt).toISOString())}.`
-      : "";
+  const cached = lastSyncAt !== null ? absoluteTime(new Date(lastSyncAt).toISOString()) : null;
 
   return (
     <div
       role="status"
-      className={cn(
-        "flex min-h-7 shrink-0 items-center gap-2 border-b px-3 py-1 text-micro",
-        status === "offline"
-          ? "border-strike/30 bg-strike-tint text-strike-ink"
-          : "border-cue/30 bg-cue-tint text-cue-ink",
-      )}
+      className={cn("q-banner", status === "offline" && "err")}
+      style={inline ? { flex: "none", margin: "0 12px 8px" } : { flex: "none", marginTop: 8 }}
+      title={error ? `${error.message}${error.hint ? ` ${error.hint}` : ""}` : undefined}
     >
-      <WifiOffIcon className="size-3.5 shrink-0" aria-hidden />
-      <span className="min-w-0 flex-1 truncate">
-        {status === "connecting" ? (
-          <>Connecting to the daemon…</>
-        ) : status === "degraded" ? (
+      <span className="ic">
+        <WifiOffIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+      </span>
+      <span className="grow">
+        {status === "degraded" ? (
           <>
-            <span className="font-medium">Reconnecting to the daemon…</span>
-            {attempt > 0 ? ` attempt ${attempt}.` : ""}
-            {cached}
+            <b>Reconnecting</b>
+            {attempt > 0 ? ` · attempt ${attempt}` : ""}
+            {cached ? ` · threads as of ${cached}` : ""}
           </>
         ) : (
           <>
-            <span className="font-medium">Offline.</span>{" "}
-            {error?.message ?? "The daemon is unreachable."}
-            {cached}
+            <b>Offline</b>
+            {cached ? ` · threads as of ${cached}` : " · no cached threads"}
           </>
         )}
       </span>
       {status === "offline" ? (
         <button
           type="button"
-          className="flex shrink-0 items-center gap-1 font-medium underline underline-offset-2"
+          className="q-btn ghost"
+          style={{ height: 24 }}
           onClick={() => getClient().reconnectNow()}
         >
-          <RefreshCwIcon className="size-3" aria-hidden />
+          <RefreshCwIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
           Reconnect
         </button>
       ) : null}

@@ -5,6 +5,31 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### UI: Quiet native redesign
+
+- **Direction A ("Quiet native") replaces the Prompt Book look** across `apps/ui`: graphite
+  neutrals with one 258° blue accent reserved for "you", Geist and Geist Mono self-hosted via
+  `@fontsource-variable`, hairline panes, 4 px spacing, and the 4/6/8/12/14 radii scale.
+- **Shell, inbox and thread** are rebuilt around the prototype: 212 px sidebar with hosts and
+  connection line, 328 px inbox with Working / Done / Settled segments and state glyphs, a
+  detail pane with provenance, an approval card above the composer, and a usage footer.
+- **Subagents inspector, terminal, attachment tray/lightbox, command palette, new-thread and
+  shortcuts dialogs, toasts** are restyled to the same grammar; the terminal follows the theme.
+- **IDE** ports the prototype's file tree, agent-changes group, tabs, `Edit | vs HEAD | vs agent`
+  control, change banner with Revert file / Accept, full-hunk diff bands and 26 px status bar.
+- **Phone** gains the large-title inbox, 66 px rows, pushed thread header, compact approval card
+  and review sheet, full-screen terminal with key bar, pairing consent flow, and a 14-day Usage
+  chart.
+- **Offline, loading, empty and partial-failure states** now use the prototype's copy and
+  layout-shaped skeletons, including "Offline · threads as of HH:MM", "Showing 3 of 4 hosts",
+  the paused-stream line and disabled approvals with a reason.
+- **New mock-mode surfaces** for Pull requests, MCP & skills, Usage, Settings (hosts, devices,
+  providers) and pairing are routed now and clearly marked as Phase 4–6 shells until their wire
+  protocol lands.
+- `apps/ui/scripts/screenshots.mjs` now captures the 22 prototype screens in light and dark at
+  1440×900 or 390×844 into `apps/ui/screenshots/`, and `?scenario=` adds `loading`, `offline`
+  and `error` states for review.
+
 ### Phase 2 — more harnesses, terminal, attachments and IDE mode
 
 - **Codex adapter** (`h4rn-harness/src/codex.rs`): long-lived `codex app-server` sessions over

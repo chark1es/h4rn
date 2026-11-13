@@ -90,6 +90,7 @@ A neighboring agent product could copy a feature, but not the operating model: t
 - The product should read as an instrument: restrained surfaces, one working accent, and information density where the user is competent.
 
 **Anti-references** (what h4rn must not look or sound like):
+- The rejected "Prompt Book" look: a stage-manager metaphor with an amber cue gutter, numbered turns, a stage-black rail, a black status bar in both themes, pill/chip provenance rows, and an orange logo block. Direction A (Quiet native) replaced it because it made the user learn theatre to read an inbox.
 - A generic SaaS analytics dashboard: hero KPI cards, gradient chart fills, friendly empty-state illustrations, purple accent.
 - A terminal costume: phosphor green on black, scanlines, monospace everywhere, "hacker" chrome. h4rn runs terminals; it is not one.
 - An IDE cosplay: VS Code's blue, a permanent activity bar with twenty icons, a minimap on every surface.

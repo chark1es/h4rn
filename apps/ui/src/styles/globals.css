@@ -1,6 +1,7 @@
 /* biome-ignore-all lint/complexity/noImportantStyles: shiki + reduced-motion overrides must win the cascade */
 @import "tailwindcss";
 @import "./tokens.css";
+@import "./quiet.css";
 
 #root {
   height: 100dvh;
@@ -45,15 +46,17 @@
   }
 
   .stream-prose {
-    max-width: 68ch;
-    color: var(--ink);
-    font-size: 0.875rem;
-    line-height: 1.6;
+    max-width: 720px;
+    color: var(--fg);
+    font-size: 14px;
+    line-height: 22px;
+    margin: 0 0 12px;
+    text-wrap: pretty;
     overflow-wrap: anywhere;
   }
 
   .stream-prose > * + * {
-    margin-top: 0.75rem;
+    margin-top: 12px;
   }
 
   .stream-prose p {
@@ -70,15 +73,15 @@
   }
 
   .stream-prose h1 {
-    font-size: 1.125rem;
+    font-size: 17px;
   }
 
   .stream-prose h2 {
-    font-size: 1rem;
+    font-size: 15px;
   }
 
   .stream-prose h3 {
-    font-size: 0.875rem;
+    font-size: 14px;
   }
 
   .stream-prose ul,
@@ -100,7 +103,7 @@
   }
 
   .stream-prose a {
-    color: var(--prompt);
+    color: var(--accent-tx);
     text-underline-offset: 3px;
     text-decoration: underline;
     text-decoration-thickness: 1px;
@@ -142,12 +145,11 @@
   }
 
   .stream-prose :not(pre) > code {
-    font-family: var(--font-code);
-    font-size: 0.8125em;
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 3px;
-    padding: 0.05em 0.3em;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    background: var(--fill);
+    border-radius: 4px;
+    padding: 1px 5px;
   }
 
   .stream-prose pre {
@@ -159,7 +161,7 @@
     display: block;
     min-width: max-content;
     padding: 0.75rem;
-    font-family: var(--font-code);
+    font-family: var(--mono);
     font-size: 0.78125rem;
     line-height: 1.6;
   }

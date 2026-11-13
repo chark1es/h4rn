@@ -32,10 +32,21 @@ export function SearchPanel({ search, onQuery, onOption, onRun, onOpen }: Search
   }, []);
 
   return (
-    <section aria-label="Search files" className="flex min-h-0 flex-1 flex-col bg-paper">
-      <header className="shrink-0 border-b border-line px-3 py-2">
-        <div className="flex items-center gap-1.5 rounded-sm border border-control-border bg-raised px-2 focus-within:ring-1 focus-within:ring-ring">
-          <SearchIcon className="size-3.5 shrink-0 text-ink-faint" aria-hidden />
+    <section
+      aria-label="Search files"
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        minHeight: 0,
+        flex: 1,
+        background: "var(--bg)",
+      }}
+    >
+      <div
+        style={{ flex: "none", padding: "12px 12px 10px", borderBottom: "1px solid var(--line)" }}
+      >
+        <div className="q-side-search" style={{ margin: 0 }}>
+          <SearchIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           <input
             ref={input}
             value={search.query}
@@ -47,26 +58,31 @@ export function SearchPanel({ search, onQuery, onOption, onRun, onOpen }: Search
             placeholder="Find in workspace"
             aria-label="Find in workspace"
             spellCheck={false}
-            className="h-8 min-w-0 flex-1 bg-transparent font-mono text-[11px] text-ink outline-none placeholder:text-ink-faint"
+            className="q-mono"
+            style={{
+              flex: 1,
+              minWidth: 0,
+              background: "transparent",
+              border: 0,
+              outline: 0,
+              color: "var(--fg)",
+              fontSize: 11.5,
+            }}
           />
           {search.running ? (
-            <Loader2Icon className="size-3.5 animate-spin text-ink-faint" aria-hidden />
+            <Loader2Icon className="q-icon s12 animate-spin q-faint" aria-hidden />
           ) : null}
         </div>
-        <div className="mt-2 flex items-center gap-1">
+        <div style={{ display: "flex", alignItems: "center", gap: 4, marginTop: 8 }}>
           <button
             type="button"
             aria-pressed={search.caseSensitive}
             onClick={() => onOption({ caseSensitive: !search.caseSensitive })}
             title="Match case"
-            className={cn(
-              "grid size-6 place-items-center rounded-[2px] border text-[11px]",
-              search.caseSensitive
-                ? "border-cue text-cue-ink"
-                : "border-transparent text-ink-faint hover:bg-panel hover:text-ink",
-            )}
+            className={cn("q-ibtn", search.caseSensitive && "on")}
+            style={{ width: 24, height: 24 }}
           >
-            <CaseSensitiveIcon className="size-3.5" aria-hidden />
+            <CaseSensitiveIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             <span className="sr-only">Match case</span>
           </button>
           <button
@@ -74,14 +90,10 @@ export function SearchPanel({ search, onQuery, onOption, onRun, onOpen }: Search
             aria-pressed={search.regex}
             onClick={() => onOption({ regex: !search.regex })}
             title="Regular expression"
-            className={cn(
-              "grid size-6 place-items-center rounded-[2px] border",
-              search.regex
-                ? "border-cue text-cue-ink"
-                : "border-transparent text-ink-faint hover:bg-panel hover:text-ink",
-            )}
+            className={cn("q-ibtn", search.regex && "on")}
+            style={{ width: 24, height: 24 }}
           >
-            <RegexIcon className="size-3.5" aria-hidden />
+            <RegexIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             <span className="sr-only">Regular expression</span>
           </button>
           <input
@@ -90,53 +102,112 @@ export function SearchPanel({ search, onQuery, onOption, onRun, onOpen }: Search
             placeholder="*.ts"
             aria-label="File glob"
             spellCheck={false}
-            className="h-6 w-24 rounded-[2px] border border-line bg-panel px-1.5 font-mono text-[10px] text-ink outline-none placeholder:text-ink-faint focus-visible:border-cue"
+            className="q-mono"
+            style={{
+              height: 24,
+              width: 88,
+              borderRadius: 6,
+              border: "1px solid var(--line)",
+              background: "var(--bg-sunk)",
+              padding: "0 6px",
+              fontSize: 10.5,
+              color: "var(--fg)",
+              outline: 0,
+            }}
           />
           <button
             type="button"
             onClick={onRun}
-            className="ml-auto h-6 rounded-[2px] bg-cue-tint px-2 text-[10px] font-medium text-cue-ink hover:brightness-95"
+            className="q-btn secondary"
+            style={{ marginLeft: "auto", height: 24 }}
           >
             Search
           </button>
         </div>
-      </header>
+      </div>
 
       {search.error ? (
-        <div className="m-3 rounded-sm border border-line bg-raised p-3 text-compact">
-          <p className="font-medium text-ink">Search failed.</p>
-          <p className="mt-1 text-ink-muted">{search.error.message}</p>
+        <div style={{ margin: 12, fontSize: 12, color: "var(--fg-2)" }}>
+          <p style={{ margin: 0, fontWeight: 500, color: "var(--fg)" }}>Search failed.</p>
+          <p style={{ margin: "4px 0 0" }}>{search.error.message}</p>
         </div>
       ) : null}
 
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div className="q-scroll">
         {groups.length === 0 && !search.running ? (
-          <p className="p-4 text-compact text-ink-muted">
+          <p
+            className="q-faint"
+            style={{ margin: 0, padding: 16, fontSize: 12, lineHeight: "18px" }}
+          >
             {search.searchId
               ? "No matches in this workspace."
               : "Type a pattern, then Enter. Results stream in as the daemon walks the tree."}
           </p>
         ) : null}
         {groups.map((group) => (
-          <div key={group.path} className="border-b border-line/70">
-            <div className="flex h-7 items-center gap-2 bg-panel px-3">
-              <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-ink-muted">
+          <div key={group.path} style={{ borderBottom: "1px solid var(--line)" }}>
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                height: 28,
+                padding: "0 12px",
+                background: "var(--bg-sunk)",
+              }}
+            >
+              <span
+                className="q-mono"
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  fontSize: 11,
+                  color: "var(--fg-2)",
+                }}
+              >
                 {group.path}
               </span>
-              <span className="font-mono text-[10px] text-ink-faint">{group.matches.length}</span>
+              <span className="q-num q-faint" style={{ fontSize: 11 }}>
+                {group.matches.length}
+              </span>
             </div>
-            <ul>
+            <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
               {group.matches.map((match) => (
                 <li key={`${match.line_number}-${match.column}`}>
                   <button
                     type="button"
                     onClick={() => onOpen(match.path, match.line_number)}
-                    className="flex w-full items-baseline gap-2 px-3 py-1 text-left hover:bg-raised"
+                    style={{
+                      display: "flex",
+                      width: "100%",
+                      alignItems: "baseline",
+                      gap: 8,
+                      padding: "3px 12px",
+                      textAlign: "left",
+                    }}
+                    className="q-hover-row"
                   >
-                    <span className="w-8 shrink-0 text-right font-mono text-[10px] text-ink-faint">
+                    <span
+                      className="q-mono q-faint"
+                      style={{ width: 32, flex: "none", textAlign: "right", fontSize: 11 }}
+                    >
                       {match.line_number}
                     </span>
-                    <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-ink-muted">
+                    <span
+                      className="q-mono"
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                        fontSize: 11.5,
+                        color: "var(--fg-2)",
+                      }}
+                    >
                       {match.preview}
                     </span>
                   </button>
@@ -147,12 +218,15 @@ export function SearchPanel({ search, onQuery, onOption, onRun, onOpen }: Search
         ))}
       </div>
 
-      <footer className="flex h-7 shrink-0 items-center justify-between border-t border-line bg-panel px-3 font-mono text-[10px] text-ink-faint">
+      <div
+        className="q-statusbar"
+        style={{ justifyContent: "space-between", fontFamily: "var(--mono)" }}
+      >
         <span>
           {search.results.length} {search.results.length === 1 ? "match" : "matches"}
         </span>
-        {search.truncated ? <span className="text-cue-ink">Result cap reached</span> : null}
-      </footer>
+        {search.truncated ? <span style={{ color: "var(--warn)" }}>Result cap reached</span> : null}
+      </div>
     </section>
   );
 }

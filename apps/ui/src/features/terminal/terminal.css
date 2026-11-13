@@ -4,7 +4,8 @@
  */
 .terminal-surface {
   overflow: hidden;
-  background: var(--stage);
+  background: var(--bg-sunk);
+  font-size: 12px;
 }
 
 .terminal-surface .xterm {
@@ -13,8 +14,9 @@
 }
 
 .terminal-surface .xterm-viewport {
+  background-color: transparent !important;
   scrollbar-width: thin;
-  scrollbar-color: color-mix(in oklch, var(--stage-ink-muted) 35%, transparent) transparent;
+  scrollbar-color: color-mix(in oklch, var(--fg-3) 35%, transparent) transparent;
 }
 
 .terminal-surface .xterm-screen canvas {

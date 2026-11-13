@@ -1,11 +1,23 @@
-import { CheckIcon, ShieldCheckIcon, XIcon } from "lucide-react";
+import { ShieldCheckIcon } from "lucide-react";
 
-import { ENTER, Kbd, MOD } from "@/components/common/Kbd";
-import { Button } from "@/components/ui/button";
+import { BACKSPACE, ENTER, MOD } from "@/components/common/Kbd";
+import type { ApprovalKind } from "@/gen";
+import { harnessLabel } from "@/lib/entities";
 import { respondApproval, useApp } from "@/lib/store/appStore";
+
+const KIND_LABEL: Record<ApprovalKind, string> = {
+  command: "run a command",
+  file_change: "change a file",
+  permission: "use a permission",
+  plan: "review a plan",
+  question: "answer a question",
+};
 
 export function StandbyBar({ threadId }: { threadId: string }) {
   const log = useApp((state) => state.logs[threadId]);
+  const summary = useApp((state) => state.threads[threadId]);
+  const hosts = useApp((state) => state.hosts);
+  const connection = useApp((state) => state.connection.status);
   const pending = (log?.turns ?? [])
     .flatMap((turn) => turn.items)
     .filter((item) => item.kind === "approval")
@@ -19,46 +31,84 @@ export function StandbyBar({ threadId }: { threadId: string }) {
 
   const status = log?.approvals?.[first.approvalId]?.status ?? "pending";
   const more = pending.length - 1;
+  const hostName = hosts[summary?.host ?? ""]?.name ?? summary?.host ?? "the host";
+  const harness = summary ? harnessLabel(summary.harness) : "Agent";
+  const hostOnline = hosts[summary?.host ?? ""]?.online ?? false;
+  const blocked = connection !== "online" || !hostOnline;
 
   return (
-    <div className="shrink-0 border-t border-cue/30 bg-cue-tint/80">
-      <div className="mx-auto flex w-full max-w-[760px] items-start gap-2 px-3 py-2 sm:items-center sm:px-6">
-        <span aria-hidden className="mt-0.5 h-8 w-0.5 shrink-0 rounded-sm bg-cue sm:mt-0" />
-        <ShieldCheckIcon className="mt-0.5 size-4 shrink-0 text-cue-ink sm:mt-0" aria-hidden />
-        <div className="min-w-0 flex-1">
-          <p className="line-clamp-2 text-micro leading-snug text-cue-ink sm:line-clamp-1 sm:text-compact">
-            <span className="font-semibold">Waiting for approval:</span> {first.prompt}
-          </p>
-          <p className="hidden text-micro text-cue-ink/70 sm:block">
-            Go runs it on the host; Hold ends the turn without it.
-            {more > 0 ? ` +${more} more waiting.` : ""}
-          </p>
-        </div>
-        <div className="flex shrink-0 items-center gap-1.5">
-          <Button
-            size="sm"
-            className="h-9 px-2.5 sm:h-[26px]"
-            disabled={status === "sending"}
-            onClick={() => void respondApproval(threadId, first.approvalId, "approve")}
-          >
-            <CheckIcon aria-hidden />
-            Go
-            <Kbd className="hidden border-ink/20 bg-ink/10 text-ink sm:inline-flex">
-              {MOD} {ENTER}
-            </Kbd>
-          </Button>
-          <Button
-            size="sm"
-            variant="secondary"
-            className="h-9 px-2.5 sm:h-[26px]"
-            disabled={status === "sending"}
-            onClick={() => void respondApproval(threadId, first.approvalId, "deny")}
-          >
-            <XIcon aria-hidden />
-            Hold
-          </Button>
-        </div>
+    <section className="q-ask" aria-label="Approval request">
+      <div className="q-ask-h">
+        <ShieldCheckIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+        <span className="t">
+          {harness} on {hostName} wants to {KIND_LABEL[first.approvalKind]}
+        </span>
+        <span className="q-faint" style={{ fontSize: 12 }}>
+          {more > 0 ? `+${more} more` : "now"}
+        </span>
       </div>
-    </div>
+      <div className="q-ask-sub">
+        {first.approvalKind === "command" ? "Command" : "Request"}
+        {summary?.workspace_path ? (
+          <>
+            {" "}
+            · in{" "}
+            <span className="q-mono" style={{ fontSize: 11.5 }}>
+              {summary.workspace_path}
+            </span>
+          </>
+        ) : null}
+      </div>
+      <div className="q-cmd">{first.prompt}</div>
+      {first.options.length > 0 ? (
+        <div className="q-ask-f" style={{ marginTop: 8 }}>
+          {first.options.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              className="q-btn secondary"
+              disabled={blocked || status === "sending"}
+              onClick={() => void respondApproval(threadId, first.approvalId, "approve", option.id)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      <div className="q-ask-f">
+        {blocked ? (
+          <span className="q-faint" style={{ fontSize: 12 }}>
+            Reconnect to approve or deny. Nothing runs until you do.
+          </span>
+        ) : (
+          <button type="button" className="q-btn ghost" disabled title="Not available yet">
+            Always allow <span aria-hidden>›</span>
+          </button>
+        )}
+        <span className="grow" />
+        <button
+          type="button"
+          className="q-btn secondary"
+          disabled={blocked || status === "sending"}
+          onClick={() => void respondApproval(threadId, first.approvalId, "deny")}
+        >
+          Deny{" "}
+          <span className="q-kbd">
+            {MOD} {BACKSPACE}
+          </span>
+        </button>
+        <button
+          type="button"
+          className="q-btn primary"
+          disabled={blocked || status === "sending"}
+          onClick={() => void respondApproval(threadId, first.approvalId, "approve")}
+        >
+          Approve{" "}
+          <span className="q-kbd">
+            {MOD} {ENTER}
+          </span>
+        </button>
+      </div>
+    </section>
   );
 }

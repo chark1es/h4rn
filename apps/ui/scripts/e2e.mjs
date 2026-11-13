@@ -153,6 +153,9 @@ async function main() {
 
     await page.getByRole("button", { name: "New thread" }).first().click();
     await page.locator("#new-thread-workspace").fill(workspace);
+    // The fake adapter registers as Claude Code; pick it explicitly so a real
+    // Codex/OpenCode install on the test machine cannot take the turn.
+    await page.locator("#new-thread-harness").selectOption("claude_code");
     await page.locator("#new-thread-task").fill("Reply with exactly: pong");
     await page.waitForFunction(() => {
       const button = [...document.querySelectorAll("button")].find(

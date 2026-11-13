@@ -28,6 +28,7 @@ export function TerminalView({
   active,
   onTitle,
   onController,
+  onDimensions,
 }: {
   client: H4rnClient;
   threadId: string | null;
@@ -36,6 +37,7 @@ export function TerminalView({
   active: boolean;
   onTitle?: (title: string) => void;
   onController?: (controller: TerminalController | null) => void;
+  onDimensions?: (dimensions: { cols: number; rows: number }) => void;
 }) {
   const surfaceRef = useRef<HTMLDivElement>(null);
   const controllerRef = useRef<TerminalController | null>(null);
@@ -43,8 +45,11 @@ export function TerminalView({
   titleRef.current = onTitle;
   const controllerCallbackRef = useRef(onController);
   controllerCallbackRef.current = onController;
+  const dimensionsRef = useRef(onDimensions);
+  dimensionsRef.current = onDimensions;
 
   const [status, setStatus] = useState<TerminalStatus>({ phase: "opening" });
+  const [dimensions, setDimensions] = useState({ cols: 0, rows: 0 });
   const statusRef = useRef(status);
   statusRef.current = status;
   const [attempt, setAttempt] = useState(0);
@@ -69,6 +74,10 @@ export function TerminalView({
       reducedMotion,
       onStatus: setStatus,
       onTitle: (title) => titleRef.current?.(title),
+      onDimensions: (next) => {
+        setDimensions(next);
+        dimensionsRef.current?.(next);
+      },
     });
     return () => {
       controllerCallbackRef.current?.(null);
@@ -165,11 +174,17 @@ export function TerminalView({
         ) : null}
       </div>
 
+      {status.phase === "attached" ? (
+        <div className="q-term-note">
+          <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+          <span>
+            Sized to this phone. Desktop viewers see the same {dimensions.cols || "—"} columns.
+          </span>
+        </div>
+      ) : null}
+
       <div
-        className={cn(
-          "flex h-12 shrink-0 items-center gap-0.5 overflow-x-auto border-t border-white/10 bg-stage px-2 sm:hidden",
-          status.phase !== "attached" && "opacity-60",
-        )}
+        className={cn("q-keybar sm:hidden", status.phase !== "attached" && "opacity-60")}
         role="toolbar"
         aria-label="Terminal keys"
       >
@@ -181,10 +196,9 @@ export function TerminalView({
           aria-pressed={ctrlArmed}
           onPress={() => setCtrlArmed((value) => !value)}
         />
-        <span className="h-5 w-px bg-white/10" aria-hidden />
-        <KeyButton label="←" ariaLabel="Left arrow" onPress={() => arrow("ArrowLeft")} />
         <KeyButton label="↑" ariaLabel="Up arrow" onPress={() => arrow("ArrowUp")} />
         <KeyButton label="↓" ariaLabel="Down arrow" onPress={() => arrow("ArrowDown")} />
+        <KeyButton label="←" ariaLabel="Left arrow" onPress={() => arrow("ArrowLeft")} />
         <KeyButton label="→" ariaLabel="Right arrow" onPress={() => arrow("ArrowRight")} />
         <KeyButton label="Paste" onPress={() => void paste()} />
       </div>
@@ -214,10 +228,7 @@ function KeyButton({
     <button
       type="button"
       aria-label={ariaLabel ?? label}
-      className={cn(
-        "inline-flex h-11 min-w-11 shrink-0 items-center justify-center rounded-sm border border-white/15 px-2 text-micro text-stage-ink transition-colors active:bg-white/20",
-        active && "border-cue/60 bg-cue/20 text-cue",
-      )}
+      className={cn("q-key", active && "on")}
       onClick={onPress}
       {...rest}
     >

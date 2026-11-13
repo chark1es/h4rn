@@ -1,517 +1,303 @@
 ---
-name: h4rn
-description: A cross-harness, cross-machine control surface for coding agents — the prompt book above the work.
+name: h4rn — Quiet native
+description: The h4rn interface. A calm, system-native control surface for coding agents across machines.
+status: adopted — implemented in apps/ui (prototype at design/a-quiet-native/index.html)
 colors:
-  paper: "oklch(0.975 0.004 250)"
-  panel: "oklch(0.955 0.006 250)"
-  raised: "oklch(0.992 0.002 250)"
-  ink: "oklch(0.22 0.018 255)"
-  ink-muted: "oklch(0.435 0.014 255)"
-  ink-faint: "oklch(0.545 0.012 255)"
-  line: "oklch(0.88 0.008 250)"
-  control-border: "oklch(0.545 0.012 255)"
-  stage: "oklch(0.20 0.022 255)"
-  stage-ink: "oklch(0.94 0.004 250)"
-  stage-ink-muted: "oklch(0.72 0.010 250)"
-  cue: "oklch(0.64 0.15 68)"
-  cue-ink: "oklch(0.45 0.12 55)"
-  cue-tint: "oklch(0.945 0.045 75)"
-  standby: "oklch(0.50 0.10 155)"
-  standby-ink: "oklch(0.41 0.09 155)"
-  standby-tint: "oklch(0.93 0.035 155)"
-  strike: "oklch(0.52 0.19 27)"
-  strike-ink: "oklch(0.46 0.18 27)"
-  strike-tint: "oklch(0.94 0.035 25)"
-  prompt: "oklch(0.48 0.12 250)"
-  prompt-tint: "oklch(0.94 0.025 250)"
-  dark-ground: "oklch(0.16 0.014 255)"
-  dark-panel: "oklch(0.19 0.016 255)"
-  dark-raised: "oklch(0.235 0.016 255)"
-  dark-ink: "oklch(0.93 0.005 250)"
-  dark-ink-muted: "oklch(0.72 0.012 250)"
-  dark-ink-faint: "oklch(0.58 0.012 250)"
-  dark-line: "oklch(0.30 0.014 255)"
-  dark-control-border: "oklch(0.58 0.012 250)"
-  dark-stage: "oklch(0.115 0.012 255)"
-  dark-cue: "oklch(0.78 0.14 70)"
-  dark-cue-fill: "oklch(0.72 0.15 70)"
-  dark-cue-tint: "oklch(0.26 0.05 70)"
-  dark-standby: "oklch(0.74 0.12 155)"
-  dark-standby-tint: "oklch(0.25 0.045 155)"
-  dark-strike: "oklch(0.70 0.16 27)"
-  dark-strike-tint: "oklch(0.25 0.045 25)"
-  dark-prompt: "oklch(0.72 0.10 250)"
+  light:
+    bg: "oklch(0.995 0.0015 260)"
+    bg-side: "oklch(0.970 0.0025 260)"
+    bg-raised: "oklch(1 0 0)"
+    bg-sunk: "oklch(0.978 0.002 260)"
+    fill: "oklch(0.955 0.003 260)"
+    fill-2: "oklch(0.925 0.004 260)"
+    hover: "oklch(0.962 0.003 260)"
+    sel: "oklch(0.940 0.004 260)"
+    line: "oklch(0.915 0.003 260)"
+    line-2: "oklch(0.860 0.004 260)"
+    fg: "oklch(0.210 0.006 260)"
+    fg-2: "oklch(0.440 0.007 260)"
+    fg-3: "oklch(0.510 0.007 260)"
+    accent: "oklch(0.540 0.180 258)"
+    accent-hi: "oklch(0.490 0.180 258)"
+    accent-fg: "oklch(0.995 0 0)"
+    accent-tx: "oklch(0.500 0.170 258)"
+    accent-soft: "oklch(0.955 0.024 258)"
+    focus: "oklch(0.600 0.170 258)"
+    warn: "oklch(0.500 0.110 62)"
+    warn-dot: "oklch(0.760 0.150 72)"
+    warn-soft: "oklch(0.968 0.030 80)"
+    ok: "oklch(0.490 0.120 150)"
+    ok-dot: "oklch(0.640 0.150 150)"
+    danger: "oklch(0.520 0.190 27)"
+    danger-soft: "oklch(0.966 0.020 25)"
+    add-bg: "oklch(0.966 0.028 150)"
+    add-tx: "oklch(0.450 0.120 150)"
+    del-bg: "oklch(0.966 0.020 25)"
+    del-tx: "oklch(0.500 0.180 27)"
+    syn-kw: "oklch(0.470 0.150 300)"
+    syn-str: "oklch(0.480 0.110 150)"
+    syn-fn: "oklch(0.470 0.130 250)"
+    syn-cm: "oklch(0.520 0.010 260)"
+  dark:
+    bg: "oklch(0.190 0.004 260)"
+    bg-side: "oklch(0.163 0.004 260)"
+    bg-raised: "oklch(0.232 0.005 260)"
+    bg-sunk: "oklch(0.172 0.004 260)"
+    fill: "oklch(0.240 0.005 260)"
+    fill-2: "oklch(0.285 0.006 260)"
+    hover: "oklch(0.222 0.005 260)"
+    sel: "oklch(0.252 0.006 260)"
+    line: "oklch(0.268 0.005 260)"
+    line-2: "oklch(0.345 0.006 260)"
+    fg: "oklch(0.945 0.003 260)"
+    fg-2: "oklch(0.760 0.005 260)"
+    fg-3: "oklch(0.640 0.006 260)"
+    accent: "oklch(0.560 0.170 258)"
+    accent-hi: "oklch(0.610 0.170 258)"
+    accent-fg: "oklch(0.995 0 0)"
+    accent-tx: "oklch(0.760 0.120 258)"
+    accent-soft: "oklch(0.275 0.050 258)"
+    focus: "oklch(0.700 0.140 258)"
+    warn: "oklch(0.830 0.120 80)"
+    warn-dot: "oklch(0.790 0.140 76)"
+    warn-soft: "oklch(0.265 0.035 75)"
+    ok: "oklch(0.780 0.130 150)"
+    ok-dot: "oklch(0.700 0.140 150)"
+    danger: "oklch(0.730 0.150 25)"
+    danger-soft: "oklch(0.262 0.040 25)"
+    add-bg: "oklch(0.245 0.032 150)"
+    add-tx: "oklch(0.790 0.130 150)"
+    del-bg: "oklch(0.245 0.032 25)"
+    del-tx: "oklch(0.750 0.140 25)"
+    syn-kw: "oklch(0.780 0.110 300)"
+    syn-str: "oklch(0.790 0.110 150)"
+    syn-fn: "oklch(0.790 0.100 250)"
+    syn-cm: "oklch(0.620 0.010 260)"
+  chart:
+    light: ["#2a78d6", "#eb6834", "#1baf7a", "#6250d6"]
+    dark: ["#3987e5", "#d95926", "#199e70", "#9085e9"]
 typography:
-  display:
-    fontFamily: "Archivo, ui-sans-serif, system-ui, sans-serif"
-    fontSize: "1.75rem"
-    fontWeight: 600
-    lineHeight: 1.15
-    letterSpacing: "-0.02em"
-  headline:
-    fontFamily: "Archivo, ui-sans-serif, system-ui, sans-serif"
-    fontSize: "1.375rem"
-    fontWeight: 600
-    lineHeight: 1.25
-    letterSpacing: "-0.015em"
-  title:
-    fontFamily: "Archivo, ui-sans-serif, system-ui, sans-serif"
-    fontSize: "1.125rem"
-    fontWeight: 600
-    lineHeight: 1.3
-    letterSpacing: "-0.01em"
-  body:
-    fontFamily: "Archivo, ui-sans-serif, system-ui, sans-serif"
-    fontSize: "0.875rem"
-    fontWeight: 400
-    lineHeight: 1.5
-    letterSpacing: "0em"
-  compact:
-    fontFamily: "Archivo, ui-sans-serif, system-ui, sans-serif"
-    fontSize: "0.8125rem"
-    fontWeight: 400
-    lineHeight: 1.45
-    letterSpacing: "0em"
-  label:
-    fontFamily: "Archivo, ui-sans-serif, system-ui, sans-serif"
-    fontSize: "0.71875rem"
-    fontWeight: 600
-    lineHeight: 1.25
-    letterSpacing: "0.08em"
-  micro:
-    fontFamily: "Archivo, ui-sans-serif, system-ui, sans-serif"
-    fontSize: "0.6875rem"
-    fontWeight: 500
-    lineHeight: 1.2
-    letterSpacing: "0.02em"
-  code:
-    fontFamily: "Spline Sans Mono, ui-monospace, SFMono-Regular, Cascadia Mono, monospace"
-    fontSize: "0.78125rem"
-    fontWeight: 400
-    lineHeight: 1.6
-    letterSpacing: "0em"
+  ui: "Geist, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif"
+  mono: "'Geist Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace"
+  scale:
+    caption: "11px / 14px, 500"
+    small: "12px / 16px, 400–500"
+    body: "13px / 18px, 400–500"
+    prose: "14px / 22px, 400"
+    title: "15px / 20px, 600, -0.01em"
+    heading: "17px / 22px, 600, -0.01em"
+    page: "20px / 26px, 600, -0.015em"
+    figure: "22px / 28px, 600, -0.015em"
+    code: "12–12.5px / 19–20px mono"
+  phone:
+    body: "16px / 22px"
+    prose: "16px / 24px"
+    meta: "13–14px / 18–20px"
+    nav-title: "17px / 22px, 600"
+    large-title: "30px / 36px, 600, -0.02em"
+    tab-label: "11px / 13px, 500"
+spacing: [2, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48]
 rounded:
-  xs: "2px"
-  sm: "4px"
-  md: "6px"
-  lg: "10px"
-  xl: "14px"
-  full: "999px"
-spacing:
-  1: "4px"
-  2: "8px"
-  3: "12px"
-  4: "16px"
-  5: "20px"
-  6: "24px"
-  8: "32px"
-  10: "40px"
-  12: "48px"
-  16: "64px"
-components:
-  button-primary:
-    backgroundColor: "{colors.cue}"
-    textColor: "{colors.ink}"
-    rounded: "{rounded.sm}"
-    padding: "0 12px"
-    height: "30px"
-  button-secondary:
-    backgroundColor: "{colors.raised}"
-    textColor: "{colors.ink}"
-    rounded: "{rounded.sm}"
-    padding: "0 12px"
-    height: "30px"
-  button-ghost:
-    backgroundColor: "transparent"
-    textColor: "{colors.ink-muted}"
-    rounded: "{rounded.sm}"
-    padding: "0 8px"
-    height: "30px"
-  input:
-    backgroundColor: "{colors.paper}"
-    textColor: "{colors.ink}"
-    rounded: "{rounded.sm}"
-    padding: "0 10px"
-    height: "30px"
-  nav-rail:
-    backgroundColor: "{colors.stage}"
-    textColor: "{colors.stage-ink}"
-    height: "100%"
-    width: "56px"
-  thread-row:
-    backgroundColor: "{colors.paper}"
-    textColor: "{colors.ink}"
-    height: "48px"
-  badge-cue:
-    backgroundColor: "{colors.cue-tint}"
-    textColor: "{colors.cue-ink}"
-    rounded: "{rounded.sm}"
-    padding: "0 6px"
-    height: "20px"
-  standby-bar:
-    backgroundColor: "{colors.cue-tint}"
-    textColor: "{colors.ink}"
-    height: "40px"
-  card:
-    backgroundColor: "{colors.raised}"
-    textColor: "{colors.ink}"
-    rounded: "{rounded.md}"
-    padding: "12px"
-  dialog:
-    backgroundColor: "{colors.paper}"
-    textColor: "{colors.ink}"
-    rounded: "{rounded.lg}"
-    width: "560px"
+  xs: "4px   kbd, badges, inline code"
+  sm: "6px   buttons, inputs, nav items, tabs"
+  md: "8px   list rows, code blocks, banners, segmented track"
+  lg: "12px  cards, composer, approval, popovers, phone groups"
+  xl: "14px  command palette, phone sheet (top corners)"
+  full: "switches, dots, avatars"
+elevation:
+  flat: "panes, rows, buttons, cards in the page plane"
+  pop: "0 1px 2px oklch(0.2 0.01 260/.06), 0 10px 28px -10px oklch(0.2 0.01 260/.22)"
+  dialog: "0 2px 8px oklch(0.2 0.01 260/.08), 0 28px 64px -16px oklch(0.2 0.01 260/.32)"
+motion:
+  dur-1: "120ms  hover, press, colour"
+  dur-2: "180ms  focus, segmented change, switch, approval resolve, palette in"
+  dur-3: "240ms  sheet, panel reveal"
+  ease-out: "cubic-bezier(0.22, 1, 0.36, 1)"
+  ease-in: "cubic-bezier(0.4, 0, 1, 1)"
 ---
 
-# Design System: h4rn
+# h4rn: Quiet native
 
-## Overview
+This is a redesign. The current h4rn look, with its prompt-book metaphor, amber cue gutter, stage-black rail, orange logo block, numbered rows and pill-tag headers, is an anti-reference here and nothing from it is carried over. What carries over is product truth: the Working / Done / Settled lifecycle, "where it runs" provenance, host-local secrets, reversible actions, honest harness differences, and the state vocabulary in `docs/ux.md`.
 
-**Creative North Star: "The Prompt Book"**
+**Mode:** Operate. The person using h4rn is supervising work, so ambition shows up as precision and restraint. The world contributes type, palette, density and one signature move. It never changes navigation or controls.
 
-A stage manager's prompt book is the working document that makes a live performance repeatable: every cue numbered, every standby called, every entrance and light change annotated in pencil, and a spine that survives the run. It is not a script and not a control panel. It is a high-density, low-drama instrument for the one person responsible for the whole show.
+**Signature move:** *Blue means you.* The single accent appears only where the user is the subject: the needs-you dot in the list, the primary action that answers the agent, focus, and selection. Everything the agents do on their own stays graphite. If you look at any screen and ask "what needs me?", the answer is whatever is blue.
 
-h4rn borrows that world's **type, palette, density and one signature move** — never its page layout, navigation or controls. The shell is standard and learnable: a rail, a list, a detail pane, a context panel, shadcn controls. The world shows up in a stage-black rail that stays black in both themes, a cool paper ground, cue amber reserved for the one thing that needs a decision, and a **cue gutter** that numbers every turn and a **standby bar** that names the next required action. Nothing glows, nothing bounces, nothing is decorated as a theatre prop.
+## Why it looks like this (10 points)
 
-The result should feel like an instrument left running on a desk: quiet at rest, exact under load, and legible at a glance from across the room. Density is a feature. Colour does jobs: cue amber = attention and primary action; standby green = ready, scheduled, healthy; strike red = stopped, failed, destructive; prompt blue = information and links. The default surface is neutral and cool, not warm paper and not a black terminal.
+1. **The old look sold a metaphor. This one sells the work.** The stage-manager costume (cues, standby, a black rail) made you learn theatre to read an inbox. Here, structure comes from the platform's own patterns: sidebar, list, detail, inspector, sheet, tab bar. A fluent Mac, Windows or iOS user can tell where everything is before they notice the styling.
+2. **One accent, and it only ever means "you".** Agents running, queued or done stay neutral. Approvals, needs-you dots, focus and the primary button are blue. That makes colour a sorting tool and not decoration, and a screen with no blue on it is a screen that needs nothing from you.
+3. **Status colours are semantic and rare.** Amber marks a limit or a pause (time is involved). Red marks failure or an unreachable host. Green appears only as a pass or a healthy dot. Each one is always paired with a word or glyph, never shown as colour alone.
+4. **Hairlines, not boxes.** Panes are divided by 1 px lines and a single tonal step (sidebar vs content). The only bordered objects are the things that really are objects: a change set, a composer, an approval request, a resume card. There is no card-in-card anywhere.
+5. **Typography does the hierarchy.** There is one sans (Geist) at 13 px body, 14 px for agent prose and 15/17/20 px for titles, with weight steps of 400, 500 and 600 only. There are no uppercase eyebrows, kickers or numbered rows. Mono is limited to code, paths, commands, model slugs, terminal output and diffs, where character alignment carries meaning.
+6. **Provenance is plain text, not tag soup.** "atlas / Claude Code / claude-sonnet-5-5 / h4rn/fix-flaky-auth" sits as one quiet line under the title, and narrow widths drop items from the right. Identity glyphs (blobatars) appear only where *who* matters: hosts, harnesses, subagents and reviewers.
+7. **Liveness is small and truthful.** A 14 px orb moves only while a turn is actually doing work. Queued breathes, waiting is a still ring, and finished, limited or offline states are static glyphs. Motion never claims work that isn't happening, and under reduced motion every orb freezes into a still frame without losing any information.
+8. **The approval is a request, not an alarm.** It is a single raised card above the composer, with no amber band and no modal. It names who is asking, where the command runs and in which folder, shows the exact command, and offers Deny and Approve with their shortcuts. A subagent's request surfaces on its parent, so the inbox stays one row per job.
+9. **Density where you're competent, calm where you decide.** Lists, tables, tool calls and trees are dense: 28 px tool rows, 40 px table rows, two-line thread rows. Decision points get whitespace: the approval card, the resume countdown and the pairing consent.
+10. **The phone is an iPhone/Android app, not a small desktop.** It uses a large title, a segmented control, 66 px rows, a five-item tab bar with a badge, a pushed thread with a back button, a sheet for approval, grouped inset lists for consent, a key bar for the terminal, and primary actions in the bottom third.
 
-**Key Characteristics:**
-- Stage-black chrome in both themes, cool paper content surfaces, hairline seams.
-- One working accent (cue amber) used at ≤5% of pixels; state colours are semantic, never decorative.
-- Archivo for UI, Spline Sans Mono for identifiers, times and cue numbers; tabular figures everywhere.
-- High information density with a strict 4 px rhythm; no card-on-card nesting.
-- Cue gutter + standby bar as the only signature interaction; everything else is a familiar control.
-- Flat by default; depth is a seam and one tonal step, not a shadow.
-- Terminal states are static glyphs, live states are thinking orbs; identity is a blobatar, never a robot icon.
+## Colour
 
-## Colors
+Strategy: **Restrained.** Graphite neutrals tinted toward 260° (cool, not blue), one accent at 258°, and four semantic states. Light and dark are tuned separately and are never inverted.
 
-The palette is a working wardrobe: a constant black rail, a cool neutral stage, and four state inks that only appear when they mean something. It is **Restrained** overall and **Committed** at the shell — the rail is stage black on every screen in both themes, which gives the product a recognisable silhouette with no ornament.
+### Roles
 
-### Primary
-- **Cue Amber** (`oklch(0.64 0.15 68)`, dark `oklch(0.78 0.14 70)`): the primary action, the current cue in the gutter, an approval that is waiting, and focus rings. Filled amber always carries ink text in light theme (`4.98:1`) and ground text in dark (`7.60:1`).
-- **Cue Ink** (`oklch(0.45 0.12 55)`): amber used as *text* on paper (`7.21:1`) and inside cue-tint panels (`6.57:1`). Never use raw cue amber for small text on paper.
+| Token | Job |
+|---|---|
+| `bg` | Content surface (list, detail, pages). |
+| `bg-side` | The second neutral layer: app sidebar and phone tab bar. One step darker than content, never coloured. |
+| `bg-raised` | Things above the plane: popovers, palette, approval card, composer, secondary buttons. |
+| `bg-sunk` | Code, diffs, terminal, tool output. Recessed reading surfaces. |
+| `fill` / `fill-2` | Segmented track, user message bubble, inline code, skeletons, inactive switch. |
+| `hover` / `sel` | Row hover and selected row. Selection is neutral; the needs-you dot carries the colour. |
+| `line` / `line-2` | Hairline dividers / control outlines and tree connectors. |
+| `fg` / `fg-2` / `fg-3` | Primary text / metadata / tertiary (times, units, placeholders). `fg-3` is the floor. |
+| `accent` (+`-hi`, `-fg`) | Primary button fill, switch on, checkbox on, needs-you dot, tab badge. |
+| `accent-tx` | Accent as text: "Needs approval", links, phone nav buttons. |
+| `accent-soft` | Selection highlight, active key on the phone key bar. |
+| `focus` | 2 px focus ring at 2 px offset. |
+| `warn` / `warn-dot` / `warn-soft` | Usage limit, scheduled resume, conflicts that block an apply. |
+| `ok` / `ok-dot` | Passing check, healthy host dot, `+` in diffs. |
+| `danger` / `danger-soft` | Failed turn or check, unreachable host, revoke. |
+| `add-*` / `del-*` | Diff bands and signs. The `+`/`−` sign column is mandatory. |
 
-### Secondary
-- **Standby Green** (`oklch(0.50 0.10 155)`, dark `oklch(0.74 0.12 155)`): scheduled auto-resume, healthy host, passing check, successful completion. Used as a dot, a 3 px bar or tinted badge; text uses `standby-ink` (`7.86:1`).
-- **Strike Red** (`oklch(0.52 0.19 27)`, dark `oklch(0.70 0.16 27)`): failed turn, unreachable host, destructive action, denied approval. Solid red is reserved for confirmation; ordinary destructive affordances are outline + red text.
-- **Prompt Blue** (`oklch(0.48 0.12 250)`, dark `oklch(0.72 0.10 250)`): informational callouts, links inside prose, "where it runs" provenance links.
+### Checked pairs (WCAG 2.x, computed from the OKLCH values)
 
-### Neutral
-- **Paper** (`oklch(0.975 0.004 250)`): content ground in light theme. Cool, not cream.
-- **Panel** (`oklch(0.955 0.006 250)`): list pane, sidebars, toolbars — one step cooler/darker than content.
-- **Raised** (`oklch(0.992 0.002 250)`): inputs, popovers, cards, the one step above paper.
-- **Ink** (`oklch(0.22 0.018 255)`): primary text; `16.11:1` on paper.
-- **Ink Muted** (`oklch(0.435 0.014 255)`): metadata, secondary labels; `7.38:1`.
-- **Ink Faint** (`oklch(0.545 0.012 255)`): placeholders and disabled-adjacent labels; `4.61:1` — the floor, never lighter for text.
-- **Line** (`oklch(0.88 0.008 250)`): decorative seams and dividers. **Control Border** (`oklch(0.545 0.012 255)`) is the ≥3:1 border for inputs and toggles.
-- **Stage** (`oklch(0.20 0.022 255)`, dark `oklch(0.115 0.012 255)`): the rail, status bar and scrim ground. Stage stays black in both themes; it is the constant shell.
+| Pair | Light | Dark | Use |
+|---|---|---|---|
+| fg / bg | 17.47 | 15.72 | body |
+| fg-2 / bg | 7.66 | 8.60 | metadata |
+| fg-3 / bg | 5.67 | 5.49 | tertiary floor |
+| fg-3 / bg-side | 5.27 | 5.75 | sidebar counts |
+| fg-3 / sel | 4.82 | 4.73 | meta on a selected row |
+| fg-3 / bg-sunk | 5.39 | 5.67 | line numbers, terminal dim |
+| accent-fg / accent | 5.10 | 4.67 | primary button label |
+| accent-tx / bg | 6.05 | 8.58 | "Needs approval", links |
+| accent-tx / sel | 5.15 | 7.39 | needs-you on selected row |
+| accent-tx / accent-soft | 5.38 | 6.90 | active key, selection |
+| warn / bg | 6.11 | 10.83 | "Resumes 14:32" |
+| warn / warn-soft | 5.64 | 9.01 | conflict text |
+| ok / bg | 5.84 | 9.70 | passing check |
+| danger / bg | 5.99 | 7.24 | failure text |
+| danger / danger-soft | 5.44 | 6.14 | error banner |
+| add-tx / add-bg | 6.44 | 8.73 | diff `+` |
+| del-tx / del-bg | 5.90 | 6.95 | diff `−` |
+| syn-cm / bg-sunk | 5.17 | 5.24 | code comments (lowest syntax pair) |
+| focus / bg | 3.95 | 6.87 | focus ring (non-text, ≥ 3) |
 
-### Dark theme mapping
+### Charts
 
-The same roles invert onto a near-black blue-green ground: `dark-ground`, `dark-panel`, `dark-raised`, `dark-ink`, `dark-ink-muted`, `dark-line`, `dark-control-border`. Cue amber brightens rather than darkening; green and red lift to remain legible on the dark ground. Never derive dark colours by inverting light ones — the state hues are separately tuned.
-
-### Checked pairs
-
-| Pair | Ratio | Use |
-|---|---|---|
-| ink / paper | 16.11 | body text |
-| ink-muted / paper | 7.38 | metadata |
-| ink-faint / paper | 4.61 | placeholder floor |
-| cue-ink / cue-tint | 6.57 | cue badge text |
-| standby-ink / standby-tint | 6.96 | healthy badge text |
-| strike-ink / strike-tint | 6.45 | failed badge text |
-| paper / strike | 5.65 | text on solid red |
-| stage-ink / stage | 15.18 | rail labels |
-| dark-ink / dark-ground | 15.80 | body text (dark) |
-| dark-ink-muted / dark-ground | 7.83 | metadata (dark) |
-| dark-cue / dark-ground | 9.46 | cue text (dark) |
-| dark-cue / dark-cue-tint | 7.63 | cue badge text (dark) |
-| dark-standby / dark-standby-tint | 7.18 | healthy badge text (dark) |
-| dark-strike / dark-strike-tint | 5.67 | failed badge text (dark) |
-| dark-control-border / dark-ground | 4.54 | control border (dark, ≥3) |
-| dark-ground / dark-cue-fill | 7.60 | primary button (dark) |
-| stage-ink-muted / stage | 7.30 | inactive rail labels |
-| cue / paper | 3.23 | focus ring (non-text, ≥3) |
-
-### Named Rules
-
-**The One Cue Rule.** Amber is attention, not decoration. It appears on the primary action, the current cue, a waiting approval, and the focus ring — nowhere else. If a screen has two amber fills competing, one is wrong.
-
-**The Stage Black Rule.** The rail and status bar are stage-black in both themes. Do not tint them with the accent, do not make them translucent, do not invert them in dark mode. The silhouette is the brand.
-
-**The State Never Alone Rule.** No state is carried by colour only. Every orb, dot, badge and diff line is paired with a word, an icon, or a `+`/`−` sign. Colour is the fast channel, not the only channel.
+Charts use a categorical order validated with the dataviz validator (CVD ΔE ≥ 9.2 on adjacent pairs, normal-vision ≥ 24.6, both modes). The colours stay fixed per harness: Claude Code blue, Codex orange, OpenCode aqua, Antigravity violet. The default slot 4 (yellow) was skipped on purpose because it collides with the amber status colour. Light-mode aqua sits below 3:1 against the surface, so every chart ships a legend with values and a "View as table" toggle. Bars are 2 px apart with a 3 px rounded top, the grid is recessive, there's a hover tooltip per day, and there is only ever one axis.
 
 ## Typography
 
-**Display / UI Font:** Archivo (with `ui-sans-serif, system-ui, sans-serif`)
-**Mono Font:** Spline Sans Mono (with `ui-monospace, SFMono-Regular, Cascadia Mono, monospace`)
+**Geist** carries the whole UI, and **Geist Mono** carries code. They share metrics, so a path inside a sentence doesn't jump. Production may substitute the platform face (SF Pro / Segoe UI Variable) on desktop and must use the platform face on native phone builds. The scale is built to survive that swap.
 
-**Character:** Archivo is a workhorse grotesque with slightly condensed proportions and a tall x-height — plain enough for a table, distinctive enough to give labels a printed-cue-sheet crispness. Spline Sans Mono has a humanist quirk that keeps IDs and timestamps from reading as a generic developer terminal. One family carries the interface; the mono carries facts.
+- Tabular figures everywhere (`font-feature-settings: "tnum"`), so tokens, costs, timers and counts never jitter.
+- Agent prose is 14/22 with a 720 px column (about 70 characters). UI text is 13/18. Phone prose is 16/24.
+- Tracking is negative only at 15 px and up (−0.01 to −0.02 em). No uppercase.
+- Section headings are 14/600 in sentence case. **No eyebrow above a heading, ever.**
+- Mono is never decorative. It's used only for code, diffs, terminal output, file paths, shell commands, model slugs, branch names and URLs.
 
-### Hierarchy
+## Space, radius, elevation
 
-| Role | Size / line-height | Weight | Purpose |
-|---|---|---|---|
-| Display | 28 / 32 px (1.75 rem) | 600 | Screen-defining titles and the rare setup hero; never inside a pane. |
-| Headline | 22 / 28 px (1.375 rem) | 600 | Pane titles, PR titles, dashboard section leads. |
-| Title | 18 / 23 px (1.125 rem) | 600 | Thread title in detail, dialog titles, card headings. |
-| Body | 14 / 21 px (0.875 rem) | 400 | Stream prose, descriptions, form values. |
-| Compact | 13 / 19 px (0.8125 rem) | 400 | List rows, table cells, tool-call summaries. |
-| Label | 11.5 / 14 px (0.71875 rem) | 600, 0.08 em, uppercase | Pane headers, table headers, field groups. |
-| Micro | 11 / 13 px (0.6875 rem) | 500, 0.02 em | Cue numbers, timestamps, token counts, shortcut hints. |
-| Code | 12.5 / 20 px (0.78125 rem) | 400 mono | Terminal, diffs, IDs, file paths, model slugs. |
+- 4 px base. Component internals use 6, 8, 10 or 12. Groups are separated by 16, 24 or 32. Page sections use 36–48. Headings have more space above than below.
+- Desktop shell: sidebar 212, list 328, detail flexible (min 540), inspector 356, terminal panel 340 high. The prose column is `max-width: 720px`.
+- Radii follow a fixed scale: 4, 6, 8, 12, 14, plus full rounding for switches, dots and avatars. A radius above 14 px on a working surface is decoration.
+- Elevation is declared once, either as a border or a shadow, never both, with one exception: the approval card and popovers combine a hairline with a soft `pop` shadow, because they really do sit above the page. The palette and phone sheets use `dialog` plus a scrim. Rows, panes and buttons never cast shadows.
 
-### Named Rules
-
-**The Tabular Rule.** Every number that can change — tokens, cost, TPS, TTFT, duration, counts, cue numbers — uses `font-variant-numeric: tabular-nums`. Columns must not jitter as values update.
-
-**The No Display Voice Rule.** Archivo at 600 is the loudest voice allowed in the product. No display serif, no condensed poster face, no italic headings, no all-caps sentences. Uppercase exists only at Label size with tracking.
-
-**The Measure Rule.** Stream prose is capped at 68 ch and centred in the detail pane; documentation-style prose at 72 ch. Code, tables and terminals are exempt and run full width.
-
-## Layout
-
-The shell is a **three-pane instrument**: a 56 px stage-black rail, a 304 px list pane, and a flexible detail pane. A collapsible 420 px context panel (diff / files / terminal / subagents) is the only fourth region, and only on desktop ≥1280 px. It is a tab strip, not a second sidebar.
-
-```
-┌ 56 ┬────────── 304 ──────────┬──────────── detail ────────────┬── 420 ──┐
-│rail│ list + tabs + filter    │ header / stream / composer     │ context │
-└────┴─────────────────────────┴────────────────────────────────┴─────────┘
-```
-
-- **Desktop ≥1280 px:** all three panes + optional context panel. The status bar (24 px) spans the bottom with connection, presence and queue depth. No global top bar: each pane owns its header so vertical space goes to content.
-- **Tablet 768–1279 px:** rail + list + detail; the context panel becomes a tab *inside* detail, not a column. In landscape, list and detail can split 40/60; in portrait, detail pushes over the list.
-- **Phone <768 px:** single column, bottom navigation (Inbox / Hosts / New / Limits / More). Thread detail pushes full-screen with a back affordance; the standby action becomes a sticky card above the composer; context (terminal, diff, subagents) becomes a full-height sheet. Never shrink the three-pane desktop into a phone.
-- **Spacing rhythm:** 4 px base; 8/12/16 for component internals, 16/24/32 between groups, 48/64 for screen-level breathing room. One rhythm per pane; no arbitrary 10/18 px gaps.
-- **Density:** desktop list rows 48 px (two-line) or 32 px (compact table); thread stream blocks separated by 16 px; tool calls 28 px collapsed. Phone list rows 64 px minimum, touch targets 44×44 px, 16 px page gutters.
-- **Cue gutter:** 48 px column at the left of the stream on desktop; each turn carries a two-digit cue number, the current cue has a 2 px amber bar, struck cues are dimmed and marked with a slash. On phone the gutter collapses to a 4 px progress rail plus “Cue 03 / 12” in the header.
-- **Stream width:** the readable column is `min(100%, 760px)`; the composer matches it. The context panel and terminal use the full pane width.
-- **Breakpoints:** 640 (large phone), 768 (tablet portrait), 1024 (tablet landscape), 1280 (desktop 3-pane), 1600 (wide desktop, context panel default open).
-
-### Named Rules
-
-**The No Fourth Column Rule.** A permanent fourth column is a failure of priority. Context is a tab, a sheet, or a panel the user opens; it never squeezes the stream below 560 px.
-
-**The Thumb Rule.** On phone, the primary action and the standby bar live in the bottom 30% of the screen. Destructive actions never sit next to the primary; they are separated by at least 24 px and require a deliberate press.
-
-**The One Scroll Rule.** Each pane scrolls independently; the page itself never scrolls. On phone, only the content region scrolls — headers and the composer are fixed.
-
-## Elevation & Depth
-
-The system is **flat by default**. Depth is conveyed by tonal steps (paper → panel → raised) and 1 px hairline seams, not by shadow. A panel is a different value, not a floating card. Shadows exist only for things that genuinely leave the page plane: popovers, dialogs, sheets and the command palette.
-
-### Shadow Vocabulary
-- **Overlay low** (`0 1px 2px rgb(3 5 9 / 0.18), 0 8px 24px -12px rgb(3 5 9 / 0.35)`): popovers, dropdowns, tooltips with content.
-- **Overlay high** (`0 2px 4px rgb(3 5 9 / 0.20), 0 24px 48px -16px rgb(3 5 9 / 0.45)`): dialogs, command palette, phone sheets.
-- **No shadow** on rows, cards, panes, buttons or the rail. Hover on a row is a background step, not a lift.
-
-### Named Rules
-
-**The Flat-By-Default Rule.** If an element stays in the page plane, it has no shadow. If it leaves the plane, it gets both a scrim (stage at 40–60% opacity) and one shadow — never a border and a shadow and a tint.
-
-**The Seam Rule.** Dividers are 1 px `line`; selected or active boundaries are 2 px (`cue` for the current cue/tab, `stage` for a pinned divider). Never use a 1 px border plus a shadow to separate two panes.
-
-## Shapes
-
-Corners are **small and precise**: 4 px on controls, 6 px on cards and inputs, 10 px on dialogs, 14 px on phone sheets. Pills are reserved for counts and presence, never for buttons. The dominant silhouette is the rectangle with one hairline; the only angled mark is the 2 px cue tick in the gutter.
-
-- Buttons and inputs: 4 px; height 30 px desktop, 44 px phone.
-- Cards, popovers, table containers: 6 px.
-- Dialogs, command palette: 10 px.
-- Sheets, phone modals: 14 px top corners.
-- Blobatars: squircle for machines, circle for harnesses and humans, transparent for subagents.
-- Terminal and diff panels: 0 px inside the pane; the pane itself owns the corners.
-
-**The Small Radius Rule.** If a corner radius exceeds 14 px on a working surface, it is decoration. Status pills and avatars are the only full-round shapes.
-
-## Components
-
-Every component is a shadcn/ui primitive with a thin h4rn skin. The vocabulary is deliberately standard; the world lives in type, palette, density and the cue gutter, not in reinvented controls.
-
-### Buttons
-- **Shape:** 4 px radius, 30 px high desktop, 44 px phone, 12 px horizontal padding.
-- **Primary:** cue amber fill with ink text in light theme, cue-fill with ground text in dark. One per visible region; if two compete, the secondary becomes `secondary`.
-- **Hover / Focus:** 90 ms background/border change; hover adds a 1 px ink inset border rather than changing hue. Focus is a 2 px cue ring with 1 px paper offset; `:focus-visible` only.
-- **Secondary:** raised fill, 1 px control-border, ink text. **Ghost:** no fill, muted text, panel hover. **Destructive:** strike text + strike-tint hover; solid strike fill only inside a confirmation dialog.
-- **Loading:** the label stays, a 14 px orb or a 3-dot inline pulse replaces the icon, width does not change. Never a spinner in a button.
-
-### Inputs / Fields
-- **Style:** raised ground, 1 px control-border, 4 px radius, 10 px padding, 30/44 px height. Labels sit above at Label size; no floating labels.
-- **Focus:** 1 px cue border + 2 px cue ring at 2 px offset. The caret is ink, the selection is cue-tint.
-- **Error:** 1 px strike border, a strike-ink message below with a specific cause, and `aria-invalid`. Disabled: panel ground, ink-faint text, no hover.
-- **Secret fields:** show “Stored on atlas” with a `KeyRound` icon and a Replace action; never reveal, never prefill, never echo in errors.
-
-### Tabs
-- **Style:** text tabs at Compact size with counts, 2 px cue underline on the active tab, 1 px line under the strip. Working / Done / Settled are the only top-level tabs in Inbox.
-- **State:** active = ink + cue underline; inactive = ink-muted; hover = panel ground; focus = cue ring. Counts use micro tabular figures and never animate as a rolling number.
-
-### List rows
-- **Thread row:** 48 px desktop / 64 px phone, two lines: title (Compact 500) and meta (Micro: host blobatar, harness blobatar, state orb + word, time). A left 2 px cue bar marks selection; panel background marks hover; a “Needs approval” cue badge sits at the right.
-- **Table row:** 32 px, 1 px line separators, sticky Label header, numeric columns right-aligned and tabular.
-
-### Chips & badges
-- **Entity chip:** 20 px high, tinted ground, 14 px blobatar + label, 4 px radius. Host, harness, model and branch each get a chip; model and branch use mono.
-- **State badge:** cue/standby/strike tint + matching ink + icon. Never a saturated fill except the primary button.
-
-### Cards / Containers
-- Used only for limits, usage summaries, pairing and empty states — not as a generic page wrapper. 6 px radius, raised ground, 1 px line, 12–16 px padding. No card inside a card.
-
-### Navigation
-- **Rail:** stage black, 56 px, 20 px Lucide icons, 10 px labels only on hover/focus tooltip. Active item: 2 px cue left bar + stage-ink icon. Inactive: stage-ink-muted. Bottom cluster: search, settings, user blobatar.
-- **Phone:** bottom navigation, 64 px + safe area, five items (Inbox, Hosts, New, Limits, More). The center New action is a 44 px cue-tint square with a plus; it is not a floating action button.
-- **Breadcrumb:** compact, slash-separated, truncates from the middle; host and harness chips follow the title.
-
-### Tables
-- Sticky header, 32 px rows, zebra never; hover row = panel, selected = cue-tint at 40% plus a 2 px cue left edge. Sort indicators are 14 px chevrons, always paired with the active sort label. Column visibility lives in a popover, not a settings page.
-
-### Diff
-- 12.5 px Spline Sans Mono, 20 px line height, unified by default with a split toggle. Added lines use standby-tint + `+`; removed use strike-tint + `−`; hunk headers use panel + mono. File headers stick. Never rely on red/green alone; the sign column is mandatory. Inline comments are 1 px prompt-blue left borders.
-
-### Terminal
-- xterm.js with a token-mapped theme: ground = dark-ground in both themes (a terminal is dark by default; light terminal is an explicit setting), ink text, cue cursor, cue-tint selection, standby/strike for ANSI green/red. 13 px mono, 1.4 line height. The terminal pane has a 28 px header with shell, cwd, host and a font-size stepper. Phone adds a 44 px key bar (Esc, Tab, Ctrl, arrows, paste).
-
-### Agent glyph (thinking orb)
-- Wrap `thinking-orbs` in an h4rn `<AgentGlyph>` that owns the mapping table below. Sizes 16 (inline), 20 (row), 28 (thread header), 64 (empty/hero only). Never size 32. Always pair with a text state; `aria-label` names the state and host.
-- One orb per visible turn, not per message. Offscreen turns pause via the library; do not mount two orbs in the same row.
-- Terminal states are **static glyphs**, not frozen orbs. An orb that never moves again is a glyph with extra steps and a larger performance cost.
-
-| h4rn state | Tab | Orb `state` | Props | Text label | Notes |
-|---|---|---|---|---|---|
-| Running | Working | `working` | `speed={1}` | `Running` | Canonical live state; particles on orbits. |
-| Thinking | Working | `working` | `speed={0.9}` | `Thinking` | Model reasoning; no separate mode. |
-| Searching | Working | `searching` | — | `Searching` | Web, grep, glob; scan meridian. |
-| Reading | Working | `listening` | `speed={0.9}` | `Reading` | Files/URLs; data flowing in. |
-| Editing | Working | `weaving` | — | `Editing` | File writes and diffs being merged. |
-| Running tool | Working | `solving` | — | `Running <tool>` | Discrete steps resolving into a fixed state. |
-| Queued | Working | `breathing` | `speed={0.5}` | `Queued` | Behind another run; alive, not working. |
-| Awaiting approval / answer | Working | `shaping` | `speed={0.8}`, `opts={{shape:0}}` | `Waiting for approval` / `Waiting for answer` | Held circle, not a progress cycle; paired with Go/Hold. |
-| Scheduled auto-resume | Working | `breathing` | `speed={0.3}` | `Resumes 14:32` | Clock badge + countdown text; slow stalled breath. |
-| Limited, auto-resume off | Done | static limit glyph | — | `Limited · needs you` | No orb; the animation would imply work. |
-| Failed | Working | static strike glyph | — | `Failed` | Raised hand; the turn did not complete. |
-| Done | Done | static check glyph | — | `Done · unread` | Terminal; acknowledge moves to Settled. |
-| Idle | Working (pinned) | `breathing` | `paused` | `Idle` | Only for an explicit “Keep in Working” pin. |
-| Host unreachable | Working | static disconnected glyph | — | `Host unreachable` | Animation would lie about liveness. |
-| Settled | Settled | static check, dimmed | — | `Settled` | No orb, no motion. |
-
-- **Only `working`, `searching` and `solving` are unambiguous**; the other mappings are design decisions, not library facts. `connecting` is intentionally unused — a transport handshake is too short to read as an animation and is better shown by a disabled control.
-- **Reduced motion** collapses every animated row to the library’s static representative frame. Static glyphs are unchanged, so the mapping survives with no alternate table.
-- **Never** use an orb as the only state signal, as a page loader, or as a button spinner. Loaders are skeletons or inline text.
-
-### Entity avatar (blobatar)
-- Wrap `blobatar` in `<EntityAvatar>`. Static `<img>` by default; `animate="hover"` only on a single large host header; never in lists or tables. Always pass `title` = the human label. Pin `blobatar@2.7.0` exactly, with a golden test for a handful of IDs.
-- The face answers **who** is doing it; the orb answers **what** is happening. Never run both at full amplitude in one row: in a list, the avatar is static and the orb is the only motion.
-
-| Entity | Seed string | Background | Sizes | Animation |
-|---|---|---|---|---|
-| Machine | `machine:<machine_id>` | `squircle` | 20 row, 28 header, 64 profile | static; `hover` only at 64 |
-| Harness instance | `harness:<machine_id>:<harness_kind>[:<instance_id>]` | `circle` | 14 inline, 20 row | static |
-| Subagent | `subagent:<machine_id>:<parent_thread_id>:<subagent_id>` | transparent | 14 tree row | static |
-| Thread (optional) | `thread:<machine_id>:<thread_id>` | transparent | 20 | static |
-| Human | `user:<user_id>` | `circle` | 20 rail, 64 profile | static |
-
-**Seed rules**
-
-- **Type-prefix every seed.** A machine, a thread and a user with the same underlying id must not alias to the same face.
-- **Stable ids only.** Never put a display name, model, branch or title in the seed; renaming must not change the face.
-- **Lowercase from the daemon.** The library normalizes to NFC + trim + lowercase; emitting lowercase keeps server and client in agreement.
-- **Keep the parent in a subagent’s seed**, so a child’s face is stable and unique per parent without a registry.
-- **Narrow silhouettes by role, never pin a hue.** Machines draw from `round / cloud / sun / capsule`; subagents from `nub / capsule / droplet / triangle`; humans from `round / organic / cloud`. The id still chooses within the set. Do not pin `hue` or `tone` per role, and never pass `palette` (it bypasses the library’s 4.5:1 eye/body contrast guarantee).
-- **`title` is mandatory** and is the human label (“atlas”, “Claude Code”, “Reproduce CI failure”). Mark the avatar `aria-hidden` when an adjacent text label already names it.
-- **Windows and WSL are different entities.** A WSL distro host gets `machine:<wsl_id>`, not the Windows host’s id.
-
-### Cue gutter
-- 48 px column; one cell per turn; two-digit mono number; a 2 px amber bar marks the current cue; struck cues are ink-faint with a diagonal slash; clicking or `[`/`]` jumps to the turn. Hover reveals a 1-line cue summary. It is a navigation index, not a progress bar.
-
-### Standby bar
-- 40 px strip above the composer, cue-tint ground, 3 px cue left bar. One line: what is waiting + the consequence + a countdown if any. Actions on the right: primary `Go` (approve/resume), secondary `Hold` (deny/cancel), overflow for details. On phone it becomes a 2-line card with 44 px buttons. Only one standby bar exists per thread; queued items collapse into “+2 more”.
-
-### Toasts
-- Bottom-right desktop, above the phone nav. 4 s, one action maximum. **Never** use a toast for an error that requires a decision — that is a standby bar or an inline alert. Success toasts are silent by default for auto-save; explicit actions may confirm.
-
-### Motion tokens
+## Motion
 
 | Token | Value | Use |
 |---|---|---|
-| `dur-instant` | 90 ms | hover, press, colour feedback |
-| `dur-fast` | 150 ms | focus ring, row select, tooltip, tab underline |
-| `dur-base` | 200 ms | pane reveal, diff expand, approved cue resolution |
-| `dur-slow` | 250 ms | sheet/drawer, phone push, context panel |
-| `ease-out` | `cubic-bezier(0.22, 1, 0.36, 1)` | entrances, reveals |
-| `ease-in` | `cubic-bezier(0.4, 0, 1, 1)` | exits, dismissals |
-| `ease-standard` | `cubic-bezier(0.65, 0, 0.35, 1)` | resize, reorder, layout |
-| `spring-sheet` | stiffness 420, damping 40, mass 0.9 | phone sheets only |
+| dur-1 | 120 ms | hover, press, colour |
+| dur-2 | 180 ms | focus, segmented change, switch thumb, approval card resolving, palette pop |
+| dur-3 | 240 ms | phone sheet rise, panel reveal |
+| ease-out | `cubic-bezier(0.22, 1, 0.36, 1)` | entrances |
+| ease-in | `cubic-bezier(0.4, 0, 1, 1)` | exits |
 
-- Transitions animate `transform` and `opacity` only; never `height` on stream content, never `filter: blur` on text.
-- Every animation is interruptible: Motion's `layout`/`AnimatePresence` always starts from the current value; no queued sequences.
-- Approval resolution: the standby bar collapses in 200 ms while the cue tick moves to the executed state; the row does not slide. One moving element.
-- Skeletons are static blocks with a 1.5 s opacity pulse; under reduced motion they are static at 60% opacity.
-- **Reduced motion policy:** `prefers-reduced-motion: reduce` sets all durations to 1 ms, disables transforms and smooth scrolling, freezes orbs on their representative static frame, renders blobatars static, and swaps the sheet spring for an instant cut. Information is never carried by motion alone, so nothing is lost.
+- One authored moment: **resolving an approval**. The card fades and drops 6 px over 180 ms, then collapses to a one-line receipt with Undo. Nothing else on the screen moves.
+- Live motion is limited to the orb (1.4 s orbit), the streaming caret (1 s blink), and the skeleton pulse (1.6 s, opacity only).
+- `prefers-reduced-motion: reduce` sets every duration to 1 ms and stops all animation. Orbs show a static frame with the particle at 50°, the caret stays solid, and skeletons sit at 70% opacity. Information never depends on motion.
 
-### Iconography
-- **Lucide**, 1.5 px stroke, sizes 14 (inline), 16 (buttons/rows), 20 (rail/nav), 28 (empty states). No filled icons except the 6 px presence dot, which is a shape, not an icon.
-- Key mappings: `Inbox` inbox, `Server` host, `Boxes` WSL distro, `Terminal` terminal, `GitPullRequest` PR/MR, `Plug` MCP server, `Blocks` skill, `ChartNoAxesColumn` usage, `Code2` IDE, `Settings` settings, `Command` palette, `Search`, `Plus`, `Check`, `X`, `CircleAlert` error, `TriangleAlert` warning, `Clock` snooze/countdown, `Pause`, `Play`, `RotateCcw` resume/retry, `ShieldCheck` approval, `KeyRound` secret, `Smartphone` device, `QrCode` pairing, `WifiOff` offline, `FileDiff` diff, `ListTree` subagents, `Paperclip` attachments, `GitBranch` branch, `Activity` live.
-- **No `Bot` icon.** Agent identity is a blobatar; agent state is an orb or a static status glyph. A robot head is the category costume.
+## Components
 
-### Component inventory
+**Sidebar.** The wordmark "h4rn" is set in 14/600 text, with no logo block. Below it: compose, a "Search or run ⌘K" field, five destinations (Inbox, Pull requests, Editor, MCP & skills, Usage) with counts, a Hosts group (blobatar, name, presence dot, WSL distros indented under their Windows host, offline hosts showing last-seen), and Settings plus the connection line at the bottom. Only the Inbox count can be blue, and only when something needs you.
 
-| h4rn surface | shadcn/ui base | Notes |
-|---|---|---|
-| App rail | `Sidebar` (collapsed) | Custom 56 px stage skin; tooltips. |
-| Thread list | `ScrollArea` + custom `ThreadRow` | Tabs above via `ToggleGroup`. |
-| Inbox tabs | `ToggleGroup` | Working/Done/Settled with counts. |
-| Filter / sort | `Popover` + `Command` | Multi-select chips. |
-| New thread | `Dialog` (desktop) / `Drawer` (phone) | Host/harness/model selects. |
-| Composer | `Textarea` + `Popover` | Mentions, slash commands, attachments. |
-| Attachments | `Attachment` pattern + `HoverCard` | Image thumbs, file rows, remove. |
-| Tool call | `Collapsible` + `Badge` | Collapsed one-liner, expanded args/result. |
-| Approval | `Alert` + custom `StandbyBar` | Go/Hold; never a modal by default. |
-| Thread stream | `ScrollArea` + custom `Turn` | Cue numbers, orb, timestamps. |
-| Diffs | custom `DiffViewer` | Split/unified, file tree, comments. |
-| File tree | `Collapsible` + `ScrollArea` | IDE and diff share it. |
-| Terminal | custom `TerminalPane` | xterm.js; `Tabs` for sessions. |
-| Subagents | custom `SubagentTree` | `Collapsible` rows, orb + blobatar. |
-| Hosts | `Table` (desktop) / `Item` list (phone) | Presence, harnesses, WSL. |
-| Host detail | `Tabs` + `Card` + `Switch` | Harnesses, resources, providers. |
-| Pair device | `Dialog` + `QRCode` | Scopes, expiry, copy link. |
-| Devices | `Table` + `AlertDialog` | Revoke, last seen, presence. |
-| MCP servers | `Table` + `Switch` matrix | Transport, targets, conflicts. |
-| Skills | list + `Sheet` detail | Per-harness toggles, source path. |
-| Provider setup | `Stepper` (custom) + `Form` | CLIProxyAPI probe and overrides. |
-| Usage dashboard | `Chart` + `Card` + `Table` | KPI strip, series, per-harness. |
-| Limits | `Card` + `Progress` + `Countdown` | Reset time, auto-resume, failover. |
-| IDE | custom shell + CodeMirror 6 | Tabs, search, diff toggle. |
-| PR/MR | `Tabs` + `Table` + `Textarea` | Checks, comments, hand to agent. |
-| Settings | `Tabs` + `Form` + `Switch` | Account, devices, notifications, appearance. |
-| Command palette | `Command` | 560 px, grouped, keyboard-first. |
-| Toasts | `Sonner` | Success/info only. |
-| Empty states | custom `EmptyState` | Static orb/glyph + one action. |
-| Skeletons | `Skeleton` | Layout-shaped, not a spinner. |
-| Tooltips | `Tooltip` | Shortcuts appended in micro. |
-| Context menus | `DropdownMenu` / `ContextMenu` | Row actions, never hover-only on phone. |
+**Thread row.** The row has two lines. Line 1 has a state slot (14 px), the title (13/500), and the relative time. Line 2 has "host · harness" and the status word on the right. States: blue dot for needs you, orb for running, breathing orb for queued, amber clock for scheduled resume, amber pause for limited needing you, red wifi-off for host unreachable, check-circle for done, faint check for settled (with a dimmed title). Done rows add an inline `Acknowledge (A)` action. Separators are inset hairlines that disappear around hovered or selected rows.
 
-## Do's and Don'ts
+**Segmented control.** Used for Working / Done / Settled, MCP / Skills, ranges, and diff mode. It has a 2 px inset track and a raised thumb. Counts are shown in `fg-3`.
 
-### Do:
-- **Do** keep the rail and status bar stage-black in both themes, and let content surfaces step paper → panel → raised.
-- **Do** reserve cue amber for the primary action, the current cue, a waiting approval and focus; keep it at ≤5% of pixels.
-- **Do** pair every orb, dot and diff colour with a word, icon or sign.
-- **Do** use tabular numerals for every changing value, and mono for IDs, times, paths and cue numbers.
-- **Do** keep rows dense: 48 px thread rows, 32 px table rows, 28 px collapsed tool calls; 44 px touch targets on phone.
-- **Do** use the standby bar for anything that needs a decision, and toasts only for confirmation.
-- **Do** animate 150–250 ms, transform/opacity only, interruptibly; cut everything under reduced motion.
-- **Do** show provenance at the point of decision: host blobatar, harness chip, model, branch, and “where it runs” for every subagent and MCP target.
-- **Do** write error copy as “what happened + what to do”, naming the host and the still-running work.
+**Thread header.** Title (15/600), one provenance line, the state (orb or glyph plus a word), icon buttons for Terminal, Subagents and Changes, a secondary Stop button, and overflow. Below 640 px the model and branch drop from the provenance line first.
 
-### Don't:
-- **Don't** use a card as a page wrapper, nest cards, or put a shadow on a row, pane or button.
-- **Don't** use gradients, glows, glassmorphism, neon-on-black, or a purple “AI” accent.
-- **Don't** use pill buttons, oversized radii, display fonts in labels, or uppercase sentences.
-- **Don't** use a robot icon, a mascot, or an illustration system for agent identity.
-- **Don't** show a spinner in content or a button; use a layout skeleton or an orb.
-- **Don't** use saturated red/green as large fills or rely on red/green alone in diffs.
-- **Don't** put the primary action and a destructive action within 24 px on phone.
-- **Don't** make the phone a scaled-down desktop: no 3-pane miniature, no hover-only actions, no 12 px touch targets.
-- **Don't** expose secrets in the client, in errors, in logs or in a “copy config” blob; show “stored on <host>”.
-- **Don't** animate layout on scroll, page-load choreography, or more than one moving element per row.
+**Stream.** User messages are a right-aligned `fill` bubble with attachments and time beneath. Agent turns start with a small header (harness blobatar, "Claude Code on atlas · 12:03") and no bubble. Tool calls are 28 px rows (status glyph, verb, mono target, measured result) that expand into a bounded mono output well. A change set is the one bordered block in the stream: a header with totals and Review, file rows, and the first hunk inline. A delegated subagent appears as one bordered row that links into the tree. The live tail ends with a caret and a quiet "Writing · 61 tok/s" line.
+
+**Approval card.** It sits above the composer and contains a shield icon, "Codex on orion wants to run a command", provenance (subagent, folder, worktree), the exact command in a mono well, "Always allow ▾" on the left, and Deny and Approve on the right with shortcuts. It is never a modal. Offline, it stays visible with disabled actions and the sentence "Reconnect to approve or deny. Nothing runs until you do."
+
+**Composer + usage line.** A 12 px-radius field that names its target ("Reply to Claude Code on atlas"), with attach, mention, a model menu, and a send button that turns blue only when there is something to send. Underneath is one 11.5 px line: tokens · cost est. · tok/s · TTFT · active time, plus a context bar on the right. Cost is always labelled as an estimate.
+
+**Inspector: Subagents.** A real tree. The parent sits at the top, and children hang off 1 px elbow connectors. Each node shows state, title, elapsed time, a "host · harness" line with blobatars, a state/turn/token line, and a 3 px budget bar while running. Failed or cancelled children stay in the tree with their reason. The selected node expands into a key/value block (runs on, model, context handoff, budget, approvals, credential location).
+
+**Terminal panel.** A bottom panel inside the thread on a `bg-sunk` ground, following the theme rather than being a forced black terminal. It has session tabs, the size and viewer count, split and close controls. Prompts and branch names use `accent-tx`, passes and failures use `ok` and `danger`, and dim output uses `fg-3`.
+
+**Editor.** File tree with git markers and an "Agent changes" group pinned at the bottom, document tabs with a dirty dot, a path bar with a `Edit | vs HEAD | vs agent` segmented control and "Hand to agent", a scope strip that says whose changes these are and since when (with Revert file / Accept), and a code view with full-width diff bands and a sign column. The status bar is 26 px and neutral.
+
+**MCP & skills.** List and detail. The list shows health as a glyph plus word, transport, target summary, and a share glyph for servers defined on another machine. The detail starts with a credential row showing "Stored on atlas" / "Stored on orion" badges (key icon, never a value). The core is a **Where it runs** table: host, harness, delivery mechanism, status, switch. Unsupported targets stay in the table, disabled, with the reason. Conflicts are an amber-soft inline block with a single Resolve action. A "Shared with you" section names the host it comes from and the transport path.
+
+**Usage.** The auto-resume card comes first because it's the only thing that might need you. It shows a live countdown, Fail over…, Cancel auto-resume, and Resume now. Next is a six-column stat strip separated by hairlines, where each changing number carries a 56 px sparkline of real history. This is not the hero-metric template: there are no big tiles and no accent. Then the stacked bar chart with legend totals and a table toggle, active vs idle as one proportion bar with both numbers in text, limit meters (red at 100% plus "Limited", amber at 78%, neutral otherwise) with reset times, and a per-model table with right-aligned tabular numbers where an unknown price shows "—" instead of $0.00.
+
+**Pull request.** Header (title, number, state badge, `head → base`, commits, author, Open on GitHub), text tabs with a 2 px underline in `fg` (not accent), a conversation with review comments that quote their diff context, and per-comment Reply / Hand to agent buttons. Hand to agent opens a popover: this thread or a new thread, a note that the agent won't push without approval, and send. The right column shows checks (glyph, name, required, duration, View log, Re-run failed), reviewers, and the linked thread.
+
+**Settings.** A second-level nav (General, Appearance, Notifications, Shortcuts / Hosts, Devices, Providers / Account & relay) and a 760–880 px form column made of label/control rows separated by hairlines.
+- *Hosts:* a table with WSL distros indented under their Windows host as separate rows. Host detail lists harnesses with version, state, credential source, and Restart/Start.
+- *Devices:* a pair panel with the QR code (on white in both themes so it scans), an 8-character code, a live expiry countdown, scope checkboxes, Copy link and New code. A paired-devices table offers per-device Revoke.
+- *Providers (CLIProxyAPI):* base URL and Probe, the probe results as glyph + key + value, two separate secret rows (management key, access key), a models table with aliases and a custom alias badge, per-harness override switches (off means keep the harness's own credential) with the exact config path and a redacted preview diff, a verified test request, and "Apply and restart" that names the turn it will interrupt.
+
+**Command palette.** 620 px, 14 px radius, `dialog` shadow over a scrim. It has a context chip for the focused thread. The "This thread" group comes first (approve, deny, terminal, subagents, interrupt), then Threads, then Go to. Every row shows its shortcut, and the footer explains the keys and which hosts are being searched.
+
+**States.**
+- *Empty:* the list teaches what lands where and offers one action. The detail pane becomes "Start a thread" with host, harness and folder pickers and a composer.
+- *Loading:* layout-shaped skeletons, tab counts shown as "—", and "Connecting to atlas…" in the header. No spinners.
+- *Offline:* a neutral banner ("Offline · threads as of 12:04 · Reconnect"), the thread stays readable with "Stream paused at 12:04", the approval is visible but disabled with a reason, and the composer saves a draft.
+- *Error:* partial failure is stated as such ("Couldn't reach buildbox. Showing 3 of 4 hosts. Retry"). A thread that can't load gets a centred message that names the host, says whether the run may still be active, offers Retry and Open host, and has a Details disclosure (route, last event, status, correlation ID, Copy diagnostics).
+
+### Phone
+
+- **Shell.** Status-bar safe area, a nav bar with 44 px targets, a large title on top-level screens, and a 5-item tab bar (Inbox with badge, PRs, Usage, Hosts, Settings) with 24 px icons and 11 px labels. Compose lives in the nav bar, not in a floating button.
+- **Inbox.** A segmented control under the large title, 66 px rows (title 16/500, "host · harness" with the status word on one line), and Snoozed as a row that opens a sheet.
+- **Thread.** A pushed screen with a "‹ Inbox" back button, a 20/600 title, and a provenance + state line. The stream sticks to the live tail. A compact approval card sits above the composer with Details / Review (44 px). The usage line sits under the composer.
+- **Approval.** A bottom sheet with a grabber: who and where, the full command wrapping at word boundaries, a grouped list (folder, worktree, asked, "Always allow in this thread" switch), and Deny | Approve as two 44 px buttons in the bottom third.
+- **Terminal.** A full screen with the host, cwd and grid size, a "Sized to this phone" note, and a scrollable 44 px key bar (Esc, Tab, Ctrl latched, arrows, Paste).
+- **Pairing.** A consent screen: host identity (56 px blobatar), how the connection is made, signed-in identity, a grouped list of scope switches ("View threads" is locked on), included WSL hosts, a line saying credentials stay on the host, the expiry countdown, and a full-width "Pair this phone".
+- **Usage.** The paused-thread card first, with its countdown as the largest number on screen. Then a 2×2 stat group, one chart at a time behind a segmented control, and limit meters.
+
+## Identity and state
+
+- **Blobatars** (placeholder drawn in the prototype; production uses `blobatar@2.7.0`). Machine is a squircle, harness a circle, subagent a free shape. They're 14–18 px in rows, 32 px in host headers and 56 px on the phone pairing screen. They're always static, and they always sit next to the name, which carries the accessible label. Seeds follow the type-prefixed scheme in the old DESIGN.md (`machine:`, `harness:`, `subagent:`), so WSL distros get their own faces.
+- **Orbs** (placeholder; production uses `thinking-orbs`). Inline size is 14 px, with 20 px reserved for a large thread header. Running = orbit, queued = breathe, waiting for approval = still ring. Every terminal state is a static Lucide glyph instead. There's one orb per row and they're never used as a loader.
+- **Icons:** Lucide at 1.5 px stroke, 14/16 px in UI, 22–24 px on phone. Keyboard glyphs (⌘ ↵ ⌫ ⇧) are drawn as SVG so they render regardless of the font.
+
+## Removed from the previous system, and why
+
+| Removed | Reason |
+|---|---|
+| Prompt Book / stage-manager metaphor, cue/standby/strike vocabulary | It added a layer of translation between the user and the state words already defined in `docs/ux.md`. |
+| Amber cue gutter and numbered turns (01, 02…) | Row numbers carried no information, and amber attention bars made every thread look urgent. |
+| Stage-black rail and status bar in both themes | It was branding through chrome. The new silhouette comes from typography and the single accent. |
+| Orange "h4" logo block | The wordmark is undecided (`PRODUCT.md`), so lowercase text is honest until a mark exists. |
+| Pill/chip rows for host, harness, model, branch | Replaced by one provenance line, which reads faster and can truncate cleanly. |
+| Uppercase tracked labels | Replaced by sentence-case section headings. |
+| Mono for times, counts and cue numbers | Tabular figures in the sans do this job better. Mono is reserved for code. |
+
+## Resolved owner decisions
+
+1. **Accent hue:** 258° blue stays. "Blue means you" is the product rule; ownability comes from restraint, not from a different hue.
+2. **Terminal:** the panel follows the light/dark theme. It is a reading surface, not a costume, and it keeps the same tonal ground as diffs and code.
+3. **Hosts group:** the desktop sidebar keeps the group visible for up to six hosts and then collapses it behind a "N of M" summary row, so the destinations above stay fixed in place.
+
+## Implementation notes
+
+- Tokens, type and spacing here are the source of truth for `apps/ui/src/styles/tokens.css`; the `q-` component layer in `apps/ui/src/styles/quiet.css` ports the prototype one-for-one.
+- Geist and Geist Mono are self-hosted through `@fontsource-variable`. The prototype's placeholder blobatars and orbs are replaced by `@blobatar/react` and `thinking-orbs` with the seed scheme below.
+- New Phase 4–6 surfaces (Pull requests, MCP & skills, Usage, Settings, pairing) are static mock-mode shells until their wire protocol lands; they are marked at the top of each page module.

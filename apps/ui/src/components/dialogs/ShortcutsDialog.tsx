@@ -73,11 +73,11 @@ export function ShortcutsDialog() {
         <div className="grid gap-4 sm:grid-cols-2">
           {GROUPS.map((group) => (
             <section key={group.title} className="space-y-1">
-              <h3 className="text-label text-ink-faint">{group.title}</h3>
+              <h3 className="text-[12px] font-medium text-[var(--fg-3)]">{group.title}</h3>
               <dl className="divide-y divide-line/70">
                 {group.rows.map(([label, keys]) => (
                   <div key={label} className="flex items-center justify-between gap-2 py-1">
-                    <dt className="text-micro text-ink-muted">{label}</dt>
+                    <dt className="text-[12.5px] text-[var(--fg-2)]">{label}</dt>
                     <dd className="flex shrink-0 items-center gap-1">
                       {keys.split(" / ").map((part) => (
                         <Kbd key={part}>{part}</Kbd>
@@ -90,7 +90,7 @@ export function ShortcutsDialog() {
           ))}
         </div>
 
-        <p className="text-micro text-ink-faint">
+        <p className="text-[11.5px] text-[var(--fg-3)]">
           Browser-reserved combinations (Ctrl/Cmd N, T, W) are not intercepted. On the web build,
           use the rail or palette for those routes.
         </p>

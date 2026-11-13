@@ -27,7 +27,7 @@ const DEFAULT_MODELS: Record<HarnessKind, string> = {
   claude_code: "claude-sonnet-5-5",
   codex: "gpt-5.1-codex",
   opencode: "claude-sonnet-5-5",
-  antigravity: "gemini-3-pro",
+  antigravity: "gemini-4-argon-medium",
 };
 
 const HARNESSES: HarnessKind[] = ["claude_code", "codex", "opencode", "antigravity"];
@@ -43,8 +43,8 @@ function FieldLabel({
 }) {
   return (
     <label htmlFor={htmlFor} className="flex items-baseline justify-between">
-      <span className="text-label text-ink-faint">{children}</span>
-      {hint ? <span className="text-micro text-ink-faint">{hint}</span> : null}
+      <span className="text-[12px] text-[var(--fg-3)]">{children}</span>
+      {hint ? <span className="text-[11.5px] text-[var(--fg-3)]">{hint}</span> : null}
     </label>
   );
 }
@@ -150,7 +150,7 @@ export function NewThreadDialog() {
                   setModel(DEFAULT_MODELS[nextHarness]);
                 }
               }}
-              className="h-11 w-full rounded-sm border border-control-border bg-raised px-2 text-compact text-ink outline-none focus-visible:border-cue focus-visible:ring-2 focus-visible:ring-cue/40 md:h-[30px]"
+              className="h-7 w-full rounded-[6px] border-0 bg-raised px-2 text-[12.5px] text-ink shadow-[inset_0_0_0_1px_var(--line-2)] outline-none focus-visible:shadow-[inset_0_0_0_1px_var(--accent)]"
             >
               {onlineHosts.length === 0 ? <option value="">No online hosts</option> : null}
               {onlineHosts.map((option) => (
@@ -171,7 +171,7 @@ export function NewThreadDialog() {
                 setHarness(next);
                 setModel(DEFAULT_MODELS[next]);
               }}
-              className="h-11 w-full rounded-sm border border-control-border bg-raised px-2 text-compact text-ink outline-none focus-visible:border-cue focus-visible:ring-2 focus-visible:ring-cue/40 md:h-[30px]"
+              className="h-7 w-full rounded-[6px] border-0 bg-raised px-2 text-[12.5px] text-ink shadow-[inset_0_0_0_1px_var(--line-2)] outline-none focus-visible:shadow-[inset_0_0_0_1px_var(--accent)]"
             >
               {harnessChoices.map((option) => (
                 <option key={option} value={option}>
@@ -203,7 +203,7 @@ export function NewThreadDialog() {
             <FieldLabel htmlFor="new-thread-mode">Mode</FieldLabel>
             <select
               id="new-thread-mode"
-              className="h-11 w-full rounded-sm border border-control-border bg-raised px-2 text-compact text-ink outline-none focus-visible:border-cue focus-visible:ring-2 focus-visible:ring-cue/40 md:h-[30px]"
+              className="h-7 w-full rounded-[6px] border-0 bg-raised px-2 text-[12.5px] text-ink shadow-[inset_0_0_0_1px_var(--line-2)] outline-none focus-visible:shadow-[inset_0_0_0_1px_var(--accent)]"
               value={runtimeMode}
               onChange={(event) => setRuntimeMode(event.target.value as RuntimeMode)}
             >

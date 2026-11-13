@@ -17,11 +17,13 @@ import {
   SunMoonIcon,
 } from "lucide-react";
 import { useMemo } from "react";
+import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ALT, ENTER, MOD, SHIFT } from "@/components/common/Kbd";
 import {
   CommandDialog,
   CommandEmpty,
+  CommandFooter,
   CommandGroup,
   CommandInput,
   CommandItem,
@@ -29,6 +31,7 @@ import {
   CommandSeparator,
   CommandShortcut,
 } from "@/components/ui/command";
+import { glyphForThread } from "@/lib/agent";
 import { harnessLabel, machineSeed } from "@/lib/entities";
 import {
   acknowledgeThread,
@@ -70,16 +73,39 @@ export function CommandPalette() {
     action();
   };
 
+  const currentGlyph = current
+    ? glyphForThread(current, hosts[current.host]?.online ?? false)
+    : null;
+
   return (
     <CommandDialog
       open={open}
       onOpenChange={(value) => (value ? undefined : closePalette())}
       title="Command palette"
       description="Search threads, run a command, or move around h4rn."
-      className="max-sm:top-0 max-sm:left-0 max-sm:h-dvh max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-none sm:max-w-[560px]"
     >
-      <CommandInput placeholder="Search threads, hosts or commands…" autoFocus />
-      <CommandList className="max-h-[min(60dvh,420px)] max-sm:max-h-none">
+      <CommandInput
+        placeholder="Search threads, hosts, files, or commands"
+        autoFocus
+        trailing={
+          current ? (
+            <span className="q-pal-ctx">
+              {currentGlyph ? <AgentGlyph glyph={currentGlyph} size={12} /> : null}
+              <span
+                style={{
+                  maxWidth: 220,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {current.title}
+              </span>
+            </span>
+          ) : null
+        }
+      />
+      <CommandList>
         <CommandEmpty>
           No commands match that. Try a thread title, a host name, or a command.
         </CommandEmpty>
@@ -306,6 +332,23 @@ export function CommandPalette() {
           ) : null}
         </CommandGroup>
       </CommandList>
+      <CommandFooter>
+        <span>
+          <span className="q-kbd">↑</span> <span className="q-kbd">↓</span> Move
+        </span>
+        <span>
+          <span className="q-kbd">↵</span> Run
+        </span>
+        <span>
+          <span className="q-kbd">Esc</span> Close
+        </span>
+        <span style={{ flex: 1 }} />
+        <span>
+          Searches{" "}
+          {[...new Set(Object.values(hosts).map((host) => host.name))].slice(0, 3).join(", ") ||
+            "this machine"}
+        </span>
+      </CommandFooter>
     </CommandDialog>
   );
 }

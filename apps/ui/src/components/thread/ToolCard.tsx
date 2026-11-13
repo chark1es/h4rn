@@ -7,13 +7,6 @@ import { glyphForToolStatus } from "@/lib/agent";
 import { duration } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
-const STATUS_WORD: Record<ToolCall["status"], string> = {
-  running: "Running",
-  completed: "Completed",
-  failed: "Failed",
-  denied: "Denied",
-};
-
 function stringify(value: unknown): string {
   if (value === null) return "";
   if (typeof value === "string") return value;
@@ -24,76 +17,43 @@ function stringify(value: unknown): string {
   }
 }
 
+function verbOf(name: string): string {
+  const word = name.replace(/[_-]+/g, " ");
+  return word.length > 9 ? `${word.slice(0, 8)}…` : word;
+}
+
 export function ToolCard({ toolCall }: { toolCall: ToolCall }) {
   const [open, setOpen] = useState(false);
   const glyph = glyphForToolStatus(toolCall.status);
   const elapsed = toolCall.completed_at
     ? Date.parse(toolCall.completed_at) - Date.parse(toolCall.started_at)
     : null;
-  const hasDetails = toolCall.input !== null || Boolean(toolCall.output);
+  const output = [toolCall.input !== null ? stringify(toolCall.input) : "", toolCall.output ?? ""]
+    .filter(Boolean)
+    .join("\n\n");
+  const hasDetails = output.length > 0;
+  const failed = toolCall.status === "failed" || toolCall.status === "denied";
 
   return (
-    <div
-      className={cn(
-        "rounded-sm border border-line/80 bg-panel/60",
-        toolCall.status === "failed" || toolCall.status === "denied"
-          ? "border-strike/40 bg-strike-tint/40"
-          : "",
-      )}
-    >
+    <>
       <button
         type="button"
-        className="flex h-7 w-full items-center gap-2 px-2 text-left transition-colors duration-[var(--dur-instant)] hover:bg-panel"
+        className="q-tool"
         aria-expanded={open}
         disabled={!hasDetails}
         onClick={() => setOpen((value) => !value)}
       >
-        <ChevronRightIcon
-          className={cn("size-3 shrink-0 text-ink-faint transition-transform", open && "rotate-90")}
-          aria-hidden
-        />
-        <AgentGlyph glyph={glyph} size={14} />
-        <span className="shrink-0 font-mono text-micro font-medium text-ink">{toolCall.name}</span>
-        <span className="min-w-0 flex-1 truncate font-mono text-micro text-ink-muted">
-          {toolCall.summary}
+        <span className={cn("st", failed && "q-danger")}>
+          <AgentGlyph glyph={glyph} size={14} />
         </span>
-        <span
-          className={cn(
-            "hidden shrink-0 text-micro sm:inline",
-            toolCall.status === "failed" || toolCall.status === "denied"
-              ? "text-strike-ink"
-              : "text-ink-faint",
-          )}
-        >
-          {STATUS_WORD[toolCall.status]}
+        <span className="verb">{verbOf(toolCall.name)}</span>
+        <span className="tgt">{toolCall.summary}</span>
+        <span className={cn("m q-num", failed && "q-danger")}>
+          {elapsed !== null && elapsed >= 0 ? duration(elapsed) : toolCall.status}
         </span>
-        {elapsed !== null && elapsed >= 0 ? (
-          <span className="shrink-0 font-mono text-micro tabular text-ink-faint">
-            {duration(elapsed)}
-          </span>
-        ) : null}
+        <ChevronRightIcon className="q-icon s14 chev" strokeWidth={1.5} aria-hidden />
       </button>
-
-      {open && hasDetails ? (
-        <div className="space-y-2 border-t border-line/70 px-2 py-2">
-          {toolCall.input !== null ? (
-            <div>
-              <p className="mb-1 text-label text-ink-faint">Arguments</p>
-              <pre className="max-h-40 overflow-auto rounded-sm bg-raised p-2 font-mono text-micro leading-relaxed text-ink-muted">
-                {stringify(toolCall.input)}
-              </pre>
-            </div>
-          ) : null}
-          {toolCall.output ? (
-            <div>
-              <p className="mb-1 text-label text-ink-faint">Result</p>
-              <pre className="max-h-52 overflow-auto rounded-sm bg-raised p-2 font-mono text-micro leading-relaxed text-ink-muted">
-                {toolCall.output}
-              </pre>
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
+      {open && hasDetails ? <div className="q-tool-out">{output}</div> : null}
+    </>
   );
 }
