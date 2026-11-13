@@ -41,12 +41,15 @@ use tokio::task::JoinHandle;
 
 use crate::auth::{TokenStore, authorize};
 use crate::blobs::{BlobError, BlobStore};
-use crate::forge::{ForgeChecksUpdate, ForgeService, ForgeServiceError};
+use crate::forge::ForgeService;
 use crate::fs::{FsError, FsService};
 use crate::hosts::HostInventory;
 use crate::remote::{RemoteAudit, SessionOrigin};
 use crate::terminal::{Attached, OpenSpec, TerminalManager, run_viewer};
 use crate::threads::ThreadManager;
+
+mod forward;
+mod handlers;
 
 /// Capacity of one connection's outbound queue.
 pub const OUTBOUND_CAPACITY: usize = 128;
@@ -335,6 +338,10 @@ struct Connection {
     origin: SessionOrigin,
     /// One filesystem watcher subscription per requested workspace.
     watches: HashMap<String, JoinHandle<()>>,
+    /// Set when this connection must be dropped with a resume hint.
+    overflowed: Arc<AtomicBool>,
+    /// Wakes the writer loop when a forwarder overflows this connection.
+    notify: Arc<Notify>,
 }
 
 impl Connection {
@@ -377,40 +384,6 @@ where
         Arc::clone(&last_seq),
     ));
 
-    let subscription = state.manager.subscribe();
-    let forward = tokio::spawn(forward_loop(
-        subscription,
-        tx.clone(),
-        Arc::clone(&topics),
-        Arc::clone(&ready),
-        Arc::clone(&overflowed),
-        Arc::clone(&notify),
-        Arc::clone(&last_seq),
-    ));
-    let proxy_forward = tokio::spawn(proxy_forward_loop(
-        state.proxy.subscribe(),
-        tx.clone(),
-        Arc::clone(&ready),
-        Arc::clone(&overflowed),
-        Arc::clone(&notify),
-    ));
-    let forge_forward = tokio::spawn(forge_forward_loop(
-        state.forge.subscribe(),
-        tx.clone(),
-        Arc::clone(&ready),
-        Arc::clone(&last_seq),
-    ));
-    let skills_forward = tokio::spawn(skills_forward_loop(
-        state.skills.subscribe(),
-        tx.clone(),
-        Arc::clone(&topics),
-        Arc::clone(&ready),
-        Arc::clone(&overflowed),
-        Arc::clone(&notify),
-        Arc::clone(&last_seq),
-        state.skills.host().clone(),
-    ));
-
     let viewer_id = state.terminals.next_viewer_id();
     let mut connection = Connection {
         state,
@@ -423,7 +396,24 @@ where
         tx: tx.clone(),
         origin,
         watches: HashMap::new(),
+        overflowed: Arc::clone(&overflowed),
+        notify: Arc::clone(&notify),
     };
+    let journal_forward = tokio::spawn(forward::forward_loop(
+        connection.state.manager.subscribe(),
+        forward::ForwardContext::for_connection(&connection),
+        forward::ForwardConfig::JOURNAL,
+        |event: crate::journal::WireEvent, _last| {
+            forward::ForwardFrame::durable(
+                ServerFrame::Event {
+                    seq: event.seq,
+                    event: event.event,
+                },
+                event.seq,
+            )
+        },
+    ));
+    let service_forwards = handlers::spawn_forwarders(&connection);
 
     while let Some(message) = stream.next().await {
         let Ok(message) = message else {
@@ -450,10 +440,10 @@ where
         }
     }
 
-    forward.abort();
-    proxy_forward.abort();
-    forge_forward.abort();
-    skills_forward.abort();
+    journal_forward.abort();
+    for handle in service_forwards {
+        handle.abort();
+    }
     // Detaching a socket never kills a terminal; it only removes this
     // connection's viewers so the PTY keeps running for the next attach.
     connection
@@ -518,1080 +508,671 @@ impl Connection {
             ));
         }
 
-        let result: Result<ResponseBody, ProtoError> = match body {
-            ClientRequest::Hello {
-                protocol_version,
-                device,
-            } => {
-                if protocol_version != PROTOCOL_VERSION {
-                    Err(ProtoError::new(
-                        ProtoErrorCode::Unsupported,
-                        format!(
-                            "protocol version {protocol_version} is not supported (daemon speaks {PROTOCOL_VERSION})"
-                        ),
-                        "Update the client or the daemon so both speak the same protocol major",
-                    ))
-                } else {
-                    self.hello_done = true;
-                    self.ready.store(true, Ordering::Relaxed);
-                    self.device = Some(device.clone());
-                    *self
-                        .topics
-                        .write()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = vec![Topic::All];
-                    Ok(ResponseBody::Hello {
-                        protocol_version: PROTOCOL_VERSION,
-                        server_version: crate::version().to_owned(),
-                        device_id: device.device_id,
-                        hosts: self.state.hosts.summaries(),
-                    })
-                }
-            }
-            ClientRequest::ListHosts => Ok(ResponseBody::Hosts {
-                hosts: self.state.hosts.summaries(),
-            }),
-            ClientRequest::ListThreads { filter } => Ok(ResponseBody::Threads {
-                threads: self.state.manager.list_threads(&filter).await,
-            }),
-            ClientRequest::GetThread {
-                thread_id,
-                since_seq,
-            } => self
-                .state
-                .manager
-                .get_thread(&thread_id, since_seq)
-                .await
-                .map(|snapshot| ResponseBody::Thread {
-                    summary: snapshot.summary,
-                    events: snapshot
-                        .events
-                        .into_iter()
-                        .map(|event| SeqEvent {
-                            seq: event.seq,
-                            event: event.event,
+        let result: Result<ResponseBody, ProtoError> = match handlers::Service::of(&body) {
+            Some(service) => service.handle(self, body).await,
+            None => match body {
+                ClientRequest::Hello {
+                    protocol_version,
+                    device,
+                } => {
+                    if protocol_version != PROTOCOL_VERSION {
+                        Err(ProtoError::new(
+                            ProtoErrorCode::Unsupported,
+                            format!(
+                                "protocol version {protocol_version} is not supported (daemon speaks {PROTOCOL_VERSION})"
+                            ),
+                            "Update the client or the daemon so both speak the same protocol major",
+                        ))
+                    } else {
+                        self.hello_done = true;
+                        self.ready.store(true, Ordering::Relaxed);
+                        self.device = Some(device.clone());
+                        *self
+                            .topics
+                            .write()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = vec![Topic::All];
+                        Ok(ResponseBody::Hello {
+                            protocol_version: PROTOCOL_VERSION,
+                            server_version: crate::version().to_owned(),
+                            device_id: device.device_id,
+                            hosts: self.state.hosts.summaries(),
                         })
-                        .collect(),
-                    next_seq: snapshot.next_seq,
-                })
-                .map_err(crate::threads::ManagerError::into_proto),
-            ClientRequest::CreateThread {
-                host,
-                harness,
-                workspace_path,
-                model,
-                prompt,
-                attachments,
-                runtime_mode,
-                worktree,
-            } => {
-                let request = crate::threads::NewThread {
+                    }
+                }
+                ClientRequest::ListHosts => Ok(ResponseBody::Hosts {
+                    hosts: self.state.hosts.summaries(),
+                }),
+                ClientRequest::ListThreads { filter } => Ok(ResponseBody::Threads {
+                    threads: self.state.manager.list_threads(&filter).await,
+                }),
+                ClientRequest::GetThread {
+                    thread_id,
+                    since_seq,
+                } => self
+                    .state
+                    .manager
+                    .get_thread(&thread_id, since_seq)
+                    .await
+                    .map(|snapshot| ResponseBody::Thread {
+                        summary: snapshot.summary,
+                        events: snapshot
+                            .events
+                            .into_iter()
+                            .map(|event| SeqEvent {
+                                seq: event.seq,
+                                event: event.event,
+                            })
+                            .collect(),
+                        next_seq: snapshot.next_seq,
+                    })
+                    .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::CreateThread {
                     host,
                     harness,
-                    workspace_path: workspace_path.clone(),
+                    workspace_path,
                     model,
                     prompt,
                     attachments,
                     runtime_mode,
                     worktree,
-                };
-                match self.state.manager.create_thread(request).await {
-                    Ok(created) => {
-                        // A thread's workspace becomes an authorised IDE root.
-                        // This is the only way a workspace is added at runtime,
-                        // so IDE mode cannot reach a path the user never opened.
-                        if let Err(error) = self.state.fs.allow_root(&workspace_path) {
-                            tracing::warn!(%workspace_path, %error, "IDE root not authorised");
+                } => {
+                    let request = crate::threads::NewThread {
+                        host,
+                        harness,
+                        workspace_path: workspace_path.clone(),
+                        model,
+                        prompt,
+                        attachments,
+                        runtime_mode,
+                        worktree,
+                    };
+                    match self.state.manager.create_thread(request).await {
+                        Ok(created) => {
+                            // A thread's workspace becomes an authorised IDE root.
+                            // This is the only way a workspace is added at runtime,
+                            // so IDE mode cannot reach a path the user never opened.
+                            if let Err(error) = self.state.fs.allow_root(&workspace_path) {
+                                tracing::warn!(%workspace_path, %error, "IDE root not authorised");
+                            }
+                            self.audit(
+                                "thread.created",
+                                Some("thread"),
+                                Some(created.thread_id.as_ref()),
+                                json!({"workspace": workspace_path}),
+                            );
+                            Ok(ResponseBody::ThreadCreated {
+                                thread_id: created.thread_id,
+                                turn_id: created.turn_id,
+                                summary: created.summary,
+                            })
                         }
-                        self.audit(
-                            "thread.created",
-                            Some("thread"),
-                            Some(created.thread_id.as_ref()),
-                            json!({"workspace": workspace_path}),
-                        );
-                        Ok(ResponseBody::ThreadCreated {
-                            thread_id: created.thread_id,
-                            turn_id: created.turn_id,
-                            summary: created.summary,
-                        })
+                        Err(error) => Err(error.into_proto()),
                     }
-                    Err(error) => Err(error.into_proto()),
                 }
-            }
-            ClientRequest::SendMessage {
-                thread_id,
-                text,
-                attachments,
-            } => self
-                .state
-                .manager
-                .send_message(&thread_id, text, attachments)
-                .await
-                .map(|accepted| ResponseBody::MessageAccepted {
-                    thread_id: accepted.thread_id,
-                    turn_id: accepted.turn_id,
-                    seq: accepted.seq,
-                })
-                .map_err(crate::threads::ManagerError::into_proto),
-            ClientRequest::Interrupt { thread_id } => self
-                .state
-                .manager
-                .interrupt(&thread_id)
-                .await
-                .map(|()| ResponseBody::Ack)
-                .map_err(crate::threads::ManagerError::into_proto),
-            ClientRequest::RespondApproval {
-                thread_id,
-                approval_id,
-                decision,
-                option_id,
-            } => self
-                .state
-                .manager
-                .respond_approval(
-                    &thread_id,
-                    &approval_id,
+                ClientRequest::SendMessage {
+                    thread_id,
+                    text,
+                    attachments,
+                } => self
+                    .state
+                    .manager
+                    .send_message(&thread_id, text, attachments)
+                    .await
+                    .map(|accepted| ResponseBody::MessageAccepted {
+                        thread_id: accepted.thread_id,
+                        turn_id: accepted.turn_id,
+                        seq: accepted.seq,
+                    })
+                    .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::Interrupt { thread_id } => self
+                    .state
+                    .manager
+                    .interrupt(&thread_id)
+                    .await
+                    .map(|()| ResponseBody::Ack)
+                    .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::RespondApproval {
+                    thread_id,
+                    approval_id,
                     decision,
                     option_id,
-                    self.device_id(),
-                )
-                .await
-                .map(|()| ResponseBody::Ack)
-                .map_err(crate::threads::ManagerError::into_proto),
-            ClientRequest::SetThreadTab {
-                thread_id,
-                tab,
-                pinned,
-            } => self
-                .state
-                .manager
-                .set_thread_tab(&thread_id, tab, pinned)
-                .await
-                .map(|_| ResponseBody::Ack)
-                .map_err(crate::threads::ManagerError::into_proto),
-            ClientRequest::Snooze { thread_id, until } => self
-                .state
-                .manager
-                .snooze(&thread_id, until)
-                .await
-                .map(|_| ResponseBody::Ack)
-                .map_err(crate::threads::ManagerError::into_proto),
-            ClientRequest::Subscribe { topics, since_seq } => {
-                *self
-                    .topics
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = topics;
-                match since_seq {
-                    None => {
-                        self.ready.store(true, Ordering::Relaxed);
-                        Ok(ResponseBody::Ack)
-                    }
-                    Some(since) => {
-                        // Hold the manager's append lock across read + enqueue
-                        // + ready so no event falls between replay and live.
-                        let guard = self.state.manager.lock_append().await;
-                        let replay = self.state.manager.replay_global_since(since).await;
-                        if let Ok(events) = &replay {
-                            for event in events {
-                                let frame = ServerFrame::Event {
-                                    seq: event.seq,
-                                    event: event.event.clone(),
-                                };
-                                if let Ok(text) = serde_json::to_string(&frame)
-                                    && self.send(Outbound::Text(text)).await.is_err()
-                                {
-                                    break;
-                                }
-                            }
-                            if let Some(last) = events.last() {
-                                self.last_seq.store(last.seq, Ordering::Relaxed);
-                            }
+                } => self
+                    .state
+                    .manager
+                    .respond_approval(
+                        &thread_id,
+                        &approval_id,
+                        decision,
+                        option_id,
+                        self.device_id(),
+                    )
+                    .await
+                    .map(|()| ResponseBody::Ack)
+                    .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::SetThreadTab {
+                    thread_id,
+                    tab,
+                    pinned,
+                } => self
+                    .state
+                    .manager
+                    .set_thread_tab(&thread_id, tab, pinned)
+                    .await
+                    .map(|_| ResponseBody::Ack)
+                    .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::Snooze { thread_id, until } => self
+                    .state
+                    .manager
+                    .snooze(&thread_id, until)
+                    .await
+                    .map(|_| ResponseBody::Ack)
+                    .map_err(crate::threads::ManagerError::into_proto),
+                ClientRequest::Subscribe { topics, since_seq } => {
+                    *self
+                        .topics
+                        .write()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = topics;
+                    match since_seq {
+                        None => {
                             self.ready.store(true, Ordering::Relaxed);
+                            Ok(ResponseBody::Ack)
                         }
-                        drop(guard);
-                        replay
-                            .map(|_| ResponseBody::Ack)
-                            .map_err(crate::threads::ManagerError::into_proto)
+                        Some(since) => {
+                            // Hold the manager's append lock across read + enqueue
+                            // + ready so no event falls between replay and live.
+                            let guard = self.state.manager.lock_append().await;
+                            let replay = self.state.manager.replay_global_since(since).await;
+                            if let Ok(events) = &replay {
+                                for event in events {
+                                    let frame = ServerFrame::Event {
+                                        seq: event.seq,
+                                        event: event.event.clone(),
+                                    };
+                                    if let Ok(text) = serde_json::to_string(&frame)
+                                        && self.send(Outbound::Text(text)).await.is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                                if let Some(last) = events.last() {
+                                    self.last_seq.store(last.seq, Ordering::Relaxed);
+                                }
+                                self.ready.store(true, Ordering::Relaxed);
+                            }
+                            drop(guard);
+                            replay
+                                .map(|_| ResponseBody::Ack)
+                                .map_err(crate::threads::ManagerError::into_proto)
+                        }
                     }
                 }
-            }
-            ClientRequest::TerminalOpen {
-                thread_id,
-                host,
-                cwd,
-                shell,
-                args,
-                cols,
-                rows,
-            } => match self.require_device() {
-                Ok(device) => {
-                    let opened = self
-                        .state
-                        .terminals
-                        .open(
-                            OpenSpec {
-                                thread_id,
-                                host,
-                                cwd,
-                                shell,
-                                args,
-                                cols,
-                                rows,
-                            },
-                            &device,
-                        )
-                        .await;
-                    if let Ok(terminal) = &opened {
-                        self.audit(
+                ClientRequest::TerminalOpen {
+                    thread_id,
+                    host,
+                    cwd,
+                    shell,
+                    args,
+                    cols,
+                    rows,
+                } => match self.require_device() {
+                    Ok(device) => {
+                        let opened = self
+                            .state
+                            .terminals
+                            .open(
+                                OpenSpec {
+                                    thread_id,
+                                    host,
+                                    cwd,
+                                    shell,
+                                    args,
+                                    cols,
+                                    rows,
+                                },
+                                &device,
+                            )
+                            .await;
+                        if let Ok(terminal) = &opened {
+                            self.audit(
                             "terminal.opened",
                             Some("terminal"),
                             Some(terminal.terminal_id.as_ref()),
                             json!({"thread_id": terminal.thread_id.as_ref().map(|id| id.as_ref())}),
                         );
+                        }
+                        opened
+                            .map(|terminal| ResponseBody::TerminalOpened { terminal })
+                            .map_err(crate::terminal::TerminalError::into_proto)
                     }
-                    opened
-                        .map(|terminal| ResponseBody::TerminalOpened { terminal })
-                        .map_err(crate::terminal::TerminalError::into_proto)
-                }
-                Err(error) => Err(error),
-            },
-            ClientRequest::TerminalAttach {
-                terminal_id,
-                cols,
-                rows,
-            } => self
-                .state
-                .terminals
-                .attach(&terminal_id, self.viewer_id, self.tx.clone(), cols, rows)
-                .map(|attached| {
-                    let Attached {
-                        terminal,
-                        snapshot,
-                        output,
-                        viewer,
-                        session,
-                    } = attached;
-                    let start_seq = snapshot.seq;
-                    let ansi = snapshot.ansi;
-                    // The viewer task frames output and applies backpressure
-                    // until this connection closes or the terminal exits.
-                    tokio::spawn(run_viewer(
-                        session,
-                        self.viewer_id,
-                        viewer,
-                        output,
-                        start_seq,
-                    ));
-                    ResponseBody::TerminalAttached {
-                        terminal,
-                        snapshot: ansi,
-                        start_seq,
-                    }
-                })
-                .map_err(crate::terminal::TerminalError::into_proto),
-            ClientRequest::TerminalList { thread_id } => Ok(ResponseBody::Terminals {
-                terminals: self.state.terminals.list(thread_id.as_ref()),
-            }),
-            ClientRequest::TerminalResize {
-                terminal_id,
-                cols,
-                rows,
-            } => self
-                .state
-                .terminals
-                .resize(&terminal_id, self.viewer_id, cols, rows)
-                .map(|()| ResponseBody::Ack)
-                .map_err(crate::terminal::TerminalError::into_proto),
-            ClientRequest::TerminalAck {
-                terminal_id,
-                up_to_chunk,
-            } => self
-                .state
-                .terminals
-                .ack(&terminal_id, self.viewer_id, up_to_chunk)
-                .map(|()| ResponseBody::Ack)
-                .map_err(crate::terminal::TerminalError::into_proto),
-            ClientRequest::TerminalClose { terminal_id } => self
-                .state
-                .terminals
-                .close(&terminal_id)
-                .await
-                .map(|()| ResponseBody::Ack)
-                .map_err(crate::terminal::TerminalError::into_proto),
-            // ------------------------------------------------------------------
-            // IDE mode: workspace-scoped filesystem, search, watch and git.
-            // Every path is resolved daemon-side; the client never sends an
-            // absolute target.
-            // ------------------------------------------------------------------
-            ClientRequest::FsList {
-                host,
-                workspace,
-                path,
-            } => {
-                if let Some(error) = self.local_host_error(&host) {
-                    return Some(error_frame(id, error));
-                }
-                let fs = Arc::clone(&self.state.fs);
-                fs_block(fs, move |fs| fs.list(&workspace, &path))
-                    .await
-                    .map(|listing| ResponseBody::FsListing { listing })
-            }
-            ClientRequest::FsRead {
-                host,
-                workspace,
-                path,
-            } => {
-                if let Some(error) = self.local_host_error(&host) {
-                    return Some(error_frame(id, error));
-                }
-                let fs = Arc::clone(&self.state.fs);
-                fs_block(fs, move |fs| fs.read(&workspace, &path))
-                    .await
-                    .map(|file| ResponseBody::FsFile { file })
-            }
-            ClientRequest::FsWrite {
-                host,
-                workspace,
-                path,
-                content,
-                base_etag,
-            } => {
-                if let Some(error) = self.local_host_error(&host) {
-                    return Some(error_frame(id, error));
-                }
-                let fs = Arc::clone(&self.state.fs);
-                let device = self.device_id().map(|id| id.as_str().to_owned());
-                let audit_path = path.clone();
-                let audit_workspace = workspace.clone();
-                let written = fs_block(fs, move |fs| {
-                    fs.write(
-                        &workspace,
-                        &path,
-                        &content,
-                        base_etag.as_deref(),
-                        device.as_deref(),
-                    )
-                })
-                .await;
-                if written.is_ok() {
-                    self.audit(
-                        "file.written",
-                        Some("file"),
-                        Some(&audit_path),
-                        json!({"workspace": audit_workspace}),
-                    );
-                }
-                written.map(|result| ResponseBody::FsWritten { result })
-            }
-            ClientRequest::FsCreate {
-                host,
-                workspace,
-                path,
-                kind,
-            } => {
-                if let Some(error) = self.local_host_error(&host) {
-                    return Some(error_frame(id, error));
-                }
-                let fs = Arc::clone(&self.state.fs);
-                let device = self.device_id().map(|id| id.as_str().to_owned());
-                fs_block(fs, move |fs| {
-                    fs.create(&workspace, &path, kind, device.as_deref())
-                })
-                .await
-                .map(|entry| ResponseBody::FsEntryCreated { entry })
-            }
-            ClientRequest::FsRename {
-                host,
-                workspace,
-                from,
-                to,
-            } => {
-                if let Some(error) = self.local_host_error(&host) {
-                    return Some(error_frame(id, error));
-                }
-                let fs = Arc::clone(&self.state.fs);
-                let device = self.device_id().map(|id| id.as_str().to_owned());
-                fs_block(fs, move |fs| {
-                    fs.rename(&workspace, &from, &to, device.as_deref())
-                })
-                .await
-                .map(|entry| ResponseBody::FsEntryCreated { entry })
-            }
-            ClientRequest::FsDelete {
-                host,
-                workspace,
-                path,
-            } => {
-                if let Some(error) = self.local_host_error(&host) {
-                    return Some(error_frame(id, error));
-                }
-                let fs = Arc::clone(&self.state.fs);
-                let device = self.device_id().map(|id| id.as_str().to_owned());
-                fs_block(fs, move |fs| {
-                    fs.delete(&workspace, &path, device.as_deref())
-                })
-                .await
-                .map(|result| ResponseBody::FsDeleted { result })
-            }
-            ClientRequest::FsRestore {
-                host,
-                workspace,
-                trash_id,
-            } => {
-                if let Some(error) = self.local_host_error(&host) {
-                    return Some(error_frame(id, error));
-                }
-                let fs = Arc::clone(&self.state.fs);
-                let device = self.device_id().map(|id| id.as_str().to_owned());
-                fs_block(fs, move |fs| {
-                    fs.restore(&workspace, &trash_id, device.as_deref())
-                })
-                .await
-                .map(|path| ResponseBody::FsRestored { path })
-            }
-            ClientRequest::FsSearch {
-                host,
-                workspace,
-                query,
-                regex,
-                case_sensitive,
-                glob,
-                max_results,
-            } => {
-                if let Some(error) = self.local_host_error(&host) {
-                    return Some(error_frame(id, error));
-                }
-                let fs = Arc::clone(&self.state.fs);
-                let searched = tokio::task::spawn_blocking(move || {
-                    fs.search(
-                        &workspace,
-                        &query,
-                        regex,
-                        case_sensitive,
-                        glob.as_deref(),
-                        max_results,
-                    )
-                })
-                .await;
-                let (search_id, mut rx) = match searched {
-                    Ok(Ok(value)) => value,
-                    Ok(Err(error)) => return Some(error_frame(id, error.into_proto())),
-                    Err(error) => {
-                        return Some(error_frame(
-                            id,
-                            ProtoError::plain(
-                                ProtoErrorCode::Internal,
-                                format!("search task failed: {error}"),
-                            ),
+                    Err(error) => Err(error),
+                },
+                ClientRequest::TerminalAttach {
+                    terminal_id,
+                    cols,
+                    rows,
+                } => self
+                    .state
+                    .terminals
+                    .attach(&terminal_id, self.viewer_id, self.tx.clone(), cols, rows)
+                    .map(|attached| {
+                        let Attached {
+                            terminal,
+                            snapshot,
+                            output,
+                            viewer,
+                            session,
+                        } = attached;
+                        let start_seq = snapshot.seq;
+                        let ansi = snapshot.ansi;
+                        // The viewer task frames output and applies backpressure
+                        // until this connection closes or the terminal exits.
+                        tokio::spawn(run_viewer(
+                            session,
+                            self.viewer_id,
+                            viewer,
+                            output,
+                            start_seq,
                         ));
+                        ResponseBody::TerminalAttached {
+                            terminal,
+                            snapshot: ansi,
+                            start_seq,
+                        }
+                    })
+                    .map_err(crate::terminal::TerminalError::into_proto),
+                ClientRequest::TerminalList { thread_id } => Ok(ResponseBody::Terminals {
+                    terminals: self.state.terminals.list(thread_id.as_ref()),
+                }),
+                ClientRequest::TerminalResize {
+                    terminal_id,
+                    cols,
+                    rows,
+                } => self
+                    .state
+                    .terminals
+                    .resize(&terminal_id, self.viewer_id, cols, rows)
+                    .map(|()| ResponseBody::Ack)
+                    .map_err(crate::terminal::TerminalError::into_proto),
+                ClientRequest::TerminalAck {
+                    terminal_id,
+                    up_to_chunk,
+                } => self
+                    .state
+                    .terminals
+                    .ack(&terminal_id, self.viewer_id, up_to_chunk)
+                    .map(|()| ResponseBody::Ack)
+                    .map_err(crate::terminal::TerminalError::into_proto),
+                ClientRequest::TerminalClose { terminal_id } => self
+                    .state
+                    .terminals
+                    .close(&terminal_id)
+                    .await
+                    .map(|()| ResponseBody::Ack)
+                    .map_err(crate::terminal::TerminalError::into_proto),
+                // ------------------------------------------------------------------
+                // IDE mode: workspace-scoped filesystem, search, watch and git.
+                // Every path is resolved daemon-side; the client never sends an
+                // absolute target.
+                // ------------------------------------------------------------------
+                ClientRequest::FsList {
+                    host,
+                    workspace,
+                    path,
+                } => {
+                    if let Some(error) = self.local_host_error(&host) {
+                        return Some(error_frame(id, error));
                     }
-                };
+                    let fs = Arc::clone(&self.state.fs);
+                    fs_block(fs, move |fs| fs.list(&workspace, &path))
+                        .await
+                        .map(|listing| ResponseBody::FsListing { listing })
+                }
+                ClientRequest::FsRead {
+                    host,
+                    workspace,
+                    path,
+                } => {
+                    if let Some(error) = self.local_host_error(&host) {
+                        return Some(error_frame(id, error));
+                    }
+                    let fs = Arc::clone(&self.state.fs);
+                    fs_block(fs, move |fs| fs.read(&workspace, &path))
+                        .await
+                        .map(|file| ResponseBody::FsFile { file })
+                }
+                ClientRequest::FsWrite {
+                    host,
+                    workspace,
+                    path,
+                    content,
+                    base_etag,
+                } => {
+                    if let Some(error) = self.local_host_error(&host) {
+                        return Some(error_frame(id, error));
+                    }
+                    let fs = Arc::clone(&self.state.fs);
+                    let device = self.device_id().map(|id| id.as_str().to_owned());
+                    let audit_path = path.clone();
+                    let audit_workspace = workspace.clone();
+                    let written = fs_block(fs, move |fs| {
+                        fs.write(
+                            &workspace,
+                            &path,
+                            &content,
+                            base_etag.as_deref(),
+                            device.as_deref(),
+                        )
+                    })
+                    .await;
+                    if written.is_ok() {
+                        self.audit(
+                            "file.written",
+                            Some("file"),
+                            Some(&audit_path),
+                            json!({"workspace": audit_workspace}),
+                        );
+                    }
+                    written.map(|result| ResponseBody::FsWritten { result })
+                }
+                ClientRequest::FsCreate {
+                    host,
+                    workspace,
+                    path,
+                    kind,
+                } => {
+                    if let Some(error) = self.local_host_error(&host) {
+                        return Some(error_frame(id, error));
+                    }
+                    let fs = Arc::clone(&self.state.fs);
+                    let device = self.device_id().map(|id| id.as_str().to_owned());
+                    fs_block(fs, move |fs| {
+                        fs.create(&workspace, &path, kind, device.as_deref())
+                    })
+                    .await
+                    .map(|entry| ResponseBody::FsEntryCreated { entry })
+                }
+                ClientRequest::FsRename {
+                    host,
+                    workspace,
+                    from,
+                    to,
+                } => {
+                    if let Some(error) = self.local_host_error(&host) {
+                        return Some(error_frame(id, error));
+                    }
+                    let fs = Arc::clone(&self.state.fs);
+                    let device = self.device_id().map(|id| id.as_str().to_owned());
+                    fs_block(fs, move |fs| {
+                        fs.rename(&workspace, &from, &to, device.as_deref())
+                    })
+                    .await
+                    .map(|entry| ResponseBody::FsEntryCreated { entry })
+                }
+                ClientRequest::FsDelete {
+                    host,
+                    workspace,
+                    path,
+                } => {
+                    if let Some(error) = self.local_host_error(&host) {
+                        return Some(error_frame(id, error));
+                    }
+                    let fs = Arc::clone(&self.state.fs);
+                    let device = self.device_id().map(|id| id.as_str().to_owned());
+                    fs_block(fs, move |fs| {
+                        fs.delete(&workspace, &path, device.as_deref())
+                    })
+                    .await
+                    .map(|result| ResponseBody::FsDeleted { result })
+                }
+                ClientRequest::FsRestore {
+                    host,
+                    workspace,
+                    trash_id,
+                } => {
+                    if let Some(error) = self.local_host_error(&host) {
+                        return Some(error_frame(id, error));
+                    }
+                    let fs = Arc::clone(&self.state.fs);
+                    let device = self.device_id().map(|id| id.as_str().to_owned());
+                    fs_block(fs, move |fs| {
+                        fs.restore(&workspace, &trash_id, device.as_deref())
+                    })
+                    .await
+                    .map(|path| ResponseBody::FsRestored { path })
+                }
+                ClientRequest::FsSearch {
+                    host,
+                    workspace,
+                    query,
+                    regex,
+                    case_sensitive,
+                    glob,
+                    max_results,
+                } => {
+                    if let Some(error) = self.local_host_error(&host) {
+                        return Some(error_frame(id, error));
+                    }
+                    let fs = Arc::clone(&self.state.fs);
+                    let searched = tokio::task::spawn_blocking(move || {
+                        fs.search(
+                            &workspace,
+                            &query,
+                            regex,
+                            case_sensitive,
+                            glob.as_deref(),
+                            max_results,
+                        )
+                    })
+                    .await;
+                    let (search_id, mut rx) = match searched {
+                        Ok(Ok(value)) => value,
+                        Ok(Err(error)) => return Some(error_frame(id, error.into_proto())),
+                        Err(error) => {
+                            return Some(error_frame(
+                                id,
+                                ProtoError::plain(
+                                    ProtoErrorCode::Internal,
+                                    format!("search task failed: {error}"),
+                                ),
+                            ));
+                        }
+                    };
 
-                let tx = self.tx.clone();
-                let seq = self.last_seq.load(Ordering::Relaxed);
-                let response_id = search_id.clone();
-                tokio::spawn(async move {
-                    while let Some(batch) = rx.recv().await {
-                        let frame = ServerFrame::Event {
-                            seq,
-                            event: Event::FsSearchBatch {
-                                search_id: batch.search_id,
-                                results: batch.results,
-                                done: batch.done,
-                                truncated: batch.truncated,
-                            },
-                        };
-                        let Ok(text) = serde_json::to_string(&frame) else {
-                            continue;
-                        };
-                        if tx.send(Outbound::Text(text)).await.is_err() {
-                            break;
+                    let tx = self.tx.clone();
+                    let seq = self.last_seq.load(Ordering::Relaxed);
+                    let response_id = search_id.clone();
+                    tokio::spawn(async move {
+                        while let Some(batch) = rx.recv().await {
+                            let frame = ServerFrame::Event {
+                                seq,
+                                event: Event::FsSearchBatch {
+                                    search_id: batch.search_id,
+                                    results: batch.results,
+                                    done: batch.done,
+                                    truncated: batch.truncated,
+                                },
+                            };
+                            let Ok(text) = serde_json::to_string(&frame) else {
+                                continue;
+                            };
+                            if tx.send(Outbound::Text(text)).await.is_err() {
+                                break;
+                            }
                         }
-                    }
-                });
-                Ok(ResponseBody::FsSearchStarted {
-                    search_id: response_id,
-                })
-            }
-            ClientRequest::FsWatch {
-                host,
-                workspace,
-                paths,
-            } => {
-                if let Some(error) = self.local_host_error(&host) {
-                    return Some(error_frame(id, error));
+                    });
+                    Ok(ResponseBody::FsSearchStarted {
+                        search_id: response_id,
+                    })
                 }
-                let fs = Arc::clone(&self.state.fs);
-                let requested = workspace.clone();
-                let watched = tokio::task::spawn_blocking(move || fs.watch(&requested)).await;
-                let root = match watched {
-                    Ok(Ok(value)) => value,
-                    Ok(Err(error)) => return Some(error_frame(id, error.into_proto())),
-                    Err(error) => {
-                        return Some(error_frame(
-                            id,
-                            ProtoError::plain(
-                                ProtoErrorCode::Internal,
-                                format!("watcher task failed: {error}"),
-                            ),
-                        ));
-                    }
-                };
-                let canonical = root.display().to_string();
-                let mut rx = self.state.fs.subscribe();
-                let tx = self.tx.clone();
-                let seq = self.last_seq.load(Ordering::Relaxed);
-                let filter = paths.clone();
-                let event_workspace = canonical.clone();
-                if let Some(previous) = self.watches.remove(&workspace) {
-                    previous.abort();
-                }
-                let handle = tokio::spawn(async move {
-                    while let Ok(change) = rx.recv().await {
-                        if change.workspace != root {
-                            continue;
-                        }
-                        let inside = filter.is_empty()
-                            || filter.iter().any(|path| {
-                                change.path == *path || change.path.starts_with(&format!("{path}/"))
-                            });
-                        if !inside {
-                            continue;
-                        }
-                        let frame = ServerFrame::Event {
-                            seq,
-                            event: Event::FsChanged {
-                                workspace: event_workspace.clone(),
-                                path: change.path,
-                                change: change.change,
-                                at: chrono::Utc::now(),
-                            },
-                        };
-                        let Ok(text) = serde_json::to_string(&frame) else {
-                            continue;
-                        };
-                        if tx.send(Outbound::Text(text)).await.is_err() {
-                            break;
-                        }
-                    }
-                });
-                self.watches.insert(workspace, handle);
-                Ok(ResponseBody::FsWatching {
-                    workspace: canonical,
+                ClientRequest::FsWatch {
+                    host,
+                    workspace,
                     paths,
-                })
-            }
-            ClientRequest::FsUnwatch { workspace } => {
-                if let Some(handle) = self.watches.remove(&workspace) {
-                    handle.abort();
-                }
-                Ok(ResponseBody::Ack)
-            }
-            ClientRequest::FsDiff {
-                host,
-                workspace,
-                path,
-                against,
-            } => {
-                if let Some(error) = self.local_host_error(&host) {
-                    return Some(error_frame(id, error));
-                }
-                let fs = Arc::clone(&self.state.fs);
-                fs_block(fs, move |fs| fs.diff(&workspace, &path, &against))
-                    .await
-                    .map(|diff| ResponseBody::FsDiff { diff })
-            }
-            ClientRequest::FsTurnChanges {
-                host,
-                workspace,
-                thread_id,
-                turn_id,
-            } => {
-                if let Some(error) = self.local_host_error(&host) {
-                    return Some(error_frame(id, error));
-                }
-                let fs = Arc::clone(&self.state.fs);
-                fs_block(fs, move |fs| {
-                    fs.turn_changes(&workspace, &thread_id, &turn_id)
-                })
-                .await
-                .map(|changes| ResponseBody::FsTurnChanges { changes })
-            }
-            ClientRequest::BeginUpload {
-                name,
-                size,
-                mime_hint,
-            } => self
-                .state
-                .blobs
-                .begin_upload(&name, size, mime_hint)
-                .map(|upload| ResponseBody::UploadStarted { upload })
-                .map_err(BlobError::into_proto),
-            ClientRequest::CommitUpload { upload_id, blake3 } => self
-                .state
-                .blobs
-                .commit_upload(&upload_id, &blake3)
-                .await
-                .map(|blob| ResponseBody::UploadCommitted { blob })
-                .map_err(BlobError::into_proto),
-            ClientRequest::AbortUpload { upload_id } => self
-                .state
-                .blobs
-                .abort_upload(&upload_id)
-                .map(|()| ResponseBody::Ack)
-                .map_err(BlobError::into_proto),
-            ClientRequest::QueryUpload { upload_id } => self
-                .state
-                .blobs
-                .query_upload(&upload_id)
-                .map(|upload| ResponseBody::UploadStatus { upload })
-                .map_err(BlobError::into_proto),
-            ClientRequest::GetBlob {
-                id,
-                range,
-                thumbnail,
-            } => match self.state.blobs.download(&id, range, thumbnail).await {
-                Ok((download, bytes)) => {
-                    let reply = response_frame(
-                        reply_id,
-                        ResponseBody::Blob {
-                            download: download.clone(),
-                        },
-                    );
-                    if self.send(Outbound::Text(reply)).await.is_err() {
-                        return None;
+                } => {
+                    if let Some(error) = self.local_host_error(&host) {
+                        return Some(error_frame(id, error));
                     }
-                    for (seq, chunk) in bytes.chunks(crate::blobs::DOWNLOAD_CHUNK_SIZE).enumerate()
-                    {
-                        let frame = BinaryFrame {
-                            kind: BinaryKind::BlobChunk,
-                            stream_id: download.stream_id,
-                            seq: seq as u64,
-                            payload: chunk.to_vec(),
+                    let fs = Arc::clone(&self.state.fs);
+                    let requested = workspace.clone();
+                    let watched = tokio::task::spawn_blocking(move || fs.watch(&requested)).await;
+                    let root = match watched {
+                        Ok(Ok(value)) => value,
+                        Ok(Err(error)) => return Some(error_frame(id, error.into_proto())),
+                        Err(error) => {
+                            return Some(error_frame(
+                                id,
+                                ProtoError::plain(
+                                    ProtoErrorCode::Internal,
+                                    format!("watcher task failed: {error}"),
+                                ),
+                            ));
                         }
-                        .encode();
-                        if self.send(Outbound::Binary(frame)).await.is_err() {
+                    };
+                    let canonical = root.display().to_string();
+                    let mut rx = self.state.fs.subscribe();
+                    let tx = self.tx.clone();
+                    let seq = self.last_seq.load(Ordering::Relaxed);
+                    let filter = paths.clone();
+                    let event_workspace = canonical.clone();
+                    if let Some(previous) = self.watches.remove(&workspace) {
+                        previous.abort();
+                    }
+                    let handle = tokio::spawn(async move {
+                        while let Ok(change) = rx.recv().await {
+                            if change.workspace != root {
+                                continue;
+                            }
+                            let inside = filter.is_empty()
+                                || filter.iter().any(|path| {
+                                    change.path == *path
+                                        || change.path.starts_with(&format!("{path}/"))
+                                });
+                            if !inside {
+                                continue;
+                            }
+                            let frame = ServerFrame::Event {
+                                seq,
+                                event: Event::FsChanged {
+                                    workspace: event_workspace.clone(),
+                                    path: change.path,
+                                    change: change.change,
+                                    at: chrono::Utc::now(),
+                                },
+                            };
+                            let Ok(text) = serde_json::to_string(&frame) else {
+                                continue;
+                            };
+                            if tx.send(Outbound::Text(text)).await.is_err() {
+                                break;
+                            }
+                        }
+                    });
+                    self.watches.insert(workspace, handle);
+                    Ok(ResponseBody::FsWatching {
+                        workspace: canonical,
+                        paths,
+                    })
+                }
+                ClientRequest::FsUnwatch { workspace } => {
+                    if let Some(handle) = self.watches.remove(&workspace) {
+                        handle.abort();
+                    }
+                    Ok(ResponseBody::Ack)
+                }
+                ClientRequest::FsDiff {
+                    host,
+                    workspace,
+                    path,
+                    against,
+                } => {
+                    if let Some(error) = self.local_host_error(&host) {
+                        return Some(error_frame(id, error));
+                    }
+                    let fs = Arc::clone(&self.state.fs);
+                    fs_block(fs, move |fs| fs.diff(&workspace, &path, &against))
+                        .await
+                        .map(|diff| ResponseBody::FsDiff { diff })
+                }
+                ClientRequest::FsTurnChanges {
+                    host,
+                    workspace,
+                    thread_id,
+                    turn_id,
+                } => {
+                    if let Some(error) = self.local_host_error(&host) {
+                        return Some(error_frame(id, error));
+                    }
+                    let fs = Arc::clone(&self.state.fs);
+                    fs_block(fs, move |fs| {
+                        fs.turn_changes(&workspace, &thread_id, &turn_id)
+                    })
+                    .await
+                    .map(|changes| ResponseBody::FsTurnChanges { changes })
+                }
+                ClientRequest::BeginUpload {
+                    name,
+                    size,
+                    mime_hint,
+                } => self
+                    .state
+                    .blobs
+                    .begin_upload(&name, size, mime_hint)
+                    .map(|upload| ResponseBody::UploadStarted { upload })
+                    .map_err(BlobError::into_proto),
+                ClientRequest::CommitUpload { upload_id, blake3 } => self
+                    .state
+                    .blobs
+                    .commit_upload(&upload_id, &blake3)
+                    .await
+                    .map(|blob| ResponseBody::UploadCommitted { blob })
+                    .map_err(BlobError::into_proto),
+                ClientRequest::AbortUpload { upload_id } => self
+                    .state
+                    .blobs
+                    .abort_upload(&upload_id)
+                    .map(|()| ResponseBody::Ack)
+                    .map_err(BlobError::into_proto),
+                ClientRequest::QueryUpload { upload_id } => self
+                    .state
+                    .blobs
+                    .query_upload(&upload_id)
+                    .map(|upload| ResponseBody::UploadStatus { upload })
+                    .map_err(BlobError::into_proto),
+                ClientRequest::GetBlob {
+                    id,
+                    range,
+                    thumbnail,
+                } => match self.state.blobs.download(&id, range, thumbnail).await {
+                    Ok((download, bytes)) => {
+                        let reply = response_frame(
+                            reply_id,
+                            ResponseBody::Blob {
+                                download: download.clone(),
+                            },
+                        );
+                        if self.send(Outbound::Text(reply)).await.is_err() {
                             return None;
                         }
+                        for (seq, chunk) in
+                            bytes.chunks(crate::blobs::DOWNLOAD_CHUNK_SIZE).enumerate()
+                        {
+                            let frame = BinaryFrame {
+                                kind: BinaryKind::BlobChunk,
+                                stream_id: download.stream_id,
+                                seq: seq as u64,
+                                payload: chunk.to_vec(),
+                            }
+                            .encode();
+                            if self.send(Outbound::Binary(frame)).await.is_err() {
+                                return None;
+                            }
+                        }
+                        return None;
                     }
-                    return None;
-                }
-                Err(error) => Err(error.into_proto()),
+                    Err(error) => Err(error.into_proto()),
+                },
+                other => Err(not_implemented(&other)),
             },
-            // ----------------------------------------------------------
-            // Phase 5: CLIProxyAPI profiles (ADR-015).
-            // ----------------------------------------------------------
-            ClientRequest::ListProxyProfiles => Ok(ResponseBody::ProxyProfiles {
-                profiles: self.state.proxy.profiles(),
-            }),
-            ClientRequest::AddProxyProfile { profile } => self
-                .state
-                .proxy
-                .add_profile(profile)
-                .map(|profile| ResponseBody::ProxyProfile { profile })
-                .map_err(h4rn_proxy::ProxyError::into_proto),
-            ClientRequest::UpdateProxyProfile { profile_id, patch } => self
-                .state
-                .proxy
-                .update_profile(&profile_id, patch)
-                .map(|profile| ResponseBody::ProxyProfile { profile })
-                .map_err(h4rn_proxy::ProxyError::into_proto),
-            ClientRequest::RemoveProxyProfile { profile_id } => self
-                .state
-                .proxy
-                .remove_profile(&profile_id)
-                .map(|()| ResponseBody::Ack)
-                .map_err(h4rn_proxy::ProxyError::into_proto),
-            ClientRequest::TestProxyProfile { profile_id } => self
-                .state
-                .proxy
-                .test(&profile_id)
-                .await
-                .map(|report| ResponseBody::ProxyTested { report })
-                .map_err(h4rn_proxy::ProxyError::into_proto),
-            ClientRequest::ListProxyModels { profile_id } => self
-                .state
-                .proxy
-                .models(&profile_id)
-                .await
-                .map(|catalog| ResponseBody::ProxyModels { catalog })
-                .map_err(h4rn_proxy::ProxyError::into_proto),
-            ClientRequest::SetProxyHarnessOverride {
-                profile_id,
-                harness,
-                enabled,
-                default_model,
-            } => self
-                .state
-                .proxy
-                .set_harness_override(&profile_id, harness, enabled, default_model)
-                .map(|profile| ResponseBody::ProxyProfile { profile })
-                .map_err(h4rn_proxy::ProxyError::into_proto),
-            ClientRequest::ListProxyLimits { profile_id } => self
-                .state
-                .proxy
-                .limits(&profile_id)
-                .await
-                .map(|limits| ResponseBody::ProxyLimits { limits })
-                .map_err(h4rn_proxy::ProxyError::into_proto),
-            ClientRequest::PickProxyFailover {
-                profile_id,
-                current_model,
-                policy,
-            } => self
-                .state
-                .proxy
-                .pick_failover(&profile_id, &current_model, &policy)
-                .await
-                .map(|choice| ResponseBody::ProxyFailover { choice })
-                .map_err(h4rn_proxy::ProxyError::into_proto),
-            ClientRequest::ForgeListAccounts => {
-                let (accounts, capabilities) = self.state.forge.list_accounts();
-                Ok(ResponseBody::ForgeAccounts {
-                    accounts,
-                    capabilities,
-                })
-            }
-            ClientRequest::ForgeAddAccount {
-                forge,
-                base_url,
-                token,
-                username,
-                source,
-            } => self
-                .state
-                .forge
-                .add_account(forge, &base_url, &token, username, source)
-                .await
-                .map(|account| ResponseBody::ForgeAccount { account })
-                .map_err(ForgeServiceError::into_proto),
-            ClientRequest::ForgeRemoveAccount { account_id } => self
-                .state
-                .forge
-                .remove_account(&account_id)
-                .map(|()| ResponseBody::Ack)
-                .map_err(ForgeServiceError::into_proto),
-            ClientRequest::ForgeDetectRepo { workspace } => self
-                .state
-                .forge
-                .detect_repo(&workspace)
-                .map(|repos| ResponseBody::ForgeRepos { repos })
-                .map_err(ForgeServiceError::into_proto),
-            ClientRequest::ForgeListPrs {
-                account_id,
-                repo,
-                filter,
-                page,
-            } => self
-                .state
-                .forge
-                .list_prs(account_id.as_deref(), &repo, &filter, page)
-                .await
-                .map(|result| ResponseBody::ForgePrs {
-                    prs: result.prs,
-                    page: result.page,
-                    has_more: result.has_more,
-                })
-                .map_err(ForgeServiceError::into_proto),
-            ClientRequest::ForgeGetPr {
-                account_id,
-                repo,
-                number,
-            } => self
-                .state
-                .forge
-                .get_pr(account_id.as_deref(), &repo, number)
-                .await
-                .map(|pr| ResponseBody::ForgePr { pr })
-                .map_err(ForgeServiceError::into_proto),
-            ClientRequest::ForgeGetPrDiff {
-                account_id,
-                repo,
-                number,
-                page,
-                per_page,
-            } => self
-                .state
-                .forge
-                .get_diff(account_id.as_deref(), &repo, number, page, per_page)
-                .await
-                .map(|diff| ResponseBody::ForgeDiff { diff })
-                .map_err(ForgeServiceError::into_proto),
-            ClientRequest::ForgeListPrComments {
-                account_id,
-                repo,
-                number,
-            } => self
-                .state
-                .forge
-                .list_comments(account_id.as_deref(), &repo, number)
-                .await
-                .map(|page| ResponseBody::ForgeComments { page })
-                .map_err(ForgeServiceError::into_proto),
-            ClientRequest::ForgeListChecks {
-                account_id,
-                repo,
-                number,
-            } => self
-                .state
-                .forge
-                .list_checks(account_id.as_deref(), &repo, number)
-                .await
-                .map(|checks| ResponseBody::ForgeChecks { checks })
-                .map_err(ForgeServiceError::into_proto),
-            ClientRequest::ForgeReply {
-                account_id,
-                repo,
-                number,
-                thread_id,
-                comment_id,
-                body,
-            } => {
-                let result = self
-                    .state
-                    .forge
-                    .reply(
-                        account_id.as_deref(),
-                        &repo,
-                        number,
-                        thread_id.as_deref(),
-                        &comment_id,
-                        &body,
-                    )
-                    .await;
-                if result.is_ok() {
-                    self.audit(
-                        "forge.reply",
-                        Some("forge_pr"),
-                        Some(&format!("{}#{number}", repo.full_name())),
-                        json!({"thread": thread_id, "comment": comment_id, "chars": body.len()}),
-                    );
-                }
-                result
-                    .map(|comment| ResponseBody::ForgeReviewCommentPosted { comment })
-                    .map_err(ForgeServiceError::into_proto)
-            }
-            ClientRequest::ForgeComment {
-                account_id,
-                repo,
-                number,
-                body,
-            } => {
-                let result = self
-                    .state
-                    .forge
-                    .create_comment(account_id.as_deref(), &repo, number, &body)
-                    .await;
-                if result.is_ok() {
-                    self.audit(
-                        "forge.comment",
-                        Some("forge_pr"),
-                        Some(&format!("{}#{number}", repo.full_name())),
-                        json!({"chars": body.len()}),
-                    );
-                }
-                result
-                    .map(|comment| ResponseBody::ForgeCommentPosted { comment })
-                    .map_err(ForgeServiceError::into_proto)
-            }
-            ClientRequest::ForgeOpenPr {
-                thread_id,
-                repo,
-                title,
-                body,
-                base,
-            } => {
-                let result = self
-                    .state
-                    .forge
-                    .open_pr(&self.state.manager, &thread_id, repo, &title, &body, &base)
-                    .await;
-                if let Ok(pr) = &result {
-                    self.audit(
-                        "forge.open_pr",
-                        Some("forge_pr"),
-                        Some(&format!(
-                            "{}#{}",
-                            pr.summary.repo.full_name(),
-                            pr.summary.number
-                        )),
-                        json!({"thread": thread_id, "base": base}),
-                    );
-                }
-                result
-                    .map(|pr| ResponseBody::ForgePrOpened { pr })
-                    .map_err(ForgeServiceError::into_proto)
-            }
-            ClientRequest::ForgeHandPrToAgent {
-                account_id,
-                repo,
-                number,
-                thread_id,
-                target,
-            } => {
-                if let Some(target) = &target
-                    && let Some(error) = self.local_host_error(&target.host)
-                {
-                    Err(error)
-                } else {
-                    self.state
-                        .forge
-                        .hand_pr_to_agent(
-                            &self.state.manager,
-                            account_id.as_deref(),
-                            &repo,
-                            number,
-                            thread_id.as_ref(),
-                            target,
-                        )
-                        .await
-                        .map(|handoff| ResponseBody::ForgeHandoff { handoff })
-                        .map_err(ForgeServiceError::into_proto)
-                }
-            }
-            ClientRequest::SkillsList { host } => {
-                if let Some(error) = self.local_host_error(&host) {
-                    return Some(error_frame(id, error));
-                }
-                self.state
-                    .skills
-                    .list()
-                    .await
-                    .map(|inventory| ResponseBody::Skills { inventory })
-                    .map_err(h4rn_skills::SkillError::into_proto)
-            }
-            ClientRequest::SkillsAdd {
-                host,
-                source,
-                harnesses,
-                name,
-            } => {
-                if let Some(error) = self.local_host_error(&host) {
-                    return Some(error_frame(id, error));
-                }
-                self.state
-                    .skills
-                    .add(&source, &harnesses, name.as_deref())
-                    .await
-                    .map(|skill| ResponseBody::SkillAdded { skill })
-                    .map_err(h4rn_skills::SkillError::into_proto)
-            }
-            ClientRequest::SkillsUpdate {
-                host,
-                skill_id,
-                source,
-            } => {
-                if let Some(error) = self.local_host_error(&host) {
-                    return Some(error_frame(id, error));
-                }
-                self.state
-                    .skills
-                    .update(&skill_id, &source)
-                    .await
-                    .map(|skill| ResponseBody::SkillAdded { skill })
-                    .map_err(h4rn_skills::SkillError::into_proto)
-            }
-            ClientRequest::SkillsRemove { host, skill_id } => {
-                if let Some(error) = self.local_host_error(&host) {
-                    return Some(error_frame(id, error));
-                }
-                self.state
-                    .skills
-                    .remove(&skill_id)
-                    .await
-                    .map(|()| ResponseBody::Ack)
-                    .map_err(h4rn_skills::SkillError::into_proto)
-            }
-            ClientRequest::SkillsSetEnabled {
-                host,
-                skill_id,
-                harness,
-                enabled,
-            } => {
-                if let Some(error) = self.local_host_error(&host) {
-                    return Some(error_frame(id, error));
-                }
-                self.state
-                    .skills
-                    .set_enabled(&skill_id, harness, enabled)
-                    .await
-                    .map(|skill| ResponseBody::SkillAdded { skill })
-                    .map_err(h4rn_skills::SkillError::into_proto)
-            }
-            ClientRequest::SkillsImportPreview { host } => {
-                if let Some(error) = self.local_host_error(&host) {
-                    return Some(error_frame(id, error));
-                }
-                self.state
-                    .skills
-                    .import_preview()
-                    .await
-                    .map(|preview| ResponseBody::SkillsImportPreview { preview })
-                    .map_err(h4rn_skills::SkillError::into_proto)
-            }
-            ClientRequest::SkillsImportCommit {
-                host,
-                candidate_ids,
-            } => {
-                if let Some(error) = self.local_host_error(&host) {
-                    return Some(error_frame(id, error));
-                }
-                self.state
-                    .skills
-                    .import_commit(&candidate_ids)
-                    .await
-                    .map(|_| ResponseBody::Ack)
-                    .map_err(h4rn_skills::SkillError::into_proto)
-            }
-            ClientRequest::SkillsConflicts { host } => {
-                if let Some(error) = self.local_host_error(&host) {
-                    return Some(error_frame(id, error));
-                }
-                self.state
-                    .skills
-                    .conflicts()
-                    .await
-                    .map(|conflicts| ResponseBody::SkillConflicts { conflicts })
-                    .map_err(h4rn_skills::SkillError::into_proto)
-            }
-            ClientRequest::SkillsResolveConflict {
-                host,
-                conflict_id,
-                resolution,
-            } => {
-                if let Some(error) = self.local_host_error(&host) {
-                    return Some(error_frame(id, error));
-                }
-                self.state
-                    .skills
-                    .resolve_conflict(&conflict_id, resolution)
-                    .await
-                    .map(|()| ResponseBody::Ack)
-                    .map_err(h4rn_skills::SkillError::into_proto)
-            }
-            ClientRequest::SkillsSyncNow => self
-                .state
-                .skills
-                .sync_now()
-                .await
-                .map(|status| ResponseBody::SkillSyncStatus { status })
-                .map_err(h4rn_skills::SkillError::into_proto),
-            ClientRequest::SkillsDiff {
-                host,
-                skill_id,
-                from_version,
-                to_version,
-            } => {
-                if let Some(error) = self.local_host_error(&host) {
-                    return Some(error_frame(id, error));
-                }
-                self.state
-                    .skills
-                    .diff(&skill_id, from_version.as_deref(), to_version.as_deref())
-                    .await
-                    .map(|diff| ResponseBody::SkillDiff { diff })
-                    .map_err(h4rn_skills::SkillError::into_proto)
-            }
-            other => Err(not_implemented(&other)),
         };
 
         Some(match result {
@@ -1671,209 +1252,6 @@ impl Connection {
 
     async fn send(&self, message: Outbound) -> Result<(), mpsc::error::SendError<Outbound>> {
         self.tx.send(message).await
-    }
-}
-
-async fn forward_loop(
-    mut subscription: tokio::sync::broadcast::Receiver<crate::journal::WireEvent>,
-    tx: mpsc::Sender<Outbound>,
-    topics: Arc<RwLock<Vec<Topic>>>,
-    ready: Arc<AtomicBool>,
-    overflowed: Arc<AtomicBool>,
-    notify: Arc<Notify>,
-    last_seq: Arc<AtomicU64>,
-) {
-    loop {
-        let event = match subscription.recv().await {
-            Ok(event) => event,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
-                tracing::warn!(missed, "client fell behind the event broadcast");
-                overflowed.store(true, Ordering::Relaxed);
-                notify.notify_waiters();
-                return;
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-        };
-
-        if !ready.load(Ordering::Relaxed) {
-            continue;
-        }
-        let subscribed = {
-            let topics = topics
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            topics
-                .iter()
-                .any(|topic| matches!(topic, Topic::All | Topic::Threads))
-        };
-        if !subscribed {
-            continue;
-        }
-
-        last_seq.store(event.seq, Ordering::Relaxed);
-        let frame = ServerFrame::Event {
-            seq: event.seq,
-            event: event.event,
-        };
-        let Ok(text) = serde_json::to_string(&frame) else {
-            continue;
-        };
-        match tx.try_send(Outbound::Text(text)) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                tracing::warn!("client outbound queue is full; dropping the connection");
-                overflowed.store(true, Ordering::Relaxed);
-                notify.notify_waiters();
-                return;
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => return,
-        }
-    }
-}
-
-async fn proxy_forward_loop(
-    mut subscription: tokio::sync::broadcast::Receiver<h4rn_protocol::ProxyEvent>,
-    tx: mpsc::Sender<Outbound>,
-    ready: Arc<AtomicBool>,
-    overflowed: Arc<AtomicBool>,
-    notify: Arc<Notify>,
-) {
-    loop {
-        let event = match subscription.recv().await {
-            Ok(event) => event,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
-                tracing::warn!(missed, "client fell behind the proxy event broadcast");
-                overflowed.store(true, Ordering::Relaxed);
-                notify.notify_waiters();
-                return;
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-        };
-        if !ready.load(Ordering::Relaxed) {
-            continue;
-        }
-        let frame = ServerFrame::ProxyEvent { event };
-        let Ok(text) = serde_json::to_string(&frame) else {
-            continue;
-        };
-        match tx.try_send(Outbound::Text(text)) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                tracing::warn!("client outbound queue is full; dropping the connection");
-                overflowed.store(true, Ordering::Relaxed);
-                notify.notify_waiters();
-                return;
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => return,
-        }
-    }
-}
-
-async fn forge_forward_loop(
-    mut updates: tokio::sync::broadcast::Receiver<ForgeChecksUpdate>,
-    tx: mpsc::Sender<Outbound>,
-    ready: Arc<AtomicBool>,
-    last_seq: Arc<AtomicU64>,
-) {
-    loop {
-        let update = match updates.recv().await {
-            Ok(update) => update,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-        };
-        if !ready.load(Ordering::Relaxed) {
-            continue;
-        }
-        let frame = ServerFrame::Event {
-            // Checks updates are transient: they carry the durable sequence
-            // this connection has already reached, not a new journal row.
-            seq: last_seq.load(Ordering::Relaxed),
-            event: Event::ForgeChecksUpdated {
-                repo: update.repo,
-                number: update.number,
-                checks: update.checks,
-            },
-        };
-        let Ok(text) = serde_json::to_string(&frame) else {
-            continue;
-        };
-        match tx.try_send(Outbound::Text(text)) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                // The connection's main forward loop will report the overflow
-                // with a resume hint; dropping the update is safe.
-                return;
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => return,
-        }
-    }
-}
-
-/// Forwards skill notifications as transient events.
-///
-/// Skills are not part of the durable thread journal: a client re-lists after
-/// `skills_changed`, so the frame carries the last durable sequence rather than
-/// inventing one (the same rule as [`Event::FsChanged`]).
-#[allow(clippy::too_many_arguments)]
-async fn skills_forward_loop(
-    mut subscription: tokio::sync::broadcast::Receiver<h4rn_skills::SkillNotice>,
-    tx: mpsc::Sender<Outbound>,
-    topics: Arc<RwLock<Vec<Topic>>>,
-    ready: Arc<AtomicBool>,
-    overflowed: Arc<AtomicBool>,
-    notify: Arc<Notify>,
-    last_seq: Arc<AtomicU64>,
-    host: h4rn_protocol::HostId,
-) {
-    loop {
-        let notice = match subscription.recv().await {
-            Ok(notice) => notice,
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
-                tracing::warn!(missed, "client fell behind the skill broadcast");
-                overflowed.store(true, Ordering::Relaxed);
-                notify.notify_waiters();
-                return;
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
-        };
-        if !ready.load(Ordering::Relaxed) {
-            continue;
-        }
-        let subscribed = {
-            let topics = topics
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            topics
-                .iter()
-                .any(|topic| matches!(topic, Topic::All | Topic::Skills))
-        };
-        if !subscribed {
-            continue;
-        }
-        let event = match notice {
-            h4rn_skills::SkillNotice::Changed => Event::SkillsChanged {
-                host: host.clone(),
-                at: chrono::Utc::now(),
-            },
-            h4rn_skills::SkillNotice::Sync(status) => Event::SyncStatus(status),
-        };
-        let frame = ServerFrame::Event {
-            seq: last_seq.load(Ordering::Relaxed),
-            event,
-        };
-        let Ok(text) = serde_json::to_string(&frame) else {
-            continue;
-        };
-        match tx.try_send(Outbound::Text(text)) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                tracing::warn!("client outbound queue is full; dropping the connection");
-                overflowed.store(true, Ordering::Relaxed);
-                notify.notify_waiters();
-                return;
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => return,
-        }
     }
 }
 
