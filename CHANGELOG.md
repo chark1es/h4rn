@@ -5,6 +5,37 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### Phase 3 — mobile
+
+- **Android/iOS shell** (`apps/mobile`): Tauri v2 app `dev.h4rn.app` that loads the same React
+  bundle as desktop, with min SDK 26, target SDK 37, iOS 16, scaffold icons and the `h4rn://`
+  URL scheme. Native customisations live in `apps/mobile/native/android/` and are copied over
+  the ignored generated project.
+- **Pairing** (`apps/ui/src/lib/platform/mobile.ts`): a mobile-only adapter added with one import
+  in `main.tsx`. It accepts `h4rn://connect?daemon=…&token=…` on cold and warm starts, scans
+  pairing QR codes through `tauri-plugin-barcode-scanner`, stores the pairing in the Android
+  Keystore and localStorage, and keeps the token out of the URL. Desktop and browser builds are
+  unchanged.
+- **Keystore secret store** (`SecretStorePlugin.kt`): AES-256/GCM key in the Android Keystore
+  behind `secret_get` / `secret_set` / `secret_delete`; invalidated keys are dropped so the app
+  can pair again. iOS returns an explicit unimplemented error rather than falling back to
+  plaintext.
+- **Native integration**: edge-to-edge window with `env(safe-area-inset-*)`, hardware back mapped
+  onto WebView history, and a network security config that allows cleartext only for loopback and
+  emulator host aliases in release (LAN hosts only in debug).
+- **Build pipeline** (`scripts/mobile-android.sh`): `init`, `build`, `install`, `run`,
+  `screenshot`, `logs` and `daemon` commands. Builds one debug APK per ABI (x86_64 for the
+  emulator, aarch64 for phones); `run` starts a fake-harness daemon, wires
+  `adb reverse tcp:47800 tcp:47800`, launches through a pairing deep link, screenshots and dumps
+  logcat.
+- **CI**: `mobile-android` builds both APKs on Linux with Temurin 21, SDK 36 and NDK
+  27.1.12297006; `mobile-ios` builds an unsigned simulator app on `macos-latest`. TestFlight
+  signing requirements and the current Android/iOS limitations are documented in
+  `docs/mobile.md`.
+- **Verified on the Android emulator**: connect screen, deep-link pairing, online inbox,
+  fake-harness thread with streamed output, Keystore cold-start reuse, QR camera permission,
+  safe-area layout and hardware back. Screenshots are in `apps/mobile/screenshots/`.
+
 ### Phase 2 — more harnesses, terminal, attachments and IDE mode
 
 - **Codex adapter** (`h4rn-harness/src/codex.rs`): long-lived `codex app-server` sessions over
