@@ -93,6 +93,7 @@ const initialTheme = (): Theme => {
 };
 
 function createInitialState(): AppState {
+  const route = readRoute();
   return {
     connection: {
       status: "connecting",
@@ -115,10 +116,10 @@ function createInitialState(): AppState {
     pendingActions: {},
     toasts: [],
     ui: {
-      route: readRoute(),
+      route,
       tab: "working",
       query: "",
-      selectedThreadId: null,
+      selectedThreadId: route.kind === "thread" ? route.threadId : null,
       paletteOpen: false,
       shortcutsOpen: false,
       newThreadOpen: false,

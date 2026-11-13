@@ -5,12 +5,18 @@ export type Route =
   | { kind: "ide" }
   | { kind: "placeholder"; surface: string; path: string };
 
-const PLACEHOLDER_TITLES: Record<string, string> = {
-  library: "Library",
-  usage: "Usage & limits",
-  ide: "IDE",
-  pulls: "Pull requests",
-  settings: "Settings",
+/**
+ * Surfaces that are not yet backed by daemon data. They render static,
+ * mock-mode-friendly shells while the protocol catches up. The key is the
+ * first path segment (or explicit settings section) and the value is the
+ * surface name the shell switches on.
+ */
+const SURFACES: Record<string, string> = {
+  library: "library",
+  usage: "usage",
+  pulls: "pulls",
+  settings: "settings",
+  pairing: "pairing",
 };
 
 export function parseRoute(pathname: string): Route {
@@ -21,7 +27,11 @@ export function parseRoute(pathname: string): Route {
   const thread = /^\/t\/([^/]+)$/.exec(path);
   if (thread?.[1]) return { kind: "thread", threadId: decodeURIComponent(thread[1]) };
   const key = path.slice(1).split("/")[0] ?? "";
-  return { kind: "placeholder", surface: PLACEHOLDER_TITLES[key] ?? "h4rn", path };
+  if (key === "settings") {
+    const section = path.slice(1).split("/")[1] ?? "hosts";
+    return { kind: "placeholder", surface: "settings", path: `/settings/${section}` };
+  }
+  return { kind: "placeholder", surface: SURFACES[key] ?? "h4rn", path };
 }
 
 export function routePath(route: Route): string {

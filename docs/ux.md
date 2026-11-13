@@ -1,14 +1,29 @@
 # h4rn UX
 
-**Status:** greenfield specification. Every screen below is pre-implementation; wireframes are structural, not pixel comps. Tokens, type and component rules live in [`DESIGN.md`](../DESIGN.md); product truth lives in [`PRODUCT.md`](../PRODUCT.md).
+**Status:** greenfield specification, implemented in `apps/ui` as the Quiet-native direction. Wireframes below are structural, not pixel comps; they keep the original flow labels where a sketch needs a named region, but the shipped surface uses the visual language in the next section. Tokens, type and component rules live in [`DESIGN.md`](../DESIGN.md); product truth lives in [`PRODUCT.md`](../PRODUCT.md).
 
-**Mode:** Operate. The user is in a task; familiarity is a feature. The product-specific grammar is limited to the thread lifecycle, the cue gutter, the standby bar, and provenance (host / harness / machine) shown at every decision.
+**Mode:** Operate. The user is in a task; familiarity is a feature. The product-specific grammar is limited to the thread lifecycle, the single-accent attention rule, the approval card above the composer, and provenance (host / harness / machine) shown at every decision.
 
 **Three invariants**
 
-1. **Nothing is silently stuck.** Every thread is in Working, Done or Settled, and anything that needs a human raises a hand in Working with a standby bar.
+1. **Nothing is silently stuck.** Every thread is in Working, Done or Settled, and anything that needs a human raises a hand in Working with an approval card above the composer (the "standby" region in older wireframes).
 2. **Where it runs is visible.** A harness name is always accompanied by its host; a subagent by its machine and harness; an MCP server by the targets that can actually receive it.
 3. **Every automated action is reversible.** Resume, settle, snooze, revoke, disable, cancel and fail over all have a manual counterpart and a stated consequence.
+
+## Visual language (Quiet native)
+
+The IA, flows and state vocabulary below are unchanged. The visual grammar is now the one in [`DESIGN.md`](../DESIGN.md):
+
+- **One accent, and it only means "you".** 258° blue marks a needs-you dot, the primary answer action, focus and selection. Running, queued and done agents stay graphite; a screen with no blue is a screen that needs nothing from you.
+- **Status colour is semantic and always paired with a word or glyph.** Amber is a limit or a pause, red is failure or an unreachable host, green is a pass or a healthy dot.
+- **Hairlines, not boxes.** Panes are separated by 1 px lines and the sidebar/content tonal step. The only bordered objects are real objects: a change set, the composer, an approval request, a resume card.
+- **Typography carries hierarchy.** Geist at 13/18 for UI, 14/22 for agent prose with a 720 px column, 15/17/20 for titles, weights 400/500/600. No uppercase eyebrows or numbered rows. Geist Mono only for code, paths, commands, model slugs, terminal output and diffs.
+- **Provenance is one quiet line.** "atlas · Claude Code · claude-sonnet-5-5 · h4rn/fix-flaky-auth" sits under the title and drops items from the right on narrow widths; blobatars appear only where identity matters.
+- **Liveness is truthful.** A 14 px orb moves only while work is happening; every terminal state is a static glyph; reduced motion freezes every orb without losing information.
+- **Decisions get calm, competence gets density.** Tool rows are 28 px, table rows 40 px, phone list rows 66 px; approval, consent and resume surfaces keep whitespace.
+- **Native before branded.** Desktop uses sidebar / list / detail / inspector / tabs; phone uses a large title, a 5-item tab bar, pushed screens and sheets. The wordmark is lowercase text, not a logo block.
+
+Wireframe labels from the earlier drafts map to the shipped UI as follows: **RAIL** → sidebar; **cue gutter / cue bar / cue badge** → state glyph and the blue needs-you dot (no numbered turns); **standby bar / standby card** → approval card above the composer; **strike** → failed/danger; **stage status bar** → the 26 px neutral status line where one is still useful (IDE). Visual references in those sketches are historical; behaviour is normative.
 
 ---
 

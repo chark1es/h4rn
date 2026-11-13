@@ -90,18 +90,6 @@ function messageItem(
   return { kind: "message", item_id: itemId, role, text, attachments };
 }
 
-/** Transparent stand-in for a daemon-materialised copy (mock has no host FS). */
-function demoAttachment(id: string, name: string, mime: string, size: number): Attachment {
-  return { id: id as Attachment["id"], name, mime, size, local_path: "" };
-}
-
-function demoAttachments(): Attachment[] {
-  return [
-    demoAttachment(DEMO_IMAGE_ID, DEMO_IMAGE_NAME, DEMO_IMAGE_MIME, DEMO_IMAGE_BYTES.length),
-    demoAttachment(DEMO_LOG_ID, DEMO_LOG_NAME, "text/plain", DEMO_LOG_BYTES.length),
-  ];
-}
-
 function userMessage(
   threadId: string,
   turnId: string,
@@ -149,7 +137,7 @@ function usage(input: number, output: number, durationMs: number, costMicros: nu
   };
 }
 
-const TOTAL_USAGE: Usage = usage(182_400, 41_800, 214_000, 420_000);
+const TOTAL_USAGE: Usage = usage(3_000, 15_400, 252_000, 420_000);
 
 const continuedText = [
   "The failure only reproduces under the CI runner because the fake clock is installed after the database pool opens, so the first `find` races the timer advance.",
@@ -166,11 +154,10 @@ function historyFor(thread: ThreadSummary): Event[] {
     turnId,
     `msg_${thread.thread_id}_u0`,
     thread.thread_id === "thr_a"
-      ? "The auth test fails on CI only. Fix it and add a regression test that pins the clock. Do not change the public API."
+      ? "The auth test fails on CI only. Fix it and add a regression test that pins the clock. Don’t change the public API."
       : thread.thread_id === "thr_b"
         ? "Add exponential backoff with jitter to the relay reconnect, and make sure a resumed stream does not replay events the client already applied."
         : `Work on ${thread.title.toLowerCase()} in ${thread.workspace_path}. Report what you find before changing files.`,
-    thread.thread_id === "thr_a" ? demoAttachments() : [],
   );
   events.push(user);
 
@@ -187,7 +174,7 @@ function historyFor(thread: ThreadSummary): Event[] {
         thread.thread_id,
         turnId,
         `msg_${thread.thread_id}_a0`,
-        "I'll reproduce the CI-only failure first, then pin the clock in the setup hook.",
+        "I’ll reproduce the CI-only failure first, then check how the test setup installs the fake clock.",
       ),
       {
         type: "tool_call",
@@ -196,9 +183,11 @@ function historyFor(thread: ThreadSummary): Event[] {
         tool_call: toolCall({
           tool_call_id: "tool_a_read",
           name: "Read",
-          summary: "auth/session.test.ts · 42 lines",
+          summary: "src/auth/session.test.ts",
+          output:
+            '  1  import { describe, it, expect, beforeAll, vi } from "vitest";\n  2  import { createPool } from "../db/pool";\n  3  import { verifySession } from "./session";\n  …\n 41    it("expires at the boundary", async () => {\n 42      vi.advanceTimersByTime(30_000);\n (142 lines, showing 4)',
           started_at: iso(-7_900),
-          completed_at: iso(-7_500),
+          completed_at: iso(-7_600),
         }),
       },
       {
@@ -207,9 +196,24 @@ function historyFor(thread: ThreadSummary): Event[] {
         turn_id: turnId,
         tool_call: toolCall({
           tool_call_id: "tool_a_grep",
-          name: "Grep",
-          summary: '"fakeTimers|Date.now" · 3 matches in tests',
-          started_at: iso(-7_400),
+          name: "Search",
+          summary: "useFakeTimers|Date.now  in src/ tests/",
+          output:
+            "src/auth/session.test.ts:12   vi.useFakeTimers();\nsrc/db/pool.ts:28              const openedAt = Date.now();\ntests/setup.ts:9               beforeAll(() => vi.useFakeTimers());",
+          started_at: iso(-7_500),
+          completed_at: iso(-7_300),
+        }),
+      },
+      {
+        type: "tool_call",
+        thread_id: thread.thread_id,
+        turn_id: turnId,
+        tool_call: toolCall({
+          tool_call_id: "tool_a_setup",
+          name: "Read",
+          summary: "tests/setup.ts",
+          output: "  9  beforeAll(() => vi.useFakeTimers());",
+          started_at: iso(-7_200),
           completed_at: iso(-7_100),
         }),
       },
@@ -217,8 +221,32 @@ function historyFor(thread: ThreadSummary): Event[] {
         thread.thread_id,
         turnId,
         `msg_${thread.thread_id}_a1`,
-        "The assertion is not the problem. The pool opens on a real timer before the setup hook installs the fake clock, so the first lookup races the timer advance on slower CI hardware.",
+        "The assertion isn’t the problem. `createPool()` reads `Date.now()` at import time, before `beforeAll` installs the fake clock, so the first session lookup races the timer advance on slower CI runners.",
       ),
+      {
+        type: "tool_call",
+        thread_id: thread.thread_id,
+        turn_id: turnId,
+        tool_call: toolCall({
+          tool_call_id: "tool_a_edit_setup",
+          name: "Edit",
+          summary: "tests/setup.ts",
+          started_at: iso(-7_000),
+          completed_at: iso(-6_500),
+        }),
+      },
+      {
+        type: "tool_call",
+        thread_id: thread.thread_id,
+        turn_id: turnId,
+        tool_call: toolCall({
+          tool_call_id: "tool_a_edit_test",
+          name: "Edit",
+          summary: "src/auth/session.test.ts",
+          started_at: iso(-6_400),
+          completed_at: iso(-6_000),
+        }),
+      },
       {
         type: "approval_requested",
         thread_id: thread.thread_id,
@@ -226,8 +254,7 @@ function historyFor(thread: ThreadSummary): Event[] {
         approval_id: "ap_a_1",
         subagent_id: null,
         kind: "command",
-        prompt:
-          "Run `CI=1 pnpm test --filter auth --repeat 3` on atlas to confirm the race before editing tests/setup.ts.",
+        prompt: "CI=1 pnpm vitest run --project auth --repeat 20",
         options: [],
       },
       { type: "agent_state_changed", thread_id: thread.thread_id, state: "awaiting_approval" },
@@ -279,20 +306,7 @@ function historyFor(thread: ThreadSummary): Event[] {
   }
 
   if (thread.thread_id === "thr_c") {
-    events.push({
-      type: "tool_call",
-      thread_id: thread.thread_id,
-      turn_id: turnId,
-      tool_call: toolCall({
-        tool_call_id: "tool_c_read",
-        name: "Read",
-        summary: "pnpm-lock.yaml · 2,104 lines",
-        status: "running",
-        completed_at: null,
-        started_at: iso(-4_000),
-      }),
-    });
-    events.push({ type: "agent_state_changed", thread_id: thread.thread_id, state: "reading" });
+    events.push({ type: "agent_state_changed", thread_id: thread.thread_id, state: "queued" });
     return events;
   }
 
@@ -353,6 +367,9 @@ function summary(input: {
   unread?: boolean;
   needsAttention?: boolean;
   usage?: Usage;
+  /** When auto-resume will retry, for rate-limited rows (ADR-024). */
+  resumeAtMs?: number;
+  limitResetAtMs?: number;
 }): ThreadSummary {
   return {
     thread_id: input.id,
@@ -365,13 +382,22 @@ function summary(input: {
     tab: input.tab,
     pinned: input.pinned ?? false,
     snoozed_until: input.snoozedMs ? iso(input.snoozedMs) : null,
-    last_activity: iso(-input.lastActivityMs),
+    // A small buffer keeps `relativeAge` rounding to the seeded minute even
+    // when the store snapshots `now` a few milliseconds before the seed.
+    last_activity: iso(-input.lastActivityMs - 5_000),
     agent_state: input.state,
     usage: input.usage ?? usage(12_000, 3_400, 42_000, 31_000),
     needs_attention: input.needsAttention ?? false,
     unread: input.unread ?? false,
-    resume_at: null,
-    limit: null,
+    resume_at: input.resumeAtMs === undefined ? null : iso(input.resumeAtMs),
+    limit:
+      input.limitResetAtMs === undefined
+        ? null
+        : {
+            harness: input.harness,
+            reset_at: iso(input.limitResetAtMs),
+            message: "Weekly limit reached. Auto-resume is armed.",
+          },
   };
 }
 
@@ -384,11 +410,11 @@ function buildThreads(scenario: string): Map<string, MockThread> {
       id: "thr_a",
       host: "atlas",
       harness: "claude_code",
-      title: "Fix the flaky auth test",
+      title: "Fix flaky auth test",
       model: "claude-sonnet-5-5",
       tab: "working",
       state: "awaiting_approval",
-      lastActivityMs: 42_000,
+      lastActivityMs: 2 * 60_000,
       needsAttention: true,
       usage: TOTAL_USAGE,
     }),
@@ -401,87 +427,103 @@ function buildThreads(scenario: string): Map<string, MockThread> {
       tab: "working",
       state: "running_tool",
       workspace: "/home/you/code/h4rn-connect",
-      lastActivityMs: 3 * 60_000,
-      usage: usage(98_000, 22_600, 184_000, 214_000),
+      lastActivityMs: 18 * 60_000,
+      usage: usage(98_000, 11_200, 184_000, 214_000),
     }),
     summary({
       id: "thr_c",
       host: "atlas-wsl",
       harness: "opencode",
-      title: "Audit the dependency tree",
+      title: "Audit dependency tree",
       model: "claude-sonnet-5-5",
       tab: "working",
-      state: "reading",
+      state: "queued",
       workspace: "/home/you/code/web",
-      lastActivityMs: 2 * 60_000,
+      lastActivityMs: 4 * 60_000,
       usage: usage(31_000, 6_200, 74_000, 58_000),
     }),
     summary({
-      id: "thr_k",
-      host: "atlas",
-      harness: "claude_code",
-      title: "Draft the pairing copy",
-      model: "claude-sonnet-5-5",
+      id: "thr_d",
+      host: "orion",
+      harness: "codex",
+      title: "Migrate session store to Redis",
+      model: "gpt-5.1-codex",
       tab: "working",
-      state: "thinking",
+      state: "rate_limited",
       workspace: "/home/you/code/h4rn",
-      lastActivityMs: 12 * 60_000,
+      lastActivityMs: HOUR,
       usage: usage(44_000, 9_800, 96_000, 81_000),
+      resumeAtMs: 35 * 60_000,
+      limitResetAtMs: 35 * 60_000,
     }),
     summary({
-      id: "thr_l",
-      host: "atlas-wsl",
+      id: "thr_e",
+      host: "buildbox",
       harness: "codex",
       title: "Parse WSL distro hosts",
       model: "gpt-5.1-codex-mini",
       tab: "working",
-      state: "thinking",
+      state: "unreachable",
       workspace: "/home/you/code/h4rn",
-      lastActivityMs: 20 * 60_000,
+      lastActivityMs: 3 * HOUR,
       usage: usage(18_400, 3_100, 38_000, 22_000),
     }),
     summary({
-      id: "thr_d",
-      host: "atlas",
-      harness: "claude_code",
-      title: "Migrate the session store",
-      model: "claude-sonnet-5-5",
-      tab: "done",
-      state: "done",
-      lastActivityMs: HOUR,
-      unread: true,
-      usage: usage(64_200, 18_900, 126_000, 122_000),
+      id: "thr_f",
+      host: "orion",
+      harness: "antigravity",
+      title: "Draft pairing screen copy",
+      model: "gemini-3-pro",
+      tab: "working",
+      state: "thinking",
+      workspace: "/home/you/code/h4rn",
+      lastActivityMs: 6 * 60_000,
+      usage: usage(12_400, 2_800, 31_000, 26_000),
     }),
     summary({
-      id: "thr_e",
+      id: "thr_g",
       host: "orion",
       harness: "opencode",
-      title: "Update the PR template",
+      title: "Update PR template",
       model: "claude-sonnet-5-5",
       tab: "done",
       state: "done",
       workspace: "/home/you/code/h4rn",
-      lastActivityMs: 3 * HOUR,
+      lastActivityMs: HOUR,
       unread: true,
       usage: usage(9_800, 2_200, 31_000, 18_000),
     }),
     summary({
-      id: "thr_f",
-      host: "buildbox",
+      id: "thr_h",
+      host: "atlas",
       harness: "claude_code",
-      title: "Bump the Tauri plugin set",
+      title: "Bump xterm to 5.5 and fix resize",
       model: "claude-sonnet-5-5",
-      tab: "settled",
+      tab: "done",
       state: "done",
       workspace: "/home/you/code/desktop",
-      lastActivityMs: DAY,
+      lastActivityMs: 3 * HOUR,
+      unread: true,
+      usage: usage(64_200, 18_900, 126_000, 122_000),
+    }),
+    summary({
+      id: "thr_i",
+      host: "atlas",
+      harness: "claude_code",
+      title: "Index usage events by harness",
+      model: "claude-sonnet-5-5",
+      tab: "done",
+      state: "rate_limited",
+      workspace: "/home/you/code/h4rn",
+      lastActivityMs: 5 * HOUR,
+      needsAttention: true,
       usage: usage(52_000, 11_200, 98_000, 74_000),
     }),
     summary({
-      id: "thr_g",
+      id: "thr_j",
       host: "atlas",
       harness: "claude_code",
-      title: "Review ADR-004 edge cases",
+      title: "Add DPoP proof to device pairing",
       model: "claude-sonnet-5-5",
       tab: "settled",
       state: "done",
@@ -490,21 +532,165 @@ function buildThreads(scenario: string): Map<string, MockThread> {
       usage: usage(38_000, 7_400, 82_000, 55_000),
     }),
     summary({
-      id: "thr_h",
+      id: "thr_k",
       host: "orion",
       harness: "codex",
-      title: "Trim unused MCP servers",
+      title: "Rename harness instance ids",
       model: "gpt-5.1-codex",
       tab: "settled",
       state: "done",
       workspace: "/home/you/code/h4rn",
-      lastActivityMs: 3 * DAY,
+      lastActivityMs: 2 * DAY + 3 * HOUR,
       usage: usage(21_000, 5_600, 61_000, 39_000),
     }),
     summary({
-      id: "thr_i",
+      id: "thr_l",
+      host: "atlas",
+      harness: "claude_code",
+      title: "Write CLIProxyAPI probe tests",
+      model: "claude-sonnet-5-5",
+      tab: "settled",
+      state: "done",
+      workspace: "/home/you/code/h4rn",
+      lastActivityMs: 3 * DAY,
+      usage: usage(28_400, 4_900, 71_000, 41_000),
+    }),
+    summary({
+      id: "thr_m",
+      host: "orion",
+      harness: "antigravity",
+      title: "Fix terminal paste on Android",
+      model: "gemini-3-pro",
+      tab: "settled",
+      state: "done",
+      workspace: "/home/you/code/h4rn",
+      lastActivityMs: 3 * DAY + 5 * HOUR,
+      usage: usage(15_800, 2_400, 44_000, 24_000),
+    }),
+    summary({
+      id: "thr_n",
+      host: "atlas-wsl",
+      harness: "opencode",
+      title: "Document OrbitID device grant",
+      model: "claude-sonnet-5-5",
+      tab: "settled",
+      state: "done",
+      workspace: "/home/you/code/h4rn",
+      lastActivityMs: 4 * DAY,
+      usage: usage(19_600, 3_900, 52_000, 33_000),
+    }),
+    summary({
+      id: "thr_o",
       host: "atlas",
       harness: "codex",
+      title: "Stream backpressure for relay",
+      model: "gpt-5.1-codex",
+      tab: "settled",
+      state: "done",
+      workspace: "/home/you/code/h4rn-connect",
+      lastActivityMs: 5 * DAY,
+      usage: usage(33_200, 8_100, 88_000, 69_000),
+    }),
+    summary({
+      id: "thr_p",
+      host: "atlas",
+      harness: "claude_code",
+      title: "Golden tests for blobatar seeds",
+      model: "claude-sonnet-5-5",
+      tab: "settled",
+      state: "done",
+      workspace: "/home/you/code/h4rn",
+      lastActivityMs: 6 * DAY,
+      usage: usage(24_800, 5_100, 66_000, 47_000),
+    }),
+    summary({
+      id: "thr_q",
+      host: "orion",
+      harness: "codex",
+      title: "Retry pairing on expired QR",
+      model: "gpt-5.1-codex",
+      tab: "settled",
+      state: "done",
+      workspace: "/home/you/code/h4rn",
+      lastActivityMs: 7 * DAY,
+      usage: usage(17_200, 3_300, 49_000, 28_000),
+    }),
+    summary({
+      id: "thr_r",
+      host: "atlas",
+      harness: "claude_code",
+      title: "Split connection store from UI state",
+      model: "claude-sonnet-5-5",
+      tab: "settled",
+      state: "done",
+      workspace: "/home/you/code/h4rn",
+      lastActivityMs: 8 * DAY,
+      usage: usage(41_600, 9_200, 99_000, 83_000),
+    }),
+    summary({
+      id: "thr_s",
+      host: "atlas",
+      harness: "claude_code",
+      title: "Guard tool output against ANSI",
+      model: "claude-sonnet-5-5",
+      tab: "settled",
+      state: "done",
+      workspace: "/home/you/code/h4rn",
+      lastActivityMs: 9 * DAY,
+      usage: usage(26_400, 4_700, 62_000, 44_000),
+    }),
+    summary({
+      id: "thr_t",
+      host: "atlas-wsl",
+      harness: "opencode",
+      title: "Normalize WSL distro labels",
+      model: "claude-sonnet-5-5",
+      tab: "settled",
+      state: "done",
+      workspace: "/home/you/code/h4rn",
+      lastActivityMs: 10 * DAY,
+      usage: usage(14_200, 2_600, 37_000, 21_000),
+    }),
+    summary({
+      id: "thr_u",
+      host: "orion",
+      harness: "codex",
+      title: "Cache device keys per host",
+      model: "gpt-5.1-codex",
+      tab: "settled",
+      state: "done",
+      workspace: "/home/you/code/h4rn",
+      lastActivityMs: 11 * DAY,
+      usage: usage(23_800, 4_200, 58_000, 36_000),
+    }),
+    summary({
+      id: "thr_v",
+      host: "atlas",
+      harness: "claude_code",
+      title: "Preserve scroll on tab switch",
+      model: "claude-sonnet-5-5",
+      tab: "settled",
+      state: "done",
+      workspace: "/home/you/code/h4rn",
+      lastActivityMs: 12 * DAY,
+      usage: usage(22_600, 4_000, 54_000, 37_000),
+    }),
+    summary({
+      id: "thr_y",
+      host: "atlas-wsl",
+      harness: "codex",
+      title: "Trim pairing QR payload",
+      model: "gpt-5.1-codex",
+      tab: "settled",
+      state: "done",
+      workspace: "/home/you/code/h4rn",
+      lastActivityMs: 13 * DAY,
+      usage: usage(18_200, 3_600, 47_000, 29_000),
+    }),
+    summary({
+      id: "thr_w",
+      host: "atlas",
+      harness: "claude_code",
       title: "Pin the Tauri sidecar build",
       model: "gpt-5.1-codex",
       tab: "working",
@@ -515,7 +701,7 @@ function buildThreads(scenario: string): Map<string, MockThread> {
       usage: usage(15_800, 2_400, 44_000, 24_000),
     }),
     summary({
-      id: "thr_j",
+      id: "thr_x",
       host: "buildbox",
       harness: "claude_code",
       title: "Re-run the Windows installer check",
@@ -556,7 +742,7 @@ function buildHosts(scenario: string): HostSummary[] {
     },
     {
       host_id: "atlas-wsl",
-      name: "atlas / Ubuntu",
+      name: "Ubuntu-24.04",
       platform: "wsl:Ubuntu 24.04",
       online: true,
       last_seen: iso(-1_000),
@@ -567,7 +753,7 @@ function buildHosts(scenario: string): HostSummary[] {
       name: "buildbox",
       platform: "linux",
       online: false,
-      last_seen: iso(-4 * HOUR),
+      last_seen: iso(-3 * HOUR - 60_000),
       harnesses: ["claude_code", "antigravity"],
     },
   ];
@@ -590,13 +776,23 @@ class MockDaemon {
   private readonly fs = createMockFs();
   private created = 0;
   private nextTerminal = 0;
+  private readonly failLists: boolean;
+  private readonly failThread: boolean;
+  /** Keep the skeleton screens up while still publishing cached hosts. */
+  private readonly holdLists: boolean;
 
   constructor(
     private readonly handlers: TransportHandlers,
     scenario: string,
+    private readonly attempt = 0,
   ) {
     this.hosts = buildHosts(scenario);
     this.threads = buildThreads(scenario);
+    // The error scenario renders the cached inbox, then fails the reload so
+    // the partial-host banner and the thread error state are both visible.
+    this.failLists = scenario === "error" && this.attempt > 0;
+    this.failThread = scenario === "error";
+    this.holdLists = scenario === "loading";
     this.blobs.set(DEMO_IMAGE_ID, {
       bytes: DEMO_IMAGE_BYTES,
       name: DEMO_IMAGE_NAME,
@@ -687,7 +883,10 @@ class MockDaemon {
 
   private prompt(terminal: MockTerminal): string {
     const cwd = terminal.info.cwd.replace(/^\/home\/[^/]+/, "~");
-    return `\u001b[38;5;110m${cwd}\u001b[0m \u001b[38;5;180m❯\u001b[0m `;
+    return (
+      `\u001b[38;5;110m${cwd}\u001b[0m \u001b[38;5;180mh4rn/fix-flaky-auth\u001b[0m\r\n` +
+      `\u001b[38;5;114m$\u001b[0m `
+    );
   }
 
   private runCommand(terminal: MockTerminal, line: string): string {
@@ -704,6 +903,25 @@ class MockDaemon {
     if (command.startsWith("echo ")) return command.slice(5);
     if (command === "git status" || command === "git status -sb") {
       return "On branch dev\nnothing to commit, working tree clean";
+    }
+    if (command === "git status --short") {
+      return " M src/auth/session.test.ts\r\n M tests/setup.ts";
+    }
+    if (command.includes("vitest")) {
+      return [
+        "",
+        " \u001b[2mRUN  v3.2.4 /home/dev/code/api\u001b[0m",
+        "",
+        " \u001b[32mok\u001b[0m src/auth/token.test.ts \u001b[2m(12 tests) 84ms\u001b[0m",
+        " \u001b[32mok\u001b[0m src/auth/refresh.test.ts \u001b[2m(6 tests) 96ms\u001b[0m",
+        " \u001b[32mok\u001b[0m src/auth/session.test.ts \u001b[2m(9 tests) 212ms\u001b[0m   \u001b[2mrun 1 of 3\u001b[0m",
+        " \u001b[32mok\u001b[0m src/auth/session.test.ts \u001b[2m(9 tests) 207ms\u001b[0m   \u001b[2mrun 2 of 3\u001b[0m",
+        " \u001b[32mok\u001b[0m src/auth/session.test.ts \u001b[2m(9 tests) 219ms\u001b[0m   \u001b[2mrun 3 of 3\u001b[0m",
+        "",
+        " \u001b[2mTest Files\u001b[0m  \u001b[32m5 passed\u001b[0m (5)",
+        "      \u001b[2mTests\u001b[0m  \u001b[32m45 passed\u001b[0m (45)",
+        "   \u001b[2mDuration\u001b[0m  2.84s",
+      ].join("\r\n");
     }
     if (command === "help") {
       return "mock commands: ls, pwd, echo, git status, clear, help";
@@ -729,6 +947,14 @@ class MockDaemon {
 
   private handle(frame: ClientFrame): void {
     const { body } = frame;
+    if (
+      this.holdLists &&
+      body.type !== "hello" &&
+      body.type !== "list_hosts" &&
+      body.type !== "subscribe"
+    ) {
+      return;
+    }
     switch (body.type) {
       case "hello":
         this.ok(frame.id, {
@@ -743,6 +969,11 @@ class MockDaemon {
         this.ok(frame.id, { type: "hosts", hosts: this.hosts });
         return;
       case "list_threads": {
+        if (this.holdLists) return;
+        if (this.failLists) {
+          this.err(frame.id, "unsupported", "Couldn’t reach buildbox.", "Showing 3 of 4 hosts.");
+          return;
+        }
         const filter = body.filter;
         const threads = [...this.threads.values()]
           .map((entry) => entry.summary)
@@ -763,6 +994,15 @@ class MockDaemon {
         return;
       }
       case "get_thread": {
+        if (this.failThread && body.thread_id === "thr_e") {
+          this.err(
+            frame.id,
+            "unsupported",
+            "buildbox stopped answering at 09:14 while this turn was running.",
+            "The run may still be active there; nothing on this device was lost.",
+          );
+          return;
+        }
         const entry = this.threads.get(body.thread_id);
         if (!entry) {
           this.err(
@@ -948,9 +1188,7 @@ class MockDaemon {
           exit: null,
         };
         const terminal: MockTerminal = { info, seq: 0, scrollback: "", line: "" };
-        terminal.scrollback =
-          "\u001b[38;5;110mh4rn mock shell\u001b[0m — no daemon is connected.\r\n" +
-          this.prompt(terminal);
+        terminal.scrollback = this.prompt(terminal);
         this.terminals.set(info.terminal_id, terminal);
         this.ok(frame.id, { type: "terminal_opened", terminal: info });
         return;
@@ -1555,18 +1793,39 @@ class MockDaemon {
   }
 }
 
-export function createMockTransport(scenario: string): Transport {
+export function createMockTransport(scenario: string, attempt = 0): Transport {
   let daemon: MockDaemon | null = null;
   let openTimer: ReturnType<typeof setTimeout> | null = null;
+  let closeTimer: ReturnType<typeof setTimeout> | null = null;
   let closed = false;
 
   return {
     kind: "mock",
     connect(handlers) {
-      daemon = new MockDaemon(handlers, scenario);
+      // The loading scenario opens the handshake so cached hosts can paint, but
+      // it never answers list_threads, which keeps the skeleton screens up.
+      daemon = new MockDaemon(handlers, scenario, attempt);
       openTimer = setTimeout(() => {
         openTimer = null;
-        if (!closed) handlers.onOpen();
+        if (closed) return;
+        handlers.onOpen();
+        if (attempt === 0 && (scenario === "offline" || scenario === "error")) {
+          closeTimer = setTimeout(
+            () => {
+              closeTimer = null;
+              if (closed) return;
+              handlers.onClose({
+                code: 1006,
+                reason:
+                  scenario === "offline"
+                    ? "This device lost its connection."
+                    : "The relay dropped the connection.",
+                wasClean: false,
+              });
+            },
+            scenario === "offline" ? 1_800 : 1_200,
+          );
+        }
       }, 220);
     },
     send(data: string | ArrayBuffer | Uint8Array) {
@@ -1575,6 +1834,7 @@ export function createMockTransport(scenario: string): Transport {
     close() {
       closed = true;
       if (openTimer) clearTimeout(openTimer);
+      if (closeTimer) clearTimeout(closeTimer);
       daemon?.dispose();
       daemon = null;
     },

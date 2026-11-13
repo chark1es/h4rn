@@ -1,5 +1,20 @@
-import { CircleAlertIcon, LoaderCircleIcon, RefreshCwIcon, WifiOffIcon } from "lucide-react";
-import { type ButtonHTMLAttributes, useCallback, useEffect, useRef, useState } from "react";
+import {
+  ArrowDownIcon,
+  ArrowLeftIcon,
+  ArrowRightIcon,
+  ArrowUpIcon,
+  CircleAlertIcon,
+  RefreshCwIcon,
+  WifiOffIcon,
+} from "lucide-react";
+import {
+  type ButtonHTMLAttributes,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 import type { H4rnClient } from "@/lib/client/client";
 import { cn } from "@/lib/utils";
@@ -28,6 +43,7 @@ export function TerminalView({
   active,
   onTitle,
   onController,
+  onDimensions,
 }: {
   client: H4rnClient;
   threadId: string | null;
@@ -36,6 +52,7 @@ export function TerminalView({
   active: boolean;
   onTitle?: (title: string) => void;
   onController?: (controller: TerminalController | null) => void;
+  onDimensions?: (dimensions: { cols: number; rows: number }) => void;
 }) {
   const surfaceRef = useRef<HTMLDivElement>(null);
   const controllerRef = useRef<TerminalController | null>(null);
@@ -43,8 +60,11 @@ export function TerminalView({
   titleRef.current = onTitle;
   const controllerCallbackRef = useRef(onController);
   controllerCallbackRef.current = onController;
+  const dimensionsRef = useRef(onDimensions);
+  dimensionsRef.current = onDimensions;
 
   const [status, setStatus] = useState<TerminalStatus>({ phase: "opening" });
+  const [dimensions, setDimensions] = useState({ cols: 0, rows: 0 });
   const statusRef = useRef(status);
   statusRef.current = status;
   const [attempt, setAttempt] = useState(0);
@@ -69,6 +89,10 @@ export function TerminalView({
       reducedMotion,
       onStatus: setStatus,
       onTitle: (title) => titleRef.current?.(title),
+      onDimensions: (next) => {
+        setDimensions(next);
+        dimensionsRef.current?.(next);
+      },
     });
     return () => {
       controllerCallbackRef.current?.(null);
@@ -128,23 +152,28 @@ export function TerminalView({
         />
 
         {showOpening ? (
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center gap-2 bg-stage/80 text-micro text-stage-ink-muted">
-            <LoaderCircleIcon className="size-3.5 animate-spin" aria-hidden />
+          <div
+            className="pointer-events-none absolute inset-0 flex items-center justify-center text-[12px] text-[var(--fg-3)]"
+            style={{ background: "color-mix(in oklch, var(--bg-sunk) 85%, transparent)" }}
+          >
             Opening shell…
           </div>
         ) : null}
 
         {showError || showOffline ? (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-stage px-6 text-center">
+          <div
+            className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center"
+            style={{ background: "var(--bg-sunk)", color: "var(--fg)" }}
+          >
             {showOffline ? (
-              <WifiOffIcon className="size-5 text-stage-ink-muted" aria-hidden />
+              <WifiOffIcon className="size-5 text-[var(--fg-3)]" aria-hidden />
             ) : (
-              <CircleAlertIcon className="size-5 text-strike" aria-hidden />
+              <CircleAlertIcon className="size-5 text-[var(--danger)]" aria-hidden />
             )}
-            <p className="text-compact font-medium text-stage-ink">
+            <p className="text-[13px] font-medium text-[var(--fg)]">
               {showOffline ? "The daemon is offline." : status.message}
             </p>
-            <p className="max-w-[46ch] text-micro text-stage-ink-muted">
+            <p className="max-w-[46ch] text-[12px] text-[var(--fg-2)]">
               {status.hint ??
                 (showOffline
                   ? "Reconnect and the terminal will open on its own."
@@ -152,7 +181,7 @@ export function TerminalView({
             </p>
             <button
               type="button"
-              className="mt-1 inline-flex h-7 items-center gap-1.5 rounded-sm border border-white/20 px-2.5 text-micro font-medium text-stage-ink transition-colors hover:bg-white/10"
+              className="mt-1 inline-flex h-7 items-center gap-1.5 rounded-md border border-[var(--line-2)] px-2.5 text-[12px] font-medium text-[var(--fg)] transition-colors hover:bg-[var(--hover)]"
               onClick={() => {
                 if (showOffline) client.reconnectNow();
                 setAttempt((value) => value + 1);
@@ -165,11 +194,17 @@ export function TerminalView({
         ) : null}
       </div>
 
+      {status.phase === "attached" ? (
+        <div className="q-term-note">
+          <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+          <span>
+            Sized to this phone. Desktop viewers see the same {dimensions.cols || "—"} columns.
+          </span>
+        </div>
+      ) : null}
+
       <div
-        className={cn(
-          "flex h-12 shrink-0 items-center gap-0.5 overflow-x-auto border-t border-white/10 bg-stage px-2 sm:hidden",
-          status.phase !== "attached" && "opacity-60",
-        )}
+        className={cn("q-keybar sm:hidden", status.phase !== "attached" && "opacity-60")}
         role="toolbar"
         aria-label="Terminal keys"
       >
@@ -181,16 +216,35 @@ export function TerminalView({
           aria-pressed={ctrlArmed}
           onPress={() => setCtrlArmed((value) => !value)}
         />
-        <span className="h-5 w-px bg-white/10" aria-hidden />
-        <KeyButton label="←" ariaLabel="Left arrow" onPress={() => arrow("ArrowLeft")} />
-        <KeyButton label="↑" ariaLabel="Up arrow" onPress={() => arrow("ArrowUp")} />
-        <KeyButton label="↓" ariaLabel="Down arrow" onPress={() => arrow("ArrowDown")} />
-        <KeyButton label="→" ariaLabel="Right arrow" onPress={() => arrow("ArrowRight")} />
+        <KeyButton
+          icon={<ArrowUpIcon strokeWidth={1.75} aria-hidden />}
+          label="↑"
+          ariaLabel="Up arrow"
+          onPress={() => arrow("ArrowUp")}
+        />
+        <KeyButton
+          icon={<ArrowDownIcon strokeWidth={1.75} aria-hidden />}
+          label="↓"
+          ariaLabel="Down arrow"
+          onPress={() => arrow("ArrowDown")}
+        />
+        <KeyButton
+          icon={<ArrowLeftIcon strokeWidth={1.75} aria-hidden />}
+          label="←"
+          ariaLabel="Left arrow"
+          onPress={() => arrow("ArrowLeft")}
+        />
+        <KeyButton
+          icon={<ArrowRightIcon strokeWidth={1.75} aria-hidden />}
+          label="→"
+          ariaLabel="Right arrow"
+          onPress={() => arrow("ArrowRight")}
+        />
         <KeyButton label="Paste" onPress={() => void paste()} />
       </div>
 
       {status.phase === "exited" ? (
-        <div className="flex h-8 shrink-0 items-center justify-center border-t border-white/10 bg-stage text-micro text-stage-ink-muted">
+        <div className="flex h-8 shrink-0 items-center justify-center border-t border-[var(--line)] bg-[var(--bg-sunk)] text-[12px] text-[var(--fg-3)]">
           {status.message ?? "Process exited."}
         </div>
       ) : null}
@@ -201,12 +255,14 @@ export function TerminalView({
 function KeyButton({
   label,
   ariaLabel,
+  icon,
   active,
   onPress,
   ...rest
 }: {
   label: string;
   ariaLabel?: string;
+  icon?: ReactNode;
   active?: boolean;
   onPress: () => void;
 } & Pick<ButtonHTMLAttributes<HTMLButtonElement>, "aria-pressed">) {
@@ -214,14 +270,11 @@ function KeyButton({
     <button
       type="button"
       aria-label={ariaLabel ?? label}
-      className={cn(
-        "inline-flex h-11 min-w-11 shrink-0 items-center justify-center rounded-sm border border-white/15 px-2 text-micro text-stage-ink transition-colors active:bg-white/20",
-        active && "border-cue/60 bg-cue/20 text-cue",
-      )}
+      className={cn("q-key", active && "on")}
       onClick={onPress}
       {...rest}
     >
-      {label}
+      {icon ?? label}
     </button>
   );
 }

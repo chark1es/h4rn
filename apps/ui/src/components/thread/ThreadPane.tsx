@@ -1,12 +1,14 @@
-import { CircleAlertIcon, InboxIcon, RefreshCwIcon, ServerIcon } from "lucide-react";
+import { CircleAlertIcon, CopyIcon, InboxIcon, RefreshCwIcon, ServerIcon } from "lucide-react";
 import { useEffect, useState } from "react";
+
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
-import { EmptyState } from "@/components/common/EmptyState";
-import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
+import { SubagentsInspector } from "@/features/subagents/SubagentsInspector";
 import { TerminalPanel } from "@/features/terminal/TerminalPanel";
+import type { Usage } from "@/gen";
+import { useIsPhone } from "@/hooks/use-media-query";
 import { glyphForAgentState } from "@/lib/agent";
 import { harnessLabel } from "@/lib/entities";
+import { absoluteTime, cost, duration, tokens, tokensPerSecond } from "@/lib/format";
 import {
   ensureThread,
   interruptThread,
@@ -15,17 +17,25 @@ import {
   retryThread,
   useApp,
 } from "@/lib/store/appStore";
+import type { ApprovalItem, StreamTurn } from "@/lib/store/projection";
+import { cn } from "@/lib/utils";
+import { ApprovalCard } from "./ApprovalCard";
 import { Composer } from "./Composer";
-import { StandbyBar } from "./StandbyBar";
+import { PhoneApprovalSheet, PhoneApprovalSummary } from "./PhoneApproval";
 import { ThreadHeader } from "./ThreadHeader";
 import { ThreadStream, ThreadStreamSkeleton } from "./ThreadStream";
 
-function HeaderSkeleton() {
+function HeaderSkeleton({ hostName }: { hostName?: string | undefined }) {
   return (
-    <div className="flex h-14 shrink-0 items-center gap-3 border-b border-line px-4">
-      <Skeleton className="h-4 w-56" />
-      <Skeleton className="ml-auto h-3 w-24" />
-    </div>
+    <header className="q-th-head">
+      <div className="q-th-titles">
+        <div className="q-skel" style={{ width: 240, height: 12, marginBottom: 8 }} />
+        <div className="q-skel" style={{ width: 360, height: 9 }} />
+      </div>
+      <div className="q-th-state q-faint" style={{ fontWeight: 400 }}>
+        Connecting{hostName ? ` to ${hostName}` : ""}…
+      </div>
+    </header>
   );
 }
 
@@ -40,28 +50,28 @@ function WaitingForTurn({
 }) {
   const glyph = glyphForAgentState("thinking");
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="mx-auto w-full max-w-[760px] flex-1 px-4 py-6">
-        <div className="flex items-center gap-2">
-          <AgentGlyph glyph={glyph} size={16} />
-          <p className="text-micro text-ink-muted">
+    <div className="q-stream">
+      <div className="q-col">
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <AgentGlyph glyph={glyph} size={14} />
+          <p className="q-faint" style={{ margin: 0, fontSize: 12 }}>
             Waiting for {harness} on {host}…
           </p>
-          <Button
-            size="sm"
-            variant="ghost"
-            className="ml-auto h-7"
+          <button
+            type="button"
+            className="q-btn ghost"
+            style={{ height: 24, marginLeft: "auto" }}
             onClick={() => void interruptThread(threadId)}
           >
             Cancel
-          </Button>
+          </button>
         </div>
-        <div className="mt-4 space-y-2" aria-hidden>
-          <Skeleton className="h-3 w-10/12" />
-          <Skeleton className="h-3 w-8/12" />
-          <Skeleton className="h-3 w-5/12" />
+        <div style={{ marginTop: 16, display: "grid", gap: 8 }} aria-hidden>
+          <div className="q-skel" style={{ height: 10, width: "82%" }} />
+          <div className="q-skel" style={{ height: 10, width: "64%" }} />
+          <div className="q-skel" style={{ height: 10, width: "44%" }} />
         </div>
-        <p className="mt-4 text-micro text-ink-faint">
+        <p className="q-faint" style={{ marginTop: 16, fontSize: 12 }}>
           The thread exists on the daemon. Nothing has streamed yet; the first token will replace
           this outline.
         </p>
@@ -70,26 +80,58 @@ function WaitingForTurn({
   );
 }
 
+function UsageFooter({ turns, fallback }: { turns: StreamTurn[]; fallback: Usage }) {
+  const isPhone = useIsPhone();
+  const usage = [...turns].reverse().find((turn) => turn.usage)?.usage ?? fallback;
+  if (!usage) return null;
+  const total = usage.input_tokens + usage.output_tokens;
+  return (
+    <div className="q-usage-foot q-num">
+      <span>{tokens(total)} tokens</span>
+      <span>{cost(usage.cost_micros)} est.</span>
+      <span>{tokensPerSecond(usage.output_tokens, usage.duration_ms)} tok/s</span>
+      {isPhone ? null : <span>{duration(usage.duration_ms)} active</span>}
+      {isPhone ? null : <span className="grow" />}
+    </div>
+  );
+}
+
 export function ThreadPane({ threadId }: { threadId: string }) {
   const summary = useApp((state) => state.threads[threadId]);
+  const hosts = useApp((state) => state.hosts);
   const host = useApp((state) => state.hosts[summary?.host ?? ""]);
   const log = useApp((state) => state.logs[threadId]);
   const threadError = useApp((state) => state.threadErrors[threadId]);
+  const connection = useApp((state) => state.connection.status);
+  const lastSyncAt = useApp((state) => state.lastSyncAt);
+  const isPhone = useIsPhone();
   const [terminalOpen, setTerminalOpen] = useState(false);
   // Mount on first open, then keep the panel (and its PTYs) alive while hidden.
   const [terminalMounted, setTerminalMounted] = useState(false);
+  const [subagentsOpen, setSubagentsOpen] = useState(false);
+  const [approvalSheetOpen, setApprovalSheetOpen] = useState(false);
 
   useEffect(() => {
     ensureThread(threadId);
+    setApprovalSheetOpen(false);
   }, [threadId]);
+
+  // The delegated row in the stream opens the right panel's Subagents tab.
+  useEffect(() => {
+    const handler = () => setSubagentsOpen(true);
+    window.addEventListener("h4rn:subagents", handler);
+    return () => window.removeEventListener("h4rn:subagents", handler);
+  }, []);
 
   if (!summary && !log && !threadError) {
     return (
-      <main className="flex h-full min-h-0 flex-1 flex-col bg-paper" aria-busy="true">
-        <HeaderSkeleton />
+      <main className="q-main" aria-busy="true" aria-label="Loading thread">
+        <HeaderSkeleton hostName={Object.values(hosts)[0]?.name} />
         <ThreadStreamSkeleton />
-        <div className="border-t border-line px-4 py-3">
-          <Skeleton className="h-9 w-full" />
+        <div className="q-dock">
+          <div className="q-col">
+            <div className="q-skel" style={{ height: 84, borderRadius: 12, opacity: 0.6 }} />
+          </div>
         </div>
       </main>
     );
@@ -97,44 +139,71 @@ export function ThreadPane({ threadId }: { threadId: string }) {
 
   if (!summary) {
     return (
-      <main className="flex h-full min-h-0 flex-1 flex-col bg-paper">
-        <div className="flex h-14 items-center border-b border-line px-4">
-          <h2 className="text-title text-ink">Thread</h2>
-        </div>
-        <EmptyState
-          icon={CircleAlertIcon}
-          title="This thread couldn’t be loaded."
-          description={
-            threadError
-              ? `${threadError.message} The run may still be active on its host.`
-              : "It may have been settled, or the daemon restarted. The run may still be active on its host."
-          }
-          action={
-            <>
-              <Button onClick={() => retryThread(threadId)}>
-                <RefreshCwIcon aria-hidden />
+      <main className="q-main" aria-label="Thread">
+        <div className="q-center-empty">
+          <div className="q-empty" style={{ width: 460, padding: 0 }}>
+            <span className="q-danger">
+              <CircleAlertIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
+            </span>
+            <h3 style={{ fontSize: 17, lineHeight: "24px", marginTop: 10 }}>
+              This thread couldn’t be loaded
+            </h3>
+            <p style={{ margin: 0 }}>
+              {threadError
+                ? `${threadError.message} The run may still be active on its host.`
+                : "It may have been settled, or the daemon restarted. The run may still be active on its host."}
+            </p>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button type="button" className="q-btn primary" onClick={() => retryThread(threadId)}>
+                <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                 Retry
-              </Button>
-              <Button variant="secondary" onClick={() => navigate({ kind: "hosts" })}>
-                <ServerIcon aria-hidden />
-                Open hosts
-              </Button>
-            </>
-          }
-        />
+              </button>
+              <button
+                type="button"
+                className="q-btn secondary"
+                onClick={() => navigate({ kind: "hosts" })}
+              >
+                <ServerIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                Open host
+              </button>
+            </div>
+          </div>
+        </div>
       </main>
     );
   }
 
   const hostOnline = host?.online ?? false;
+  const stale = connection === "offline" || connection === "degraded";
+  const offline = stale || !hostOnline;
+  const seenAt =
+    lastSyncAt !== null
+      ? absoluteTime(new Date(lastSyncAt).toISOString())
+      : absoluteTime(host?.last_seen ?? summary.last_activity);
   const turns = log?.turns ?? [];
   const pending = log?.pending ?? [];
   const loaded = log?.loaded ?? false;
   const waiting =
     loaded && turns.length === 0 && pending.length === 0 && summary.agent_state !== "done";
+  const pendingApprovals = turns
+    .flatMap((turn) => turn.items)
+    .filter((item): item is ApprovalItem => item.kind === "approval")
+    .filter((item) => {
+      const status = log?.approvals?.[item.approvalId]?.status ?? "pending";
+      return status === "pending" || status === "sending" || status === "error";
+    });
+  const firstApproval = pendingApprovals[0];
+  const hostName = host?.name ?? summary.host;
 
-  return (
-    <main className="flex h-full min-h-0 flex-1 flex-col bg-paper" aria-label={summary.title}>
+  const main = (
+    <main
+      className={cn(
+        "q-main",
+        terminalOpen && "q-term-open",
+        isPhone && terminalOpen && "q-phone-term",
+      )}
+      aria-label={summary.title}
+    >
       <ThreadHeader
         summary={summary}
         host={host}
@@ -144,21 +213,41 @@ export function ThreadPane({ threadId }: { threadId: string }) {
           setTerminalMounted(true);
           setTerminalOpen((value) => !value);
         }}
+        subagentsOpen={subagentsOpen}
+        onToggleSubagents={() => setSubagentsOpen((value) => !value)}
+        stale={stale}
       />
 
-      {!hostOnline && summary.tab === "working" ? (
-        <div className="shrink-0 border-b border-strike/30 bg-strike-tint/50 px-4 py-1.5 text-micro text-strike-ink">
-          <span className="font-medium">{host?.name ?? summary.host} is unreachable.</span> The turn
-          may still be running. The cached stream is read-only until the host returns.
+      {loaded && offline && summary.tab === "working" ? (
+        <div
+          className="q-banner wrap"
+          style={{ margin: "12px auto 0", maxWidth: 656, width: "calc(100% - 64px)" }}
+        >
+          <span className="ic">
+            <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+          </span>
+          <span className="grow">
+            <b>{hostName} is unreachable from this device.</b> The turn may still be running there.
+            You’re reading the stream as of {seenAt}.
+          </span>
         </div>
       ) : null}
 
       {threadError && log?.loaded ? (
-        <div className="shrink-0 border-b border-strike/30 bg-strike-tint/50 px-4 py-1.5 text-micro text-strike-ink">
-          <span className="font-medium">The stream may be stale.</span> {threadError.message}{" "}
+        <div
+          className="q-banner err"
+          style={{ margin: "12px auto 0", maxWidth: 656, width: "calc(100% - 64px)" }}
+        >
+          <span className="ic">
+            <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+          </span>
+          <span className="grow">
+            <b>The stream may be stale.</b> {threadError.message}
+          </span>
           <button
             type="button"
-            className="font-medium underline underline-offset-2"
+            className="q-btn ghost"
+            style={{ height: 24 }}
             onClick={() => retryThread(threadId)}
           >
             Retry
@@ -167,19 +256,66 @@ export function ThreadPane({ threadId }: { threadId: string }) {
       ) : null}
 
       {!loaded && threadError && !log?.loading ? (
-        <EmptyState
-          icon={CircleAlertIcon}
-          title="The stream couldn’t load."
-          description={`${threadError.message} ${threadError.hint ?? "Check the daemon connection, then retry."}`}
-          action={
-            <Button onClick={() => retryThread(threadId)}>
-              <RefreshCwIcon aria-hidden />
-              Retry
-            </Button>
-          }
-          compact
-          className="flex-1"
-        />
+        <div className="q-center-empty">
+          <div className="q-empty" style={{ width: 460, padding: 0 }}>
+            <span className="q-danger">
+              <CircleAlertIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
+            </span>
+            <h3 style={{ fontSize: 17, lineHeight: "24px", marginTop: 10 }}>
+              This thread couldn’t be loaded
+            </h3>
+            <p style={{ margin: 0 }}>
+              {threadError.message}{" "}
+              {threadError.hint ??
+                "The run may still be active there; nothing on this device was lost."}
+            </p>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button type="button" className="q-btn primary" onClick={() => retryThread(threadId)}>
+                <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                Retry
+              </button>
+              <button
+                type="button"
+                className="q-btn secondary"
+                onClick={() => navigate({ kind: "hosts" })}
+              >
+                <ServerIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                Open host
+              </button>
+            </div>
+            <details style={{ fontSize: 12, color: "var(--fg-2)", alignSelf: "stretch" }}>
+              <summary style={{ cursor: "pointer" }}>Details</summary>
+              <dl className="q-kv" style={{ marginTop: 10, textAlign: "left" }}>
+                <dt>Host</dt>
+                <dd>{hostName}</dd>
+                <dt>Last seen</dt>
+                <dd className="q-num">{absoluteTime(host?.last_seen ?? summary.last_activity)}</dd>
+                <dt>Status</dt>
+                <dd>{threadError.code.replace(/_/g, " ")}</dd>
+                <dt>Last event</dt>
+                <dd className="q-num">{absoluteTime(summary.last_activity)}</dd>
+              </dl>
+              <button
+                type="button"
+                className="q-btn ghost"
+                style={{ marginTop: 8, marginLeft: -10 }}
+                onClick={() => {
+                  void navigator.clipboard?.writeText(
+                    [
+                      `thread: ${threadId}`,
+                      `host: ${hostName}`,
+                      `status: ${threadError.code}`,
+                      `message: ${threadError.message}`,
+                    ].join("\n"),
+                  );
+                }}
+              >
+                <CopyIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                Copy diagnostics
+              </button>
+            </details>
+          </div>
+        </div>
       ) : !loaded ? (
         <ThreadStreamSkeleton />
       ) : waiting ? (
@@ -189,13 +325,16 @@ export function ThreadPane({ threadId }: { threadId: string }) {
           harness={harnessLabel(summary.harness)}
         />
       ) : turns.length === 0 ? (
-        <EmptyState
-          icon={InboxIcon}
-          title="Nothing has streamed yet."
-          description={`The thread is ${summary.agent_state === "done" ? "finished" : "idle"} on ${host?.name ?? summary.host}. Reply below to start the next turn.`}
-          compact
-          className="flex-1"
-        />
+        <div className="q-center-empty">
+          <div className="q-empty" style={{ width: 460, padding: 0 }}>
+            <InboxIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
+            <h3 style={{ fontSize: 17, lineHeight: "24px" }}>Nothing has streamed yet</h3>
+            <p style={{ margin: 0 }}>
+              The thread is {summary.agent_state === "done" ? "finished" : "idle"} on{" "}
+              {host?.name ?? summary.host}. Reply below to start the next turn.
+            </p>
+          </div>
+        </div>
       ) : (
         <ThreadStream
           threadId={threadId}
@@ -203,6 +342,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
           turns={turns}
           pending={pending}
           onRetry={requestComposerFocus}
+          staleAt={offline ? lastSyncAt : null}
         />
       )}
 
@@ -217,8 +357,52 @@ export function ThreadPane({ threadId }: { threadId: string }) {
         />
       ) : null}
 
-      <StandbyBar threadId={threadId} />
-      <Composer summary={summary} />
+      {!threadError || loaded ? (
+        <div className="q-dock">
+          <div className="q-col">
+            {isPhone ? (
+              <>
+                {firstApproval ? (
+                  <PhoneApprovalSummary
+                    thread={summary}
+                    hostName={hostName}
+                    approval={firstApproval}
+                    onReview={() => setApprovalSheetOpen(true)}
+                  />
+                ) : null}
+                <Composer summary={summary} />
+                <UsageFooter turns={turns} fallback={summary.usage} />
+              </>
+            ) : (
+              <>
+                <ApprovalCard threadId={threadId} />
+                <Composer summary={summary} />
+                <UsageFooter turns={turns} fallback={summary.usage} />
+              </>
+            )}
+          </div>
+        </div>
+      ) : null}
+
+      {isPhone && approvalSheetOpen && firstApproval ? (
+        <PhoneApprovalSheet
+          thread={summary}
+          hostName={hostName}
+          approval={firstApproval}
+          onClose={() => setApprovalSheetOpen(false)}
+        />
+      ) : null}
     </main>
+  );
+
+  if (isPhone) return main;
+
+  return (
+    <>
+      {main}
+      {subagentsOpen ? (
+        <SubagentsInspector threadId={threadId} onClose={() => setSubagentsOpen(false)} />
+      ) : null}
+    </>
   );
 }

@@ -5,22 +5,23 @@ import type * as React from "react";
 import { cn } from "@/lib/utils";
 
 const buttonVariants = cva(
-  "inline-flex shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-sm text-compact font-medium transition-colors duration-[var(--dur-instant)] ease-[var(--ease-out)] outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4",
+  "inline-flex shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-[6px] text-[13px] font-medium transition-[background,color,box-shadow] duration-[var(--dur-1)] ease-[var(--ease-out)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-soft)] disabled:pointer-events-none disabled:opacity-45 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4",
   {
     variants: {
       variant: {
-        default: "bg-primary text-primary-foreground hover:bg-primary/90",
+        default: "bg-[var(--accent)] text-[var(--accent-fg)] hover:bg-[var(--accent-hi)]",
         secondary:
-          "border border-control-border bg-raised text-ink hover:bg-panel hover:[box-shadow:inset_0_0_0_1px_var(--ink)]",
-        ghost: "text-ink-muted hover:bg-panel hover:text-ink",
-        destructive: "text-strike-ink hover:bg-strike-tint",
-        link: "text-prompt underline-offset-4 hover:underline",
+          "bg-[var(--bg-raised)] text-fg shadow-[inset_0_0_0_1px_var(--line-2),0_1px_0_oklch(0.2_0.01_260/0.04)] hover:bg-[var(--hover)]",
+        ghost: "text-[var(--fg-2)] hover:bg-[var(--hover)] hover:text-fg",
+        destructive:
+          "bg-[var(--bg-raised)] text-[var(--danger)] shadow-[inset_0_0_0_1px_var(--line-2)] hover:bg-[var(--danger-soft)]",
+        link: "text-[var(--accent-tx)] underline-offset-4 hover:underline",
       },
       size: {
-        default: "h-11 px-3 md:h-[30px]",
-        sm: "h-9 px-2.5 text-micro md:h-[26px]",
-        lg: "h-11 px-4 md:h-[34px]",
-        icon: "size-11 md:size-[30px]",
+        default: "h-7 px-2.5",
+        sm: "h-6 px-2 text-[12px]",
+        lg: "h-8 px-3",
+        icon: "size-7",
       },
     },
     defaultVariants: {

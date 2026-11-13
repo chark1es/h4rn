@@ -83,14 +83,23 @@ export function createClientFromEnv(): H4rnClient {
   const config = readBootConfig();
 
   if (config.mock) {
-    const transportFactory: TransportFactory = () => createMockTransport(config.scenario);
+    const transportFactory: TransportFactory = (context) =>
+      createMockTransport(config.scenario, context.attempt);
     const options: ClientOptions = {
       url: config.daemonUrl ?? DEFAULT_WS_URL,
       token: "mock",
       transportLabel: "mock",
       transportFactory,
       requestTimeoutMs: 10_000,
-      reconnect: { baseMs: 300, maxMs: 4_000, jitter: 0.2, maxAttempts: 8 },
+      // The visual regression scenarios need a deterministic stop: `offline`
+      // drops the socket and gives up, `error` reconnects once and fails the
+      // reload so the partial-failure banner is rendered.
+      reconnect:
+        config.scenario === "offline"
+          ? { baseMs: 100, maxMs: 100, jitter: 0, maxAttempts: 0 }
+          : config.scenario === "error"
+            ? { baseMs: 120, maxMs: 120, jitter: 0, maxAttempts: 8 }
+            : { baseMs: 300, maxMs: 4_000, jitter: 0.2, maxAttempts: 8 },
     };
     return new H4rnClient(options);
   }

@@ -677,3 +677,34 @@ every operation to its own thread, so a token cannot read or cancel another
 thread's children. The tradeoff is that policy lives in one daemon-side module
 with no per-call escape hatch; a caller that needs a different bound must ask
 for it explicitly and still pass validation.
+
+## ADR-040: Quiet native UI direction replaces Prompt Book
+
+**Status:** Accepted
+
+The interface is the "Quiet native" direction: graphite neutrals at 260°, one 258° blue
+accent reserved for "you" (needs-you dots, the primary answer action, focus and selection),
+Geist/Geist Mono type, hairline panes, and platform-native navigation (sidebar, list, detail,
+inspector, tabs, sheets). The earlier Prompt Book metaphor — cue gutter, numbered turns,
+stage-black rail and status bar, amber attention bands, pill provenance rows, an orange logo
+block, theatre vocabulary (cue/standby/strike) — is an anti-reference and no part of it
+survives in the shell or the token layer. Product truth is unchanged: the Working / Done /
+Settled lifecycle, host provenance, host-local secrets, reversible actions, honest harness
+differences and the state vocabulary in `docs/ux.md` all carry over.
+
+The change is forced by the usability finding that the metaphor added a translation step
+between the user and the state words the product already uses: an operator had to read the
+stage-manager costume before reading the work, and amber bars plus numbered rows made every
+thread look urgent. The Quiet-native grammar makes attention a sorting tool: anything blue is
+the user's, everything the agents do on their own stays neutral. It also lets the desktop and
+phone use the patterns their platforms already teach, so density can rise where the operator
+is competent (lists, tables, trees, tool rows) while decision points (approvals, consent,
+resume) keep whitespace.
+
+Consequences: `DESIGN.md` now records this direction as the adopted token/type/component spec;
+`apps/ui` implements it through `tokens.css` and the `q-` layer; the terminal follows the
+theme; the sidebar hosts group collapses past six hosts. The tradeoff is that the old
+look's strongest brand signal (the stage silhouette) is gone, so identity must come from
+restraint, the blobatar/orb system and typographic precision. Surfaces whose wire protocol
+has not landed yet (Pull requests, MCP & skills, Usage, Settings, pairing) ship as clearly
+marked mock-mode shells rather than as partial implementations.

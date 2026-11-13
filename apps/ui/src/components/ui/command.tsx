@@ -1,7 +1,9 @@
 import { Command as CommandPrimitive } from "cmdk";
 import { SearchIcon } from "lucide-react";
 import type * as React from "react";
+import { Children } from "react";
 
+import { KeyGlyphs } from "@/components/common/Kbd";
 import { cn } from "@/lib/utils";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./dialog";
 
@@ -9,10 +11,7 @@ function Command({ className, ...props }: React.ComponentProps<typeof CommandPri
   return (
     <CommandPrimitive
       data-slot="command"
-      className={cn(
-        "flex h-full w-full flex-col overflow-hidden rounded-md bg-raised text-ink",
-        className,
-      )}
+      className={cn("flex h-full w-full flex-col overflow-hidden bg-bg-raised text-fg", className)}
       {...props}
     />
   );
@@ -23,13 +22,17 @@ function CommandDialog({
   description = "Search for a command to run.",
   children,
   className,
-  showCloseButton = true,
+  showCloseButton = false,
+  onOpenAutoFocus,
+  onCloseAutoFocus,
   ...props
 }: React.ComponentProps<typeof Dialog> & {
   title?: string;
   description?: string;
   className?: string;
   showCloseButton?: boolean;
+  onOpenAutoFocus?: React.ComponentProps<typeof DialogContent>["onOpenAutoFocus"];
+  onCloseAutoFocus?: React.ComponentProps<typeof DialogContent>["onCloseAutoFocus"];
 }) {
   return (
     <Dialog {...props}>
@@ -38,12 +41,12 @@ function CommandDialog({
         <DialogDescription>{description}</DialogDescription>
       </DialogHeader>
       <DialogContent
-        className={cn("overflow-hidden p-0", className)}
+        className={cn("q-palette block gap-0 overflow-hidden p-0", className)}
         showCloseButton={showCloseButton}
+        onOpenAutoFocus={onOpenAutoFocus}
+        onCloseAutoFocus={onCloseAutoFocus}
       >
-        <Command className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1 [&_[cmdk-group-heading]]:text-label [&_[cmdk-group-heading]]:text-ink-faint [&_[cmdk-group]]:px-1 [&_[cmdk-input-wrapper]_svg]:size-4 [&_[cmdk-input]]:h-10 [&_[cmdk-item]]:px-2 [&_[cmdk-item]]:py-1.5 [&_[cmdk-item]_svg]:size-4">
-          {children}
-        </Command>
+        <Command>{children}</Command>
       </DialogContent>
     </Dialog>
   );
@@ -51,22 +54,21 @@ function CommandDialog({
 
 function CommandInput({
   className,
+  trailing,
   ...props
-}: React.ComponentProps<typeof CommandPrimitive.Input>) {
+}: React.ComponentProps<typeof CommandPrimitive.Input> & { trailing?: React.ReactNode }) {
   return (
-    <div
-      data-slot="command-input-wrapper"
-      className="flex h-10 items-center gap-2 border-b border-line px-3"
-    >
-      <SearchIcon className="size-4 shrink-0 text-ink-faint" />
+    <div data-slot="command-input-wrapper" className="q-pal-in">
+      <SearchIcon className="q-icon s18 q-faint" strokeWidth={1.5} aria-hidden />
       <CommandPrimitive.Input
         data-slot="command-input"
         className={cn(
-          "flex h-10 w-full rounded-sm bg-transparent py-2 text-compact outline-none placeholder:text-ink-faint disabled:cursor-not-allowed disabled:opacity-50",
+          "h-full w-full min-w-0 border-0 bg-transparent text-[15px] text-fg outline-none placeholder:text-fg-3 disabled:cursor-not-allowed disabled:opacity-50",
           className,
         )}
         {...props}
       />
+      {trailing}
     </div>
   );
 }
@@ -75,7 +77,7 @@ function CommandList({ className, ...props }: React.ComponentProps<typeof Comman
   return (
     <CommandPrimitive.List
       data-slot="command-list"
-      className={cn("max-h-72 scroll-py-1 overflow-x-hidden overflow-y-auto", className)}
+      className={cn("q-pal-list", className)}
       {...props}
     />
   );
@@ -85,7 +87,7 @@ function CommandEmpty({ ...props }: React.ComponentProps<typeof CommandPrimitive
   return (
     <CommandPrimitive.Empty
       data-slot="command-empty"
-      className="py-6 text-center text-compact text-ink-muted"
+      className="py-6 text-center text-[12.5px] text-fg-2"
       {...props}
     />
   );
@@ -98,10 +100,7 @@ function CommandGroup({
   return (
     <CommandPrimitive.Group
       data-slot="command-group"
-      className={cn(
-        "overflow-hidden p-1 text-ink [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-label [&_[cmdk-group-heading]]:text-ink-faint",
-        className,
-      )}
+      className={cn("overflow-hidden text-fg", className)}
       {...props}
     />
   );
@@ -114,7 +113,7 @@ function CommandSeparator({
   return (
     <CommandPrimitive.Separator
       data-slot="command-separator"
-      className={cn("-mx-1 h-px bg-line", className)}
+      className={cn("mx-2 my-1 h-px bg-line", className)}
       {...props}
     />
   );
@@ -125,7 +124,7 @@ function CommandItem({ className, ...props }: React.ComponentProps<typeof Comman
     <CommandPrimitive.Item
       data-slot="command-item"
       className={cn(
-        "relative flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 text-compact outline-none select-none data-[disabled=true]:pointer-events-none data-[selected=true]:bg-cue-tint data-[selected=true]:text-cue-ink data-[disabled=true]:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 [&_svg]:shrink-0",
+        "q-pal-i cursor-default outline-none select-none data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 [&_svg]:shrink-0",
         className,
       )}
       {...props}
@@ -133,20 +132,40 @@ function CommandItem({ className, ...props }: React.ComponentProps<typeof Comman
   );
 }
 
-function CommandShortcut({ className, ...props }: React.ComponentProps<"span">) {
+function CommandShortcut({ className, children, ...props }: React.ComponentProps<"span">) {
+  const text = Children.toArray(children)
+    .map((child) => (typeof child === "string" ? child : ""))
+    .join("");
+  const keys = text.trim().split(/\s+/).filter(Boolean);
+  const seen = new Map<string, number>();
+  const chips = keys.map((key) => {
+    const ordinal = seen.get(key) ?? 0;
+    seen.set(key, ordinal + 1);
+    return { key, id: `${key}-${ordinal}` };
+  });
+
   return (
-    <span
-      data-slot="command-shortcut"
-      className={cn("ml-auto text-micro tracking-widest text-ink-faint", className)}
-      {...props}
-    />
+    <span data-slot="command-shortcut" className={cn("q-pal-kbd", className)} {...props}>
+      {chips.length > 0
+        ? chips.map((chip) => (
+            <span className="q-kbd" key={chip.id}>
+              <KeyGlyphs value={chip.key} />
+            </span>
+          ))
+        : children}
+    </span>
   );
+}
+
+function CommandFooter({ className, ...props }: React.ComponentProps<"div">) {
+  return <div data-slot="command-footer" className={cn("q-pal-foot", className)} {...props} />;
 }
 
 export {
   Command,
   CommandDialog,
   CommandEmpty,
+  CommandFooter,
   CommandGroup,
   CommandInput,
   CommandItem,

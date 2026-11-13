@@ -152,12 +152,12 @@ export function useKeyboardShortcuts(): void {
       if (route.kind === "thread") {
         if (key === "]") {
           event.preventDefault();
-          window.dispatchEvent(new CustomEvent("h4rn:cue", { detail: { direction: 1 } }));
+          window.dispatchEvent(new CustomEvent("h4rn:turn", { detail: { direction: 1 } }));
           return;
         }
         if (key === "[") {
           event.preventDefault();
-          window.dispatchEvent(new CustomEvent("h4rn:cue", { detail: { direction: -1 } }));
+          window.dispatchEvent(new CustomEvent("h4rn:turn", { detail: { direction: -1 } }));
           return;
         }
       }

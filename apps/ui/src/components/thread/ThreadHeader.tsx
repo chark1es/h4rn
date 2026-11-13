@@ -1,20 +1,19 @@
 import {
-  ArrowLeftIcon,
   CircleSlash2Icon,
   ExternalLinkIcon,
+  FileDiffIcon,
+  ListTreeIcon,
   MoreHorizontalIcon,
   PinIcon,
   Share2Icon,
   SquareIcon,
-  SquareTerminalIcon,
   SunMoonIcon,
+  TerminalIcon,
 } from "lucide-react";
-import type * as React from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { MOD, SHIFT } from "@/components/common/Kbd";
-import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -24,10 +23,12 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import type { HostSummary, ThreadSummary } from "@/gen";
+import { useIsPhone } from "@/hooks/use-media-query";
 import { glyphForThread } from "@/lib/agent";
 import { harnessLabel, harnessSeed, machineSeed } from "@/lib/entities";
-import { absoluteDateTime } from "@/lib/format";
+import { absoluteDateTime, relativeAge } from "@/lib/format";
 import {
+  acknowledgeThread,
   interruptThread,
   navigate,
   pushToast,
@@ -38,202 +39,275 @@ import {
 } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 
-function Chip({
-  children,
-  title,
-  mono,
-}: {
-  children: React.ReactNode;
-  title?: string;
-  mono?: boolean;
-}) {
-  return (
-    <span
-      title={title}
-      className={cn(
-        "inline-flex h-5 max-w-[220px] items-center gap-1 truncate rounded-sm border border-line bg-panel px-1.5 text-micro text-ink-muted",
-        mono && "font-mono",
-      )}
-    >
-      {children}
-    </span>
-  );
-}
-
 export function ThreadHeader({
   summary,
   host,
   onBack,
   terminalOpen = false,
   onToggleTerminal,
+  subagentsOpen = false,
+  onToggleSubagents,
+  stale = false,
 }: {
   summary: ThreadSummary;
   host: HostSummary | undefined;
   onBack: () => void;
   terminalOpen?: boolean;
   onToggleTerminal?: () => void;
+  subagentsOpen?: boolean;
+  onToggleSubagents?: () => void;
+  stale?: boolean;
 }) {
   const hostOnline = host?.online ?? false;
-  const glyph = glyphForThread(summary, hostOnline);
   const working = summary.tab === "working";
+  const unreachable =
+    summary.agent_state === "unreachable" ||
+    summary.agent_state === "error" ||
+    (working && !hostOnline);
+  // A dropped connection outranks the last agent state: do not animate work
+  // the daemon can no longer confirm.
+  const glyph =
+    stale && working
+      ? { kind: "offline" as const, label: "Last seen running" }
+      : glyphForThread(summary, hostOnline);
+  const isPhone = useIsPhone();
+  const hostName = host?.name ?? summary.host;
+  const stateLabel =
+    summary.tab === "done" && summary.agent_state === "done"
+      ? `Done · ${relativeAge(summary.last_activity)}`
+      : glyph.label;
+  // The prototype's Done and unreachable headers carry only state and the
+  // actions that are actually available; the tool strip belongs to live work.
+  const showToolIcons = summary.tab !== "done" && !unreachable;
 
-  return (
-    <header className="shrink-0 border-b border-line bg-paper">
-      <div className="flex h-13 items-center gap-2 px-3 sm:h-14 sm:px-4">
-        <Button
-          size="icon"
-          variant="ghost"
-          className="-ml-1 lg:hidden"
-          aria-label="Back to inbox"
-          onClick={onBack}
+  const threadMenu = (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button type="button" className={isPhone ? "navbtn" : "q-ibtn"} aria-label="Thread actions">
+          <MoreHorizontalIcon className={isPhone ? "q-icon s22" : "q-icon"} strokeWidth={1.5} />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-56">
+        <DropdownMenuLabel>Thread</DropdownMenuLabel>
+        <DropdownMenuItem onSelect={() => void togglePin(summary.thread_id)}>
+          <PinIcon aria-hidden />
+          {summary.pinned ? "Unpin from Working" : "Keep in Working"}
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => void setThreadTab(summary.thread_id, "done")}>
+          Move to Done
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => void setThreadTab(summary.thread_id, "settled")}>
+          Settle now
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          onSelect={() =>
+            void snoozeThread(summary.thread_id, new Date(Date.now() + 3_600_000).toISOString())
+          }
         >
-          <ArrowLeftIcon />
-        </Button>
+          Snooze for 1 h
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onSelect={() => {
+            void navigator.clipboard
+              ?.writeText(`${window.location.origin}/t/${summary.thread_id}`)
+              .then(() => pushToast({ title: "Thread link copied.", variant: "success" }));
+          }}
+        >
+          <Share2Icon aria-hidden />
+          Copy thread link
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => navigate({ kind: "hosts" })}>
+          <ExternalLinkIcon aria-hidden />
+          Open hosts
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => navigate({ kind: "ide" })}>
+          <CircleSlash2Icon aria-hidden />
+          Open in IDE
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={toggleTheme}>
+          <SunMoonIcon aria-hidden />
+          Toggle theme
+          <span className="ml-auto text-small text-fg-3">
+            {MOD} {SHIFT} L
+          </span>
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem disabled>
+          <span className="text-small">Started {absoluteDateTime(summary.last_activity)}</span>
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
 
-        <div className="flex min-w-0 flex-1 flex-col justify-center">
-          <h2 className="truncate text-compact font-semibold text-ink sm:text-title">
-            {summary.title}
-          </h2>
-          <div className="hidden items-center gap-1.5 md:flex">
-            <Chip title={host?.name ?? summary.host}>
-              <EntityAvatar
-                seed={machineSeed(summary.host)}
-                kind="machine"
-                label={host?.name ?? summary.host}
-                size={12}
-              />
-              <span className="truncate">{host?.name ?? summary.host}</span>
-            </Chip>
-            <Chip>
-              <EntityAvatar
-                seed={harnessSeed(summary.host, summary.harness)}
-                kind="harness"
-                label={harnessLabel(summary.harness)}
-                size={12}
-              />
-              <span className="truncate">{harnessLabel(summary.harness)}</span>
-            </Chip>
-            <Chip mono title={summary.model}>
-              {summary.model}
-            </Chip>
-            <Chip mono title={summary.workspace_path}>
-              {summary.workspace_path}
-            </Chip>
+  if (isPhone) {
+    return (
+      <>
+        <div className="q-ph-nav">
+          <button type="button" className="navbtn" aria-label="Back to inbox" onClick={onBack}>
+            <span aria-hidden className="q-ph-back-glyph">
+              ‹
+            </span>
+            Inbox
+          </button>
+          <span className="ttl" />
+          <div className="q-ph-nav-actions">
+            {onToggleTerminal ? (
+              <button
+                type="button"
+                className={cn("navbtn", terminalOpen && "on")}
+                aria-label="Toggle terminal"
+                aria-pressed={terminalOpen}
+                onClick={onToggleTerminal}
+              >
+                <TerminalIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
+              </button>
+            ) : null}
+            {threadMenu}
           </div>
         </div>
-
-        <div className="flex shrink-0 items-center gap-1">
-          <span className="mr-1 hidden items-center gap-1.5 text-micro text-ink-muted sm:flex">
-            <AgentGlyph glyph={glyph} size={18} />
-            <span className={cn(summary.needs_attention && "text-cue-ink")}>{glyph.label}</span>
-          </span>
-
-          {onToggleTerminal ? (
-            <Button
-              size="icon"
-              variant="ghost"
-              aria-label="Toggle terminal"
-              aria-pressed={terminalOpen}
-              title="Toggle terminal"
-              className={cn(terminalOpen && "bg-panel text-ink")}
-              onClick={onToggleTerminal}
-            >
-              <SquareTerminalIcon className="size-3.5" />
-            </Button>
-          ) : null}
-
-          {working ? (
-            <Button
-              size="icon"
-              variant="ghost"
-              aria-label="Interrupt turn"
-              title="Interrupt turn (Ctrl .)"
-              onClick={() => void interruptThread(summary.thread_id)}
-            >
-              <SquareIcon className="size-3.5" />
-            </Button>
-          ) : null}
-
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button size="icon" variant="ghost" aria-label="Thread actions">
-                <MoreHorizontalIcon />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-56">
-              <DropdownMenuLabel>Thread</DropdownMenuLabel>
-              <DropdownMenuItem onSelect={() => void togglePin(summary.thread_id)}>
-                <PinIcon aria-hidden />
-                {summary.pinned ? "Unpin from Working" : "Keep in Working"}
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => void setThreadTab(summary.thread_id, "done")}>
-                Move to Done
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => void setThreadTab(summary.thread_id, "settled")}>
-                Settle now
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onSelect={() =>
-                  void snoozeThread(
-                    summary.thread_id,
-                    new Date(Date.now() + 3_600_000).toISOString(),
-                  )
-                }
-              >
-                Snooze for 1 h
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem
-                onSelect={() => {
-                  void navigator.clipboard
-                    ?.writeText(`${window.location.origin}/t/${summary.thread_id}`)
-                    .then(() => pushToast({ title: "Thread link copied.", variant: "success" }));
-                }}
-              >
-                <Share2Icon aria-hidden />
-                Copy thread link
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => navigate({ kind: "hosts" })}>
-                <ExternalLinkIcon aria-hidden />
-                Open hosts
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                onSelect={() => navigate({ kind: "placeholder", surface: "ide", path: "/ide" })}
-              >
-                <CircleSlash2Icon aria-hidden />
-                Open in IDE
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={toggleTheme}>
-                <SunMoonIcon aria-hidden />
-                Toggle theme
-                <span className="ml-auto text-micro text-ink-faint">
-                  {MOD} {SHIFT} L
-                </span>
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem disabled>
-                <span className="text-micro">
-                  Started {absoluteDateTime(summary.last_activity)}
-                </span>
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+        <div className="q-ph-th-title">
+          <div className="q-ph-th-name">{summary.title}</div>
+          <div className="q-ph-th-meta">
+            <EntityAvatar
+              seed={machineSeed(summary.host)}
+              kind="machine"
+              label={hostName}
+              size={16}
+            />
+            <span>{hostName}</span>
+            <span className="q-sep">·</span>
+            <EntityAvatar
+              seed={harnessSeed(summary.host, summary.harness)}
+              kind="harness"
+              label={harnessLabel(summary.harness)}
+              size={14}
+            />
+            <span>{harnessLabel(summary.harness)}</span>
+            <span className="grow" />
+            <span className={cn("q-th-state", summary.needs_attention && "q-accent")}>
+              <AgentGlyph glyph={glyph} size={14} />
+              <span>{stateLabel}</span>
+            </span>
+          </div>
         </div>
-      </div>
+      </>
+    );
+  }
 
-      <div className="flex items-center gap-1.5 overflow-x-auto px-3 pb-2 md:hidden">
-        <Chip title={host?.name ?? summary.host}>
+  return (
+    <header className="q-th-head">
+      <div className="q-th-titles">
+        <h1>{summary.title}</h1>
+        <div className="q-prov">
           <EntityAvatar
             seed={machineSeed(summary.host)}
             kind="machine"
-            label={host?.name ?? summary.host}
-            size={12}
+            label={hostName}
+            size={14}
           />
-          {host?.name ?? summary.host}
-        </Chip>
-        <Chip>{harnessLabel(summary.harness)}</Chip>
-        <Chip mono>{summary.model}</Chip>
+          <span>{hostName}</span>
+          <span className="q-sep">·</span>
+          <EntityAvatar
+            seed={harnessSeed(summary.host, summary.harness)}
+            kind="harness"
+            label={harnessLabel(summary.harness)}
+            size={14}
+          />
+          <span>{harnessLabel(summary.harness)}</span>
+          <span className="opt">
+            <span className="q-sep">·</span> {summary.model}
+          </span>
+          <span className="br">
+            <span className="q-sep">·</span>
+            <span className="q-mono" style={{ fontSize: 11.5 }}>
+              {summary.workspace_path}
+            </span>
+          </span>
+        </div>
+      </div>
+
+      <div className={cn("q-th-state", summary.needs_attention && "q-accent")}>
+        <AgentGlyph glyph={glyph} size={14} />
+        <span>{stateLabel}</span>
+      </div>
+
+      <div className="q-th-actions">
+        {showToolIcons ? (
+          <>
+            {onToggleTerminal ? (
+              <button
+                type="button"
+                className={cn("q-ibtn", terminalOpen && "on")}
+                aria-label="Toggle terminal"
+                aria-pressed={terminalOpen}
+                title="Terminal · T"
+                onClick={onToggleTerminal}
+              >
+                <TerminalIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+              </button>
+            ) : null}
+            {onToggleSubagents ? (
+              <button
+                type="button"
+                className={cn("q-ibtn", subagentsOpen && "on")}
+                aria-label="Toggle subagents"
+                aria-pressed={subagentsOpen}
+                title={`Subagents · ${MOD} J`}
+                onClick={onToggleSubagents}
+              >
+                <ListTreeIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="q-ibtn"
+              aria-label="Changes"
+              title="Changes · D"
+              onClick={() => navigate({ kind: "ide" })}
+            >
+              <FileDiffIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+            </button>
+            <span className="q-vsep" />
+          </>
+        ) : (
+          <span className="q-vsep" />
+        )}
+
+        {working && !stale && !unreachable ? (
+          <button
+            type="button"
+            className="q-btn secondary"
+            onClick={() => void interruptThread(summary.thread_id)}
+          >
+            <SquareIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+            Stop
+          </button>
+        ) : null}
+
+        {summary.tab === "done" ? (
+          <>
+            <button
+              type="button"
+              className="q-btn secondary"
+              onClick={() =>
+                void snoozeThread(summary.thread_id, new Date(Date.now() + 3_600_000).toISOString())
+              }
+            >
+              Snooze
+            </button>
+            <button
+              type="button"
+              className="q-btn primary"
+              onClick={() => void acknowledgeThread(summary.thread_id)}
+            >
+              Acknowledge <span className="q-kbd">A</span>
+            </button>
+          </>
+        ) : null}
+
+        {threadMenu}
       </div>
     </header>
   );

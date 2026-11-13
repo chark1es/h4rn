@@ -40,8 +40,8 @@ function Chip({ task, onRemove }: { task: AttachmentDraft; onRemove: () => void 
   return (
     <div
       className={cn(
-        "relative flex h-11 min-w-0 items-center gap-1.5 overflow-hidden rounded-sm border bg-panel py-1 pr-0.5 pl-1.5 sm:h-8",
-        failed ? "border-strike/45" : "border-line",
+        "relative flex h-11 min-w-0 items-center gap-1.5 overflow-hidden rounded-sm border bg-bg-side py-1 pr-0.5 pl-1.5 sm:h-8",
+        failed ? "border-danger/45" : "border-line",
       )}
       title={`${task.file.name} · ${formatBytes(task.file.size)}`}
     >
@@ -52,15 +52,15 @@ function Chip({ task, onRemove }: { task: AttachmentDraft; onRemove: () => void 
           className="size-8 shrink-0 rounded-[2px] border border-line/70 object-cover sm:size-6"
         />
       ) : (
-        <FileTextIcon className="size-4 shrink-0 text-ink-faint" aria-hidden />
+        <FileTextIcon className="size-4 shrink-0 text-fg-3" aria-hidden />
       )}
 
       <div className="min-w-0">
-        <p className="max-w-[30ch] truncate text-micro leading-tight text-ink">{task.file.name}</p>
+        <p className="max-w-[30ch] truncate text-small leading-tight text-fg">{task.file.name}</p>
         <p
           className={cn(
-            "font-mono text-micro leading-tight tabular",
-            failed ? "text-strike-ink" : "text-ink-faint",
+            "font-mono text-small leading-tight tabular",
+            failed ? "text-danger" : "text-fg-3",
           )}
         >
           {statusLine(task)}
@@ -71,7 +71,7 @@ function Chip({ task, onRemove }: { task: AttachmentDraft; onRemove: () => void 
         type="button"
         onClick={onRemove}
         aria-label={`Remove ${task.file.name}`}
-        className="ml-auto flex size-10 shrink-0 items-center justify-center rounded-sm text-ink-faint transition-colors duration-[var(--dur-instant)] hover:bg-paper hover:text-ink focus-visible:ring-2 focus-visible:ring-cue/40 focus-visible:outline-none sm:size-6"
+        className="ml-auto flex size-10 shrink-0 items-center justify-center rounded-sm text-fg-3 transition-colors duration-[var(--dur-instant)] hover:bg-bg hover:text-fg focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none sm:size-6"
       >
         <XIcon className="size-3.5" aria-hidden />
       </button>
@@ -79,12 +79,12 @@ function Chip({ task, onRemove }: { task: AttachmentDraft; onRemove: () => void 
       {busy ? (
         <span
           aria-hidden
-          className="absolute bottom-0 left-0 h-0.5 bg-cue transition-[width] duration-[var(--dur-fast)]"
+          className="absolute bottom-0 left-0 h-0.5 bg-accent transition-[width] duration-[var(--dur-fast)]"
           style={{ width: `${percent}%` }}
         />
       ) : null}
       {failed ? (
-        <span aria-hidden className="absolute bottom-0 left-0 h-0.5 w-full bg-strike/70" />
+        <span aria-hidden className="absolute bottom-0 left-0 h-0.5 w-full bg-danger/70" />
       ) : null}
     </div>
   );
@@ -119,14 +119,12 @@ export function AttachmentTray({
       {failures.slice(0, 2).map((task) => (
         <div
           key={`failure-${task.key}`}
-          className="mt-1.5 flex items-start gap-2 rounded-sm border border-strike/40 bg-strike-tint/60 px-2 py-1.5"
+          className="mt-1.5 flex items-start gap-2 rounded-md border border-danger/40 bg-danger-soft/60 px-2 py-1.5"
         >
-          <CircleAlertIcon className="mt-0.5 size-3.5 shrink-0 text-strike-ink" aria-hidden />
+          <CircleAlertIcon className="mt-0.5 size-3.5 shrink-0 text-danger" aria-hidden />
           <div className="min-w-0 flex-1">
-            <p className="text-micro font-medium text-strike-ink">
-              {task.file.name} was not attached.
-            </p>
-            <p className="text-micro leading-relaxed text-strike-ink/85">
+            <p className="text-small font-medium text-danger">{task.file.name} was not attached.</p>
+            <p className="text-small leading-relaxed text-danger/85">
               {task.failure?.message}
               {task.failure?.hint ? ` ${task.failure.hint}` : ""}
             </p>
@@ -135,7 +133,7 @@ export function AttachmentTray({
             <button
               type="button"
               onClick={() => onRetry(task.key)}
-              className="flex h-8 shrink-0 items-center gap-1 rounded-sm border border-strike/40 px-1.5 text-micro font-medium text-strike-ink transition-colors duration-[var(--dur-instant)] hover:bg-strike-tint focus-visible:ring-2 focus-visible:ring-cue/40 focus-visible:outline-none sm:h-6"
+              className="flex h-8 shrink-0 items-center gap-1 rounded-sm border border-danger/40 px-1.5 text-small font-medium text-danger transition-colors duration-[var(--dur-instant)] hover:bg-danger-soft focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none sm:h-6"
             >
               <RotateCcwIcon className="size-3" aria-hidden />
               Retry

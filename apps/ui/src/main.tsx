@@ -1,5 +1,5 @@
-import "@fontsource-variable/archivo";
-import "@fontsource-variable/spline-sans-mono";
+import "@fontsource-variable/geist";
+import "@fontsource-variable/geist-mono";
 import "./styles/globals.css";
 // Mobile-only pairing/deep-link/safe-area adapter; inert everywhere else.
 import "./lib/platform/mobile";

@@ -1,8 +1,8 @@
 import {
   Code2Icon,
   FileCodeIcon,
-  FileDiffIcon,
   GitBranchIcon,
+  HandIcon,
   Loader2Icon,
   PanelLeftIcon,
   SaveIcon,
@@ -11,7 +11,6 @@ import {
   WifiOffIcon,
   XIcon,
 } from "lucide-react";
-import type * as React from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { EmptyState } from "@/components/common/EmptyState";
@@ -26,12 +25,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
-import { Skeleton } from "@/components/ui/skeleton";
 import type { ThreadId, ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { toProtoError } from "@/lib/client/errors";
 import { harnessLabel } from "@/lib/entities";
-import { ensureThread, navigate, pushToast, useApp } from "@/lib/store/appStore";
+import { ensureThread, navigate, openNewThread, pushToast, useApp } from "@/lib/store/appStore";
 import type { ThreadLog } from "@/lib/store/projection";
 import { cn } from "@/lib/utils";
 import { CodeEditor, type CursorPosition } from "./CodeEditor";
@@ -70,39 +68,6 @@ function workspaceName(path: string): string {
   return path.split("/").filter(Boolean).at(-1) ?? path;
 }
 
-const EDITOR_SKELETON_WIDTHS = [30, 43, 56, 69, 82, 45, 58, 71, 84, 37, 50, 63];
-
-function PanelShell({
-  title,
-  onClose,
-  children,
-  className,
-}: {
-  title: string;
-  onClose: () => void;
-  children: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <div className={cn("flex min-h-0 flex-col border-l border-line bg-paper", className)}>
-      <div className="flex h-8 shrink-0 items-center justify-between border-b border-line bg-panel px-2">
-        <span className="text-[10px] font-semibold tracking-[0.08em] text-ink-muted uppercase">
-          {title}
-        </span>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label={`Close ${title.toLowerCase()}`}
-          className="grid size-5 place-items-center rounded-sm text-ink-faint hover:bg-raised hover:text-ink"
-        >
-          <XIcon className="size-3" aria-hidden />
-        </button>
-      </div>
-      {children}
-    </div>
-  );
-}
-
 export function IdePane() {
   const isPhone = useIsPhone();
   const threads = useApp((state) => state.threads);
@@ -115,11 +80,7 @@ export function IdePane() {
     () => buildOptions(threads, logs, selectedThread),
     [threads, logs, selectedThread],
   );
-  const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  const workspace = useMemo(
-    () => options.find((option) => option.path === selectedPath) ?? options[0] ?? null,
-    [options, selectedPath],
-  );
+  const workspace = options[0] ?? null;
 
   const session = useIdeSession(workspace);
   const active = session.active;
@@ -187,19 +148,6 @@ export function IdePane() {
     [session.openDiff],
   );
 
-  const toggleDiff = useCallback(() => {
-    if (panel === "diff") {
-      setPanel(null);
-      return;
-    }
-    const path = active?.path;
-    if (!path) {
-      pushToast({ title: "Open a file first.", variant: "info" });
-      return;
-    }
-    openDiff(path, state.diffMode);
-  }, [panel, active?.path, openDiff, state.diffMode]);
-
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const mod = event.metaKey || event.ctrlKey;
@@ -224,7 +172,7 @@ export function IdePane() {
 
   if (!workspace) {
     return (
-      <main className="flex min-h-0 flex-1 flex-col bg-paper" aria-label="IDE">
+      <main className="q-main" aria-label="IDE" style={{ flex: 1 }}>
         <EmptyState
           className="flex-1"
           icon={Code2Icon}
@@ -238,11 +186,7 @@ export function IdePane() {
 
   const dirty = active ? isDirty(active) : false;
   const external = active ? state.external[active.path] : undefined;
-  const changedCount = state.agentChanges?.files.length ?? 0;
-  const threadName = workspace.threadTitle ?? "No thread";
-  const harness = workspace.harness ? harnessLabel(workspace.harness) : "the agent";
   const readOnly = offline || !active || active.binary || active.truncated;
-
   const editor = (() => {
     if (!active) {
       return (
@@ -271,51 +215,92 @@ export function IdePane() {
     }
     if (active.loading) {
       return (
-        <div className="space-y-2 p-4" role="status" aria-label="Loading file">
-          {EDITOR_SKELETON_WIDTHS.map((width) => (
-            <Skeleton key={width} className="h-3" style={{ width: `${width}%` }} />
+        <div
+          style={{ display: "grid", gap: 8, padding: 16 }}
+          role="status"
+          aria-label="Loading file"
+        >
+          {[30, 43, 56, 69, 82, 45, 58, 71, 84, 37, 50, 63].map((width) => (
+            <div key={width} className="q-skel" style={{ height: 11, width: `${width}%` }} />
           ))}
         </div>
       );
     }
     if (active.error) {
       return (
-        <div className="m-4 rounded-sm border border-line bg-raised p-4 text-compact">
-          <p className="flex items-center gap-1.5 font-medium text-ink">
-            <TriangleAlertIcon className="size-3.5 text-strike-ink" aria-hidden />
+        <div style={{ margin: 16, fontSize: 12, color: "var(--fg-2)" }}>
+          <p
+            style={{
+              margin: 0,
+              fontWeight: 500,
+              color: "var(--fg)",
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            <TriangleAlertIcon
+              className="q-icon s14"
+              style={{ color: "var(--danger)" }}
+              aria-hidden
+            />
             {active.name} did not open.
           </p>
-          <p className="mt-1 text-ink-muted">{active.error.message}</p>
-          {active.error.hint ? <p className="mt-1 text-ink-faint">{active.error.hint}</p> : null}
-          <Button
-            className="mt-3"
-            size="sm"
-            variant="secondary"
+          <p style={{ margin: "4px 0 0" }}>{active.error.message}</p>
+          {active.error.hint ? (
+            <p style={{ margin: "4px 0 0", color: "var(--fg-3)" }}>{active.error.hint}</p>
+          ) : null}
+          <button
+            type="button"
+            className="q-btn secondary"
+            style={{ marginTop: 12, height: 26 }}
             onClick={() => void session.reload(active.path)}
           >
             Try again
-          </Button>
+          </button>
         </div>
       );
     }
     if ((active.binary || active.truncated) && active.content.length === 0) {
       return (
-        <div className="m-4 rounded-sm border border-line bg-raised p-4 text-compact">
-          <p className="flex items-center gap-1.5 font-medium text-ink">
-            <TriangleAlertIcon className="size-3.5 text-cue-ink" aria-hidden />
+        <div style={{ margin: 16, fontSize: 12, color: "var(--fg-2)" }}>
+          <p
+            style={{
+              margin: 0,
+              fontWeight: 500,
+              color: "var(--fg)",
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+            }}
+          >
+            <TriangleAlertIcon
+              className="q-icon s14"
+              style={{ color: "var(--warn)" }}
+              aria-hidden
+            />
             {active.binary ? "This is a binary file." : "This file is too large for the editor."}
           </p>
-          <p className="mt-1 text-ink-muted">
+          <p style={{ margin: "4px 0 0" }}>
             {active.hint ?? "h4rn leaves this file to a terminal or your full IDE."}
           </p>
-          <div className="mt-3 flex items-center gap-2">
-            <Button size="sm" variant="secondary" onClick={() => openDiff(active.path, "head")}>
-              <FileDiffIcon aria-hidden />
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12 }}>
+            <button
+              type="button"
+              className="q-btn secondary"
+              style={{ height: 26 }}
+              onClick={() => openDiff(active.path, "head")}
+            >
               View diff
-            </Button>
-            <Button size="sm" variant="ghost" onClick={() => setTreeOpen(true)}>
+            </button>
+            <button
+              type="button"
+              className="q-btn ghost"
+              style={{ height: 26 }}
+              onClick={() => setTreeOpen(true)}
+            >
               Pick another file
-            </Button>
+            </button>
           </div>
         </div>
       );
@@ -334,282 +319,316 @@ export function IdePane() {
     );
   })();
 
-  const panelBody =
-    panel === "search" ? (
-      <SearchPanel
-        search={state.search}
-        onQuery={session.setSearchQuery}
-        onOption={session.setSearchOption}
-        onRun={() =>
-          void session.runSearch({
-            query: state.search.query,
-            regex: state.search.regex,
-            caseSensitive: state.search.caseSensitive,
-            glob: state.search.glob,
-          })
-        }
-        onOpen={(path, line) => {
-          session.openFile(path, line);
-          setPanel(null);
-        }}
-      />
-    ) : panel === "diff" ? (
-      <DiffView
-        path={state.diffPath ?? active?.path ?? null}
-        mode={state.diffMode}
-        diff={state.diff}
-        loading={state.diffLoading}
-        error={state.diffError}
-        changes={state.agentChanges}
-        onMode={(mode) => {
-          const path = state.diffPath ?? active?.path;
-          if (path) void session.openDiff(path, mode);
-        }}
-        onSelectFile={(path) => void session.openDiff(path, state.diffMode)}
-        onOpenFile={(path) => {
-          session.openFile(path);
-          setPanel(null);
-        }}
-      />
-    ) : null;
+  const tree = (
+    <FileTree
+      root={state.listings[""]}
+      listings={state.listings}
+      expanded={state.expanded}
+      activePath={active?.path ?? null}
+      agentChanges={state.agentChanges}
+      agentLoading={state.agentLoading}
+      loading={state.treeLoading}
+      error={state.treeError}
+      workspaceName={workspaceName(workspace.path)}
+      host={workspace.host}
+      changeLabel={
+        workspace.threadTitle && workspace.harness
+          ? `${workspace.threadTitle} · ${harnessLabel(workspace.harness)}`
+          : undefined
+      }
+      className={isPhone ? "fill" : undefined}
+      onToggle={session.toggleDirectory}
+      onOpen={(path) => {
+        session.openFile(path);
+        if (isPhone) setTreeOpen(false);
+      }}
+      onOpenAgent={(path) => {
+        openDiff(path, "agent");
+        if (isPhone) setTreeOpen(false);
+      }}
+      onRetry={() => void session.loadListing("")}
+      onSearch={() => setPanel((current) => (current === "search" ? null : "search"))}
+    />
+  );
+
+  const showDiff = panel === "diff";
 
   return (
-    <main className="flex h-full min-h-0 flex-1 flex-col bg-paper text-ink" aria-label="IDE">
-      <header className="flex h-11 shrink-0 items-center gap-2 border-b border-line px-2">
-        {isPhone ? (
-          <button
-            type="button"
-            aria-label="Open files"
-            onClick={() => setTreeOpen(true)}
-            className="grid size-9 place-items-center rounded-sm text-ink-muted hover:bg-panel hover:text-ink"
-          >
-            <PanelLeftIcon className="size-4" aria-hidden />
-          </button>
-        ) : null}
-        <label className="flex min-w-0 items-center gap-1.5">
-          <span className="sr-only">Workspace</span>
-          <select
-            value={workspace.path}
-            onChange={(event) => setSelectedPath(event.target.value)}
-            className="h-8 max-w-[220px] rounded-sm border border-transparent bg-transparent px-1 font-mono text-[11px] text-ink hover:border-line focus-visible:border-cue focus-visible:outline-none"
-          >
-            {options.map((option) => (
-              <option key={option.path} value={option.path}>
-                {workspaceName(option.path)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <span className="hidden items-center gap-1 font-mono text-[10px] text-ink-faint sm:flex">
-          <GitBranchIcon className="size-3.5" aria-hidden />
-          main
-        </span>
-        {!isPhone ? (
-          <span className="min-w-0 truncate font-mono text-[10px] text-ink-faint">
-            {workspace.path}
-          </span>
-        ) : null}
+    <>
+      {!isPhone ? tree : null}
+      <main className="q-main" aria-label="IDE" style={{ flex: 1 }}>
+        <TabStrip
+          tabs={state.tabs.tabs}
+          activePath={state.tabs.activePath}
+          onActivate={session.activateTab}
+          onClose={close}
+          onReorder={session.moveTab}
+        />
 
-        <div className="ml-auto flex items-center gap-1">
-          {dirty ? (
-            <span className="hidden font-mono text-[10px] text-cue-ink sm:inline">Unsaved</span>
+        <div className="q-ebar">
+          {isPhone ? (
+            <button
+              type="button"
+              aria-label="Open files"
+              onClick={() => setTreeOpen(true)}
+              className="q-ibtn"
+              style={{ marginLeft: -6 }}
+            >
+              <PanelLeftIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+            </button>
           ) : null}
-          <button
-            type="button"
-            onClick={() => void save()}
-            disabled={!dirty || readOnly}
-            aria-label="Save file"
-            className="grid size-8 place-items-center rounded-sm text-ink-muted hover:bg-panel hover:text-ink disabled:pointer-events-none disabled:opacity-40"
-          >
-            <SaveIcon className="size-4" aria-hidden />
-          </button>
-          <button
-            type="button"
-            aria-label="Search workspace"
-            aria-pressed={panel === "search"}
-            onClick={() => setPanel((current) => (current === "search" ? null : "search"))}
-            className={cn(
-              "grid size-8 place-items-center rounded-sm",
-              panel === "search"
-                ? "bg-cue-tint text-cue-ink"
-                : "text-ink-muted hover:bg-panel hover:text-ink",
-            )}
-          >
-            <SearchIcon className="size-4" aria-hidden />
-          </button>
-          <button
-            type="button"
-            aria-label="Toggle diff"
-            aria-pressed={panel === "diff"}
-            onClick={toggleDiff}
-            className={cn(
-              "flex h-8 items-center gap-1 rounded-sm px-2 text-micro",
-              panel === "diff"
-                ? "bg-cue-tint text-cue-ink"
-                : "text-ink-muted hover:bg-panel hover:text-ink",
-            )}
-          >
-            <FileDiffIcon className="size-4" aria-hidden />
-            <span className="hidden sm:inline">Diff</span>
-          </button>
-        </div>
-      </header>
-
-      <div className="flex min-h-0 flex-1">
-        {!isPhone ? (
-          <FileTree
-            root={state.listings[""]}
-            listings={state.listings}
-            expanded={state.expanded}
-            activePath={active?.path ?? null}
-            agentChanges={state.agentChanges}
-            agentLoading={state.agentLoading}
-            loading={state.treeLoading}
-            error={state.treeError}
-            onToggle={session.toggleDirectory}
-            onOpen={session.openFile}
-            onReviewAll={() => {
-              const path = state.agentChanges?.files[0]?.path ?? active?.path;
-              if (path) openDiff(path, "agent");
+          <span
+            className="q-mono"
+            style={{
+              fontSize: 12,
+              color: "var(--fg)",
+              minWidth: 0,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
             }}
-            onOpenAgent={(path) => openDiff(path, "agent")}
-            onRetry={() => void session.loadListing("")}
-          />
+          >
+            {active?.path ?? workspace.path}
+          </span>
+          <span className="grow" />
+          {!isPhone ? (
+            <div className="q-seg inline" role="tablist" aria-label="Editor mode">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={!showDiff}
+                onClick={() => setPanel((current) => (current === "diff" ? null : current))}
+              >
+                Edit
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={showDiff && state.diffMode === "head"}
+                disabled={!active}
+                onClick={() => active && openDiff(active.path, "head")}
+              >
+                vs HEAD
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={showDiff && state.diffMode === "agent"}
+                disabled={!active}
+                onClick={() => active && openDiff(active.path, "agent")}
+              >
+                vs agent
+              </button>
+            </div>
+          ) : null}
+          {!isPhone && active ? (
+            <button
+              type="button"
+              className="q-btn ghost"
+              style={{ height: 24 }}
+              onClick={openNewThread}
+              title="Start a thread with this file in context"
+            >
+              <HandIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+              Hand to agent
+            </button>
+          ) : null}
+          {isPhone ? (
+            <>
+              <button
+                type="button"
+                onClick={() => void save()}
+                disabled={!dirty || readOnly}
+                aria-label="Save file"
+                className="q-ibtn"
+              >
+                <SaveIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+              </button>
+              <button
+                type="button"
+                aria-label="Search workspace"
+                aria-pressed={panel === "search"}
+                onClick={() => setPanel((current) => (current === "search" ? null : "search"))}
+                className={cn("q-ibtn", panel === "search" && "on")}
+              >
+                <SearchIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+              </button>
+            </>
+          ) : null}
+        </div>
+
+        {external && active ? (
+          <div
+            style={{
+              display: "flex",
+              flex: "none",
+              alignItems: "center",
+              gap: 8,
+              padding: "5px 16px",
+              borderBottom: "1px solid var(--line)",
+              background: "var(--warn-soft)",
+              color: "var(--warn)",
+              fontSize: 12,
+            }}
+          >
+            <TriangleAlertIcon className="q-icon s14" aria-hidden />
+            <span style={{ minWidth: 0, flex: 1 }}>
+              {external === "deleted"
+                ? "This file was deleted on disk."
+                : "This file changed on disk while you were editing."}
+            </span>
+            <button
+              type="button"
+              onClick={() => void session.reload(active.path)}
+              className="q-btn ghost"
+              style={{ height: 22 }}
+            >
+              Reload
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                const next = { ...state.external };
+                delete next[active.path];
+                session.patch({ external: next });
+              }}
+              className="q-btn ghost"
+              style={{ height: 22 }}
+            >
+              Keep mine
+            </button>
+          </div>
         ) : null}
 
-        <div className="flex min-w-0 flex-1 flex-col">
-          <TabStrip
-            tabs={state.tabs.tabs}
-            activePath={state.tabs.activePath}
-            onActivate={session.activateTab}
-            onClose={close}
-            onReorder={session.moveTab}
-          />
-
-          {external && active ? (
-            <div className="flex shrink-0 items-center gap-2 border-b border-line bg-cue-tint px-3 py-1.5 text-micro text-cue-ink">
-              <TriangleAlertIcon className="size-3.5 shrink-0" aria-hidden />
-              <span className="min-w-0 flex-1">
-                {external === "deleted"
-                  ? "This file was deleted on disk."
-                  : "This file changed on disk while you were editing."}
-              </span>
-              <button
-                type="button"
-                onClick={() => void session.reload(active.path)}
-                className="shrink-0 underline underline-offset-2 hover:no-underline"
-              >
-                Reload
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  const next = { ...state.external };
-                  delete next[active.path];
-                  session.patch({ external: next });
+        <div style={{ position: "relative", display: "flex", minHeight: 0, flex: 1 }}>
+          <div
+            style={{ display: "flex", minWidth: 0, minHeight: 0, flex: 1, flexDirection: "column" }}
+          >
+            {showDiff ? (
+              <DiffView
+                path={state.diffPath ?? active?.path ?? null}
+                mode={state.diffMode}
+                diff={state.diff}
+                loading={state.diffLoading}
+                error={state.diffError}
+                changes={state.agentChanges}
+                host={workspace.host}
+                harness={workspace.harness}
+                changeTitle={workspace.threadTitle}
+                changeAt={
+                  workspace.threadId ? (threads[workspace.threadId]?.last_activity ?? null) : null
+                }
+                onSelectFile={(path) => void session.openDiff(path, state.diffMode)}
+                onOpenFile={(path) => {
+                  session.openFile(path);
+                  setPanel(null);
                 }}
-                className="shrink-0 underline underline-offset-2 hover:no-underline"
+                onRevert={(path, content) => void session.revertTo(path, content)}
+              />
+            ) : (
+              <div
+                className="q-code"
+                style={{ display: "flex", flexDirection: "column", padding: 0 }}
               >
-                Keep mine
-              </button>
-            </div>
-          ) : null}
-
-          <div className="relative flex min-h-0 flex-1">
-            <div className="flex min-h-0 flex-1 flex-col">
-              {active && !active.loading && !active.error ? (
-                <div className="flex h-7 shrink-0 items-center gap-2 border-b border-line bg-panel px-3 font-mono text-[10px] text-ink-faint">
-                  <span className="min-w-0 flex-1 truncate text-ink-muted">{active.path}</span>
-                  <span>{active.encoding}</span>
-                  <span className="text-ink-faint">{languageLabel(active.path)}</span>
-                </div>
-              ) : null}
-              <div className="flex min-h-0 flex-1 flex-col">{editor}</div>
-            </div>
-
-            {panelBody ? (
-              <PanelShell
-                title={panel === "search" ? "Search" : "Diff"}
-                onClose={() => setPanel(null)}
-                className={isPhone ? "absolute inset-0 z-20 border-l-0" : "w-[360px] shrink-0"}
-              >
-                {panelBody}
-              </PanelShell>
-            ) : null}
+                {editor}
+              </div>
+            )}
           </div>
-        </div>
-      </div>
 
-      <footer className="flex h-7 shrink-0 items-center gap-3 border-t border-line bg-panel px-3 font-mono text-[10px] text-ink-faint">
-        <span className="flex min-w-0 items-center gap-1">
-          <GitBranchIcon className="size-3 shrink-0" aria-hidden />
-          <span className="truncate text-ink-muted">main</span>
-        </span>
-        <span className="hidden min-w-0 items-center gap-1 sm:flex">
-          <span className="truncate">
-            {changedCount} {changedCount === 1 ? "file" : "files"} changed by {harness}
-          </span>
-          {state.agentChanges ? (
-            <span className="shrink-0">
-              <span className="text-standby-ink">
-                +{state.agentChanges.files.reduce((total, file) => total + file.added, 0)}
-              </span>{" "}
-              <span className="text-strike-ink">
-                −{state.agentChanges.files.reduce((total, file) => total + file.removed, 0)}
-              </span>
-            </span>
+          {panel === "search" ? (
+            <div
+              style={
+                isPhone
+                  ? {
+                      position: "absolute",
+                      inset: 0,
+                      zIndex: 20,
+                      display: "flex",
+                      flexDirection: "column",
+                      background: "var(--bg)",
+                    }
+                  : {
+                      width: 300,
+                      flex: "none",
+                      display: "flex",
+                      flexDirection: "column",
+                      borderLeft: "1px solid var(--line)",
+                      minHeight: 0,
+                    }
+              }
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  height: 40,
+                  padding: "0 10px 0 14px",
+                  borderBottom: "1px solid var(--line)",
+                  flex: "none",
+                }}
+              >
+                <span style={{ flex: 1, fontSize: 12, fontWeight: 600 }}>Search</span>
+                <button
+                  type="button"
+                  onClick={() => setPanel(null)}
+                  aria-label="Close search"
+                  className="q-ibtn"
+                >
+                  <XIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                </button>
+              </div>
+              <SearchPanel
+                search={state.search}
+                onQuery={session.setSearchQuery}
+                onOption={session.setSearchOption}
+                onRun={() =>
+                  void session.runSearch({
+                    query: state.search.query,
+                    regex: state.search.regex,
+                    caseSensitive: state.search.caseSensitive,
+                    glob: state.search.glob,
+                  })
+                }
+                onOpen={(path, line) => {
+                  session.openFile(path, line);
+                  setPanel(null);
+                }}
+              />
+            </div>
           ) : null}
-        </span>
-        <span className="ml-auto flex items-center gap-3">
-          <span className="hidden sm:inline">{languageLabel(active?.path)}</span>
+        </div>
+
+        <div className="q-statusbar">
+          <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <GitBranchIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+            main
+          </span>
+          <span>{workspace.host ?? "local"}</span>
+          <span className="grow" />
           <span>
             Ln {cursor.line}, Col {cursor.column}
           </span>
-          <span className={cn(dirty ? "text-cue-ink" : "text-ink-faint")}>
-            {state.saveState === "saving" ? "Saving…" : dirty ? "Unsaved" : "Up to date"}
-          </span>
+          <span className={isPhone ? "hidden" : undefined}>Spaces: 2</span>
+          <span>{active?.encoding === "utf-8" ? "UTF-8" : (active?.encoding ?? "UTF-8")}</span>
+          <span>{languageLabel(active?.path)}</span>
           {offline ? (
-            <span className="flex items-center gap-1 text-strike-ink" title="Daemon offline">
-              <WifiOffIcon className="size-3" aria-hidden />
-              <span className="hidden sm:inline">Offline</span>
+            <span
+              style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--danger)" }}
+              title="Daemon offline"
+            >
+              <WifiOffIcon className="q-icon s12" aria-hidden />
+              <span className={isPhone ? "hidden" : undefined}>Offline</span>
             </span>
           ) : null}
-          <span className="hidden lg:inline">{threadName}</span>
-        </span>
-      </footer>
+        </div>
+      </main>
 
       {isPhone ? (
         <Sheet open={treeOpen} onOpenChange={setTreeOpen}>
           <SheetContent side="left" className="w-[86vw] max-w-sm p-0">
             <SheetTitle className="sr-only">Workspace files</SheetTitle>
-            <div className="flex h-full min-h-0 flex-col [&>aside]:w-full [&>aside]:border-r-0">
-              <FileTree
-                root={state.listings[""]}
-                listings={state.listings}
-                expanded={state.expanded}
-                activePath={active?.path ?? null}
-                agentChanges={state.agentChanges}
-                agentLoading={state.agentLoading}
-                loading={state.treeLoading}
-                error={state.treeError}
-                onToggle={session.toggleDirectory}
-                onOpen={(path) => {
-                  session.openFile(path);
-                  setTreeOpen(false);
-                }}
-                onReviewAll={() => {
-                  const path = state.agentChanges?.files[0]?.path ?? active?.path;
-                  if (path) {
-                    openDiff(path, "agent");
-                    setTreeOpen(false);
-                  }
-                }}
-                onOpenAgent={(path) => {
-                  openDiff(path, "agent");
-                  setTreeOpen(false);
-                }}
-                onRetry={() => void session.loadListing("")}
-              />
+            <div style={{ display: "flex", height: "100%", minHeight: 0, flexDirection: "column" }}>
+              {tree}
             </div>
           </SheetContent>
         </Sheet>
@@ -658,7 +677,7 @@ export function IdePane() {
             </DialogDescription>
           </DialogHeader>
           {state.conflict ? (
-            <div className="max-h-64 overflow-auto rounded-sm border border-line bg-panel font-mono text-[10px] leading-4">
+            <div className="max-h-64 overflow-auto rounded-md border border-line bg-bg-side font-mono text-[10px] leading-4">
               {computeDiff(state.conflict.theirs, state.conflict.mine)
                 .slice(0, 80)
                 .map((line) => (
@@ -666,11 +685,11 @@ export function IdePane() {
                     key={`${line.kind}-${line.oldLine}-${line.newLine}`}
                     className={cn(
                       "flex gap-2 px-2",
-                      line.kind === "added" && "bg-standby-tint text-standby-ink",
-                      line.kind === "removed" && "bg-strike-tint text-strike-ink",
+                      line.kind === "added" && "bg-ok-soft text-ok",
+                      line.kind === "removed" && "bg-danger-soft text-danger",
                     )}
                   >
-                    <span className="w-4 shrink-0 text-ink-faint">
+                    <span className="w-4 shrink-0 text-fg-3">
                       {line.kind === "added" ? "+" : line.kind === "removed" ? "−" : " "}
                     </span>
                     <span className="whitespace-pre-wrap">{line.text || " "}</span>
@@ -706,6 +725,6 @@ export function IdePane() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </main>
+    </>
   );
 }

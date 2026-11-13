@@ -13,6 +13,8 @@ export type AgentGlyphSpec =
   | { kind: "check"; label: string; dim?: boolean }
   | { kind: "strike"; label: string }
   | { kind: "limit"; label: string }
+  | { kind: "pause"; label: string }
+  | { kind: "you"; label: string }
   | { kind: "offline"; label: string };
 
 export function agentStateLabel(state: AgentState): string {
@@ -69,13 +71,7 @@ export function glyphForAgentState(state: AgentState, toolName?: string): AgentG
         label: toolName ? `Running ${toolName}` : "Running tool",
       };
     case "awaiting_approval":
-      return {
-        kind: "orb",
-        state: "shaping",
-        speed: 0.8,
-        opts: { shape: 0 },
-        label: "Waiting for approval",
-      };
+      return { kind: "you", label: "Needs approval" };
     case "rate_limited":
       return { kind: "orb", state: "breathing", speed: 0.3, label: "Limited" };
     case "error":
@@ -103,7 +99,7 @@ export function glyphForThread(
     return { kind: "offline", label: "Host unreachable" };
   }
   if (summary.agent_state === "scheduled") {
-    return { kind: "orb", state: "breathing", speed: 0.3, label: "Auto-resume scheduled" };
+    return { kind: "limit", label: "Auto-resume scheduled" };
   }
   if (summary.agent_state === "queued") {
     return { kind: "orb", state: "breathing", speed: 0.35, paused: true, label: "Queued" };
@@ -113,8 +109,8 @@ export function glyphForThread(
   }
   if (summary.agent_state === "rate_limited") {
     return summary.needs_attention
-      ? { kind: "limit", label: "Limited · needs you" }
-      : { kind: "orb", state: "breathing", speed: 0.3, label: "Limited" };
+      ? { kind: summary.tab === "done" ? "pause" : "limit", label: "Limited · needs you" }
+      : { kind: "limit", label: "Limited" };
   }
   if (summary.agent_state === "done") {
     return { kind: "check", label: summary.unread ? "Done · unread" : "Done" };

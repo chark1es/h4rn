@@ -18,7 +18,7 @@ function TabsList({ className, ...props }: React.ComponentProps<typeof TabsPrimi
     <TabsPrimitive.List
       data-slot="tabs-list"
       className={cn(
-        "inline-flex h-8 w-fit items-center justify-center gap-0.5 rounded-sm bg-panel p-0.5 text-ink-muted",
+        "inline-flex h-8 w-fit items-center justify-center gap-0.5 rounded-md bg-bg-side p-0.5 text-fg-2",
         className,
       )}
       {...props}
@@ -31,7 +31,7 @@ function TabsTrigger({ className, ...props }: React.ComponentProps<typeof TabsPr
     <TabsPrimitive.Trigger
       data-slot="tabs-trigger"
       className={cn(
-        "inline-flex h-full flex-1 items-center justify-center gap-1.5 rounded-[3px] px-2 text-micro font-medium whitespace-nowrap transition-colors duration-[var(--dur-instant)] ease-[var(--ease-out)] outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-raised data-[state=active]:text-ink [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-3.5",
+        "inline-flex h-full flex-1 items-center justify-center gap-1.5 rounded-xs px-2 text-small font-medium whitespace-nowrap transition-colors duration-[var(--dur-instant)] ease-[var(--ease-out)] outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-bg-raised data-[state=active]:text-fg [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-3.5",
         className,
       )}
       {...props}
