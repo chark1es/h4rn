@@ -7,6 +7,15 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use h4rn_protocol::connect::{
+    AuditEntry, AuditPage, ConnectDevice, ConnectErrorBody, ConnectMeResponse,
+    ConnectSessionTokens, ConnectUser, DeviceGrantPollResponse, DeviceGrantStartResponse,
+    DeviceRenameRequest, LoginCompleteRequest, LoginCompleteResponse, LoginStartRequest,
+    LoginStartResponse, LogoutRequest, MachineHost, MachineHostInput, MachineHostsUpdate,
+    MachineSummary, PairingClaimRequest, PairingClaimResponse, PairingCreateRequest,
+    PairingCreateResponse, PairingInfo, PairingPayload, PresenceUpdate, ProviderInfo,
+    RefreshRequest, RelayFrame, RelayServerEvent, UsageEvent,
+};
 use h4rn_protocol::{ClientFrame, ServerFrame};
 use ts_rs::TS;
 
@@ -58,6 +67,40 @@ fn export_typescript_bindings() {
     // the complete JSON contract.
     ClientFrame::export_all_to(&dir).expect("export client bindings");
     ServerFrame::export_all_to(&dir).expect("export server bindings");
+
+    // The connect contract is a second root: it is not referenced by the
+    // daemon WebSocket frames, so export every public connect type explicitly.
+    AuditEntry::export_all_to(&dir).expect("export audit entry");
+    AuditPage::export_all_to(&dir).expect("export audit page");
+    ConnectDevice::export_all_to(&dir).expect("export connect device");
+    ConnectErrorBody::export_all_to(&dir).expect("export connect error");
+    ConnectMeResponse::export_all_to(&dir).expect("export connect me");
+    ConnectSessionTokens::export_all_to(&dir).expect("export session tokens");
+    ConnectUser::export_all_to(&dir).expect("export connect user");
+    DeviceGrantPollResponse::export_all_to(&dir).expect("export device grant poll");
+    DeviceGrantStartResponse::export_all_to(&dir).expect("export device grant start");
+    DeviceRenameRequest::export_all_to(&dir).expect("export device rename");
+    LoginCompleteRequest::export_all_to(&dir).expect("export login complete request");
+    LoginCompleteResponse::export_all_to(&dir).expect("export login complete");
+    LoginStartRequest::export_all_to(&dir).expect("export login start request");
+    LoginStartResponse::export_all_to(&dir).expect("export login start");
+    LogoutRequest::export_all_to(&dir).expect("export logout");
+    MachineHost::export_all_to(&dir).expect("export machine host");
+    MachineHostInput::export_all_to(&dir).expect("export machine host input");
+    MachineHostsUpdate::export_all_to(&dir).expect("export machine hosts update");
+    MachineSummary::export_all_to(&dir).expect("export machine summary");
+    PairingClaimRequest::export_all_to(&dir).expect("export pairing claim request");
+    PairingClaimResponse::export_all_to(&dir).expect("export pairing claim");
+    PairingCreateRequest::export_all_to(&dir).expect("export pairing create request");
+    PairingCreateResponse::export_all_to(&dir).expect("export pairing create");
+    PairingInfo::export_all_to(&dir).expect("export pairing info");
+    PairingPayload::export_all_to(&dir).expect("export pairing payload");
+    PresenceUpdate::export_all_to(&dir).expect("export presence");
+    ProviderInfo::export_all_to(&dir).expect("export provider info");
+    RefreshRequest::export_all_to(&dir).expect("export refresh");
+    RelayFrame::export_all_to(&dir).expect("export relay frame");
+    RelayServerEvent::export_all_to(&dir).expect("export relay event");
+    UsageEvent::export_all_to(&dir).expect("export usage event");
     write_barrel(&dir);
 
     assert!(dir.join("ClientFrame.ts").is_file());

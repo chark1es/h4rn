@@ -1,20 +1,95 @@
+# Self-hosted h4rn relay (ADR-018).
+#
+#   cp .env.example .env        # then edit it
+#   docker compose up -d --wait
+#
+# Postgres is the system of record (ADR-012). The optional `orbitid` profile
+# runs a local IdP for development; production deployments normally point at
+# their existing provider instead. `/relay` is the same port as the REST API.
+
 name: h4rn
 
 services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${H4RN_PG_USER:-h4rn}
+      POSTGRES_PASSWORD: ${H4RN_PG_PASSWORD:?set H4RN_PG_PASSWORD in .env}
+      POSTGRES_DB: ${H4RN_PG_DATABASE:-h4rn}
+    ports:
+      - "${H4RN_PG_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${H4RN_PG_USER:-h4rn} -d ${H4RN_PG_DATABASE:-h4rn}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   connect:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
     image: h4rn/connect:dev
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
-      - "8787:8787"
+      - "${H4RN_CONNECT_PORT:-8787}:8787"
     environment:
-      H4RN_CONNECT_ADDR: 0.0.0.0:8787
-      RUST_LOG: h4rn_connect=info
+      H4RN_CONNECT_BIND: 0.0.0.0:8787
+      H4RN_CONNECT_PUBLIC_BASE_URL: ${H4RN_CONNECT_PUBLIC_BASE_URL:?set the URL clients use}
+      H4RN_CONNECT_DATABASE_URL: postgres://${H4RN_PG_USER:-h4rn}:${H4RN_PG_PASSWORD}@postgres:5432/${H4RN_PG_DATABASE:-h4rn}
+      H4RN_CONNECT_KEK: ${H4RN_CONNECT_KEK:?set a 32-byte base64/hex key}
+      H4RN_CONNECT_SIGNING_KEY: ${H4RN_CONNECT_SIGNING_KEY:?set a 32-byte base64/hex seed}
+      H4RN_CONNECT_MODE: ${H4RN_CONNECT_MODE:-self_hosted}
+      H4RN_CONNECT_CORS_ORIGINS: ${H4RN_CONNECT_CORS_ORIGINS:-}
+      H4RN_CONNECT_WEB_DIR: ${H4RN_CONNECT_WEB_DIR:-}
+      H4RN_CONNECT_ALLOW_INSECURE: ${H4RN_CONNECT_ALLOW_INSECURE:-false}
+      H4RN_CONNECT_TRUST_FORWARDED_FOR: ${H4RN_CONNECT_TRUST_FORWARDED_FOR:-false}
+      H4RN_CONNECT_OIDC_PROVIDERS: ${H4RN_CONNECT_OIDC_PROVIDERS:-[]}
+      RUST_LOG: ${RUST_LOG:-h4rn_connect=info,tower_http=info}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/healthz"]
-      interval: 30s
+      interval: 15s
       timeout: 3s
-      retries: 3
-      start_period: 5s
+      retries: 5
+      start_period: 10s
+
+  # Optional local IdP for development:
+  #   docker build -t orbitid:local /path/to/orbitid
+  #   docker compose --profile orbitid up -d --wait
+  # Then bootstrapping creates the h4rn-connect client (see docs/self-hosting.md).
+  orbitid-postgres:
+    profiles: ["orbitid"]
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: orbitid
+      POSTGRES_PASSWORD: ${ORBITID_PG_PASSWORD:-orbitid}
+      POSTGRES_DB: orbitid
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orbitid -d orbitid"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  orbitid:
+    profiles: ["orbitid"]
+    image: ${H4RN_ORBITID_IMAGE:-orbitid:local}
+    depends_on:
+      orbitid-postgres:
+        condition: service_healthy
+    ports:
+      - "${H4RN_ORBITID_PORT:-4000}:4000"
+    environment:
+      NODE_ENV: development
+      ORBITID_PORT: 4000
+      ORBITID_BASE_URL: ${ORBITID_BASE_URL:-http://localhost:4000}
+      ORBITID_ENCRYPTION_KEY: ${ORBITID_ENCRYPTION_KEY:?set ORBITID_ENCRYPTION_KEY for the orbitid profile}
+      DATABASE_URL: postgres://orbitid:${ORBITID_PG_PASSWORD:-orbitid}@orbitid-postgres:5432/orbitid
+      POSTGRES_PASSWORD: ${ORBITID_PG_PASSWORD:-orbitid}
+
+volumes:
+  postgres-data:

@@ -51,10 +51,12 @@ sqlx = { version = "0.8.6", default-features = false, features = [
     "migrate",
     "postgres",
     "runtime-tokio",
+    "uuid",
     "sqlite",
     "tls-rustls",
 ] }
 subtle = "2.6.1"
+url = "2.5.8"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 time = { version = "0.3.55", features = ["serde"] }
@@ -65,6 +67,13 @@ tokio-tungstenite = { version = "0.30.0", default-features = false, features = [
     "rustls-tls-native-roots",
 ] }
 tracing = "0.1.44"
+tower = "0.5.3"
+tower-http = { version = "0.6.11", features = ["cors", "fs", "trace", "limit"] }
+toml = "0.8.23"
+openidconnect = { version = "3.5.0", default-features = false, features = ["reqwest", "rustls-tls"] }
+chacha20poly1305 = "0.10.1"
+ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
+
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 ts-rs = { version = "11.1.0", features = ["chrono-impl", "serde-json-impl"] }
 uuid = { version = "1.29.2", features = ["serde", "v7"] }

@@ -5,6 +5,35 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### Phase 3 — connect
+
+- **Relay service** (`h4rn-connect`): axum + Postgres, self-hostable image and compose stack
+  (`deploy/Dockerfile`, `deploy/docker-compose.yml`, `deploy/.env.example`), optional local
+  OrbitID profile, `/healthz`, `/readyz`, JSON errors as `{code, message, hint}`, optional
+  static web serving, CORS and per-IP rate limits.
+- **OIDC login**: authorization code + S256 PKCE via `openidconnect` with a stored nonce,
+  device authorization grant for daemons, `userinfo` fallback for thin ID tokens, refresh and
+  revocation, and the OrbitID quirks documented in `docs/research.md` §9.
+- **Sessions and devices**: h4rn-signed EdDSA access tokens plus rotating refresh tokens
+  bound to the device's Ed25519 key through DPoP-style proofs with a per-request nonce; refresh
+  rotation is single-flight per family with a 30-second idempotent successor window and
+  family revocation on reuse outside it; device revocation ends its sessions.
+- **Pairing**: `h4rn://pair?...` QR creation and same-user single-use claims, five-minute
+  expiry, rate-limited attempts, daemon notification on claim and revoke, and machine host
+  lists including WSL entries.
+- **Relay WebSocket**: authenticated `/relay` for daemons and clients, opaque
+  `RelayFrame { conn_id, kind, payload }` routing by connection id, pairing enforcement,
+  bounded per-peer queues, payload-blind metadata logs and presence broadcasts.
+- **Data and audit**: Postgres migrations for users, identities, auth flows, sessions,
+  devices, machines/hosts, pairings, presence, envelope-encrypted secrets, audit log, device
+  authorizations and the usage ledger; `/v1/me`, devices, machines, pairings, audit, usage and
+  auth routes.
+- **Shared wire types** (`h4rn-protocol::connect`) and regenerated TypeScript bindings.
+- **Docs and tests**: `docs/self-hosting.md`, ADR-028–030, unit tests for pairing hashes,
+  proof/envelope/crypto, refresh classification and relay routing/backpressure, plus real
+  Postgres integration tests run by `scripts/test-connect.sh` and an optional live OrbitID
+  test behind `--orbitid`.
+
 ### Phase 2 — more harnesses, terminal, attachments and IDE mode
 
 - **Codex adapter** (`h4rn-harness/src/codex.rs`): long-lived `codex app-server` sessions over

@@ -8,12 +8,14 @@ repository.workspace = true
 description = "Wire contract shared by the h4rn daemon, clients and generated TypeScript"
 
 [dependencies]
+base64.workspace = true
 blake3.workspace = true
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 ts-rs.workspace = true
+url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]

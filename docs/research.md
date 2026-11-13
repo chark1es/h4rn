@@ -398,3 +398,47 @@ Ordered by expected cost, with the mitigation each verdict already implies.
 | Proxy integration | ADR-015 |
 | Hosts, checkpoints, diagnostics, push | ADR-019, ADR-022, ADR-023, ADR-027 |
 | Antigravity policy | ADR-026 |
+
+---
+
+## 9. Phase 3 implementation findings — OrbitID breaks (2026-11-12)
+
+These came from building the Rust OIDC client in `crates/h4rn-connect/src/oidc.rs` against
+the quirks catalogued in [research/orbitid.md](research/orbitid.md). They are implementation
+consequences, not new provider behaviour, and each one changed code.
+
+1. **`openidconnect` 3.5 requires a nonce verifier for every code exchange.** The device
+   grant has no browser session and OrbitID's device ID token has no `nonce` (the TS build
+   only binds a nonce on the authorization-code path). `exchange_code` must use the stored
+   nonce, while the device-grant ID token needs a verifier that accepts absence; signature,
+   issuer, audience and expiry are still checked. Requiring a nonce there rejects every
+   daemon login.
+2. **The crate's default token-endpoint auth is `client_secret_basic`.** OrbitID advertises
+   both basic and post. The relay pins `AuthType::RequestBody` because the device
+   authorization, poll, revoke and userinfo calls are hand-written form posts; mixing basic
+   for one call and post for the others produces `invalid_client` only on some endpoints.
+3. **The device endpoint is absent, not merely disabled.** With
+   `deviceAuthorizationEnabled=false`, the TS discovery document omits
+   `device_authorization_endpoint` entirely. Configuration alone cannot enable the grant:
+   the relay feature-detects the endpoint and returns a hint instead of failing at poll time.
+4. **A confidential client must authenticate at `/oauth/device_authorization`, not just at
+   `/oauth/token`.** RFC 8628 allows a public client there; OrbitID returns `invalid_client`
+   unless `client_secret` is included. The same secret is sent on every poll.
+5. **The discovery JSON contains fields the crate does not model.** Device authorization,
+   revocation and end-session endpoints have to be parsed from a second, permissive raw
+   struct. `openidconnect`'s validated metadata remains the source for authorization, token,
+   JWKS and ID-token verification; the relay never trusts the raw copy for values it also
+   validates.
+6. **Device polling errors are normal control flow, not failures.** `authorization_pending`
+   and `slow_down` arrive as HTTP 400 with a JSON `error`; `slow_down` may omit
+   `Retry-After`. Treating either as an upstream error makes a normal approval look like an
+   outage. `access_denied` and `expired_token` are terminal; unknown codes are retried with a
+   bounded interval.
+7. **`invalid_grant` has two meanings and must not be retried.** At the token endpoint it
+   means the code or refresh token is dead (ADR-011: re-authenticate). At the device poll it
+   is not used; terminal device states use `access_denied`/`expired_token`. Mapping both to a
+   generic upstream error hides the difference.
+8. **Issuer normalisation must happen before discovery, not after.** `ProviderMetadata`
+   compares the configured issuer byte-for-byte against the document. A configured trailing
+   slash or a prefixed path fails with an opaque issuer mismatch; the relay normalises and
+   rejects a path prefix at config validation, with a message that names the provider.

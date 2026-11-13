@@ -32,6 +32,7 @@ mod binary;
 mod blob;
 mod client;
 mod common;
+pub mod connect;
 mod fs;
 mod ids;
 mod server;
@@ -47,6 +48,7 @@ pub use common::{
     HostSummary, Item, MessageRole, RuntimeMode, ThreadFilter, ThreadSummary, ThreadTab, ToolCall,
     ToolCallStatus, Topic, TurnStatus, Usage, WorktreeRequest,
 };
+pub use connect::*;
 pub use fs::{
     DiffAgainst, FileEntry, FileEntryKind, FsChangeKind, FsCreateKind, FsDeleteResult, FsDiff,
     FsFileContent, FsListing, FsSearchBatch, FsSearchMatch, FsTurnChanges, FsTurnFile,
