@@ -12,6 +12,12 @@ import {
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts } from "@/features/attachments/use-attachments";
+import {
+  proxyModelsFor,
+  proxyOverrideFor,
+  useProxy,
+  useProxyCatalog,
+} from "@/features/proxy/proxyStore";
 import type { ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { harnessLabel } from "@/lib/entities";
@@ -29,6 +35,10 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   const [sending, setSending] = useState(false);
   const [dragging, setDragging] = useState(false);
   const ref = useRef<HTMLTextAreaElement | null>(null);
+  useProxyCatalog();
+  useProxy((state) => state.profiles);
+  const proxyActive = proxyOverrideFor(summary.harness);
+  const proxyModels = proxyModelsFor(summary.harness);
 
   const online = connection === "online";
   const writable = online && hostOnline;
@@ -318,6 +328,18 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
               <DropdownMenuItem disabled>
                 <span className="font-mono">{summary.model}</span>
               </DropdownMenuItem>
+              {proxyActive && proxyModels.length > 0 ? (
+                <>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuLabel>Proxy models · {proxyActive.profile.name}</DropdownMenuLabel>
+                  {proxyModels.slice(0, 8).map((model) => (
+                    <DropdownMenuItem key={model.id} disabled>
+                      <span className="font-mono">{model.id}</span>
+                      <span className="ml-auto text-small text-fg-3">{model.source}</span>
+                    </DropdownMenuItem>
+                  ))}
+                </>
+              ) : null}
               <DropdownMenuSeparator />
               <p className="px-2 py-1.5 text-small leading-relaxed text-fg-3">
                 Harness and model are fixed for a thread. Start a new thread to change them.

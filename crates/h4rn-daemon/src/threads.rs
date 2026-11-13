@@ -252,6 +252,10 @@ struct ThreadRecord {
     resume_at: Option<DateTime<Utc>>,
     /// Latest limit observation shown on the thread summary (ADR-024).
     limit: Option<LimitBrief>,
+    /// Time to first token of the most recent metered turn (ADR-024).
+    ttft_ms: Option<u64>,
+    /// Context window of the model the session is running (ADR-015/024).
+    context_window: Option<u64>,
     closed: bool,
 }
 
@@ -348,6 +352,8 @@ impl ThreadRecord {
             last_activity: self.state.last_activity,
             agent_state: self.state.agent_state,
             usage: self.meta.usage.clone(),
+            ttft_ms: self.ttft_ms,
+            context_window: self.context_window,
             needs_attention: needs_attention(&self.state, now, settings),
             unread: tab == ThreadTab::Done && !self.state.acknowledged,
             resume_at: self.resume_at,
@@ -786,6 +792,8 @@ impl ThreadManager {
             scheduled_limit: None,
             resume_at: None,
             limit: None,
+            ttft_ms: None,
+            context_window: None,
             closed: false,
         };
         let (turn_id, _) = record.begin_turn(now);
@@ -1243,6 +1251,7 @@ impl ThreadManager {
                 range: Default::default(),
                 group_by: h4rn_protocol::UsageGroupBy::None,
                 bucket: None,
+                series_group_by: None,
             })
             .await
             .ok()?;
@@ -1540,6 +1549,8 @@ impl Inner {
                 scheduled_limit: None,
                 resume_at: None,
                 limit: None,
+                ttft_ms: None,
+                context_window: None,
                 closed: false,
             };
 
@@ -1616,6 +1627,7 @@ impl Inner {
         // CLIProxyAPI routing is applied only when the harness's toggle is on.
         // This is synchronous and offline: a probe never delays a session start.
         let mut spec = spec;
+        let mut context_window = None;
         if let Some(proxy) = self.proxy.get()
             && let Some(applied) = proxy.override_for(harness_kind, &spec.model)
         {
@@ -1626,6 +1638,17 @@ impl Inner {
                 verified = applied.verified,
                 "routing a harness session through CLIProxyAPI"
             );
+            // The cached catalogue is the only place a context window is
+            // known; without it the footer simply omits the fill bar.
+            context_window = proxy
+                .cached_models(&applied.profile_id)
+                .and_then(|catalog| {
+                    catalog
+                        .models
+                        .into_iter()
+                        .find(|model| model.id == applied.model)
+                })
+                .and_then(|model| model.context_length);
             spec.model = applied.model;
             spec.env_overrides = applied.env;
         }
@@ -1645,6 +1668,9 @@ impl Inner {
             return;
         }
         record.session = Some(session);
+        if context_window.is_some() {
+            record.context_window = context_window;
+        }
         let inner = Arc::clone(self);
         let pump_handle = handle.clone();
         record.pump = Some(tokio::spawn(async move {
@@ -1983,6 +2009,13 @@ impl Inner {
                     completed = true;
                     if status == TurnStatus::Completed {
                         record.limit = None;
+                    }
+                    // The summary footer shows TTFT after the turn ends, so
+                    // read it from the live meter before the turn is taken.
+                    if let Some(active) = record.active.as_ref()
+                        && let Some(ttft) = active.meter.live(now).ttft_ms
+                    {
+                        record.ttft_ms = Some(ttft);
                     }
                     let mut active = record.active.take();
                     let (turn_id, item_id, text, turn_usage) = match &active {

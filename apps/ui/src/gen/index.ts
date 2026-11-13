@@ -221,6 +221,7 @@ export type * from "./UsageGroupBy";
 export type * from "./UsageRange";
 export type * from "./UsageReport";
 export type * from "./UsageScope";
+export type * from "./UsageSeries";
 export type * from "./UsageStreamEvent";
 export type * from "./UsageTotals";
 export type * from "./WorktreeRequest";

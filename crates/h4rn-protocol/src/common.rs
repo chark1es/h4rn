@@ -315,6 +315,14 @@ pub struct ThreadSummary {
     pub agent_state: AgentState,
     /// Cumulative usage for the thread.
     pub usage: Usage,
+    /// Time to first token of the most recent metered turn (ADR-024).
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub ttft_ms: Option<u64>,
+    /// Context window of the active model, when the proxy catalog reports it.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub context_window: Option<u64>,
     /// Whether the thread is raising a hand.
     pub needs_attention: bool,
     /// Whether a finished turn has not been acknowledged.
@@ -476,6 +484,8 @@ mod tests {
             last_activity: Utc::now(),
             agent_state: AgentState::Scheduled,
             usage: Usage::default(),
+            ttft_ms: None,
+            context_window: None,
             needs_attention: false,
             unread: false,
             resume_at,

@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Duration, Timelike, Utc};
 use h4rn_protocol::{
     UsageBucket, UsageBucketPoint, UsageGroup, UsageGroupBy, UsageRange, UsageReport, UsageScope,
-    UsageTotals,
+    UsageSeries, UsageTotals,
 };
 
 use crate::ledger::UsageRow;
@@ -29,6 +29,8 @@ pub struct ReportQuery {
     pub group_by: UsageGroupBy,
     /// Optional series.
     pub bucket: Option<UsageBucket>,
+    /// Optional grouping for the stacked series.
+    pub series_group_by: Option<UsageGroupBy>,
 }
 
 /// Rows that are allowed to contribute to totals.
@@ -85,6 +87,10 @@ pub fn build_report(rows: &[UsageRow], query: &ReportQuery) -> UsageReport {
         .bucket
         .map(|width| buckets(&counted, query, width))
         .unwrap_or_default();
+    let series = match (query.bucket, query.series_group_by) {
+        (Some(width), Some(group_by)) => build_series(&counted, query, width, group_by),
+        _ => Vec::new(),
+    };
 
     UsageReport {
         scope: query.scope,
@@ -92,8 +98,10 @@ pub fn build_report(rows: &[UsageRow], query: &ReportQuery) -> UsageReport {
         range: query.range.clone(),
         group_by: query.group_by,
         bucket: query.bucket,
+        series_group_by: query.series_group_by,
         totals: report_totals,
         buckets,
+        series,
         groups,
     }
 }
@@ -205,8 +213,13 @@ fn totals(rows: &[&UsageRow]) -> UsageTotals {
     totals
 }
 
-fn buckets(rows: &[&UsageRow], query: &ReportQuery, width: UsageBucket) -> Vec<UsageBucketPoint> {
-    let Some((first, last)) = rows
+/// The aligned, floored time axis for a set of rows.
+fn axis(
+    rows: &[&UsageRow],
+    query: &ReportQuery,
+    width: UsageBucket,
+) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let (first, last) = rows
         .iter()
         .map(|row| (row.started_at, row.completed_at))
         .fold(
@@ -217,10 +230,7 @@ fn buckets(rows: &[&UsageRow], query: &ReportQuery, width: UsageBucket) -> Vec<U
                     None => (start, end),
                 })
             },
-        )
-    else {
-        return Vec::new();
-    };
+        )?;
     let first = floor(first, width).max(
         query
             .range
@@ -233,7 +243,22 @@ fn buckets(rows: &[&UsageRow], query: &ReportQuery, width: UsageBucket) -> Vec<U
         .until
         .map(|value| floor(value, width))
         .unwrap_or_else(|| floor(last, width));
+    Some((first, last))
+}
 
+fn buckets(rows: &[&UsageRow], query: &ReportQuery, width: UsageBucket) -> Vec<UsageBucketPoint> {
+    let Some((first, last)) = axis(rows, query, width) else {
+        return Vec::new();
+    };
+    points(rows, first, last, width)
+}
+
+fn points(
+    rows: &[&UsageRow],
+    first: DateTime<Utc>,
+    last: DateTime<Utc>,
+    width: UsageBucket,
+) -> Vec<UsageBucketPoint> {
     let mut grouped: BTreeMap<DateTime<Utc>, Vec<&UsageRow>> = BTreeMap::new();
     for row in rows {
         grouped
@@ -260,6 +285,33 @@ fn buckets(rows: &[&UsageRow], query: &ReportQuery, width: UsageBucket) -> Vec<U
         guard += 1;
     }
     points
+}
+
+/// Builds one stacked series per group over the report's shared time axis.
+fn build_series(
+    rows: &[&UsageRow],
+    query: &ReportQuery,
+    width: UsageBucket,
+    group_by: UsageGroupBy,
+) -> Vec<UsageSeries> {
+    let Some((first, last)) = axis(rows, query, width) else {
+        return Vec::new();
+    };
+    let mut grouped: BTreeMap<String, Vec<&UsageRow>> = BTreeMap::new();
+    for row in rows {
+        let key = match group_by {
+            UsageGroupBy::None => "total".to_owned(),
+            other => group_key(row, other),
+        };
+        grouped.entry(key).or_default().push(row);
+    }
+    grouped
+        .into_iter()
+        .map(|(key, rows)| UsageSeries {
+            key,
+            points: points(&rows, first, last, width),
+        })
+        .collect()
 }
 
 fn floor(value: DateTime<Utc>, width: UsageBucket) -> DateTime<Utc> {
@@ -345,6 +397,7 @@ mod tests {
             range: UsageRange::default(),
             group_by,
             bucket: None,
+            series_group_by: None,
         }
     }
 
@@ -437,6 +490,37 @@ mod tests {
         assert_eq!(report.buckets.len(), 2);
         assert_eq!(report.buckets[0].totals.output_tokens, 1);
         assert_eq!(report.buckets[1].totals.output_tokens, 3);
+    }
+
+    #[test]
+    fn stacked_series_share_one_aligned_axis() {
+        let mut first = row("a", "t1", 0, 1_000, 1, UsageProvenance::SelfMetered, false);
+        first.harness = Some("claude-code".into());
+        let mut second = row(
+            "b",
+            "t2",
+            3_600_000,
+            1_000,
+            3,
+            UsageProvenance::SelfMetered,
+            false,
+        );
+        second.harness = Some("codex".into());
+        let mut query = query(UsageScope::Global, UsageGroupBy::Harness);
+        query.bucket = Some(UsageBucket::Hour);
+        query.series_group_by = Some(UsageGroupBy::Harness);
+        let report = build_report(&[first, second], &query);
+
+        assert_eq!(report.series_group_by, Some(UsageGroupBy::Harness));
+        assert_eq!(report.series.len(), 2);
+        assert_eq!(report.series[0].key, "claude-code");
+        assert_eq!(report.series[1].key, "codex");
+        // Both keys carry every bucket, so the chart can stack them.
+        assert_eq!(report.series[0].points.len(), report.buckets.len());
+        assert_eq!(report.series[1].points.len(), report.buckets.len());
+        assert_eq!(report.series[0].points[0].totals.output_tokens, 1);
+        assert_eq!(report.series[0].points[1].totals.output_tokens, 0);
+        assert_eq!(report.series[1].points[1].totals.output_tokens, 3);
     }
 
     #[test]

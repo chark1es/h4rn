@@ -484,6 +484,8 @@ mod tests {
             last_activity: Utc::now(),
             agent_state: AgentState::Thinking,
             usage: Usage::default(),
+            ttft_ms: None,
+            context_window: None,
             needs_attention: false,
             unread: false,
             resume_at: None,

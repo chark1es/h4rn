@@ -657,6 +657,10 @@ group_by: UsageGroupBy,
  */
 bucket: UsageBucket | null, 
 /**
+ * Optional grouping for the stacked series, when `bucket` is set.
+ */
+series_group_by: UsageGroupBy | null, 
+/**
  * Include subagent children in a thread-scoped report.
  *
  * With this set, `scope_id` names a parent thread and the report adds

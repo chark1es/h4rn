@@ -204,11 +204,44 @@ impl HarnessSession for FakeSession {
                 text: format!("echo: {}", input.text),
             },
         );
+        // Deterministic, plausible numbers so the UI's token, cost and
+        // throughput surfaces have something real to render in e2e tests.
+        let output_tokens = (input.text.chars().count() as u64 / 4).max(8);
+        let usage = Usage {
+            input_tokens: 120 + input.text.chars().count() as u64 / 2,
+            output_tokens,
+            cached_input_tokens: 64,
+            cost_micros: 0,
+            duration_ms: 0,
+        };
+        send(
+            &self.sender,
+            HarnessEvent::Usage {
+                usage: usage.clone(),
+            },
+        );
+        // Tests opt into a limit with a prompt marker; the reset delay comes
+        // from the environment so a test can keep the countdown on screen.
+        if input.text.contains("[h4rn-limit]") {
+            let reset_ms = std::env::var("H4RN_FAKE_LIMIT_MS")
+                .ok()
+                .and_then(|value| value.parse::<i64>().ok())
+                .unwrap_or(60_000);
+            send(
+                &self.sender,
+                HarnessEvent::LimitHit {
+                    reset_at: Some(
+                        chrono::Utc::now() + chrono::Duration::milliseconds(reset_ms.max(1)),
+                    ),
+                    auto_resume: true,
+                },
+            );
+        }
         send(
             &self.sender,
             HarnessEvent::TurnCompleted {
                 status: TurnStatus::Completed,
-                usage: Usage::default(),
+                usage,
             },
         );
         Ok(())

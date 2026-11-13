@@ -130,6 +130,19 @@ pub struct UsageBucketPoint {
     pub totals: UsageTotals,
 }
 
+/// One stacked series: a group key and its aligned bucket points.
+///
+/// A chart needs the same time axis for every stack, so every series in one
+/// report has exactly the buckets in `UsageReport::buckets`; a key with no
+/// rows in a bucket carries a defaulted [`UsageTotals`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+pub struct UsageSeries {
+    /// Stable group key, matching the `series_group_by` breakdown.
+    pub key: String,
+    /// Buckets for this key, aligned with the report's buckets.
+    pub points: Vec<UsageBucketPoint>,
+}
+
 /// A complete usage report.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 pub struct UsageReport {
@@ -143,10 +156,14 @@ pub struct UsageReport {
     pub group_by: UsageGroupBy,
     /// Bucket width, when a series was requested.
     pub bucket: Option<UsageBucket>,
+    /// Grouping applied to [`Self::series`], when one was requested.
+    pub series_group_by: Option<UsageGroupBy>,
     /// Account-wide totals for the scope.
     pub totals: UsageTotals,
     /// Time series, oldest first.
     pub buckets: Vec<UsageBucketPoint>,
+    /// Stacked series, one per `series_group_by` key, aligned with `buckets`.
+    pub series: Vec<UsageSeries>,
     /// Breakdowns, sorted by key.
     pub groups: Vec<UsageGroup>,
 }

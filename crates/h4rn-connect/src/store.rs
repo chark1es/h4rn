@@ -1932,8 +1932,10 @@ impl Store {
             range: h4rn_protocol::UsageRange { since, until },
             group_by,
             bucket,
+            series_group_by: None,
             totals,
             buckets,
+            series: Vec::new(),
             groups,
         })
     }

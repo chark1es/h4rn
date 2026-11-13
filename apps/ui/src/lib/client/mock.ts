@@ -12,14 +12,25 @@ import { createMockFs } from "@/features/ide/mockFs";
 import type {
   AgentState,
   Attachment,
+  AutoResumePolicy,
   BlobInfo,
   ClientFrame,
+  ClientRequest,
   Event,
   HarnessKind,
   HostSummary,
   Item,
+  LimitStatus,
+  LimitsReport,
   ProtoError,
+  ProxyModel,
+  ProxyModelCatalog,
+  ProxyProfile,
+  ProxyProfilePatch,
+  ProxyTestReport,
+  Resets,
   ResponseBody,
+  ResumeSchedule,
   SeqEvent,
   ServerFrame,
   TerminalExit,
@@ -28,6 +39,11 @@ import type {
   ToolCall,
   TurnStatus,
   Usage,
+  UsageGroup,
+  UsageGroupBy,
+  UsageReport,
+  UsageSeries,
+  UsageTotals,
 } from "@/gen";
 
 import { decodeBinaryFrame, encodeBinaryFrame, BinaryKind as TerminalBinaryKind } from "./binary";
@@ -370,6 +386,8 @@ function summary(input: {
   /** When auto-resume will retry, for rate-limited rows (ADR-024). */
   resumeAtMs?: number;
   limitResetAtMs?: number;
+  ttftMs?: number;
+  contextWindow?: number;
 }): ThreadSummary {
   return {
     thread_id: input.id,
@@ -390,6 +408,8 @@ function summary(input: {
     needs_attention: input.needsAttention ?? false,
     unread: input.unread ?? false,
     resume_at: input.resumeAtMs === undefined ? null : iso(input.resumeAtMs),
+    ttft_ms: input.ttftMs ?? 640,
+    context_window: input.contextWindow ?? 200_000,
     limit:
       input.limitResetAtMs === undefined
         ? null
@@ -760,6 +780,261 @@ function buildHosts(scenario: string): HostSummary[] {
 }
 
 /** An in-browser daemon used by `?mock=1` for development and screenshots. */
+const MOCK_PROXY_MODELS: ProxyModel[] = [
+  {
+    id: "claude-sonnet-5-5",
+    display_name: "Claude Sonnet 5.5",
+    shape: "claude",
+    source: "claude",
+    alias_of: null,
+    owned_by: "anthropic",
+    context_length: 200_000n,
+    max_output_tokens: 64_000n,
+    fork_enriched: true,
+  },
+  {
+    id: "claude-opus-5-5",
+    display_name: "Claude Opus 5.5",
+    shape: "claude",
+    source: "claude",
+    alias_of: null,
+    owned_by: "anthropic",
+    context_length: 200_000n,
+    max_output_tokens: 32_000n,
+    fork_enriched: true,
+  },
+  {
+    id: "gpt-5.1-codex",
+    display_name: "GPT-5.1 Codex",
+    shape: "open_ai",
+    source: "open_ai",
+    alias_of: null,
+    owned_by: "openai",
+    context_length: 272_000n,
+    max_output_tokens: 128_000n,
+    fork_enriched: true,
+  },
+  {
+    id: "fast",
+    display_name: "Fast",
+    shape: "open_ai",
+    source: "alias",
+    alias_of: "claude-haiku-5-5",
+    owned_by: null,
+    context_length: 200_000n,
+    max_output_tokens: 16_000n,
+    fork_enriched: false,
+  },
+  {
+    id: "gemini-3-pro",
+    display_name: "Gemini 3 Pro",
+    shape: "gemini",
+    source: "gemini",
+    alias_of: null,
+    owned_by: "google",
+    context_length: 1_000_000n,
+    max_output_tokens: 65_536n,
+    fork_enriched: false,
+  },
+];
+
+function mockProxyCatalog(profileId: string): ProxyModelCatalog {
+  return {
+    profile_id: profileId,
+    models: MOCK_PROXY_MODELS,
+    aliases_merged: true,
+    fetched_at: iso(),
+  };
+}
+
+function mockProxyProfile(): ProxyProfile {
+  return {
+    id: "prx_mock",
+    name: "CLIProxyAPI on atlas",
+    base_url: "http://127.0.0.1:8317",
+    default: true,
+    has_management_key: true,
+    has_api_key: true,
+    harnesses: [
+      {
+        harness: "claude_code",
+        enabled: true,
+        default_model: "claude-sonnet-5-5",
+        verified: true,
+        note: null,
+      },
+      {
+        harness: "codex",
+        enabled: false,
+        default_model: null,
+        verified: false,
+        note: null,
+      },
+      {
+        harness: "opencode",
+        enabled: false,
+        default_model: null,
+        verified: false,
+        note: "Unverified in this repository",
+      },
+      {
+        harness: "antigravity",
+        enabled: false,
+        default_model: null,
+        verified: false,
+        note: "Unverified in this repository",
+      },
+    ],
+    capabilities: {
+      reachable: true,
+      management: "available",
+      version: "v8.0.69",
+      commit: "a1b2c3d",
+      build_date: "2026-10-30T09:00:00Z",
+      plugin_support: true,
+      usage_queue: true,
+      legacy_usage: false,
+      v8_config: true,
+      v8_etag: 'W/"mock"',
+      performance: true,
+      api_key_usage: true,
+      credentials_verify: false,
+      cooldowns: true,
+      quota_providers: true,
+      openai_models: true,
+      claude_models: true,
+      gemini_models: true,
+      fork_model_enrichment: true,
+      detected_at: iso(-12 * 60_000),
+    },
+  };
+}
+
+function mockProxyReport(): ProxyTestReport {
+  return {
+    capabilities: mockProxyProfile().capabilities ?? {
+      reachable: true,
+      management: "available",
+      version: null,
+      commit: null,
+      build_date: null,
+      plugin_support: false,
+      usage_queue: false,
+      legacy_usage: false,
+      v8_config: false,
+      v8_etag: null,
+      performance: false,
+      api_key_usage: false,
+      credentials_verify: false,
+      cooldowns: false,
+      quota_providers: false,
+      openai_models: false,
+      claude_models: false,
+      gemini_models: false,
+      fork_model_enrichment: false,
+      detected_at: iso(),
+    },
+    latency_ms: 23n,
+    diagnostics: [
+      {
+        level: "info",
+        code: "fork_detected",
+        message: "This is a CLIProxyAPI fork with the performance and usage-queue routes.",
+        hint: "No action needed.",
+      },
+      {
+        level: "warning",
+        code: "legacy_usage_missing",
+        message: "The ≤ 6.9 usage endpoint is absent, so h4rn counts usage itself.",
+        hint: "That is expected on 6.10 and newer.",
+      },
+    ],
+  };
+}
+
+function totalOf(usage: Usage): UsageTotals {
+  const input = Math.round(usage.input_tokens * 0.82);
+  return {
+    input_tokens: usage.input_tokens,
+    output_tokens: usage.output_tokens,
+    cached_input_tokens: Math.round(input * 0.35),
+    cached_creation_tokens: Math.round(input * 0.05),
+    cost_micros: usage.cost_micros,
+    ttft_ms: 640,
+    tps: usage.duration_ms > 0 ? (usage.output_tokens / (usage.duration_ms / 1000)) * 0.8 : 0,
+    wall_ms: usage.duration_ms,
+    generation_ms: Math.round(usage.duration_ms * 0.72),
+    active_ms: usage.duration_ms,
+    idle_ms: Math.round(usage.duration_ms * 0.35),
+    runtime_ms: Math.round(usage.duration_ms * 1.35),
+    turns: 1,
+  };
+}
+
+function addTotals(left: UsageTotals, right: UsageTotals): UsageTotals {
+  return {
+    input_tokens: left.input_tokens + right.input_tokens,
+    output_tokens: left.output_tokens + right.output_tokens,
+    cached_input_tokens: left.cached_input_tokens + right.cached_input_tokens,
+    cached_creation_tokens: left.cached_creation_tokens + right.cached_creation_tokens,
+    cost_micros: left.cost_micros + right.cost_micros,
+    ttft_ms: left.ttft_ms + right.ttft_ms,
+    tps: left.tps + right.tps,
+    wall_ms: left.wall_ms + right.wall_ms,
+    generation_ms: left.generation_ms + right.generation_ms,
+    active_ms: left.active_ms + right.active_ms,
+    idle_ms: left.idle_ms + right.idle_ms,
+    runtime_ms: left.runtime_ms + right.runtime_ms,
+    turns: left.turns + right.turns,
+  };
+}
+
+function emptyTotals(): UsageTotals {
+  return {
+    input_tokens: 0,
+    output_tokens: 0,
+    cached_input_tokens: 0,
+    cached_creation_tokens: 0,
+    cost_micros: 0,
+    ttft_ms: 0,
+    tps: 0,
+    wall_ms: 0,
+    generation_ms: 0,
+    active_ms: 0,
+    idle_ms: 0,
+    runtime_ms: 0,
+    turns: 0,
+  };
+}
+
+function meanTotals(totals: UsageTotals, turns: number): UsageTotals {
+  if (turns <= 0) return totals;
+  return {
+    ...totals,
+    ttft_ms: totals.ttft_ms / turns,
+    tps: totals.tps / turns,
+  };
+}
+
+function scaleTotals(totals: UsageTotals, ratio: number): UsageTotals {
+  const scale = (value: number) => Math.round(value * ratio);
+  return {
+    input_tokens: scale(totals.input_tokens),
+    output_tokens: scale(totals.output_tokens),
+    cached_input_tokens: scale(totals.cached_input_tokens),
+    cached_creation_tokens: scale(totals.cached_creation_tokens),
+    cost_micros: scale(totals.cost_micros),
+    ttft_ms: totals.ttft_ms,
+    tps: totals.tps,
+    wall_ms: scale(totals.wall_ms),
+    generation_ms: scale(totals.generation_ms),
+    active_ms: scale(totals.active_ms),
+    idle_ms: scale(totals.idle_ms),
+    runtime_ms: scale(totals.runtime_ms),
+    turns: totals.turns * ratio,
+  };
+}
+
 class MockDaemon {
   private readonly threads: Map<string, MockThread>;
   private readonly hosts: HostSummary[];
@@ -780,6 +1055,16 @@ class MockDaemon {
   private readonly failThread: boolean;
   /** Keep the skeleton screens up while still publishing cached hosts. */
   private readonly holdLists: boolean;
+  private resumePolicy: AutoResumePolicy = {
+    failover: true,
+    max_wait_ms: 6 * 60 * 60_000,
+    prompt: "The provider limit has reset. Continue the turn from where it stopped.",
+    jitter_ms: 15_000,
+  };
+  private schedules: ResumeSchedule[] = [];
+  private limitHistory: LimitStatus[] = [];
+  private proxyProfiles: ProxyProfile[] = [];
+  private proxyCatalogs = new Map<string, ProxyModelCatalog>();
 
   constructor(
     private readonly handlers: TransportHandlers,
@@ -813,6 +1098,74 @@ class MockDaemon {
         return { seq: this.seq, event };
       });
     }
+    const limited = [...this.threads.values()].find(
+      (entry) => entry.summary.limit?.reset_at,
+    )?.summary;
+    if (limited) {
+      this.limitHistory = [
+        {
+          thread_id: limited.thread_id,
+          harness: limited.harness,
+          account: "orion · codex",
+          provider: "openai",
+          model: limited.model,
+          reset_at: limited.limit?.reset_at ?? null,
+          message: limited.limit?.message ?? "Weekly limit reached.",
+          consumed: 100,
+          limit: 100,
+          observed_at: iso(-60 * 60_000),
+          source: "harness",
+        },
+        {
+          thread_id: null,
+          harness: "claude_code",
+          account: "atlas · anthropic",
+          provider: "anthropic",
+          model: "claude-sonnet-5-5",
+          reset_at: iso(3 * 24 * 60 * 60_000),
+          message: "Weekly budget is 78% consumed.",
+          consumed: 78,
+          limit: 100,
+          observed_at: iso(-3 * 60 * 60_000),
+          source: "proxy",
+        },
+        {
+          thread_id: null,
+          harness: "antigravity",
+          account: "orion · google",
+          provider: "google",
+          model: "gemini-3-pro",
+          reset_at: iso(11 * 60 * 60_000),
+          message: "Daily budget is 23% consumed.",
+          consumed: 23,
+          limit: 100,
+          observed_at: iso(-5 * 60 * 60_000),
+          source: "provider",
+        },
+      ];
+      if (limited.resume_at) {
+        this.schedules = [
+          {
+            schedule_id: "sched_mock1",
+            thread_id: limited.thread_id,
+            scheduled_at: iso(-30 * 60_000),
+            resume_at: limited.resume_at,
+            attempt: 0,
+            state: "scheduled",
+            reason: "The provider reset time is known.",
+            prompt: this.resumePolicy.prompt,
+            failover: {
+              model: "claude-sonnet-5-5",
+              account: "atlas · anthropic",
+              reason: "Same family, warmer credential",
+            },
+            last_error: null,
+          },
+        ];
+      }
+    }
+    this.proxyProfiles = [mockProxyProfile()];
+    this.proxyCatalogs.set("prx_mock", mockProxyCatalog("prx_mock"));
   }
 
   dispose(): void {
@@ -1047,6 +1400,8 @@ class MockDaemon {
           unread: false,
           resume_at: null,
           limit: null,
+          ttft_ms: 0,
+          context_window: 200_000,
         };
         this.threads.set(id, { summary: thread, events: [], wire: [] });
         this.ok(frame.id, {
@@ -1375,6 +1730,208 @@ class MockDaemon {
         this.streamBlob(streamId, blob.bytes);
         return;
       }
+      case "get_usage":
+        this.ok(frame.id, { type: "usage_report", report: this.usageReport(body) });
+        return;
+      case "get_limits":
+        this.ok(frame.id, { type: "limits", report: this.limitsReport() });
+        return;
+      case "list_resets":
+        this.ok(frame.id, {
+          type: "resets",
+          resets: { schedules: this.schedules, history: this.limitHistory } satisfies Resets,
+        });
+        return;
+      case "cancel_resume": {
+        this.schedules = this.schedules.filter((schedule) => schedule.thread_id !== body.thread_id);
+        const thread = this.threads.get(body.thread_id);
+        if (thread) {
+          thread.summary = { ...thread.summary, resume_at: null };
+          this.emit(body.thread_id, { type: "thread_upserted", ...thread.summary });
+        }
+        this.sendUsage({ type: "schedule_changed", schedule: null });
+        this.ok(frame.id, { type: "resume_changed", schedule: null });
+        return;
+      }
+      case "resume_now": {
+        this.schedules = this.schedules.filter((schedule) => schedule.thread_id !== body.thread_id);
+        const thread = this.threads.get(body.thread_id);
+        if (thread) {
+          thread.summary = {
+            ...thread.summary,
+            resume_at: null,
+            agent_state: "thinking",
+            tab: "working",
+          };
+          this.emit(body.thread_id, { type: "thread_upserted", ...thread.summary });
+        }
+        this.sendUsage({ type: "schedule_changed", schedule: null });
+        this.ok(frame.id, { type: "resume_changed", schedule: null });
+        return;
+      }
+      case "set_auto_resume_policy":
+        this.resumePolicy = body.policy;
+        this.ok(frame.id, { type: "ack" });
+        return;
+      case "list_proxy_profiles":
+        this.ok(frame.id, { type: "proxy_profiles", profiles: this.proxyProfiles });
+        return;
+      case "add_proxy_profile": {
+        const profile: ProxyProfile = {
+          id: `prx_${this.proxyProfiles.length + 1}`,
+          name: body.profile.name,
+          base_url: body.profile.base_url,
+          default: body.profile.default || this.proxyProfiles.length === 0,
+          has_management_key: Boolean(body.profile.management_key),
+          has_api_key: Boolean(body.profile.api_key),
+          harnesses: [],
+          capabilities: null,
+        };
+        this.proxyProfiles = [...this.proxyProfiles, profile];
+        this.proxyCatalogs.set(profile.id, mockProxyCatalog(profile.id));
+        this.ok(frame.id, { type: "proxy_profile", profile });
+        return;
+      }
+      case "update_proxy_profile": {
+        const profile = this.proxyProfiles.find((candidate) => candidate.id === body.profile_id);
+        if (!profile) {
+          this.err(frame.id, "not_found", "That profile is gone.", "Reload profiles.");
+          return;
+        }
+        const patch: ProxyProfilePatch = body.patch;
+        const next: ProxyProfile = {
+          ...profile,
+          name: patch.name ?? profile.name,
+          base_url: patch.base_url ?? profile.base_url,
+          default: patch.default ?? profile.default,
+          has_management_key: patch.clear_management_key
+            ? false
+            : patch.management_key !== null
+              ? true
+              : profile.has_management_key,
+          has_api_key: patch.clear_api_key
+            ? false
+            : patch.api_key !== null
+              ? true
+              : profile.has_api_key,
+        };
+        this.proxyProfiles = this.proxyProfiles.map((candidate) =>
+          candidate.id === profile.id ? next : candidate,
+        );
+        this.ok(frame.id, { type: "proxy_profile", profile: next });
+        return;
+      }
+      case "remove_proxy_profile": {
+        this.proxyProfiles = this.proxyProfiles.filter((profile) => profile.id !== body.profile_id);
+        this.proxyCatalogs.delete(body.profile_id);
+        this.ok(frame.id, { type: "proxy_profiles", profiles: this.proxyProfiles });
+        return;
+      }
+      case "test_proxy_profile": {
+        const report = mockProxyReport();
+        this.proxyProfiles = this.proxyProfiles.map((profile) =>
+          profile.id === body.profile_id
+            ? { ...profile, capabilities: report.capabilities }
+            : profile,
+        );
+        this.ok(frame.id, { type: "proxy_tested", report });
+        return;
+      }
+      case "list_proxy_models": {
+        const catalog =
+          this.proxyCatalogs.get(body.profile_id) ?? mockProxyCatalog(body.profile_id);
+        this.proxyCatalogs.set(body.profile_id, catalog);
+        this.ok(frame.id, { type: "proxy_models", catalog });
+        return;
+      }
+      case "set_proxy_harness_override": {
+        const current = this.proxyProfiles.find((profile) => profile.id === body.profile_id);
+        if (!current) {
+          this.err(frame.id, "not_found", "That profile is gone.", "Reload profiles.");
+          return;
+        }
+        const existing = current.harnesses.find((override) => override.harness === body.harness);
+        const override = {
+          harness: body.harness,
+          enabled: body.enabled,
+          default_model: body.default_model,
+          verified: existing?.verified ?? false,
+          note: existing?.note ?? null,
+        };
+        const next: ProxyProfile = {
+          ...current,
+          harnesses: existing
+            ? current.harnesses.map((candidate) =>
+                candidate.harness === body.harness ? override : candidate,
+              )
+            : [...current.harnesses, override],
+        };
+        this.proxyProfiles = this.proxyProfiles.map((profile) =>
+          profile.id === current.id ? next : profile,
+        );
+        this.ok(frame.id, { type: "proxy_profile", profile: next });
+        return;
+      }
+      case "list_proxy_limits": {
+        const profile = this.proxyProfiles.find((candidate) => candidate.id === body.profile_id);
+        const limits = {
+          profile_id: body.profile_id,
+          available: Boolean(profile?.has_management_key),
+          credentials: profile?.has_management_key
+            ? [
+                {
+                  auth_index: "0",
+                  name: "anthropic-work.json",
+                  provider: "anthropic",
+                  status: "ready",
+                  disabled: false,
+                  success: 1_284n,
+                  failed: 3n,
+                  supports_quota: true,
+                  cooldowns: [],
+                },
+                {
+                  auth_index: "1",
+                  name: "openai-team.json",
+                  provider: "openai",
+                  status: "cooling down",
+                  disabled: false,
+                  success: 402n,
+                  failed: 18n,
+                  supports_quota: true,
+                  cooldowns: [
+                    {
+                      scope: "model",
+                      model_key: "gpt-5.1-codex",
+                      reason: "429 rate limit",
+                      retry_at: iso(8 * 60_000),
+                      remaining_seconds: 480n,
+                      backoff_level: 2,
+                      http_status: 429,
+                    },
+                  ],
+                },
+              ]
+            : [],
+          observed_at: iso(),
+          note: profile?.has_management_key
+            ? null
+            : "Add the management key to read credential health.",
+        };
+        this.ok(frame.id, { type: "proxy_limits", limits });
+        return;
+      }
+      case "pick_proxy_failover": {
+        this.ok(frame.id, {
+          type: "proxy_failover",
+          choice: {
+            model: body.current_model.includes("claude") ? "claude-sonnet-5-5" : "gpt-5.1-codex",
+            account: "anthropic-work.json",
+            reason: "Same family, lowest cooldown backoff",
+          },
+        });
+        return;
+      }
       default: {
         const handled = this.fs.handle(body, {
           ok: (response) => this.ok(frame.id, response),
@@ -1402,6 +1959,187 @@ class MockDaemon {
       created_at: blob.created_at,
       has_thumbnail: blob.mime.startsWith("image/"),
     };
+  }
+
+  private mockLimit(threadId: string, turnId: string): void {
+    const entry = this.threads.get(threadId);
+    if (!entry || this.disposed) return;
+    const resetAt = new Date(Date.now() + 90_000).toISOString();
+    const status: LimitStatus = {
+      thread_id: threadId,
+      harness: entry.summary.harness,
+      account: "mock · provider",
+      provider: "anthropic",
+      model: entry.summary.model,
+      reset_at: resetAt,
+      message: "The provider's short-window budget is exhausted.",
+      consumed: 100,
+      limit: 100,
+      observed_at: iso(),
+      source: "harness",
+    };
+    this.limitHistory = [status, ...this.limitHistory];
+    const schedule: ResumeSchedule = {
+      schedule_id: `sched_${this.schedules.length + 1}`,
+      thread_id: threadId,
+      scheduled_at: iso(),
+      resume_at: resetAt,
+      attempt: 0,
+      state: "scheduled",
+      reason: "The provider reported a reset time; auto-resume is armed.",
+      prompt: this.resumePolicy.prompt,
+      failover: this.resumePolicy.failover
+        ? {
+            model: "claude-sonnet-5-5",
+            account: "atlas · anthropic",
+            reason: "Same family, warmer credential",
+          }
+        : null,
+      last_error: null,
+    };
+    this.schedules = [schedule, ...this.schedules];
+    entry.summary = {
+      ...entry.summary,
+      tab: "working",
+      agent_state: "rate_limited",
+      needs_attention: false,
+      resume_at: resetAt,
+      limit: {
+        harness: entry.summary.harness,
+        reset_at: resetAt,
+        message: status.message,
+      },
+      last_activity: iso(),
+    };
+    this.emit(threadId, {
+      type: "usage_limit_hit",
+      thread_id: threadId,
+      reset_at: resetAt,
+      auto_resume: true,
+    });
+    this.emit(threadId, { type: "thread_upserted", ...entry.summary });
+    this.sendUsage({ type: "limit_status", status });
+    this.sendUsage({ type: "schedule_changed", schedule });
+    this.sendUsage({
+      type: "usage_tick",
+      thread_id: threadId,
+      run_id: turnId,
+      usage: usage(1_200, 40, 900, 400),
+      ttft_ms: 380,
+      tps: null,
+      elapsed_ms: 900,
+      tool_ms: 0,
+      at: iso(),
+    });
+  }
+
+  private sendUsage(event: import("@/gen").UsageStreamEvent): void {
+    if (this.disposed) return;
+    const frame: ServerFrame = { kind: "usage_event", event };
+    this.handlers.onMessage(JSON.stringify(frame));
+  }
+
+  private usageReport(body: Extract<ClientRequest, { type: "get_usage" }>): UsageReport {
+    const bucket = body.bucket ?? "day";
+    const span = bucket === "hour" ? 60 * 60_000 : 24 * 60 * 60_000;
+    const now = Date.now();
+    const since = body.range.since ? Date.parse(body.range.since) : now - 14 * span;
+    const count = Math.max(1, Math.min(30, Math.ceil((now - since) / span)));
+    const lastStart = Math.floor(now / span) * span;
+    const starts = Array.from(
+      { length: count },
+      (_, index) => lastStart - (count - 1 - index) * span,
+    );
+
+    const keyOf = (thread: ThreadSummary, grouping: UsageGroupBy): string => {
+      switch (grouping) {
+        case "harness":
+          return thread.harness;
+        case "model":
+          return thread.model;
+        case "machine":
+          return thread.host;
+        case "workspace":
+          return thread.workspace_path;
+        case "thread":
+          return thread.thread_id;
+        default:
+          return "all";
+      }
+    };
+
+    const threads = [...this.threads.values()]
+      .map((entry) => entry.summary)
+      .filter((thread) => {
+        if (body.scope === "thread") return thread.thread_id === body.scope_id;
+        if (body.scope === "workspace") return thread.workspace_path === body.scope_id;
+        if (body.scope === "machine") return thread.host === body.scope_id;
+        return true;
+      });
+
+    const seriesGrouping = body.series_group_by ?? body.group_by;
+    const seriesTotals = new Map<string, UsageTotals[]>();
+    const totals = emptyTotals();
+    const groups = new Map<string, UsageTotals>();
+    const buckets = starts.map((start) => ({
+      start: new Date(start).toISOString(),
+      end: new Date(start + span).toISOString(),
+      totals: emptyTotals(),
+    }));
+
+    threads.forEach((thread, threadIndex) => {
+      const threadTotals = totalOf(thread.usage);
+      const weights = starts.map((_, index) => 0.4 + ((index * 7 + threadIndex * 13) % 9) / 10);
+      const weightSum = weights.reduce((sum, weight) => sum + weight, 0);
+      const seriesKey = keyOf(thread, seriesGrouping);
+      const keyed = seriesTotals.get(seriesKey) ?? starts.map(() => emptyTotals());
+      starts.forEach((_, index) => {
+        const ratio = (weights[index] ?? 0) / weightSum;
+        const share = scaleTotals(threadTotals, ratio);
+        const point = buckets[index];
+        if (point) point.totals = addTotals(point.totals, share);
+        const keyedPoint = keyed[index];
+        if (keyedPoint) keyed[index] = addTotals(keyedPoint, share);
+      });
+      seriesTotals.set(seriesKey, keyed);
+
+      const groupKey = keyOf(thread, body.group_by);
+      groups.set(groupKey, addTotals(groups.get(groupKey) ?? emptyTotals(), threadTotals));
+      const added = addTotals(totals, threadTotals);
+      Object.assign(totals, added);
+    });
+
+    const series: UsageSeries[] = [...seriesTotals.entries()].map(([key, points]) => ({
+      key,
+      points: points.map((pointTotals, index) => ({
+        start: new Date(starts[index] ?? lastStart).toISOString(),
+        end: new Date((starts[index] ?? lastStart) + span).toISOString(),
+        totals: pointTotals,
+      })),
+    }));
+
+    const turns = totals.turns;
+    const grouped: UsageGroup[] = [...groups.entries()].map(([key, groupTotals]) => ({
+      key,
+      totals: meanTotals(groupTotals, groupTotals.turns),
+    }));
+
+    return {
+      scope: body.scope,
+      scope_id: body.scope_id,
+      range: body.range,
+      group_by: body.group_by,
+      bucket,
+      series_group_by: body.series_group_by,
+      totals: meanTotals(totals, turns),
+      buckets,
+      series,
+      groups: grouped,
+    };
+  }
+
+  private limitsReport(): LimitsReport {
+    return { limits: this.limitHistory, policy: this.resumePolicy };
   }
 
   private attachmentsFor(ids: string[]): Attachment[] {
@@ -1493,6 +2231,11 @@ class MockDaemon {
     const reply =
       "\n\nI'll start by mapping the relevant files, then make the smallest change that explains the failure. " +
       "I’ll keep the branch clean and report the command output before touching anything irreversible.";
+    if (prompt.includes("[h4rn-limit]")) {
+      this.later(900, () => this.mockLimit(threadId, turnId));
+      return;
+    }
+    const startedAt = Date.now();
     let offset = 0;
     const tick = () => {
       if (this.disposed) return;
@@ -1531,6 +2274,17 @@ class MockDaemon {
             usage: usage(8_400, 1_900, 24_000, 14_000),
             status: "completed",
           });
+          this.sendUsage({
+            type: "usage_tick",
+            thread_id: threadId,
+            run_id: turnId,
+            usage: usage(8_400, 1_900, 24_000, 14_000),
+            ttft_ms: 610,
+            tps: 61,
+            elapsed_ms: 24_000,
+            tool_ms: 1_200,
+            at: iso(),
+          });
           const thread = this.threads.get(threadId);
           if (thread) {
             thread.summary = {
@@ -1549,6 +2303,23 @@ class MockDaemon {
       const size = 8 + Math.floor(Math.random() * 14);
       const chunk = reply.slice(offset, offset + size);
       offset += size;
+      const elapsed = Date.now() - startedAt;
+      this.sendUsage({
+        type: "usage_tick",
+        thread_id: threadId,
+        run_id: turnId,
+        usage: usage(
+          2_400,
+          Math.max(24, Math.round(offset / 3)),
+          elapsed,
+          Math.round(offset * 0.9),
+        ),
+        ttft_ms: 420,
+        tps: elapsed > 0 ? Math.round(offset / 3 / (elapsed / 1000)) : null,
+        elapsed_ms: elapsed,
+        tool_ms: 0,
+        at: iso(),
+      });
       this.emit(threadId, {
         type: "message_delta",
         thread_id: threadId,
