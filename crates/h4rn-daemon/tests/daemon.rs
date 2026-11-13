@@ -326,7 +326,11 @@ async fn creates_streams_and_moves_working_done_settled() {
             assert_eq!(protocol_version, h4rn_protocol::PROTOCOL_VERSION);
             assert!(hosts[0].online);
             assert_eq!(hosts[0].host_id, host);
-            assert_eq!(hosts[0].harnesses, vec![HarnessKind::ClaudeCode]);
+            // Both built-in adapters are registered; each resolves its install
+            // lazily, so `available()` is not filtered by detection.
+            assert_eq!(hosts[0].harnesses.len(), 2, "{:?}", hosts[0].harnesses);
+            assert!(hosts[0].harnesses.contains(&HarnessKind::ClaudeCode));
+            assert!(hosts[0].harnesses.contains(&HarnessKind::Antigravity));
         }
         other => panic!("unexpected hello: {other:?}"),
     }
