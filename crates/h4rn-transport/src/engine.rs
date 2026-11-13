@@ -168,6 +168,17 @@ impl TransportEngine {
         if config.daemon_public == [0u8; 32] {
             return Err(EngineError::Protocol("daemon public key is all zeroes"));
         }
+        // A persisted ticket must be sent in the first `Open` on every path.
+        // Without it the daemon sees a new session with an id it already holds
+        // and rejects the path, so a reconnect could never resume.
+        if let Some(resume) = config.resume
+            && resume.session_id != config.session_id
+        {
+            return Err(EngineError::Protocol(
+                "resume ticket belongs to a different session",
+            ));
+        }
+        let ticket = config.resume;
         Ok(Self {
             config,
             session: SessionLayer::new(),
@@ -178,7 +189,7 @@ impl TransportEngine {
             established: false,
             closed: false,
             queued: VecDeque::new(),
-            ticket: None,
+            ticket,
             next_nonce: 1,
             last_status_key: String::new(),
         })
@@ -607,9 +618,23 @@ impl TransportEngine {
                 }
             }
             Control::Close { code } => {
-                self.fail_path(path, format!("peer closed the session ({code})"));
-                self.recover(now_ms, effects);
-                self.maybe_emit_status(effects, false, Some("peer closed the path"), true);
+                // The daemon sends Close only when the logical session is over
+                // (the device was revoked, or the daemon is shutting down), so
+                // this is final and not a path-local failure: ending the session
+                // immediately is what tells the app a revocation happened.
+                for runtime in self.paths.values_mut() {
+                    runtime.state = TransportPathState::Disabled;
+                    runtime.channel = None;
+                    runtime.handshake = None;
+                    runtime.pending_ping = None;
+                }
+                self.closed = true;
+                self.active = None;
+                self.better_candidate = None;
+                self.maybe_emit_status(effects, false, Some("the daemon closed the session"), true);
+                effects.push(Effect::Closed {
+                    reason: format!("the daemon closed the session ({code})"),
+                });
             }
             Control::Open { .. } => {
                 return Err(EngineError::Protocol("client received Open"));

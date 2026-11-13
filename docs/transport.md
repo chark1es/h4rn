@@ -237,6 +237,7 @@ Configuration:
 | --- | --- |
 | `H4RN_SECURE=1` | Enable the Noise service and `/secure`. |
 | `H4RN_PAIRING_PSK=<64 hex chars>` | Enable one-time `IKpsk2` pairing with this PSK. |
+| `H4RN_TAILSCALE=auto\|off` | Detect Tailscale and bind/advertise the tailnet address (default `auto`). |
 
 The daemon's identity is persisted as `transport-identity` in its data
 directory. A non-loopback bind rejects plaintext `/ws` with `403`; loopback
@@ -248,6 +249,93 @@ the default 2 s) so a client that reconnects, or fails over from LAN to relay,
 can resume the same sequence space. A resume with an unknown or wrong token is
 rejected and the client starts a fresh session.
 
+## Remote access glue
+
+`h4rnd` owns the host side of remote access. Connect supplies identity,
+pairing and a relay; it never terminates Noise.
+
+### Login and credentials
+
+```sh
+h4rnd login --connect https://connect.example.com [--provider orbitid] [--name HOST]
+h4rnd serve
+h4rnd logout
+```
+
+`login` runs the OIDC device authorization grant, prints the verification URL
+and user code, and polls until the user approves it. The daemon registers as
+`kind=daemon` with its X25519 and Ed25519 public keys, so the same transport
+identity also proves possession on every connect API call (DPoP-style
+`h4rn-dpop-v1` signature over method, path, timestamp and nonce). Credentials
+are stored in the OS keychain when one is available. On headless Linux and WSL
+the daemon falls back to `<data_dir>/connect-credentials.json`, sealed with
+ChaCha20-Poly1305 and a sibling `<path>.key` file with mode `0600`. `logout`
+revokes the refresh token, forgets the local session, and leaves the transport
+identity in place.
+
+`login` also publishes the machine's hosts (including WSL distributions) and
+its address candidates immediately; `serve` republishes them on every start.
+
+### Relay connector
+
+While signed in, `serve` keeps one authenticated WebSocket to
+`<connect>/relay`. Authentication is in the query string (`access_token`,
+`proof`, `timestamp`, `nonce`) because browser WebSocket clients cannot set
+headers; the proof is single-use. The daemon converts the connect `http(s)`
+base URL to `ws(s)` itself.
+
+The relay speaks JSON `RelayFrame { conn_id, kind, payload }` with base64
+payloads; the transport speaks binary `HR` packets. An `open` starts a
+`serve_secure_link` task for that `conn_id`, `data` is pushed into its inbound
+queue, and the task's packets become `data` frames. A dropped relay socket is
+retried with exponential backoff (1 s to 30 s); logical sessions stay
+resumable in `SecureService` meanwhile. The daemon pings every 30 s to keep
+presence warm.
+
+`DevicePaired` adds the device's Noise key to the allowlist and persists it;
+`DeviceRevoked` removes the key and drops every matching live session, which
+sends a transport `Close` control so the client learns immediately rather than
+waiting for a probe timeout.
+
+### Pairing
+
+```sh
+h4rnd pair              # connect pairing: QR plus h4rn://pair URL
+h4rnd pair --direct     # LAN/tailnet-only pairing
+```
+
+The connect flow creates a pairing on the relay and renders the returned
+`h4rn://pair?...` URL as a terminal QR (Unicode half blocks, no external
+image). The claimed device is announced over the relay and allowlisted.
+
+`--direct` skips connect: the CLI writes `<data_dir>/direct-pairing.json`
+(mode `0600`) with a fresh PSK, expiry and address candidates. The running
+daemon watches that file, installs the PSK, and the payload carries the
+endpoint plus the daemon's X25519 key; the first successful `IKpsk2` handshake
+consumes the PSK and allowlists the device. An expired file is ignored and
+removed.
+
+### Address advertisement
+
+The daemon publishes, in order: an explicit `--extra-bind` address, the
+primary LAN IPv4 address, the Tailscale IPv4 address when `tailscale` is
+`auto` and the node is up, and finally `relay:<connect base URL>`. Tailscale is
+detected with `tailscale status --json` and falls back to `tailscale ip -4`;
+detection failures mean "off" and never block startup. When Tailscale is up,
+the secure listener also binds the tailnet address, so a client can keep a
+direct tailnet path warm next to the relay.
+
+### Remote-action audit
+
+Remote actions that change local state — `thread.created`, `terminal.opened`
+and `file.written` — append one JSON line to
+`<data_dir>/remote-audit.jsonl` with the path (`secure` or `relay`), the
+connect device id when known, the authenticated Noise key, the action and
+metadata. Metadata only: never prompts, terminal bytes or file contents. When
+the relay is reachable the same record is mirrored best-effort with
+`POST /v1/audit`; a failure never blocks or rolls back the action, and the
+local file is always the first write.
+
 ## Browser client
 
 `apps/ui/src/gen/transport-wasm` is built with:
@@ -256,6 +344,12 @@ rejected and the client starts a fresh session.
 wasm-pack build crates/h4rn-transport-wasm --target web \
   --out-name h4rn_transport_wasm --out-dir apps/ui/src/gen/transport-wasm
 ```
+
+The `wasm-bindgen` CLI must match the `wasm-bindgen` crate in `Cargo.lock`
+(for example `cargo install wasm-bindgen-cli --version 0.2.130 --locked`).
+`crates/h4rn-transport-wasm/Cargo.toml` also enables `getrandom` 0.2's `js`
+feature for `wasm32-unknown-unknown`, which a transitive `rand_core` needs
+alongside the getrandom 0.3 backend cfg in `.cargo/config.toml`.
 
 `SecureTransport` (`apps/ui/src/lib/client/secure.ts`) implements the existing
 `Transport` interface. It owns:
@@ -274,6 +368,11 @@ keychain API; the desktop shell uses the native keychain instead (ADR-016).
 Open the UI with `?pair=<h4rn://pair?...>`, or with `?secure=1` after a daemon
 has already been pinned. `?relay=<host:port>` adds a standby relay path.
 `?daemon=` alone keeps the old plaintext loopback behavior.
+
+When the relay path is used, the browser opens an authenticated
+`/relay` WebSocket whose URL is minted by connect (single-use proof in the
+query string), wraps outgoing binary packets in `RelayFrame` JSON and unwraps
+`data` frames for the core. The relay still cannot read them.
 
 ## Threat model
 
@@ -328,5 +427,7 @@ has already been pinned. `?relay=<host:port>` adds a standby relay path.
 | `h4rn-transport` unit tests | Framing, Noise handshake, pinned key, PSK, revocation, rekey, session acks/retransmit. |
 | `crates/h4rn-transport/tests/multipath.rs` | Reorder/duplication, failover with no loss or duplication in under 2 s, hysteretic switch-back, resume without replay. |
 | `crates/h4rn-daemon/tests/secure.rs` | Real daemon over Noise WebSocket: `CreateThread` with `FakeHarness`, revoked device, PSK pairing. |
+| `crates/h4rn-daemon/tests/remote.rs` | Docker-backed end-to-end remote access: device grant, connect pairing, relay-only `CreateThread`, direct-to-relay failover under 2 s, revocation and audit. Run with `./scripts/test-remote.sh`. |
+| `scripts/wasm-relay-client.mjs` | The wasm core, driven from Node, completes a real Noise session over the connect relay, sends `Hello` and receives the host list. Also run by `./scripts/test-remote.sh`. |
 | `h4rn-transport-wasm` `handshake_smoke` | The same core handshake natively and under `wasm-pack test --node`. |
 | `apps/ui` typecheck/lint/test/build | `SecureTransport` compiles, the wasm glue bundles, and existing client tests stay green. |

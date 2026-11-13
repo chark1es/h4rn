@@ -34,6 +34,42 @@ All notable changes to h4rn are recorded here. The format follows
   Postgres integration tests run by `scripts/test-connect.sh` and an optional live OrbitID
   test behind `--orbitid`.
 
+### Phase 3 — remote access glue
+
+- **Daemon login** (`h4rnd login --connect`, `h4rnd logout`): OIDC device
+  authorization grant with a printed verification URL and user code, device
+  registration with the daemon's transport keys, host and address publishing,
+  and credentials in the OS keychain with an encrypted-file fallback
+  (ChaCha20-Poly1305, `0600` sibling key) for headless Linux and WSL.
+- **Authenticated relay connector**: a persistent, DPoP-proofed `/relay`
+  WebSocket with exponential backoff, JSON `RelayFrame`/binary transport
+  adaptation, 30 s presence pings, `DevicePaired` allowlisting and
+  `DeviceRevoked` session drops. Fixed `http(s)` to `ws(s)` relay URL
+  conversion.
+- **Pairing CLI** (`h4rnd pair`, `--direct`): connect pairing rendered as a
+  terminal QR plus `h4rn://pair` URL, and a connect-free `IKpsk2` flow whose
+  QR carries LAN/tailnet candidates, the daemon key and a single-use PSK
+  picked up by the running daemon.
+- **Tailscale**: best-effort detection through `tailscale status --json` /
+  `tailscale ip -4`, `tailscale = auto|off`, optional secure-listener bind on
+  the tailnet address, and address advertisement ordered LAN, tailnet,
+  relay.
+- **Remote-action audit**: `thread.created`, `terminal.opened` and
+  `file.written` written locally to `remote-audit.jsonl` and mirrored
+  best-effort to `POST /v1/audit`.
+- **Connect additions**: machine address candidates (`PUT
+  /v1/machines/{id}/addresses`, migration `0002_machine_addresses.sql`) and
+  the audit-ingest route.
+- **Transport fixes for multi-path remote sessions**: one application-frame
+  and one command channel per logical session, resumed paths that attach
+  without a second loop, authoritative session close on a peer `Close`
+  control, persisted allowlists, and resume-ticket handling.
+- **Tests and docs**: `crates/h4rn-daemon/tests/remote.rs` with
+  `scripts/test-remote.sh` (Postgres, relay and OrbitID in Docker: device
+  grant, pairing, relay-only thread creation, direct→relay failover under
+  2 s, revocation and audit), plus updates to `docs/transport.md` and
+  `docs/self-hosting.md`.
+
 ### Phase 3 — encrypted multipath transport
 
 - **Noise E2E per path** (`h4rn-transport/src/noise.rs`):

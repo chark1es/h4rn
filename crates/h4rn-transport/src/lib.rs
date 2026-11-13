@@ -35,8 +35,12 @@ pub mod relay;
 pub mod server;
 
 pub use engine::{EngineConfig, PathId, PathSpec, TransportEngine};
+#[cfg(feature = "keychain")]
+pub use keys::KeychainOrFile;
 pub use keys::{
-    DeviceIdentity, DevicePublicIdentity, FileKeyStore, KeyStore, KeyStoreError, MemoryKeyStore,
+    DeviceIdentity, DevicePublicIdentity, EncryptedFileKeyStore, FileKeyStore, KeyStore,
+    KeyStoreError, MemoryKeyStore, read_allowlist, read_secret_file, remove_secret_file,
+    write_secret_file,
 };
 pub use noise::{Handshake, SecureChannel};
 pub use pairing::PairingPayload;

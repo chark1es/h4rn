@@ -221,5 +221,6 @@ pub async fn machine_summary(
         last_seen,
         daemon_device_id: machine.daemon_device_id.map(|id| id.to_string()),
         hosts: hosts.iter().map(|host| host.to_wire()).collect(),
+        addresses: state.store.addresses(machine.id).await?,
     })
 }

@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::remote::TailscaleMode;
+
 /// The loopback address a fresh daemon listens on.
 pub const DEFAULT_BIND: &str = "127.0.0.1:47800";
 
@@ -26,6 +28,8 @@ pub struct Config {
     /// Extra address to listen on (for example a Tailscale IP); loopback only
     /// by default because remote access arrives through the transport crate.
     pub extra_bind: Option<SocketAddr>,
+    /// Whether to detect and bind/advertise Tailscale automatically.
+    pub tailscale: TailscaleMode,
     /// `tracing` filter directive.
     pub log_level: String,
 }
@@ -38,6 +42,7 @@ impl Default for Config {
                 .parse()
                 .expect("the default bind address is valid"),
             extra_bind: None,
+            tailscale: TailscaleMode::Auto,
             log_level: "h4rn_daemon=info".to_owned(),
         }
     }
@@ -60,6 +65,32 @@ impl Config {
     /// Path of the SQLite event cache.
     pub fn event_db_path(&self) -> PathBuf {
         self.data_dir.join("events.db")
+    }
+
+    /// Path of the Noise transport identity.
+    pub fn transport_identity_path(&self) -> PathBuf {
+        self.data_dir.join("transport-identity")
+    }
+
+    /// Path of the paired-device allowlist written by the secure transport.
+    pub fn allowlist_path(&self) -> PathBuf {
+        self.data_dir.join("transport-allowlist")
+    }
+
+    /// Path of the persisted h4rn-connect session.
+    pub fn connect_credentials_path(&self) -> PathBuf {
+        self.data_dir
+            .join(crate::remote::credentials::CREDENTIALS_FILE)
+    }
+
+    /// Path of the pending direct-pairing file.
+    pub fn direct_pairing_path(&self) -> PathBuf {
+        crate::remote::pairing::direct_pairing_path(&self.data_dir)
+    }
+
+    /// Path of the remote-action audit trail.
+    pub fn remote_audit_path(&self) -> PathBuf {
+        self.data_dir.join(crate::remote::audit::AUDIT_FILE)
     }
 
     /// Directory holding content-addressed attachment blobs (ADR-008).

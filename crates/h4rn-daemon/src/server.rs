@@ -32,7 +32,7 @@ use h4rn_protocol::{
     Event, PROTOCOL_VERSION, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame,
     Topic,
 };
-use h4rn_transport::server::{Link, LinkError, SecureService, SessionSender};
+use h4rn_transport::server::{AcceptOutcome, Link, LinkError, SecureService, SessionSender};
 use h4rn_transport::session::AppFrame;
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -43,6 +43,7 @@ use crate::auth::{TokenStore, authorize};
 use crate::blobs::{BlobError, BlobStore};
 use crate::fs::{FsError, FsService};
 use crate::hosts::HostInventory;
+use crate::remote::{RemoteAudit, SessionOrigin};
 use crate::terminal::{Attached, OpenSpec, TerminalManager, run_viewer};
 use crate::threads::ThreadManager;
 
@@ -69,6 +70,8 @@ pub struct AppState {
     pub fs: Arc<FsService>,
     /// Noise-encrypted multipath transport, when enabled.
     pub secure: Option<Arc<SecureService>>,
+    /// Remote-action audit trail, when the daemon is signed in to connect.
+    pub remote: Option<Arc<RemoteAudit>>,
     /// Server boot time, for `/healthz`.
     pub started: Instant,
 }
@@ -138,7 +141,7 @@ async fn ws_handler(
         Some(protocol) => ws.protocols([protocol]),
         None => ws,
     };
-    upgrade.on_upgrade(move |socket| handle_socket(socket, state))
+    upgrade.on_upgrade(move |socket| handle_socket(socket, state, SessionOrigin::local()))
 }
 
 /// Upgrades to the Noise-encrypted multipath transport.
@@ -160,13 +163,58 @@ async fn secure_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> 
     ws.on_upgrade(move |socket| async move {
         let link = Box::new(WsLink { socket });
         match service.accept(link).await {
-            Ok(handle) => {
+            Ok(AcceptOutcome::New(handle)) => {
+                let origin = SessionOrigin::secure(handle.device);
                 let (sender, frames) = handle.into_parts();
-                handle_socket(SecureSocket { sender, frames }, state).await;
+                handle_socket(SecureSocket { sender, frames }, state, origin).await;
+            }
+            // The path attached to a live session. Its application loop is
+            // already running, so there is nothing to start here: returning
+            // drops the raw socket and leaves the path task to drive it.
+            Ok(AcceptOutcome::Resumed { session_id }) => {
+                tracing::debug!(
+                    session = %hex::encode(session_id),
+                    "secure session resumed on a new path"
+                );
             }
             Err(error) => tracing::warn!(%error, "secure transport handshake failed"),
         }
     })
+}
+
+/// Runs one accepted secure session through the normal protocol loop.
+///
+/// Both `/secure` and the relay connector call this, so a relayed session is
+/// indistinguishable from a direct one after the Noise handshake. `origin`
+/// carries the authenticated device identity for the audit trail.
+pub(crate) async fn serve_secure_link(
+    service: Arc<SecureService>,
+    link: Box<dyn h4rn_transport::server::Link>,
+    state: AppState,
+    origin: SessionOrigin,
+) {
+    match service.accept(link).await {
+        Ok(AcceptOutcome::New(handle)) => {
+            let mut origin = origin;
+            if origin.device_key.is_none() {
+                origin.device_key = Some(handle.device);
+            }
+            if origin.device_id.is_none()
+                && let Some(audit) = &state.remote
+            {
+                origin.device_id = audit.device_id_for_key(&handle.device);
+            }
+            let (sender, frames) = handle.into_parts();
+            handle_socket(SecureSocket { sender, frames }, state, origin).await;
+        }
+        Ok(AcceptOutcome::Resumed { session_id }) => {
+            tracing::debug!(
+                session = %hex::encode(session_id),
+                "secure session resumed on a new path"
+            );
+        }
+        Err(error) => tracing::warn!(%error, "secure transport handshake failed"),
+    }
 }
 
 /// Adapts an axum WebSocket to the transport's packet-oriented [`Link`].
@@ -276,6 +324,8 @@ struct Connection {
     device: Option<DeviceInfo>,
     viewer_id: crate::terminal::ViewerId,
     tx: mpsc::Sender<Outbound>,
+    /// Who opened this session, for the remote audit trail.
+    origin: SessionOrigin,
     /// One filesystem watcher subscription per requested workspace.
     watches: HashMap<String, JoinHandle<()>>,
 }
@@ -284,9 +334,22 @@ impl Connection {
     fn device_id(&self) -> Option<DeviceId> {
         self.device.as_ref().map(|device| device.device_id.clone())
     }
+
+    /// Records one remote action, if this session came from another device.
+    fn audit(
+        &self,
+        action: &str,
+        target_type: Option<&str>,
+        target_id: Option<&str>,
+        metadata: serde_json::Value,
+    ) {
+        if let Some(audit) = &self.state.remote {
+            audit.record(&self.origin, action, target_type, target_id, metadata);
+        }
+    }
 }
 
-async fn handle_socket<S, E>(socket: S, state: AppState)
+async fn handle_socket<S, E>(socket: S, state: AppState, origin: SessionOrigin)
 where
     S: Sink<Message, Error = E> + Stream<Item = Result<Message, E>> + Unpin + Send + 'static,
     E: std::fmt::Debug + Send + 'static,
@@ -328,6 +391,7 @@ where
         device: None,
         viewer_id,
         tx: tx.clone(),
+        origin,
         watches: HashMap::new(),
     };
 
@@ -505,6 +569,12 @@ impl Connection {
                         if let Err(error) = self.state.fs.allow_root(&workspace_path) {
                             tracing::warn!(%workspace_path, %error, "IDE root not authorised");
                         }
+                        self.audit(
+                            "thread.created",
+                            Some("thread"),
+                            Some(created.thread_id.as_ref()),
+                            json!({"workspace": workspace_path}),
+                        );
                         Ok(ResponseBody::ThreadCreated {
                             thread_id: created.thread_id,
                             turn_id: created.turn_id,
@@ -620,24 +690,35 @@ impl Connection {
                 cols,
                 rows,
             } => match self.require_device() {
-                Ok(device) => self
-                    .state
-                    .terminals
-                    .open(
-                        OpenSpec {
-                            thread_id,
-                            host,
-                            cwd,
-                            shell,
-                            args,
-                            cols,
-                            rows,
-                        },
-                        &device,
-                    )
-                    .await
-                    .map(|terminal| ResponseBody::TerminalOpened { terminal })
-                    .map_err(crate::terminal::TerminalError::into_proto),
+                Ok(device) => {
+                    let opened = self
+                        .state
+                        .terminals
+                        .open(
+                            OpenSpec {
+                                thread_id,
+                                host,
+                                cwd,
+                                shell,
+                                args,
+                                cols,
+                                rows,
+                            },
+                            &device,
+                        )
+                        .await;
+                    if let Ok(terminal) = &opened {
+                        self.audit(
+                            "terminal.opened",
+                            Some("terminal"),
+                            Some(terminal.terminal_id.as_ref()),
+                            json!({"thread_id": terminal.thread_id.as_ref().map(|id| id.as_ref())}),
+                        );
+                    }
+                    opened
+                        .map(|terminal| ResponseBody::TerminalOpened { terminal })
+                        .map_err(crate::terminal::TerminalError::into_proto)
+                }
                 Err(error) => Err(error),
             },
             ClientRequest::TerminalAttach {
@@ -746,7 +827,9 @@ impl Connection {
                 }
                 let fs = Arc::clone(&self.state.fs);
                 let device = self.device_id().map(|id| id.as_str().to_owned());
-                fs_block(fs, move |fs| {
+                let audit_path = path.clone();
+                let audit_workspace = workspace.clone();
+                let written = fs_block(fs, move |fs| {
                     fs.write(
                         &workspace,
                         &path,
@@ -755,8 +838,16 @@ impl Connection {
                         device.as_deref(),
                     )
                 })
-                .await
-                .map(|result| ResponseBody::FsWritten { result })
+                .await;
+                if written.is_ok() {
+                    self.audit(
+                        "file.written",
+                        Some("file"),
+                        Some(&audit_path),
+                        json!({"workspace": audit_workspace}),
+                    );
+                }
+                written.map(|result| ResponseBody::FsWritten { result })
             }
             ClientRequest::FsCreate {
                 host,

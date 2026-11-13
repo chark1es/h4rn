@@ -1,11 +1,12 @@
 //! Daemon assembly: builder, bound listeners and graceful shutdown.
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use h4rn_harness::Harness;
-use h4rn_transport::keys::{FileKeyStore, KEY_LEN, load_or_create};
+use h4rn_protocol::{MachineHostInput, MachineHostKind};
+use h4rn_transport::keys::{DeviceIdentity, FileKeyStore, KEY_LEN, load_or_create};
 use h4rn_transport::server::{SecureOptions, SecureService};
 use tokio::net::TcpListener;
 
@@ -16,6 +17,9 @@ use crate::fs::FsService;
 use crate::harnesses::{HarnessCatalog, StaticHarnessCatalog};
 use crate::hosts::HostInventory;
 use crate::journal::{Journal, SqliteJournal};
+use crate::remote::{
+    ConnectClient, RemoteState, TailscaleMode, advertised_addresses, pairing::read_direct_pairing,
+};
 use crate::server::{self, AppState};
 use crate::supervisor::ProcessSupervisor;
 use crate::terminal::{FileAudit, TerminalManager};
@@ -170,10 +174,39 @@ impl DaemonBuilder {
         // Provision on first serve so a client has a token to read.
         let _ = tokens.load_or_create()?;
 
+        // One identity serves the Noise listener, the connect device proof and
+        // every pairing payload, so a device is the same device on every path.
+        let identity = load_or_create(&FileKeyStore::new(self.config.transport_identity_path()))
+            .map_err(|error| anyhow::anyhow!("load the transport identity: {error}"))?;
+
+        // A signed-in daemon loads its connect session before deciding whether
+        // the secure listener is needed: remote access implies `/secure`.
+        let remote = RemoteState::open(&self.config.data_dir, identity.clone())?;
+
         let secure = match self.secure {
             Some(service) => Some(service),
-            None => secure_from_env(&self.config.data_dir)?,
+            None => secure_from_env(identity.clone(), remote.is_some())?,
         };
+
+        if let Some(service) = &secure
+            && remote.is_some()
+        {
+            // Load the allowlist *before* pointing the service at the file, or
+            // the first persist would overwrite the saved pairings.
+            match h4rn_transport::keys::read_allowlist(&self.config.allowlist_path()) {
+                Ok(keys) => {
+                    for key in keys {
+                        service.allow(key);
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "could not load the paired-device allowlist"),
+            }
+            service.set_allowlist_path(self.config.allowlist_path());
+            tracing::info!(
+                devices = service.allowed_devices().len(),
+                "remote access enabled; joining the relay"
+            );
+        }
 
         Ok(Daemon {
             config: self.config,
@@ -184,6 +217,7 @@ impl DaemonBuilder {
             tokens,
             fs,
             secure,
+            remote,
             supervisor: self.supervisor,
         })
     }
@@ -199,6 +233,7 @@ pub struct Daemon {
     tokens: TokenStore,
     fs: Arc<FsService>,
     secure: Option<Arc<SecureService>>,
+    remote: Option<Arc<RemoteState>>,
     supervisor: Arc<ProcessSupervisor>,
 }
 
@@ -244,16 +279,65 @@ impl Daemon {
             listeners.push(listener);
         }
 
+        // The secure transport is the only remote path worth exposing on a
+        // tailnet, so the extra listener shares the primary port. A bind
+        // failure is not fatal: the relay and any LAN address still work.
+        if self.config.tailscale == TailscaleMode::Auto
+            && let Some(ip) = crate::remote::tailscale::tailnet_ip()
+        {
+            let addr = SocketAddr::new(ip, addrs[0].port());
+            if !addrs.contains(&addr) {
+                match TcpListener::bind(addr).await {
+                    Ok(listener) => {
+                        addrs.push(listener.local_addr()?);
+                        listeners.push(listener);
+                        tracing::info!(%addr, "listening on the tailnet address");
+                    }
+                    Err(error) => tracing::warn!(
+                        %addr,
+                        %error,
+                        "could not bind the tailnet address; relay and LAN remain available"
+                    ),
+                }
+            }
+        }
+
+        let hosts = Arc::clone(&self.hosts);
+        let remote = self.remote;
+        let secure = self.secure;
+        let config = self.config.clone();
         let state = AppState {
             manager: Arc::clone(&self.manager),
-            hosts: self.hosts,
+            hosts,
             terminals: Arc::clone(&self.terminals),
             blobs: Arc::clone(&self.blobs),
             tokens: self.tokens,
             fs: self.fs,
-            secure: self.secure,
+            secure: secure.clone(),
+            remote: remote.as_ref().map(|remote| Arc::clone(&remote.audit)),
             started: std::time::Instant::now(),
         };
+
+        let mut remote_tasks = Vec::new();
+        if let Some(remote) = &remote
+            && let Some(service) = &secure
+        {
+            remote_tasks.push(tokio::spawn(crate::remote::run_relay(
+                state.clone(),
+                Arc::clone(service),
+                Arc::clone(&remote.client),
+                Arc::clone(&remote.devices),
+            )));
+            remote_tasks.push(tokio::spawn(watch_direct_pairing(
+                Arc::clone(service),
+                config.data_dir.clone(),
+            )));
+            remote_tasks.push(tokio::spawn(publish_presence(
+                state.clone(),
+                Arc::clone(&remote.client),
+                config,
+            )));
+        }
 
         Ok(BoundDaemon {
             app: server::router(state),
@@ -263,6 +347,7 @@ impl Daemon {
             terminals: self.terminals,
             supervisor: self.supervisor,
             data_dir: self.config.data_dir,
+            remote_tasks,
         })
     }
 }
@@ -276,6 +361,7 @@ pub struct BoundDaemon {
     terminals: Arc<TerminalManager>,
     supervisor: Arc<ProcessSupervisor>,
     data_dir: PathBuf,
+    remote_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl BoundDaemon {
@@ -308,6 +394,7 @@ impl BoundDaemon {
             terminals,
             supervisor,
             data_dir,
+            remote_tasks,
         } = self;
 
         tracing::info!(
@@ -317,6 +404,11 @@ impl BoundDaemon {
         );
 
         server::serve_all(listeners, app, shutdown).await?;
+        // Stop the relay connector and pairing watcher before tearing down the
+        // thread manager so no new session starts during shutdown.
+        for task in remote_tasks {
+            task.abort();
+        }
         manager.shutdown().await;
         terminals.shutdown().await;
         supervisor.shutdown().await;
@@ -325,20 +417,22 @@ impl BoundDaemon {
     }
 }
 
-/// Builds the secure service when `H4RN_SECURE=1` is set.
+/// Builds the secure service when remote access needs it.
 ///
-/// The identity lives in the data directory as a `0600` file (the keychain
-/// feature is available to the desktop shell but not required here). An
-/// optional `H4RN_PAIRING_PSK` enables one-time LAN/Tailscale pairing.
-fn secure_from_env(data_dir: &Path) -> anyhow::Result<Option<Arc<SecureService>>> {
-    if std::env::var("H4RN_SECURE").as_deref() != Ok("1") {
+/// It is enabled by `H4RN_SECURE=1`, by a signed-in connect session and by
+/// `H4RN_PAIRING_PSK`. The identity lives in the data directory as a `0600`
+/// file; the same identity is the connect device proof and the pairing key.
+fn secure_from_env(
+    identity: DeviceIdentity,
+    remote: bool,
+) -> anyhow::Result<Option<Arc<SecureService>>> {
+    let forced = std::env::var("H4RN_SECURE").as_deref() == Ok("1");
+    let env_psk = std::env::var("H4RN_PAIRING_PSK").ok();
+    if !forced && !remote && env_psk.is_none() {
         return Ok(None);
     }
-    let store = FileKeyStore::new(data_dir.join("transport-identity"));
-    let identity = load_or_create(&store)
-        .map_err(|error| anyhow::anyhow!("load the transport identity: {error}"))?;
     let mut options = SecureOptions::new(identity);
-    if let Ok(value) = std::env::var("H4RN_PAIRING_PSK") {
+    if let Some(value) = env_psk {
         let value = value.trim();
         let bytes = hex::decode(value)
             .map_err(|error| anyhow::anyhow!("H4RN_PAIRING_PSK is not hex: {error}"))?;
@@ -350,6 +444,91 @@ fn secure_from_env(data_dir: &Path) -> anyhow::Result<Option<Arc<SecureService>>
         options = options.with_psk(psk);
     }
     Ok(Some(Arc::new(SecureService::new(options))))
+}
+
+/// Reports hosts and address candidates, then keeps presence fresh.
+///
+/// The first tick fires immediately so a freshly started daemon appears online
+/// as soon as the relay connects. A failure is only logged: connect may be
+/// restarting, and the next tick retries.
+async fn publish_presence(state: AppState, client: Arc<ConnectClient>, config: Config) {
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        let hosts = machine_hosts(&state.hosts);
+        if let Err(error) = client.update_hosts(hosts).await {
+            tracing::debug!(%error, "could not publish hosts to connect");
+        }
+        let relay = client
+            .credentials()
+            .map(|credentials| credentials.connect_url);
+        let addresses = advertised_addresses(&config, relay.as_deref());
+        if let Err(error) = client.update_addresses(addresses).await {
+            tracing::debug!(%error, "could not publish addresses to connect");
+        }
+    }
+}
+
+/// Converts the daemon's host inventory into the connect report.
+pub(crate) fn machine_hosts(hosts: &HostInventory) -> Vec<MachineHostInput> {
+    hosts
+        .summaries()
+        .into_iter()
+        .map(|summary| {
+            let distro = summary.platform.strip_prefix("wsl:").map(str::to_owned);
+            MachineHostInput {
+                name: summary.name,
+                kind: if distro.is_some() {
+                    MachineHostKind::Wsl
+                } else {
+                    MachineHostKind::Host
+                },
+                distro,
+            }
+        })
+        .collect()
+}
+
+/// Watches `<data_dir>/direct-pairing.json` and arms the one-time PSK.
+///
+/// The CLI writes the file; the daemon applies it within a couple of seconds.
+/// The transport clears the PSK after the first successful pairing, so a
+/// second device needs a fresh file. An expired or removed file also clears it.
+async fn watch_direct_pairing(service: Arc<SecureService>, data_dir: PathBuf) {
+    let mut applied: Option<String> = None;
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(2));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        match read_direct_pairing(&data_dir) {
+            Ok(Some(pairing)) if !pairing.expired() => {
+                if applied.as_deref() != Some(pairing.psk.as_str()) {
+                    match pairing.psk() {
+                        Ok(psk) => {
+                            service.set_psk(psk);
+                            applied = Some(pairing.psk.clone());
+                            tracing::info!(
+                                label = ?pairing.label,
+                                expires_at = pairing.expires_at,
+                                "armed a direct pairing; scan the QR now"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "ignoring a malformed direct pairing file")
+                        }
+                    }
+                }
+            }
+            Ok(_) => {
+                if applied.take().is_some() {
+                    service.clear_psk();
+                    tracing::info!("direct pairing expired or was closed");
+                }
+            }
+            Err(error) => tracing::debug!(%error, "could not read the direct pairing file"),
+        }
+    }
 }
 
 /// Starts a production daemon with the default catalog.

@@ -799,6 +799,7 @@ impl Store {
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
             let hosts = self.hosts(row.id).await?;
+            let addresses = self.addresses(row.id).await?;
             let last_seen = match row.daemon_device_id {
                 Some(device_id) => self
                     .device(device_id)
@@ -814,9 +815,54 @@ impl Store {
                 last_seen,
                 daemon_device_id: row.daemon_device_id.map(|id| id.to_string()),
                 hosts: hosts.iter().map(HostRow::to_wire).collect(),
+                addresses,
             });
         }
         Ok(out)
+    }
+
+    /// Advertised connection candidates for a machine, preferred first.
+    pub async fn addresses(&self, machine_id: Uuid) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar::<_, String>(
+            "SELECT address FROM machine_addresses
+             WHERE machine_id = $1 ORDER BY ordinal ASC, address ASC",
+        )
+        .bind(machine_id)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Replaces the address list for a machine, preserving order.
+    pub async fn replace_addresses(
+        &self,
+        machine_id: Uuid,
+        addresses: &[String],
+    ) -> Result<Vec<String>> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM machine_addresses WHERE machine_id = $1")
+            .bind(machine_id)
+            .execute(&mut *tx)
+            .await?;
+        for (ordinal, address) in addresses.iter().enumerate() {
+            let address = address.trim();
+            if address.is_empty() || address.len() > 512 {
+                continue;
+            }
+            sqlx::query(
+                "INSERT INTO machine_addresses (id, machine_id, address, ordinal)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (machine_id, address) DO UPDATE
+                 SET ordinal = EXCLUDED.ordinal, updated_at = now()",
+            )
+            .bind(Uuid::now_v7())
+            .bind(machine_id)
+            .bind(address)
+            .bind(ordinal as i32)
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        self.addresses(machine_id).await
     }
 
     /// Hosts of a machine.

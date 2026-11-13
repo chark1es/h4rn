@@ -164,8 +164,32 @@ still return the JSON error envelope.
 - **Revocation:** `DELETE /v1/devices/{id}` revokes the device's sessions and tells the relay
   peer to disconnect; it does not require the daemon to be online.
 - **Audit:** `/v1/audit` is metadata-only and cursor-paged (`before_id`, `limit`). Pairing,
-  device, host and logout events are recorded; payloads and secrets never are.
+  device, host and logout events are recorded; payloads and secrets never are. A signed-in
+  daemon also mirrors remote-action records (`thread.created`, `terminal.opened`,
+  `file.written`) to `POST /v1/audit`, and keeps a local first copy even when offline.
 - **Usage:** `POST /v1/usage` appends to the durable ledger (ADR-024).
+
+### Daemon login, pairing and addresses
+
+Point a daemon at this deployment and complete the OIDC device grant:
+
+```bash
+h4rnd login --connect https://connect.example.com --provider orbitid --name workstation
+h4rnd serve
+h4rnd pair              # QR for a device, via connect
+h4rnd pair --direct     # QR with a LAN/tailnet endpoint and one-time PSK
+```
+
+`login` stores connect credentials in the OS keychain, or in an
+encrypted `connect-credentials.json` on headless hosts, and registers the
+machine's hosts (including WSL distributions). `logout` revokes the session.
+While signed in, `serve` keeps the authenticated `/relay` WebSocket open,
+publishes presence and mirrors audit records.
+
+`PUT /v1/machines/{id}/addresses` stores the candidates a client should probe:
+LAN, tailnet when Tailscale is up, and `relay:<public base URL>` last. The
+daemon republishes them on startup and on new `h4rnd login`. Addresses are
+metadata; nothing about the relay payload is stored.
 
 ## 5. Tests
 
@@ -194,6 +218,17 @@ H4RN_TEST_OIDC_CLIENT_ID=oa_... \
 The script uses `docker.exe` when Docker Desktop exposes only the Windows CLI. It feeds
 compose through a temporary env file because a Windows `docker.exe` does not inherit WSL
 environment variables.
+
+Daemon-side remote access (Postgres, the real relay and OrbitID in Docker, a device grant,
+pairing, relay thread creation, direct-to-relay failover and revocation):
+
+```bash
+./scripts/test-remote.sh
+```
+
+The script starts both stacks on free ports, runs the ignored
+`crates/h4rn-daemon/tests/remote.rs` end-to-end test, and always removes its containers and
+volumes with `compose down -v`.
 
 Build the image directly:
 

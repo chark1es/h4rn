@@ -110,3 +110,5 @@ image = { version = "0.25.10", default-features = false, features = [
     "webp",
 ] }
 infer = "0.22.0"
+# Added by Phase 3 remote access: terminal pairing QR rendering.
+qrcode = { version = "0.14.1", default-features = false }

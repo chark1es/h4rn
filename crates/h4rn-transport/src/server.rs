@@ -16,7 +16,7 @@
 //! alive. Losing that path leaves the session resumable, not dead.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -117,6 +117,7 @@ pub struct SessionHandle {
     /// Decrypted frames from the client.
     pub frames: mpsc::Receiver<AppFrame>,
     commands: mpsc::UnboundedSender<SessionCommand>,
+    closed: Arc<AtomicBool>,
 }
 
 impl SessionHandle {
@@ -139,6 +140,7 @@ impl SessionHandle {
 
     /// Closes the session and lets the peer reconcile.
     pub async fn close(self) {
+        self.closed.store(true, Ordering::SeqCst);
         let _ = self.commands.send(SessionCommand::Close);
     }
 
@@ -146,11 +148,13 @@ impl SessionHandle {
     ///
     /// The daemon uses this to adapt the session to its existing socket loop:
     /// the sender stands in for the WebSocket sink and the receiver for the
-    /// WebSocket stream.
+    /// WebSocket stream. Both stay valid across a path switch because they are
+    /// owned by the logical session, not by the socket that created them.
     pub fn into_parts(self) -> (SessionSender, mpsc::Receiver<AppFrame>) {
         (
             SessionSender {
                 commands: self.commands,
+                closed: self.closed,
             },
             self.frames,
         )
@@ -161,6 +165,7 @@ impl SessionHandle {
 #[derive(Clone)]
 pub struct SessionSender {
     commands: mpsc::UnboundedSender<SessionCommand>,
+    closed: Arc<AtomicBool>,
 }
 
 impl SessionSender {
@@ -173,8 +178,22 @@ impl SessionSender {
 
     /// Closes the session and lets the peer reconcile.
     pub fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
         let _ = self.commands.send(SessionCommand::Close);
     }
+}
+
+/// Outcome of dialling `/secure` on one path.
+pub enum AcceptOutcome {
+    /// A brand-new logical session. The caller owns its application loop.
+    New(SessionHandle),
+    /// A new path attached to a session whose application loop is already
+    /// running. Nothing else must be started: the existing loop survives a
+    /// direct-to-relay failover.
+    Resumed {
+        /// Logical session id.
+        session_id: SessionId,
+    },
 }
 
 enum SessionCommand {
@@ -182,11 +201,24 @@ enum SessionCommand {
     Close,
 }
 
+/// One logical session and the channels its application loop owns.
+struct SessionEndpoint {
+    session: Arc<Mutex<ServerSession>>,
+    frames: mpsc::Sender<AppFrame>,
+    commands: mpsc::UnboundedSender<SessionCommand>,
+    closed: Arc<AtomicBool>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
 /// The daemon's secure transport service.
 pub struct SecureService {
     options: SecureOptions,
     policy: RwLock<PairingPolicy>,
-    sessions: Mutex<HashMap<SessionId, Arc<Mutex<ServerSession>>>>,
+    /// Current one-time pairing secret, consumed by the first successful pair.
+    psk: RwLock<Option<[u8; TOKEN_LEN]>>,
+    /// Optional file the allowlist is mirrored to, so pairings survive restart.
+    allowlist_path: RwLock<Option<std::path::PathBuf>>,
+    sessions: Mutex<HashMap<SessionId, Arc<SessionEndpoint>>>,
     next_path: AtomicU32,
     started: Instant,
 }
@@ -195,9 +227,12 @@ impl SecureService {
     /// Creates a service from `options`.
     pub fn new(options: SecureOptions) -> Self {
         let policy = RwLock::new(options.policy.clone());
+        let psk = RwLock::new(options.psk);
         Self {
             options,
             policy,
+            psk,
+            allowlist_path: RwLock::new(None),
             sessions: Mutex::new(HashMap::new()),
             next_path: AtomicU32::new(1),
             started: Instant::now(),
@@ -220,14 +255,32 @@ impl SecureService {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .allow(key);
+        self.persist_allowlist();
     }
 
-    /// Revokes a device key immediately.
+    /// Revokes a device key immediately and drops its live sessions.
+    ///
+    /// This is what a `DeviceRevoked` control frame from connect calls. It
+    /// removes the key from the allowlist and marks every session owned by it
+    /// closed, so path tasks stop retransmitting and the application loop ends.
     pub fn revoke(&self, key: [u8; KEY_LEN]) {
         self.policy
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .revoke(key);
+        self.persist_allowlist();
+        let mut sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        sessions.retain(|_, endpoint| {
+            let matches = lock(&endpoint.session).device == Some(key);
+            if matches {
+                endpoint.closed.store(true, Ordering::SeqCst);
+                endpoint.notify.notify_waiters();
+            }
+            !matches
+        });
     }
 
     /// Whether `key` may attach right now.
@@ -238,6 +291,66 @@ impl SecureService {
             .is_allowed(key)
     }
 
+    /// Every currently allowed device key, for diagnostics and persistence.
+    pub fn allowed_devices(&self) -> Vec<[u8; KEY_LEN]> {
+        self.policy
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .allowed_keys()
+            .collect()
+    }
+
+    /// Installs a one-time pairing secret.
+    pub fn set_psk(&self, psk: [u8; TOKEN_LEN]) {
+        *self
+            .psk
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(psk);
+    }
+
+    /// Removes the current pairing secret (rotation or expiry).
+    pub fn clear_psk(&self) {
+        *self
+            .psk
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    /// The current pairing secret, when pairing is open.
+    pub fn psk(&self) -> Option<[u8; TOKEN_LEN]> {
+        *self
+            .psk
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Mirrors the allowlist to `path` on every change.
+    pub fn set_allowlist_path(&self, path: impl Into<std::path::PathBuf>) {
+        *self
+            .allowlist_path
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(path.into());
+        self.persist_allowlist();
+    }
+
+    fn persist_allowlist(&self) {
+        let path = self
+            .allowlist_path
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(path) = path else { return };
+        let body = self
+            .allowed_devices()
+            .into_iter()
+            .map(hex::encode)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Err(error) = crate::keys::write_secret_file(&path, body.as_bytes()) {
+            tracing::warn!(%error, "could not persist the paired-device allowlist");
+        }
+    }
+
     /// Number of live logical sessions.
     pub fn session_count(&self) -> usize {
         self.sessions
@@ -246,12 +359,17 @@ impl SecureService {
             .len()
     }
 
-    /// Runs the handshake and the first `Open`/`Welcome` exchange, then returns
-    /// a handle whose channels are serviced by a background task.
+    /// Runs the handshake and the first `Open`/`Welcome` exchange, then either
+    /// returns a handle for a new logical session or attaches another path to
+    /// an existing one.
+    ///
+    /// A resumed path deliberately returns no handle: the application loop that
+    /// owns the original session keeps running, so a direct-to-relay failover
+    /// never restarts `Hello` or replays application state.
     pub async fn accept(
         self: &Arc<Self>,
         mut link: Box<dyn Link>,
-    ) -> Result<SessionHandle, SecureError> {
+    ) -> Result<AcceptOutcome, SecureError> {
         let Some(first) = link
             .recv_packet()
             .await
@@ -265,7 +383,12 @@ impl SecureService {
             return Err(SecureError::Protocol("first packet was not a handshake"));
         }
         let session_id = packet.session_id;
-        let (mut path, device) = self.handshake(&mut *link, session_id, packet.body).await?;
+        let (mut path, device, newly_paired) =
+            self.handshake(&mut *link, session_id, packet.body).await?;
+        if newly_paired {
+            // The QR is single-use: rotate the secret as soon as a device pairs.
+            self.clear_psk();
+        }
 
         // The first encrypted record must be `Open`: it binds this fresh Noise
         // channel to the logical session and carries the resume token.
@@ -296,33 +419,61 @@ impl SecureService {
 
         let now = self.now_ms();
         let path_id = self.next_path.fetch_add(1, Ordering::Relaxed);
-        let (session, welcome, pending, ticket) = {
+        // The channels only exist for a brand-new logical session. A resumed
+        // path reuses the ones the existing application loop already owns.
+        type AppChannels = (
+            mpsc::Receiver<AppFrame>,
+            mpsc::UnboundedReceiver<SessionCommand>,
+        );
+        let (endpoint, app_channels, welcome, pending, ticket) = {
             let mut sessions = self
                 .sessions
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             self.evict_stale(&mut sessions, now);
-            let session = match token {
+            let (endpoint, app_channels): (Arc<SessionEndpoint>, Option<AppChannels>) = match token
+            {
                 Some(token) => {
-                    let session = sessions
+                    let endpoint = sessions
                         .get(&session_id)
                         .cloned()
                         .ok_or(SecureError::NotPaired)?;
-                    if !lock(&session).token_matches(&token) {
-                        return Err(SecureError::NotPaired);
+                    {
+                        let mut guard = lock(&endpoint.session);
+                        if !guard.token_matches(&token) {
+                            return Err(SecureError::NotPaired);
+                        }
+                        match guard.device {
+                            Some(existing) if existing != device => {
+                                return Err(SecureError::Rejected(RejectReason::NotPaired));
+                            }
+                            Some(_) => {}
+                            None => guard.set_device(device),
+                        }
                     }
-                    session
+                    (endpoint, None)
                 }
                 None => {
                     if sessions.contains_key(&session_id) {
                         return Err(SecureError::Protocol("session id is already in use"));
                     }
-                    let session = Arc::new(Mutex::new(ServerSession::new(session_id, now)?));
-                    sessions.insert(session_id, Arc::clone(&session));
-                    session
+                    let mut session = ServerSession::new(session_id, now)?;
+                    session.set_device(device);
+                    let session = Arc::new(Mutex::new(session));
+                    let (frames, frames_rx) = mpsc::channel(256);
+                    let (commands, commands_rx) = mpsc::unbounded_channel();
+                    let endpoint = Arc::new(SessionEndpoint {
+                        session: Arc::clone(&session),
+                        frames,
+                        commands,
+                        closed: Arc::new(AtomicBool::new(false)),
+                        notify: Arc::new(tokio::sync::Notify::new()),
+                    });
+                    sessions.insert(session_id, Arc::clone(&endpoint));
+                    (endpoint, Some((frames_rx, commands_rx)))
                 }
             };
-            let mut guard = lock(&session);
+            let mut guard = lock(&endpoint.session);
             let welcome = guard.attach(path_id, recv_next, send_next, now)?;
             let (ack, ack_bits) = guard.ack_state();
             let pending = guard.sendable(now, true);
@@ -332,7 +483,8 @@ impl SecureService {
             };
             drop(guard);
             (
-                Arc::clone(&session),
+                Arc::clone(&endpoint),
+                app_channels,
                 (welcome, ack, ack_bits),
                 pending,
                 ticket,
@@ -348,23 +500,68 @@ impl SecureService {
             send_outgoing(&mut path, &mut *link, session_id, outgoing, ack, ack_bits).await?;
         }
 
-        let (frames_tx, frames_rx) = mpsc::channel(256);
-        let (commands_tx, commands_rx) = mpsc::unbounded_channel();
         let service = Arc::clone(self);
+        let path_endpoint = Arc::clone(&endpoint);
         tokio::spawn(async move {
-            service
-                .serve_path(session, path_id, path, link, frames_tx, commands_rx)
-                .await;
+            service.serve_path(path_endpoint, path_id, path, link).await;
         });
 
-        Ok(SessionHandle {
+        // A resumed path attaches to a session whose application loop is
+        // already running. Starting another one here would fork the outbound
+        // stream, so the caller gets no handle.
+        let Some((frames_rx, commands_rx)) = app_channels else {
+            return Ok(AcceptOutcome::Resumed { session_id });
+        };
+
+        // The command loop is session-scoped, not path-scoped. It survives a
+        // path dying because the failover path only needs the shared channel.
+        let loop_service = Arc::clone(self);
+        let loop_endpoint = Arc::clone(&endpoint);
+        tokio::spawn(async move {
+            loop_service.run_commands(loop_endpoint, commands_rx).await;
+        });
+
+        Ok(AcceptOutcome::New(SessionHandle {
             session_id,
             device,
             ticket,
             path: path_id,
             frames: frames_rx,
-            commands: commands_tx,
-        })
+            commands: endpoint.commands.clone(),
+            closed: Arc::clone(&endpoint.closed),
+        }))
+    }
+
+    /// Drains application frames into the logical session and wakes the path
+    /// tasks that carry them.
+    ///
+    /// Exactly one of these runs per logical session. A resumed path attaches
+    /// to the same session and never starts a second loop, so a direct-to-relay
+    /// failover cannot reorder or duplicate the outbound stream.
+    async fn run_commands(
+        &self,
+        endpoint: Arc<SessionEndpoint>,
+        mut commands: mpsc::UnboundedReceiver<SessionCommand>,
+    ) {
+        while let Some(command) = commands.recv().await {
+            match command {
+                SessionCommand::Frame(frame) => {
+                    let now = self.now_ms();
+                    if lock(&endpoint.session).send(frame, now).is_err() {
+                        // The retransmit window is full because the peer is not
+                        // acknowledging. Stop pretending the session is healthy;
+                        // the path tasks send `Close` and detach.
+                        endpoint.closed.store(true, Ordering::SeqCst);
+                    }
+                    endpoint.notify.notify_waiters();
+                }
+                SessionCommand::Close => {
+                    endpoint.closed.store(true, Ordering::SeqCst);
+                    endpoint.notify.notify_waiters();
+                    break;
+                }
+            }
+        }
     }
 
     async fn handshake(
@@ -372,13 +569,17 @@ impl SecureService {
         link: &mut dyn Link,
         session_id: SessionId,
         mut message: Vec<u8>,
-    ) -> Result<(ServerPath, [u8; KEY_LEN]), SecureError> {
+    ) -> Result<(ServerPath, [u8; KEY_LEN], bool), SecureError> {
         let mut path = ServerPath::new(
             session_id,
             self.options.identity.clone(),
-            self.options.psk,
+            // Read the live secret: a pairing payload installed after the
+            // daemon started must be usable on the next handshake, and a
+            // consumed secret must never be reused.
+            self.psk(),
             self.options.rekey,
         );
+        let mut paired_through_psk = false;
         loop {
             let step = {
                 let policy = self
@@ -396,6 +597,7 @@ impl SecureService {
                     send_handshake(link, session_id, reply).await?;
                 }
                 ServerHandshakeStep::PairedThroughPsk { device, reply } => {
+                    paired_through_psk = true;
                     self.allow(device);
                     if let Some(reply) = reply {
                         send_handshake(link, session_id, reply).await?;
@@ -406,13 +608,14 @@ impl SecureService {
                     newly_paired,
                     reply,
                 } => {
+                    paired_through_psk |= newly_paired;
                     if newly_paired {
                         self.allow(device);
                     }
                     if let Some(reply) = reply {
                         send_handshake(link, session_id, reply).await?;
                     }
-                    return Ok((path, device));
+                    return Ok((path, device, paired_through_psk));
                 }
                 ServerHandshakeStep::Waiting => {}
             }
@@ -434,45 +637,31 @@ impl SecureService {
 
     async fn serve_path(
         &self,
-        session: Arc<Mutex<ServerSession>>,
+        endpoint: Arc<SessionEndpoint>,
         path_id: PathId,
         mut path: ServerPath,
         mut link: Box<dyn Link>,
-        frames: mpsc::Sender<AppFrame>,
-        mut commands: mpsc::UnboundedReceiver<SessionCommand>,
     ) {
         let mut ticker = tokio::time::interval(self.options.tick);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut idle_since = self.now_ms();
-        let session_id = session_id_of(&session);
+        let session_id = session_id_of(&endpoint.session);
 
         loop {
+            if endpoint.closed.load(Ordering::SeqCst) {
+                break;
+            }
             let keep_going = tokio::select! {
-                command = commands.recv() => {
-                    match command {
-                        Some(SessionCommand::Frame(frame)) => {
-                            let now = self.now_ms();
-                            let queued = lock(&session).send(frame, now);
-                            idle_since = now;
-                            queued.is_ok()
-                        }
-                        Some(SessionCommand::Close) | None => {
-                            let (ack, ack_bits) = lock(&session).ack_state();
-                            let mut record = Record::control(&Control::Close { code: 0 });
-                            record.ack = ack;
-                            record.ack_bits = ack_bits;
-                            let _ = send_record(&mut path, &mut *link, session_id, record).await;
-                            false
-                        }
-                    }
-                }
+                // The session command loop queued a frame, or the session was
+                // closed/revoked. Either way, wake up and flush promptly.
+                _ = endpoint.notify.notified() => true,
                 packet = link.recv_packet() => {
                     self.on_packet(
-                        &session,
+                        &endpoint.session,
                         path_id,
                         &mut path,
                         &mut *link,
-                        &frames,
+                        &endpoint.frames,
                         &mut idle_since,
                         packet,
                     )
@@ -489,7 +678,7 @@ impl SecureService {
                 break;
             }
             if !flush(
-                &session,
+                &endpoint.session,
                 path_id,
                 &mut path,
                 &mut *link,
@@ -503,7 +692,19 @@ impl SecureService {
             }
         }
 
-        lock(&session).detach(path_id);
+        if endpoint.closed.load(Ordering::SeqCst) {
+            // Tell the peer this path is finished so it drops the socket now
+            // rather than waiting for the timeout. Every attached path sends a
+            // Close; the peer treats the first one as final.
+            let (ack, ack_bits) = lock(&endpoint.session).ack_state();
+            let mut record = Record::control(&Control::Close { code: 0 });
+            record.ack = ack;
+            record.ack_bits = ack_bits;
+            let _ = send_record(&mut path, &mut *link, session_id, record).await;
+        }
+
+        lock(&endpoint.session).detach(path_id);
+        endpoint.notify.notify_waiters();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -590,13 +791,16 @@ impl SecureService {
         }
     }
 
-    fn evict_stale(&self, sessions: &mut HashMap<SessionId, Arc<Mutex<ServerSession>>>, now: u64) {
+    fn evict_stale(&self, sessions: &mut HashMap<SessionId, Arc<SessionEndpoint>>, now: u64) {
         // Keep a detached session long enough for a client to resume it, then
         // reclaim it. The application protocol replays its own gap if the
         // resume arrives too late.
         let grace = self.options.path_timeout.as_millis() as u64 * 4;
-        sessions.retain(|_, session| {
-            let guard = lock(session);
+        sessions.retain(|_, endpoint| {
+            if endpoint.closed.load(Ordering::SeqCst) {
+                return false;
+            }
+            let guard = lock(&endpoint.session);
             !guard.attached.is_empty() || now.saturating_sub(guard.last_seen_ms) < grace
         });
     }

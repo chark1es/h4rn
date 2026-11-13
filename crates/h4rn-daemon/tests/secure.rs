@@ -51,6 +51,7 @@ async fn boot(service: Arc<SecureService>) -> TestDaemon {
         bind: "127.0.0.1:0".parse().expect("bind"),
         extra_bind: None,
         log_level: "off".to_owned(),
+        tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
     };
     let options = ThreadManagerOptions {
         settings: LifecycleSettings::default()
@@ -88,6 +89,7 @@ struct SecureClient {
     client: Client,
     next_id: u64,
     pending: VecDeque<(u64, Event)>,
+    ticket: Option<h4rn_transport::session::ResumeTicket>,
 }
 
 impl SecureClient {
@@ -107,10 +109,14 @@ impl SecureClient {
             format!("ws://{}/secure", daemon.addr),
         )];
         let mut client = Client::connect(ClientConfig::new(engine, paths)).expect("start client");
+        let mut ticket = None;
         let established = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
                 match client.recv().await {
-                    Some(ClientEvent::Established(_)) => return,
+                    Some(ClientEvent::Established(value)) => {
+                        ticket = Some(value);
+                        return;
+                    }
                     Some(ClientEvent::Closed { reason }) => {
                         panic!("secure session closed during connect: {reason}")
                     }
@@ -128,6 +134,7 @@ impl SecureClient {
             client,
             next_id: 1,
             pending: VecDeque::new(),
+            ticket,
         }
     }
 
@@ -293,6 +300,87 @@ async fn secure_transport_rejects_a_revoked_device() {
         outcome.contains("revoked") || outcome.contains("not paired"),
         "unexpected rejection reason: {outcome}"
     );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_resumed_path_reattaches_without_forking_the_session() {
+    let client_identity = device_identity();
+    let allowed = PairingPolicy::new([client_identity.public().noise_public]);
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_policy(allowed),
+    ));
+    let daemon = boot(Arc::clone(&service)).await;
+
+    // A first socket establishes the logical session and its application loop.
+    let mut first = SecureClient::connect(&daemon, client_identity.clone(), None).await;
+    first.hello().await;
+    let ticket = first.ticket.expect("the daemon issues a resume ticket");
+    assert_eq!(service.session_count(), 1);
+
+    // The path drops (a dead LAN socket, a relay reconnect). The daemon keeps
+    // the logical session and its application loop alive for the resume grace.
+    first.close().await;
+    for _ in 0..500 {
+        if service.session_count() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        service.session_count(),
+        1,
+        "losing a path must not destroy the logical session"
+    );
+
+    // A new socket presents the same session id and resume token. It must
+    // attach to the existing session rather than start a second application
+    // loop, which would fork the outbound stream.
+    let mut engine = EngineConfig::new(
+        ticket.session_id,
+        client_identity,
+        service.public_identity().noise_public,
+    );
+    engine.resume = Some(ticket);
+    let paths = vec![ClientPath::websocket(
+        TransportPathKind::Tailscale,
+        format!("ws://{}/secure", daemon.addr),
+    )];
+    let mut resumed =
+        Client::connect(ClientConfig::new(engine, paths)).expect("start second client");
+    let mut resumed_ticket = None;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match resumed.recv().await {
+                Some(ClientEvent::Established(value)) => {
+                    resumed_ticket = Some(value);
+                    return;
+                }
+                Some(ClientEvent::Closed { reason }) => {
+                    panic!("the resumed path was rejected: {reason}")
+                }
+                Some(_) => {}
+                None => panic!("the second client stopped before resuming"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for the resume");
+    assert_eq!(
+        service.session_count(),
+        1,
+        "a resumed path must not fork the logical session"
+    );
+
+    // The pre-existing application loop is still the one handling requests.
+    let mut resumed = SecureClient {
+        client: resumed,
+        next_id: 1,
+        pending: VecDeque::new(),
+        ticket: resumed_ticket,
+    };
+    resumed.hello().await;
+    resumed.close().await;
     daemon.stop().await;
 }
 

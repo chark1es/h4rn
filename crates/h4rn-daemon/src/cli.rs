@@ -27,6 +27,10 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "ADDR", env = "H4RN_EXTRA_BIND")]
     pub extra_bind: Option<String>,
 
+    /// Tailscale handling: `auto` (detect and use) or `off`.
+    #[arg(long, global = true, value_name = "MODE", env = "H4RN_TAILSCALE")]
+    pub tailscale: Option<String>,
+
     /// Log filter directive.
     #[arg(long, global = true, value_name = "DIRECTIVE", env = "H4RN_LOG")]
     pub log_level: Option<String>,
@@ -49,6 +53,29 @@ pub enum Command {
     },
     /// Report hosts, harnesses, WSL distributions and state paths.
     Doctor,
+    /// Sign this daemon in to an h4rn-connect deployment.
+    Login {
+        /// Public base URL of the connect deployment.
+        #[arg(long, value_name = "URL", env = "H4RN_CONNECT_URL")]
+        connect: String,
+        /// OIDC provider id configured on the deployment.
+        #[arg(long, default_value = "orbitid", value_name = "ID")]
+        provider: String,
+        /// Machine name shown to other devices.
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
+    },
+    /// Revoke this daemon's connect session and forget it locally.
+    Logout,
+    /// Pair a new device: over connect by default, or directly over LAN/tailnet.
+    Pair {
+        /// Skip connect and pair over a LAN or Tailscale endpoint.
+        #[arg(long)]
+        direct: bool,
+        /// Label printed on the QR (defaults to the host name).
+        #[arg(long, value_name = "NAME")]
+        label: Option<String>,
+    },
 }
 
 impl Cli {
@@ -63,6 +90,14 @@ impl Cli {
         }
         if let Some(extra_bind) = self.extra_bind {
             config.extra_bind = Some(parse_addr(&extra_bind)?);
+        }
+        if let Some(tailscale) = self.tailscale {
+            config.tailscale =
+                crate::remote::TailscaleMode::parse(&tailscale).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "invalid tailscale mode {tailscale:?}; expected `auto` or `off`"
+                    )
+                })?;
         }
         if let Some(log_level) = self.log_level {
             config.log_level = log_level;
