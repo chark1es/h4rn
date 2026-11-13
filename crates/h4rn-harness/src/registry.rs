@@ -8,14 +8,17 @@ use std::sync::Arc;
 
 use h4rn_protocol::HarnessKind;
 
-use crate::{ClaudeCodeHarness, Harness, HarnessInstall};
+use crate::{ClaudeCodeHarness, CodexHarness, Harness, HarnessInstall};
 
 /// Returns one adapter instance per built-in harness.
 ///
 /// Detected installs are resolved lazily by [`Harness::detect`], so the
 /// registry is cheap to build at daemon start even when nothing is installed.
 pub fn builtin_adapters() -> Vec<Arc<dyn Harness>> {
-    vec![Arc::new(ClaudeCodeHarness::new())]
+    vec![
+        Arc::new(ClaudeCodeHarness::new()),
+        Arc::new(CodexHarness::new()),
+    ]
 }
 
 /// The set of adapters the daemon can pick from.
@@ -81,6 +84,12 @@ mod tests {
             .get(HarnessKind::ClaudeCode)
             .expect("claude adapter");
         assert_eq!(adapter.kind(), HarnessKind::ClaudeCode);
-        assert!(registry.get(HarnessKind::Codex).is_none());
+    }
+
+    #[test]
+    fn the_registry_exposes_codex() {
+        let registry = HarnessRegistry::new();
+        let adapter = registry.get(HarnessKind::Codex).expect("codex adapter");
+        assert_eq!(adapter.kind(), HarnessKind::Codex);
     }
 }

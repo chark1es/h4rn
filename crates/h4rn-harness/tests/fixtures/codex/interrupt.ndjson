@@ -1,0 +1,5 @@
+{"method":"thread/started","params":{"thread":{"id":"01a1d36f-1111-7222-8333-944455556666","model":"gpt-6.1-sol","status":{"type":"idle"}}},"emittedAtMs":1794548671247}
+{"method":"turn/started","params":{"threadId":"01a1d36f-1111-7222-8333-944455556666","turn":{"id":"01a1d36f-1111-7222-8333-944455556667","status":"inProgress","startedAt":1794548671633}},"emittedAtMs":1794548671633}
+{"method":"item/started","params":{"item":{"type":"agentMessage","id":"item-2","text":""},"threadId":"01a1d36f-1111-7222-8333-944455556666","turnId":"01a1d36f-1111-7222-8333-944455556667","startedAtMs":1794548674009},"emittedAtMs":1794548674009}
+{"method":"item/agentMessage/delta","params":{"threadId":"01a1d36f-1111-7222-8333-944455556666","turnId":"01a1d36f-1111-7222-8333-944455556667","itemId":"item-2","delta":"partial"},"emittedAtMs":1794548674009}
+{"method":"turn/completed","params":{"threadId":"01a1d36f-1111-7222-8333-944455556666","turn":{"id":"01a1d36f-1111-7222-8333-944455556667","status":"interrupted","error":null,"startedAt":1794548671633,"completedAt":1794548674063,"durationMs":2430}},"emittedAtMs":1794548674082}

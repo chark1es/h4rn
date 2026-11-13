@@ -326,7 +326,8 @@ async fn creates_streams_and_moves_working_done_settled() {
             assert_eq!(protocol_version, h4rn_protocol::PROTOCOL_VERSION);
             assert!(hosts[0].online);
             assert_eq!(hosts[0].host_id, host);
-            assert_eq!(hosts[0].harnesses, vec![HarnessKind::ClaudeCode]);
+            assert!(hosts[0].harnesses.contains(&HarnessKind::ClaudeCode));
+            assert!(hosts[0].harnesses.contains(&HarnessKind::Codex));
         }
         other => panic!("unexpected hello: {other:?}"),
     }

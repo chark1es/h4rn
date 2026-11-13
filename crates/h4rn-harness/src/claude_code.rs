@@ -66,7 +66,7 @@ use crate::{
 };
 
 mod limit;
-mod process;
+pub(crate) mod process;
 mod protocol;
 
 pub use limit::{LimitSignal, detect_limit, parse_reset_time};

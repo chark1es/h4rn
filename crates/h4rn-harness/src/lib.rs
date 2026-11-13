@@ -26,6 +26,7 @@ use h4rn_protocol::{
 use serde::{Deserialize, Serialize};
 
 mod claude_code;
+mod codex;
 mod fake;
 pub mod registry;
 
@@ -34,6 +35,10 @@ pub use claude_code::{
     ENV_MCP_BEARER_TOKEN, ENV_PERMISSION_MODE, ENV_PERMISSION_PROMPT_TOOL, LimitSignal, TurnReport,
     build_user_frame, detect_claude, detect_limit, parse_reset_time, state_for_tool, tool_paths,
     tool_summary,
+};
+pub use codex::{
+    ApprovalRequest, CodexHarness, CodexParser, CodexSession, ENV_BASE_URL, ENV_MODEL_PROVIDER,
+    approval_from_request, approval_response, build_turn_input, detect_codex,
 };
 pub use fake::{FakeHarness, FakeSession, test_spec};
 pub use registry::{HarnessRegistry, builtin_adapters};
