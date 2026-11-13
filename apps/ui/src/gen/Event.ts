@@ -7,7 +7,9 @@ import type { ForgeChecks } from "./ForgeChecks";
 import type { ForgeRepoRef } from "./ForgeRepoRef";
 import type { FsChangeKind } from "./FsChangeKind";
 import type { FsSearchMatch } from "./FsSearchMatch";
+import type { HostId } from "./HostId";
 import type { Item } from "./Item";
+import type { SkillSyncStatus } from "./SkillSyncStatus";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadSummary } from "./ThreadSummary";
 import type { ToolCall } from "./ToolCall";
@@ -211,4 +213,12 @@ number: number,
 /**
  * New snapshot, including the aggregate state.
  */
-checks: ForgeChecks, } | { "type": "transport_status" } & TransportStatus;
+checks: ForgeChecks, } | { "type": "skills_changed", 
+/**
+ * Host whose skills changed.
+ */
+host: HostId, 
+/**
+ * When the daemon observed it.
+ */
+at: string, } | { "type": "sync_status" } & SkillSyncStatus | { "type": "transport_status" } & TransportStatus;

@@ -38,6 +38,7 @@ mod fs;
 mod ids;
 mod proxy;
 mod server;
+pub mod skills;
 mod terminal;
 mod transport;
 
@@ -63,6 +64,13 @@ pub use ids::{
 };
 pub use proxy::*;
 pub use server::{Event, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame};
+pub use skills::{
+    SkillBundleFile, SkillConflict, SkillConflictResolution, SkillDetail, SkillDiff, SkillDiffFile,
+    SkillFile, SkillFileChange, SkillHarnessAvailability, SkillImportCandidate, SkillImportPreview,
+    SkillInstallState, SkillInventory, SkillManifest, SkillSource, SkillSummary, SkillSyncAck,
+    SkillSyncConflict, SkillSyncEntry, SkillSyncPull, SkillSyncPullResponse, SkillSyncPush,
+    SkillSyncPushResponse, SkillSyncState, SkillSyncStatus, SkillVersionVector,
+};
 pub use terminal::{
     CREDIT_MAX_BYTES, CREDIT_MAX_CHUNKS, TerminalExit, TerminalExitNotice, TerminalInfo,
 };

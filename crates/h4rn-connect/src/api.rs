@@ -20,6 +20,10 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use chrono::Utc;
+use h4rn_protocol::skills::{
+    SkillBundleFile, SkillManifest, SkillSyncAck, SkillSyncConflict, SkillSyncEntry, SkillSyncPull,
+    SkillSyncPullResponse, SkillSyncPush, SkillSyncPushResponse, SkillVersionVector,
+};
 use h4rn_protocol::{
     AuditEntry, AuditIngestRequest, AuditPage, ConnectDevice, ConnectMeResponse,
     ConnectSessionTokens, DeviceGrantPollRequest, DeviceGrantPollResponse, DeviceGrantStartRequest,
@@ -29,13 +33,14 @@ use h4rn_protocol::{
     PairingClaimRequest, PairingClaimResponse, PairingCreateRequest, PairingCreateResponse,
     PairingInfo, ProviderInfo, RefreshRequest,
 };
+use h4rn_skills::SkillBundle;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::crypto::{Envelope, Keystore, b64, b64_decode};
+use crate::crypto::{Envelope, Keystore, SealedSecret, b64, b64_decode};
 use crate::dpop::ReplayCache;
 use crate::error::{AppError, Result};
 use crate::jwt::{AccessClaims, issue_access_token};
@@ -45,8 +50,8 @@ use crate::rate_limit::RateLimiter;
 use crate::relay::RelayHub;
 use crate::store::Authenticated;
 use crate::store::{
-    AuthFlowRow, DeviceGrantRow, DeviceRow, NewDevice, NewDeviceGrant, SessionRow, Store, UserRow,
-    user_to_wire,
+    AuthFlowRow, DeviceGrantRow, DeviceRow, NewDevice, NewDeviceGrant, NewSkillEntry, SessionRow,
+    Store, UserRow, user_to_wire,
 };
 
 /// Shared process state.
@@ -130,6 +135,14 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/pairings/claim", post(claim_pairing))
         .route("/v1/pairings/{id}", delete(revoke_pairing))
         .route("/v1/audit", get(audit).post(ingest_audit))
+        .merge(
+            Router::new()
+                .route("/v1/skills/sync/push", post(skills_push))
+                .route("/v1/skills/sync/pull", post(skills_pull))
+                // A bundle is documents and scripts, not media. 16 MiB leaves
+                // room for a large reference tree while bounding a bad client.
+                .layer(DefaultBodyLimit::max(16 * 1024 * 1024)),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             api_rate_limit,
@@ -1302,6 +1315,334 @@ async fn ingest_audit(
         )
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Skills
+// ---------------------------------------------------------------------------
+
+/// The plaintext half of a sealed bundle row.
+///
+/// The manifest travels with the files so a pull can rebuild a complete
+/// [`SkillSyncEntry`] without a second table. Tombstones seal a manifest with
+/// an empty file list, which keeps the shape uniform.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct SkillPayload {
+    manifest: SkillManifest,
+    files: Vec<SkillBundleFile>,
+}
+
+/// Publishes local skill versions and reads back the server's decisions.
+async fn skills_push(
+    State(state): State<AppState>,
+    authed: Authed,
+    Json(request): Json<SkillSyncPush>,
+) -> Result<Json<SkillSyncPushResponse>> {
+    let mut accepted = Vec::new();
+    let mut rejected = Vec::new();
+
+    for entry in request.entries {
+        validate_skill_entry(&entry)?;
+        let payload = if entry.deleted {
+            SkillPayload {
+                manifest: entry.manifest.clone(),
+                files: Vec::new(),
+            }
+        } else {
+            let bundle = SkillBundle::from_wire(entry.manifest.clone(), entry.files.clone())
+                .map_err(|error| {
+                    AppError::bad_request("skill_bundle_invalid", error.to_string())
+                })?;
+            if bundle.version() != entry.version {
+                return Err(AppError::bad_request(
+                    "skill_version_mismatch",
+                    format!(
+                        "the bundle hashes to {}, not {}",
+                        bundle.version(),
+                        entry.version
+                    ),
+                ));
+            }
+            SkillPayload {
+                manifest: bundle.manifest.clone(),
+                files: bundle.wire_files(),
+            }
+        };
+
+        if entry.name != payload.manifest.name || entry.description != payload.manifest.description
+        {
+            return Err(AppError::bad_request(
+                "skill_metadata_mismatch",
+                "the entry metadata does not match the signed manifest",
+            ));
+        }
+
+        let vector_json = serde_json::to_string(&entry.vector)
+            .map_err(|_| AppError::internal("serialise skill vector"))?;
+        let etag = skill_etag(
+            &entry.skill_id,
+            &entry.version,
+            &vector_json,
+            entry.updated_at,
+        );
+        let existing = state
+            .store
+            .skill_entry(authed.user.id, &entry.skill_id)
+            .await?;
+
+        if let Some(row) = &existing {
+            let existing_vector: SkillVersionVector =
+                serde_json::from_str(&row.vector_json).unwrap_or_default();
+            let same_content = row.version == entry.version && row.deleted == entry.deleted;
+            let etag_mismatch = entry
+                .expected_etag
+                .as_deref()
+                .is_some_and(|expected| expected != row.etag);
+            let stale = existing_vector.dominates(&entry.vector);
+            let concurrent = existing_vector.concurrent(&entry.vector);
+
+            if etag_mismatch {
+                state
+                    .store
+                    .record_skill_conflict(
+                        authed.user.id,
+                        &entry.skill_id,
+                        Some(&row.version),
+                        &entry.version,
+                        "the client updated a version the server has already replaced",
+                    )
+                    .await?;
+                rejected.push(SkillSyncAck {
+                    skill_id: entry.skill_id.clone(),
+                    version: entry.version.clone(),
+                    etag: Some(row.etag.clone()),
+                    accepted: false,
+                    reason: Some("etag mismatch".into()),
+                });
+                continue;
+            }
+            if same_content && !entry.vector.dominates(&existing_vector) {
+                accepted.push(SkillSyncAck {
+                    skill_id: entry.skill_id.clone(),
+                    version: row.version.clone(),
+                    etag: Some(row.etag.clone()),
+                    accepted: true,
+                    reason: None,
+                });
+                continue;
+            }
+            if stale {
+                state
+                    .store
+                    .record_skill_conflict(
+                        authed.user.id,
+                        &entry.skill_id,
+                        Some(&row.version),
+                        &entry.version,
+                        "the server already has a newer version",
+                    )
+                    .await?;
+                rejected.push(SkillSyncAck {
+                    skill_id: entry.skill_id.clone(),
+                    version: entry.version.clone(),
+                    etag: Some(row.etag.clone()),
+                    accepted: false,
+                    reason: Some("the remote vector dominates this version".into()),
+                });
+                continue;
+            }
+            if concurrent {
+                state
+                    .store
+                    .record_skill_conflict(
+                        authed.user.id,
+                        &entry.skill_id,
+                        Some(&row.version),
+                        &entry.version,
+                        "both machines changed the skill at the same time",
+                    )
+                    .await?;
+                if entry.updated_at < row.updated_at {
+                    rejected.push(SkillSyncAck {
+                        skill_id: entry.skill_id.clone(),
+                        version: entry.version.clone(),
+                        etag: Some(row.etag.clone()),
+                        accepted: false,
+                        reason: Some("a concurrent version has a newer timestamp".into()),
+                    });
+                    continue;
+                }
+            }
+        }
+
+        let plaintext = serde_json::to_vec(&payload)
+            .map_err(|error| AppError::internal(format!("serialise skill payload: {error}")))?;
+        let aad = skill_aad(authed.user.id, &entry.skill_id, &entry.version);
+        let sealed = state.envelope.seal(&plaintext, &aad)?;
+        state
+            .store
+            .upsert_skill_entry(
+                authed.user.id,
+                Some(authed.device.id),
+                &NewSkillEntry {
+                    skill_id: &entry.skill_id,
+                    name: &entry.name,
+                    description: &entry.description,
+                    version: &entry.version,
+                    vector_json: &vector_json,
+                    etag: &etag,
+                    deleted: entry.deleted,
+                    sealed,
+                    updated_at: entry.updated_at,
+                },
+            )
+            .await?;
+        accepted.push(SkillSyncAck {
+            skill_id: entry.skill_id,
+            version: entry.version,
+            etag: Some(etag),
+            accepted: true,
+            reason: None,
+        });
+    }
+
+    let response = SkillSyncPushResponse {
+        accepted,
+        rejected,
+        conflicts: user_conflicts(&state, authed.user.id).await?,
+        etag: cursor(&state, authed.user.id).await?,
+        server_time: Utc::now(),
+    };
+    Ok(Json(response))
+}
+
+/// Reads entries changed since a cursor.
+async fn skills_pull(
+    State(state): State<AppState>,
+    authed: Authed,
+    Json(request): Json<SkillSyncPull>,
+) -> Result<Json<SkillSyncPullResponse>> {
+    let since = match request.since.as_deref() {
+        None | Some("") => None,
+        Some(value) => Some(
+            chrono::DateTime::parse_from_rfc3339(value)
+                .map_err(|_| {
+                    AppError::bad_request("skill_cursor_invalid", "the sync cursor is not RFC 3339")
+                })?
+                .with_timezone(&Utc),
+        ),
+    };
+    let rows = state
+        .store
+        .skill_entries_since(authed.user.id, since)
+        .await?;
+    let mut entries = Vec::with_capacity(rows.len());
+    for row in rows {
+        let aad = skill_aad(row.user_id, &row.skill_id, &row.version);
+        let sealed = SealedSecret {
+            dek_nonce: row.dek_nonce,
+            wrapped_dek: row.wrapped_dek,
+            nonce: row.nonce,
+            ciphertext: row.ciphertext,
+        };
+        let plaintext = state.envelope.open(&sealed, &aad)?;
+        let payload: SkillPayload = serde_json::from_slice(&plaintext)
+            .map_err(|error| AppError::internal(format!("decode skill payload: {error}")))?;
+        let vector: SkillVersionVector = serde_json::from_str(&row.vector_json).unwrap_or_default();
+        entries.push(SkillSyncEntry {
+            skill_id: row.skill_id,
+            name: row.name,
+            description: row.description,
+            version: row.version,
+            manifest: payload.manifest,
+            files: if row.deleted {
+                Vec::new()
+            } else {
+                payload.files
+            },
+            vector,
+            updated_at: row.updated_at,
+            deleted: row.deleted,
+            expected_etag: Some(row.etag),
+        });
+    }
+
+    let response = SkillSyncPullResponse {
+        entries,
+        conflicts: user_conflicts(&state, authed.user.id).await?,
+        etag: cursor(&state, authed.user.id).await?,
+        server_time: Utc::now(),
+    };
+    Ok(Json(response))
+}
+
+/// Rejects metadata that is obviously malformed before doing any work.
+fn validate_skill_entry(entry: &SkillSyncEntry) -> Result<()> {
+    let id = entry.skill_id.trim();
+    if id.is_empty() || id.len() > 128 {
+        return Err(AppError::bad_request(
+            "skill_id_invalid",
+            "a skill id must be 1-128 characters",
+        ));
+    }
+    if entry.name.trim().is_empty() || entry.name.len() > 200 {
+        return Err(AppError::bad_request(
+            "skill_name_invalid",
+            "a skill name must be 1-200 characters",
+        ));
+    }
+    if entry.version.len() != 64 || !entry.version.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(AppError::bad_request(
+            "skill_version_invalid",
+            "a skill version must be a BLAKE3 hex digest",
+        ));
+    }
+    Ok(())
+}
+
+fn skill_aad(user_id: Uuid, skill_id: &str, version: &str) -> Vec<u8> {
+    format!("h4rn-connect/skills/{user_id}/{skill_id}/{version}").into_bytes()
+}
+
+fn skill_etag(
+    skill_id: &str,
+    version: &str,
+    vector_json: &str,
+    updated_at: chrono::DateTime<Utc>,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(skill_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(version.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(vector_json.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(updated_at.to_rfc3339().as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+async fn user_conflicts(state: &AppState, user_id: Uuid) -> Result<Vec<SkillSyncConflict>> {
+    Ok(state
+        .store
+        .skill_conflicts(user_id)
+        .await?
+        .into_iter()
+        .map(|row| SkillSyncConflict {
+            skill_id: row.skill_id,
+            local_version: row.local_version,
+            remote_version: row.remote_version,
+            reason: row.reason,
+            at: row.created_at,
+        })
+        .collect())
+}
+
+async fn cursor(state: &AppState, user_id: Uuid) -> Result<Option<String>> {
+    Ok(state
+        .store
+        .skill_cursor(user_id)
+        .await?
+        .map(|time| time.to_rfc3339()))
 }
 
 // ---------------------------------------------------------------------------

@@ -16,6 +16,10 @@ use h4rn_protocol::connect::{
     PairingCreateResponse, PairingInfo, PairingPayload, PresenceUpdate, ProviderInfo,
     RefreshRequest, RelayFrame, RelayServerEvent, UsageEvent,
 };
+use h4rn_protocol::skills::{
+    SkillSyncAck, SkillSyncConflict, SkillSyncEntry, SkillSyncPull, SkillSyncPullResponse,
+    SkillSyncPush, SkillSyncPushResponse, SkillVersionVector,
+};
 use h4rn_protocol::{ClientFrame, ServerFrame};
 use ts_rs::TS;
 
@@ -101,6 +105,14 @@ fn export_typescript_bindings() {
     RelayFrame::export_all_to(&dir).expect("export relay frame");
     RelayServerEvent::export_all_to(&dir).expect("export relay event");
     UsageEvent::export_all_to(&dir).expect("export usage event");
+    SkillSyncAck::export_all_to(&dir).expect("export skill sync ack");
+    SkillSyncConflict::export_all_to(&dir).expect("export skill sync conflict");
+    SkillSyncEntry::export_all_to(&dir).expect("export skill sync entry");
+    SkillSyncPull::export_all_to(&dir).expect("export skill sync pull");
+    SkillSyncPullResponse::export_all_to(&dir).expect("export skill sync pull response");
+    SkillSyncPush::export_all_to(&dir).expect("export skill sync push");
+    SkillSyncPushResponse::export_all_to(&dir).expect("export skill sync push response");
+    SkillVersionVector::export_all_to(&dir).expect("export skill version vector");
     write_barrel(&dir);
 
     assert!(dir.join("ClientFrame.ts").is_file());

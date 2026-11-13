@@ -504,6 +504,24 @@ impl ConnectClient {
             .await
     }
 
+    /// Publishes local skill versions to connect.
+    pub async fn skills_push(
+        &self,
+        request: &h4rn_protocol::SkillSyncPush,
+    ) -> Result<h4rn_protocol::SkillSyncPushResponse> {
+        self.authorized_json(Method::POST, "/v1/skills/sync/push", Some(request))
+            .await
+    }
+
+    /// Reads skill versions changed on another machine.
+    pub async fn skills_pull(
+        &self,
+        request: &h4rn_protocol::SkillSyncPull,
+    ) -> Result<h4rn_protocol::SkillSyncPullResponse> {
+        self.authorized_json(Method::POST, "/v1/skills/sync/pull", Some(request))
+            .await
+    }
+
     // ------------------------------------------------------------------
     // Proof-authenticated requests
     // ------------------------------------------------------------------
@@ -599,6 +617,27 @@ impl ConnectClient {
             .context("serialise request body")?;
         self.authorized(method, path, bytes).await?;
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl h4rn_skills::SkillSyncApi for ConnectClient {
+    async fn push(
+        &self,
+        request: h4rn_protocol::SkillSyncPush,
+    ) -> std::result::Result<h4rn_protocol::SkillSyncPushResponse, h4rn_skills::SkillError> {
+        self.skills_push(&request)
+            .await
+            .map_err(|error| h4rn_skills::SkillError::Sync(error.to_string()))
+    }
+
+    async fn pull(
+        &self,
+        request: h4rn_protocol::SkillSyncPull,
+    ) -> std::result::Result<h4rn_protocol::SkillSyncPullResponse, h4rn_skills::SkillError> {
+        self.skills_pull(&request)
+            .await
+            .map_err(|error| h4rn_skills::SkillError::Sync(error.to_string()))
     }
 }
 

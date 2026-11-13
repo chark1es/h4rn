@@ -1062,3 +1062,48 @@ async fn create_and_send_report_durable_ids_and_worktrees_are_not_implemented() 
 
     daemon.stop().await;
 }
+
+#[tokio::test]
+async fn skills_list_returns_the_install_matrix_and_conflicts() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+
+    match client
+        .request(ClientRequest::SkillsList { host: host.clone() })
+        .await
+        .expect("list skills")
+    {
+        ResponseBody::Skills { inventory } => {
+            assert!(inventory.skills.is_empty());
+            assert_eq!(inventory.harnesses.len(), 4);
+            let harnesses: Vec<_> = inventory
+                .harnesses
+                .iter()
+                .map(|entry| entry.harness)
+                .collect();
+            for harness in [
+                HarnessKind::ClaudeCode,
+                HarnessKind::Codex,
+                HarnessKind::Opencode,
+                HarnessKind::Antigravity,
+            ] {
+                assert!(harnesses.contains(&harness), "missing {harness:?}");
+            }
+        }
+        other => panic!("unexpected skills response: {other:?}"),
+    }
+
+    match client
+        .request(ClientRequest::SkillsConflicts { host })
+        .await
+        .expect("list conflicts")
+    {
+        ResponseBody::SkillConflicts { conflicts } => assert!(conflicts.is_empty()),
+        other => panic!("unexpected conflicts response: {other:?}"),
+    }
+
+    daemon.stop().await;
+}

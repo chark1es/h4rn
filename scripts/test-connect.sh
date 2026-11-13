@@ -161,7 +161,7 @@ echo "--- starting postgres:17 on 127.0.0.1:${H4RN_PG_PORT}"
 export H4RN_TEST_DATABASE_URL="postgres://${H4RN_PG_USER}:${H4RN_PG_PASSWORD}@127.0.0.1:${H4RN_PG_PORT}/${H4RN_PG_DATABASE}"
 
 echo "--- running Postgres integration tests"
-cargo test -p h4rn-connect --test postgres -- --ignored --test-threads=1
+cargo test -p h4rn-connect --test postgres --test skills -- --ignored --test-threads=1
 
 if [[ "$ORBITID" == "1" ]]; then
   build_orbitid
