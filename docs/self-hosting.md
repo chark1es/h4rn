@@ -6,8 +6,15 @@ the opaque `/relay` WebSocket, audit and usage. It never sees prompt or terminal
 deployment must supply a public URL, Postgres, a key-encryption key (KEK) and at least one
 OIDC provider.
 
-The image is `deploy/Dockerfile`; the reference stack is `deploy/docker-compose.yml`.
-Everything below is deployment configuration, not code.
+The image is built from `deploy/Dockerfile` and published on release tags to
+`ghcr.io/chark1es/h4rn-connect` for `linux/amd64` and `linux/arm64`; the reference stack is
+`deploy/docker-compose.yml`, pinned to that image. Everything below is deployment configuration,
+not code.
+
+A Helm chart for Kubernetes lives at [`packaging/helm/h4rn-connect`](../packaging/helm/h4rn-connect/values.yaml)
+(Deployment, Service, Ingress, PodDisruptionBudget, optional in-chart Postgres or external
+database, chart-managed or existing Secret). The release process is in
+[release.md](release.md).
 
 ## 1. Quick start (local)
 
@@ -28,6 +35,34 @@ separate migrate step and no SQLite file to back up.
 
 `H4RN_CONNECT_ALLOW_INSECURE=true` is required when the public URL is `http://` or when an
 OIDC issuer is not HTTPS. Do not use it in production.
+
+### Build from the working tree
+
+The base compose file is pinned to the published image, so a deployment never silently builds
+local code. To build the same stack from a checkout, add the build override:
+
+```bash
+docker compose -f deploy/docker-compose.yml \
+               -f deploy/docker-compose.build.yml up -d --build
+```
+
+Set `H4RN_CONNECT_IMAGE` to tag the local build differently from the published image.
+
+### Kubernetes
+
+```bash
+helm install h4rn packaging/helm/h4rn-connect \
+  --namespace h4rn --create-namespace \
+  --set config.publicBaseUrl=https://connect.example.com \
+  --set config.allowInsecure=false \
+  --set ingress.enabled=true --set ingress.hosts[0].host=connect.example.com
+```
+
+With the defaults the chart runs Postgres in-cluster. For a managed database set
+`postgres.enabled=false` and either `externalDatabase.url` or its host/user/password fields.
+Set `secrets.existingSecret` to a Secret containing `database-url`, `kek`, `signing-key` (and
+`postgres-password` when Postgres is in-cluster); otherwise the chart generates and reuses them
+across upgrades. Pass `config.oidcProviders` as the same JSON array described below.
 
 ## 2. Configuration
 
@@ -230,10 +265,11 @@ The script starts both stacks on free ports, runs the ignored
 `crates/h4rn-daemon/tests/remote.rs` end-to-end test, and always removes its containers and
 volumes with `compose down -v`.
 
-Build the image directly:
+Build and publish the image directly (the release workflow does this for both architectures):
 
 ```bash
-docker build -f deploy/Dockerfile -t h4rn/connect .
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -f deploy/Dockerfile -t ghcr.io/chark1es/h4rn-connect:<version> --push .
 ```
 
 ## 6. What the relay does not do

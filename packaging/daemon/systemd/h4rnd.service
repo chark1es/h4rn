@@ -1,0 +1,25 @@
+[Unit]
+Description=h4rn daemon
+Documentation=https://github.com/chark1es/h4rn
+After=network-online.target
+Wants=network-online.target
+# The daemon supervises agent processes. It should survive a desktop session
+# restart, but it must not be started by a root system unit: the agents run as
+# the user and need the user's harness credentials.
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/h4rnd serve
+Environment=H4RN_DATA_DIR=%h/.local/share/h4rn
+Environment=H4RN_BIND=127.0.0.1:47800
+Restart=on-failure
+RestartSec=2
+# Agent process groups are killed by the daemon's own supervisor; give it time.
+KillMode=mixed
+TimeoutStopSec=15
+LimitNOFILE=65536
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

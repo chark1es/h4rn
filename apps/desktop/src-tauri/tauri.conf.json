@@ -32,7 +32,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["msi", "nsis"],
+    "targets": "all",
     "externalBin": ["binaries/h4rnd"],
     "icon": [
       "icons/32x32.png",
@@ -46,6 +46,15 @@
     "deep-link": {
       "desktop": {
         "schemes": ["h4rn"]
+      }
+    },
+    "updater": {
+      "endpoints": [
+        "https://github.com/chark1es/h4rn/releases/latest/download/latest.json"
+      ],
+      "pubkey": "__H4RN_UPDATER_PUBKEY__",
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

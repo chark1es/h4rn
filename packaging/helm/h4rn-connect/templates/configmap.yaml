@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "h4rn-connect.fullname" . }}
+  labels:
+    {{- include "h4rn-connect.labels" . | nindent 4 }}
+data:
+  H4RN_CONNECT_BIND: "0.0.0.0:8787"
+  H4RN_CONNECT_PUBLIC_BASE_URL: {{ .Values.config.publicBaseUrl | quote }}
+  H4RN_CONNECT_MODE: {{ .Values.config.mode | quote }}
+  H4RN_CONNECT_CORS_ORIGINS: {{ .Values.config.corsOrigins | quote }}
+  H4RN_CONNECT_WEB_DIR: {{ .Values.config.webDir | quote }}
+  H4RN_CONNECT_ALLOW_INSECURE: {{ .Values.config.allowInsecure | quote }}
+  H4RN_CONNECT_TRUST_FORWARDED_FOR: {{ .Values.config.trustForwardedFor | quote }}
+  H4RN_CONNECT_OIDC_PROVIDERS: {{ .Values.config.oidcProviders | quote }}
+  H4RN_CONNECT_SESSION_TTL_SECS: {{ .Values.config.sessionTtlSecs | quote }}
+  H4RN_CONNECT_REFRESH_TTL_SECS: {{ .Values.config.refreshTtlSecs | quote }}
+  H4RN_CONNECT_PAIRING_TTL_SECS: {{ .Values.config.pairingTtlSecs | quote }}
+  RUST_LOG: {{ .Values.config.log | quote }}

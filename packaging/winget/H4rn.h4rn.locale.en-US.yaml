@@ -1,0 +1,23 @@
+# winget locale manifest (template); see H4rn.h4rn.yaml.
+PackageIdentifier: H4rn.h4rn
+PackageVersion: __VERSION__
+PackageLocale: en-US
+Publisher: h4rn
+PublisherUrl: https://github.com/chark1es/h4rn
+PublisherSupportUrl: https://github.com/chark1es/h4rn/issues
+PackageName: h4rn
+PackageUrl: https://github.com/chark1es/h4rn
+License: MIT
+LicenseUrl: https://github.com/chark1es/h4rn
+Copyright: Copyright (c) h4rn contributors
+ShortDescription: Quiet-native orchestration for local coding agents.
+Description: h4rn runs a local daemon that supervises Claude Code, Codex, OpenCode and Antigravity over one WebSocket protocol, with threads, terminals, attachments, skills and approvals in a native desktop and mobile shell.
+Moniker: h4rn
+Tags:
+  - ai
+  - agents
+  - terminal
+  - developer-tools
+ReleaseNotesUrl: https://github.com/chark1es/h4rn/releases/tag/v__VERSION__
+ManifestType: locale
+ManifestVersion: 1.10.0

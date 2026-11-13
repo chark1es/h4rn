@@ -1,0 +1,4 @@
+# App Store Connect identity. CI provides either an App Store Connect API key
+# (preferred) or Apple ID + app-specific password.
+app_identifier("dev.h4rn.app")
+team_id(ENV["APPLE_TEAM_ID"]) if ENV["APPLE_TEAM_ID"]

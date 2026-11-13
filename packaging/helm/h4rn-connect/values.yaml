@@ -1,0 +1,124 @@
+# Default values for h4rn-connect.
+#
+# The chart can either run Postgres in-cluster (postgres.enabled=true) or point
+# at an external database. In both modes the relay reads the full connection
+# URL from a Secret so credentials never appear in a Deployment.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/chark1es/h4rn-connect
+  # Defaults to the chart appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  automount: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+# The relay image runs as uid 10001 and keeps no writable state.
+podSecurityContext:
+  fsGroup: 10001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 10001
+
+service:
+  type: ClusterIP
+  port: 8787
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: connect.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources: {}
+  # limits:
+  #   cpu: "1"
+  #   memory: 512Mi
+  # requests:
+  #   cpu: 100m
+  #   memory: 128Mi
+
+# Non-secret relay configuration. These become a ConfigMap and are injected
+# with envFrom; secrets are referenced separately.
+config:
+  publicBaseUrl: "http://localhost:8787"
+  mode: self_hosted
+  corsOrigins: ""
+  webDir: ""
+  allowInsecure: "true"
+  trustForwardedFor: "false"
+  # JSON array; see docs/self-hosting.md for the provider object.
+  oidcProviders: "[]"
+  sessionTtlSecs: "600"
+  refreshTtlSecs: "2592000"
+  pairingTtlSecs: "300"
+  log: "h4rn_connect=info,tower_http=info"
+
+secrets:
+  # Use a pre-created Secret instead of the chart-managed one. It must contain
+  # the keys `database-url`, `kek`, `signing-key` and, when Postgres runs in
+  # this cluster, `postgres-password`.
+  existingSecret: ""
+  # 32 random bytes, base64 or hex. Empty means the chart generates one on
+  # first install and reuses it on upgrade (see the Secret template).
+  kek: ""
+  # 32-byte Ed25519 seed. Empty means generated/reused like the KEK.
+  signingKey: ""
+  # Full connection URL. When empty it is derived from the Postgres mode below.
+  databaseUrl: ""
+
+postgres:
+  enabled: true
+  image: postgres:17-alpine
+  auth:
+    username: h4rn
+    database: h4rn
+    # Empty means the chart generates one and stores it in its Secret.
+    password: ""
+  persistence:
+    enabled: true
+    size: 8Gi
+    storageClass: ""
+  resources: {}
+  # Extra pg_hba/SSL settings can be added through the environment map below.
+  extraEnv: []
+
+externalDatabase:
+  # Preferred: a complete URL such as postgres://user:pass@host:5432/h4rn.
+  # Alternatively set host/port/user/database/password and the chart builds it.
+  url: ""
+  host: ""
+  port: 5432
+  user: h4rn
+  database: h4rn
+  password: ""
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1

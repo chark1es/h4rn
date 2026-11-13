@@ -1,0 +1,20 @@
+# winget installer manifest (template); see H4rn.h4rn.yaml.
+PackageIdentifier: H4rn.h4rn
+PackageVersion: __VERSION__
+InstallerLocale: en-US
+Platform:
+  - Windows.Desktop
+MinimumOSVersion: 10.0.0.0
+InstallerType: wix
+Scope: machine
+InstallModes:
+  - interactive
+  - silent
+  - silentWithProgress
+UpgradeBehavior: install
+Installers:
+  - Architecture: x64
+    InstallerUrl: __MSI_URL__
+    InstallerSha256: __MSI_SHA256__
+ManifestType: installer
+ManifestVersion: 1.10.0

@@ -28,10 +28,9 @@ services:
       retries: 20
 
   connect:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile
-    image: h4rn/connect:dev
+    # Pinned to the published multi-arch image. For a local build add
+    # `-f deploy/docker-compose.build.yml` (see packaging/docker/README.md).
+    image: ${H4RN_CONNECT_IMAGE:-ghcr.io/chark1es/h4rn-connect:0.1.0}
     restart: unless-stopped
     depends_on:
       postgres:
@@ -87,7 +86,7 @@ services:
       NODE_ENV: development
       ORBITID_PORT: 4000
       ORBITID_BASE_URL: ${ORBITID_BASE_URL:-http://localhost:4000}
-      ORBITID_ENCRYPTION_KEY: ${ORBITID_ENCRYPTION_KEY:?set ORBITID_ENCRYPTION_KEY for the orbitid profile}
+      ORBITID_ENCRYPTION_KEY: ${ORBITID_ENCRYPTION_KEY:-}
       DATABASE_URL: postgres://orbitid:${ORBITID_PG_PASSWORD:-orbitid}@orbitid-postgres:5432/orbitid
       POSTGRES_PASSWORD: ${ORBITID_PG_PASSWORD:-orbitid}
 
@@ -106,7 +105,7 @@ services:
       NODE_ENV: development
       ORBITID_PORT: 4000
       ORBITID_BASE_URL: ${ORBITID_ALT_BASE_URL:-http://localhost:4001}
-      ORBITID_ENCRYPTION_KEY: ${ORBITID_ENCRYPTION_KEY:?set ORBITID_ENCRYPTION_KEY for the orbitid profile}
+      ORBITID_ENCRYPTION_KEY: ${ORBITID_ENCRYPTION_KEY:-}
       DATABASE_URL: postgres://orbitid:${ORBITID_PG_PASSWORD:-orbitid}@orbitid-postgres:5432/orbitid
       POSTGRES_PASSWORD: ${ORBITID_PG_PASSWORD:-orbitid}
 

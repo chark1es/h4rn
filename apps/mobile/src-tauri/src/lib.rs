@@ -4,8 +4,8 @@
 //! shared React bundle. Product behaviour stays behind the daemon's WebSocket
 //! protocol; the native side only owns what a WebView cannot do:
 //!
-//! - `secret_get` / `secret_set` / `secret_delete`: Android Keystore-backed
-//!   storage for the daemon pairing token (ADR-016);
+//! - `secret_get` / `secret_set` / `secret_delete`: Android Keystore- and iOS
+//!   Keychain-backed storage for the daemon pairing token (ADR-016);
 //! - `deep_link_current`: the `h4rn://` URL that cold-started the app, so the
 //!   connect screen can pair from `h4rn://connect?daemon=…&token=…` and the
 //!   OIDC callback can be forwarded to the UI;
@@ -17,18 +17,21 @@
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use tauri::Manager;
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 use tauri::plugin::PluginHandle;
+
+#[cfg(target_os = "ios")]
+tauri::ios_plugin_binding!(init_plugin_h4rn_secret_store);
 
 /// Upper bound for a logical secret key.
 const MAX_SECRET_KEY: usize = 256;
 /// Upper bound for one secret, matching the desktop keychain command.
 const MAX_SECRET_VALUE: usize = 64 * 1024;
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 struct SecretStore(PluginHandle<tauri::Wry>);
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 #[derive(serde::Serialize)]
 struct SecretArgs<'a> {
     key: &'a str,
@@ -36,7 +39,7 @@ struct SecretArgs<'a> {
     value: Option<&'a str>,
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 #[derive(serde::Deserialize)]
 struct SecretValue {
     value: Option<String>,
@@ -59,7 +62,7 @@ fn validate_secret_key(key: &str) -> Result<(), String> {
 fn secret_get(app: tauri::AppHandle, key: String) -> Result<Option<String>, String> {
     validate_secret_key(&key)?;
 
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         let store = app.state::<SecretStore>();
         store
@@ -75,10 +78,10 @@ fn secret_get(app: tauri::AppHandle, key: String) -> Result<Option<String>, Stri
             .map_err(|error| error.to_string())
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = app;
-        Err("secret storage is only implemented on Android in this build".into())
+        Err("secret storage is only implemented on the mobile shells".into())
     }
 }
 
@@ -92,7 +95,7 @@ fn secret_set(app: tauri::AppHandle, key: String, value: String) -> Result<(), S
         ));
     }
 
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         let store = app.state::<SecretStore>();
         store
@@ -107,10 +110,10 @@ fn secret_set(app: tauri::AppHandle, key: String, value: String) -> Result<(), S
             .map_err(|error| error.to_string())
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = (app, value);
-        Err("secret storage is only implemented on Android in this build".into())
+        Err("secret storage is only implemented on the mobile shells".into())
     }
 }
 
@@ -119,7 +122,7 @@ fn secret_set(app: tauri::AppHandle, key: String, value: String) -> Result<(), S
 fn secret_delete(app: tauri::AppHandle, key: String) -> Result<(), String> {
     validate_secret_key(&key)?;
 
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         let store = app.state::<SecretStore>();
         store
@@ -134,10 +137,10 @@ fn secret_delete(app: tauri::AppHandle, key: String) -> Result<(), String> {
             .map_err(|error| error.to_string())
     }
 
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = app;
-        Err("secret storage is only implemented on Android in this build".into())
+        Err("secret storage is only implemented on the mobile shells".into())
     }
 }
 
@@ -182,7 +185,12 @@ pub fn run() {
                             api.register_android_plugin("dev.h4rn.app", "SecretStorePlugin")?;
                         app.manage(SecretStore(handle));
                     }
-                    #[cfg(not(target_os = "android"))]
+                    #[cfg(target_os = "ios")]
+                    {
+                        let handle = api.register_ios_plugin(init_plugin_h4rn_secret_store)?;
+                        app.manage(SecretStore(handle));
+                    }
+                    #[cfg(not(any(target_os = "android", target_os = "ios")))]
                     {
                         let _ = (app, api);
                     }

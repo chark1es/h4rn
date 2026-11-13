@@ -1,0 +1,35 @@
+default_platform(:android)
+
+platform :android do
+  desc "Upload the release AAB to the Play internal track"
+  lane :internal do
+    aab = ENV["H4RN_AAB_PATH"]
+    UI.user_error!("set H4RN_AAB_PATH to the release .aab") if aab.nil? || !File.exist?(aab)
+
+    options = {
+      track: ENV.fetch("H4RN_PLAY_TRACK", "internal"),
+      aab: aab,
+      # The APK is attached to the GitHub release; Play consumes the AAB.
+      skip_upload_apk: true,
+      skip_upload_metadata: true,
+      skip_upload_images: true,
+      skip_upload_screenshots: true,
+      release_status: ENV.fetch("H4RN_PLAY_RELEASE_STATUS", "completed"),
+      changes_not_sent_for_review: false,
+    }
+
+    if ENV["PLAY_STORE_JSON_KEY_FILE"] && !ENV["PLAY_STORE_JSON_KEY_FILE"].empty?
+      options[:json_key_file] = ENV["PLAY_STORE_JSON_KEY_FILE"]
+    elsif ENV["PLAY_STORE_JSON_KEY"] && !ENV["PLAY_STORE_JSON_KEY"].empty?
+      require "tempfile"
+      key = Tempfile.new(["play-service-account", ".json"])
+      key.write(ENV["PLAY_STORE_JSON_KEY"])
+      key.close
+      options[:json_key_file] = key.path
+    else
+      UI.user_error!("set PLAY_STORE_JSON_KEY_FILE or PLAY_STORE_JSON_KEY")
+    end
+
+    upload_to_play_store(options)
+  end
+end

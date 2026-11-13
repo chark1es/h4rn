@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  h4rn daemon launch agent.
+
+  Install (replace __HOME__ with $HOME first):
+
+    sed "s|__HOME__|$HOME|g" dev.h4rn.h4rnd.plist \
+      > ~/Library/LaunchAgents/dev.h4rn.h4rnd.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.h4rn.h4rnd.plist
+
+  Uninstall:
+
+    launchctl bootout gui/$(id -u)/dev.h4rn.h4rnd
+    rm ~/Library/LaunchAgents/dev.h4rn.h4rnd.plist
+
+  Or use `packaging/daemon/launchd/install.sh`, which performs the substitution
+  and bootstraps the agent.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.h4rn.h4rnd</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/h4rnd</string>
+    <string>serve</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>H4RN_DATA_DIR</key>
+    <string>__HOME__/.local/share/h4rn</string>
+    <key>H4RN_BIND</key>
+    <string>127.0.0.1:47800</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <key>ThrottleInterval</key>
+  <integer>2</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/h4rn/h4rnd.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/h4rn/h4rnd.err.log</string>
+</dict>
+</plist>

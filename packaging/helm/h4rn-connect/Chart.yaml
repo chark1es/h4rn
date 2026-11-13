@@ -1,0 +1,16 @@
+apiVersion: v2
+name: h4rn-connect
+description: Self-hosted h4rn relay (OIDC, pairing, presence and the opaque /relay WebSocket)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/chark1es/h4rn
+sources:
+  - https://github.com/chark1es/h4rn
+keywords:
+  - h4rn
+  - relay
+  - agents
+maintainers:
+  - name: h4rn contributors

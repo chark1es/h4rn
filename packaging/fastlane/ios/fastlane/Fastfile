@@ -1,0 +1,31 @@
+default_platform(:ios)
+
+platform :ios do
+  desc "Upload a signed .ipa to TestFlight"
+  lane :beta do
+    ipa = ENV["H4RN_IPA_PATH"]
+    UI.user_error!("set H4RN_IPA_PATH to the signed .ipa") if ipa.nil? || !File.exist?(ipa)
+
+    options = {
+      ipa: ipa,
+      skip_waiting_for_build_processing: true,
+      skip_submission: true,
+      notify_external_testers: false,
+    }
+    options[:groups] = ENV["H4RN_TESTFLIGHT_GROUPS"].split(",") if ENV["H4RN_TESTFLIGHT_GROUPS"]
+    options[:changelog] = ENV["H4RN_TESTFLIGHT_CHANGELOG"] if ENV["H4RN_TESTFLIGHT_CHANGELOG"]
+
+    if ENV["APPLE_API_KEY_PATH"] && !ENV["APPLE_API_KEY_PATH"].empty?
+      # The .p8 file is named AuthKey_<key_id>.p8; fastlane reads the key id
+      # from the filename and the issuer id from the environment.
+      options[:api_key_path] = ENV["APPLE_API_KEY_PATH"]
+    elsif ENV["APPLE_ID"] && ENV["APPLE_PASSWORD"]
+      options[:username] = ENV["APPLE_ID"]
+      options[:app_specific_password] = ENV["APPLE_PASSWORD"]
+    else
+      UI.user_error!("set APPLE_API_KEY_PATH (+ APPLE_API_KEY_ID/APPLE_API_ISSUER) or APPLE_ID/APPLE_PASSWORD")
+    end
+
+    upload_to_testflight(options)
+  end
+end

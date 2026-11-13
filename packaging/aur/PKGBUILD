@@ -1,0 +1,25 @@
+# Maintainer: h4rn contributors
+# AUR package for the h4rn desktop application (binary release).
+#
+# `packaging/scripts/update-manifests.sh` fills pkgver and the .deb checksum
+# and writes `packaging-out/aur/`. Push the result to the h4rn-bin AUR
+# repository manually; CI never publishes.
+pkgname=h4rn-bin
+pkgver=__VERSION__
+pkgrel=1
+pkgdesc="Quiet-native orchestration for local coding agents"
+arch=('x86_64')
+url="https://github.com/chark1es/h4rn"
+license=('MIT')
+depends=('gtk3' 'webkit2gtk-4.1' 'libayatana-appindicator' 'librsvg')
+provides=('h4rn')
+conflicts=('h4rn')
+options=('!strip')
+source_x86_64=("h4rn_${pkgver}_amd64.deb::${url}/releases/download/v${pkgver}/h4rn_${pkgver}_amd64.deb")
+sha256sums_x86_64=('__DEB_SHA256_X86_64__')
+
+package() {
+  # The Tauri .deb already has the FHS layout and bundles the h4rnd sidecar.
+  bsdtar -xf "${srcdir}/h4rn_${pkgver}_amd64.deb" -C "${srcdir}" data.tar.*
+  bsdtar -xf "${srcdir}"/data.tar.* -C "${pkgdir}" --no-same-owner
+}

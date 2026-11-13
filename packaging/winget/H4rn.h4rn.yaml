@@ -1,0 +1,11 @@
+# winget version manifest (template).
+#
+# `packaging/scripts/update-manifests.sh` fills __VERSION__ and writes the
+# three-file manifest set into `packaging-out/winget/manifests/h/H4rn/h4rn/`.
+# Submit that directory as a PR to microsoft/winget-pkgs; nothing here is
+# published automatically.
+PackageIdentifier: H4rn.h4rn
+PackageVersion: __VERSION__
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.10.0

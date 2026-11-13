@@ -1,0 +1,18 @@
+pkgbase = h4rn-bin
+	pkgdesc = Quiet-native orchestration for local coding agents
+	pkgver = __VERSION__
+	pkgrel = 1
+	url = https://github.com/chark1es/h4rn
+	arch = x86_64
+	license = MIT
+	depends = gtk3
+	depends = webkit2gtk-4.1
+	depends = libayatana-appindicator
+	depends = librsvg
+	provides = h4rn
+	conflicts = h4rn
+	options = !strip
+	source_x86_64 = h4rn___VERSION___amd64.deb::https://github.com/chark1es/h4rn/releases/download/v__VERSION__/h4rn___VERSION___amd64.deb
+	sha256sums_x86_64 = __DEB_SHA256_X86_64__
+
+pkgname = h4rn-bin

@@ -1,0 +1,4 @@
+# Staged by src-tauri/build.rs from the Tauri crate during an iOS build.
+.tauri/
+.build/
+Package.resolved

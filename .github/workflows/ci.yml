@@ -85,11 +85,13 @@ jobs:
       - name: Install Android SDK packages
         run: |
           yes | sdkmanager --licenses >/dev/null
-          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.1.12297006"
+          sdkmanager "platform-tools" "platforms;android-37.0" "build-tools;37.0.0" "ndk;27.1.12297006"
       - run: bun install --frozen-lockfile
       # The script installs the Rust Android targets, runs `tauri android init`
       # into the ignored gen/ tree, applies native/android over the result and
       # builds one debug APK per ABI (x86_64 emulator + aarch64 devices).
+      # It also compiles the checked-in release signing configuration, so a
+      # broken Gradle overlay fails on the PR rather than at release time.
       - run: scripts/mobile-android.sh build
 
   mobile-ios:
@@ -109,6 +111,42 @@ jobs:
       # CI can verify. TestFlight signing requirements are in docs/mobile.md.
       - run: bun run --cwd apps/mobile tauri ios init --ci
       - run: bun run --cwd apps/mobile tauri ios build --debug --ci --target aarch64-sim
+
+  packaging:
+    name: Packaging config (Helm, actionlint, scripts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - name: Lint and render the Helm chart
+        run: |
+          helm lint packaging/helm/h4rn-connect
+          helm template h4rn packaging/helm/h4rn-connect \
+            --set secrets.kek=00000000000000000000000000000000 \
+            --set secrets.signingKey=11111111111111111111111111111111 \
+            --set postgres.auth.password=test-password >/tmp/h4rn-connect.yaml
+          grep -q 'kind: Deployment' /tmp/h4rn-connect.yaml
+          grep -q 'kind: StatefulSet' /tmp/h4rn-connect.yaml
+      - name: Shell syntax and YAML parse
+        run: |
+          bash -n scripts/mobile-android.sh
+          for script in packaging/scripts/*.sh packaging/daemon/launchd/install.sh; do
+            bash -n "${script}"
+          done
+          # Helm templates are Go text/template, not YAML until rendered;
+          # helm lint/template above validates those.
+          ruby -e '
+            require "yaml"
+            Dir.glob("packaging/**/*.{yaml,yml}").each do |path|
+              next if path.split(File::SEPARATOR).include?("templates")
+              YAML.load_file(path)
+            end
+          '
+      - name: actionlint
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest -color
 
   docker:
     name: Docker image builds

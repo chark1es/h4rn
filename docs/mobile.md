@@ -151,7 +151,7 @@ trusted differently from a typed one.
 
 iOS is configured in `apps/mobile/src-tauri/tauri.conf.json` (bundle id, minimum iOS 16,
 `h4rn` URL scheme via `plugins.deep-link.mobile`) but **cannot be initialised or built on
-Linux**: every `tauri ios` command is macOS-only. The CI job `tauri-ios` runs on
+Linux**: every `tauri ios` command is macOS-only. The CI job `mobile-ios` runs on
 `macos-latest` and does:
 
 ```sh
@@ -164,8 +164,7 @@ The first `ios init` generates `src-tauri/gen/apple`; it is ignored like `gen/an
 
 ### What TestFlight needs from the owner
 
-Nothing in this repository can complete an App Store upload without account credentials. Before
-a signed/TestFlight build:
+Nothing in this repository can complete an App Store upload without account credentials:
 
 1. **Apple Developer Program** membership for the account that owns `dev.h4rn.app` (or a new
    bundle id registered in Certificates, Identifiers & Profiles).
@@ -174,13 +173,26 @@ a signed/TestFlight build:
    bundle id, or an App Store Connect API key (`.p8`, key id, issuer id) with App Manager access.
 4. The **team id**, and in CI: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
    `APPLE_SIGNING_IDENTITY`, `APPLE_TEAM_ID`, plus `APPLE_ID` and `APPLE_PASSWORD` (app-specific
-   password) for notarisation/upload. These belong in repository secrets, never in the tree.
-5. A monotonically increasing build number — pass `tauri ios build --build-number <n>` or use
-   `bundle.iOS.bundleVersion`.
-6. A signed build for TestFlight:
-   `tauri ios build --export-method release-testing --build-number <n>`, then upload the
-   resulting `.ipa` with `xcrun altool`/Transporter.
+   password) or the `APPLE_API_*` triple. These belong in repository secrets, never in the tree.
+5. A monotonically increasing build number; the release workflow passes the GitHub run number.
 
-iOS secret storage is not implemented in this phase. The Rust commands return an explicit
-"only implemented on Android" error rather than falling back to plaintext; the plan is a
-Swift Keychain plugin behind the same `secret_get`/`secret_set`/`secret_delete` commands.
+### TestFlight upload
+
+The release workflow reuses the same `macos-latest` job: when the Apple signing secrets are
+present it builds with `--export-method release-testing --build-number <run>`, copies the IPA
+to `dist/ios/` and runs `packaging/fastlane/ios` lane `beta` (`upload_to_testflight`). The lane
+accepts either `APPLE_API_KEY_PATH` (+ `APPLE_API_KEY_ID`/`APPLE_API_ISSUER`) or
+`APPLE_ID`/`APPLE_PASSWORD`; `H4RN_TESTFLIGHT_GROUPS` and `H4RN_TESTFLIGHT_CHANGELOG` are
+optional. Without Apple secrets the job still compiles the simulator build and uploads no IPA.
+Exact secret names are in [release.md](release.md).
+
+### iOS secret storage
+
+The same `secret_get` / `secret_set` / `secret_delete` commands are implemented for iOS by a
+local Swift package at `apps/mobile/native/ios` (`H4rnSecretStorePlugin`), linked from
+`apps/mobile/src-tauri/build.rs`. It stores values as `kSecClassGenericPassword` items scoped to
+the app's service and access group, with
+`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, and replaces any existing item rather than
+creating duplicates. Key material never leaves the Keychain, and the Rust command surface is
+identical to Android, so the UI does not branch on platform. The CI simulator build compiles the Swift
+package, which is the only verification possible without a Mac and an Apple account.

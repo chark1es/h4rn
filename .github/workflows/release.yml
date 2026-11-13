@@ -1,0 +1,429 @@
+name: Release
+
+# Tag-driven release: desktop bundles, standalone daemon archives, Android
+# AAB/APK, iOS (signed when the owner's secrets exist) and the multi-arch relay
+# image, plus checksums and PR-ready winget/Homebrew/AUR manifests.
+#
+# Required secrets and repository variables are listed in docs/release.md.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release_id: ${{ steps.release.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve version
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "tag $GITHUB_REF_NAME is not a semver release tag" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Create draft release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
+              --draft \
+              --title "h4rn $GITHUB_REF_NAME" \
+              --generate-notes
+          fi
+          id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}" --jq .id)"
+          echo "release_id=$id" >> "$GITHUB_OUTPUT"
+
+  desktop:
+    name: Desktop (${{ matrix.os }})
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            display: Windows
+          - os: macos-latest
+            target: universal-apple-darwin
+            display: macOS
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            display: Linux
+    runs-on: ${{ matrix.os }}
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: bun install --frozen-lockfile
+      - name: Install Linux bundle dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+      - name: Add macOS Rust targets
+        if: matrix.target == 'universal-apple-darwin'
+        run: rustup target add x86_64-apple-darwin aarch64-apple-darwin
+      - name: Build the h4rnd sidecar
+        run: |
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            cargo build --release --locked -p h4rn-daemon --target x86_64-apple-darwin
+            cargo build --release --locked -p h4rn-daemon --target aarch64-apple-darwin
+          fi
+          bash packaging/scripts/stage-sidecar.sh "${{ matrix.target }}"
+        shell: bash
+      - name: Generate the release Tauri config
+        shell: bash
+        env:
+          H4RN_UPDATER_ENDPOINT: ${{ vars.H4RN_UPDATER_ENDPOINT }}
+          H4RN_UPDATER_PUBKEY: ${{ secrets.H4RN_UPDATER_PUBKEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            sign_path="${GITHUB_WORKSPACE}\\packaging\\windows\\sign.ps1"
+            export H4RN_WINDOWS_SIGN_COMMAND="powershell -NoProfile -ExecutionPolicy Bypass -File \"${sign_path}\" \"%1\""
+          fi
+          bash packaging/scripts/generate-tauri-config.sh
+      - name: Build and upload the desktop bundles
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        with:
+          projectPath: apps/desktop
+          releaseId: ${{ needs.prepare.outputs.release_id }}
+          includeUpdaterJson: ${{ env.TAURI_SIGNING_PRIVATE_KEY != '' }}
+          args: --target ${{ matrix.target }} --config src-tauri/tauri.release.conf.json
+
+  daemon:
+    name: Daemon (${{ matrix.target }})
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04
+            target: aarch64-unknown-linux-gnu
+            cross: true
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            musl: true
+          - os: macos-latest
+            target: universal-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cross toolchain
+        if: matrix.cross || matrix.musl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu musl-tools
+      - name: Add Rust target
+        if: matrix.target != 'universal-apple-darwin'
+        run: rustup target add ${{ matrix.target }}
+      - name: Build macOS universal daemon
+        if: matrix.target == 'universal-apple-darwin'
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo build --release --locked -p h4rn-daemon --target x86_64-apple-darwin
+          cargo build --release --locked -p h4rn-daemon --target aarch64-apple-darwin
+      - name: Build daemon archive
+        shell: bash
+        env:
+          H4RN_VERSION: ${{ needs.prepare.outputs.version }}
+          CC_aarch64_unknown_linux_gnu: ${{ matrix.cross && 'aarch64-linux-gnu-gcc' || '' }}
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross && 'aarch64-linux-gnu-gcc' || '' }}
+          CC_x86_64_unknown_linux_musl: ${{ matrix.musl && 'musl-gcc' || '' }}
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: ${{ matrix.musl && 'musl-gcc' || '' }}
+        run: bash packaging/scripts/build-daemon-archives.sh "${{ matrix.target }}" dist/daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: daemon-${{ matrix.target }}
+          path: dist/daemon/*
+          if-no-files-found: error
+
+  android:
+    name: Android release
+    needs: prepare
+    runs-on: ubuntu-24.04
+    env:
+      PLAY_STORE_JSON_KEY: ${{ secrets.PLAY_STORE_JSON_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/mobile/src-tauri
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platform-tools" "platforms;android-37.0" "build-tools;37.0.0" "ndk;27.1.12297006"
+      - run: bun install --frozen-lockfile
+      - name: Decode the upload keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [[ -n "${ANDROID_KEYSTORE_BASE64}" ]]; then
+            echo "${ANDROID_KEYSTORE_BASE64}" | base64 -d >"${RUNNER_TEMP}/h4rn-release.jks"
+            echo "ANDROID_KEYSTORE_PATH=${RUNNER_TEMP}/h4rn-release.jks" >>"$GITHUB_ENV"
+          else
+            echo "ANDROID_KEYSTORE_BASE64 is unset; the release variant will be debug-signed"
+          fi
+      - name: Write the version code overlay
+        run: |
+          printf '{"bundle":{"android":{"versionCode":%s}}}\n' "${GITHUB_RUN_NUMBER}" \
+            >"${RUNNER_TEMP}/android-version.json"
+          echo "H4RN_ANDROID_CONFIG=${RUNNER_TEMP}/android-version.json" >>"$GITHUB_ENV"
+      - name: Build the release AAB and APK
+        env:
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: scripts/mobile-android.sh build-release
+      - name: Collect Android artifacts
+        run: |
+          mkdir -p dist/android
+          outputs=apps/mobile/src-tauri/gen/android/app/build/outputs
+          aab="$(find "${outputs}/bundle" -type f -name '*.aab' | head -n 1)"
+          apk="$(find "${outputs}/apk" -type f -name '*.apk' -path '*release*' | head -n 1)"
+          [[ -n "${aab}" ]] || { echo "no release AAB found" >&2; exit 1; }
+          [[ -n "${apk}" ]] || { echo "no release APK found" >&2; exit 1; }
+          cp "${aab}" dist/android/app-release.aab
+          cp "${apk}" dist/android/app-release.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: dist/android/*
+          if-no-files-found: error
+      - name: Upload to the Play internal track
+        if: env.PLAY_STORE_JSON_KEY != ''
+        env:
+          H4RN_AAB_PATH: ${{ github.workspace }}/dist/android/app-release.aab
+          H4RN_PLAY_TRACK: internal
+        working-directory: packaging/fastlane/android
+        run: |
+          gem install bundler --no-document
+          bundle install
+          bundle exec fastlane internal
+
+  ios:
+    name: iOS
+    needs: prepare
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/mobile/src-tauri
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      - name: Detect Apple signing credentials
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          if [[ -n "${APPLE_CERTIFICATE}" && -n "${APPLE_SIGNING_IDENTITY}" ]]; then
+            echo "H4RN_HAS_APPLE_SIGNING=true" >>"$GITHUB_ENV"
+          else
+            echo "H4RN_HAS_APPLE_SIGNING=false" >>"$GITHUB_ENV"
+            echo "Apple signing secrets are unset; only the simulator build will run"
+          fi
+      - name: Initialise the iOS project
+        run: bun run --cwd apps/mobile tauri ios init --ci
+      - name: Compile for the simulator (also verifies the Swift Keychain plugin)
+        run: bun run --cwd apps/mobile tauri ios build --debug --ci --target aarch64-sim
+      - name: Write the App Store Connect API key
+        if: env.H4RN_HAS_APPLE_SIGNING == 'true'
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+        run: |
+          # Tauri expects APPLE_API_KEY to be a path, so materialise the secret
+          # before the signed build. TestFlight reads the same file again below.
+          if [[ -n "${APPLE_API_KEY}" && -n "${APPLE_API_KEY_ID}" ]]; then
+            key="${RUNNER_TEMP}/AuthKey_${APPLE_API_KEY_ID}.p8"
+            printf '%s' "${APPLE_API_KEY}" >"${key}"
+            echo "APPLE_API_KEY=${key}" >>"$GITHUB_ENV"
+          fi
+      - name: Build a signed TestFlight archive
+        if: env.H4RN_HAS_APPLE_SIGNING == 'true'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          bun run --cwd apps/mobile tauri ios build --ci \
+            --target aarch64-apple-ios \
+            --export-method release-testing \
+            --build-number "${GITHUB_RUN_NUMBER}"
+      - name: Collect the IPA
+        if: env.H4RN_HAS_APPLE_SIGNING == 'true'
+        run: |
+          mkdir -p dist/ios
+          ipa="$(find apps/mobile/src-tauri/gen/apple -name '*.ipa' -type f | head -n 1)"
+          [[ -n "${ipa}" ]] || { echo "no IPA produced" >&2; exit 1; }
+          cp "${ipa}" "dist/ios/h4rn-${GITHUB_RUN_NUMBER}.ipa"
+      - uses: actions/upload-artifact@v4
+        if: env.H4RN_HAS_APPLE_SIGNING == 'true'
+        with:
+          name: ios
+          path: dist/ios/*
+          if-no-files-found: error
+      - name: Upload to TestFlight
+        if: env.H4RN_HAS_APPLE_SIGNING == 'true'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          H4RN_IPA_PATH: ${{ github.workspace }}/dist/ios/h4rn-${{ github.run_number }}.ipa
+          H4RN_TESTFLIGHT_CHANGELOG: ${{ github.ref_name }}
+        working-directory: packaging/fastlane/ios
+        run: |
+          if [[ -n "${APPLE_API_KEY}" && -n "${APPLE_API_KEY_ID}" ]]; then
+            key="${RUNNER_TEMP}/AuthKey_${APPLE_API_KEY_ID}.p8"
+            printf '%s' "${APPLE_API_KEY}" >"${key}"
+            export APPLE_API_KEY_PATH="${key}"
+          fi
+          gem install bundler --no-document
+          bundle install
+          bundle exec fastlane beta
+
+  connect-image:
+    name: Relay image (amd64 + arm64)
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/h4rn-connect
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.version }}
+            type=raw,value=latest
+            type=sha
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  publish:
+    name: Publish release assets
+    needs: [prepare, desktop, daemon, android, ios, connect-image]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Download desktop assets from the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release download "$GITHUB_REF_NAME" --dir dist --clobber
+      - name: Generate package manifests
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          bash packaging/scripts/update-manifests.sh \
+            --version "${VERSION}" --dist dist --out packaging-out
+          tar -C . -czf dist/packaging-manifests.tar.gz packaging-out
+      - name: Write checksums
+        run: |
+          cd dist
+          find . -type f ! -name SHA256SUMS ! -name '*.sha256' -print0 \
+            | sort -z \
+            | xargs -0 sha256sum >SHA256SUMS
+      - name: Upload assets and publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mapfile -d '' assets < <(find dist -type f ! -name SHA256SUMS -print0)
+          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
+          gh release upload "$GITHUB_REF_NAME" dist/SHA256SUMS --clobber
+          gh release edit "$GITHUB_REF_NAME" --draft=false --latest

@@ -1,0 +1,1 @@
+h4rn connects to a daemon on your own machine and shows Claude Code, Codex, OpenCode and Antigravity threads in one quiet, native interface. Approve actions, read terminal output, and pick up finished work from anywhere. Your prompts and files never pass through a relay in readable form; the daemon stays on your hardware.

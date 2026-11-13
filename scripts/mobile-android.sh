@@ -12,6 +12,11 @@
 # Commands:
 #   init         Generate src-tauri/gen/android and apply native/overlay files
 #   build        Build debug APKs, one per ABI (see H4RN_ANDROID_TARGETS)
+#   build-release
+#                Build the release AAB and APK. Signing is read from
+#                ANDROID_KEYSTORE_PATH/_PASSWORD, ANDROID_KEY_ALIAS and
+#                ANDROID_KEY_PASSWORD; without them Gradle signs with the debug
+#                key so locally produced artifacts stay installable.
 #   install      Install the newest APK on the running emulator/device
 #   run          build + install + daemon + adb reverse + deep-link launch + screenshot
 #   screenshot   Capture the emulator screen to apps/mobile/screenshots/
@@ -19,9 +24,14 @@
 #   daemon       Start the demo daemon (fake harness) if it is not running
 #
 # Environment:
-#   H4RN_ANDROID_TARGETS   space-separated rust targets
+#   H4RN_ANDROID_TARGETS   space-separated rust targets for debug builds
 #                          (default: "x86_64 aarch64": emulator + phone ABIs,
 #                          one APK per ABI)
+#   H4RN_ANDROID_RELEASE_TARGETS
+#                          ABIs for `build-release` (default:
+#                          "aarch64 armv7 x86_64")
+#   H4RN_ANDROID_CONFIG    extra Tauri config overlay for release builds
+#                          (used for the versionCode from the CI run number)
 #   H4RN_AVD               emulator AVD (default: Medium_Phone_API_36.0)
 #   H4RN_PORT              daemon port (default: 47800)
 #   H4RN_DATA_DIR          daemon data dir
@@ -117,8 +127,9 @@ rust_target_triple() {
 
 ensure_rust_targets() {
   local target triple installed
+  local targets="${1:-${TARGETS}}"
   installed="$(rustup target list --installed)"
-  for target in ${TARGETS}; do
+  for target in ${targets}; do
     triple="$(rust_target_triple "${target}")"
     if ! grep -qx "${triple}" <<<"${installed}"; then
       log "Installing Rust target ${triple}"
@@ -166,6 +177,43 @@ build_apk() {
   local apk
   apk="$(newest_apk || true)"
   [[ -n "${apk}" ]] || die "the build produced no APK"
+  log "APK ${apk}"
+}
+
+build_release() {
+  setup_env
+  local targets="${H4RN_ANDROID_RELEASE_TARGETS:-aarch64 armv7 x86_64}"
+  TARGETS="${targets}"
+  ensure_rust_targets "${targets}"
+  ensure_android_project
+
+  if [[ -n "${ANDROID_KEYSTORE_PATH:-}" && -n "${ANDROID_KEYSTORE_PASSWORD:-}" && -n "${ANDROID_KEY_ALIAS:-}" ]]; then
+    printf 'Signing release with keystore %s (alias %s)\n' \
+      "${ANDROID_KEYSTORE_PATH}" "${ANDROID_KEY_ALIAS}"
+  else
+    printf 'warning: no release keystore configured; the release variant is debug-signed\n' >&2
+    printf '         set ANDROID_KEYSTORE_PATH, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS,\n' >&2
+    printf '         and optionally ANDROID_KEY_PASSWORD (see docs/release.md)\n' >&2
+  fi
+
+  local -a args=(--apk --aab --ci --target ${targets})
+  if [[ -n "${H4RN_ANDROID_CONFIG:-}" ]]; then
+    args+=(--config "${H4RN_ANDROID_CONFIG}")
+  fi
+  log "Building the release APK and AAB (${targets})"
+  (cd "${MOBILE_DIR}" && bun run tauri android build "${args[@]}")
+
+  local aab apk
+  # Tauri's Gradle invocation puts the universal AAB under
+  # bundle/universalRelease and the APK under apk/universal/release, so search
+  # the whole outputs tree and take the newest of each kind.
+  aab="$(find "${GEN_DIR}/app/build/outputs/bundle" -type f -name '*.aab' \
+    -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR == 1 { print $2 }' || true)"
+  apk="$(find "${GEN_DIR}/app/build/outputs/apk" -type f -name '*.apk' -path '*release*' \
+    -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR == 1 { print $2 }' || true)"
+  [[ -n "${aab}" ]] || die "the release build produced no AAB"
+  [[ -n "${apk}" ]] || die "the release build produced no APK"
+  log "AAB ${aab}"
   log "APK ${apk}"
 }
 
@@ -338,6 +386,9 @@ case "${command}" in
   build)
     build_apk
     ;;
+  build-release)
+    build_release
+    ;;
   install)
     setup_env
     install_apk
@@ -367,6 +418,6 @@ case "${command}" in
     printf 'Token: %s\n' "${TOKEN}"
     ;;
   *)
-    die "unknown command ${command}; expected init, build, install, run, screenshot, logs or daemon"
+    die "unknown command ${command}; expected init, build, build-release, install, run, screenshot, logs or daemon"
     ;;
 esac

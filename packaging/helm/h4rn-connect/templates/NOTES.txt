@@ -1,0 +1,45 @@
+h4rn-connect is deployed.
+
+Relay URL: {{ .Values.config.publicBaseUrl }}
+Service:   {{ include "h4rn-connect.fullname" . }}:{{ .Values.service.port }} (in-cluster)
+{{- if .Values.ingress.enabled }}
+Ingress hosts:
+{{- range .Values.ingress.hosts }}
+  - {{ .host }}
+{{- end }}
+{{- end }}
+
+{{- if not .Values.secrets.existingSecret }}
+{{- $secretName := include "h4rn-connect.secretName" . }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $secretName }}
+{{- if $existing }}
+The chart reuses the existing KEK, signing key and Postgres password in
+Secret {{ $secretName }}. Back it up: losing the KEK logs users out and
+losing the signing key invalidates access tokens.
+{{- else }}
+A Secret named {{ $secretName }} was generated with a random KEK, signing
+key and Postgres password. Back it up now: losing the KEK logs users out and
+losing the signing key invalidates access tokens.
+
+  kubectl -n {{ .Release.Namespace }} get secret {{ $secretName }} -o yaml
+{{- end }}
+{{- else }}
+Using the existing Secret {{ .Values.secrets.existingSecret }}. It must contain
+database-url, kek, signing-key and (for in-cluster Postgres) postgres-password.
+{{- end }}
+
+{{- if .Values.postgres.enabled }}
+
+Postgres runs in-cluster as StatefulSet {{ include "h4rn-connect.postgresServiceName" . }}.
+For production, prefer an external managed Postgres and set
+externalDatabase.url (or host/port/user/database/password).
+{{- else }}
+
+Using external Postgres.
+{{- end }}
+
+Point daemons at this deployment with:
+
+  h4rnd login --connect {{ .Values.config.publicBaseUrl }} --provider <id>
+  h4rnd serve
+  h4rnd pair

@@ -5,6 +5,31 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### Phase 7 — packaging
+
+- **Desktop bundles** ship on Windows (MSI and NSIS), macOS (universal DMG) and Linux
+  (AppImage and `.deb`) with the `h4rnd` sidecar staged per target. Tauri's updater plugin is
+  configured through a generated release overlay: `H4RN_UPDATER_ENDPOINT` selects the hosted or
+  self-hosted manifest, `H4RN_UPDATER_PUBKEY` pins the minisign key, and signed `.sig`/`latest.json`
+  artifacts are emitted only when the signing key is present.
+- **Standalone `h4rnd` archives** for Linux x86_64 glibc/musl, Linux aarch64, macOS universal and
+  Windows, each with a checksum, `README.txt` and contrib service files (systemd user unit,
+  launchd plist, Windows scheduled-task scripts).
+- **Android release signing** reads the upload keystore from
+  `ANDROID_KEYSTORE_PATH`/password/alias/key variables (CI decodes `ANDROID_KEYSTORE_BASE64`) and
+  falls back to debug signing locally; the Play internal track uploads through a fastlane lane.
+- **iOS Keychain secret storage** implements `secret_get`/`secret_set`/`secret_delete` in Swift
+  with `kSecClassGenericPassword` and `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`, matching
+  the Android Keystore command surface; the CI macOS job compiles the Swift package for the
+  simulator and uploads a signed TestFlight build when Apple credentials exist.
+- **Relay image and chart**: `ghcr.io/<owner>/h4rn-connect` is built for `linux/amd64` and
+  `linux/arm64` with Buildx on tags, compose is pinned to the published tag (with a local build
+  override), and a Helm chart provides Deployment, Service, Ingress, PodDisruptionBudget and
+  optional in-chart Postgres or an external database URL.
+- **Tag-driven release workflow** (`.github/workflows/release.yml`) builds all targets into a
+  draft release, writes `SHA256SUMS`, and generates review-only winget, Homebrew cask and AUR
+  manifests. `docs/release.md` lists every secret and the release/update flow.
+
 ### UI: Quiet native redesign
 
 - **Direction A ("Quiet native") replaces the Prompt Book look** across `apps/ui`: graphite

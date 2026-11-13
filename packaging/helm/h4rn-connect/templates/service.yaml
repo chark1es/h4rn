@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "h4rn-connect.fullname" . }}
+  labels:
+    {{- include "h4rn-connect.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "h4rn-connect.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: relay

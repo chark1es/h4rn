@@ -1,0 +1,13 @@
+# Local build override for the relay image.
+#
+#   docker compose -f deploy/docker-compose.yml \
+#                  -f deploy/docker-compose.build.yml up -d --build
+#
+# The base file is pinned to ghcr.io/chark1es/h4rn-connect so a deployment
+# never silently builds from a working tree.
+services:
+  connect:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: ${H4RN_CONNECT_IMAGE:-h4rn/connect:dev}

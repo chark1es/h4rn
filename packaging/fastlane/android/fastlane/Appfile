@@ -1,0 +1,8 @@
+# Google Play upload identity.
+#
+# CI supplies PLAY_STORE_JSON_KEY (contents) and the lane writes a temporary
+# key file; PLAY_STORE_JSON_KEY_FILE is also honoured for local runs.
+# `package_name` must match the Android applicationId in
+# apps/mobile/native/android/app/build.gradle.kts.
+json_key_file(ENV["PLAY_STORE_JSON_KEY_FILE"]) if ENV["PLAY_STORE_JSON_KEY_FILE"]
+package_name("dev.h4rn.app")

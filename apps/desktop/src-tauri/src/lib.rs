@@ -28,6 +28,10 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_deep_link::init())
+        // Signed updates are opt-in: the endpoint and public key live in
+        // `plugins.updater`, and release builds replace them from CI secrets.
+        // A dev build with the placeholder key simply fails `check()`.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_window_state::Builder::default()
                 // Size, position and maximised state remember the user's
