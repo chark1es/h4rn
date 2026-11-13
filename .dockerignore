@@ -1,0 +1,11 @@
+# Build context excludes. The relay image only needs the Rust workspace.
+.git
+.github
+target
+apps
+docs
+node_modules
+*.log
+.env
+.env.*
+!.env.example
