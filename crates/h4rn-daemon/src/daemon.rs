@@ -8,6 +8,7 @@ use h4rn_harness::Harness;
 use tokio::net::TcpListener;
 
 use crate::auth::TokenStore;
+use crate::blobs::{AttachmentResolver, BlobStore};
 use crate::config::Config;
 use crate::harnesses::{HarnessCatalog, StaticHarnessCatalog};
 use crate::hosts::HostInventory;
@@ -108,12 +109,26 @@ impl DaemonBuilder {
         };
 
         let hosts = Arc::new(HostInventory::detect(Arc::clone(&catalog)));
+        let blobs = Arc::new(
+            BlobStore::open(
+                self.config.blob_dir(),
+                self.config.attachments_dir(),
+                self.config.max_blob_bytes(),
+                self.config.blob_gc_grace(),
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("open attachment store: {error}"))?,
+        );
+        crate::blobs::spawn_gc(&blobs, self.config.blob_gc_interval());
+        let resolver: Arc<dyn AttachmentResolver> =
+            Arc::clone(&blobs) as Arc<dyn AttachmentResolver>;
         let manager = Arc::new(
             ThreadManager::open(
                 journal,
                 Arc::clone(&catalog),
                 hosts.local_id(),
                 self.options,
+                Some(resolver),
             )
             .await
             .map_err(|error| anyhow::anyhow!("open thread manager: {error}"))?,
@@ -128,6 +143,7 @@ impl DaemonBuilder {
             config: self.config,
             manager,
             hosts,
+            blobs,
             tokens,
             supervisor: self.supervisor,
         })
@@ -139,6 +155,7 @@ pub struct Daemon {
     config: Config,
     manager: Arc<ThreadManager>,
     hosts: Arc<HostInventory>,
+    blobs: Arc<BlobStore>,
     tokens: TokenStore,
     supervisor: Arc<ProcessSupervisor>,
 }
@@ -178,6 +195,7 @@ impl Daemon {
         let state = AppState {
             manager: Arc::clone(&self.manager),
             hosts: self.hosts,
+            blobs: Arc::clone(&self.blobs),
             tokens: self.tokens,
             started: std::time::Instant::now(),
         };

@@ -326,6 +326,9 @@ pub enum Item {
         role: MessageRole,
         /// Message text.
         text: String,
+        /// Attachments delivered with the message, in the order they were sent.
+        #[serde(default)]
+        attachments: Vec<crate::blob::Attachment>,
     },
     /// A tool call and its result.
     ToolCall {

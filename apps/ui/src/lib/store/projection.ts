@@ -2,6 +2,7 @@ import type {
   ApprovalDecision,
   ApprovalKind,
   ApprovalOption,
+  Attachment,
   Event,
   MessageRole,
   ToolCall,
@@ -17,6 +18,7 @@ export type MessageItem = {
   itemId: string;
   role: MessageRole;
   text: string;
+  attachments: Attachment[];
   streaming: boolean;
 };
 
@@ -63,6 +65,7 @@ export type StreamTurn = {
 export type PendingMessage = {
   id: string;
   text: string;
+  attachments: Attachment[];
   at: string;
   sending: boolean;
 };
@@ -194,6 +197,7 @@ export function foldEvent(
           itemId: event.item_id,
           role: "assistant",
           text: event.text,
+          attachments: [],
           streaming: true,
         });
       }
@@ -221,6 +225,7 @@ export function foldEvent(
                 itemId: item.item_id,
                 role: "user",
                 text: item.text,
+                attachments: item.attachments,
                 streaming: false,
               },
             ],
@@ -243,6 +248,7 @@ export function foldEvent(
             itemId: item.item_id,
             role: item.role,
             text: item.text,
+            attachments: item.attachments,
             streaming: false,
           });
         }

@@ -154,6 +154,25 @@ as-is — Claude native image/document blocks, Codex data-URL items, ACP only wh
 windows. The tradeoff is that a content-addressed store needs correct concurrent refcounting,
 which is the risk most likely to leak or over-collect; that is why uploads are two-phase.
 
+**Addendum (Phase 2): the delivery matrix as implemented.** The daemon stores one copy of
+the bytes under `blobs/<first two hex>/<rest>`, sniffs the media type at commit (a file that
+claims to be an image must decode as one), keeps a 256 px PNG thumbnail beside it, and only
+materialises a per-thread copy under `attachments/<thread-id>/<hash prefix>-<safe name>` when
+a message references it. `h4rn-harness/src/attachments.rs` owns the strategy enum that maps
+each harness to the matrix T3 gets right:
+
+| Harness | Images | PDFs and other files |
+| --- | --- | --- |
+| Claude Code | native `image` base64 block | path reference |
+| Codex | `input_image` data URL item | path reference |
+| OpenCode | `file://` part for local servers | path reference |
+| Antigravity (ACP) | image block only when `promptCapabilities.image` was negotiated | path reference |
+
+The prompt path line is added for every attachment on every harness — `[Attached image
+"x.png" is saved at: /abs/path]` — so a model can always fall back to reading the file when a
+native block was not negotiated. Phase 2 keeps PDFs on that fallback; native document blocks
+land with the per-harness capability work.
+
 ## ADR-009: Multipath transport with a path-agnostic session layer
 
 **Status:** Accepted

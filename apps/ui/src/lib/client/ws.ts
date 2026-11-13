@@ -47,12 +47,17 @@ export class WebSocketTransport implements Transport {
     }
 
     this.socket = socket;
+    socket.binaryType = "arraybuffer";
 
     socket.onopen = () => {
       handlers.onOpen();
     };
     socket.onmessage = (message) => {
-      if (typeof message.data === "string") handlers.onMessage(message.data);
+      if (typeof message.data === "string") {
+        handlers.onMessage(message.data);
+      } else if (message.data instanceof ArrayBuffer) {
+        handlers.onBinary(message.data);
+      }
     };
     socket.onerror = () => {
       handlers.onError("The daemon did not answer. It may be stopped or unreachable.");
@@ -67,7 +72,7 @@ export class WebSocketTransport implements Transport {
     };
   }
 
-  send(data: string): void {
+  send(data: string | ArrayBuffer | Uint8Array): void {
     if (this.socket?.readyState !== WebSocket.OPEN) {
       throw new Error("The socket is not open.");
     }

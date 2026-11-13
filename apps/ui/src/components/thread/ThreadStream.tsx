@@ -2,6 +2,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Skeleton } from "@/components/ui/skeleton";
+import { MessageAttachments } from "@/features/attachments/MessageAttachments";
 import type { ThreadSummary } from "@/gen";
 import type { PendingMessage, StreamTurn } from "@/lib/store/projection";
 import { cn } from "@/lib/utils";
@@ -22,14 +23,17 @@ function PendingTurn({ message }: { message: PendingMessage }) {
           <span className="font-medium text-ink-muted">You</span>
           <span>{message.sending ? "Sending…" : "Sent"}</span>
         </div>
-        <div
-          className={cn(
-            "max-w-[68ch] rounded-md border border-line bg-panel px-3 py-2 text-compact leading-relaxed whitespace-pre-wrap text-ink",
-            message.sending && "opacity-70",
-          )}
-        >
-          {message.text}
-        </div>
+        {message.text ? (
+          <div
+            className={cn(
+              "max-w-[68ch] rounded-md border border-line bg-panel px-3 py-2 text-compact leading-relaxed whitespace-pre-wrap text-ink",
+              message.sending && "opacity-70",
+            )}
+          >
+            {message.text}
+          </div>
+        ) : null}
+        <MessageAttachments attachments={message.attachments} align="end" />
       </div>
     </div>
   );

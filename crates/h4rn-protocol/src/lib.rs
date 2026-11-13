@@ -29,6 +29,7 @@
 #![deny(missing_docs)]
 
 mod binary;
+mod blob;
 mod client;
 mod common;
 mod ids;
@@ -37,6 +38,7 @@ mod server;
 pub use binary::{
     BINARY_HEADER_LEN, BINARY_MAGIC, BINARY_VERSION, BinaryFrame, BinaryFrameError, BinaryKind,
 };
+pub use blob::{Attachment, BlobDownload, BlobInfo, BlobRange, UploadState, UploadTicket};
 pub use client::{ClientFrame, ClientRequest};
 pub use common::{
     AgentState, ApprovalDecision, ApprovalKind, ApprovalOption, DeviceInfo, HarnessKind,

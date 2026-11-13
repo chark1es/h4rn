@@ -11,6 +11,9 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { AttachmentTray } from "@/features/attachments/AttachmentTray";
+import { FILE_ACCEPT } from "@/features/attachments/picker";
+import { useAttachmentDrafts } from "@/features/attachments/use-attachments";
 import type { ThreadSummary } from "@/gen";
 import { harnessLabel } from "@/lib/entities";
 import { sendMessage, useApp } from "@/lib/store/appStore";
@@ -24,6 +27,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   const hostOnline = useApp((state) => state.hosts[summary.host]?.online ?? false);
   const [text, setText] = useState(() => drafts.get(summary.thread_id) ?? "");
   const [sending, setSending] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const ref = useRef<HTMLTextAreaElement | null>(null);
 
   const online = connection === "online";
@@ -33,6 +37,10 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     : !hostOnline
       ? `${summary.host} is unreachable. The draft stays here.`
       : null;
+  const attachments = useAttachmentDrafts(summary.thread_id, {
+    enabled: writable,
+    disabledReason,
+  });
 
   useEffect(() => {
     setText(drafts.get(summary.thread_id) ?? "");
@@ -48,6 +56,17 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     if (focusNonce > 0) ref.current?.focus();
   }, [focusNonce]);
 
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "u") {
+        event.preventDefault();
+        attachments.openPicker();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [attachments.openPicker]);
+
   const autosize = () => {
     const element = ref.current;
     if (!element) return;
@@ -61,14 +80,16 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   };
 
   const submit = async () => {
-    if (!writable || sending || !text.trim()) return;
+    if (!writable || sending || attachments.blockedReason) return;
+    if (!text.trim() && attachments.attachments.length === 0) return;
     const value = text;
     setSending(true);
-    const ok = await sendMessage(summary.thread_id, value);
+    const ok = await sendMessage(summary.thread_id, value, attachments.attachments);
     setSending(false);
     if (ok) {
       drafts.delete(summary.thread_id);
       setText("");
+      attachments.clear();
       requestAnimationFrame(autosize);
     }
   };
@@ -76,12 +97,41 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   return (
     <div className="shrink-0 border-t border-line bg-paper px-3 pt-2 pb-2 sm:px-6">
       <div className="mx-auto w-full max-w-[760px]">
-        <div
+        <fieldset
+          aria-label="Message composer"
           className={cn(
-            "rounded-md border border-control-border bg-raised transition-[border-color,box-shadow] duration-[var(--dur-fast)] focus-within:border-cue focus-within:ring-2 focus-within:ring-cue/30",
+            "relative m-0 min-w-0 rounded-md border border-control-border bg-raised p-0 transition-[border-color,box-shadow] duration-[var(--dur-fast)] focus-within:border-cue focus-within:ring-2 focus-within:ring-cue/30",
             disabledReason && "bg-panel",
+            dragging && "border-cue ring-2 ring-cue/30",
           )}
+          onDragEnter={(event) => {
+            if (!writable || !event.dataTransfer.types.includes("Files")) return;
+            event.preventDefault();
+            setDragging(true);
+          }}
+          onDragOver={(event) => {
+            if (!writable) return;
+            event.preventDefault();
+            event.dataTransfer.dropEffect = "copy";
+          }}
+          onDragLeave={(event) => {
+            if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+            setDragging(false);
+          }}
+          onDrop={(event) => {
+            event.preventDefault();
+            setDragging(false);
+            if (!writable) return;
+            const files = Array.from(event.dataTransfer.files);
+            if (files.length > 0) attachments.addFiles(files);
+          }}
         >
+          <AttachmentTray
+            tasks={attachments.tasks}
+            onRemove={attachments.remove}
+            onRetry={attachments.retry}
+          />
+
           <textarea
             ref={ref}
             value={text}
@@ -93,6 +143,17 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
             disabled={!writable}
             onChange={(event) => update(event.target.value)}
             onInput={autosize}
+            onPaste={(event) => {
+              if (!writable) return;
+              const files = Array.from(event.clipboardData.files);
+              if (files.length > 0) {
+                event.preventDefault();
+                attachments.addFiles(files);
+                return;
+              }
+              const pasted = event.clipboardData.getData("text/plain");
+              if (attachments.addPastedText(pasted)) event.preventDefault();
+            }}
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
                 event.preventDefault();
@@ -100,6 +161,25 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
               }
             }}
             className="block max-h-[132px] min-h-[38px] w-full resize-none bg-transparent px-3 py-2 text-compact leading-relaxed text-ink outline-none placeholder:text-ink-faint disabled:cursor-not-allowed"
+          />
+
+          {dragging ? (
+            <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-md bg-raised/90">
+              <p className="rounded-sm border border-dashed border-cue bg-cue-tint/60 px-3 py-2 text-micro font-medium text-cue-ink">
+                Drop files to attach
+              </p>
+            </div>
+          ) : null}
+
+          <input
+            ref={attachments.inputRef}
+            type="file"
+            multiple
+            accept={FILE_ACCEPT}
+            aria-label="Attach files"
+            className="sr-only"
+            tabIndex={-1}
+            onChange={(event) => attachments.onInputChange(event.target.files)}
           />
 
           <div className="flex items-center gap-1.5 border-t border-line/70 px-2 py-1.5">
@@ -110,12 +190,13 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
             <div className="ml-auto flex items-center gap-1">
               <button
                 type="button"
-                disabled
-                aria-label="Attach a file"
-                title="Attachments arrive in Phase 2"
-                className="flex size-7 items-center justify-center rounded-sm text-ink-faint opacity-50"
+                disabled={!writable}
+                onClick={attachments.openPicker}
+                aria-label="Attach files"
+                title={disabledReason ?? "Attach files (Ctrl/Cmd U)"}
+                className="flex size-10 items-center justify-center rounded-sm text-ink-faint transition-colors duration-[var(--dur-instant)] hover:bg-panel hover:text-ink focus-visible:ring-2 focus-visible:ring-cue/40 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50 sm:size-7"
               >
-                <PaperclipIcon className="size-3.5" />
+                <PaperclipIcon className="size-3.5" aria-hidden />
               </button>
 
               <DropdownMenu>
@@ -147,9 +228,22 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
               <Button
                 size="sm"
                 className="h-7 px-2"
-                disabled={!writable || !text.trim() || sending}
+                disabled={
+                  !writable ||
+                  sending ||
+                  Boolean(attachments.blockedReason) ||
+                  (!text.trim() && attachments.attachments.length === 0)
+                }
                 onClick={() => void submit()}
-                title={disabledReason ?? "Send (Enter)"}
+                title={
+                  attachments.blockedReason ??
+                  disabledReason ??
+                  (attachments.attachments.length > 0
+                    ? `Send with ${attachments.attachments.length} attachment${
+                        attachments.attachments.length === 1 ? "" : "s"
+                      } (Enter)`
+                    : "Send (Enter)")
+                }
                 aria-label="Send reply"
               >
                 <SendIcon aria-hidden />
@@ -157,11 +251,13 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
               </Button>
             </div>
           </div>
-        </div>
+        </fieldset>
 
         <div className="mt-1 flex items-center gap-2 text-micro text-ink-faint">
           {disabledReason ? (
             <span className="text-strike-ink/80">{disabledReason}</span>
+          ) : attachments.blockedReason ? (
+            <span className="text-strike-ink/80">{attachments.blockedReason}</span>
           ) : (
             <span className="hidden sm:inline">
               <Kbd>{ENTER}</Kbd> send ·{" "}
@@ -171,7 +267,12 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
               newline · <Kbd>R</Kbd> focus
             </span>
           )}
-          <span className="ml-auto hidden sm:inline">@ files · / commands</span>
+          {attachments.attachments.length > 0 ? (
+            <span className="font-mono tabular">{attachments.attachments.length} attached</span>
+          ) : null}
+          <span className="ml-auto hidden sm:inline">
+            @ files · / commands · paste or drop images
+          </span>
         </div>
       </div>
     </div>

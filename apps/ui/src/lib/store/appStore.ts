@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import type {
   ApprovalDecision,
+  Attachment,
   ClientRequest,
   HarnessKind,
   HostId,
@@ -806,9 +807,13 @@ export async function respondApproval(
 
 let localCounter = 0;
 
-export async function sendMessage(threadId: ThreadId, text: string): Promise<boolean> {
+export async function sendMessage(
+  threadId: ThreadId,
+  text: string,
+  attachments: Attachment[] = [],
+): Promise<boolean> {
   const body = text.trim();
-  if (!body) return false;
+  if (!body && attachments.length === 0) return false;
   const state = getState();
   const log = state.logs[threadId] ?? createThreadLog();
   const localId = `local-${++localCounter}`;
@@ -819,7 +824,7 @@ export async function sendMessage(threadId: ThreadId, text: string): Promise<boo
       ...state.logs,
       [threadId]: {
         ...log,
-        pending: [...log.pending, { id: localId, text: body, at, sending: true }],
+        pending: [...log.pending, { id: localId, text: body, attachments, at, sending: true }],
       },
     },
   });
@@ -829,7 +834,7 @@ export async function sendMessage(threadId: ThreadId, text: string): Promise<boo
       type: "send_message",
       thread_id: threadId,
       text: body,
-      attachments: [],
+      attachments: attachments.map((attachment) => attachment.id),
     });
     const current = getState();
     const currentLog = current.logs[threadId];
@@ -879,6 +884,7 @@ export type CreateThreadInput = {
   workspacePath: string;
   model: string;
   prompt: string;
+  attachments?: Attachment[];
   runtimeMode?: RuntimeMode;
   worktree?: WorktreeRequest | null;
 };
@@ -962,7 +968,7 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
       workspace_path: input.workspacePath,
       model: input.model,
       prompt: input.prompt,
-      attachments: [],
+      attachments: (input.attachments ?? []).map((attachment) => attachment.id),
       runtime_mode: input.runtimeMode ?? "approval_required",
       worktree: input.worktree ?? null,
     });

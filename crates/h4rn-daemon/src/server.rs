@@ -26,8 +26,8 @@ use axum::routing::get;
 use axum::{Router, serve};
 use futures::{SinkExt, StreamExt};
 use h4rn_protocol::{
-    BinaryFrame, ClientFrame, ClientRequest, DeviceId, Event, PROTOCOL_VERSION, ProtoError,
-    ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame, Topic,
+    BINARY_HEADER_LEN, BinaryFrame, BinaryKind, ClientFrame, ClientRequest, DeviceId, Event,
+    PROTOCOL_VERSION, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame, Topic,
 };
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -35,6 +35,7 @@ use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::auth::{TokenStore, authorize};
+use crate::blobs::{BlobError, BlobStore};
 use crate::hosts::HostInventory;
 use crate::threads::ThreadManager;
 
@@ -51,6 +52,8 @@ pub struct AppState {
     pub manager: Arc<ThreadManager>,
     /// Host inventory.
     pub hosts: Arc<HostInventory>,
+    /// Content-addressed attachment blobs (ADR-008).
+    pub blobs: Arc<BlobStore>,
     /// Local access token.
     pub tokens: TokenStore,
     /// Server boot time, for `/healthz`.
@@ -108,6 +111,7 @@ async fn ws_handler(
 #[derive(Debug)]
 enum Outbound {
     Text(String),
+    Binary(Vec<u8>),
 }
 
 struct Connection {
@@ -172,33 +176,81 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             }
             Message::Binary(bytes) => {
-                let reply = match BinaryFrame::decode(&bytes) {
-                    Ok(frame) => ServerFrame::Event {
-                        seq: connection.last_seq.load(Ordering::Relaxed),
-                        event: Event::Error {
-                            thread_id: None,
-                            message: format!(
-                                "binary {:?} frames are reserved for PTY and blob streams",
-                                frame.kind
-                            ),
-                            hint: Some("Terminal support arrives in phase 2".into()),
-                            retryable: false,
-                        },
-                    },
-                    Err(error) => ServerFrame::Event {
-                        seq: connection.last_seq.load(Ordering::Relaxed),
-                        event: Event::Error {
-                            thread_id: None,
-                            message: format!("malformed binary frame: {error}"),
-                            hint: Some("The binary header is 16 bytes; see protocol docs".into()),
-                            retryable: false,
-                        },
-                    },
-                };
-                if let Ok(text) = serde_json::to_string(&reply)
-                    && connection.send(Outbound::Text(text)).await.is_err()
-                {
-                    break;
+                match BinaryFrame::decode(&bytes) {
+                    Ok(frame) if frame.kind == BinaryKind::BlobChunk => {
+                        match connection.state.blobs.append_chunk(
+                            frame.stream_id,
+                            frame.seq,
+                            &frame.payload,
+                        ) {
+                            Ok(_) => {
+                                // Ack the chunk on the same stream so a client
+                                // can advance its progress without a round trip.
+                                let ack =
+                                    BinaryFrame::new(BinaryKind::Ack, frame.stream_id, frame.seq)
+                                        .encode();
+                                if connection.send(Outbound::Binary(ack)).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                let reply = ServerFrame::Event {
+                                    seq: connection.last_seq.load(Ordering::Relaxed),
+                                    event: Event::Error {
+                                        thread_id: None,
+                                        message: error.to_string(),
+                                        hint: error.into_proto().hint,
+                                        retryable: true,
+                                    },
+                                };
+                                if let Ok(text) = serde_json::to_string(&reply)
+                                    && connection.send(Outbound::Text(text)).await.is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Ok(frame) => {
+                        let reply = ServerFrame::Event {
+                            seq: connection.last_seq.load(Ordering::Relaxed),
+                            event: Event::Error {
+                                thread_id: None,
+                                message: format!(
+                                    "binary {:?} frames are reserved for PTY and blob streams",
+                                    frame.kind
+                                ),
+                                hint: Some(
+                                    "Attachment uploads use BeginUpload and blob_chunk frames"
+                                        .into(),
+                                ),
+                                retryable: false,
+                            },
+                        };
+                        if let Ok(text) = serde_json::to_string(&reply)
+                            && connection.send(Outbound::Text(text)).await.is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let reply = ServerFrame::Event {
+                            seq: connection.last_seq.load(Ordering::Relaxed),
+                            event: Event::Error {
+                                thread_id: None,
+                                message: format!("malformed binary frame: {error}"),
+                                hint: Some(format!(
+                                    "The binary header is {BINARY_HEADER_LEN} bytes; see protocol docs"
+                                )),
+                                retryable: false,
+                            },
+                        };
+                        if let Ok(text) = serde_json::to_string(&reply)
+                            && connection.send(Outbound::Text(text)).await.is_err()
+                        {
+                            break;
+                        }
+                    }
                 }
             }
             Message::Close(_) => break,
@@ -228,6 +280,7 @@ impl Connection {
             }
         };
         let id = frame.id;
+        let reply_id = id;
         let body = frame.body;
 
         if !self.hello_done && !matches!(&body, ClientRequest::Hello { .. }) {
@@ -303,7 +356,7 @@ impl Connection {
                 workspace_path,
                 model,
                 prompt,
-                attachments: _,
+                attachments,
                 runtime_mode,
                 worktree,
             } => {
@@ -313,6 +366,7 @@ impl Connection {
                     workspace_path,
                     model,
                     prompt,
+                    attachments,
                     runtime_mode,
                     worktree,
                 };
@@ -330,11 +384,11 @@ impl Connection {
             ClientRequest::SendMessage {
                 thread_id,
                 text,
-                attachments: _,
+                attachments,
             } => self
                 .state
                 .manager
-                .send_message(&thread_id, text)
+                .send_message(&thread_id, text, attachments)
                 .await
                 .map(|accepted| ResponseBody::MessageAccepted {
                     thread_id: accepted.thread_id,
@@ -424,6 +478,67 @@ impl Connection {
                     }
                 }
             }
+            ClientRequest::BeginUpload {
+                name,
+                size,
+                mime_hint,
+            } => self
+                .state
+                .blobs
+                .begin_upload(&name, size, mime_hint)
+                .map(|upload| ResponseBody::UploadStarted { upload })
+                .map_err(BlobError::into_proto),
+            ClientRequest::CommitUpload { upload_id, blake3 } => self
+                .state
+                .blobs
+                .commit_upload(&upload_id, &blake3)
+                .await
+                .map(|blob| ResponseBody::UploadCommitted { blob })
+                .map_err(BlobError::into_proto),
+            ClientRequest::AbortUpload { upload_id } => self
+                .state
+                .blobs
+                .abort_upload(&upload_id)
+                .map(|()| ResponseBody::Ack)
+                .map_err(BlobError::into_proto),
+            ClientRequest::QueryUpload { upload_id } => self
+                .state
+                .blobs
+                .query_upload(&upload_id)
+                .map(|upload| ResponseBody::UploadStatus { upload })
+                .map_err(BlobError::into_proto),
+            ClientRequest::GetBlob {
+                id,
+                range,
+                thumbnail,
+            } => match self.state.blobs.download(&id, range, thumbnail).await {
+                Ok((download, bytes)) => {
+                    let reply = response_frame(
+                        reply_id,
+                        ResponseBody::Blob {
+                            download: download.clone(),
+                        },
+                    );
+                    if self.send(Outbound::Text(reply)).await.is_err() {
+                        return None;
+                    }
+                    for (seq, chunk) in bytes.chunks(crate::blobs::DOWNLOAD_CHUNK_SIZE).enumerate()
+                    {
+                        let frame = BinaryFrame {
+                            kind: BinaryKind::BlobChunk,
+                            stream_id: download.stream_id,
+                            seq: seq as u64,
+                            payload: chunk.to_vec(),
+                        }
+                        .encode();
+                        if self.send(Outbound::Binary(frame)).await.is_err() {
+                            return None;
+                        }
+                    }
+                    return None;
+                }
+                Err(error) => Err(error.into_proto()),
+            },
             other => Err(not_implemented(&other)),
         };
 
@@ -521,6 +636,17 @@ async fn writer_loop(
                         .await;
                         if sent.is_err() {
                             tracing::warn!("client write timed out; closing the connection");
+                            break;
+                        }
+                    }
+                    Outbound::Binary(bytes) => {
+                        let sent = tokio::time::timeout(
+                            WRITE_TIMEOUT,
+                            sink.send(Message::Binary(bytes.into())),
+                        )
+                        .await;
+                        if sent.is_err() {
+                            tracing::warn!("client binary write timed out; closing the connection");
                             break;
                         }
                     }

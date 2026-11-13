@@ -23,7 +23,15 @@ export type ResponseOf<T extends ClientRequest["type"]> = T extends "hello"
           ? Extract<ResponseBody, { type: "thread_created" }>
           : T extends "send_message"
             ? Extract<ResponseBody, { type: "message_accepted" }>
-            : Extract<ResponseBody, { type: "ack" }>;
+            : T extends "begin_upload"
+              ? Extract<ResponseBody, { type: "upload_started" }>
+              : T extends "commit_upload"
+                ? Extract<ResponseBody, { type: "upload_committed" }>
+                : T extends "query_upload"
+                  ? Extract<ResponseBody, { type: "upload_status" }>
+                  : T extends "get_blob"
+                    ? Extract<ResponseBody, { type: "blob" }>
+                    : Extract<ResponseBody, { type: "ack" }>;
 
 type Pending = {
   id: number;
@@ -63,6 +71,7 @@ export class H4rnClient {
   private readonly device: DeviceInfo;
   private readonly statusListeners = new Set<(snapshot: ConnectionSnapshot) => void>();
   private readonly eventListeners = new Set<(event: EventEnvelope) => void>();
+  private readonly binaryListeners = new Set<(data: ArrayBuffer) => void>();
   private readonly readyListeners = new Set<(info: ReadyInfo) => void>();
   private readonly pending = new Map<number, Pending>();
 
@@ -157,6 +166,31 @@ export class H4rnClient {
     return () => this.eventListeners.delete(listener);
   }
 
+  /**
+   * Delivers raw binary frames (PTY output, blob chunks, acks).
+   *
+   * The protocol header is feature-owned so the client stays a byte pipe; see
+   * `features/attachments/frames.ts` for the attachment decoder.
+   */
+  onBinary(listener: (data: ArrayBuffer) => void): () => void {
+    this.binaryListeners.add(listener);
+    return () => this.binaryListeners.delete(listener);
+  }
+
+  /** Sends one binary frame. Throws when the socket is not open. */
+  sendBinary(data: Uint8Array | ArrayBuffer): void {
+    if (!this.socketOpen || !this.transport) {
+      throw new H4rnRequestError(
+        protoError(
+          "internal",
+          "The daemon is not connected.",
+          "Wait until the status bar says online, then retry the upload.",
+        ),
+      );
+    }
+    this.transport.send(data);
+  }
+
   onReady(listener: (info: ReadyInfo) => void): () => void {
     this.readyListeners.add(listener);
     return () => this.readyListeners.delete(listener);
@@ -244,6 +278,10 @@ export class H4rnClient {
         void this.performHello();
       },
       onMessage: (data) => this.handleMessage(data),
+      onBinary: (data) => {
+        this.patchSnapshot({ lastEventAt: Date.now() });
+        for (const listener of this.binaryListeners) listener(data);
+      },
       onClose: (frame) => this.handleClose(frame.code, frame.reason),
       onError: (message) => {
         this.patchSnapshot({

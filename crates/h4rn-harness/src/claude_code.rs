@@ -726,12 +726,7 @@ pub fn build_user_frame(
     let mut total_image_bytes = 0usize;
 
     for attachment in attachments {
-        let name = attachment
-            .path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| attachment.id.to_string());
-        let media_type = resolved_media_type(attachment);
+        let media_type = crate::attachments::media_type(attachment);
         if media_type.starts_with("image/")
             && let Ok(bytes) = std::fs::read(&attachment.path)
             && bytes.len() <= MAX_IMAGE_BYTES
@@ -747,15 +742,7 @@ pub fn build_user_frame(
                 }
             }));
         }
-        let kind = if media_type.starts_with("image/") {
-            "image"
-        } else {
-            "file"
-        };
-        path_lines.push(format!(
-            "[Attached {kind} \"{name}\" is saved at: {}]",
-            attachment.path.display()
-        ));
+        path_lines.push(crate::attachments::path_line(attachment));
     }
 
     let mut full_text = text.to_string();
@@ -785,26 +772,6 @@ fn encode_frame(frame: &serde_json::Value) -> Result<Vec<u8>, HarnessError> {
     })?;
     bytes.push(b'\n');
     Ok(bytes)
-}
-
-fn resolved_media_type(attachment: &AttachmentRef) -> String {
-    if !attachment.media_type.is_empty() {
-        return attachment.media_type.clone();
-    }
-    let extension = attachment
-        .path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase);
-    match extension.as_deref() {
-        Some("png") => "image/png",
-        Some("jpg" | "jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("pdf") => "application/pdf",
-        _ => "",
-    }
-    .to_string()
 }
 
 fn permission_mode(env: &BTreeMap<String, String>, runtime_mode: RuntimeMode) -> Option<String> {

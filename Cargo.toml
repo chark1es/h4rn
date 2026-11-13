@@ -71,3 +71,12 @@ uuid = { version = "1.29.2", features = ["serde", "v7"] }
 # Added by the Claude Code adapter (Phase 1b).
 base64 = "0.22.1"
 libc = "0.2.191"
+
+# Added by the content-addressed attachment store (Phase 2, ADR-008).
+image = { version = "0.25.10", default-features = false, features = [
+    "gif",
+    "jpeg",
+    "png",
+    "webp",
+] }
+infer = "0.22.0"

@@ -25,15 +25,18 @@ use futures::StreamExt;
 use h4rn_core::{
     LifecycleSettings, ThreadEvent, ThreadState, apply_all, is_snoozed, needs_attention, tab_for,
 };
-use h4rn_harness::{HarnessEvent, HarnessInstall, HarnessSession, SessionSpec, UserInput};
+use h4rn_harness::{
+    AttachmentRef, HarnessEvent, HarnessInstall, HarnessSession, SessionSpec, UserInput,
+};
 use h4rn_protocol::{
-    AgentState, ApprovalDecision, ApprovalKind, DeviceId, Event, HarnessKind, HostId, Item,
-    MessageRole, ProtoError, ProtoErrorCode, RuntimeMode, ThreadFilter, ThreadId, ThreadSummary,
-    ThreadTab, ToolCallStatus, TurnId, TurnStatus, Usage, WorktreeRequest,
+    AgentState, ApprovalDecision, ApprovalKind, Attachment, AttachmentId, DeviceId, Event,
+    HarnessKind, HostId, Item, MessageRole, ProtoError, ProtoErrorCode, RuntimeMode, ThreadFilter,
+    ThreadId, ThreadSummary, ThreadTab, ToolCallStatus, TurnId, TurnStatus, Usage, WorktreeRequest,
 };
 use tokio::sync::{Mutex, broadcast};
 use tokio::task::JoinHandle;
 
+use crate::blobs::{AttachmentResolver, BlobError};
 use crate::journal::{Journal, ThreadMeta, WireEvent};
 
 /// Capacity of the live event broadcast. A subscriber that falls further behind
@@ -71,6 +74,8 @@ pub struct NewThread {
     pub model: String,
     /// First user prompt.
     pub prompt: String,
+    /// Attachments uploaded before this request.
+    pub attachments: Vec<AttachmentId>,
     /// Permission autonomy for the whole thread.
     pub runtime_mode: RuntimeMode,
     /// Worktree creation intent.
@@ -180,6 +185,7 @@ pub struct ThreadManager {
 struct Inner {
     journal: Arc<dyn Journal>,
     harnesses: Arc<dyn crate::harnesses::HarnessCatalog>,
+    attachments: Option<Arc<dyn AttachmentResolver>>,
     local_host: HostId,
     options: ThreadManagerOptions,
     events: broadcast::Sender<WireEvent>,
@@ -295,12 +301,14 @@ impl ThreadManager {
         harnesses: Arc<dyn crate::harnesses::HarnessCatalog>,
         local_host: HostId,
         options: ThreadManagerOptions,
+        attachments: Option<Arc<dyn AttachmentResolver>>,
     ) -> Result<Self, ManagerError> {
         let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
         let manager = Self {
             inner: Arc::new(Inner {
                 journal,
                 harnesses,
+                attachments,
                 local_host,
                 options,
                 events,
@@ -409,6 +417,11 @@ impl ThreadManager {
 
         let now = Utc::now();
         let thread_id = ThreadId::new_uuid_v7();
+        let resolved_attachments = self
+            .inner
+            .resolve_attachments(&thread_id, &request.attachments)
+            .await?;
+        let harness_attachments = harness_refs(&resolved_attachments);
         let meta = ThreadMeta {
             thread_id: thread_id.clone(),
             host: request.host,
@@ -453,6 +466,7 @@ impl ThreadManager {
                     item_id: user_item_id(&turn_id),
                     role: MessageRole::User,
                     text: request.prompt.clone(),
+                    attachments: resolved_attachments,
                 },
             },
             Event::TurnStarted {
@@ -477,7 +491,7 @@ impl ThreadManager {
             handle,
             Some(UserInput {
                 text: request.prompt,
-                attachments: Vec::new(),
+                attachments: harness_attachments,
             }),
         );
         Ok(CreatedThread {
@@ -493,8 +507,14 @@ impl ThreadManager {
         &self,
         thread_id: &ThreadId,
         text: String,
+        attachments: Vec<AttachmentId>,
     ) -> Result<AcceptedMessage, ManagerError> {
         let handle = self.inner.handle(thread_id).await?;
+        let resolved_attachments = self
+            .inner
+            .resolve_attachments(thread_id, &attachments)
+            .await?;
+        let harness_attachments = harness_refs(&resolved_attachments);
         let mut record = handle.lock().await;
         if record.closed {
             return Err(ManagerError::NotFound(format!(
@@ -508,7 +528,7 @@ impl ThreadManager {
             // stays Working. `MessageReceived` records the user activity.
             record.queued.push_back(UserInput {
                 text: text.clone(),
-                attachments: Vec::new(),
+                attachments: harness_attachments,
             });
             let domain = vec![ThreadEvent::MessageReceived {
                 source: h4rn_core::MessageSource::User,
@@ -521,6 +541,7 @@ impl ThreadManager {
                     item_id: fresh_item_id("user"),
                     role: MessageRole::User,
                     text,
+                    attachments: resolved_attachments,
                 },
             }];
             let (_, seq) = self.inner.emit(&mut record, domain, wire).await?;
@@ -548,6 +569,7 @@ impl ThreadManager {
                     item_id: user_item_id(&turn_id),
                     role: MessageRole::User,
                     text: text.clone(),
+                    attachments: resolved_attachments,
                 },
             },
             Event::TurnStarted {
@@ -560,7 +582,7 @@ impl ThreadManager {
 
         let input = UserInput {
             text,
-            attachments: Vec::new(),
+            attachments: harness_attachments,
         };
         if record.session.is_some() {
             drop(record);
@@ -814,6 +836,32 @@ impl ThreadManager {
 impl Inner {
     fn local_host_is(&self, host: &HostId) -> bool {
         &self.local_host == host
+    }
+
+    /// Resolves upload ids to committed blob metadata and materialises the
+    /// per-thread copies the harness will see.
+    async fn resolve_attachments(
+        &self,
+        thread_id: &ThreadId,
+        ids: &[AttachmentId],
+    ) -> Result<Vec<Attachment>, ManagerError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(resolver) = &self.attachments else {
+            return Err(ManagerError::Unsupported(
+                "this daemon has no attachment store".into(),
+            ));
+        };
+        resolver
+            .resolve(thread_id, ids)
+            .await
+            .map_err(|error| match error {
+                BlobError::NotFound(id) => ManagerError::InvalidRequest(format!(
+                    "attachment {id} is no longer available; upload it again"
+                )),
+                other => ManagerError::Internal(other.to_string()),
+            })
     }
 
     async fn handle(&self, thread_id: &ThreadId) -> Result<ThreadHandle, ManagerError> {
@@ -1218,6 +1266,7 @@ impl Inner {
                                 item_id,
                                 role: MessageRole::Assistant,
                                 text,
+                                attachments: Vec::new(),
                             },
                         });
                     }
@@ -1367,6 +1416,18 @@ impl Inner {
 
 fn user_item_id(turn_id: &TurnId) -> String {
     format!("item_user_{}", turn_suffix(turn_id))
+}
+
+/// Converts committed attachments into the harness adapter's delivery refs.
+fn harness_refs(attachments: &[Attachment]) -> Vec<AttachmentRef> {
+    attachments
+        .iter()
+        .map(|attachment| AttachmentRef {
+            id: attachment.id.clone(),
+            path: std::path::PathBuf::from(&attachment.local_path),
+            media_type: attachment.mime.clone(),
+        })
+        .collect()
 }
 
 fn assistant_item_id(turn_id: &TurnId) -> String {

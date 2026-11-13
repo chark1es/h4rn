@@ -25,10 +25,12 @@ use h4rn_protocol::{
 };
 use serde::{Deserialize, Serialize};
 
+mod attachments;
 mod claude_code;
 mod fake;
 pub mod registry;
 
+pub use attachments::{AttachmentClass, AttachmentDelivery, media_type, path_line, strategy};
 pub use claude_code::{
     ClaudeCodeHarness, ClaudeCodeSession, ClaudeStreamParser, ENV_MCP_AUTH_TOKEN,
     ENV_MCP_BEARER_TOKEN, ENV_PERMISSION_MODE, ENV_PERMISSION_PROMPT_TOOL, LimitSignal, TurnReport,

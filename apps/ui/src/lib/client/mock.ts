@@ -1,5 +1,17 @@
+import {
+  DEMO_IMAGE_BYTES,
+  DEMO_IMAGE_ID,
+  DEMO_IMAGE_MIME,
+  DEMO_IMAGE_NAME,
+  DEMO_LOG_BYTES,
+  DEMO_LOG_ID,
+  DEMO_LOG_NAME,
+} from "@/features/attachments/demo";
+import { BinaryKind, decodeFrame, encodeFrame } from "@/features/attachments/frames";
 import type {
   AgentState,
+  Attachment,
+  BlobInfo,
   ClientFrame,
   Event,
   HarnessKind,
@@ -29,6 +41,26 @@ type MockApproval = {
   turnId: string;
 };
 
+type MockBlob = {
+  bytes: Uint8Array;
+  name: string;
+  mime: string;
+  size: number;
+  created_at: string;
+};
+
+type MockUpload = {
+  uploadId: string;
+  streamId: number;
+  name: string;
+  size: number;
+  mimeHint: string | null;
+  chunks: Uint8Array[];
+  received: number;
+  nextSeq: number;
+  committed: string | null;
+};
+
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 
@@ -38,16 +70,39 @@ function uid(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function messageItem(itemId: string, role: "user" | "assistant" | "system", text: string): Item {
-  return { kind: "message", item_id: itemId, role, text };
+function messageItem(
+  itemId: string,
+  role: "user" | "assistant" | "system",
+  text: string,
+  attachments: Attachment[] = [],
+): Item {
+  return { kind: "message", item_id: itemId, role, text, attachments };
 }
 
-function userMessage(threadId: string, turnId: string, itemId: string, text: string): Event {
+/** Transparent stand-in for a daemon-materialised copy (mock has no host FS). */
+function demoAttachment(id: string, name: string, mime: string, size: number): Attachment {
+  return { id: id as Attachment["id"], name, mime, size, local_path: "" };
+}
+
+function demoAttachments(): Attachment[] {
+  return [
+    demoAttachment(DEMO_IMAGE_ID, DEMO_IMAGE_NAME, DEMO_IMAGE_MIME, DEMO_IMAGE_BYTES.length),
+    demoAttachment(DEMO_LOG_ID, DEMO_LOG_NAME, "text/plain", DEMO_LOG_BYTES.length),
+  ];
+}
+
+function userMessage(
+  threadId: string,
+  turnId: string,
+  itemId: string,
+  text: string,
+  attachments: Attachment[] = [],
+): Event {
   return {
     type: "item_completed",
     thread_id: threadId,
     turn_id: turnId,
-    item: messageItem(itemId, "user", text),
+    item: messageItem(itemId, "user", text, attachments),
   };
 }
 
@@ -104,6 +159,7 @@ function historyFor(thread: ThreadSummary): Event[] {
       : thread.thread_id === "thr_b"
         ? "Add exponential backoff with jitter to the relay reconnect, and make sure a resumed stream does not replay events the client already applied."
         : `Work on ${thread.title.toLowerCase()} in ${thread.workspace_path}. Report what you find before changing files.`,
+    thread.thread_id === "thr_a" ? demoAttachments() : [],
   );
   events.push(user);
 
@@ -510,6 +566,10 @@ class MockDaemon {
   private disposed = false;
   private readonly timers = new Set<ReturnType<typeof setTimeout>>();
   private readonly approvals = new Map<string, MockApproval>();
+  private readonly blobs = new Map<string, MockBlob>();
+  private readonly uploads = new Map<string, MockUpload>();
+  private readonly uploadsByStream = new Map<number, string>();
+  private nextStream = 7_000;
   private readonly startedStreams = new Set<string>();
   private created = 0;
 
@@ -519,6 +579,20 @@ class MockDaemon {
   ) {
     this.hosts = buildHosts(scenario);
     this.threads = buildThreads(scenario);
+    this.blobs.set(DEMO_IMAGE_ID, {
+      bytes: DEMO_IMAGE_BYTES,
+      name: DEMO_IMAGE_NAME,
+      mime: DEMO_IMAGE_MIME,
+      size: DEMO_IMAGE_BYTES.length,
+      created_at: iso(-12 * 60_000),
+    });
+    this.blobs.set(DEMO_LOG_ID, {
+      bytes: DEMO_LOG_BYTES,
+      name: DEMO_LOG_NAME,
+      mime: "text/plain",
+      size: DEMO_LOG_BYTES.length,
+      created_at: iso(-12 * 60_000),
+    });
     for (const entry of this.threads.values()) {
       entry.wire = entry.events.map((event) => {
         this.seq += 1;
@@ -533,7 +607,12 @@ class MockDaemon {
     this.timers.clear();
   }
 
-  receive(data: string): void {
+  receive(data: string | ArrayBuffer | Uint8Array): void {
+    if (typeof data !== "string") {
+      this.handleBinary(data);
+      return;
+    }
+
     let frame: ClientFrame;
     try {
       frame = JSON.parse(data) as ClientFrame;
@@ -633,7 +712,9 @@ class MockDaemon {
           summary: thread,
         });
         this.later(260, () => this.emit(id, { type: "thread_upserted", ...thread }));
-        this.later(520, () => this.runTurn(id, body.prompt, turnId));
+        this.later(520, () =>
+          this.runTurn(id, body.prompt, turnId, this.attachmentsFor(body.attachments)),
+        );
         return;
       }
       case "send_message": {
@@ -664,7 +745,9 @@ class MockDaemon {
         this.later(120, () =>
           this.emit(body.thread_id, { type: "thread_upserted", ...entry.summary }),
         );
-        this.later(380, () => this.runTurn(body.thread_id, body.text, turnId));
+        this.later(380, () =>
+          this.runTurn(body.thread_id, body.text, turnId, this.attachmentsFor(body.attachments)),
+        );
         return;
       }
       case "respond_approval": {
@@ -744,17 +827,216 @@ class MockDaemon {
         this.emit(body.thread_id, { type: "thread_upserted", ...entry.summary });
         return;
       }
+      case "begin_upload": {
+        if (body.size > 50 * 1024 * 1024) {
+          this.err(
+            frame.id,
+            "invalid_request",
+            `${body.name} is larger than the 50 MiB attachment limit.`,
+            "Compress it or split it into smaller files.",
+          );
+          return;
+        }
+        const upload: MockUpload = {
+          uploadId: uid("upload"),
+          streamId: this.nextStream++,
+          name: body.name,
+          size: body.size,
+          mimeHint: body.mime_hint,
+          chunks: [],
+          received: 0,
+          nextSeq: 0,
+          committed: null,
+        };
+        this.uploads.set(upload.uploadId, upload);
+        this.uploadsByStream.set(upload.streamId, upload.uploadId);
+        this.ok(frame.id, {
+          type: "upload_started",
+          upload: {
+            upload_id: upload.uploadId,
+            stream_id: upload.streamId,
+            chunk_size: 1024 * 1024,
+          },
+        });
+        return;
+      }
+      case "commit_upload": {
+        const upload = this.uploads.get(body.upload_id);
+        if (!upload) {
+          this.err(
+            frame.id,
+            "not_found",
+            "That upload is no longer open.",
+            "Attach the file again.",
+          );
+          return;
+        }
+        const id = body.blake3;
+        if (!upload.committed) {
+          const bytes = new Uint8Array(upload.received);
+          let offset = 0;
+          for (const chunk of upload.chunks) {
+            bytes.set(chunk, offset);
+            offset += chunk.length;
+          }
+          const name = upload.name.split(/[\\/]/).pop()?.trim() || "attachment";
+          this.blobs.set(id, {
+            bytes,
+            name,
+            mime: upload.mimeHint ?? "application/octet-stream",
+            size: bytes.length,
+            created_at: iso(),
+          });
+          upload.committed = id;
+        }
+        const blob = this.blobs.get(id);
+        if (!blob) {
+          this.err(frame.id, "internal", "The mock blob was not stored.", "Try again.");
+          return;
+        }
+        this.ok(frame.id, { type: "upload_committed", blob: this.blobInfo(id, blob) });
+        return;
+      }
+      case "query_upload": {
+        const upload = this.uploads.get(body.upload_id);
+        if (!upload) {
+          this.err(frame.id, "not_found", "That upload is no longer open.", "Attach it again.");
+          return;
+        }
+        this.ok(frame.id, {
+          type: "upload_status",
+          upload: {
+            upload_id: upload.uploadId,
+            stream_id: upload.streamId,
+            received_bytes: upload.received,
+            size: upload.size,
+            committed: upload.committed,
+          },
+        });
+        return;
+      }
+      case "abort_upload": {
+        const upload = this.uploads.get(body.upload_id);
+        if (upload) {
+          this.uploads.delete(body.upload_id);
+          this.uploadsByStream.delete(upload.streamId);
+        }
+        this.ok(frame.id, { type: "ack" });
+        return;
+      }
+      case "get_blob": {
+        const blob = this.blobs.get(body.id);
+        if (!blob) {
+          this.err(
+            frame.id,
+            "not_found",
+            "That attachment is no longer stored.",
+            "Ask for it to be sent again.",
+          );
+          return;
+        }
+        const streamId = this.nextStream++;
+        this.ok(frame.id, {
+          type: "blob",
+          download: {
+            id: body.id,
+            name: blob.name,
+            mime: blob.mime,
+            size: blob.size,
+            offset: 0,
+            stream_id: streamId,
+            thumbnail: body.thumbnail,
+          },
+        });
+        this.streamBlob(streamId, blob.bytes);
+        return;
+      }
       default:
         this.err(
           frame.id,
           "unsupported",
           `The mock daemon does not implement \`${body.type}\`.`,
-          "Phase 1b only exercises threads and approvals.",
+          "This surface is not part of the mock scenario.",
         );
     }
   }
 
-  private runTurn(threadId: string, prompt: string, turnId: string): void {
+  private blobInfo(id: string, blob: MockBlob): BlobInfo {
+    return {
+      id,
+      name: blob.name,
+      mime: blob.mime,
+      size: blob.size,
+      created_at: blob.created_at,
+      has_thumbnail: blob.mime.startsWith("image/"),
+    };
+  }
+
+  private attachmentsFor(ids: string[]): Attachment[] {
+    const attachments: Attachment[] = [];
+    for (const id of ids) {
+      const blob = this.blobs.get(id);
+      if (!blob) continue;
+      attachments.push({
+        id,
+        name: blob.name,
+        mime: blob.mime,
+        size: blob.size,
+        local_path: "",
+      });
+    }
+    return attachments;
+  }
+
+  private handleBinary(data: ArrayBuffer | Uint8Array): void {
+    const frame = decodeFrame(data);
+    if (!frame || frame.kind !== BinaryKind.BlobChunk) return;
+    const uploadId = this.uploadsByStream.get(frame.streamId);
+    const upload = uploadId ? this.uploads.get(uploadId) : undefined;
+    if (!upload) return;
+    if (frame.seq < upload.nextSeq) {
+      this.ackChunk(frame.streamId, frame.seq);
+      return;
+    }
+    if (frame.seq > upload.nextSeq) return;
+    if (upload.received + frame.payload.length > upload.size) return;
+    upload.chunks.push(frame.payload.slice());
+    upload.received += frame.payload.length;
+    upload.nextSeq = frame.seq + 1;
+    this.ackChunk(frame.streamId, frame.seq);
+  }
+
+  private ackChunk(streamId: number, seq: number): void {
+    if (this.disposed) return;
+    const encoded = encodeFrame(BinaryKind.Ack, streamId, seq);
+    this.handlers.onBinary(encoded.buffer as ArrayBuffer);
+  }
+
+  private streamBlob(streamId: number, bytes: Uint8Array): void {
+    const chunkSize = 256 * 1024;
+    let offset = 0;
+    const send = () => {
+      if (this.disposed || offset >= bytes.length) return;
+      const slice = bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length));
+      const encoded = encodeFrame(
+        BinaryKind.BlobChunk,
+        streamId,
+        Math.floor(offset / chunkSize),
+        slice,
+      );
+      this.handlers.onBinary(encoded.buffer as ArrayBuffer);
+      offset += slice.length;
+      if (offset < bytes.length) this.later(0, send);
+    };
+    this.later(0, send);
+  }
+
+  private runTurn(
+    threadId: string,
+    prompt: string,
+    turnId: string,
+    attachments: Attachment[] = [],
+  ): void {
     const entry = this.threads.get(threadId);
     if (!entry || this.disposed) return;
 
@@ -774,7 +1056,7 @@ class MockDaemon {
       turn_id: turnId,
       started_at: iso(),
     });
-    this.emit(threadId, userMessage(threadId, turnId, uid("msg"), prompt));
+    this.emit(threadId, userMessage(threadId, turnId, uid("msg"), prompt, attachments));
 
     const reply =
       "\n\nI'll start by mapping the relevant files, then make the smallest change that explains the failure. " +
