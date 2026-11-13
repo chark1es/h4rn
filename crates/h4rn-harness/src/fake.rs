@@ -6,14 +6,14 @@
 //! response to any event sequence without a child process.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures::stream::{BoxStream, StreamExt};
-use h4rn_protocol::{ApprovalDecision, HarnessKind, TurnStatus, Usage};
+use h4rn_protocol::{ApprovalDecision, HarnessKind, ToolCall, ToolCallStatus, TurnStatus, Usage};
 
 use crate::{
     Harness, HarnessError, HarnessEvent, HarnessInstall, HarnessSession, SessionSpec, UserInput,
@@ -149,6 +149,7 @@ impl Harness for FakeHarness {
 
         Ok(Box::new(FakeSession {
             kind: self.kind,
+            workspace: spec.workspace,
             sender,
             receiver: Some(receiver),
             script: self.script.clone(),
@@ -162,6 +163,7 @@ impl Harness for FakeHarness {
 /// The session returned by [`FakeHarness`].
 pub struct FakeSession {
     kind: HarnessKind,
+    workspace: PathBuf,
     sender: UnboundedSender<HarnessEvent>,
     receiver: Option<UnboundedReceiver<HarnessEvent>>,
     script: Option<Vec<HarnessEvent>>,
@@ -196,6 +198,55 @@ impl HarnessSession for FakeSession {
             // A scripted session is a complete fixture; `send` is accepted
             // (the harness contract allows it) but does not replay the script.
             return Ok(());
+        }
+
+        // Test convention: a user message may carry one write directive,
+        // `[[write:relative/path]]<content>`, so daemon end-to-end tests can
+        // produce a real working-tree change without a vendor harness.
+        if let Some((path, _content)) = parse_write_directive(&input.text) {
+            // Announce the edit first so the daemon snapshots the pre-turn
+            // bytes, then write. The brief pause is what makes the ordering
+            // deterministic for the single-threaded test scripts.
+            let now = chrono::Utc::now();
+            send(
+                &self.sender,
+                HarnessEvent::ToolCall {
+                    tool_call: ToolCall {
+                        tool_call_id: format!("fake-edit-{now}"),
+                        name: "Edit".into(),
+                        status: ToolCallStatus::Running,
+                        summary: path.to_owned(),
+                        input: Some(serde_json::json!({ "path": path })),
+                        output: None,
+                        started_at: now,
+                        completed_at: None,
+                    },
+                },
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if let Some(written) = apply_write_directive(&self.workspace, &input.text) {
+                send(
+                    &self.sender,
+                    HarnessEvent::ToolCall {
+                        tool_call: ToolCall {
+                            tool_call_id: format!("fake-edit-{now}"),
+                            name: "Edit".into(),
+                            status: ToolCallStatus::Completed,
+                            summary: written.clone(),
+                            input: None,
+                            output: Some(format!("wrote {written}")),
+                            started_at: now,
+                            completed_at: Some(chrono::Utc::now()),
+                        },
+                    },
+                );
+                send(
+                    &self.sender,
+                    HarnessEvent::TextDelta {
+                        text: format!("wrote {written}"),
+                    },
+                );
+            }
         }
 
         send(
@@ -291,6 +342,39 @@ pub fn test_spec() -> SessionSpec {
     }
 }
 
+/// Applies the first `[[write:path]]content` directive in `text`.
+///
+/// Returns the relative path written. Traversal and absolute paths are
+/// ignored: the fake harness must never write outside the session workspace.
+fn parse_write_directive(text: &str) -> Option<(&str, &str)> {
+    let start = text.find("[[write:")?;
+    let rest = &text[start + "[[write:".len()..];
+    let end = rest.find("]]")?;
+    let relative = rest[..end].trim();
+    if relative.is_empty()
+        || relative.starts_with('/')
+        || relative
+            .split(['/', '\\'])
+            .any(|component| component == ".." || component.is_empty())
+    {
+        return None;
+    }
+    let content = rest[end + 2..]
+        .strip_prefix('\n')
+        .unwrap_or(&rest[end + 2..]);
+    Some((relative, content))
+}
+
+fn apply_write_directive(workspace: &Path, text: &str) -> Option<String> {
+    let (relative, content) = parse_write_directive(text)?;
+    let path = workspace.join(relative);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok()?;
+    }
+    std::fs::write(&path, content).ok()?;
+    Some(relative.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +395,46 @@ mod tests {
             next(session.as_mut()).await,
             HarnessEvent::SessionStarted { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn write_directive_edits_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut spec = test_spec();
+        spec.workspace = dir.path().to_path_buf();
+        let mut session = FakeHarness::new().start_session(spec).await.unwrap();
+        let mut events = session.events();
+        assert!(matches!(
+            events.next().await,
+            Some(HarnessEvent::SessionStarted { .. })
+        ));
+        session
+            .send(UserInput {
+                text: "edit it [[write:src/lib.rs]]fn main() {}\n".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            events.next().await,
+            Some(HarnessEvent::ToolCall { .. })
+        ));
+        assert!(matches!(
+            events.next().await,
+            Some(HarnessEvent::ToolCall { .. })
+        ));
+        assert!(matches!(
+            events.next().await,
+            Some(HarnessEvent::TextDelta { .. })
+        ));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src/lib.rs")).unwrap(),
+            "fn main() {}\n"
+        );
+        assert!(
+            parse_write_directive("[[write:../escape]]x").is_none(),
+            "traversal is refused"
+        );
     }
 
     #[tokio::test]

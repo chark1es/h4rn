@@ -641,6 +641,56 @@ pub struct ForgeCapabilityEntry {
     pub capabilities: ForgeCapabilities,
 }
 
+/// A started device authorization the client can poll.
+///
+/// The device code itself never crosses this contract; the daemon keeps it and
+/// only hands the client the short code and verification URL.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ForgeDeviceFlow {
+    /// Opaque id used to poll for completion.
+    pub flow_id: String,
+    /// Short code the user types at `verification_uri`.
+    pub user_code: String,
+    /// URL the user visits.
+    pub verification_uri: String,
+    /// Seconds until the code expires.
+    #[ts(type = "number")]
+    pub expires_in: u64,
+    /// Suggested seconds between polls.
+    #[ts(type = "number")]
+    pub interval: u64,
+}
+
+/// One poll of a device authorization.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ForgeDeviceFlowStatus {
+    /// The user has not approved yet.
+    Pending {
+        /// Seconds to wait before polling again.
+        #[ts(type = "number")]
+        interval: u64,
+    },
+    /// The forge asked the client to slow down.
+    SlowDown {
+        /// Seconds to wait before polling again.
+        #[ts(type = "number")]
+        interval: u64,
+    },
+    /// The user approved and the account was stored.
+    Complete {
+        /// The stored account (never the token).
+        account: ForgeAccount,
+    },
+    /// The code expired; start a new flow.
+    Expired,
+    /// The user denied the authorization.
+    Denied {
+        /// Provider or daemon explanation.
+        message: String,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

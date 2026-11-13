@@ -19,14 +19,14 @@ use std::time::Duration;
 
 use chrono::Utc;
 use h4rn_forge::{
-    Forge, ForgeError, ForgeHosts, ForgeViewer, PrPage, client_for_with_budget, detect_repos,
+    Forge, ForgeError, ForgeHosts, ForgeViewer, PrPage, auth, client_for_with_budget, detect_repos,
     pr_context_for_agent, remote::validate_base_url,
 };
 use h4rn_protocol::{
     ForgeAccount, ForgeAgentTarget, ForgeCapabilityEntry, ForgeChecks, ForgeComment,
-    ForgeCommentPage, ForgeCredentialSource, ForgeDiffPage, ForgeHandoff, ForgeKind, ForgeNewPr,
-    ForgePrFilter, ForgePullRequest, ForgeRemote, ForgeRepoRef, ForgeReviewComment, ProtoError,
-    ProtoErrorCode, RuntimeMode, ThreadId,
+    ForgeCommentPage, ForgeCredentialSource, ForgeDeviceFlow, ForgeDeviceFlowStatus, ForgeDiffPage,
+    ForgeHandoff, ForgeKind, ForgeNewPr, ForgePrFilter, ForgePullRequest, ForgeRemote,
+    ForgeRepoRef, ForgeReviewComment, ProtoError, ProtoErrorCode, RuntimeMode, ThreadId,
 };
 use serde_json::json;
 use tokio::sync::broadcast;
@@ -259,6 +259,14 @@ struct WatchState {
     signature: Option<String>,
 }
 
+/// A device authorization the daemon is holding between polls.
+struct DeviceFlowState {
+    device_code: String,
+    base_url: String,
+    expires_at: chrono::DateTime<Utc>,
+    interval: u64,
+}
+
 /// The daemon's forge service.
 pub struct ForgeService {
     accounts_path: PathBuf,
@@ -270,6 +278,8 @@ pub struct ForgeService {
     updates: broadcast::Sender<ForgeChecksUpdate>,
     watches: RwLock<HashMap<(String, ForgeRepoRef, u32), WatchState>>,
     poller: Mutex<Option<JoinHandle<()>>>,
+    /// Device authorizations in flight, keyed by the id handed to the client.
+    flows: Mutex<HashMap<String, DeviceFlowState>>,
     requests_per_minute: u32,
 }
 
@@ -296,6 +306,7 @@ impl ForgeService {
             updates,
             watches: RwLock::new(HashMap::new()),
             poller: Mutex::new(None),
+            flows: Mutex::new(HashMap::new()),
             requests_per_minute,
         });
         service.start_poller();
@@ -382,6 +393,165 @@ impl ForgeService {
             json!({"source": source.label(), "username": account.username}),
         );
         Ok(account)
+    }
+
+    /// Starts a GitHub device authorization.
+    ///
+    /// The device code stays in the daemon; the client only receives the flow
+    /// id, the short code and the verification URL.
+    pub async fn start_device_flow(
+        &self,
+        base_url: Option<String>,
+    ) -> Result<ForgeDeviceFlow, ForgeServiceError> {
+        let client_id = auth::github_client_id().ok_or_else(|| {
+            ForgeError::NotConfigured(format!(
+                "set {} before starting the daemon to use GitHub sign-in",
+                auth::GITHUB_CLIENT_ID_ENV
+            ))
+        })?;
+        let base_url = validate_base_url(base_url.as_deref().unwrap_or("https://github.com"))?;
+        if !base_url.eq_ignore_ascii_case("https://github.com") {
+            return Err(ForgeError::Unsupported(format!(
+                "the device flow is only available on github.com, not {base_url}"
+            ))
+            .into());
+        }
+        let start = auth::start_github_device_flow(&client_id, auth::GITHUB_DEVICE_SCOPES).await?;
+        let flow_id = format!("flow_{}", uuid::Uuid::now_v7().simple());
+        let expires_at = Utc::now() + chrono::Duration::seconds(start.expires_in as i64);
+        self.flows
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(
+                flow_id.clone(),
+                DeviceFlowState {
+                    device_code: start.device_code,
+                    base_url,
+                    expires_at,
+                    interval: start.interval,
+                },
+            );
+        Ok(ForgeDeviceFlow {
+            flow_id,
+            user_code: start.user_code,
+            verification_uri: start.verification_uri,
+            expires_in: start.expires_in,
+            interval: start.interval,
+        })
+    }
+
+    /// Polls one device authorization and stores the account when approved.
+    pub async fn poll_device_flow(
+        &self,
+        flow_id: &str,
+    ) -> Result<ForgeDeviceFlowStatus, ForgeServiceError> {
+        let client_id = auth::github_client_id().ok_or_else(|| {
+            ForgeError::NotConfigured(format!(
+                "set {} before starting the daemon to use GitHub sign-in",
+                auth::GITHUB_CLIENT_ID_ENV
+            ))
+        })?;
+        let (device_code, base_url, expires_at, interval) = {
+            let flows = self
+                .flows
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let flow = flows.get(flow_id).ok_or_else(|| {
+                ForgeError::NotFound("this device authorization is no longer active".into())
+            })?;
+            (
+                flow.device_code.clone(),
+                flow.base_url.clone(),
+                flow.expires_at,
+                flow.interval,
+            )
+        };
+        if Utc::now() >= expires_at {
+            self.forget_flow(flow_id);
+            return Ok(ForgeDeviceFlowStatus::Expired);
+        }
+        let outcome = auth::poll_github_device_once(&client_id, &device_code).await?;
+        match outcome {
+            auth::DevicePoll::Pending { .. } => Ok(ForgeDeviceFlowStatus::Pending { interval }),
+            auth::DevicePoll::SlowDown { interval } => {
+                if let Some(flow) = self
+                    .flows
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get_mut(flow_id)
+                {
+                    flow.interval = interval;
+                }
+                Ok(ForgeDeviceFlowStatus::SlowDown { interval })
+            }
+            auth::DevicePoll::Authorized(token) => {
+                let account = self
+                    .add_account(
+                        ForgeKind::GitHub,
+                        &base_url,
+                        &token.access_token,
+                        None,
+                        ForgeCredentialSource::OAuthDevice,
+                    )
+                    .await?;
+                self.forget_flow(flow_id);
+                Ok(ForgeDeviceFlowStatus::Complete { account })
+            }
+            auth::DevicePoll::Expired => {
+                self.forget_flow(flow_id);
+                Ok(ForgeDeviceFlowStatus::Expired)
+            }
+            auth::DevicePoll::Denied { message } => {
+                self.forget_flow(flow_id);
+                Ok(ForgeDeviceFlowStatus::Denied { message })
+            }
+        }
+    }
+
+    /// Imports a token the user already stored with `gh` or `glab`.
+    pub async fn import_cli_account(
+        &self,
+        forge: ForgeKind,
+        base_url: Option<String>,
+    ) -> Result<ForgeAccount, ForgeServiceError> {
+        let (token, source, base_url) = match forge {
+            ForgeKind::GitHub => {
+                let base_url =
+                    validate_base_url(base_url.as_deref().unwrap_or("https://github.com"))?;
+                let hostname = (base_url != "https://github.com").then(|| base_url.clone());
+                (
+                    auth::import_gh_token(hostname.as_deref())?,
+                    ForgeCredentialSource::GhCli,
+                    base_url,
+                )
+            }
+            ForgeKind::GitLab => {
+                let base_url =
+                    validate_base_url(base_url.as_deref().unwrap_or("https://gitlab.com"))?;
+                let hostname = (base_url != "https://gitlab.com").then(|| base_url.clone());
+                (
+                    auth::import_glab_token(hostname.as_deref())?,
+                    ForgeCredentialSource::GlabCli,
+                    base_url,
+                )
+            }
+            other => {
+                return Err(ForgeError::Unsupported(format!(
+                    "{} has no CLI to import from; add a personal access token",
+                    other.slug()
+                ))
+                .into());
+            }
+        };
+        self.add_account(forge, &base_url, &token, None, source)
+            .await
+    }
+
+    fn forget_flow(&self, flow_id: &str) {
+        self.flows
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(flow_id);
     }
 
     /// Removes an account and its token.

@@ -19,6 +19,7 @@ import type * as React from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ENTER, KeyGlyphs, MOD, SHIFT } from "@/components/common/Kbd";
+import { ForgeSettings } from "@/features/forge/ForgeSettings";
 import type { HarnessKind } from "@/gen";
 import { harnessSeed, machineSeed } from "@/lib/entities";
 import { navigate } from "@/lib/store/appStore";
@@ -983,6 +984,7 @@ const FORMS: Record<string, () => React.ReactNode> = {
   hosts: HostsForm,
   devices: DevicesForm,
   providers: ProvidersForm,
+  forges: ForgeSettings,
   general: GeneralForm,
   appearance: AppearanceForm,
   notifications: NotificationsForm,

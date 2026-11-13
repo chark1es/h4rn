@@ -17,11 +17,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use h4rn_protocol::{ThreadId, TurnId};
+use h4rn_protocol::{FsTurnChanges, FsTurnFile, ThreadId, TurnId};
 use serde::{Deserialize, Serialize};
 
 use super::paths::{FsError, ResolveMode, normalize_relative, relative_of, resolve_inside};
-use super::text;
+use super::{count_line_delta, text};
 
 /// One captured file.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -175,6 +175,56 @@ impl SnapshotStore {
         self.entries(thread_id, turn_id)
             .into_iter()
             .find(|entry| entry.path == rel)
+    }
+
+    /// The files one turn changed, compared with the current working tree.
+    ///
+    /// Uses the first observation of each path as the pre-turn base, so the
+    /// result stays stable across turns that start from a dirty tree. A path
+    /// whose content is unchanged since capture is omitted.
+    pub fn turn_changes(
+        &self,
+        workspace: &Path,
+        thread_id: &ThreadId,
+        turn_id: &TurnId,
+    ) -> FsTurnChanges {
+        let entries = self.entries(thread_id, turn_id);
+        let mut files = Vec::new();
+        for entry in &entries {
+            let Ok(relative) = normalize_relative(&entry.path) else {
+                continue;
+            };
+            let current = fs::read(workspace.join(relative)).ok();
+            let before = entry.blob.as_deref().and_then(|blob| self.read_blob(blob));
+            let before_text = before.as_deref().and_then(text::decode);
+            let after_text = current.as_deref().and_then(text::decode);
+            let (added, removed) = match (&before_text, &after_text) {
+                (Some(before), Some(after)) => count_line_delta(&before.text, &after.text),
+                (None, Some(after)) => (after.text.lines().count() as u32, 0),
+                (Some(before), None) => (0, before.text.lines().count() as u32),
+                (None, None) => (0, 0),
+            };
+            if added == 0 && removed == 0 && entry.etag == current.as_deref().map(text::etag) {
+                continue;
+            }
+            files.push(FsTurnFile {
+                path: entry.path.clone(),
+                added,
+                removed,
+                before_etag: entry.etag.clone(),
+                after_etag: current.as_deref().map(text::etag),
+            });
+        }
+        files.sort_by(|left, right| left.path.cmp(&right.path));
+        FsTurnChanges {
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+            note: entries.is_empty().then(|| {
+                "No snapshots recorded for this turn yet. They are captured as the turn reports file tool calls."
+                    .into()
+            }),
+            files,
+        }
     }
 
     /// Reads a captured blob by content address.

@@ -641,6 +641,29 @@ pub enum ClientRequest {
         /// Account to remove.
         account_id: String,
     },
+    /// Start GitHub's OAuth device authorization grant.
+    ///
+    /// Only GitHub supports this. The daemon must have a client id configured
+    /// (`H4RN_GITHUB_CLIENT_ID`); otherwise the request fails with a hint.
+    ForgeDeviceFlowStart {
+        /// Public base URL; only `https://github.com` supports the grant.
+        base_url: Option<String>,
+    },
+    /// Poll one device authorization started by [`Self::ForgeDeviceFlowStart`].
+    ForgeDeviceFlowPoll {
+        /// Opaque flow id returned by the start request.
+        flow_id: String,
+    },
+    /// Import a token the user already stored with `gh` or `glab`.
+    ///
+    /// The daemon only runs this after an explicit client action; nothing is
+    /// imported at startup. The token is validated, stored, and never echoed.
+    ForgeImportCli {
+        /// Which CLI to read: GitHub (`gh`) or GitLab (`glab`).
+        forge: crate::forge::ForgeKind,
+        /// Self-hosted hostname the CLI knows about, when not the public one.
+        base_url: Option<String>,
+    },
     /// Detect the forge, owner and repository from a workspace's git remotes.
     ForgeDetectRepo {
         /// Absolute workspace path on this host.

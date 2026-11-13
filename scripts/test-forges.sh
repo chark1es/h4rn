@@ -4,6 +4,7 @@
 #   ./scripts/test-forges.sh            # Gitea in Docker
 #   ./scripts/test-forges.sh --forgejo  # Forgejo instead of Gitea
 #   ./scripts/test-forges.sh --github   # also run the read-only GitHub test
+#   ./scripts/test-forges.sh --ui       # also drive the UI against the seeded PR
 #
 # The script owns the lifecycle. It starts a real Gitea (or Forgejo) container
 # on a free port, creates an admin user and token through the forge's own CLI,
@@ -22,11 +23,13 @@ cd "$ROOT"
 export PATH="${HOME}/.cargo/bin:${PATH}"
 
 RUN_GITHUB=0
+RUN_UI=0
 KIND=gitea
 for arg in "$@"; do
   case "$arg" in
     --forgejo) KIND=forgejo ;;
     --github) RUN_GITHUB=1 ;;
+    --ui) RUN_UI=1 ;;
     -h|--help)
       sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
@@ -199,6 +202,16 @@ H4RN_GITEA_REPO="$REPO" \
 H4RN_GITEA_PR="$PR_NUMBER" \
 H4RN_GITEA_KIND="$KIND" \
   cargo test -p h4rn-forge --test wiremock_clients -- --ignored live_gitea_read_and_write --test-threads=1
+
+if [[ "$RUN_UI" == "1" ]]; then
+  echo "--- running the forge UI e2e against ${BASE}"
+  H4RN_GITEA_URL="$BASE" \
+  H4RN_GITEA_TOKEN="$TOKEN" \
+  H4RN_GITEA_REPO="$REPO" \
+  H4RN_GITEA_PR="$PR_NUMBER" \
+  H4RN_GITEA_KIND="$KIND" \
+    node apps/ui/scripts/forge-e2e.mjs
+fi
 
 if [[ "$RUN_GITHUB" == "1" ]]; then
   if [[ -z "${H4RN_GITHUB_TOKEN:-}" ]]; then

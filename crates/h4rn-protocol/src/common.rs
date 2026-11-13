@@ -301,6 +301,10 @@ pub struct ThreadSummary {
     pub title: String,
     /// Workspace path on the host.
     pub workspace_path: String,
+    /// Current git branch of the workspace, when it has one.
+    #[serde(default)]
+    #[ts(optional)]
+    pub branch: Option<String>,
     /// Model slug reported by the harness.
     pub model: String,
     /// Derived tab placement.
@@ -469,6 +473,7 @@ mod tests {
             harness: HarnessKind::ClaudeCode,
             title: "usage limit".into(),
             workspace_path: "/tmp/work".into(),
+            branch: Some("h4rn/usage-limit".into()),
             model: "claude-sonnet-5".into(),
             tab: ThreadTab::Working,
             pinned: false,

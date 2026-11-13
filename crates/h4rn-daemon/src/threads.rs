@@ -252,6 +252,8 @@ struct ThreadRecord {
     resume_at: Option<DateTime<Utc>>,
     /// Latest limit observation shown on the thread summary (ADR-024).
     limit: Option<LimitBrief>,
+    /// Git branch of the workspace, cached for the thread header.
+    branch: Option<String>,
     closed: bool,
 }
 
@@ -339,6 +341,7 @@ impl ThreadRecord {
             harness: self.meta.harness,
             title: self.meta.title.clone(),
             workspace_path: self.meta.workspace_path.clone(),
+            branch: self.branch.clone(),
             model: self.meta.model.clone(),
             tab,
             pinned: self.state.pinned(),
@@ -364,6 +367,7 @@ impl ThreadRecord {
         // target no longer describe the thread.
         self.resume_at = None;
         self.limit = None;
+        self.branch = crate::fs::git::branch(std::path::Path::new(&self.meta.workspace_path));
         let turn_id = TurnId::new_uuid_v7();
         let item_id = assistant_item_id(&turn_id);
         self.active = Some(ActiveTurn {
@@ -786,6 +790,7 @@ impl ThreadManager {
             scheduled_limit: None,
             resume_at: None,
             limit: None,
+            branch: None,
             closed: false,
         };
         let (turn_id, _) = record.begin_turn(now);
@@ -1381,6 +1386,7 @@ impl ThreadManager {
                     turn_id: record.turn_id_for_event(),
                     usage: Usage::default(),
                     status: TurnStatus::Interrupted,
+                    changes: None,
                 }];
                 let _ = self.inner.emit(&mut record, domain, wire).await;
             }
@@ -1527,6 +1533,7 @@ impl Inner {
                 .await
                 .map_err(|error| ManagerError::Internal(error.to_string()))?;
             let state = apply_all(ThreadState::new(meta.created_at), &domain);
+            let branch = crate::fs::git::branch(std::path::Path::new(&meta.workspace_path));
             let mut record = ThreadRecord {
                 meta,
                 state,
@@ -1540,6 +1547,7 @@ impl Inner {
                 scheduled_limit: None,
                 resume_at: None,
                 limit: None,
+                branch,
                 closed: false,
             };
 
@@ -1836,9 +1844,11 @@ impl Inner {
                                 &paths,
                             ) {
                                 Ok(0) => {}
-                                Ok(count) => tracing::debug!(
+                                Ok(count) => tracing::info!(
                                     thread_id = %thread_id,
+                                    %turn_id,
                                     count,
+                                    ?paths,
                                     "captured pre-turn file snapshots"
                                 ),
                                 Err(error) => tracing::warn!(
@@ -2093,11 +2103,26 @@ impl Inner {
                             },
                         });
                     }
+                    let changes = self.snapshots.get().map(|snapshots| {
+                        let computed = snapshots.turn_changes(
+                            std::path::Path::new(&record.meta.workspace_path),
+                            &thread_id,
+                            &turn_id,
+                        );
+                        tracing::info!(
+                            thread_id = %thread_id,
+                            %turn_id,
+                            files = computed.files.len(),
+                            "computed turn change set"
+                        );
+                        computed
+                    });
                     wire.push(Event::TurnCompleted {
                         thread_id: thread_id.clone(),
                         turn_id,
                         usage,
                         status,
+                        changes,
                     });
                 }
                 HarnessEvent::Error { message, retryable } => {
@@ -2156,6 +2181,7 @@ impl Inner {
                     turn_id,
                     usage: Usage::default(),
                     status: TurnStatus::Failed,
+                    changes: None,
                 },
             ];
             let _ = self

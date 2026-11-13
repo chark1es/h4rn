@@ -21,6 +21,9 @@ pub(super) fn matches(request: &ClientRequest) -> bool {
         request,
         ClientRequest::ForgeListAccounts
             | ClientRequest::ForgeAddAccount { .. }
+            | ClientRequest::ForgeDeviceFlowStart { .. }
+            | ClientRequest::ForgeDeviceFlowPoll { .. }
+            | ClientRequest::ForgeImportCli { .. }
             | ClientRequest::ForgeRemoveAccount { .. }
             | ClientRequest::ForgeDetectRepo { .. }
             | ClientRequest::ForgeListPrs { .. }
@@ -58,6 +61,27 @@ pub(super) async fn handle(
             .state
             .forge
             .add_account(forge, &base_url, &token, username, source)
+            .await
+            .map(|account| ResponseBody::ForgeAccount { account })
+            .map_err(ForgeServiceError::into_proto),
+        ClientRequest::ForgeDeviceFlowStart { base_url } => conn
+            .state
+            .forge
+            .start_device_flow(base_url)
+            .await
+            .map(|flow| ResponseBody::ForgeDeviceFlow { flow })
+            .map_err(ForgeServiceError::into_proto),
+        ClientRequest::ForgeDeviceFlowPoll { flow_id } => conn
+            .state
+            .forge
+            .poll_device_flow(&flow_id)
+            .await
+            .map(|status| ResponseBody::ForgeDeviceFlowStatus { status })
+            .map_err(ForgeServiceError::into_proto),
+        ClientRequest::ForgeImportCli { forge, base_url } => conn
+            .state
+            .forge
+            .import_cli_account(forge, base_url)
             .await
             .map(|account| ResponseBody::ForgeAccount { account })
             .map_err(ForgeServiceError::into_proto),

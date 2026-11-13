@@ -129,6 +129,17 @@ export function ThreadPane({ threadId }: { threadId: string }) {
     return () => window.removeEventListener("h4rn:subagents", handler);
   }, [isPhone]);
 
+  // The stream's change-set card opens one turn in the Changes tab.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ tab?: string }>).detail;
+      if (isPhone) setPhonePanel(detail?.tab === "subagents" ? "subagents" : "changes");
+      else setPanelTab(detail?.tab === "subagents" ? "subagents" : "changes");
+    };
+    window.addEventListener("h4rn:open-panel", handler);
+    return () => window.removeEventListener("h4rn:open-panel", handler);
+  }, [isPhone]);
+
   if (!summary && !log && !threadError) {
     return (
       <main className="q-main" aria-busy="true" aria-label="Loading thread">

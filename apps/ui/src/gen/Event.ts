@@ -7,6 +7,7 @@ import type { ForgeChecks } from "./ForgeChecks";
 import type { ForgeRepoRef } from "./ForgeRepoRef";
 import type { FsChangeKind } from "./FsChangeKind";
 import type { FsSearchMatch } from "./FsSearchMatch";
+import type { FsTurnChanges } from "./FsTurnChanges";
 import type { HostId } from "./HostId";
 import type { Item } from "./Item";
 import type { McpCaller } from "./McpCaller";
@@ -144,7 +145,14 @@ usage: Usage,
 /**
  * How it finished.
  */
-status: TurnStatus, } | { "type": "agent_state_changed", 
+status: TurnStatus, 
+/**
+ * Files this turn changed, when the daemon recorded snapshots.
+ *
+ * The stream renders its change-set card from this; older journals
+ * simply omit it and the card falls back to the Changes panel.
+ */
+changes?: FsTurnChanges, } | { "type": "agent_state_changed", 
 /**
  * Thread.
  */

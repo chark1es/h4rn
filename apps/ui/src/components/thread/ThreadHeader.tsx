@@ -289,6 +289,14 @@ export function ThreadHeader({
           <span className="opt">
             <span className="q-sep">·</span> {summary.model}
           </span>
+          {summary.branch ? (
+            <span className="br">
+              <span className="q-sep">·</span>
+              <span className="q-mono" style={{ fontSize: 11.5 }}>
+                {summary.branch}
+              </span>
+            </span>
+          ) : null}
           <span className="br">
             <span className="q-sep">·</span>
             <span className="q-mono" style={{ fontSize: 11.5 }}>

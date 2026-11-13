@@ -5,6 +5,7 @@ import type {
   ApprovalOption,
   Attachment,
   Event,
+  FsTurnChanges,
   HarnessKind,
   HostId,
   MessageRole,
@@ -84,6 +85,8 @@ export type StreamTurn = {
   status: TurnStatusOrRunning;
   items: TurnItem[];
   usage: Usage | null;
+  /** Files this turn changed, when the daemon was able to snapshot them. */
+  changes: FsTurnChanges | null;
 };
 
 export type PendingMessage = {
@@ -151,6 +154,7 @@ function ensureTurn(log: ThreadLog, turnId: TurnId, startedAt: string): StreamTu
     status: "running",
     items: [],
     usage: null,
+    changes: null,
   };
   log.turns.push(turn);
   return turn;
@@ -213,6 +217,7 @@ export function foldEvent(
           status: "running",
           items: [],
           usage: null,
+          changes: null,
         });
       }
       return log;
@@ -265,6 +270,7 @@ export function foldEvent(
               },
             ],
             usage: null,
+            changes: null,
           });
           return log;
         }
@@ -370,6 +376,7 @@ export function foldEvent(
       const turn = ensureTurn(log, event.turn_id, at);
       turn.status = event.status;
       turn.usage = event.usage;
+      if (event.changes) turn.changes = event.changes;
       for (const item of turn.items) {
         if (item.kind === "message") item.streaming = false;
       }

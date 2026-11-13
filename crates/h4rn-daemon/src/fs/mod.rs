@@ -39,8 +39,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, Utc};
 use h4rn_protocol::{
     DiffAgainst, FileEntry, FileEntryKind, FsCreateKind, FsDeleteResult, FsDiff, FsFileContent,
-    FsListing, FsSearchBatch, FsTurnChanges, FsTurnFile, FsWriteConflict, FsWriteResult,
-    ProtoError, ProtoErrorCode, ThreadId, TurnId,
+    FsListing, FsSearchBatch, FsTurnChanges, FsWriteConflict, FsWriteResult, ProtoError,
+    ProtoErrorCode, ThreadId, TurnId,
 };
 use tokio::sync::mpsc;
 
@@ -593,44 +593,7 @@ impl FsService {
         turn_id: &TurnId,
     ) -> Result<FsTurnChanges, FsError> {
         let root = self.workspace(workspace)?;
-        let entries = self.snapshots.entries(thread_id, turn_id);
-        let mut files = Vec::new();
-        for entry in &entries {
-            let path = root.join(paths::normalize_relative(&entry.path)?);
-            let current = fs::read(&path).ok();
-            let before = entry
-                .blob
-                .as_deref()
-                .and_then(|blob| self.snapshots.read_blob(blob));
-            let before_text = before.as_deref().and_then(text::decode);
-            let after_text = current.as_deref().and_then(text::decode);
-            let (added, removed) = match (&before_text, &after_text) {
-                (Some(before), Some(after)) => count_line_delta(&before.text, &after.text),
-                (None, Some(after)) => (after.text.lines().count() as u32, 0),
-                (Some(before), None) => (0, before.text.lines().count() as u32),
-                (None, None) => (0, 0),
-            };
-            if added == 0 && removed == 0 && entry.etag == current.as_deref().map(text::etag) {
-                continue;
-            }
-            files.push(FsTurnFile {
-                path: entry.path.clone(),
-                added,
-                removed,
-                before_etag: entry.etag.clone(),
-                after_etag: current.as_deref().map(text::etag),
-            });
-        }
-        files.sort_by(|left, right| left.path.cmp(&right.path));
-        Ok(FsTurnChanges {
-            thread_id: thread_id.clone(),
-            turn_id: turn_id.clone(),
-            note: entries.is_empty().then(|| {
-                "No snapshots recorded for this turn yet. They are captured as the turn reports file tool calls."
-                    .into()
-            }),
-            files,
-        })
+        Ok(self.snapshots.turn_changes(&root, thread_id, turn_id))
     }
 
     // ------------------------------------------------------------------

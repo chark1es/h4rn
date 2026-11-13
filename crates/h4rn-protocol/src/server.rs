@@ -301,6 +301,16 @@ pub enum ResponseBody {
         /// Public account metadata (never the token).
         account: crate::forge::ForgeAccount,
     },
+    /// A started GitHub device authorization.
+    ForgeDeviceFlow {
+        /// Short code, verification URL and poll id.
+        flow: crate::forge::ForgeDeviceFlow,
+    },
+    /// The state of one device authorization poll.
+    ForgeDeviceFlowStatus {
+        /// Pending, slow down, complete or terminal.
+        status: crate::forge::ForgeDeviceFlowStatus,
+    },
     /// Forge repositories detected in a workspace.
     ForgeRepos {
         /// Detected remotes, preferred remote first.
@@ -589,6 +599,13 @@ pub enum Event {
         usage: Usage,
         /// How it finished.
         status: TurnStatus,
+        /// Files this turn changed, when the daemon recorded snapshots.
+        ///
+        /// The stream renders its change-set card from this; older journals
+        /// simply omit it and the card falls back to the Changes panel.
+        #[serde(default)]
+        #[ts(optional)]
+        changes: Option<crate::fs::FsTurnChanges>,
     },
     /// The agent state changed; drives the orb or static glyph.
     AgentStateChanged {
