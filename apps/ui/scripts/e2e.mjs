@@ -173,6 +173,28 @@ async function main() {
       .filter({ has: page.getByRole("button", { name: "Thread actions" }) });
     await header.getByText(/^Done/).waitFor({ timeout: 20_000 });
 
+    // Layout v2: the view cluster switches the main area to the IDE for this
+    // thread's project, and the right panel follows the selected thread.
+    await page.getByRole("tab", { name: "IDE" }).click();
+    await page.locator('[aria-label="IDE"]').waitFor({ timeout: 10_000 });
+    await page
+      .getByRole("heading", { name: workspace.split("/").filter(Boolean).at(-1) })
+      .waitFor({ timeout: 10_000 });
+    await page.getByRole("tab", { name: "Thread" }).click();
+    // Entering the IDE reveals the file tree, so the panel is usually already
+    // open when we return to the thread; only toggle it when it is closed.
+    const panelToggle = page.getByRole("button", { name: "Right panel" });
+    if ((await panelToggle.getAttribute("aria-pressed")) !== "true") await panelToggle.click();
+    const panel = page.getByRole("complementary", { name: "Thread panel" });
+    await panel.waitFor({ timeout: 10_000 });
+    await panel.getByRole("tab", { name: /Changes/ }).click();
+    await panel.getByRole("tab", { name: "vs agent" }).waitFor({ timeout: 10_000 });
+    if (
+      (await panel.getByRole("tab", { name: "vs agent" }).getAttribute("aria-selected")) !== "true"
+    ) {
+      throw new Error("Changes tab did not open in the right panel");
+    }
+
     await page.getByRole("button", { name: "Thread actions" }).click();
     await page.getByRole("menuitem", { name: "Settle now" }).click();
     await header.getByText("Settled", { exact: true }).waitFor({ timeout: 20_000 });

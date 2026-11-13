@@ -92,64 +92,74 @@ The command palette (`⌘K`) is an overlay, not a route. Every route above is de
 
 ## 2. Navigation model
 
-### Desktop (≥1280 px): three panes, one optional context panel
+### Desktop (≥1024 px): one sidebar, one main area, one collapsible panel
 
 ```
-+------+----------------------------+-------------------------------------+--------------------+
-| RAIL | LIST                       | DETAIL                              | CONTEXT (optional) |
-| 56px | 304px (resizable 280-400)   | flex, min 560px                     | 420px (360-600)    |
-|      |                            |                                     |                    |
-| Inbox| [Working 3][Done 2][Set 8] | Thread header: title, chips, orb    | [Diff][Files][Term]|
-| Hosts| [filter]            [+New] | Cue gutter + stream                 |                    |
-| Libr |                            |                                     |                    |
-| Usage| 01 Fix flaky auth  02:14   | ...                                 |                    |
-| IDE  | 02 Ship relay retry 18:03  |                                     |                    |
-| PRs  | 03 Settle old PRs   1d     |                                     |                    |
-|      |                            |                                     |                    |
-|      | Snoozed (2)                | Standby bar (if any)                |                    |
-|      |                            | Composer                            |                    |
-+------+----------------------------+-------------------------------------+--------------------+
-| STATUS BAR: Direct · atlas 12ms · 2 queued · v0.10                                        |
-+----------------------------------------------------------------------------------------------+
++----------------------+---------------------------------------+----------------------+
+| SIDEBAR 288px        | MAIN                                  | PANEL 400px          |
+| (240-420, ⌘B)        | flex, min 560px                       | (320-640, ⌘⌥B)       |
+|                      |                                       |                      |
+| h4rn        [▢] [✎] | Thread header: title, provenance,     | Changes Files Sub-   |
+| Search or run    ⌘K  |   state, actions | Thread|IDE >_ ▢    | agents               |
+| [Working][Done][Set] |                                       |                      |
+|                      | Stream ─or─ IDE editor                | file list + diffs    |
+| api     atlas    ⌄   |                                       |                      |
+|  Fix flaky auth  2m  |                                       |                      |
+|  Claude Code  ⬤ you  |                                       |                      |
+| relay   orion    ⌄   |                                       |                      |
+|  Ship relay retry 18m|                                       |                      |
+| Snoozed (2)       >  | Composer                              | Revert all… Open in  |
+| ● 3 of 4 hosts ▾ ··· |                                       | IDE                  |
++----------------------+---------------------------------------+----------------------+
+| IDE status bar: h4rn/fix-flaky-auth · atlas · Ln 49, Col 31 · UTF-8 · TypeScript          |
++-------------------------------------------------------------------------------------------+
 ```
 
-- **Rail** is the only constant global navigation. Icon + tooltip; active item gets a 2 px cue bar. Bottom cluster: search, settings, user blobatar.
-- **List pane** owns the current collection and its tabs. It never disappears on desktop; collapsing it is a user preference, not a responsive state.
-- **Detail pane** owns one object. Opening a thread from another pane replaces detail, not the list.
-- **Context panel** is a tab strip (`Diff / Files / Terminal / Subagents`) with the last-used tab remembered per thread. It can be closed; it never opens by default on a 1280 px screen.
-- **Status bar** is 24 px, stage black, quiet: connection kind, host latency, queued commands, app version. Clicking it opens Connection details.
+- **One left column, always the sidebar.** Nothing else docks on the left. Secondary
+  destinations either take over the sidebar (Settings, including MCP servers and Skills, swaps
+  the thread list for a settings nav with a back button) or render their list in the main area
+  (Pull requests, Usage, MCP & skills).
+- **Sidebar.** Header: wordmark, hide-sidebar and new-thread buttons. Then search/run, the
+  Working / Done / Settled segment, threads grouped by project, Snoozed as the last row under
+  Working, and a footer with `● N of M hosts ▾` (presence, latency, route, WSL distros, pair a
+  device, manage hosts) plus icon buttons for Pull requests, MCP & skills, Usage and Settings.
+  A project is a folder on a host, so the same repo on atlas and orion is two groups; the group
+  header shows the name and a small grey host. Groups collapse, and a collapsed group keeps a
+  blue dot when one of its threads needs you. The sidebar is resizable and ⌘B hides it; the
+  show-sidebar button in the thread header keeps the blue dot.
+- **Main area** shows one thing: the selected thread, the selected thread's project in the IDE,
+  or a page. The `Thread | IDE` toggle (⌘E) sits in the same place in both views, next to the
+  terminal and right-panel buttons.
+- **One right panel, scoped to the selected thread.** Tabs: **Changes** (agent diff by turn or
+  vs HEAD), **Files** (the thread's workspace tree), **Subagents** (tree and details). Closed by
+  default; open/closed state, width and last tab are remembered in `localStorage`. It never
+  holds a second thread, app navigation, or the terminal.
+- **Terminal** stays a bottom drawer under the composer (`T`), not a panel tab.
+- **IDE.** ⌘E switches the main area to the IDE for the selected thread's project: tabs, the
+  `Edit | vs HEAD | vs agent` strip, the "Changes by <agent> in <thread> since …" scope strip,
+  the editor/diff and the status bar. Selecting a thread in another project switches the
+  workspace and restores that project's tabs ("Restored N tabs" appears quietly at the end of
+  the tab strip). The file tree lives in the right panel's Files tab. The header names the
+  workspace (monogram, host, path) and carries a thread chip; clicking it, or ⌘E, returns to
+  the thread.
 
-### Tablet (768–1279 px): two panes, detail takes over
+### Tablet (768–1279 px): the same frame, tighter
 
-- Rail stays 56 px. List is 280 px. Detail fills the rest.
-- The context panel becomes a tab **inside** detail (`Thread / Diff / Files / Terminal / Subagents`) — never a third column.
-- Portrait: opening a thread pushes detail over the list with a back affordance. Landscape ≥1024: list and detail split 38/62.
+- The sidebar starts at its minimum width and the right panel opens over the main area rather
+  than pushing it below 560 px.
+- The `Thread | IDE` toggle, terminal drawer and right panel behave exactly as on desktop.
 - Dialogs become 480 px sheets; the command palette stays centered and 560 px.
 
-### Phone (<768 px): one column, bottom navigation, sheets
+### Phone (<768 px): one column, grouped inbox, sheets
 
-```
-+--------------------------------+
-| 9:41            atlas · online |
-| Inbox                    [ ...]|
-| [Working 3][Done 2][Settled 8] |
-| [filter]                       |
-|                                |
-| 01  Fix flaky auth       00:42 |
-|     atlas · Claude · working   |
-| 02  Ship relay retry     18:03 |
-|     orion · Codex · approval   |
-|                                |
-| Snoozed (2)                >   |
-|                                |
-+--------------------------------+
-| Inbox Hosts  [ + ] Limits More |
-+--------------------------------+
-```
-
-- **Bottom navigation** (64 px + safe area): Inbox, Hosts, New (44 px cue-tint square), Limits, More. `More` is a sheet containing Library, PRs, IDE, Devices, Settings.
-- **Thread** is a full-screen push: back chevron, title, state word, overflow. Bottom nav is hidden; the composer sits above the safe area. Standby is a sticky 2-line card above the composer.
-- **Sheets** (drag handle, 14 px top radius) are the default overlay: host picker, filters, approvals detail, attachments, subagent tree, MCP target, diff file tree. Full-height sheets for terminal, IDE search, and subagent tree.
+- The inbox is grouped by project exactly as the sidebar is, with the host on each group header.
+- A thread is a full-screen push: back chevron, title, state word, overflow. Bottom navigation is
+  hidden; the composer sits above the safe area and standby is a sticky card above it.
+- The right panel becomes **one** large-detent sheet over the thread with a `Changes | Subagents`
+  segment (blue dot when a child needs you) and Done. Changes shows the file list and the first
+  file's diff; Subagents shows the tree and details. **Files and the IDE are desktop-only**, and
+  the sheet says so.
+- Terminal is a full-screen sheet with the key bar.
 - **Touch**: 44×44 px minimum; no hover-only affordances; long-press opens the same context menu as right-click; swipe-back is supported but every screen also has a visible back button.
 - **Pull to refresh** on Inbox, Hosts, Usage and PR list. It is the only gesture that mutates data by itself.
 
@@ -157,12 +167,13 @@ The command palette (`⌘K`) is an overlay, not a route. Every route above is de
 
 | Event | Desktop | Tablet | Phone |
 |---|---|---|---|
-| Open thread | Detail replaces; list selection persists | Push (portrait) / split (landscape) | Full-screen push |
+| Open thread | Main area replaces; sidebar selection persists | Main area replaces | Full-screen push |
 | Back | Browser/app back returns to previous detail | Back returns to list | Back returns to list |
 | New thread | 640 px dialog | 480 px sheet | Full-screen sheet |
 | Delete/revoke | Alert dialog | Alert dialog | Confirmation sheet |
 | Command palette | Centered 560 px | Centered 560 px | Full-height search sheet |
-| Context panel | Fourth column or tab | Tab in detail | Full-height sheet |
+| Right panel | Third column or hidden | Overlay | `Changes \| Subagents` sheet |
+| Settings | Takes over the sidebar | Takes over the sidebar | Pushed page |
 | Multi-select rows | `X`, shift-click | Long-press | Long-press → Select mode |
 
 ### Persistence
@@ -255,10 +266,13 @@ Quiet hours collapse pushes into one digest. Every push deep-links to the thread
 | New thread | `⌘⇧N` / `N` | `Ctrl⇧N` / `N` | Global / list focused |
 | Go to Inbox | `G` `I` | `G` `I` | Global |
 | Go to Hosts | `G` `H` | `G` `H` | Global |
-| Go to Library | `G` `L` | `G` `L` | Global |
+| Go to MCP & skills | `G` `M` | `G` `M` | Global |
 | Go to Usage | `G` `U` | `G` `U` | Global |
 | Go to IDE | `G` `E` | `G` `E` | Global |
 | Go to Pull requests | `G` `P` | `G` `P` | Global |
+| Show / hide sidebar | `⌘B` | `Ctrl B` | Global (not in inputs) |
+| Thread ↔ IDE | `⌘E` | `Ctrl E` | Thread |
+| Show / hide right panel | `⌘⌥B` | `Ctrl Alt B` | Thread / IDE |
 | Settings | `⌘,` | `Ctrl ,` | Global |
 | Toggle theme | `⌘⇧L` | `Ctrl⇧L` | Global |
 | Focus search | `/` | `/` | List |
@@ -285,14 +299,13 @@ Quiet hours collapse pushes into one digest. Every push deep-links to the thread
 | Interrupt turn | `⌘.` | `Ctrl .` | Thread |
 | Previous / next cue | `[` / `]` | `[` / `]` | Thread |
 | Terminal | `T` | `T` | Thread |
-| Diff | `D` | `D` | Thread |
-| Files | `F` | `F` | Thread |
+| Changes panel | `D` | `D` | Thread |
 | Subagents | `⌘J` | `Ctrl J` | Thread |
 | Resume now | `⇧R` | `Shift R` | Limited thread |
 | Cancel auto-resume | `⌥R` | `Alt R` | Scheduled thread |
 | Clear terminal | `⌃L` | `Ctrl L` | Terminal focused |
 | Terminal font size | `⌘+` / `⌘−` / `⌘0` | `Ctrl +/−/0` | Terminal focused |
-| Quick open file | `⌘P` | `Ctrl P` | IDE |
+| Quick open file | `⌘P` | `Ctrl P` | Thread / IDE |
 | Search in files | `⌘⇧F` | `Ctrl⇧F` | IDE |
 | Save file | `⌘S` | `Ctrl S` | IDE, editable |
 | Diff vs HEAD | `⌥D` | `Alt D` | IDE |

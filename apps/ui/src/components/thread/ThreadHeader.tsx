@@ -2,8 +2,8 @@ import {
   CircleSlash2Icon,
   ExternalLinkIcon,
   FileDiffIcon,
-  ListTreeIcon,
   MoreHorizontalIcon,
+  PanelRightIcon,
   PinIcon,
   Share2Icon,
   SquareIcon,
@@ -14,6 +14,7 @@ import {
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { MOD, SHIFT } from "@/components/common/Kbd";
+import { SidebarReveal } from "@/components/shell/Sidebar";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -33,11 +34,74 @@ import {
   navigate,
   pushToast,
   setThreadTab,
+  setView,
   snoozeThread,
+  togglePanel,
   togglePin,
   toggleTheme,
+  useApp,
 } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
+
+export function ViewCluster({
+  terminalOpen = false,
+  onToggleTerminal,
+}: {
+  terminalOpen?: boolean;
+  onToggleTerminal?: (() => void) | undefined;
+}) {
+  const view = useApp((state) => state.ui.layout.view);
+  const panelOpen = useApp((state) => state.ui.layout.panelOpen);
+  return (
+    <>
+      <div
+        className="q-seg inline q-viewseg"
+        role="tablist"
+        aria-label="View"
+        title={`Switch view  ${MOD}E`}
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={view === "thread"}
+          onClick={() => setView("thread")}
+        >
+          Thread
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={view === "ide"}
+          onClick={() => setView("ide")}
+        >
+          IDE
+        </button>
+      </div>
+      {onToggleTerminal ? (
+        <button
+          type="button"
+          className={cn("q-ibtn", terminalOpen && "on")}
+          aria-label="Toggle terminal"
+          aria-pressed={terminalOpen}
+          title="Terminal  T"
+          onClick={onToggleTerminal}
+        >
+          <TerminalIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+        </button>
+      ) : null}
+      <button
+        type="button"
+        className={cn("q-ibtn", panelOpen && "on")}
+        aria-label="Right panel"
+        aria-pressed={panelOpen}
+        title={`Right panel  ${MOD}⌥B`}
+        onClick={togglePanel}
+      >
+        <PanelRightIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+      </button>
+    </>
+  );
+}
 
 export function ThreadHeader({
   summary,
@@ -45,8 +109,7 @@ export function ThreadHeader({
   onBack,
   terminalOpen = false,
   onToggleTerminal,
-  subagentsOpen = false,
-  onToggleSubagents,
+  onOpenPanel,
   stale = false,
 }: {
   summary: ThreadSummary;
@@ -54,8 +117,7 @@ export function ThreadHeader({
   onBack: () => void;
   terminalOpen?: boolean;
   onToggleTerminal?: () => void;
-  subagentsOpen?: boolean;
-  onToggleSubagents?: () => void;
+  onOpenPanel?: () => void;
   stale?: boolean;
 }) {
   const hostOnline = host?.online ?? false;
@@ -76,9 +138,6 @@ export function ThreadHeader({
     summary.tab === "done" && summary.agent_state === "done"
       ? `Done · ${relativeAge(summary.last_activity)}`
       : glyph.label;
-  // The prototype's Done and unreachable headers carry only state and the
-  // actions that are actually available; the tool strip belongs to live work.
-  const showToolIcons = summary.tab !== "done" && !unreachable;
 
   const threadMenu = (
     <DropdownMenu>
@@ -164,6 +223,16 @@ export function ThreadHeader({
                 <TerminalIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
               </button>
             ) : null}
+            {onOpenPanel ? (
+              <button
+                type="button"
+                className="navbtn"
+                aria-label="Changes and subagents"
+                onClick={onOpenPanel}
+              >
+                <FileDiffIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
+              </button>
+            ) : null}
             {threadMenu}
           </div>
         </div>
@@ -198,6 +267,7 @@ export function ThreadHeader({
 
   return (
     <header className="q-th-head">
+      <SidebarReveal />
       <div className="q-th-titles">
         <h1>{summary.title}</h1>
         <div className="q-prov">
@@ -234,47 +304,6 @@ export function ThreadHeader({
       </div>
 
       <div className="q-th-actions">
-        {showToolIcons ? (
-          <>
-            {onToggleTerminal ? (
-              <button
-                type="button"
-                className={cn("q-ibtn", terminalOpen && "on")}
-                aria-label="Toggle terminal"
-                aria-pressed={terminalOpen}
-                title="Terminal · T"
-                onClick={onToggleTerminal}
-              >
-                <TerminalIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-              </button>
-            ) : null}
-            {onToggleSubagents ? (
-              <button
-                type="button"
-                className={cn("q-ibtn", subagentsOpen && "on")}
-                aria-label="Toggle subagents"
-                aria-pressed={subagentsOpen}
-                title={`Subagents · ${MOD} J`}
-                onClick={onToggleSubagents}
-              >
-                <ListTreeIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-              </button>
-            ) : null}
-            <button
-              type="button"
-              className="q-ibtn"
-              aria-label="Changes"
-              title="Changes · D"
-              onClick={() => navigate({ kind: "ide" })}
-            >
-              <FileDiffIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-            </button>
-            <span className="q-vsep" />
-          </>
-        ) : (
-          <span className="q-vsep" />
-        )}
-
         {working && !stale && !unreachable ? (
           <button
             type="button"
@@ -308,6 +337,8 @@ export function ThreadHeader({
         ) : null}
 
         {threadMenu}
+        <span className="q-vsep" />
+        <ViewCluster terminalOpen={terminalOpen} onToggleTerminal={onToggleTerminal} />
       </div>
     </header>
   );

@@ -1,17 +1,17 @@
 import { ArrowUpIcon, AtSignIcon, ChevronDownIcon, PaperclipIcon } from "lucide-react";
-import type * as React from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { CommandPalette } from "@/components/dialogs/CommandPalette";
 import { NewThreadDialog } from "@/components/dialogs/NewThreadDialog";
 import { ShortcutsDialog } from "@/components/dialogs/ShortcutsDialog";
-import { InboxPane } from "@/components/inbox/InboxPane";
+import { PhoneInbox } from "@/components/inbox/PhoneInbox";
 import { LibraryPage } from "@/components/pages/LibraryPage";
 import { PairingPage } from "@/components/pages/PairingPage";
 import { PullRequestsPage } from "@/components/pages/PullRequestsPage";
 import { SettingsPage } from "@/components/pages/SettingsPage";
 import { UsagePage } from "@/components/pages/UsagePage";
+import { RightPanel } from "@/components/panel/RightPanel";
 import { OfflineBanner } from "@/components/shell/OfflineBanner";
 import { PhoneNav } from "@/components/shell/PhoneNav";
 import { Sidebar } from "@/components/shell/Sidebar";
@@ -29,9 +29,10 @@ import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts } from "@/features/attachments/use-attachments";
 import { IdePane } from "@/features/ide/IdePane";
 import type { HarnessKind } from "@/gen";
-import { useIsPhone, useIsWide } from "@/hooks/use-media-query";
+import { useIsPhone } from "@/hooks/use-media-query";
 import { HARNESS_LABELS, harnessLabel, harnessSeed, machineSeed } from "@/lib/entities";
 import { createThread, navigate, useApp } from "@/lib/store/appStore";
+import { activeThread } from "@/lib/thread-selection";
 
 const START_MODELS: Record<HarnessKind, string> = {
   claude_code: "claude-sonnet-5-5",
@@ -387,27 +388,50 @@ function Surface({ surface, path }: { surface: string; path: string }) {
     case "pairing":
       return <PairingPage />;
     default:
-      return <InboxPane />;
+      return <InboxDetailEmpty />;
   }
+}
+
+function PhoneIdeNotice() {
+  return (
+    <main className="q-main" aria-label="IDE">
+      <div className="q-center-empty">
+        <div className="q-empty" style={{ width: 340, padding: 0 }}>
+          <h3 style={{ fontSize: 17, lineHeight: "24px" }}>The IDE is a desktop view.</h3>
+          <p style={{ margin: 0 }}>
+            Open the thread on a larger screen to browse files, read diffs and edit. The thread and
+            its changes are available here.
+          </p>
+          <button
+            type="button"
+            className="q-btn secondary"
+            onClick={() => navigate({ kind: "inbox" })}
+          >
+            Back to inbox
+          </button>
+        </div>
+      </div>
+    </main>
+  );
 }
 
 export function AppShell() {
   const route = useApp((state) => state.ui.route);
+  const layout = useApp((state) => state.ui.layout);
+  const threads = useApp((state) => state.threads);
+  const selectedThreadId = useApp((state) => state.ui.selectedThreadId);
   const isPhone = useIsPhone();
-  const isWide = useIsWide();
   const isThread = route.kind === "thread";
   const pairing = route.kind === "placeholder" && route.surface === "pairing";
-
   const surface =
-    route.kind === "ide" ? (
-      <IdePane />
-    ) : route.kind === "hosts" ? (
+    route.kind === "hosts" ? (
       <SettingsPage section="hosts" />
     ) : route.kind === "placeholder" ? (
       <Surface surface={route.surface} path={route.path} />
     ) : null;
-
-  const page = isThread ? <ThreadPane threadId={route.threadId} /> : (surface ?? <InboxPane />);
+  const ide = layout.view === "ide" && !isPhone && (isThread || route.kind === "ide");
+  const thread = activeThread(threads, selectedThreadId);
+  const showPanel = !isPhone && layout.panelOpen && Boolean(thread) && (isThread || ide);
 
   if (isPhone) {
     return (
@@ -417,9 +441,15 @@ export function AppShell() {
           className="q-ph-content"
           style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
         >
-          {isThread ? page : (surface ?? <InboxPane />)}
+          {ide ? (
+            <PhoneIdeNotice />
+          ) : isThread ? (
+            <ThreadPane threadId={route.threadId} />
+          ) : (
+            (surface ?? <PhoneInbox />)
+          )}
         </div>
-        {isThread || pairing ? null : <PhoneNav />}
+        {isThread || ide || pairing ? null : <PhoneNav />}
 
         <NewThreadDialog />
         <CommandPalette />
@@ -429,35 +459,25 @@ export function AppShell() {
     );
   }
 
-  let body: React.ReactNode;
-  if (surface) {
-    body = surface;
-  } else if (isThread) {
-    body = isWide ? (
-      <>
-        <InboxPane />
-        {page}
-      </>
-    ) : (
-      page
-    );
-  } else {
-    body = isWide ? (
-      <>
-        <InboxPane />
-        <InboxDetailEmpty />
-      </>
-    ) : (
-      <InboxPane />
-    );
-  }
+  const main = ide ? (
+    <IdePane />
+  ) : isThread ? (
+    <ThreadPane threadId={route.threadId} />
+  ) : surface ? (
+    surface
+  ) : (
+    <InboxDetailEmpty />
+  );
 
   return (
     <div className="q-app">
-      <Sidebar />
+      {layout.sidebarOpen ? <Sidebar /> : null}
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
         {surface ? <OfflineBanner /> : null}
-        <div style={{ flex: 1, minHeight: 0, display: "flex" }}>{body}</div>
+        <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+          {main}
+          {showPanel && thread ? <RightPanel thread={thread} ide={ide} /> : null}
+        </div>
       </div>
 
       <NewThreadDialog />

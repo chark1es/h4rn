@@ -73,7 +73,7 @@ const TOKEN =
   /(\/\/[^\n]*)|("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|`(?:[^`\\]|\\.)*`)|\b(\d[\d_]*(?:\.\d+)?)\b|\b([A-Za-z_$][\w$]*)\b(?=\s*\()|\b([A-Za-z_$][\w$]*)\b/g;
 
 /** A small TypeScript tokenizer; the prototype's code pane is not plain text. */
-function highlight(text: string): ReactNode[] {
+export function highlightCode(text: string): ReactNode[] {
   const nodes: ReactNode[] = [];
   let last = 0;
   let key = 0;
@@ -119,13 +119,10 @@ export function DiffView({
   const isPhone = useIsPhone();
   const rows = useMemo(() => {
     if (!diff) return [];
-    let offset = 0;
     const context = mode === "agent" ? 10 : 3;
-    return collapseDiff(computeDiff(diff.before ?? "", diff.after ?? ""), context).map((row) => {
-      const key = `${row.kind}-${offset}`;
-      offset += row.kind === "skip" ? row.count : 1;
-      return { key, row };
-    });
+    return collapseDiff(computeDiff(diff.before ?? "", diff.after ?? ""), context).map(
+      (row, offset) => ({ key: `${row.kind}-${offset}`, row }),
+    );
   }, [diff, mode]);
   const stats = useMemo(
     () => diffStats(computeDiff(diff?.before ?? "", diff?.after ?? "")),
@@ -302,25 +299,8 @@ export function DiffView({
           padding: "8px 0",
         }}
       >
-        {rows.map(({ key, row }, index) =>
-          row.kind === "skip" ? (
-            index === 0 ? null : (
-              <div
-                key={key}
-                className="hh"
-                style={{
-                  color: "var(--fg-3)",
-                  padding: "2px 16px",
-                  background: "var(--bg)",
-                  borderTop: "1px solid var(--line)",
-                  borderBottom: "1px solid var(--line)",
-                  font: "11.5px/20px var(--mono)",
-                }}
-              >
-                ⋯ {row.count} unchanged {row.count === 1 ? "line" : "lines"}
-              </div>
-            )
-          ) : (
+        {rows.map(({ key, row }) =>
+          row.kind === "hunk" ? null : (
             <div
               key={key}
               className={cn("q-ln", row.kind === "added" && "a", row.kind === "removed" && "d")}
@@ -337,7 +317,7 @@ export function DiffView({
                     : undefined
                 }
               >
-                {row.text ? highlight(row.text) : " "}
+                {row.text ? highlightCode(row.text) : " "}
               </span>
             </div>
           ),

@@ -22,11 +22,26 @@ import { createThreadLog, foldEvent, type ThreadLog } from "./projection";
 
 export type Theme = "light" | "dark" | "system";
 
+export type UiView = "thread" | "ide";
+export type PanelTab = "changes" | "files" | "subagents";
+
 export type ThreadFilterState = {
   host: HostId | null;
   harness: HarnessKind | null;
   needsAttention: boolean;
   unread: boolean;
+};
+
+export type LayoutState = {
+  sidebarOpen: boolean;
+  sidebarWidth: number;
+  panelOpen: boolean;
+  panelWidth: number;
+  panelTab: PanelTab;
+  view: UiView;
+  terminalOpen: boolean;
+  closedProjects: Record<string, boolean>;
+  librarySelected: string;
 };
 
 export type UiState = {
@@ -46,8 +61,62 @@ export type UiState = {
   sequenceHint: string | null;
   focusSearchNonce: number;
   focusComposerNonce: number;
+  focusFilesNonce: number;
+  pendingIdePath: string | null;
+  /** The file the IDE editor currently shows, for the panel tree's selection. */
+  ideActivePath: string | null;
   pendingRouteFocus: boolean;
+  layout: LayoutState;
 };
+
+const LAYOUT_KEY = "h4rn.layout";
+const DEFAULT_LAYOUT: LayoutState = {
+  sidebarOpen: true,
+  sidebarWidth: 288,
+  panelOpen: false,
+  panelWidth: 400,
+  panelTab: "changes",
+  view: "thread",
+  terminalOpen: false,
+  closedProjects: { "orion\u0000/home/you/code/infra": true },
+  librarySelected: "playwright",
+};
+
+function readLayout(): LayoutState {
+  try {
+    const raw = window.localStorage.getItem(LAYOUT_KEY);
+    if (!raw) return { ...DEFAULT_LAYOUT, closedProjects: { ...DEFAULT_LAYOUT.closedProjects } };
+    const parsed = JSON.parse(raw) as Partial<LayoutState>;
+    const panelTab: PanelTab =
+      parsed.panelTab === "files" || parsed.panelTab === "subagents" ? parsed.panelTab : "changes";
+    return {
+      ...DEFAULT_LAYOUT,
+      ...parsed,
+      panelTab,
+      sidebarWidth: clampNumber(parsed.sidebarWidth, 240, 420, DEFAULT_LAYOUT.sidebarWidth),
+      panelWidth: clampNumber(parsed.panelWidth, 320, 640, DEFAULT_LAYOUT.panelWidth),
+      closedProjects: { ...DEFAULT_LAYOUT.closedProjects, ...(parsed.closedProjects ?? {}) },
+    };
+  } catch {
+    return { ...DEFAULT_LAYOUT, closedProjects: { ...DEFAULT_LAYOUT.closedProjects } };
+  }
+}
+
+function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(min, Math.min(max, value))
+    : fallback;
+}
+
+function writeLayout(layout: LayoutState): void {
+  try {
+    // The view (Thread/IDE) is a per-visit choice; the rest of the shell is
+    // remembered the way the prototype remembers panel and width.
+    window.localStorage.setItem(LAYOUT_KEY, JSON.stringify({ ...layout, view: "thread" }));
+  } catch {
+    // Layout memory is a convenience; the session still works without it.
+  }
+}
 
 export type ToastVariant = "error" | "info" | "success";
 
@@ -132,7 +201,16 @@ function createInitialState(): AppState {
       sequenceHint: null,
       focusSearchNonce: 0,
       focusComposerNonce: 0,
+      focusFilesNonce: 0,
+      pendingIdePath: null,
+      ideActivePath: null,
       pendingRouteFocus: true,
+      layout: {
+        ...readLayout(),
+        view: route.kind === "ide" ? "ide" : "thread",
+        // The /ide deep link is an editor first: open its file tree.
+        ...(route.kind === "ide" ? { panelOpen: true, panelTab: "files" as PanelTab } : {}),
+      },
     },
   };
 }
@@ -245,6 +323,12 @@ export function dismissToast(id: number): void {
 export function navigate(route: Route): void {
   pushRoute(route);
   const state = getState();
+  // Thread links keep whichever view is open; every other destination is a
+  // page, so it only makes sense on the Thread side of the shell.
+  const view: UiView =
+    route.kind === "ide" ? "ide" : route.kind === "thread" ? state.ui.layout.view : "thread";
+  const layout: LayoutState = { ...state.ui.layout, view };
+  if (layout.view !== state.ui.layout.view) writeLayout(layout);
   setState({
     ...state,
     ui: {
@@ -253,6 +337,7 @@ export function navigate(route: Route): void {
       selectedThreadId: route.kind === "thread" ? route.threadId : state.ui.selectedThreadId,
       pendingRouteFocus: true,
       paletteOpen: false,
+      layout,
     },
   });
   if (route.kind === "thread") void ensureThread(route.threadId);
@@ -322,6 +407,116 @@ export function setFilter(patch: Partial<ThreadFilterState>): void {
 
 export function clearFilter(): void {
   setFilter({ host: null, harness: null, needsAttention: false, unread: false });
+}
+
+// ---------------------------------------------------------------------------
+// Layout: one sidebar, one right panel, and the Thread/IDE view
+// ---------------------------------------------------------------------------
+
+export function setLayout(patch: Partial<LayoutState>): void {
+  const state = getState();
+  const layout = { ...state.ui.layout, ...patch };
+  writeLayout(layout);
+  setState({ ...state, ui: { ...state.ui, layout } });
+}
+
+export function setView(view: UiView): void {
+  const state = getState();
+  if (state.ui.layout.view === view && (view !== "thread" || state.ui.route.kind !== "ide")) {
+    return;
+  }
+  const route =
+    view === "thread" && state.ui.route.kind === "ide"
+      ? { kind: "inbox" as const }
+      : state.ui.route;
+  if (route !== state.ui.route) pushRoute(route);
+  const layout: LayoutState = {
+    ...state.ui.layout,
+    view,
+    // Entering the IDE with the panel closed reveals the file tree; the panel
+    // is part of the editor rather than an overlay.
+    ...(view === "ide" && !state.ui.layout.panelOpen
+      ? { panelOpen: true, panelTab: "files" as PanelTab }
+      : {}),
+  };
+  writeLayout(layout);
+  setState({ ...state, ui: { ...state.ui, route, layout } });
+}
+
+export function toggleView(): void {
+  setView(getState().ui.layout.view === "ide" ? "thread" : "ide");
+}
+
+export function toggleSidebar(): void {
+  setLayout({ sidebarOpen: !getState().ui.layout.sidebarOpen });
+}
+
+export function setSidebarWidth(width: number): void {
+  setLayout({ sidebarWidth: Math.max(240, Math.min(420, Math.round(width))) });
+}
+
+export function togglePanel(): void {
+  setLayout({ panelOpen: !getState().ui.layout.panelOpen });
+}
+
+export function setPanelTab(panelTab: PanelTab): void {
+  setLayout({ panelOpen: true, panelTab });
+}
+
+export function setPanelWidth(width: number): void {
+  setLayout({ panelWidth: Math.max(320, Math.min(640, Math.round(width))) });
+}
+
+export function toggleProject(key: string): void {
+  const closed = { ...getState().ui.layout.closedProjects };
+  if (closed[key]) delete closed[key];
+  else closed[key] = true;
+  setLayout({ closedProjects: closed });
+}
+
+export function setLibrarySelected(librarySelected: string): void {
+  setLayout({ librarySelected });
+}
+
+export function toggleTerminal(): void {
+  setLayout({ terminalOpen: !getState().ui.layout.terminalOpen });
+}
+
+export function requestFilesFocus(): void {
+  const state = getState();
+  setState({
+    ...state,
+    ui: {
+      ...state.ui,
+      layout: { ...state.ui.layout, panelOpen: true, panelTab: "files" },
+      focusFilesNonce: state.ui.focusFilesNonce + 1,
+    },
+  });
+  writeLayout(getState().ui.layout);
+}
+
+export function openInIde(path: string): void {
+  const state = getState();
+  const layout: LayoutState = {
+    ...state.ui.layout,
+    view: "ide",
+    ...(state.ui.layout.panelOpen ? {} : { panelOpen: true, panelTab: "files" as PanelTab }),
+  };
+  writeLayout(layout);
+  setState({ ...state, ui: { ...state.ui, layout, pendingIdePath: path } });
+}
+
+export function setIdeActivePath(path: string | null): void {
+  const state = getState();
+  if (state.ui.ideActivePath === path) return;
+  setState({ ...state, ui: { ...state.ui, ideActivePath: path } });
+}
+
+export function takePendingIdePath(): string | null {
+  const state = getState();
+  const path = state.ui.pendingIdePath;
+  if (path !== null) setState({ ...state, ui: { ...state.ui, pendingIdePath: null } });
+  return path;
 }
 
 // ---------------------------------------------------------------------------
@@ -412,6 +607,8 @@ export function startConnection(): void {
     window.addEventListener("popstate", () => {
       const route = readRoute();
       const state = getState();
+      const view: UiView =
+        route.kind === "ide" ? "ide" : route.kind === "thread" ? state.ui.layout.view : "thread";
       setState({
         ...state,
         ui: {
@@ -419,6 +616,7 @@ export function startConnection(): void {
           route,
           selectedThreadId: route.kind === "thread" ? route.threadId : state.ui.selectedThreadId,
           pendingRouteFocus: true,
+          layout: { ...state.ui.layout, view },
         },
       });
       if (route.kind === "thread") void ensureThread(route.threadId);

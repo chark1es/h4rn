@@ -1,0 +1,40 @@
+import {
+  BellIcon,
+  CommandIcon,
+  LayersIcon,
+  PlugIcon,
+  ServerIcon,
+  SettingsIcon,
+  SmartphoneIcon,
+  SunIcon,
+  UserIcon,
+} from "lucide-react";
+
+export type SettingsSection = {
+  key: string;
+  label: string;
+  icon: typeof SettingsIcon;
+  group?: string;
+};
+
+export const SETTINGS_SECTIONS: SettingsSection[] = [
+  { key: "general", label: "General", icon: SettingsIcon },
+  { key: "appearance", label: "Appearance", icon: SunIcon },
+  { key: "notifications", label: "Notifications", icon: BellIcon },
+  { key: "shortcuts", label: "Shortcuts", icon: CommandIcon },
+  { key: "hosts", label: "Hosts", icon: ServerIcon, group: "Machines" },
+  { key: "devices", label: "Devices", icon: SmartphoneIcon, group: "Machines" },
+  { key: "providers", label: "Providers", icon: LayersIcon, group: "Machines" },
+  { key: "account", label: "Account & relay", icon: UserIcon, group: "Account" },
+];
+
+export const TOOLS_SECTION = {
+  key: "library",
+  label: "MCP servers",
+  icon: PlugIcon,
+  group: "Tools",
+} as const;
+
+export function settingsPath(section: string): string {
+  return `/settings/${section}`;
+}

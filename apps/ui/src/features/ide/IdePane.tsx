@@ -4,8 +4,6 @@ import {
   GitBranchIcon,
   HandIcon,
   Loader2Icon,
-  PanelLeftIcon,
-  SaveIcon,
   SearchIcon,
   TriangleAlertIcon,
   WifiOffIcon,
@@ -13,8 +11,12 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { AgentGlyph } from "@/components/agent/AgentGlyph";
+import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { EmptyState } from "@/components/common/EmptyState";
 import { MOD, SHIFT } from "@/components/common/Kbd";
+import { SidebarReveal } from "@/components/shell/Sidebar";
+import { ViewCluster } from "@/components/thread/ThreadHeader";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -24,70 +26,90 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
-import type { ThreadId, ThreadSummary } from "@/gen";
+import { TerminalPanel } from "@/features/terminal/TerminalPanel";
+import type { ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
+import { glyphForAgentState, glyphForThread } from "@/lib/agent";
 import { toProtoError } from "@/lib/client/errors";
-import { harnessLabel } from "@/lib/entities";
-import { ensureThread, navigate, openNewThread, pushToast, useApp } from "@/lib/store/appStore";
-import type { ThreadLog } from "@/lib/store/projection";
+import { machineSeed } from "@/lib/entities";
+import { monogram } from "@/lib/grouping";
+import {
+  ensureThread,
+  navigate,
+  openNewThread,
+  pushToast,
+  setIdeActivePath,
+  setPanelTab,
+  setView,
+  takePendingIdePath,
+  toggleTerminal,
+  useApp,
+} from "@/lib/store/appStore";
+import { activeThread } from "@/lib/thread-selection";
 import { cn } from "@/lib/utils";
 import { CodeEditor, type CursorPosition } from "./CodeEditor";
 import { DiffView } from "./DiffView";
 import { computeDiff } from "./diff";
-import { FileTree } from "./FileTree";
 import { SearchPanel } from "./SearchPanel";
 import { TabStrip } from "./TabStrip";
-import { type IdeTab, isDirty } from "./tabs";
+import type { IdeTab } from "./tabs";
 import { languageLabel, useIdeSession, type WorkspaceOption } from "./useIdeSession";
-
-function buildOptions(
-  threads: Record<ThreadId, ThreadSummary>,
-  logs: Record<ThreadId, ThreadLog>,
-  selected: ThreadId | null,
-): WorkspaceOption[] {
-  const byPath = new Map<string, WorkspaceOption>();
-  for (const thread of Object.values(threads)) {
-    if (!thread.workspace_path) continue;
-    const turn = logs[thread.thread_id]?.turns.at(-1)?.id ?? null;
-    const option: WorkspaceOption = {
-      path: thread.workspace_path,
-      host: thread.host,
-      threadId: thread.thread_id,
-      threadTitle: thread.title,
-      turnId: turn,
-      harness: thread.harness,
-    };
-    const existing = byPath.get(thread.workspace_path);
-    if (!existing || thread.thread_id === selected) byPath.set(thread.workspace_path, option);
-  }
-  return [...byPath.values()];
-}
 
 function workspaceName(path: string): string {
   return path.split("/").filter(Boolean).at(-1) ?? path;
 }
 
+function workspaceFor(thread: ThreadSummary | null, turnId: string | null): WorkspaceOption | null {
+  if (!thread?.workspace_path) return null;
+  return {
+    path: thread.workspace_path,
+    host: thread.host,
+    threadId: thread.thread_id,
+    threadTitle: thread.title,
+    turnId,
+    harness: thread.harness,
+  };
+}
+
 export function IdePane() {
   const isPhone = useIsPhone();
   const threads = useApp((state) => state.threads);
+  const hosts = useApp((state) => state.hosts);
+  const route = useApp((state) => state.ui.route);
   const logs = useApp((state) => state.logs);
   const selectedThread = useApp((state) => state.ui.selectedThreadId);
   const connection = useApp((state) => state.connection.status);
+  const terminalOpen = useApp((state) => state.ui.layout.terminalOpen);
   const offline = connection !== "online";
 
-  const options = useMemo(
-    () => buildOptions(threads, logs, selectedThread),
-    [threads, logs, selectedThread],
-  );
-  const workspace = options[0] ?? null;
+  const thread = activeThread(threads, selectedThread);
+  const latestTurn = thread ? (logs[thread.thread_id]?.turns.at(-1)?.id ?? null) : null;
+  const workspace = useMemo(() => workspaceFor(thread, latestTurn), [thread, latestTurn]);
 
   const session = useIdeSession(workspace);
   const active = session.active;
   const { state } = session;
+  const pendingIdePath = useApp((store) => store.ui.pendingIdePath);
+  const openFile = session.openFile;
+  const ideActivePath = active?.path ?? null;
+
+  // A click in the panel's Files tab asks the IDE to open that file; the IDE
+  // consumes the request here so the panel never needs the editor's state.
+  useEffect(() => {
+    if (!pendingIdePath) return;
+    const path = takePendingIdePath();
+    if (path) openFile(path);
+  }, [pendingIdePath, openFile]);
+
+  // The panel's tree highlights the file the editor is showing.
+  useEffect(() => {
+    setIdeActivePath(ideActivePath);
+  }, [ideActivePath]);
+
+  useEffect(() => () => setIdeActivePath(null), []);
 
   const [panel, setPanel] = useState<"search" | "diff" | null>(null);
-  const [treeOpen, setTreeOpen] = useState(false);
+  const [terminalMounted, setTerminalMounted] = useState(terminalOpen);
   const [cursor, setCursor] = useState<CursorPosition>({ line: 1, column: 1 });
   const [pendingClose, setPendingClose] = useState<IdeTab | null>(null);
   const [closing, setClosing] = useState(false);
@@ -100,8 +122,8 @@ export function IdePane() {
   // The IDE can be opened straight from a URL, before any thread screen has
   // hydrated the log that carries the latest turn id for agent diffs.
   useEffect(() => {
-    if (workspace?.threadId) ensureThread(workspace.threadId);
-  }, [workspace?.threadId]);
+    if (thread?.thread_id) ensureThread(thread.thread_id);
+  }, [thread?.thread_id]);
 
   const toastError = useCallback((error: unknown) => {
     const proto = toProtoError(error);
@@ -163,12 +185,11 @@ export function IdePane() {
       }
       if (event.key === "Escape") {
         if (panel) setPanel(null);
-        if (treeOpen) setTreeOpen(false);
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [panel, save, treeOpen]);
+  }, [panel, save]);
 
   if (!workspace) {
     return (
@@ -183,8 +204,6 @@ export function IdePane() {
       </main>
     );
   }
-
-  const dirty = active ? isDirty(active) : false;
   const external = active ? state.external[active.path] : undefined;
   const readOnly = offline || !active || active.binary || active.truncated;
   const editor = (() => {
@@ -197,13 +216,10 @@ export function IdePane() {
           description="Choose a file in the tree, or search the workspace. Diffs work without opening the editor first."
           action={
             <>
-              {isPhone ? (
-                <Button variant="secondary" onClick={() => setTreeOpen(true)}>
-                  <PanelLeftIcon aria-hidden />
-                  Files
-                </Button>
-              ) : null}
-              <Button variant={isPhone ? "ghost" : "secondary"} onClick={() => setPanel("search")}>
+              <Button variant="secondary" onClick={() => setPanelTab("files")}>
+                Show files
+              </Button>
+              <Button variant="ghost" onClick={() => setPanel("search")}>
                 <SearchIcon aria-hidden />
                 Search
               </Button>
@@ -297,7 +313,7 @@ export function IdePane() {
               type="button"
               className="q-btn ghost"
               style={{ height: 26 }}
-              onClick={() => setTreeOpen(true)}
+              onClick={() => setPanelTab("files")}
             >
               Pick another file
             </button>
@@ -319,64 +335,82 @@ export function IdePane() {
     );
   })();
 
-  const tree = (
-    <FileTree
-      root={state.listings[""]}
-      listings={state.listings}
-      expanded={state.expanded}
-      activePath={active?.path ?? null}
-      agentChanges={state.agentChanges}
-      agentLoading={state.agentLoading}
-      loading={state.treeLoading}
-      error={state.treeError}
-      workspaceName={workspaceName(workspace.path)}
-      host={workspace.host}
-      changeLabel={
-        workspace.threadTitle && workspace.harness
-          ? `${workspace.threadTitle} · ${harnessLabel(workspace.harness)}`
-          : undefined
-      }
-      className={isPhone ? "fill" : undefined}
-      onToggle={session.toggleDirectory}
-      onOpen={(path) => {
-        session.openFile(path);
-        if (isPhone) setTreeOpen(false);
-      }}
-      onOpenAgent={(path) => {
-        openDiff(path, "agent");
-        if (isPhone) setTreeOpen(false);
-      }}
-      onRetry={() => void session.loadListing("")}
-      onSearch={() => setPanel((current) => (current === "search" ? null : "search"))}
-    />
-  );
-
   const showDiff = panel === "diff";
+  const projectName = workspaceName(workspace.path);
+  const glyph = thread
+    ? glyphForThread(thread, hosts[thread.host]?.online ?? false)
+    : glyphForAgentState("idle");
+
+  const backToThread = () => {
+    if (!thread) return;
+    if (route.kind === "ide") navigate({ kind: "thread", threadId: thread.thread_id });
+    else setView("thread");
+  };
 
   return (
     <>
-      {!isPhone ? tree : null}
       <main className="q-main" aria-label="IDE" style={{ flex: 1 }}>
+        <header className="q-th-head bare">
+          <SidebarReveal />
+          <div className="q-th-titles">
+            <h1 className="q-ws-title">
+              <span className="q-pmono" aria-hidden="true">
+                {monogram(projectName)}
+              </span>
+              {projectName}
+            </h1>
+            <div className="q-prov">
+              <EntityAvatar
+                seed={machineSeed(workspace.host)}
+                kind="machine"
+                label={workspace.host}
+                size={14}
+              />
+              <span>{workspace.host}</span>
+              <span className="q-sep">/</span>
+              <span className="q-mono" style={{ fontSize: 11.5 }}>
+                {workspace.path}
+              </span>
+            </div>
+          </div>
+          {thread ? (
+            <button
+              type="button"
+              className="q-tchip"
+              title={`Back to the thread  ${MOD}E`}
+              onClick={backToThread}
+            >
+              <AgentGlyph glyph={glyph} size={14} />
+              <span className="t">{thread.title}</span>
+              {thread.needs_attention ? <span className="s">Needs approval</span> : null}
+            </button>
+          ) : null}
+          <div className="q-th-actions">
+            <span className="q-vsep" />
+            <ViewCluster
+              terminalOpen={terminalOpen}
+              onToggleTerminal={() => {
+                setTerminalMounted(true);
+                toggleTerminal();
+              }}
+            />
+          </div>
+        </header>
+
         <TabStrip
           tabs={state.tabs.tabs}
           activePath={state.tabs.activePath}
+          note={
+            state.restoredTabs > 0
+              ? `Restored ${state.restoredTabs} ${state.restoredTabs === 1 ? "tab" : "tabs"}`
+              : null
+          }
           onActivate={session.activateTab}
           onClose={close}
           onReorder={session.moveTab}
         />
 
         <div className="q-ebar">
-          {isPhone ? (
-            <button
-              type="button"
-              aria-label="Open files"
-              onClick={() => setTreeOpen(true)}
-              className="q-ibtn"
-              style={{ marginLeft: -6 }}
-            >
-              <PanelLeftIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            </button>
-          ) : null}
           <span
             className="q-mono"
             style={{
@@ -391,37 +425,35 @@ export function IdePane() {
             {active?.path ?? workspace.path}
           </span>
           <span className="grow" />
-          {!isPhone ? (
-            <div className="q-seg inline" role="tablist" aria-label="Editor mode">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={!showDiff}
-                onClick={() => setPanel((current) => (current === "diff" ? null : current))}
-              >
-                Edit
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={showDiff && state.diffMode === "head"}
-                disabled={!active}
-                onClick={() => active && openDiff(active.path, "head")}
-              >
-                vs HEAD
-              </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={showDiff && state.diffMode === "agent"}
-                disabled={!active}
-                onClick={() => active && openDiff(active.path, "agent")}
-              >
-                vs agent
-              </button>
-            </div>
-          ) : null}
-          {!isPhone && active ? (
+          <div className="q-seg inline" role="tablist" aria-label="Editor mode">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={!showDiff}
+              onClick={() => setPanel((current) => (current === "diff" ? null : current))}
+            >
+              Edit
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={showDiff && state.diffMode === "head"}
+              disabled={!active}
+              onClick={() => active && openDiff(active.path, "head")}
+            >
+              vs HEAD
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={showDiff && state.diffMode === "agent"}
+              disabled={!active}
+              onClick={() => active && openDiff(active.path, "agent")}
+            >
+              vs agent
+            </button>
+          </div>
+          {active ? (
             <button
               type="button"
               className="q-btn ghost"
@@ -432,28 +464,6 @@ export function IdePane() {
               <HandIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               Hand to agent
             </button>
-          ) : null}
-          {isPhone ? (
-            <>
-              <button
-                type="button"
-                onClick={() => void save()}
-                disabled={!dirty || readOnly}
-                aria-label="Save file"
-                className="q-ibtn"
-              >
-                <SaveIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-              </button>
-              <button
-                type="button"
-                aria-label="Search workspace"
-                aria-pressed={panel === "search"}
-                onClick={() => setPanel((current) => (current === "search" ? null : "search"))}
-                className={cn("q-ibtn", panel === "search" && "on")}
-              >
-                <SearchIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-              </button>
-            </>
           ) : null}
         </div>
 
@@ -598,6 +608,17 @@ export function IdePane() {
           ) : null}
         </div>
 
+        {terminalMounted && workspace.threadId ? (
+          <TerminalPanel
+            key={workspace.threadId}
+            threadId={workspace.threadId}
+            host={workspace.host}
+            cwd={workspace.path}
+            hidden={!terminalOpen}
+            onClose={toggleTerminal}
+          />
+        ) : null}
+
         <div className="q-statusbar">
           <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <GitBranchIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
@@ -622,17 +643,6 @@ export function IdePane() {
           ) : null}
         </div>
       </main>
-
-      {isPhone ? (
-        <Sheet open={treeOpen} onOpenChange={setTreeOpen}>
-          <SheetContent side="left" className="w-[86vw] max-w-sm p-0">
-            <SheetTitle className="sr-only">Workspace files</SheetTitle>
-            <div style={{ display: "flex", height: "100%", minHeight: 0, flexDirection: "column" }}>
-              {tree}
-            </div>
-          </SheetContent>
-        </Sheet>
-      ) : null}
 
       <Dialog open={pendingClose !== null} onOpenChange={(open) => !open && setPendingClose(null)}>
         <DialogContent>

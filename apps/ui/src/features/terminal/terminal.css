@@ -14,7 +14,7 @@
 }
 
 .terminal-surface .xterm-viewport {
-  background-color: transparent !important;
+  background-color: transparent;
   scrollbar-width: thin;
   scrollbar-color: color-mix(in oklch, var(--fg-3) 35%, transparent) transparent;
 }
