@@ -91,5 +91,24 @@ services:
       DATABASE_URL: postgres://orbitid:${ORBITID_PG_PASSWORD:-orbitid}@orbitid-postgres:5432/orbitid
       POSTGRES_PASSWORD: ${ORBITID_PG_PASSWORD:-orbitid}
 
+  # Second OrbitID on the same database, used only by the e2e tests to mint a
+  # token whose `iss` is a non-configured issuer (same signing keys, different
+  # base URL). It is not part of a normal deployment.
+  orbitid-alt:
+    profiles: ["orbitid-alt"]
+    image: ${H4RN_ORBITID_IMAGE:-orbitid:local}
+    depends_on:
+      orbitid-postgres:
+        condition: service_healthy
+    ports:
+      - "${H4RN_ORBITID_ALT_PORT:-4001}:4000"
+    environment:
+      NODE_ENV: development
+      ORBITID_PORT: 4000
+      ORBITID_BASE_URL: ${ORBITID_ALT_BASE_URL:-http://localhost:4001}
+      ORBITID_ENCRYPTION_KEY: ${ORBITID_ENCRYPTION_KEY:?set ORBITID_ENCRYPTION_KEY for the orbitid profile}
+      DATABASE_URL: postgres://orbitid:${ORBITID_PG_PASSWORD:-orbitid}@orbitid-postgres:5432/orbitid
+      POSTGRES_PASSWORD: ${ORBITID_PG_PASSWORD:-orbitid}
+
 volumes:
   postgres-data:

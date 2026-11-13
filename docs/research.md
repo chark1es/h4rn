@@ -287,6 +287,29 @@ Every quirk below has a coding consequence. This is the checklist ADR-011 is wri
 32. **RS256 only.** `alg: none` and HS256 are not offered, and verification pins
     `algorithms: ["RS256"]`. Do not make the algorithm configurable.
 
+**Live-suite findings (2026-11-12).** These were found by actually running
+`scripts/test-connect.sh --orbitid` against the TS build in Docker, not inferred from source.
+
+33. **A session JWT lives 60 seconds by default** (`session.tokenLifetimeSeconds`). Automating
+    `/oauth/authorize` with a bearer session works, but if the JWT was minted before a compile,
+    queue wait or retry, the next authorize call silently returns to
+    `<homeUrl>/sign-in?redirect_url=…` (or `login_required` under `prompt=none`) instead of the
+    application redirect. Workaround: `PATCH /v1/instance {"session":{"tokenLifetimeSeconds":3600}}`
+    and mint the JWT immediately before the run. The test script pre-builds the test binary first
+    and does both.
+34. **Session JWTs are issuer-bound, not key-bound.** `verifySessionToken` pins
+    `issuer: ctx.env.baseUrl` (`[TS]` `services/tokens.ts:276-293`). Two OrbitID instances can
+    share a Postgres database and signing keys, but instance B rejects a JWT minted by instance A
+    with `401 authentication_invalid`. Workaround: reuse the signed-in `__client` cookie against
+    each instance's `/v1/client/sessions/:id/tokens` to mint a per-issuer JWT; do not copy a JWT
+    between base URLs.
+35. **A shared key table makes an unconfigured issuer look cryptographically valid.** Because both
+    instances above sign with the same `signing_keys` row, an ID token minted by the alternate base
+    URL verifies against the configured instance's `jwks_uri`; only the `iss` claim distinguishes
+    them. Treat issuer validation as a separate, mandatory check and report it distinctly
+    (`issuer_mismatch`) rather than relying on signature failure. The e2e suite builds a second
+    instance on the same DB specifically to prove this rejection.
+
 ---
 
 ## 6. Antigravity (`agy` 1.5.7)
