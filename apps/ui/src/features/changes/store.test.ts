@@ -184,6 +184,22 @@ describe("revertFile", () => {
     expect(result.message).toContain("changed");
   });
 
+  test("refuses to revert a binary diff", async () => {
+    const seen: ClientRequest[] = [];
+    const result = await revertFile(
+      async (request) => {
+        seen.push(request);
+        return { type: "ack" };
+      },
+      thread,
+      file,
+      { ...modified, binary: true },
+      { kind: "head" },
+    );
+    expect(result.outcome).toBe("skipped");
+    expect(seen).toHaveLength(0);
+  });
+
   test("fetches a diff when the caller has not loaded one", async () => {
     const seen: ClientRequest[] = [];
     const result = await revertFile(

@@ -212,8 +212,8 @@ async function main() {
 
     // The panel lists the turn's file and renders the diff against the agent's
     // starting point.
-    await panel.getByText("notes.txt").waitFor({ timeout: 10_000 });
-    await panel.getByText("hello from the fake harness").waitFor({ timeout: 10_000 });
+    await panel.getByText("notes.txt").first().waitFor({ timeout: 10_000 });
+    await panel.getByText("hello from the fake harness").first().waitFor({ timeout: 10_000 });
 
     // Per-file revert goes back to the pre-turn state, which for a new file
     // means deleting it.

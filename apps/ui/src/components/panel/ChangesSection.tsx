@@ -104,8 +104,16 @@ export function ChangesSection({
             </button>
           </div>
         ) : loading && !turnChanges ? (
-          <div className="q-sub-empty" role="status">
-            Loading changes…
+          <div
+            role="status"
+            aria-busy="true"
+            aria-label="Loading changes"
+            style={{ padding: "10px 12px" }}
+          >
+            <div className="q-skel" style={{ height: 14, width: "52%", marginBottom: 12 }} />
+            {[0, 1, 2, 3].map((row) => (
+              <div key={row} className="q-skel" style={{ height: 28, marginBottom: 6 }} />
+            ))}
           </div>
         ) : files.length === 0 ? (
           <div className="q-empty q-rp-empty">

@@ -130,6 +130,13 @@ export async function revertFile(
   if (!resolved) {
     return { path: file.path, outcome: "skipped", message: "No diff is available." };
   }
+  if (resolved.binary) {
+    return {
+      path: file.path,
+      outcome: "skipped",
+      message: "Binary files cannot be reverted from here.",
+    };
+  }
   try {
     if (resolved.before === null) {
       const response = await request({

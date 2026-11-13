@@ -290,6 +290,41 @@ fn diff_against_an_agent_turn_uses_the_pre_turn_snapshot() {
     assert_eq!(changes.files[0].removed, 0);
 }
 
+#[test]
+fn a_file_the_turn_created_diffs_from_nothing() {
+    let fixture = Fixture::new();
+    let thread = ThreadId::new("th_new");
+    let turn = TurnId::new("turn_new");
+    let snapshots = fixture.service.snapshots();
+    snapshots
+        .capture(
+            &fixture.workspace,
+            &thread,
+            &turn,
+            &["new.txt".to_owned()],
+        )
+        .expect("capture");
+    fixture.write("new.txt", "written by the turn\n");
+
+    let diff = fixture
+        .service
+        .diff(
+            fixture.workspace(),
+            "new.txt",
+            &DiffAgainst::AgentTurn {
+                thread_id: thread.clone(),
+                turn_id: turn.clone(),
+            },
+        )
+        .expect("diff");
+    assert!(
+        diff.before.is_none(),
+        "a new file has no pre-turn text, so revert can delete it"
+    );
+    assert_eq!(diff.after.as_deref(), Some("written by the turn\n"));
+    assert!(diff.note.is_some());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn search_streams_matches_and_finishes() {
     let fixture = Fixture::new();

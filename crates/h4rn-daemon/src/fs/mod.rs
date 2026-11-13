@@ -557,7 +557,10 @@ impl FsService {
                             .and_then(|blob| self.snapshots.read_blob(blob));
                         (bytes, None)
                     }
-                    Some(_) => (Some(Vec::new()), None),
+                    Some(_) => (
+                        None,
+                        Some("The file did not exist when this turn started.".into()),
+                    ),
                     None => (
                         None,
                         Some(

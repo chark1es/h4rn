@@ -16,11 +16,14 @@ import {
   appendComment,
   checksLabel,
   forgeLabel,
+  mergeableLabel,
   mergeDiffPages,
   parsePatch,
   removeComment,
   replaceComment,
+  reviewChip,
   stateLabel,
+  summaryChecksLabel,
   threadForLine,
 } from "./store";
 
@@ -133,6 +136,27 @@ describe("labels", () => {
     expect(checksLabel("failing", 4, 5)).toBe("1 failing");
     expect(checksLabel("pending", 0, 0)).toBe("Checks running");
     expect(checksLabel("unknown", 0, 0)).toBe("No checks");
+  });
+
+  test("a list row never invents check counts", () => {
+    expect(summaryChecksLabel("passing")).toBe("All checks passed");
+    expect(summaryChecksLabel("failing")).toBe("Checks failing");
+    expect(summaryChecksLabel("pending")).toBe("Checks running");
+    expect(summaryChecksLabel("unknown")).toBeNull();
+  });
+
+  test("review chips match the design's words", () => {
+    expect(reviewChip("changes_requested")).toEqual({
+      label: "Changes requested",
+      tone: "warn",
+    });
+    expect(reviewChip("pending")?.label).toBe("Review requested");
+    expect(reviewChip("dismissed")).toBeNull();
+  });
+
+  test("mergeability says nothing when the forge cannot tell", () => {
+    expect(mergeableLabel("conflicting")).toEqual({ label: "Merge conflicts", tone: "danger" });
+    expect(mergeableLabel("unknown")).toBeNull();
   });
 });
 

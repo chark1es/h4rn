@@ -13,8 +13,10 @@ import type {
   ForgeFileDiff,
   ForgeHandoff,
   ForgeKind,
+  ForgeMergeable,
   ForgePrFilter,
   ForgePrState,
+  ForgeReviewState,
   ForgePullRequest,
   ForgeRemote,
   ForgeRepoRef,
@@ -305,6 +307,59 @@ export function checksLabel(state: ForgeChecksState, passed: number, total: numb
       return "Checks running";
     case "unknown":
       return "No checks";
+  }
+}
+
+/**
+ * A list row's check state, without per-check counts.
+ *
+ * The list endpoint only reports the aggregate, so saying "0 of 0 checks
+ * passed" would be a lie; `null` means the row says nothing.
+ */
+export function summaryChecksLabel(state: ForgeChecksState): string | null {
+  switch (state) {
+    case "passing":
+      return "All checks passed";
+    case "failing":
+      return "Checks failing";
+    case "pending":
+      return "Checks running";
+    case "unknown":
+      return null;
+  }
+}
+
+/** The list row's review chip, or `null` when there is nothing to say. */
+export function reviewChip(state: ForgeReviewState): {
+  label: string;
+  tone: "ok" | "warn" | "danger" | "you" | "";
+} | null {
+  switch (state) {
+    case "changes_requested":
+      return { label: "Changes requested", tone: "warn" };
+    case "approved":
+      return { label: "Approved", tone: "ok" };
+    case "pending":
+      return { label: "Review requested", tone: "you" };
+    case "commented":
+      return { label: "Review comments", tone: "" };
+    case "dismissed":
+      return null;
+  }
+}
+
+/** The mergeability line for the detail header. */
+export function mergeableLabel(state: ForgeMergeable): {
+  label: string;
+  tone: "ok" | "warn" | "danger" | "";
+} | null {
+  switch (state) {
+    case "mergeable":
+      return { label: "No conflicts", tone: "ok" };
+    case "conflicting":
+      return { label: "Merge conflicts", tone: "danger" };
+    case "unknown":
+      return null;
   }
 }
 

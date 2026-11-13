@@ -204,15 +204,19 @@ impl HarnessSession for FakeSession {
         // `[[write:relative/path]]<content>`, so daemon end-to-end tests can
         // produce a real working-tree change without a vendor harness.
         if let Some((path, _content)) = parse_write_directive(&input.text) {
-            // Announce the edit first so the daemon snapshots the pre-turn
-            // bytes, then write. The brief pause is what makes the ordering
-            // deterministic for the single-threaded test scripts.
+            // Announce the edit first. The write itself runs on its own task
+            // after a short pause: `send` returns immediately, which lets the
+            // daemon's pump observe the running tool call and snapshot the
+            // pre-turn bytes before the file exists. Writing inline here would
+            // race that snapshot because the daemon holds the thread lock for
+            // the whole `send` call.
             let now = chrono::Utc::now();
+            let tool_call_id = format!("fake-edit-{now}");
             send(
                 &self.sender,
                 HarnessEvent::ToolCall {
                     tool_call: ToolCall {
-                        tool_call_id: format!("fake-edit-{now}"),
+                        tool_call_id: tool_call_id.clone(),
                         name: "Edit".into(),
                         status: ToolCallStatus::Running,
                         summary: path.to_owned(),
@@ -223,30 +227,49 @@ impl HarnessSession for FakeSession {
                     },
                 },
             );
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            if let Some(written) = apply_write_directive(&self.workspace, &input.text) {
-                send(
-                    &self.sender,
-                    HarnessEvent::ToolCall {
-                        tool_call: ToolCall {
-                            tool_call_id: format!("fake-edit-{now}"),
-                            name: "Edit".into(),
-                            status: ToolCallStatus::Completed,
-                            summary: written.clone(),
-                            input: None,
-                            output: Some(format!("wrote {written}")),
-                            started_at: now,
-                            completed_at: Some(chrono::Utc::now()),
+            let sender = self.sender.clone();
+            let workspace = self.workspace.clone();
+            let text = input.text;
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if let Some(written) = apply_write_directive(&workspace, &text) {
+                    send(
+                        &sender,
+                        HarnessEvent::ToolCall {
+                            tool_call: ToolCall {
+                                tool_call_id,
+                                name: "Edit".into(),
+                                status: ToolCallStatus::Completed,
+                                summary: written.clone(),
+                                input: None,
+                                output: Some(format!("wrote {written}")),
+                                started_at: now,
+                                completed_at: Some(chrono::Utc::now()),
+                            },
                         },
+                    );
+                    send(
+                        &sender,
+                        HarnessEvent::TextDelta {
+                            text: format!("wrote {written}"),
+                        },
+                    );
+                }
+                send(
+                    &sender,
+                    HarnessEvent::TextDelta {
+                        text: format!("echo: {text}"),
                     },
                 );
                 send(
-                    &self.sender,
-                    HarnessEvent::TextDelta {
-                        text: format!("wrote {written}"),
+                    &sender,
+                    HarnessEvent::TurnCompleted {
+                        status: TurnStatus::Completed,
+                        usage: Usage::default(),
                     },
                 );
-            }
+            });
+            return Ok(());
         }
 
         send(

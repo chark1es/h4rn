@@ -30,11 +30,14 @@ import {
   checksLabel,
   ForgeApi,
   forgeLabel,
+  mergeableLabel,
   mergeDiffPages,
   parsePatch,
   removeComment,
   replaceComment,
+  reviewChip,
   stateLabel,
+  summaryChecksLabel,
 } from "@/features/forge/store";
 import type {
   ForgeAccount,
@@ -57,7 +60,7 @@ import { getClient, navigate, openThread, pushToast, useApp } from "@/lib/store/
 
 const api = () => new ForgeApi((request) => getClient().request(request));
 
-type FilterKey = "open" | "mine" | "review";
+type FilterKey = "open" | "mine" | "review" | "branch";
 
 const FILTERS: Array<{ key: FilterKey; label: string }> = [
   { key: "open", label: "Open" },
@@ -65,12 +68,14 @@ const FILTERS: Array<{ key: FilterKey; label: string }> = [
   { key: "review", label: "Review" },
 ];
 
-function filterFor(key: FilterKey): ForgePrFilter {
+function filterFor(key: FilterKey, branch: string | null): ForgePrFilter {
   switch (key) {
     case "mine":
       return { type: "mine" };
     case "review":
       return { type: "review_requested" };
+    case "branch":
+      return branch ? { type: "by_branch", branch } : { type: "open" };
     default:
       return { type: "open" };
   }
@@ -198,6 +203,14 @@ export function PullRequestsPage() {
     () => threadList.find((thread) => thread.workspace_path) ?? null,
     [threadList],
   );
+  const threadBranch = activeThread?.branch ?? null;
+  const filters = useMemo(
+    () =>
+      threadBranch
+        ? [...FILTERS, { key: "branch" as const, label: "This branch" }]
+        : FILTERS,
+    [threadBranch],
+  );
 
   const openSettings = () =>
     navigate({ kind: "placeholder", surface: "settings", path: "/settings/forges" });
@@ -270,7 +283,7 @@ export function PullRequestsPage() {
     setListLoading(true);
     setListError(null);
     api()
-      .listPrs(repo, filterFor(filter), page)
+      .listPrs(repo, filterFor(filter, threadBranch), page)
       .then((result) => {
         if (cancelled) return;
         setPrs((current) => (page === 1 ? result.prs : [...current, ...result.prs]));
@@ -285,7 +298,7 @@ export function PullRequestsPage() {
     return () => {
       cancelled = true;
     };
-  }, [repo, filter, page, reloadNonce]);
+  }, [repo, filter, page, reloadNonce, threadBranch]);
 
   if (loadingAccounts) return <PrSkeleton />;
   if (accountsError) {
@@ -380,7 +393,7 @@ export function PullRequestsPage() {
         ) : null}
         <span className="grow" />
         <div className="q-seg" role="tablist" aria-label="Pull request filters">
-          {FILTERS.map((item) => (
+          {filters.map((item) => (
             <button
               key={item.key}
               type="button"
@@ -439,13 +452,22 @@ export function PullRequestsPage() {
           <div className="q-center-empty">
             <div className="q-empty" style={{ width: 380 }}>
               <GitPullRequestIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
-              <h3>No {filter === "review" ? "reviews waiting" : "pull requests"}</h3>
+              <h3>
+                No{" "}
+                {filter === "review"
+                  ? "reviews waiting"
+                  : filter === "branch"
+                    ? "pull requests on this branch"
+                    : "pull requests"}
+              </h3>
               <p>
                 {filter === "mine"
                   ? "Nothing you opened is open on this repository."
                   : filter === "review"
                     ? "No one has asked you to review a pull request."
-                    : "This repository has no open pull requests."}
+                    : filter === "branch"
+                      ? `No open pull request uses ${threadBranch ?? "this branch"} as its head.`
+                      : "This repository has no open pull requests."}
               </p>
             </div>
           </div>
@@ -453,6 +475,8 @@ export function PullRequestsPage() {
           <div className="q-rows">
             {prs.map((pr) => {
               const state = stateLabel(pr.state);
+              const checks = summaryChecksLabel(pr.checks);
+              const review = reviewChip(pr.review);
               return (
                 <button
                   key={`${pr.repo.owner}/${pr.repo.repo}#${pr.number}`}
@@ -473,10 +497,15 @@ export function PullRequestsPage() {
                         {pr.head_branch} → {pr.base_branch}
                       </span>
                       <span className={`q-row-status ${state.tone}`}>{state.label}</span>
-                      {pr.checks !== "unknown" ? (
-                        <span className={`q-row-status ${pr.checks === "failing" ? "danger" : ""}`}>
-                          {checksLabel(pr.checks, 0, 0)}
+                      {checks ? (
+                        <span
+                          className={`q-row-status ${pr.checks === "failing" ? "danger" : ""}`}
+                        >
+                          {checks}
                         </span>
+                      ) : null}
+                      {review ? (
+                        <span className={`q-row-status ${review.tone}`}>{review.label}</span>
                       ) : null}
                     </span>
                   </span>
@@ -946,6 +975,7 @@ function PrDetail({
   }
 
   const state = stateLabel(pr.summary.state);
+  const mergeable = mergeableLabel(pr.mergeable);
   const unresolved = comments?.threads.filter((thread) => !thread.resolved).length ?? 0;
   const passed = checks?.passed ?? 0;
   const total = checks?.total ?? 0;
@@ -978,6 +1008,11 @@ function PrDetail({
             <span className={`q-badge ${state.tone}`} style={{ height: 18 }}>
               {state.label}
             </span>
+            {mergeable ? (
+              <span className={`q-badge ${mergeable.tone}`} style={{ height: 18 }}>
+                {mergeable.label}
+              </span>
+            ) : null}
             <span className="mono" style={{ fontSize: 11.5 }}>
               {pr.summary.head_branch}
             </span>{" "}
