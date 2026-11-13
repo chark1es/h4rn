@@ -1,0 +1,1662 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>h4rn · Quiet native</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ───────────── Tokens ───────────── */
+:root{
+  color-scheme: light;
+  --bg:        oklch(0.995 0.0015 260);
+  --bg-side:   oklch(0.970 0.0025 260);
+  --bg-raised: oklch(1 0 0);
+  --bg-sunk:   oklch(0.978 0.002 260);
+  --fill:      oklch(0.955 0.003 260);
+  --fill-2:    oklch(0.925 0.004 260);
+  --hover:     oklch(0.962 0.003 260);
+  --sel:       oklch(0.940 0.004 260);
+  --line:      oklch(0.915 0.003 260);
+  --line-2:    oklch(0.860 0.004 260);
+  --fg:        oklch(0.210 0.006 260);
+  --fg-2:      oklch(0.440 0.007 260);
+  --fg-3:      oklch(0.510 0.007 260);
+  --accent:    oklch(0.540 0.180 258);
+  --accent-hi: oklch(0.490 0.180 258);
+  --accent-fg: oklch(0.995 0 0);
+  --accent-tx: oklch(0.500 0.170 258);
+  --accent-soft: oklch(0.955 0.024 258);
+  --focus:     oklch(0.600 0.170 258);
+  --warn:      oklch(0.500 0.110 62);
+  --warn-dot:  oklch(0.760 0.150 72);
+  --warn-soft: oklch(0.968 0.030 80);
+  --ok:        oklch(0.490 0.120 150);
+  --ok-dot:    oklch(0.640 0.150 150);
+  --danger:    oklch(0.520 0.190 27);
+  --danger-soft: oklch(0.966 0.020 25);
+  --add-bg:    oklch(0.966 0.028 150);
+  --del-bg:    oklch(0.966 0.020 25);
+  --add-tx:    oklch(0.450 0.120 150);
+  --del-tx:    oklch(0.500 0.180 27);
+  --syn-kw:    oklch(0.470 0.150 300);
+  --syn-str:   oklch(0.480 0.110 150);
+  --syn-fn:    oklch(0.470 0.130 250);
+  --syn-cm:    oklch(0.520 0.010 260);
+  --scrim:     oklch(0.20 0.01 260 / 0.28);
+  --sh-pop:    0 1px 2px oklch(0.2 0.01 260 / .06), 0 10px 28px -10px oklch(0.2 0.01 260 / .22);
+  --sh-dlg:    0 2px 8px oklch(0.2 0.01 260 / .08), 0 28px 64px -16px oklch(0.2 0.01 260 / .32);
+  --s1:#2a78d6; --s2:#eb6834; --s3:#1baf7a; --s4:#6250d6;
+  --font: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --dur-1: 120ms; --dur-2: 180ms; --dur-3: 240ms;
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){ color-scheme: dark; } }
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --bg:        oklch(0.190 0.004 260);
+  --bg-side:   oklch(0.163 0.004 260);
+  --bg-raised: oklch(0.232 0.005 260);
+  --bg-sunk:   oklch(0.172 0.004 260);
+  --fill:      oklch(0.240 0.005 260);
+  --fill-2:    oklch(0.285 0.006 260);
+  --hover:     oklch(0.222 0.005 260);
+  --sel:       oklch(0.252 0.006 260);
+  --line:      oklch(0.268 0.005 260);
+  --line-2:    oklch(0.345 0.006 260);
+  --fg:        oklch(0.945 0.003 260);
+  --fg-2:      oklch(0.760 0.005 260);
+  --fg-3:      oklch(0.640 0.006 260);
+  --accent:    oklch(0.560 0.170 258);
+  --accent-hi: oklch(0.610 0.170 258);
+  --accent-tx: oklch(0.760 0.120 258);
+  --accent-soft: oklch(0.275 0.050 258);
+  --focus:     oklch(0.700 0.140 258);
+  --warn:      oklch(0.830 0.120 80);
+  --warn-dot:  oklch(0.790 0.140 76);
+  --warn-soft: oklch(0.265 0.035 75);
+  --ok:        oklch(0.780 0.130 150);
+  --ok-dot:    oklch(0.700 0.140 150);
+  --danger:    oklch(0.730 0.150 25);
+  --danger-soft: oklch(0.262 0.040 25);
+  --add-bg:    oklch(0.245 0.032 150);
+  --del-bg:    oklch(0.245 0.032 25);
+  --add-tx:    oklch(0.790 0.130 150);
+  --del-tx:    oklch(0.750 0.140 25);
+  --syn-kw:    oklch(0.780 0.110 300);
+  --syn-str:   oklch(0.790 0.110 150);
+  --syn-fn:    oklch(0.790 0.100 250);
+  --syn-cm:    oklch(0.620 0.010 260);
+  --scrim:     oklch(0.05 0.01 260 / 0.5);
+  --sh-pop:    0 1px 2px oklch(0 0 0 / .3), 0 12px 32px -10px oklch(0 0 0 / .6);
+  --sh-dlg:    0 2px 8px oklch(0 0 0 / .35), 0 28px 64px -16px oklch(0 0 0 / .7);
+  --s1:#3987e5; --s2:#d95926; --s3:#199e70; --s4:#9085e9;
+}
+
+/* ───────────── Base ───────────── */
+*,*::before,*::after{ box-sizing:border-box; }
+html,body{ margin:0; height:100%; }
+body{
+  background:var(--bg); color:var(--fg);
+  font: 400 13px/18px var(--font);
+  font-feature-settings: "tnum" 1, "cv11" 1;
+  -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  overflow:hidden;
+}
+::selection{ background: var(--accent-soft); color: var(--fg); }
+button,input,textarea,select{ font:inherit; color:inherit; }
+a{ color:inherit; text-decoration:none; }
+a.t-accent:hover{ text-decoration:underline; text-underline-offset:2px; }
+.kbd svg{ width:11px; height:11px; vertical-align:-1.5px; stroke:currentColor; fill:none; stroke-width:1.75; stroke-linecap:round; stroke-linejoin:round; }
+button{ background:none; border:0; padding:0; cursor:pointer; text-align:inherit; }
+:focus{ outline:none; }
+:focus-visible{ outline:2px solid var(--focus); outline-offset:2px; border-radius:6px; }
+code,.mono{ font-family:var(--mono); font-size:12px; font-feature-settings:"tnum" 1, "zero" 0; }
+.num{ font-variant-numeric: tabular-nums; }
+svg.i{ width:16px; height:16px; flex:none; fill:none; stroke:currentColor; stroke-width:1.5; stroke-linecap:round; stroke-linejoin:round; }
+svg.i.s14{ width:14px; height:14px; } svg.i.s12{ width:12px; height:12px; } svg.i.s18{ width:18px; height:18px; } svg.i.s20{ width:20px; height:20px; } svg.i.s22{ width:22px; height:22px; } svg.i.s24{width:24px;height:24px;}
+* { scrollbar-width: thin; scrollbar-color: var(--line-2) transparent; }
+::-webkit-scrollbar{ width:10px; height:10px; } ::-webkit-scrollbar-thumb{ background:var(--line-2); border-radius:12px; border:3px solid transparent; background-clip:content-box; }
+.sr{ position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; }
+.muted{ color:var(--fg-2); } .faint{ color:var(--fg-3); }
+.t-warn{ color:var(--warn); } .t-ok{ color:var(--ok); } .t-danger{ color:var(--danger); } .t-accent{ color:var(--accent-tx); }
+.sep{ color:var(--line-2); margin:0 6px; }
+.dot{ width:6px; height:6px; border-radius:50%; display:inline-block; flex:none; background:var(--fg-3); }
+.dot.on{ background:var(--ok-dot); } .dot.off{ background:transparent; box-shadow: inset 0 0 0 1.5px var(--fg-3); } .dot.warn{ background:var(--warn-dot); } .dot.you{ background:var(--accent); width:8px; height:8px; }
+
+/* ───────────── Controls ───────────── */
+.btn{ display:inline-flex; align-items:center; gap:6px; height:28px; padding:0 10px; border-radius:6px; font-weight:500; white-space:nowrap;
+  transition: background var(--dur-1) var(--ease-out), box-shadow var(--dur-1) var(--ease-out), color var(--dur-1); }
+.btn.primary{ background:var(--accent); color:var(--accent-fg); }
+.btn.primary:hover{ background:var(--accent-hi); }
+.btn.secondary{ background:var(--bg-raised); box-shadow: inset 0 0 0 1px var(--line-2), 0 1px 0 oklch(0.2 0.01 260 / .04); }
+.btn.secondary:hover{ background:var(--hover); }
+.btn.ghost{ color:var(--fg-2); }
+.btn.ghost:hover{ background:var(--hover); color:var(--fg); }
+.btn.danger{ color:var(--danger); box-shadow: inset 0 0 0 1px var(--line-2); background:var(--bg-raised); }
+.btn.danger:hover{ background:var(--danger-soft); }
+.btn[disabled]{ opacity:.45; cursor:not-allowed; }
+.btn .kbd{ margin-left:2px; }
+.btn.primary .kbd{ color: oklch(1 0 0 / .78); border-color: oklch(1 0 0 / .3); }
+.ibtn{ width:28px; height:28px; display:inline-grid; place-items:center; border-radius:6px; color:var(--fg-2); transition: background var(--dur-1), color var(--dur-1); }
+.ibtn:hover{ background:var(--hover); color:var(--fg); }
+.ibtn.on{ background:var(--fill); color:var(--fg); }
+.kbd{ font: 500 11px/16px var(--font); color:var(--fg-3); padding:0 4px; border-radius:4px; box-shadow: inset 0 0 0 1px var(--line); min-width:18px; text-align:center; display:inline-block; letter-spacing:.02em; }
+.seg{ display:flex; padding:2px; gap:2px; background:var(--fill); border-radius:8px; }
+.seg button{ flex:1; height:24px; border-radius:6px; color:var(--fg-2); font-weight:500; display:flex; align-items:center; justify-content:center; gap:6px; padding:0 10px; transition: background var(--dur-1), color var(--dur-1); white-space:nowrap; }
+.seg button:hover{ color:var(--fg); }
+.seg button[aria-selected="true"]{ background:var(--bg-raised); color:var(--fg); box-shadow: 0 1px 2px oklch(0.2 0.01 260 / .12), 0 0 0 .5px oklch(0.2 0.01 260 / .08); }
+:root[data-theme="dark"] .seg button[aria-selected="true"]{ background: var(--fill-2); box-shadow:none; }
+.seg .c{ color:var(--fg-3); font-weight:400; }
+.seg.inline{ display:inline-flex; } .seg.inline button{ flex:none; }
+.input{ height:28px; border-radius:6px; padding:0 10px; background:var(--bg-raised); box-shadow: inset 0 0 0 1px var(--line-2); border:0; width:100%; }
+.input:focus-visible{ outline:none; box-shadow: inset 0 0 0 1px var(--focus), 0 0 0 3px color-mix(in oklch, var(--focus) 25%, transparent); }
+.switch{ display:inline-block; vertical-align:middle; width:30px; height:18px; border-radius:8px; background:var(--fill-2); position:relative; flex:none; box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--fg) 12%, transparent); transition: background var(--dur-2) var(--ease-out); }
+.switch::after{ content:""; position:absolute; top:2px; left:2px; width:14px; height:14px; border-radius:50%; background:#fff; box-shadow:0 1px 2px oklch(0 0 0 / .25); transition: transform var(--dur-2) var(--ease-out); }
+.switch[aria-checked="true"]{ background:var(--accent); box-shadow:none; }
+.switch[aria-checked="true"]::after{ transform: translateX(12px); }
+.switch[aria-disabled="true"]{ opacity:.4; cursor:not-allowed; }
+.check{ width:16px; height:16px; border-radius:4px; box-shadow: inset 0 0 0 1px var(--line-2); display:inline-grid; place-items:center; flex:none; background:var(--bg-raised); color:var(--accent-fg); }
+.check.on{ background:var(--accent); box-shadow:none; }
+.badge{ display:inline-flex; align-items:center; gap:4px; height:20px; padding:0 6px; border-radius:4px; font-size:12px; font-weight:500; color:var(--fg-2); background:var(--fill); white-space:nowrap; }
+.badge.warn{ color:var(--warn); background:var(--warn-soft); }
+.badge.danger{ color:var(--danger); background:var(--danger-soft); }
+.badge.ok{ color:var(--ok); background: color-mix(in oklch, var(--ok-dot) 14%, var(--bg)); }
+.badge.you{ color:var(--accent-tx); background:var(--accent-soft); }
+
+/* ───────────── Identity + state placeholders ───────────── */
+.blob{ display:inline-block; flex:none; vertical-align:-3px; }
+.blob .b{ fill: oklch(0.80 0.085 var(--h)); }
+.blob .e{ fill: oklch(0.26 0.03 var(--h)); }
+:root[data-theme="dark"] .blob .b{ fill: oklch(0.70 0.090 var(--h)); }
+:root[data-theme="dark"] .blob .e{ fill: oklch(0.18 0.02 var(--h)); }
+.orb{ position:relative; display:inline-block; width:14px; height:14px; flex:none; color:var(--fg-2); }
+.orb::before{ content:""; position:absolute; inset:4px; border-radius:50%; background:currentColor; opacity:.9; }
+.orb i{ position:absolute; inset:0; border-radius:50%; transform: rotate(50deg); animation: orbit 1.4s linear infinite; }
+.orb i::after{ content:""; position:absolute; top:0; left:50%; width:3px; height:3px; margin-left:-1.5px; border-radius:50%; background:currentColor; }
+.orb i:nth-child(2){ animation-duration:2.1s; animation-direction:reverse; inset:1px; transform: rotate(230deg); }
+.orb i:nth-child(2)::after{ opacity:.55; }
+.orb.queued::before{ animation: breathe 2.4s ease-in-out infinite; } .orb.queued i{ display:none; }
+.orb.held::before{ inset:3px; background:transparent; box-shadow: inset 0 0 0 1.5px currentColor; } .orb.held i{ display:none; }
+.orb.lg{ width:20px; height:20px; } .orb.lg::before{ inset:6px; } .orb.lg i::after{ width:4px; height:4px; margin-left:-2px; }
+@keyframes orbit{ from{ transform: rotate(50deg); } to{ transform: rotate(410deg); } }
+@keyframes breathe{ 50%{ transform: scale(.6); opacity:.5; } }
+.caret{ display:inline-block; width:2px; height:1.05em; background:var(--fg); vertical-align:-2px; margin-left:1px; animation: blink 1s steps(1) infinite; }
+@keyframes blink{ 50%{ opacity:0; } }
+.skel{ background:var(--fill); border-radius:4px; animation: pulse 1.6s ease-in-out infinite; }
+@keyframes pulse{ 50%{ opacity:.55; } }
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{ animation:none !important; transition-duration:1ms !important; }
+  .skel{ opacity:.7; }
+}
+body.still *, body.still *::before, body.still *::after{ animation-play-state: paused !important; }
+
+/* ───────────── Desktop shell ───────────── */
+#stage{ position:fixed; inset:0; }
+.app{ display:flex; height:100%; width:100%; background:var(--bg); }
+.side{ width:212px; flex:none; background:var(--bg-side); border-right:1px solid var(--line); display:flex; flex-direction:column; padding:10px 8px 8px; gap:2px; }
+.side-top{ display:flex; align-items:center; justify-content:space-between; height:32px; padding:0 4px 0 8px; margin-bottom:4px; }
+.word{ font-weight:600; font-size:14px; letter-spacing:-0.01em; }
+.side-search{ display:flex; align-items:center; gap:8px; height:28px; padding:0 8px; border-radius:6px; color:var(--fg-3); background:var(--bg); box-shadow: inset 0 0 0 1px var(--line); margin-bottom:10px; }
+.side-search span:first-of-type{ flex:1; }
+.nav{ display:flex; align-items:center; gap:9px; height:28px; padding:0 8px; border-radius:6px; color:var(--fg-2); font-weight:500; transition: background var(--dur-1); }
+.nav:hover{ background:var(--hover); color:var(--fg); }
+.nav[aria-current="page"]{ background:var(--fill-2); color:var(--fg); }
+:root[data-theme="dark"] .nav[aria-current="page"]{ background:var(--sel); }
+.nav .lbl{ flex:1; }
+.nav .ct{ color:var(--fg-3); font-weight:400; }
+.nav .ct.you{ color:var(--accent-tx); font-weight:600; }
+.side-h{ font-size:12px; color:var(--fg-3); font-weight:500; padding:16px 8px 4px; display:flex; justify-content:space-between; align-items:center; }
+.host{ display:flex; align-items:center; gap:8px; height:28px; padding:0 8px; border-radius:6px; color:var(--fg-2); }
+.host:hover{ background:var(--hover); }
+.host .lbl{ flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.host.sub{ padding-left:22px; }
+.host .meta{ font-size:12px; color:var(--fg-3); }
+.side-foot{ margin-top:auto; display:flex; flex-direction:column; gap:2px; }
+.conn{ display:flex; align-items:center; gap:8px; padding:6px 8px 2px; font-size:12px; color:var(--fg-3); }
+
+.pane{ width:328px; flex:none; border-right:1px solid var(--line); display:flex; flex-direction:column; min-height:0; background:var(--bg); }
+.pane-head{ display:flex; align-items:center; gap:4px; height:52px; padding:0 10px 0 16px; flex:none; }
+.pane-head h2{ margin:0; font-size:15px; font-weight:600; letter-spacing:-0.01em; flex:1; }
+.pane-sub{ padding:0 12px 10px; flex:none; }
+.scroll{ overflow:auto; min-height:0; flex:1; }
+.main{ flex:1; min-width:0; display:flex; flex-direction:column; min-height:0; position:relative; }
+
+/* thread rows */
+.rows{ padding:2px 6px 8px; }
+.row{ display:flex; gap:10px; width:100%; padding:9px 10px 10px; border-radius:8px; position:relative; transition: background var(--dur-1); }
+.row:hover{ background:var(--hover); }
+.row.sel{ background:var(--sel); }
+.row + .row::before{ content:""; position:absolute; top:0; left:34px; right:10px; height:1px; background:var(--line); }
+.row.sel::before, .row.sel + .row::before, .row:hover::before, .row:hover + .row::before{ opacity:0; }
+.row-st{ width:14px; height:18px; display:grid; place-items:center; flex:none; color:var(--fg-3); }
+.row-main{ flex:1; min-width:0; display:flex; flex-direction:column; gap:3px; }
+.row-l1,.row-l2{ display:flex; align-items:baseline; gap:8px; min-width:0; }
+.row-title{ flex:1; min-width:0; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.row.dim .row-title{ color:var(--fg-2); font-weight:400; }
+.row-time{ font-size:12px; color:var(--fg-3); flex:none; }
+.row-meta{ flex:1; min-width:0; font-size:12px; color:var(--fg-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.row-status{ font-size:12px; color:var(--fg-3); flex:none; }
+.row-status.you{ color:var(--accent-tx); font-weight:500; }
+.row-status.warn{ color:var(--warn); } .row-status.danger{ color:var(--danger); }
+.row-act{ margin-top:6px; display:flex; gap:6px; }
+.row-act .btn{ height:24px; padding:0 8px; font-size:12px; }
+.snoozed{ display:flex; align-items:center; gap:8px; height:40px; padding:0 16px; border-top:1px solid var(--line); color:var(--fg-2); flex:none; }
+.snoozed span:nth-child(2){ flex:1; }
+
+/* thread detail */
+.th-head{ display:flex; align-items:center; gap:12px; padding:10px 12px 10px 24px; min-height:60px; border-bottom:1px solid var(--line); flex:none; }
+.main{ container-type:inline-size; }
+@container (max-width: 640px){ .main .prov .opt, .main .prov .br{ display:none; } .usage-foot .opt{ display:none; } }
+.th-titles{ flex:1; min-width:0; }
+.th-titles h1{ margin:0; font-size:15px; line-height:20px; font-weight:600; letter-spacing:-0.01em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.prov{ display:flex; align-items:center; gap:6px; font-size:12px; color:var(--fg-2); margin-top:3px; white-space:nowrap; overflow:hidden; }
+.prov .sep{ margin:0 2px; }
+.prov .br{ display:inline-flex; align-items:center; gap:4px; }
+.th-state{ display:flex; align-items:center; gap:7px; font-weight:500; color:var(--fg-2); padding-right:6px; white-space:nowrap; }
+.th-actions{ display:flex; align-items:center; gap:2px; }
+.vsep{ width:1px; height:18px; background:var(--line); margin:0 6px; }
+.stream{ flex:1; overflow:auto; min-height:0; }
+.col{ max-width:720px; margin:0 auto; padding:0 32px; }
+.stream .col{ padding-top:28px; padding-bottom:20px; }
+.turn{ margin-bottom:28px; }
+.you-msg{ display:flex; flex-direction:column; align-items:flex-end; gap:6px; }
+.bubble{ background:var(--fill); padding:9px 14px; border-radius:14px; font-size:14px; line-height:21px; max-width:84%; }
+.you-meta{ font-size:12px; color:var(--fg-3); display:flex; gap:8px; align-items:center; }
+.attach{ display:inline-flex; align-items:center; gap:6px; height:26px; padding:0 9px 0 8px; border-radius:6px; box-shadow: inset 0 0 0 1px var(--line); font-size:12px; color:var(--fg-2); background:var(--bg); }
+.ag-head{ display:flex; align-items:center; gap:7px; font-size:12px; color:var(--fg-3); margin-bottom:8px; }
+.ag-head b{ color:var(--fg-2); font-weight:500; }
+.prose{ font-size:14px; line-height:22px; margin:0 0 12px; text-wrap:pretty; }
+.prose code{ font-size:12.5px; background:var(--fill); padding:1px 5px; border-radius:4px; }
+.tools{ margin:4px 0 14px; }
+.tool{ display:flex; align-items:center; gap:10px; height:28px; padding:0 8px; margin:0 -8px; border-radius:6px; font-size:13px; color:var(--fg-2); width:calc(100% + 16px); }
+.tool:hover{ background:var(--hover); }
+.tool .verb{ width:44px; flex:none; color:var(--fg-2); }
+.tool .tgt{ font-family:var(--mono); font-size:12px; color:var(--fg); flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.tool .m{ font-size:12px; color:var(--fg-3); flex:none; }
+.tool .st{ width:16px; display:grid; place-items:center; color:var(--fg-3); flex:none; }
+.tool .chev{ color:var(--fg-3); opacity:0; transition: opacity var(--dur-1), transform var(--dur-2) var(--ease-out); flex:none; }
+.tool:hover .chev{ opacity:1; }
+.tool[aria-expanded="true"] .chev{ opacity:1; transform: rotate(90deg); }
+.tool-out{ display:none; margin:2px 0 8px 26px; padding:10px 12px; border-radius:8px; background:var(--bg-sunk); box-shadow: inset 0 0 0 1px var(--line); font: 12px/18px var(--mono); color:var(--fg-2); white-space:pre; overflow:auto; }
+.tool[aria-expanded="true"] + .tool-out{ display:block; }
+.tool .add{ color:var(--add-tx); } .tool .del{ color:var(--del-tx); }
+.changes{ border-radius:12px; box-shadow: inset 0 0 0 1px var(--line); margin:4px 0 16px; overflow:hidden; background:var(--bg); }
+.ch-head{ display:flex; align-items:center; gap:10px; height:40px; padding:0 8px 0 14px; }
+.ch-head .t{ font-weight:500; flex:1; }
+.add{ color:var(--add-tx); } .del{ color:var(--del-tx); }
+.ch-file{ display:flex; align-items:center; gap:10px; height:32px; padding:0 14px; border-top:1px solid var(--line); font-size:12px; }
+.ch-file .p{ font-family:var(--mono); flex:1; color:var(--fg); }
+.ch-file .p span{ color:var(--fg-3); }
+.hunk{ border-top:1px solid var(--line); font: 12px/20px var(--mono); background:var(--bg-sunk); overflow:auto; }
+.hunk .hh{ color:var(--fg-3); padding:4px 14px; }
+.ln{ display:flex; white-space:pre; }
+.ln .n{ width:40px; flex:none; text-align:right; padding-right:10px; color:var(--fg-3); user-select:none; }
+.ln .sg{ width:16px; flex:none; color:var(--fg-3); user-select:none; }
+.ln.a{ background:var(--add-bg); } .ln.a .sg{ color:var(--add-tx); }
+.ln.d{ background:var(--del-bg); } .ln.d .sg{ color:var(--del-tx); }
+.live-line{ display:flex; align-items:center; gap:8px; font-size:12px; color:var(--fg-3); margin-top:-2px; }
+.sub-row{ display:flex; align-items:center; gap:10px; height:32px; padding:0 10px; border-radius:8px; box-shadow: inset 0 0 0 1px var(--line); margin: 6px 0 14px; font-size:13px; }
+.sub-row .t{ flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+.dock{ flex:none; padding:0 0 14px; }
+.dock .col{ display:flex; flex-direction:column; gap:10px; }
+.ask{ border-radius:12px; background:var(--bg-raised); box-shadow: inset 0 0 0 1px var(--line-2), var(--sh-pop); padding:14px 14px 12px 16px; transition: opacity var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out); }
+.ask-h{ display:flex; align-items:center; gap:8px; }
+.ask-h .t{ font-weight:600; flex:1; }
+.ask-sub{ font-size:12px; color:var(--fg-2); margin:2px 0 10px 24px; }
+.cmd{ font: 12.5px/20px var(--mono); background:var(--fill); padding:8px 12px; border-radius:8px; margin-left:24px; white-space:pre-wrap; overflow-wrap:anywhere; }
+.ask-f{ display:flex; align-items:center; gap:8px; margin:12px 0 0 24px; }
+.ask-f .grow{ flex:1; }
+.ask.gone{ opacity:0; transform: translateY(6px); }
+.resolved{ display:flex; align-items:center; gap:8px; font-size:12px; color:var(--fg-2); padding:4px 2px; }
+.composer{ border-radius:12px; background:var(--bg-raised); box-shadow: inset 0 0 0 1px var(--line-2); padding:10px 10px 8px 14px; }
+.composer textarea{ width:100%; border:0; background:transparent; resize:none; font-size:14px; line-height:21px; height:42px; padding:0; color:var(--fg); }
+.composer textarea::placeholder{ color:var(--fg-3); }
+.composer:focus-within{ box-shadow: inset 0 0 0 1px var(--focus), 0 0 0 3px color-mix(in oklch, var(--focus) 18%, transparent); }
+.comp-f{ display:flex; align-items:center; gap:2px; margin-left:-6px; }
+.comp-f .grow{ flex:1; }
+.model{ display:inline-flex; align-items:center; gap:4px; height:26px; padding:0 8px; border-radius:6px; color:var(--fg-2); font-size:12px; font-weight:500; }
+.model:hover{ background:var(--hover); }
+.send{ width:28px; height:28px; border-radius:50%; display:grid; place-items:center; background:var(--fill-2); color:var(--fg-3); }
+.send.ready{ background:var(--accent); color:var(--accent-fg); }
+.usage-foot{ display:flex; gap:14px; white-space:nowrap; font-size:11.5px; color:var(--fg-3); padding:0 4px; }
+.usage-foot .grow{ flex:1; }
+.ctxbar{ display:inline-block; width:36px; height:4px; border-radius:2px; background:var(--fill-2); vertical-align:2px; margin-right:6px; overflow:hidden; }
+.ctxbar i{ display:block; height:100%; background:var(--fg-3); }
+
+/* inspector */
+.insp{ width:356px; flex:none; border-left:1px solid var(--line); display:flex; flex-direction:column; min-height:0; background:var(--bg); }
+.insp-head{ display:flex; align-items:center; gap:8px; height:52px; padding:0 10px 0 16px; border-bottom:1px solid var(--line); flex:none; }
+.insp-head .seg{ flex:1; }
+.tree{ padding:14px 12px 16px 16px; }
+.node{ position:relative; display:flex; gap:10px; padding:10px 10px 10px 8px; border-radius:8px; }
+.kids{ padding-left:30px; position:relative; }
+.kids > .node::before{ content:""; position:absolute; left:-14px; top:0; height:19px; width:11px; border-left:1px solid var(--line-2); border-bottom:1px solid var(--line-2); border-bottom-left-radius:6px; }
+.kids > .node:not(:last-child)::after{ content:""; position:absolute; left:-14px; top:0; bottom:0; border-left:1px solid var(--line-2); }
+.node.parent::after{ content:""; position:absolute; left:16px; top:30px; bottom:0; border-left:1px solid var(--line-2); }
+.node:hover{ background:var(--hover); }
+.node.sel{ background:var(--sel); }
+.node .gl{ width:16px; display:grid; place-items:center; height:18px; flex:none; }
+.node .bd{ flex:1; min-width:0; }
+.node .t{ font-weight:500; display:flex; gap:8px; align-items:baseline; }
+.node .t span:first-child{ flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.node .w{ font-size:12px; color:var(--fg-2); margin-top:3px; display:flex; align-items:center; gap:5px; white-space:nowrap; }
+.node .s{ font-size:12px; color:var(--fg-3); margin-top:3px; }
+.node .prog{ height:3px; border-radius:2px; background:var(--fill-2); margin-top:8px; overflow:hidden; }
+.node .prog i{ display:block; height:100%; background:var(--fg-2); border-radius:2px; }
+
+.insp-sec{ border-top:1px solid var(--line); padding:14px 16px; }
+.insp-sec h3{ margin:0 0 8px; font-size:13px; font-weight:600; }
+.kv{ display:grid; grid-template-columns: 96px 1fr; gap:6px 12px; font-size:12px; }
+.kv dt{ color:var(--fg-3); } .kv dd{ margin:0; color:var(--fg); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+/* terminal */
+.term{ flex:none; height:340px; border-top:1px solid var(--line); display:flex; flex-direction:column; background:var(--bg-sunk); }
+.term-head{ display:flex; align-items:center; gap:4px; height:36px; padding:0 8px 0 12px; border-bottom:1px solid var(--line); flex:none; }
+.ttab{ display:inline-flex; align-items:center; gap:6px; height:26px; padding:0 10px; border-radius:6px; color:var(--fg-2); font-size:12px; font-weight:500; }
+.ttab[aria-selected="true"]{ background:var(--fill); color:var(--fg); }
+.term-body{ flex:1; overflow:auto; padding:10px 16px; font: 12.5px/19px var(--mono); white-space:pre; color:var(--fg); }
+.term-body svg.i{ vertical-align:-1px; stroke-width:2; }
+.term-body .p{ color:var(--accent-tx); } .term-body .d{ color:var(--fg-3); } .term-body .g{ color:var(--ok); } .term-body .r{ color:var(--danger); } .term-body .y{ color:var(--warn); }
+.term-cur{ display:inline-block; width:7.5px; height:15px; background:var(--fg); vertical-align:-3px; animation: blink 1s steps(1) infinite; }
+
+/* generic page */
+.page{ flex:1; overflow:auto; min-height:0; }
+.page-head{ display:flex; align-items:center; gap:10px; height:52px; padding:0 16px 0 24px; border-bottom:1px solid var(--line); flex:none; }
+.page-head h1{ margin:0; font-size:15px; font-weight:600; letter-spacing:-0.01em; }
+.page-head .grow{ flex:1; }
+.wrap{ max-width:1080px; margin:0 auto; padding:24px 32px 48px; }
+.sec{ margin-bottom:36px; }
+.sec-h{ display:flex; align-items:baseline; gap:10px; margin-bottom:12px; }
+.sec-h h2{ margin:0; font-size:14px; font-weight:600; flex:1; }
+.sec-h .aside{ font-size:12px; color:var(--fg-3); }
+.list{ border-top:1px solid var(--line); }
+.li{ display:flex; align-items:center; gap:12px; min-height:44px; padding:8px 0; border-bottom:1px solid var(--line); }
+.li .grow{ flex:1; min-width:0; }
+.li .t{ font-weight:500; } .li .s{ font-size:12px; color:var(--fg-2); margin-top:2px; }
+table.tbl{ width:100%; border-collapse:collapse; font-size:13px; }
+.tbl th{ text-align:left; font-weight:500; font-size:12px; color:var(--fg-3); height:32px; border-bottom:1px solid var(--line); padding:0 12px 0 0; white-space:nowrap; }
+.tbl td{ height:40px; border-bottom:1px solid var(--line); padding:0 12px 0 0; white-space:nowrap; }
+.tbl .r{ text-align:right; } .tbl th.r{ text-align:right; }
+.tbl tr.hov:hover td{ background:var(--hover); }
+.cell-id{ display:flex; align-items:center; gap:8px; }
+
+/* states */
+.banner{ display:flex; align-items:center; gap:10px; padding:10px 12px; margin:0 12px 8px; border-radius:8px; background:var(--fill); font-size:12px; color:var(--fg-2); }
+.banner .grow{ flex:1; }
+.banner b{ color:var(--fg); font-weight:500; }
+.banner.err{ background:var(--danger-soft); }
+.banner.err .ic{ color:var(--danger); }
+.empty{ display:flex; flex-direction:column; align-items:flex-start; gap:10px; padding:28px 22px; color:var(--fg-2); }
+.empty h3{ margin:0; color:var(--fg); font-size:14px; font-weight:600; }
+.empty p{ margin:0; max-width:34ch; line-height:19px; }
+.center-empty{ flex:1; display:grid; place-items:center; }
+.center-empty .box{ width:420px; }
+
+/* overlay */
+.scrim{ position:absolute; inset:0; background:var(--scrim); z-index:20; animation: fade var(--dur-2) var(--ease-out); }
+@keyframes fade{ from{ opacity:0; } }
+.palette{ position:absolute; z-index:21; left:50%; top:96px; width:620px; margin-left:-310px; border-radius:14px; background:var(--bg-raised); box-shadow: var(--sh-dlg), inset 0 0 0 1px var(--line); overflow:hidden; animation: pop var(--dur-2) var(--ease-out); }
+@keyframes pop{ from{ opacity:0; transform: scale(.98) translateY(-4px); } }
+.pal-in{ display:flex; align-items:center; gap:10px; height:52px; padding:0 16px; border-bottom:1px solid var(--line); font-size:15px; }
+.pal-in input{ flex:1; border:0; background:transparent; font-size:15px; }
+.pal-in input:focus-visible{ outline:none; }
+.pal-in input::placeholder{ color:var(--fg-3); }
+.pal-ctx{ display:inline-flex; align-items:center; gap:6px; height:22px; padding:0 8px; border-radius:6px; background:var(--fill); font-size:12px; color:var(--fg-2); }
+.pal-list{ max-height:470px; overflow:auto; padding:6px; }
+.pal-g{ font-size:12px; color:var(--fg-3); padding:10px 10px 4px; font-weight:500; }
+.pal-i{ display:flex; align-items:center; gap:10px; height:34px; padding:0 10px; border-radius:8px; color:var(--fg); width:100%; }
+.pal-i .ic{ color:var(--fg-2); }
+.pal-i .grow{ flex:1; }
+.pal-i .h{ color:var(--fg-3); font-size:12px; }
+.pal-i[aria-selected="true"]{ background:var(--sel); }
+.pal-foot{ display:flex; gap:16px; height:36px; align-items:center; padding:0 16px; border-top:1px solid var(--line); font-size:12px; color:var(--fg-3); }
+.pop{ position:absolute; z-index:15; background:var(--bg-raised); border-radius:12px; box-shadow: var(--sh-pop), inset 0 0 0 1px var(--line); padding:14px; }
+
+/* IDE */
+.ftree{ width:244px; flex:none; border-right:1px solid var(--line); display:flex; flex-direction:column; min-height:0; background:var(--bg); }
+.fnode{ display:flex; align-items:center; gap:6px; height:26px; padding:0 10px 0 calc(10px + var(--d,0) * 14px); border-radius:6px; margin:0 6px; color:var(--fg-2); font-size:13px; }
+.fnode:hover{ background:var(--hover); }
+.fnode.sel{ background:var(--sel); color:var(--fg); }
+.fnode .grow{ flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.fnode .gs{ font: 500 11px var(--mono); }
+.etabs{ display:flex; align-items:flex-end; height:38px; border-bottom:1px solid var(--line); padding:0 8px; gap:2px; flex:none; }
+.etab{ display:inline-flex; align-items:center; gap:8px; height:30px; padding:0 10px 0 12px; border-radius:6px 6px 0 0; color:var(--fg-2); font-size:12.5px; position:relative; }
+.etab[aria-selected="true"]{ background:var(--bg-sunk); color:var(--fg); box-shadow: inset 0 0 0 1px var(--line); clip-path: inset(-1px -1px 1px -1px); }
+.etab .dirty{ width:6px; height:6px; border-radius:50%; background:var(--fg-2); }
+.ebar{ display:flex; align-items:center; gap:10px; height:40px; padding:0 12px 0 16px; border-bottom:1px solid var(--line); background:var(--bg-sunk); flex:none; font-size:12px; color:var(--fg-2); }
+.ebar .grow{ flex:1; }
+.code{ flex:1; overflow:auto; background:var(--bg-sunk); font: 12.5px/20px var(--mono); padding:8px 0; }
+.code .ln{ padding-right:16px; }
+.code .ln .n{ width:52px; }
+.sk{ color:var(--syn-kw); } .ss{ color:var(--syn-str); } .sf{ color:var(--syn-fn); } .sc{ color:var(--syn-cm); }
+.ln .cx{ white-space:pre; }
+.statusbar{ height:26px; display:flex; align-items:center; gap:16px; padding:0 16px; border-top:1px solid var(--line); font-size:11.5px; color:var(--fg-3); background:var(--bg); flex:none; }
+.statusbar .grow{ flex:1; }
+
+/* usage */
+.stats{ display:grid; grid-template-columns: repeat(6, 1fr); border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
+.stat{ padding:14px 16px 14px 0; }
+.stat + .stat{ padding-left:16px; border-left:1px solid var(--line); }
+.stat .l{ font-size:12px; color:var(--fg-2); display:flex; justify-content:space-between; }
+.stat .v{ font-size:20px; line-height:26px; font-weight:600; letter-spacing:-0.015em; margin-top:6px; }
+.stat .v small{ font-size:13px; font-weight:500; color:var(--fg-2); margin-left:2px; letter-spacing:0; }
+.stat .d{ font-size:12px; color:var(--fg-3); margin-top:2px; display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.spark{ width:56px; height:18px; color:var(--fg-3); }
+.chart-wrap{ position:relative; }
+.legend{ display:flex; gap:18px; flex-wrap:wrap; font-size:12px; color:var(--fg-2); margin-bottom:10px; }
+.legend span{ display:inline-flex; align-items:center; gap:6px; }
+.legend i{ width:8px; height:8px; border-radius:2px; display:inline-block; }
+.legend b{ font-weight:500; color:var(--fg); }
+.tip{ position:absolute; pointer-events:none; z-index:5; background:var(--bg-raised); border-radius:8px; box-shadow: var(--sh-pop), inset 0 0 0 1px var(--line); padding:8px 10px; font-size:12px; min-width:168px; display:none; }
+.tip .r{ display:flex; gap:8px; align-items:center; justify-content:space-between; }
+.tip .r i{ width:8px; height:8px; border-radius:2px; display:inline-block; margin-right:6px; }
+.meter{ height:6px; border-radius:3px; background:var(--fill-2); overflow:hidden; }
+.meter i{ display:block; height:100%; background:var(--fg-2); border-radius:3px; }
+.meter.warn i{ background:var(--warn-dot); } .meter.full i{ background:var(--danger); }
+.split{ display:flex; height:8px; border-radius:4px; overflow:hidden; gap:2px; }
+.resume{ border-radius:12px; box-shadow: inset 0 0 0 1px var(--line-2); padding:16px 18px; display:flex; gap:20px; align-items:center; background:var(--bg-raised); }
+.resume .cd{ font-size:22px; font-weight:600; letter-spacing:-0.015em; }
+
+/* library */
+.mrow{ display:flex; gap:10px; padding:10px 10px; border-radius:8px; width:100%; align-items:flex-start; }
+.mrow:hover{ background:var(--hover); } .mrow.sel{ background:var(--sel); }
+.mrow .grow{ flex:1; min-width:0; }
+.mrow .t{ font-weight:500; display:flex; align-items:center; gap:8px; }
+.mrow .s{ font-size:12px; color:var(--fg-2); margin-top:3px; }
+.health{ display:inline-flex; align-items:center; gap:5px; font-size:12px; color:var(--fg-2); white-space:nowrap; }
+.conflict{ display:flex; gap:12px; padding:12px 14px; border-radius:12px; background:var(--warn-soft); margin:12px 0 0; align-items:flex-start; }
+.conflict .grow{ flex:1; }
+.conflict .t{ font-weight:500; }
+
+/* PR */
+.pr-cols{ display:flex; gap:40px; max-width:1040px; margin:0 auto; padding:24px 32px 48px; }
+.pr-main{ flex:1; min-width:0; }
+.pr-side{ width:264px; flex:none; }
+.tabs{ display:flex; gap:20px; border-bottom:1px solid var(--line); margin-bottom:20px; }
+.tabs button{ height:36px; color:var(--fg-2); font-weight:500; position:relative; display:flex; gap:6px; align-items:center; }
+.tabs button .c{ color:var(--fg-3); font-weight:400; }
+.tabs button[aria-selected="true"]{ color:var(--fg); }
+.tabs button[aria-selected="true"]::after{ content:""; position:absolute; left:0; right:0; bottom:-1px; height:2px; background:var(--fg); border-radius:1px; }
+.cmt{ padding:16px 0; border-bottom:1px solid var(--line); }
+.cmt-h{ display:flex; align-items:center; gap:8px; font-size:12px; color:var(--fg-3); margin-bottom:8px; }
+.cmt-h b{ color:var(--fg); font-weight:500; }
+.cmt p{ margin:0 0 10px; font-size:14px; line-height:21px; }
+.ctx-code{ border-radius:8px; box-shadow: inset 0 0 0 1px var(--line); overflow:hidden; margin-bottom:10px; font: 12px/20px var(--mono); background:var(--bg-sunk); }
+.ctx-code .fh{ font-family:var(--font); font-size:12px; color:var(--fg-2); padding:6px 12px; border-bottom:1px solid var(--line); background:var(--bg); }
+.cmt-a{ display:flex; gap:6px; }
+.chk{ display:flex; align-items:center; gap:10px; height:34px; font-size:13px; }
+.chk .grow{ flex:1; }
+.side-sec{ padding:0 0 18px; margin-bottom:18px; border-bottom:1px solid var(--line); }
+.side-sec h3{ margin:0 0 8px; font-size:12px; color:var(--fg-3); font-weight:500; display:flex; justify-content:space-between; }
+
+/* settings */
+.form{ max-width:760px; margin:0 auto; padding:24px 32px 64px; }
+.form h1{ font-size:20px; line-height:26px; margin:4px 0 4px; font-weight:600; letter-spacing:-0.015em; }
+.form .lead{ color:var(--fg-2); margin:0 0 28px; font-size:13px; max-width:62ch; }
+.group{ margin-bottom:32px; }
+.group > h2{ font-size:14px; font-weight:600; margin:0 0 4px; display:flex; align-items:center; gap:10px; }
+.group > h2 .grow{ flex:1; }
+.group > .desc{ font-size:12px; color:var(--fg-2); margin:0 0 10px; }
+.field{ display:flex; align-items:center; gap:16px; min-height:48px; padding:10px 0; border-bottom:1px solid var(--line); }
+.field:first-of-type{ border-top:1px solid var(--line); }
+.field .lab{ width:200px; flex:none; }
+.field .lab .t{ font-weight:500; } .field .lab .s{ font-size:12px; color:var(--fg-2); margin-top:2px; }
+.field .ctl{ flex:1; display:flex; align-items:center; gap:10px; min-width:0; }
+.secret{ display:inline-flex; align-items:center; gap:6px; height:24px; padding:0 8px; border-radius:6px; background:var(--fill); font-size:12px; color:var(--fg-2); white-space:nowrap; }
+.secret svg{ color:var(--fg-2); }
+.probe{ display:grid; grid-template-columns: 18px 150px 1fr; gap:8px 8px; font-size:12px; align-items:center; padding:10px 0 4px; }
+.probe .k{ color:var(--fg-2); } .probe .v{ color:var(--fg); }
+.qr{ width:168px; height:168px; padding:10px; border-radius:12px; background:#fff; box-shadow: inset 0 0 0 1px var(--line); flex:none; }
+.code-big{ font: 500 22px/28px var(--mono); letter-spacing:.06em; }
+.preview{ border-radius:8px; box-shadow: inset 0 0 0 1px var(--line); background:var(--bg-sunk); font: 12px/20px var(--mono); padding:8px 0; margin-top:10px; }
+.preview .ln .n{ width:28px; }
+
+/* ───────────── Phone ───────────── */
+body.frame-phone{ background: var(--bg-side); }
+.device{ position:absolute; left:50%; top:50%; width:390px; height:844px; margin:-422px 0 0 -195px; border-radius:52px; overflow:hidden; background:var(--bg); box-shadow: 0 0 0 1px var(--line-2), 0 0 0 10px oklch(0.16 0.004 260), 0 30px 80px -20px oklch(0 0 0 / .45); }
+@media (max-width: 440px){ .device{ left:0; top:0; margin:0; width:100vw; height:100vh; border-radius:0; box-shadow:none; } }
+.ph{ position:absolute; inset:0; display:flex; flex-direction:column; font-size:16px; line-height:22px; background:var(--bg); }
+.ph-sb{ height:50px; flex:none; display:flex; align-items:center; justify-content:space-between; padding:6px 30px 0 34px; font-size:16px; font-weight:600; position:relative; }
+.ph-sb .isl{ position:absolute; left:50%; top:11px; width:122px; height:35px; margin-left:-61px; background:#000; border-radius:20px; }
+.ph-sb .r{ display:flex; gap:6px; align-items:center; }
+.ph-nav{ display:flex; align-items:center; justify-content:space-between; height:44px; padding:0 8px; flex:none; }
+.ph-nav .navbtn{ min-width:44px; height:44px; display:inline-flex; align-items:center; justify-content:center; gap:2px; color:var(--accent-tx); font-size:17px; padding:0 8px; }
+.ph-nav .ttl{ font-size:17px; font-weight:600; flex:1; text-align:center; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.ph-lt{ font-size:30px; line-height:36px; font-weight:600; letter-spacing:-0.02em; padding:2px 20px 10px; flex:none; }
+.ph-body{ flex:1; overflow:auto; min-height:0; }
+.ph-seg{ padding:0 16px 10px; }
+.ph-seg .seg button{ height:30px; font-size:14px; }
+.ph-row{ display:flex; gap:12px; padding:12px 20px 13px 20px; position:relative; width:100%; min-height:66px; }
+.ph-row::after{ content:""; position:absolute; left:46px; right:0; bottom:0; height:1px; background:var(--line); }
+.ph-row:active{ background:var(--hover); }
+.ph-row .row-st{ height:22px; width:14px; }
+.ph-row .row-title{ font-size:16px; line-height:22px; }
+.ph-row .row-time,.ph-row .row-meta,.ph-row .row-status{ font-size:14px; line-height:20px; }
+.ph-tabbar{ height:84px; flex:none; display:flex; border-top:1px solid var(--line); background:color-mix(in oklch, var(--bg-side) 92%, transparent); padding:6px 4px 0; }
+.ph-tab{ flex:1; display:flex; flex-direction:column; align-items:center; gap:3px; font-size:11px; line-height:13px; font-weight:500; color:var(--fg-3); height:50px; justify-content:center; position:relative; }
+.ph-tab[aria-current="page"]{ color:var(--accent-tx); }
+.ph-tab .bdg{ position:absolute; top:2px; left:50%; margin-left:6px; min-width:18px; height:18px; border-radius:8px; background:var(--accent); color:var(--accent-fg); font-size:11px; line-height:18px; text-align:center; padding:0 5px; font-weight:600; }
+.home{ position:absolute; bottom:8px; left:50%; width:136px; height:5px; margin-left:-68px; border-radius:3px; background:var(--fg); opacity:.85; z-index:40; }
+.ph .btn{ height:44px; border-radius:12px; font-size:16px; padding:0 18px; justify-content:center; }
+.ph .btn.sm{ height:34px; border-radius:8px; font-size:14px; padding:0 12px; }
+.ph-group{ margin:0 16px 22px; border-radius:12px; background:var(--bg-raised); box-shadow: inset 0 0 0 1px var(--line); overflow:hidden; }
+:root[data-theme="dark"] .ph-group{ background:var(--fill); box-shadow:none; }
+.ph-gh{ font-size:13px; color:var(--fg-2); padding:0 32px 6px; }
+.ph-li{ display:flex; align-items:center; gap:12px; min-height:48px; padding:10px 16px; position:relative; font-size:16px; }
+.ph-li + .ph-li::before{ content:""; position:absolute; top:0; left:16px; right:0; height:1px; background:var(--line); }
+.ph-li .grow{ flex:1; min-width:0; }
+.ph-li .s{ font-size:13px; color:var(--fg-2); line-height:18px; margin-top:1px; }
+.ph .switch{ width:51px; height:31px; border-radius:16px; }
+.ph .switch::after{ width:27px; height:27px; top:2px; left:2px; }
+.ph .switch[aria-checked="true"]::after{ transform: translateX(20px); }
+.ph-stream{ padding:8px 16px 16px; }
+.ph-stream .bubble{ font-size:16px; line-height:23px; }
+.ph-stream .prose{ font-size:16px; line-height:24px; }
+.ph-dock{ flex:none; padding:8px 12px 34px; border-top:1px solid var(--line); background:var(--bg); display:flex; flex-direction:column; gap:8px; }
+.ph-comp{ display:flex; align-items:center; gap:8px; }
+.ph-comp .in{ flex:1; height:40px; border-radius:20px; box-shadow: inset 0 0 0 1px var(--line-2); display:flex; align-items:center; padding:0 6px 0 16px; color:var(--fg-3); font-size:16px; }
+.ph-comp .in span{ flex:1; }
+.ph-ask{ border-radius:14px; background:var(--bg-raised); box-shadow: inset 0 0 0 1px var(--line-2); padding:12px 14px; }
+:root[data-theme="dark"] .ph-ask{ background:var(--fill); box-shadow:none; }
+.ph-sheet{ position:absolute; left:0; right:0; bottom:0; z-index:22; background:var(--bg-raised); border-radius:14px 14px 0 0; box-shadow: var(--sh-dlg); padding:8px 0 34px; animation: rise var(--dur-3) var(--ease-out); }
+:root[data-theme="dark"] .ph-sheet{ background:oklch(0.215 0.005 260); }
+@keyframes rise{ from{ transform: translateY(40px); opacity:0; } }
+.grab{ width:36px; height:5px; border-radius:3px; background:var(--line-2); margin:0 auto 10px; }
+.keybar{ display:flex; gap:6px; padding:8px 8px; overflow-x:auto; border-top:1px solid var(--line); background:var(--bg-side); }
+.key{ height:44px; min-width:44px; padding:0 12px; border-radius:8px; background:var(--bg-raised); box-shadow: 0 1px 0 var(--line-2), inset 0 0 0 1px var(--line); font-size:14px; font-weight:500; display:inline-grid; place-items:center; flex:none; }
+.key.on{ background:var(--accent-soft); color:var(--accent-tx); box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--accent) 40%, transparent); }
+
+/* ───────────── Prototype chrome ───────────── */
+.proto{ position:fixed; right:12px; bottom:12px; z-index:100; display:flex; align-items:center; gap:4px; padding:4px; border-radius:12px; background:var(--bg-raised); box-shadow: var(--sh-pop), inset 0 0 0 1px var(--line); font-size:12px; opacity:.55; transition: opacity var(--dur-2); }
+.proto:hover,.proto:focus-within{ opacity:1; }
+.proto select{ height:26px; border-radius:6px; border:0; background:var(--fill); padding:0 6px; font-size:12px; max-width:220px; }
+.proto .ibtn{ width:26px; height:26px; }
+body.shot .proto{ display:none; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div class="proto" role="toolbar" aria-label="Prototype controls">
+  <select id="pick" aria-label="Screen"></select>
+  <button class="ibtn" id="tgFrame" title="Desktop / phone frame"></button>
+  <button class="ibtn" id="tgTheme" title="Light / dark"></button>
+</div>
+<div id="live" class="sr" role="status" aria-live="polite"></div>
+<script>
+/* ───────────── Icons (Lucide paths, 1.5 stroke) ───────────── */
+const P = {
+  inbox:'<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
+  pr:'<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" x2="6" y1="9" y2="21"/>',
+  code:'<polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/>',
+  blocks:'<rect width="7" height="7" x="14" y="3" rx="1"/><path d="M10 21V8a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-5a1 1 0 0 0-1-1H3"/>',
+  plug:'<path d="M12 22v-5"/><path d="M9 8V2"/><path d="M15 8V2"/><path d="M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z"/>',
+  chart:'<path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
+  server:'<rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><line x1="6" x2="6.01" y1="6" y2="6"/><line x1="6" x2="6.01" y1="18" y2="18"/>',
+  gear:'<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+  search:'<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+  plus:'<path d="M5 12h14"/><path d="M12 5v14"/>',
+  check:'<path d="M20 6 9 17l-5-5"/>',
+  x:'<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  alert:'<circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/>',
+  warn:'<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+  clock:'<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+  play:'<polygon points="6 3 20 12 6 21 6 3"/>',
+  undo:'<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
+  shield:'<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
+  key:'<path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/>',
+  phone:'<rect width="14" height="20" x="5" y="2" rx="2" ry="2"/><path d="M12 18h.01"/>',
+  laptop:'<path d="M20 16V7a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v9m16 0H4m16 0 1.28 2.55a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45L4 16"/>',
+  monitor:'<rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/>',
+  wifioff:'<path d="M12 20h.01"/><path d="M8.5 16.429a5 5 0 0 1 7 0"/><path d="M5 12.859a10 10 0 0 1 5.17-2.69"/><path d="M19 12.859a10 10 0 0 0-2.007-1.523"/><path d="M2 8.82a15 15 0 0 1 4.177-2.643"/><path d="M22 8.82a15 15 0 0 0-11.288-3.764"/><path d="m2 2 20 20"/>',
+  diff:'<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M9 10h6"/><path d="M12 13V7"/><path d="M9 17h6"/>',
+  tree:'<path d="M21 12h-8"/><path d="M21 6H8"/><path d="M21 18h-8"/><path d="M3 6v4c0 1.1.9 2 2 2h3"/><path d="M3 10v6c0 1.1.9 2 2 2h3"/>',
+  clip:'<path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/>',
+  branch:'<line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
+  term:'<polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/>',
+  cr:'<path d="m9 18 6-6-6-6"/>', cd:'<path d="m6 9 6 6 6-6"/>', cl:'<path d="m15 18-6-6 6-6"/>',
+  more:'<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>',
+  up:'<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>',
+  file:'<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/>',
+  folder:'<path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/>',
+  pright:'<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M15 3v18"/>',
+  pbottom:'<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 15h18"/>',
+  sun:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>',
+  moon:'<path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>',
+  ext:'<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+  msg:'<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+  copy:'<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+  refresh:'<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/>',
+  stop:'<rect width="12" height="12" x="6" y="6" rx="2"/>',
+  ccheck:'<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
+  cx:'<circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>',
+  cdash:'<path d="M10.1 2.18a9.93 9.93 0 0 1 3.8 0"/><path d="M17.6 3.71a9.95 9.95 0 0 1 2.69 2.7"/><path d="M21.82 10.1a9.93 9.93 0 0 1 0 3.8"/><path d="M20.29 17.6a9.95 9.95 0 0 1-2.7 2.69"/><path d="M13.9 21.82a9.94 9.94 0 0 1-3.8 0"/><path d="M6.4 20.29a9.95 9.95 0 0 1-2.69-2.7"/><path d="M2.18 13.9a9.93 9.93 0 0 1 0-3.8"/><path d="M3.71 6.4a9.95 9.95 0 0 1 2.7-2.69"/>',
+  cdot:'<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="1"/>',
+  at:'<circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/>',
+  filter:'<path d="M3 6h18"/><path d="M7 12h10"/><path d="M10 18h4"/>',
+  compose:'<path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/>',
+  hand:'<polyline points="15 10 20 15 15 20"/><path d="M4 4v7a4 4 0 0 0 4 4h12"/>',
+  lock:'<rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  link:'<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+  layers:'<path d="m12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83Z"/><path d="m22 17.65-9.17 4.16a2 2 0 0 1-1.66 0L2 17.65"/><path d="m22 12.65-9.17 4.16a2 2 0 0 1-1.66 0L2 12.65"/>',
+  bell:'<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>',
+  user:'<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+  cmd:'<path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"/>',
+  arrow:'<path d="M5 12h14"/><path d="m12 5 7 7-7 7"/>',
+  share:'<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" x2="15.42" y1="13.51" y2="17.49"/><line x1="15.41" x2="8.59" y1="6.51" y2="10.49"/>',
+  qr:'<rect width="5" height="5" x="3" y="3" rx="1"/><rect width="5" height="5" x="16" y="3" rx="1"/><rect width="5" height="5" x="3" y="16" rx="1"/><path d="M21 16h-3a2 2 0 0 0-2 2v3"/><path d="M21 21v.01"/><path d="M12 7v3a2 2 0 0 1-2 2H7"/><path d="M3 12h.01"/><path d="M12 3h.01"/><path d="M12 16v.01"/><path d="M16 12h1"/><path d="M21 12v.01"/><path d="M12 21v-1"/>',
+  pause:'<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>',
+};
+const ic = (n, s=16, cls='') => `<svg class="i ${s!==16?'s'+s:''} ${cls}" viewBox="0 0 24 24" aria-hidden="true">${P[n]||''}</svg>`;
+
+/* ───────────── Blobatar placeholder (deterministic) ───────────── */
+function hash(s){ let h=2166136261; for(const c of s){ h^=c.charCodeAt(0); h=Math.imul(h,16777619); } return h>>>0; }
+function blob(seed, kind='machine', size=16, title=''){
+  const h = hash(seed), hue = h % 360, v = (h>>>9)%4;
+  let body;
+  if(kind==='machine'){ const r=[7,9,6,8][v]; body=`<rect class="b" x="2" y="2.5" width="20" height="19" rx="${r}"/>`; }
+  else if(kind==='harness'){ body=`<circle class="b" cx="12" cy="12" r="10"/>`; }
+  else { body=[`<path class="b" d="M12 2c5 5 9 8.5 9 12.5a9 9 0 0 1-18 0C3 10.5 7 7 12 2z"/>`,`<rect class="b" x="3" y="5" width="18" height="15" rx="7.5"/>`,`<path class="b" d="M12 3 21.5 20h-19z" stroke-linejoin="round"/>`,`<ellipse class="b" cx="12" cy="13" rx="9.5" ry="8"/>`][v]; }
+  const ex = 4 + (h>>>4)%3, ey = 11 + (h>>>6)%3, er = 1.5 + ((h>>>8)%2)*.4;
+  return `<svg class="blob" style="--h:${hue}" width="${size}" height="${size}" viewBox="0 0 24 24" ${title?`role="img" aria-label="${title}"`:'aria-hidden="true"'}>${body}<ellipse class="e" cx="${12-ex}" cy="${ey+1}" rx="${er}" ry="${er*1.25}"/><ellipse class="e" cx="${12+ex}" cy="${ey+1}" rx="${er}" ry="${er*1.25}"/></svg>`;
+}
+const B = {
+  atlas:(s=16)=>blob('machine:m_7f3a','machine',s,'atlas'),
+  ubuntu:(s=16)=>blob('machine:wsl_ubuntu2404_7f3a','machine',s,'Ubuntu-24.04'),
+  debian:(s=16)=>blob('machine:wsl_debian_7f3a','machine',s,'Debian'),
+  orion:(s=16)=>blob('machine:m_c21e','machine',s,'orion'),
+  buildbox:(s=16)=>blob('machine:m_0b9d','machine',s,'buildbox'),
+  claude:(s=14)=>blob('harness:m_7f3a:claude-code','harness',s,'Claude Code'),
+  codex:(s=14)=>blob('harness:m_c21e:codex','harness',s,'Codex'),
+  codexA:(s=14)=>blob('harness:m_7f3a:codex','harness',s,'Codex'),
+  opencode:(s=14)=>blob('harness:wsl_ubuntu:opencode','harness',s,'OpenCode'),
+  anti:(s=14)=>blob('harness:m_c21e:antigravity','harness',s,'Antigravity'),
+  sub:(id,s=14)=>blob('subagent:m_7f3a:t_482:'+id,'subagent',s),
+};
+const orb = (k='run', lg=false) => k==='run' ? `<span class="orb ${lg?'lg':''}" role="img" aria-label="running"><i></i><i></i></span>` : `<span class="orb ${k} ${lg?'lg':''}" aria-hidden="true"></span>`;
+
+/* ───────────── Demo clock ───────────── */
+const T0 = Date.now(); const NOW = new Date(2026,10,12,12,22,0);
+const nowMs = () => NOW.getTime() + (Date.now()-T0);
+const RESUME_AT = new Date(2026,10,12,14,32,0).getTime();
+const PAIR_EXP = NOW.getTime() + 9*60*1000 + 41*1000;
+function hms(ms, secs=true){ ms=Math.max(0,ms); const s=Math.floor(ms/1000), h=Math.floor(s/3600), m=Math.floor(s%3600/60), x=s%60; return secs ? (h?`${h}h ${String(m).padStart(2,'0')}m ${String(x).padStart(2,'0')}s`:`${m}:${String(x).padStart(2,'0')}`) : `${h}h ${m}m`; }
+
+/* ───────────── Data ───────────── */
+const THREADS = {
+  working: [
+    { id:'auth', st:'you', title:'Fix flaky auth test', meta:'atlas · Claude Code', status:'Needs approval', tone:'you', time:'2m' },
+    { id:'relay', st:'run', title:'Ship relay retry with backoff', meta:'orion · Codex', status:'Running · 61 tok/s', time:'18m' },
+    { id:'deps', st:'queued', title:'Audit dependency tree', meta:'Ubuntu-24.04 · OpenCode', status:'Queued', time:'4m' },
+    { id:'redis', st:'limited', title:'Migrate session store to Redis', meta:'orion · Codex', status:'Resumes 14:32', tone:'warn', time:'1h' },
+    { id:'wsl', st:'offline', title:'Parse WSL distro hosts', meta:'buildbox · Codex', status:'Host unreachable', tone:'danger', time:'3h' },
+    { id:'copy', st:'run', title:'Draft pairing screen copy', meta:'orion · Antigravity', status:'Thinking', time:'6m' },
+  ],
+  done: [
+    { id:'tpl', st:'done', title:'Update PR template', meta:'orion · OpenCode', status:'Unread', time:'1h', ack:true },
+    { id:'xterm', st:'done', title:'Bump xterm to 5.5 and fix resize', meta:'atlas · Claude Code', status:'Unread', time:'3h', ack:true },
+    { id:'idx', st:'limitstop', title:'Index usage events by harness', meta:'atlas · Claude Code', status:'Limited · needs you', tone:'warn', time:'5h', ack:false },
+  ],
+  settled: [
+    { id:'s1', st:'settled', title:'Add DPoP proof to device pairing', meta:'atlas · Claude Code', status:'Settled', time:'Tue' },
+    { id:'s2', st:'settled', title:'Rename harness instance ids', meta:'orion · Codex', status:'Settled', time:'Tue' },
+    { id:'s3', st:'settled', title:'Write CLIProxyAPI probe tests', meta:'atlas · Claude Code', status:'Settled', time:'Mon' },
+    { id:'s4', st:'settled', title:'Fix terminal paste on Android', meta:'orion · Antigravity', status:'Settled', time:'Mon' },
+    { id:'s5', st:'settled', title:'Document OrbitID device grant', meta:'Ubuntu-24.04 · OpenCode', status:'Settled', time:'Nov 9' },
+    { id:'s6', st:'settled', title:'Stream backpressure for relay', meta:'atlas · Codex', status:'Settled', time:'Nov 8' },
+    { id:'s7', st:'settled', title:'Golden tests for blobatar seeds', meta:'atlas · Claude Code', status:'Settled', time:'Nov 7' },
+  ]
+};
+const COUNTS = { working:6, done:3, settled:14 };
+function stGlyph(st){
+  switch(st){
+    case 'you': return `<span class="dot you" aria-hidden="true"></span>`;
+    case 'run': return orb('run');
+    case 'queued': return orb('queued');
+    case 'held': return orb('held');
+    case 'limited': return `<span class="t-warn">${ic('clock',14)}</span>`;
+    case 'limitstop': return `<span class="t-warn">${ic('pause',14)}</span>`;
+    case 'offline': return `<span class="t-danger">${ic('wifioff',14)}</span>`;
+    case 'done': return `<span style="color:var(--fg-2)">${ic('ccheck',14)}</span>`;
+    case 'settled': return `<span class="faint">${ic('check',14)}</span>`;
+    case 'failed': return `<span class="t-danger">${ic('cx',14)}</span>`;
+  }
+  return '';
+}
+
+/* ───────────── State ───────────── */
+const S = { screen:'inbox', theme:'light', frame:'desktop', tab:'working', palette:false, approved:false, chartTable:false, prPop:true };
+
+/* ───────────── Desktop building blocks ───────────── */
+function sidebar(active, o={}){
+  const n = (id, icon, label, ct='', you=false) => `<a href="#" class="nav" data-go="${id}" ${active===id?'aria-current="page"':''}>${ic(icon)}<span class="lbl">${label}</span>${ct?`<span class="ct ${you?'you':''} num">${ct}</span>`:''}</a>`;
+  return `<nav class="side" aria-label="Main">
+    <div class="side-top"><span class="word">h4rn</span><button class="ibtn" title="New thread ⌘⇧N" aria-label="New thread">${ic('compose')}</button></div>
+    <button class="side-search" data-act="palette">${ic('search',14)}<span>Search or run</span><span class="kbd">⌘K</span></button>
+    ${n('inbox','inbox','Inbox',o.empty?'':'2',true)}
+    ${n('pr','pr','Pull requests','3')}
+    ${n('ide','code','Editor')}
+    ${n('library','plug','MCP & skills')}
+    ${n('usage','chart','Usage')}
+    <div class="side-h"><span>Hosts</span><span class="num">3 of 4</span></div>
+    <a href="#" class="host" data-go="set-hosts">${B.atlas()}<span class="lbl">atlas</span><span class="dot on" aria-label="online"></span></a>
+    <a href="#" class="host sub" data-go="set-hosts">${B.ubuntu(14)}<span class="lbl">Ubuntu-24.04</span><span class="dot on" aria-label="online"></span></a>
+    <a href="#" class="host" data-go="set-hosts">${B.orion()}<span class="lbl">orion</span><span class="dot on" aria-label="online"></span></a>
+    <a href="#" class="host" data-go="set-hosts">${B.buildbox()}<span class="lbl" style="color:var(--fg-3)">buildbox</span><span class="meta">3h</span></a>
+    <div class="side-foot">
+      ${n('set-hosts','gear','Settings')}
+      <div class="conn"><span class="dot on"></span><span>Direct · atlas 12 ms</span></div>
+    </div>
+  </nav>`;
+}
+function threadRow(t, sel){
+  return `<button class="row ${sel?'sel':''} ${t.st==='settled'?'dim':''}" data-thread="${t.id}">
+    <span class="row-st">${stGlyph(t.st)}</span>
+    <span class="row-main">
+      <span class="row-l1"><span class="row-title">${t.title}</span><span class="row-time num">${t.time}</span></span>
+      <span class="row-l2"><span class="row-meta">${t.meta}</span><span class="row-status ${t.tone||''}">${t.status}</span></span>
+      ${t.ack!==undefined && S.tab==='done' ? `<span class="row-act">${t.ack?`<span class="btn secondary">Acknowledge <span class="kbd">A</span></span>`:`<span class="btn secondary">${ic('play',12)} Resume now</span><span class="btn ghost">Acknowledge</span>`}</span>`:''}
+    </span>
+  </button>`;
+}
+function inboxPane(opts={}){
+  const tab = opts.tab || S.tab;
+  const seg = ['working','done','settled'].map(k=>`<button role="tab" aria-selected="${tab===k}" data-tab="${k}">${k[0].toUpperCase()+k.slice(1)} <span class="c num">${opts.loading?'—':(opts.empty?0:COUNTS[k])}</span></button>`).join('');
+  let body = '';
+  if(opts.loading){
+    body = `<div class="rows" aria-busy="true" aria-label="Loading threads">${Array.from({length:7},(_,i)=>`<div class="row" style="pointer-events:none"><span class="row-st"><span class="skel" style="width:10px;height:10px;border-radius:50%"></span></span><span class="row-main" style="gap:8px;padding-top:2px"><span class="skel" style="height:11px;width:${[72,58,80,64,70,52,66][i]}%"></span><span class="skel" style="height:9px;width:${[44,50,38,46,40,48,36][i]}%"></span></span></div>`).join('')}</div>`;
+  } else if(opts.empty){
+    body = `<div class="empty"><h3>No threads yet</h3><p>Threads you start on a paired host show up here. Anything running, queued, or waiting on you stays in Working until it finishes.</p><button class="btn secondary">${ic('compose',14)} New thread <span class="kbd">⌘⇧N</span></button></div>`;
+  } else {
+    const list = THREADS[tab];
+    body = (opts.banner||'') + `<div class="rows">${list.map((t,i)=>threadRow(t, opts.sel ? t.id===opts.sel : (tab==='working'&&i===0))).join('')}</div>`;
+  }
+  return `<section class="pane" aria-label="Threads">
+    <div class="pane-head"><h2>Inbox</h2><button class="ibtn" aria-label="Filter">${ic('filter')}</button><button class="ibtn" aria-label="New thread">${ic('compose')}</button></div>
+    <div class="pane-sub"><div class="seg" role="tablist" aria-label="Thread state">${seg}</div></div>
+    <div class="scroll">${body}</div>
+    ${opts.loading||opts.empty?'':`<button class="snoozed">${ic('clock',14)}<span>Snoozed</span><span class="faint num">2</span>${ic('cr',14)}</button>`}
+  </section>`;
+}
+function threadHead(opts={}){
+  const st = opts.state || `${orb('run')} Running`;
+  return `<header class="th-head">
+    <div class="th-titles"><h1>${opts.title||'Fix flaky auth test'}</h1>
+      <div class="prov">${B.atlas(14)} atlas <span class="sep">/</span> ${B.claude(14)} Claude Code <span class="opt"><span class="sep">/</span> claude-sonnet-5-5</span> <span class="br"><span class="sep">/</span> ${ic('branch',12)} <span class="mono" style="font-size:11.5px">h4rn/fix-flaky-auth</span></span></div>
+    </div>
+    <div class="th-state">${st}</div>
+    <div class="th-actions">
+      <button class="ibtn ${opts.tool==='term'?'on':''}" data-go="terminal" title="Terminal  T" aria-label="Terminal">${ic('term')}</button>
+      <button class="ibtn ${opts.tool==='sub'?'on':''}" data-go="subagents" title="Subagents  ⌘J" aria-label="Subagents">${ic('tree')}</button>
+      <button class="ibtn" data-go="ide" title="Changes  D" aria-label="Changes">${ic('diff')}</button>
+      <span class="vsep"></span>
+      ${opts.noStop?'':`<button class="btn secondary">${ic('stop',14)} Stop</button>`}
+      <button class="ibtn" aria-label="More">${ic('more')}</button>
+    </div>
+  </header>`;
+}
+const TOOL_OUT = {
+  read:`  1  import { describe, it, expect, beforeAll, vi } from "vitest";
+  2  import { createPool } from "../db/pool";
+  3  import { verifySession } from "./session";
+ …
+ 41    it("expires at the boundary", async () => {
+ 42      vi.advanceTimersByTime(30_000);
+ (142 lines, showing 4)`,
+  grep:`src/auth/session.test.ts:12   vi.useFakeTimers();
+src/db/pool.ts:28              const openedAt = Date.now();
+tests/setup.ts:9               beforeAll(() => vi.useFakeTimers());`,
+};
+function streamMain(opts={}){
+  return `<div class="stream"><div class="col">
+    <div class="turn you-msg">
+      <div class="bubble">The auth test fails on CI only. Fix it and add a regression test that pins the clock. Don’t change the public API.</div>
+      <div class="you-meta"><span class="attach">${ic('clip',12)} ci-failure.log <span class="faint">18 KB</span></span><span>12:02</span></div>
+    </div>
+    <div class="turn">
+      <div class="ag-head">${B.claude(14)} <b>Claude Code</b> <span>on atlas</span> <span>·</span> <span class="num">12:03</span></div>
+      <p class="prose">I’ll reproduce the CI-only failure first, then check how the test setup installs the fake clock.</p>
+      <div class="tools">
+        <button class="tool" aria-expanded="false"><span class="st">${ic('check',14)}</span><span class="verb">Read</span><span class="tgt">src/auth/session.test.ts</span><span class="m num">142 lines · 0.3 s</span>${ic('cr',14,'chev')}</button>
+        <div class="tool-out">${TOOL_OUT.read}</div>
+        <button class="tool" aria-expanded="${opts.expandGrep?'true':'false'}"><span class="st">${ic('check',14)}</span><span class="verb">Search</span><span class="tgt">useFakeTimers|Date.now  in src/ tests/</span><span class="m num">3 matches · 0.2 s</span>${ic('cr',14,'chev')}</button>
+        <div class="tool-out">${TOOL_OUT.grep}</div>
+        <button class="tool" aria-expanded="false"><span class="st">${ic('check',14)}</span><span class="verb">Read</span><span class="tgt">tests/setup.ts</span><span class="m num">38 lines · 0.1 s</span>${ic('cr',14,'chev')}</button>
+        <div class="tool-out">  9  beforeAll(() => vi.useFakeTimers());</div>
+      </div>
+      <p class="prose">The assertion isn’t the problem. <code>createPool()</code> reads <code>Date.now()</code> at import time, before <code>beforeAll</code> installs the fake clock, so the first session lookup races the timer advance on slower CI runners.</p>
+      <div class="tools">
+        <button class="tool" aria-expanded="false"><span class="st">${ic('check',14)}</span><span class="verb">Edit</span><span class="tgt">tests/setup.ts</span><span class="m num"><span class="add">+12</span> <span class="del">−4</span></span>${ic('cr',14,'chev')}</button>
+        <div class="tool-out"></div>
+        <button class="tool" aria-expanded="false"><span class="st">${ic('check',14)}</span><span class="verb">Edit</span><span class="tgt">src/auth/session.test.ts</span><span class="m num"><span class="add">+6</span></span>${ic('cr',14,'chev')}</button>
+        <div class="tool-out"></div>
+      </div>
+      <div class="changes">
+        <div class="ch-head"><span class="t">2 files changed</span><span class="num"><span class="add">+18</span>&nbsp; <span class="del">−4</span></span><button class="btn ghost" data-go="ide">Review</button></div>
+        <div class="ch-file"><span class="p"><span>tests/</span>setup.ts</span><span class="num"><span class="add">+12</span> <span class="del">−4</span></span></div>
+        <div class="hunk">
+          <div class="hh">@@ -6,9 +6,17 @@ import { vi, beforeAll } from "vitest";</div>
+          <div class="ln d"><span class="n">9</span><span class="sg">−</span><span class="cx">beforeAll(() =&gt; vi.useFakeTimers());</span></div>
+          <div class="ln a"><span class="n">9</span><span class="sg">+</span><span class="cx">export const clock = vi.useFakeTimers({ now: new Date("2026-01-01T00:00:00Z") });</span></div>
+          <div class="ln a"><span class="n">10</span><span class="sg">+</span><span class="cx">beforeAll(() =&gt; createPool({ now: () =&gt; clock.now() }));</span></div>
+          <div class="ln"><span class="n">11</span><span class="sg"> </span><span class="cx">afterEach(() =&gt; vi.clearAllTimers());</span></div>
+        </div>
+        <div class="ch-file"><span class="p"><span>src/auth/</span>session.test.ts</span><span class="num"><span class="add">+6</span></span></div>
+      </div>
+      <div class="sub-row">${orb('run')}<span class="t"><span class="faint">Delegated</span> Reproduce CI failure</span><span class="faint" style="font-size:12px">${B.orion(14)} orion · Codex · 0:31</span><button class="btn ghost" data-go="subagents" style="height:24px">Open</button></div>
+      <p class="prose">While Codex reproduces the failure on orion: the pool now takes its clock from the test context instead of reading <code>Date.now()</code> at import, and the new regression test advances the clock by 30 s and checks the session is still valid at the boundary. I’ll run the auth suite three times once the repro confirms the race<span class="caret"></span></p>
+      <div class="live-line">${orb('run')}<span>Writing · 61 tok/s</span></div>
+    </div>
+  </div></div>`;
+}
+function askCard(phone=false){
+  if(S.approved) return `<div class="resolved">${ic('ccheck',14)}<span>Approved for orion · Codex is running <span class="mono">pnpm test</span></span><span class="grow"></span><button class="btn ghost" data-act="undo" style="height:24px">Undo</button></div>`;
+  return `<div class="ask" role="region" aria-label="Approval request">
+    <div class="ask-h">${ic('shield',16)}<span class="t">Codex on orion wants to run a command</span><span class="faint" style="font-size:12px">2m ago</span></div>
+    <div class="ask-sub">Subagent “Reproduce CI failure” · in <span class="mono" style="font-size:11.5px">~/code/api</span> · worktree h4rn/repro-ci</div>
+    <div class="cmd">CI=1 pnpm vitest run --project auth --repeat 20</div>
+    <div class="ask-f"><button class="btn ghost">Always allow ${ic('cd',12)}</button><span class="grow"></span><button class="btn secondary" data-act="deny">Deny <span class="kbd">⌘⌫</span></button><button class="btn primary" data-act="approve">Approve <span class="kbd">⌘↵</span></button></div>
+  </div>`;
+}
+function composer(opts={}){
+  return `<div class="composer">
+    <textarea aria-label="Reply" placeholder="${opts.ph||'Reply to Claude Code on atlas'}" ${opts.disabled?'disabled':''}></textarea>
+    <div class="comp-f"><button class="ibtn" aria-label="Attach" ${opts.disabled?'disabled':''}>${ic('clip')}</button><button class="ibtn" aria-label="Mention">${ic('at')}</button><span class="grow"></span><button class="model">claude-sonnet-5-5 ${ic('cd',12)}</button><button class="send" aria-label="Send">${ic('up',16)}</button></div>
+  </div>`;
+}
+const usageFoot = `<div class="usage-foot num"><span>18.4k tokens</span><span>$0.42 est.</span><span>61 tok/s</span><span class="opt">TTFT 0.8 s</span><span class="opt">4m 12s active</span><span class="grow"></span><span><span class="ctxbar"><i style="width:41%"></i></span>41% context</span></div>`;
+
+function threadDetail(opts={}){
+  return `<main class="main" aria-label="Thread">
+    ${threadHead(opts)}
+    ${streamMain(opts)}
+    <div class="dock"><div class="col">${opts.noAsk?'':askCard()}${composer()}${usageFoot}</div></div>
+  </main>`;
+}
+
+/* ───────────── Screens: desktop ───────────── */
+function scrInbox(){
+  return `<div class="app">${sidebar('inbox')}${inboxPane()}${threadDetail()}</div>`;
+}
+function scrDone(){
+  S.tab='done';
+  return `<div class="app">${sidebar('inbox')}${inboxPane({tab:'done', sel:'xterm'})}
+  <main class="main"><header class="th-head"><div class="th-titles"><h1>Bump xterm to 5.5 and fix resize</h1><div class="prov">${B.atlas(14)} atlas <span class="sep">/</span> ${B.claude(14)} Claude Code <span class="sep">/</span> claude-sonnet-5-5 <span class="sep">/</span> <span class="br">${ic('branch',12)} <span class="mono" style="font-size:11.5px">h4rn/xterm-5-5</span></span></div></div>
+  <div class="th-state">${ic('ccheck',14)} Done · 3h ago</div><div class="th-actions"><span class="vsep"></span><button class="btn secondary">Snooze</button><button class="btn primary">Acknowledge <span class="kbd">A</span></button><button class="ibtn">${ic('more')}</button></div></header>
+  <div class="stream"><div class="col">
+    <div class="turn you-msg"><div class="bubble">Bump xterm to 5.5. The terminal reflows wrong when the phone is the smallest viewer; fix that too.</div><div class="you-meta"><span>09:11</span></div></div>
+    <div class="turn"><div class="ag-head">${B.claude(14)} <b>Claude Code</b> <span>on atlas</span> · <span>09:12</span></div>
+      <div class="tools"><button class="tool"><span class="st">${ic('check',14)}</span><span class="verb">Edit</span><span class="tgt">apps/ui/package.json</span><span class="m"><span class="add">+2</span> <span class="del">−2</span></span>${ic('cr',14,'chev')}</button>
+      <button class="tool"><span class="st">${ic('check',14)}</span><span class="verb">Edit</span><span class="tgt">apps/ui/src/terminal/fit.ts</span><span class="m"><span class="add">+31</span> <span class="del">−9</span></span>${ic('cr',14,'chev')}</button>
+      <button class="tool"><span class="st">${ic('check',14)}</span><span class="verb">Run</span><span class="tgt">bun test terminal</span><span class="m">14 passed · 3.1 s</span>${ic('cr',14,'chev')}</button></div>
+      <p class="prose">Done. xterm is on 5.5.0. Resize now takes the minimum column count across attached viewers and sends one <code>resize</code> frame per change instead of one per viewer, so the phone and desktop no longer fight over the PTY size.</p>
+      <p class="prose">I didn’t touch the key bar. Worth checking on a real Android keyboard before merging.</p>
+      <div class="changes"><div class="ch-head"><span class="t">3 files changed</span><span><span class="add">+41</span>&nbsp; <span class="del">−13</span></span><button class="btn ghost">Review</button></div></div>
+      <div class="live-line">${ic('ccheck',14)}<span>Finished 09:19 · 7m 02s · 22.1k tokens · $0.51 est.</span></div>
+    </div>
+  </div></div>
+  <div class="dock"><div class="col">${composer()}</div></div></main></div>`;
+}
+function scrSubagents(){
+  return `<div class="app">${sidebar('inbox')}${inboxPane()}
+  <main class="main">${threadHead({tool:'sub'})}${streamMain()}<div class="dock"><div class="col">${askCard()}${composer()}${usageFoot}</div></div></main>
+  <aside class="insp" aria-label="Subagents">
+    <div class="insp-head"><h2 style="margin:0;font-size:14px;font-weight:600;flex:1">Subagents</h2><button class="btn ghost">${ic('plus',14)} Delegate</button><button class="ibtn" data-go="inbox" aria-label="Close">${ic('x')}</button></div>
+    <div class="scroll"><div class="tree">
+      <div class="node parent">
+        <span class="gl">${orb('run')}</span>
+        <div class="bd"><div class="t"><span>Fix flaky auth test</span><span class="faint num" style="font-size:12px">4:12</span></div>
+        <div class="w">${B.atlas(14)} atlas · ${B.claude(12)} Claude Code</div>
+        <div class="s num">Running · 18.4k tokens</div></div>
+      </div>
+      <div class="kids"><div class="node">
+        <span class="gl" style="color:var(--fg-2)">${ic('ccheck',14)}</span>
+        <div class="bd"><div class="t"><span>Audit test helpers</span><span class="faint num" style="font-size:12px">1:48</span></div>
+        <div class="w">${B.sub('a1')} atlas · Codex</div>
+        <div class="s num">Done · 6.2k tokens · native resume</div></div>
+      </div>
+      <div class="node sel">
+        <span class="gl">${orb('held')}</span>
+        <div class="bd"><div class="t"><span>Reproduce CI failure</span><span class="faint num" style="font-size:12px">0:31</span></div>
+        <div class="w">${B.sub('r2')} ${B.orion(14)} orion · ${B.codex(12)} Codex</div>
+        <div class="s num"><span class="t-accent" style="font-weight:500">Needs approval</span> · turn 3 of 20 · 2.1k tokens</div>
+        <div class="prog" aria-label="Budget used 15%"><i style="width:15%"></i></div></div>
+      </div>
+      <div class="node">
+        <span class="gl t-danger">${ic('cx',14)}</span>
+        <div class="bd"><div class="t"><span style="color:var(--fg-2)">Check clock skew on buildbox</span><span class="faint num" style="font-size:12px">0:04</span></div>
+        <div class="w">${B.sub('c3')} buildbox · Codex</div>
+        <div class="s">Couldn’t start: buildbox is offline</div></div>
+      </div></div>
+    </div>
+    <div class="insp-sec"><h3>Reproduce CI failure</h3>
+      <dl class="kv">
+        <dt>Runs on</dt><dd>orion · Codex 0.98.2</dd>
+        <dt>Model</dt><dd>gpt-5.1-codex</dd>
+        <dt>Context</dt><dd>Summary handoff · 1.2k tokens</dd>
+        <dt>Budget</dt><dd class="num">20 turns · 15 min · 50k tokens</dd>
+        <dt>Approvals</dt><dd>Inherited from parent</dd>
+        <dt>Credential</dt><dd>${ic('key',12)} Stored on orion</dd>
+      </dl>
+      <div style="display:flex;gap:6px;margin-top:14px"><button class="btn secondary">Open thread</button><button class="btn ghost">Cancel subagent</button></div>
+    </div></div>
+  </aside></div>`;
+}
+function scrTerminal(){
+  const out = `<span class="d">~/code/api</span> <span class="p">h4rn/fix-flaky-auth</span>
+<span class="p">$</span> CI=1 pnpm vitest run --project auth --repeat 3
+
+ <span class="d">RUN  v3.2.4 /home/dev/code/api</span>
+
+ <span class="g">${ic('check',12)}</span> src/auth/token.test.ts <span class="d">(12 tests) 84ms</span>
+ <span class="g">${ic('check',12)}</span> src/auth/refresh.test.ts <span class="d">(6 tests) 96ms</span>
+ <span class="g">${ic('check',12)}</span> src/auth/session.test.ts <span class="d">(9 tests) 212ms</span>   <span class="d">run 1 of 3</span>
+ <span class="g">${ic('check',12)}</span> src/auth/session.test.ts <span class="d">(9 tests) 207ms</span>   <span class="d">run 2 of 3</span>
+ <span class="g">${ic('check',12)}</span> src/auth/session.test.ts <span class="d">(9 tests) 219ms</span>   <span class="d">run 3 of 3</span>
+
+ <span class="d">Test Files</span>  <span class="g">5 passed</span> (5)
+      <span class="d">Tests</span>  <span class="g">45 passed</span> (45)
+   <span class="d">Duration</span>  2.84s
+
+<span class="d">~/code/api</span> <span class="p">h4rn/fix-flaky-auth</span>
+<span class="p">$</span> git diff --stat
+ src/auth/session.test.ts |  6 ++++++
+ tests/setup.ts           | 16 ++++++++++++----
+ 2 files changed, 18 insertions(+), 4 deletions(-)
+
+<span class="d">~/code/api</span> <span class="p">h4rn/fix-flaky-auth</span>
+<span class="p">$</span> <span class="term-cur"></span>`;
+  return `<div class="app">${sidebar('inbox')}${inboxPane()}
+  <main class="main">${threadHead({tool:'term', noStop:false})}
+    ${streamMain()}
+    <section class="term" aria-label="Terminal">
+      <div class="term-head">
+        <button class="ttab" aria-selected="true">${ic('term',14)} zsh <span class="faint">atlas</span></button>
+        <button class="ttab" aria-selected="false">pnpm dev <span class="faint">atlas</span></button>
+        <button class="ibtn" aria-label="New terminal">${ic('plus',14)}</button>
+        <span style="flex:1"></span>
+        <span class="faint" style="font-size:12px;margin-right:8px">~/code/api · 132 × 16 · 2 viewers</span>
+        <button class="ibtn" aria-label="Split">${ic('pright',14)}</button>
+        <button class="ibtn" data-go="inbox" aria-label="Close terminal">${ic('x',14)}</button>
+      </div>
+      <div class="term-body" tabindex="0" aria-label="Terminal output">${out}</div>
+    </section>
+  </main></div>`;
+}
+function scrIDE(){
+  const tree = [
+    [0,'folder','api',''],[1,'folder','src',''],[2,'folder','auth',''],[3,'file','refresh.ts',''],[3,'file','session.test.ts','M','sel'],[3,'file','session.ts',''],[3,'file','token.ts',''],[2,'folder','db',''],[3,'file','pool.ts',''],[1,'folder','tests',''],[2,'file','setup.ts','M'],[1,'file','package.json',''],[1,'file','vitest.config.ts',''],
+  ].map(([d,i,n,g,sel])=>`<div class="fnode ${sel||''}" style="--d:${d}">${ic(i==='folder'?'cd':'file',i==='folder'?12:14)}<span class="grow">${n}</span>${g?`<span class="gs t-warn">${g}</span>`:''}</div>`).join('');
+  const L = (n, cls, sg, html) => `<div class="ln ${cls}"><span class="n">${n}</span><span class="sg">${sg}</span><span class="cx">${html}</span></div>`;
+  const code = [
+    L(36,'',' ','<span class="sk">describe</span>(<span class="ss">"verifySession"</span>, () =&gt; {'),
+    L(37,'',' ','  <span class="sk">beforeEach</span>(<span class="sk">async</span> () =&gt; {'),
+    L(38,'',' ','    <span class="sk">await</span> <span class="sf">seedSession</span>({ token: <span class="ss">"t_9f2"</span>, ttl: <span class="ss">30_000</span> });'),
+    L(39,'',' ','  });'),
+    L(40,'',' ',''),
+    L(41,'',' ','  <span class="sf">it</span>(<span class="ss">"returns the session before expiry"</span>, <span class="sk">async</span> () =&gt; {'),
+    L(42,'',' ','    <span class="sk">const</span> session = <span class="sk">await</span> <span class="sf">verifySession</span>(<span class="ss">"t_9f2"</span>);'),
+    L(43,'',' ','    <span class="sf">expect</span>(session).<span class="sf">toMatchObject</span>({ token: <span class="ss">"t_9f2"</span> });'),
+    L(44,'',' ','  });'),
+    L(45,'',' ',''),
+    L(46,'a','+','  <span class="sc">// Regression: the pool used to read Date.now() at import time.</span>'),
+    L(47,'a','+','  <span class="sf">it</span>(<span class="ss">"is still valid at the 30 s boundary"</span>, <span class="sk">async</span> () =&gt; {'),
+    L(48,'a','+','    clock.<span class="sf">advanceTimersByTime</span>(<span class="ss">29_999</span>);'),
+    L(49,'a','+','    <span class="sf">expect</span>(<span class="sk">await</span> <span class="sf">verifySession</span>(<span class="ss">"t_9f2"</span>)).<span class="sf">not</span>.<span class="sf">toBeNull</span>();'),
+    L(50,'a','+','    clock.<span class="sf">advanceTimersByTime</span>(<span class="ss">1</span>);'),
+    L(51,'a','+','    <span class="sf">expect</span>(<span class="sk">await</span> <span class="sf">verifySession</span>(<span class="ss">"t_9f2"</span>)).<span class="sf">toBeNull</span>();'),
+    L(52,'a','+','  });'),
+    L(53,'',' ',''),
+    L(54,'',' ','  <span class="sf">it</span>(<span class="ss">"rejects an unknown token"</span>, <span class="sk">async</span> () =&gt; {'),
+    L(55,'d','−','    <span class="sf">expect</span>(<span class="sk">await</span> <span class="sf">verifySession</span>(<span class="ss">"nope"</span>)).<span class="sf">toBe</span>(<span class="sk">null</span>);'),
+    L(55,'a','+','    <span class="sf">expect</span>(<span class="sk">await</span> <span class="sf">verifySession</span>(<span class="ss">"nope"</span>)).<span class="sf">toBeNull</span>();'),
+    L(56,'',' ','  });'),
+    L(57,'',' ','});'),
+  ].join('');
+  return `<div class="app">${sidebar('ide')}
+  <aside class="ftree" aria-label="Files">
+    <div class="pane-head"><h2>api</h2><span class="faint" style="font-size:12px">atlas</span><button class="ibtn" aria-label="Search files">${ic('search')}</button></div>
+    <div class="scroll" style="padding-bottom:8px">${tree}</div>
+    <div style="border-top:1px solid var(--line);padding:12px 14px 14px">
+      <div style="display:flex;justify-content:space-between;align-items:baseline"><span style="font-weight:600">Agent changes</span><span class="num" style="font-size:12px"><span class="add">+18</span> <span class="del">−4</span></span></div>
+      <div class="faint" style="font-size:12px;margin:2px 0 8px">Fix flaky auth test · Claude Code</div>
+      <div class="fnode" style="margin:0 -10px">${ic('file',14)}<span class="grow">tests/setup.ts</span><span class="num" style="font-size:12px"><span class="add">+12</span> <span class="del">−4</span></span></div>
+      <div class="fnode sel" style="margin:0 -10px">${ic('file',14)}<span class="grow">session.test.ts</span><span class="num" style="font-size:12px"><span class="add">+6</span></span></div>
+    </div>
+  </aside>
+  <main class="main" aria-label="Editor">
+    <div class="etabs"><button class="etab" aria-selected="true">session.test.ts <span class="dirty" title="Unsaved"></span></button><button class="etab">setup.ts</button><button class="etab">pool.ts</button><span style="flex:1"></span></div>
+    <div class="ebar"><span class="mono" style="font-size:12px;color:var(--fg)">src/auth/session.test.ts</span><span class="grow"></span>
+      <div class="seg inline" role="tablist"><button role="tab" aria-selected="false">Edit</button><button role="tab" aria-selected="false">vs HEAD</button><button role="tab" aria-selected="true">vs agent</button></div>
+      <button class="btn ghost">${ic('hand',14)} Hand to agent</button>
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;padding:8px 16px;border-bottom:1px solid var(--line);font-size:12px;color:var(--fg-2);background:var(--bg-sunk)">${B.claude(14)} Changes by Claude Code in <b style="font-weight:500;color:var(--fg)">Fix flaky auth test</b> since 12:03 <span class="grow" style="flex:1"></span><span class="num"><span class="add">+6</span> <span class="del">−1</span></span><button class="btn ghost" style="height:24px">Revert file</button><button class="btn secondary" style="height:24px">Accept</button></div>
+    <div class="code">${code}</div>
+    <div class="statusbar"><span>${ic('branch',12)} h4rn/fix-flaky-auth</span><span>atlas</span><span class="grow"></span><span>Ln 49, Col 31</span><span>Spaces: 2</span><span>UTF-8</span><span>TypeScript</span></div>
+  </main></div>`;
+}
+function scrLibrary(){
+  const srv = [
+    ['playwright','http','5 targets · 3 hosts','healthy','sel'],
+    ['linear','http','3 targets · 2 hosts','healthy'],
+    ['postgres-dev','stdio','Shared from orion · 2 targets','healthy','',true],
+    ['sentry','http','1 target','error'],
+    ['github','stdio','4 targets','needs credential'],
+  ];
+  const hm = h => h==='healthy'?`<span class="health">${ic('ccheck',12)} Healthy</span>`:h==='error'?`<span class="health t-danger">${ic('cx',12)} Error</span>`:`<span class="health t-warn">${ic('key',12)} Needs credential</span>`;
+  const rows = srv.map(([n,t,s,h,sel,shared])=>`<button class="mrow ${sel||''}"><span style="padding-top:1px;color:var(--fg-2)">${ic(shared?'share':'plug',16)}</span><span class="grow"><span class="t">${n}<span class="faint" style="font-weight:400;font-size:12px">${t}</span></span><span class="s">${s}</span></span>${hm(h)}</button>`).join('');
+  const T = (host, hb, harness, hh, mech, on, note='', extra='') => `<tr class="hov"><td><span class="cell-id">${hb} ${host}</span></td><td><span class="cell-id">${hh} ${harness}</span></td><td class="muted">${mech}</td><td>${note}</td><td class="r" style="padding-right:0"><span class="switch" role="switch" aria-checked="${on}" ${extra}></span></td></tr>`;
+  return `<div class="app">${sidebar('library')}
+  <section class="pane" aria-label="Library">
+    <div class="pane-head"><h2>MCP & skills</h2><button class="ibtn" aria-label="Add">${ic('plus')}</button></div>
+    <div class="pane-sub"><div class="seg" role="tablist"><button role="tab" aria-selected="true">MCP servers <span class="c">5</span></button><button role="tab" aria-selected="false">Skills <span class="c">9</span></button></div></div>
+    <div class="scroll"><div class="rows">${rows}</div></div>
+  </section>
+  <main class="main"><div class="page"><div class="wrap" style="max-width:860px">
+    <div style="display:flex;align-items:flex-start;gap:16px;margin-bottom:22px">
+      <div style="flex:1"><h1 style="margin:0;font-size:20px;line-height:26px;font-weight:600;letter-spacing:-0.015em">playwright</h1>
+      <div class="muted" style="margin-top:4px">HTTP · <span class="mono">http://127.0.0.1:8931/mcp</span> · 21 tools · checked 12 s ago</div></div>
+      <button class="btn secondary">${ic('refresh',14)} Test</button><button class="btn secondary">Edit</button><button class="ibtn">${ic('more')}</button>
+    </div>
+    <div class="field" style="border-top:1px solid var(--line)"><div class="lab"><div class="t">Credential</div><div class="s">Never leaves the host</div></div><div class="ctl"><span class="secret">${ic('key',12)} Stored on atlas</span><span class="secret">${ic('key',12)} Stored on orion</span><span class="faint" style="font-size:12px">Ubuntu-24.04 uses atlas’s server</span><span style="flex:1"></span><button class="btn ghost">Replace</button></div></div>
+    <div class="sec" style="margin-top:28px">
+      <div class="sec-h"><h2>Where it runs</h2><span class="aside">Each target receives the server its own way</span></div>
+      <table class="tbl"><thead><tr><th style="width:24%">Host</th><th style="width:22%">Harness</th><th>Delivered as</th><th>Status</th><th class="r" style="padding-right:0">On</th></tr></thead><tbody>
+        ${T('atlas',B.atlas(14),'Claude Code',B.claude(),'Host config file',true,'<span class="health">'+ic('ccheck',12)+' 21 tools</span>')}
+        ${T('atlas',B.atlas(14),'Codex',B.codexA(),'Session request',true,'<span class="health">'+ic('ccheck',12)+' 21 tools</span>')}
+        ${T('Ubuntu-24.04',B.ubuntu(14),'OpenCode',B.opencode(),'Harness API',false,'<span class="faint">Off</span>')}
+        ${T('orion',B.orion(14),'Codex',B.codex(),'Session request',true,'<span class="health t-warn">'+ic('warn',12)+' Name conflict</span>')}
+        ${T('orion',B.orion(14),'Antigravity',B.anti(),'<span class="faint">Not supported</span>',false,'<span class="faint">Needs the stdio bridge</span>','aria-disabled="true"')}
+      </tbody></table>
+      <div class="conflict">${ic('warn',16,'t-warn')}<div class="grow"><div class="t">orion already has a server named playwright</div><div class="muted" style="font-size:12px;margin-top:2px">Codex on orion loads its own playwright 0.0.41 from <span class="mono">~/.codex/config.toml</span>. Pick which one Codex should see.</div></div><button class="btn secondary">Resolve…</button></div>
+    </div>
+    <div class="sec">
+      <div class="sec-h"><h2>Shared with you</h2><span class="aside">Defined on another host</span></div>
+      <div class="list"><div class="li">${B.orion(18)}<div class="grow"><div class="t">postgres-dev <span class="faint" style="font-weight:400">from orion</span></div><div class="s">stdio · <span class="mono">mcp-postgres --readonly</span> · runs on orion, reached by atlas over Tailscale</div></div><span class="secret">${ic('key',12)} Stored on orion</span><span class="switch" role="switch" aria-checked="true"></span></div></div>
+    </div>
+  </div></div></main></div>`;
+}
+function spark(vals){
+  const w=56,h=18,mx=Math.max(...vals),mn=Math.min(...vals);
+  const pts=vals.map((v,i)=>`${(i/(vals.length-1)*w).toFixed(1)},${(h-2-(v-mn)/(mx-mn||1)*(h-4)).toFixed(1)}`).join(' ');
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" aria-hidden="true"><polyline points="${pts}" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/></svg>`;
+}
+const DAYS = ['Oct 30','Oct 31','Nov 1','Nov 2','Nov 3','Nov 4','Nov 5','Nov 6','Nov 7','Nov 8','Nov 9','Nov 10','Nov 11','Nov 12'];
+const SERIES = [
+  { k:'Claude Code', c:'--s1', v:[62,71,18,12,84,92,77,96,88,21,15,94,102,58] },
+  { k:'Codex', c:'--s2', v:[28,33,9,4,41,38,46,52,44,11,6,49,55,31] },
+  { k:'OpenCode', c:'--s3', v:[12,9,0,0,14,18,11,16,13,0,2,15,19,8] },
+  { k:'Antigravity', c:'--s4', v:[4,6,2,0,8,5,9,7,10,3,0,9,12,6] },
+];
+function scrUsage(){
+  const stat = (l, v, unit, d, sp) => `<div class="stat"><div class="l"><span>${l}</span></div><div class="v num">${v}${unit?`<small>${unit}</small>`:''}</div><div class="d num"><span>${d}</span>${sp?spark(sp):''}</div></div>`;
+  const total = SERIES.map(s=>s.v.reduce((a,b)=>a+b,0));
+  return `<div class="app">${sidebar('usage')}
+  <main class="main"><header class="page-head"><h1>Usage</h1><span class="grow"></span>
+    <div class="seg inline" role="tablist"><button role="tab" aria-selected="false">Today</button><button role="tab" aria-selected="true">14 days</button><button role="tab" aria-selected="false">30 days</button></div>
+    <button class="btn secondary">All hosts ${ic('cd',12)}</button><button class="btn secondary">All harnesses ${ic('cd',12)}</button></header>
+  <div class="page"><div class="wrap">
+    <div class="resume" style="margin-bottom:28px">
+      <span class="t-warn">${ic('clock',20)}</span>
+      <div style="flex:1;min-width:0"><div style="font-weight:600">Migrate session store to Redis is paused</div><div class="muted" style="margin-top:2px">Codex on orion hit its 5-hour limit at 09:32. h4rn resumes the turn at 14:32 with its saved context.</div></div>
+      <div style="text-align:right"><div class="cd num" data-countdown="resume">2h 10m 00s</div><div class="faint" style="font-size:12px">until auto-resume</div></div>
+      <div style="display:flex;gap:6px"><button class="btn ghost">Fail over…</button><button class="btn secondary">Cancel auto-resume</button><button class="btn primary">Resume now</button></div>
+    </div>
+    <div class="stats" style="margin-bottom:32px">
+      ${stat('Tokens','1.24','M','+12% vs prior',[40,52,18,14,62,70,64,72,66,20,14,70,78,46])}
+      ${stat('Cost','$18.42','','estimate',[9,11,4,3,14,16,14,17,15,5,3,16,18,10])}
+      ${stat('Throughput p50','54','tok/s','p95 71',[51,55,49,50,56,58,52,54,57,50,49,55,56,54])}
+      ${stat('First token p50','0.8','s','p95 2.1 s',[.9,.8,1.1,1,.8,.7,.9,.8,.8,1,1.2,.7,.8,.8])}
+      ${stat('Active','41h','12m','idle 19h 48m',null)}
+      ${stat('Runs','229','','3 failed',[14,18,4,2,22,25,19,24,21,6,3,23,26,12])}
+    </div>
+    <div style="display:grid;grid-template-columns: 1fr 300px;gap:40px;margin-bottom:36px">
+      <div class="sec" style="margin:0">
+        <div class="sec-h"><h2>Tokens per day by harness</h2><button class="btn ghost" data-act="charttable" style="height:24px">${S.chartTable?'View as chart':'View as table'}</button></div>
+        <div class="legend">${SERIES.map((s,i)=>`<span><i style="background:var(${s.c})"></i>${s.k} <b class="num">${total[i]}k</b></span>`).join('')}</div>
+        <div class="chart-wrap" id="chart1" style="height:220px"></div>
+        <div class="tip" id="tip"></div>
+      </div>
+      <div class="sec" style="margin:0">
+        <div class="sec-h"><h2>Active vs idle</h2></div>
+        <div class="split" style="margin:6px 0 10px"><i style="flex:41.2;background:var(--fg-2)"></i><i style="flex:19.8;background:var(--fill-2)"></i></div>
+        <div style="display:flex;justify-content:space-between;font-size:12px" class="num"><span><b style="font-weight:500">41h 12m</b> <span class="muted">active · 68%</span></span><span class="muted">19h 48m idle</span></div>
+        <p class="faint" style="font-size:12px;margin:10px 0 24px;line-height:17px">Idle counts time a turn waited on you: approvals, questions, and limits.</p>
+        <div class="sec-h" style="margin-bottom:6px"><h2>Limits</h2><a class="faint" style="font-size:12px" href="#">Auto-resume settings</a></div>
+        <div class="list">
+          <div class="li" style="display:block;padding:10px 0"><div style="display:flex;justify-content:space-between;margin-bottom:6px"><span>${B.codex(12)} Codex · orion <span class="faint">5-hour</span></span><span class="t-danger num" style="font-size:12px;font-weight:500">Limited</span></div><div class="meter full"><i style="width:100%"></i></div><div class="faint num" style="font-size:12px;margin-top:5px">Resets 14:32 · in <span data-countdown="resume-short">2h 10m</span></div></div>
+          <div class="li" style="display:block;padding:10px 0"><div style="display:flex;justify-content:space-between;margin-bottom:6px"><span>${B.claude(12)} Claude Code · atlas <span class="faint">weekly</span></span><span class="num t-warn" style="font-size:12px;font-weight:500">78%</span></div><div class="meter warn"><i style="width:78%"></i></div><div class="faint num" style="font-size:12px;margin-top:5px">Resets Mon 09:00 · in 3d 20h</div></div>
+          <div class="li" style="display:block;padding:10px 0"><div style="display:flex;justify-content:space-between;margin-bottom:6px"><span>${B.anti(12)} Antigravity · orion <span class="faint">daily</span></span><span class="num muted" style="font-size:12px">23%</span></div><div class="meter"><i style="width:23%"></i></div><div class="faint num" style="font-size:12px;margin-top:5px">Resets 00:00 · in 11h 38m</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="sec">
+      <div class="sec-h"><h2>By model</h2><span class="aside">Cost uses your price table · estimates, not billing</span></div>
+      <table class="tbl"><thead><tr><th>Host</th><th>Harness</th><th>Model</th><th class="r">Tokens</th><th class="r">Cost</th><th class="r">tok/s p50</th><th class="r">TTFT p50</th><th class="r">Runs</th><th class="r">Active</th></tr></thead><tbody>
+        <tr class="hov"><td><span class="cell-id">${B.atlas(14)} atlas</span></td><td><span class="cell-id">${B.claude()} Claude Code</span></td><td class="mono">claude-sonnet-5-5</td><td class="r num">682k</td><td class="r num">$10.24</td><td class="r num">58</td><td class="r num">0.7 s</td><td class="r num">118</td><td class="r num">21h 40m</td></tr>
+        <tr class="hov"><td><span class="cell-id">${B.atlas(14)} atlas</span></td><td><span class="cell-id">${B.claude()} Claude Code</span></td><td class="mono">claude-opus-5-5</td><td class="r num">198k</td><td class="r num">$4.95</td><td class="r num">41</td><td class="r num">1.1 s</td><td class="r num">24</td><td class="r num">6h 02m</td></tr>
+        <tr class="hov"><td><span class="cell-id">${B.orion(14)} orion</span></td><td><span class="cell-id">${B.codex()} Codex</span></td><td class="mono">gpt-5.1-codex</td><td class="r num">247k</td><td class="r num">$2.31</td><td class="r num">61</td><td class="r num">0.9 s</td><td class="r num">61</td><td class="r num">9h 15m</td></tr>
+        <tr class="hov"><td><span class="cell-id">${B.ubuntu(14)} Ubuntu-24.04</span></td><td><span class="cell-id">${B.opencode()} OpenCode</span></td><td class="mono">claude-haiku-5-5</td><td class="r num">57k</td><td class="r num">$0.18</td><td class="r num">88</td><td class="r num">0.5 s</td><td class="r num">17</td><td class="r num">1h 31m</td></tr>
+        <tr class="hov"><td><span class="cell-id">${B.orion(14)} orion</span></td><td><span class="cell-id">${B.anti()} Antigravity</span></td><td class="mono">gemini-3-pro</td><td class="r num">51k</td><td class="r num faint" title="Price not configured">—</td><td class="r num">47</td><td class="r num">1.4 s</td><td class="r num">9</td><td class="r num">2h 44m</td></tr>
+      </tbody></table>
+    </div>
+  </div></div></main></div>`;
+}
+function drawChart(){
+  const el = document.getElementById('chart1'); if(!el) return;
+  if(S.chartTable){
+    el.style.height='auto';
+    el.innerHTML = `<table class="tbl"><thead><tr><th>Day</th>${SERIES.map(s=>`<th class="r">${s.k}</th>`).join('')}<th class="r">Total</th></tr></thead><tbody>${DAYS.map((d,i)=>`<tr><td>${d}</td>${SERIES.map(s=>`<td class="r num">${s.v[i]}k</td>`).join('')}<td class="r num">${SERIES.reduce((a,s)=>a+s.v[i],0)}k</td></tr>`).join('')}</tbody></table>`;
+    return;
+  }
+  const W = el.clientWidth, H = 220, pl=36, pb=24, pt=6, cw=W-pl, ch=H-pb-pt;
+  const tot = DAYS.map((_,i)=>SERIES.reduce((a,s)=>a+s.v[i],0)); const max=200;
+  const bw = Math.min(28, cw/DAYS.length - 10), step = cw/DAYS.length;
+  let g='';
+  [0,50,100,150,200].forEach(v=>{ const y=pt+ch-(v/max)*ch; g+=`<line x1="${pl}" x2="${W}" y1="${y}" y2="${y}" stroke="var(--line)" ${v?'':'stroke="var(--line-2)"'}/><text x="${pl-8}" y="${y+4}" text-anchor="end" font-size="11" fill="var(--fg-3)">${v?v+'k':'0'}</text>`; });
+  DAYS.forEach((d,i)=>{
+    const x = pl + i*step + (step-bw)/2; let y = pt+ch;
+    const segs = SERIES.map(s=>s.v[i]).map((v,k)=>({v,k})).filter(o=>o.v>0);
+    segs.forEach((o,j)=>{ const h=(o.v/max)*ch; const gap = j? 2:0; const top = j===segs.length-1;
+      const hh = Math.max(0,h-gap); y -= h;
+      if(top){ const r=Math.min(3,hh); g+=`<path d="M${x},${y+gap+hh} V${y+gap+r} Q${x},${y+gap} ${x+r},${y+gap} H${x+bw-r} Q${x+bw},${y+gap} ${x+bw},${y+gap+r} V${y+gap+hh} Z" fill="var(${SERIES[o.k].c})"/>`; }
+      else g+=`<rect x="${x}" y="${y+gap}" width="${bw}" height="${hh}" fill="var(${SERIES[o.k].c})"/>`;
+    });
+    if(i%2===0||i===DAYS.length-1) g+=`<text x="${x+bw/2}" y="${H-6}" text-anchor="middle" font-size="11" fill="var(--fg-3)">${d.replace('Nov ','')}</text>`;
+    g+=`<rect class="hit" data-i="${i}" x="${pl+i*step}" y="${pt}" width="${step}" height="${ch}" fill="transparent"/>`;
+  });
+  el.innerHTML = `<svg width="${W}" height="${H}" role="img" aria-label="Tokens per day by harness, Oct 30 to Nov 12. Weekdays run 120 to 190 thousand tokens; weekends drop below 40 thousand." style="font-family:var(--font);font-variant-numeric:tabular-nums">${g}</svg>`;
+  const tip = document.getElementById('tip');
+  el.querySelectorAll('.hit').forEach(r=>{
+    r.addEventListener('mouseenter', ()=>{ const i=+r.dataset.i; tip.style.display='block';
+      tip.innerHTML = `<div style="font-weight:600;margin-bottom:4px">${DAYS[i]} <span class="faint" style="font-weight:400">· ${tot[i]}k</span></div>` + SERIES.map(s=>`<div class="r"><span><i style="background:var(${s.c})"></i>${s.k}</span><span class="num">${s.v[i]}k</span></div>`).join('');
+      const x = pl + i*step + step/2; tip.style.left = Math.min(W-180, x+12)+'px'; tip.style.top = '60px'; r.setAttribute('fill','color-mix(in oklch, var(--fg) 5%, transparent)'); });
+    r.addEventListener('mouseleave', ()=>{ tip.style.display='none'; r.setAttribute('fill','transparent'); });
+  });
+}
+function scrPR(){
+  const prs = [
+    ['#482','Fix flaky auth test','1 failing check','danger','sel'],
+    ['#479','Relay retry with backoff','Review requested','you'],
+    ['#476','Audit dependency tree','All checks passed',''],
+    ['#471','Pin blobatar to 2.7.0','Merged',''],
+  ];
+  return `<div class="app">${sidebar('pr')}
+  <section class="pane" aria-label="Pull requests">
+    <div class="pane-head"><h2>Pull requests</h2><button class="ibtn">${ic('filter')}</button></div>
+    <div class="pane-sub"><div class="seg"><button aria-selected="true">Open <span class="c">3</span></button><button aria-selected="false">Mine <span class="c">2</span></button><button aria-selected="false">Review <span class="c">1</span></button></div></div>
+    <div class="scroll"><div class="rows">${prs.map(([n,t,s,tone,sel])=>`<button class="row ${sel||''}"><span class="row-st" style="color:var(--fg-2)">${ic('pr',14)}</span><span class="row-main"><span class="row-l1"><span class="row-title">${t}</span><span class="row-time">${n}</span></span><span class="row-l2"><span class="row-meta">dev/api</span><span class="row-status ${tone}">${s}</span></span></span></button>`).join('')}</div></div>
+  </section>
+  <main class="main"><header class="page-head" style="height:auto;padding:14px 16px 14px 32px;align-items:flex-start">
+    <div style="flex:1;min-width:0"><h1 style="font-size:17px;line-height:22px">Fix flaky auth test <span class="faint" style="font-weight:400">#482</span></h1>
+    <div class="muted" style="font-size:12px;margin-top:4px;display:flex;gap:6px;align-items:center"><span class="badge ok" style="height:18px">Open</span> <span class="mono" style="font-size:11.5px">h4rn/fix-flaky-auth</span> → <span class="mono" style="font-size:11.5px">main</span> · 3 commits · opened by you 40m ago · dev/api on GitHub</div></div>
+    <button class="btn secondary">${ic('ext',14)} Open on GitHub</button></header>
+  <div class="page"><div class="pr-cols">
+    <div class="pr-main">
+      <div class="tabs" role="tablist"><button role="tab" aria-selected="true">Conversation <span class="c">4</span></button><button role="tab">Commits <span class="c">3</span></button><button role="tab">Checks <span class="c">5</span></button><button role="tab">Files <span class="c">2</span></button></div>
+      <div class="cmt" style="padding-top:0"><div class="cmt-h">${blob('user:u_dev','harness',18)} <b>you</b> · 40m ago</div><p>Pins the clock in the test setup so <code class="mono">createPool()</code> no longer reads <code class="mono">Date.now()</code> at import time. Adds a regression test at the 30 s session boundary.</p><p class="muted" style="font-size:13px">Opened from thread <a href="#" class="t-accent" data-go="inbox">Fix flaky auth test</a> · Claude Code on atlas</p></div>
+      <div class="cmt"><div class="cmt-h">${blob('user:u_mara','harness',18)} <b>mara-k</b> requested changes · 12m ago</div>
+        <div class="ctx-code"><div class="fh">tests/setup.ts · line 10</div>
+          <div class="ln a"><span class="n">9</span><span class="sg">+</span><span class="cx">export const clock = vi.useFakeTimers({ now: new Date("2026-01-01T00:00:00Z") });</span></div>
+          <div class="ln a"><span class="n">10</span><span class="sg">+</span><span class="cx">beforeAll(() =&gt; createPool({ now: () =&gt; clock.now() }));</span></div></div>
+        <p>This pool is never closed, so the e2e job leaks a connection per file. Close it in <code class="mono">afterAll</code> and the e2e check should go green.</p>
+        <div class="cmt-a" style="position:relative"><button class="btn secondary">${ic('msg',14)} Reply</button><button class="btn secondary" aria-expanded="true">${ic('hand',14)} Hand to agent</button>
+          ${S.prPop?`<div class="pop" style="left:96px;top:36px;width:380px">
+            <div style="font-weight:600;margin-bottom:2px">Hand this comment to an agent</div>
+            <div class="muted" style="font-size:12px;margin-bottom:12px">Sends the comment, file and line, and the PR link.</div>
+            <div class="li" style="border-top:1px solid var(--line);min-height:40px">${orb('run')}<div class="grow"><div class="t">This thread</div><div class="s">Fix flaky auth test · Claude Code on atlas</div></div><span class="t-accent">${ic('check',16)}</span></div>
+            <div class="li" style="min-height:40px"><span style="width:14px"></span><div class="grow"><div class="t">New thread</div><div class="s">Choose host and harness</div></div></div>
+            <p class="faint" style="font-size:12px;margin:10px 0 12px">The agent won’t push without your approval.</p>
+            <div style="display:flex;justify-content:flex-end;gap:6px"><button class="btn ghost">Cancel</button><button class="btn primary">Send to Claude Code <span class="kbd">⌘↵</span></button></div>
+          </div>`:''}
+        </div>
+      </div>
+      <div class="cmt"><div class="cmt-h">${B.claude(16)} <b>Claude Code</b> <span>on atlas</span> · 9m ago</div><p>Added a deterministic clock for the token refresh path too. The e2e failure is the pool leak mara-k pointed out; handing that back now.</p></div>
+      <div style="margin-top:18px">${composer({ph:'Comment on #482'})}</div>
+    </div>
+    <aside class="pr-side">
+      <div class="side-sec"><h3><span>Checks</span><span>4 of 5 passed</span></h3>
+        <div class="chk"><span class="t-ok">${ic('ccheck',14)}</span><span class="grow">build</span><span class="faint num">1m 12s</span></div>
+        <div class="chk"><span class="t-ok">${ic('ccheck',14)}</span><span class="grow">unit</span><span class="faint num">2m 04s</span></div>
+        <div class="chk"><span class="t-ok">${ic('ccheck',14)}</span><span class="grow">lint</span><span class="faint num">18s</span></div>
+        <div class="chk"><span class="t-ok">${ic('ccheck',14)}</span><span class="grow">typecheck</span><span class="faint num">41s</span></div>
+        <div class="chk"><span class="t-danger">${ic('cx',14)}</span><span class="grow">e2e <span class="faint">· required</span></span><span class="faint num">42s</span></div>
+        <div style="display:flex;gap:6px;margin-top:8px"><button class="btn secondary">View log</button><button class="btn ghost">Re-run failed</button></div>
+      </div>
+      <div class="side-sec"><h3><span>Reviews</span></h3>
+        <div class="chk">${blob('user:u_mara','harness',16)}<span class="grow">mara-k</span><span class="t-warn" style="font-size:12px">Changes requested</span></div>
+        <div class="chk">${blob('user:u_ty','harness',16)}<span class="grow">tyler-o</span><span class="faint" style="font-size:12px">Pending</span></div>
+      </div>
+      <div class="side-sec" style="border:0"><h3><span>Linked thread</span></h3>
+        <div class="chk">${orb('run')}<span class="grow">Fix flaky auth test</span><span class="faint" style="font-size:12px">atlas</span></div>
+      </div>
+    </aside>
+  </div></div></main></div>`;
+}
+function settingsPane(active){
+  const it = (id, icon, label) => `<a href="#" class="nav" data-go="${id}" ${active===id?'aria-current="page"':''}>${ic(icon)}<span class="lbl">${label}</span></a>`;
+  return `<section class="pane" style="width:240px;background:var(--bg)"><div class="pane-head"><h2>Settings</h2></div>
+    <div style="padding:0 8px;display:flex;flex-direction:column;gap:2px">
+    ${it('set-general','gear','General')}${it('set-appearance','sun','Appearance')}${it('set-notif','bell','Notifications')}${it('set-keys','cmd','Shortcuts')}
+    <div class="side-h" style="padding-top:18px">Machines</div>
+    ${it('set-hosts','server','Hosts')}${it('set-devices','phone','Devices')}${it('set-providers','layers','Providers')}
+    <div class="side-h" style="padding-top:18px">Account</div>
+    ${it('set-account','user','Account & relay')}</div></section>`;
+}
+function scrHosts(){
+  const H = (b, name, kind, conn, pres, harn, lat, cls='', sub=false) => `<tr class="hov ${cls}"><td style="${sub?'padding-left:24px':''}"><span class="cell-id">${b} <span style="font-weight:500">${name}</span></span></td><td class="muted">${kind}</td><td class="muted">${conn}</td><td>${pres}</td><td class="muted">${harn}</td><td class="r num muted">${lat}</td><td class="r" style="padding-right:0"><button class="ibtn">${ic('more')}</button></td></tr>`;
+  return `<div class="app">${sidebar('set-hosts')}${settingsPane('set-hosts')}
+  <main class="main"><div class="page"><div class="form" style="max-width:880px">
+    <div style="display:flex;align-items:flex-start;gap:12px"><div style="flex:1"><h1>Hosts</h1><p class="lead">Machines that run agents. WSL distros are separate hosts with their own harnesses, credentials and settings.</p></div><button class="btn secondary">Add host</button><button class="btn primary" data-go="set-devices">${ic('qr',14)} Pair a device</button></div>
+    <table class="tbl" style="margin-bottom:36px"><thead><tr><th>Host</th><th>System</th><th>Connection</th><th>Presence</th><th>Harnesses</th><th class="r">Latency</th><th></th></tr></thead><tbody>
+      ${H(B.atlas(18),'atlas','Windows 11 · this host','Direct','<span class="health"><span class="dot on"></span> Online</span>','Claude Code, Codex','12 ms')}
+      ${H(B.ubuntu(16),'Ubuntu-24.04','WSL 2 on atlas','Direct','<span class="health"><span class="dot on"></span> Online</span>','OpenCode, Codex','18 ms','',true)}
+      ${H(B.debian(16),'Debian','WSL 2 on atlas','—','<span class="health"><span class="dot off"></span> Stopped</span>','None installed','—','',true)}
+      ${H(B.orion(18),'orion','macOS 15 · MacBook Pro','Tailscale','<span class="health"><span class="dot on"></span> Online</span>','Codex, Antigravity','42 ms')}
+      ${H(B.buildbox(18),'buildbox','Ubuntu 24.04 server','Relay','<span class="health t-danger">'+ic('wifioff',12)+' Offline · 3h</span>','Codex','—')}
+    </tbody></table>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:18px">${B.atlas(32)}<div style="flex:1"><div style="font-size:15px;font-weight:600">atlas</div><div class="muted" style="font-size:12px">Windows 11 Pro · h4rn 0.10.2 · up 6d 4h · CPU 18% · memory 11.2 of 32 GB</div></div><button class="btn secondary">Restart daemon</button></div>
+    <div class="group"><h2>Harnesses</h2>
+      <div class="field"><div class="lab" style="display:flex;gap:10px;align-items:center">${B.claude(18)}<div><div class="t">Claude Code</div><div class="s">2.1.4 · 3 models</div></div></div><div class="ctl"><span class="health"><span class="dot on"></span> Running · 2 threads</span><span style="flex:1"></span><span class="faint" style="font-size:12px">Uses CLIProxyAPI</span><button class="btn ghost">Restart</button></div></div>
+      <div class="field"><div class="lab" style="display:flex;gap:10px;align-items:center">${B.codexA(18)}<div><div class="t">Codex</div><div class="s">0.98.2 · 4 models</div></div></div><div class="ctl"><span class="health"><span class="dot on"></span> Running · idle</span><span style="flex:1"></span><span class="faint" style="font-size:12px">Own credential</span><button class="btn ghost">Restart</button></div></div>
+      <div class="field"><div class="lab" style="display:flex;gap:10px;align-items:center">${blob('harness:m_7f3a:opencode','harness',18)}<div><div class="t">OpenCode</div><div class="s">1.14.19</div></div></div><div class="ctl"><span class="health"><span class="dot off"></span> Stopped</span><span style="flex:1"></span><button class="btn secondary">${ic('play',12)} Start</button></div></div>
+    </div>
+  </div></div></main></div>`;
+}
+function qrSVG(seed='pair:7K4Q2M9P'){
+  const N=25; let h=hash(seed); const rnd=()=>{ h^=h<<13; h^=h>>>17; h^=h<<5; return (h>>>0)/4294967296; };
+  let s=''; const finder=(x,y)=>{ s+=`<rect x="${x}" y="${y}" width="7" height="7" fill="#111"/><rect x="${x+1}" y="${y+1}" width="5" height="5" fill="#fff"/><rect x="${x+2}" y="${y+2}" width="3" height="3" fill="#111"/>`; };
+  for(let y=0;y<N;y++) for(let x=0;x<N;x++){ const inF=(x<8&&y<8)||(x>N-9&&y<8)||(x<8&&y>N-9); if(inF) continue; if(x===6||y===6){ if((x+y)%2===0) s+=`<rect x="${x}" y="${y}" width="1" height="1" fill="#111"/>`; continue; } if(rnd()<0.5) s+=`<rect x="${x}" y="${y}" width="1" height="1" fill="#111"/>`; }
+  finder(0,0); finder(N-7,0); finder(0,N-7);
+  s+=`<rect x="16" y="16" width="5" height="5" fill="#111"/><rect x="17" y="17" width="3" height="3" fill="#fff"/><rect x="18" y="18" width="1" height="1" fill="#111"/>`;
+  return `<svg viewBox="0 0 ${N} ${N}" width="100%" height="100%" shape-rendering="crispEdges" role="img" aria-label="Pairing QR code for atlas">${s}</svg>`;
+}
+function scrDevices(){
+  const sc = (on, label, sub='') => `<label style="display:flex;gap:10px;align-items:flex-start;padding:6px 0"><span class="check ${on?'on':''}">${on?ic('check',12):''}</span><span><span style="font-weight:500">${label}</span>${sub?`<span class="faint" style="display:block;font-size:12px">${sub}</span>`:''}</span></label>`;
+  return `<div class="app">${sidebar('set-hosts')}${settingsPane('set-devices')}
+  <main class="main"><div class="page"><div class="form" style="max-width:840px">
+    <h1>Devices</h1><p class="lead">Phones and computers that can reach your hosts. Each device gets its own scopes, and you can revoke one without touching the others.</p>
+    <div class="group"><h2>Pair a device <span class="grow"></span><span class="faint num" style="font-size:12px;font-weight:400">Expires in <span data-countdown="pair">9:41</span></span></h2>
+      <div style="display:flex;gap:28px;padding:18px 0 4px;border-top:1px solid var(--line)">
+        <div class="qr">${qrSVG()}</div>
+        <div style="flex:1;min-width:0">
+          <div class="muted" style="font-size:12px">Scan with the h4rn app, or enter this code</div>
+          <div class="code-big" style="margin:4px 0 2px">7K4Q-2M9P</div>
+          <div class="faint" style="font-size:12px;margin-bottom:14px">Works once, for one device. Pairs with atlas and its WSL distros.</div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:0 24px">
+            ${sc(true,'View threads','Always included')}${sc(true,'Approve and reply')}${sc(false,'Terminal','Type into shells on atlas')}${sc(false,'Files and edits')}${sc(false,'Manage hosts and devices','Admin')}
+          </div>
+          <div style="display:flex;gap:6px;margin-top:12px"><button class="btn secondary">${ic('copy',14)} Copy link</button><button class="btn ghost">${ic('refresh',14)} New code</button></div>
+        </div>
+      </div>
+    </div>
+    <div class="group"><h2>Paired devices</h2>
+      <table class="tbl"><thead><tr><th>Device</th><th>Scopes</th><th>Last seen</th><th></th></tr></thead><tbody>
+        <tr><td><span class="cell-id">${ic('laptop')} <span><span style="font-weight:500">Framework 13</span> <span class="faint">· this device</span></span></span></td><td class="muted">All</td><td><span class="health"><span class="dot on"></span> Now</span></td><td class="r" style="padding-right:0"></td></tr>
+        <tr class="hov"><td><span class="cell-id">${ic('phone')} <span style="font-weight:500">iPhone 16 Pro</span></span></td><td class="muted">View, approve, terminal</td><td><span class="health"><span class="dot on"></span> 2 min ago</span></td><td class="r" style="padding-right:0"><button class="btn danger" style="height:24px">Revoke</button></td></tr>
+        <tr class="hov"><td><span class="cell-id">${ic('phone')} <span style="font-weight:500">Pixel 9</span></span></td><td class="muted">View, approve</td><td class="muted">Yesterday 21:40</td><td class="r" style="padding-right:0"><button class="btn danger" style="height:24px">Revoke</button></td></tr>
+        <tr class="hov"><td><span class="cell-id">${ic('monitor')} <span style="font-weight:500">Work iMac</span></span></td><td class="muted">View</td><td class="muted">Oct 28</td><td class="r" style="padding-right:0"><button class="btn danger" style="height:24px">Revoke</button></td></tr>
+      </tbody></table>
+    </div>
+  </div></div></main></div>`;
+}
+function scrProviders(){
+  const pr = (ok, k, v) => `<span class="${ok===1?'t-ok':ok===2?'faint':'t-warn'}">${ic(ok===1?'ccheck':ok===2?'cdot':'warn',14)}</span><span class="k">${k}</span><span class="v">${v}</span>`;
+  const O = (b, name, on, model, path) => `<div class="field"><div class="lab" style="display:flex;gap:10px;align-items:center;width:180px">${b}<div class="t">${name}</div></div><div class="ctl"><span class="switch" role="switch" aria-checked="${on}" aria-label="Route ${name} through CLIProxyAPI"></span><span style="width:160px" class="${on?'':'faint'}">${on?model:'Own credential'}</span><span class="mono faint" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11.5px">${path}</span></div></div>`;
+  return `<div class="app">${sidebar('set-hosts')}${settingsPane('set-providers')}
+  <main class="main"><div class="page"><div class="form">
+    <div style="display:flex;align-items:flex-start;gap:12px"><div style="flex:1"><h1>CLIProxyAPI on atlas</h1><p class="lead">Routes harnesses on atlas through one endpoint with several credentials. Keys stay on atlas; this app only sees whether they exist.</p></div><button class="btn secondary">atlas ${ic('cd',12)}</button></div>
+    <div class="group"><h2>Connection</h2>
+      <div class="field"><div class="lab"><div class="t">Base URL</div></div><div class="ctl"><input class="input mono" value="http://127.0.0.1:8317" aria-label="Base URL" style="max-width:280px;font-size:12px"><button class="btn secondary">${ic('refresh',14)} Probe</button></div></div>
+      <div class="field" style="align-items:flex-start"><div class="lab"><div class="t">Probe</div><div class="s">12:20 from atlas</div></div><div class="ctl" style="display:block"><div class="probe" style="padding-top:2px">
+        ${pr(1,'Health','OK')}${pr(1,'Management','Enabled · v8.0.69')}${pr(1,'Model shape','Claude, detected from headers')}${pr(2,'Usage history','Not available on ≥ 6.10 · h4rn counts usage itself')}
+      </div></div></div>
+      <div class="field"><div class="lab"><div class="t">Management key</div></div><div class="ctl"><span class="secret">${ic('key',12)} Stored on atlas</span><span style="flex:1"></span><button class="btn ghost">Replace</button></div></div>
+      <div class="field"><div class="lab"><div class="t">Access key</div><div class="s">What harnesses send</div></div><div class="ctl"><span class="secret">${ic('key',12)} Stored on atlas</span><span style="flex:1"></span><button class="btn ghost">Replace</button></div></div>
+    </div>
+    <div class="group"><h2>Models <span class="grow"></span><button class="btn ghost" style="font-weight:500">${ic('plus',14)} Custom model</button></h2>
+      <table class="tbl"><thead><tr><th style="width:28px"></th><th>Model</th><th>Alias</th><th class="r">Context</th><th></th></tr></thead><tbody>
+        <tr><td><span class="check on">${ic('check',12)}</span></td><td class="mono">claude-sonnet-5-5</td><td>sonnet</td><td class="r num">200k</td><td></td></tr>
+        <tr><td><span class="check on">${ic('check',12)}</span></td><td class="mono">claude-opus-5-5</td><td>opus</td><td class="r num">200k</td><td></td></tr>
+        <tr><td><span class="check">${''}</span></td><td class="mono faint">claude-haiku-5-5</td><td class="faint">haiku</td><td class="r num faint">200k</td><td></td></tr>
+        <tr><td><span class="check on">${ic('check',12)}</span></td><td><span class="mono">fast</span> <span class="badge" style="height:18px;margin-left:6px">Custom</span></td><td class="muted">maps to <span class="mono">claude-haiku-5-5</span> · keeps original id</td><td class="r num">200k</td><td class="r" style="padding-right:0"><button class="ibtn">${ic('more')}</button></td></tr>
+      </tbody></table>
+    </div>
+    <div class="group"><h2>Per-harness override</h2><p class="desc">Off means the harness keeps its own credential. Nothing changes for a harness you don’t turn on.</p>
+      ${O(B.claude(16),'Claude Code',true,'sonnet','~/.claude/settings.json')}
+      <div class="preview" style="margin:0 0 6px 196px">
+        <div class="ln a"><span class="n">+</span><span class="sg"></span><span class="cx">"ANTHROPIC_BASE_URL": "http://127.0.0.1:8317",</span></div>
+        <div class="ln a"><span class="n">+</span><span class="sg"></span><span class="cx">"ANTHROPIC_AUTH_TOKEN": <span class="faint">stored on atlas</span>,</span></div>
+        <div class="ln a"><span class="n">+</span><span class="sg"></span><span class="cx">"ANTHROPIC_MODEL": "sonnet"</span></div>
+      </div>
+      ${O(B.codexA(16),'Codex',false,'','~/.codex/config.toml')}
+      ${O(blob('harness:m_7f3a:opencode','harness',16),'OpenCode',true,'fast','~/.config/opencode/opencode.jsonc')}
+      ${O(blob('harness:m_7f3a:antigravity','harness',16),'Antigravity',false,'','~/.gemini/settings.json')}
+    </div>
+    <div class="group"><h2>Verify</h2>
+      <div class="field" style="border-top:1px solid var(--line)"><div class="lab"><div class="t">Test request</div><div class="s">Claude Code route</div></div><div class="ctl"><span class="t-ok">${ic('ccheck',14)}</span><span>Resolved <span class="mono">claude-sonnet-5-5</span> · TTFT 412 ms · 61 tok/s</span></div></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px;align-items:center"><span class="faint" style="font-size:12px;margin-right:auto">Claude Code reads this at startup. Restarting interrupts 1 running turn on atlas.</span><button class="btn ghost">Cancel</button><button class="btn primary">Apply and restart</button></div>
+    </div>
+  </div></div></main></div>`;
+}
+function scrPalette(){
+  const I = (icn, label, hint, sel=false, right='') => `<button class="pal-i" ${sel?'aria-selected="true"':''}><span class="ic">${icn}</span><span class="grow">${label}</span>${right}${hint?`<span class="h">${hint}</span>`:''}</button>`;
+  const K = (...k) => k.map(x=>`<span class="kbd">${x}</span>`).join(' ');
+  return scrInbox().replace(/<\/div>$/, '') + `<div class="scrim" data-act="closepal"></div>
+  <div class="palette" role="dialog" aria-label="Command palette">
+    <div class="pal-in">${ic('search',18)}<input autofocus placeholder="Search threads, hosts, files, or commands" aria-label="Command"><span class="pal-ctx">${orb('run')} Fix flaky auth test</span></div>
+    <div class="pal-list" role="listbox">
+      <div class="pal-g">This thread</div>
+      ${I(ic('shield'),'Approve pending command on orion','',true,K('⌘','↵'))}
+      ${I(ic('x'),'Deny pending command','',false,K('⌘','⌫'))}
+      ${I(ic('term'),'Open terminal','',false,K('T'))}
+      ${I(ic('tree'),'Show subagents','',false,K('⌘','J'))}
+      ${I(ic('stop'),'Interrupt turn','',false,K('⌘','.'))}
+      <div class="pal-g">Threads</div>
+      ${I(orb('run'),'Ship relay retry with backoff','orion · Codex')}
+      ${I(`<span class="t-warn">${ic('clock',14)}</span>`,'Migrate session store to Redis','Resumes 14:32')}
+      ${I(ic('compose'),'New thread…','',false,K('⌘','⇧','N'))}
+      <div class="pal-g">Go to</div>
+      ${I(ic('chart'),'Usage','',false,K('G','U'))}
+      ${I(ic('qr'),'Pair a device…','')}
+    </div>
+    <div class="pal-foot"><span>${K('↑','↓')} Move</span><span>${K('↵')} Run</span><span>${K('Esc')} Close</span><span style="flex:1"></span><span>Searches atlas, Ubuntu-24.04 and orion</span></div>
+  </div></div>`;
+}
+
+/* states */
+function scrEmpty(){
+  return `<div class="app">${sidebar('inbox',{empty:true})}${inboxPane({empty:true})}
+  <main class="main"><div class="center-empty"><div class="box">
+    <h2 style="margin:0 0 6px;font-size:17px;font-weight:600;letter-spacing:-0.01em">Start a thread</h2>
+    <p class="muted" style="margin:0 0 18px;line-height:19px">Pick where it runs. The agent works in a worktree on that host, and you can supervise it from any paired device.</p>
+    <div style="display:flex;gap:8px;margin-bottom:10px"><button class="btn secondary">${B.atlas(14)} atlas ${ic('cd',12)}</button><button class="btn secondary">${B.claude(14)} Claude Code ${ic('cd',12)}</button><button class="btn secondary"><span class="mono" style="font-size:11.5px">~/code/api</span> ${ic('cd',12)}</button></div>
+    ${composer({ph:'Describe the task for Claude Code on atlas'})}
+    <p class="faint" style="font-size:12px;margin:12px 0 0">No host yet? <a href="#" class="t-accent" data-go="set-devices">Pair a device</a> or run <span class="mono">h4rn host</span> on the machine.</p>
+  </div></div></main></div>`;
+}
+function scrLoading(){
+  const sk = (w,h=10,mb=10) => `<div class="skel" style="width:${w};height:${h}px;margin-bottom:${mb}px"></div>`;
+  return `<div class="app">${sidebar('inbox')}${inboxPane({loading:true})}
+  <main class="main" aria-busy="true" aria-label="Loading thread">
+    <header class="th-head"><div class="th-titles">${sk('240px',12,8)}${sk('360px',9,0)}</div><div class="th-state faint" style="font-weight:400">Connecting to atlas…</div></header>
+    <div class="stream"><div class="col" style="padding-top:28px">
+      <div style="display:flex;justify-content:flex-end;margin-bottom:32px"><div class="skel" style="width:58%;height:62px;border-radius:14px"></div></div>
+      ${sk('120px',9,14)}${sk('92%')}${sk('86%')}${sk('64%',10,22)}
+      ${[1,2,3].map(()=>`<div style="display:flex;gap:10px;align-items:center;margin-bottom:12px"><div class="skel" style="width:14px;height:14px;border-radius:50%"></div><div class="skel" style="width:36px;height:9px"></div><div class="skel" style="width:220px;height:9px"></div></div>`).join('')}
+      <div class="skel" style="width:100%;height:130px;border-radius:12px;margin-top:14px"></div>
+    </div></div>
+    <div class="dock"><div class="col"><div class="skel" style="height:84px;border-radius:12px;opacity:.6"></div></div></div>
+  </main></div>`;
+}
+function scrOffline(){
+  const banner = `<div class="banner">${ic('wifioff',14)}<span class="grow"><b>Offline</b> · threads as of 12:04</span><button class="btn ghost" style="height:24px">Reconnect</button></div>`;
+  return `<div class="app">${sidebar('inbox')}${inboxPane({banner})}
+  <main class="main">${threadHead({state:`<span class="faint">${ic('wifioff',14)}</span> Last seen running`, noStop:true})}
+    <div class="banner" style="margin:12px auto 0;max-width:656px;width:calc(100% - 64px)">${ic('alert',14)}<span class="grow"><b>atlas is unreachable from this device.</b> The turn may still be running there. You’re reading the stream as of 12:04.</span></div>
+    ${streamMain().replace('<span class="caret"></span>','…').replace(/<div class="live-line">[\s\S]*?<\/div>/,'<div class="live-line">'+ic('pause',14)+'<span>Stream paused at 12:04 · will catch up on reconnect</span></div>')}
+    <div class="dock"><div class="col">
+      <div class="ask" style="opacity:.75"><div class="ask-h">${ic('shield',16)}<span class="t">Codex on orion wants to run a command</span></div><div class="cmd" style="margin-top:8px">CI=1 pnpm vitest run --project auth --repeat 20</div><div class="ask-f"><span class="faint grow" style="font-size:12px">Reconnect to approve or deny. Nothing runs until you do.</span><button class="btn secondary" disabled>Deny</button><button class="btn primary" disabled>Approve</button></div></div>
+      ${composer({ph:'Your reply is saved as a draft and sends when atlas reconnects'})}
+    </div></div>
+  </main></div>`;
+}
+function scrError(){
+  const banner = `<div class="banner err"><span class="ic">${ic('alert',14)}</span><span class="grow"><b>Couldn’t reach buildbox.</b> Showing 3 of 4 hosts.</span><button class="btn ghost" style="height:24px">Retry</button></div>`;
+  return `<div class="app">${sidebar('inbox')}${inboxPane({banner, sel:'wsl'})}
+  <main class="main"><header class="th-head"><div class="th-titles"><h1>Parse WSL distro hosts</h1><div class="prov">${B.buildbox(14)} buildbox <span class="sep">/</span> ${blob('harness:m_0b9d:codex','harness',14)} Codex <span class="sep">/</span> gpt-5.1-codex</div></div><div class="th-state t-danger">${ic('wifioff',14)} Host unreachable</div></header>
+    <div class="center-empty"><div class="box" style="width:460px">
+      <span class="t-danger">${ic('alert',22)}</span>
+      <h2 style="margin:10px 0 6px;font-size:17px;font-weight:600;letter-spacing:-0.01em">This thread couldn’t be loaded</h2>
+      <p class="muted" style="margin:0 0 16px;line-height:19px">buildbox stopped answering at 09:14 while this turn was running. The run may still be active there; nothing on this device was lost.</p>
+      <div style="display:flex;gap:8px;margin-bottom:18px"><button class="btn primary">${ic('refresh',14)} Retry</button><button class="btn secondary" data-go="set-hosts">Open host</button></div>
+      <details style="font-size:12px;color:var(--fg-2)"><summary style="cursor:pointer">Details</summary><dl class="kv" style="margin-top:10px"><dt>Route</dt><dd>relay · h4rn-connect</dd><dt>Last event</dt><dd class="num">09:14:22 · tool call Read</dd><dt>Status</dt><dd>504 from relay</dd><dt>Correlation</dt><dd class="mono" style="font-size:11.5px">c_8e21f0a4</dd></dl><button class="btn ghost" style="margin-top:8px;margin-left:-10px">${ic('copy',14)} Copy diagnostics</button></details>
+    </div></div>
+  </main></div>`;
+}
+
+/* ───────────── Phone ───────────── */
+function phStatus(){ return `<div class="ph-sb"><span class="num">12:22</span><span class="isl"></span><span class="r"><svg width="18" height="12" viewBox="0 0 18 12" aria-hidden="true"><rect x="0" y="8" width="3" height="4" rx="1" fill="currentColor"/><rect x="5" y="5.5" width="3" height="6.5" rx="1" fill="currentColor"/><rect x="10" y="3" width="3" height="9" rx="1" fill="currentColor"/><rect x="15" y="0" width="3" height="12" rx="1" fill="currentColor"/></svg><svg width="26" height="12" viewBox="0 0 26 12" aria-hidden="true"><rect x=".5" y=".5" width="22" height="11" rx="3.5" fill="none" stroke="currentColor" opacity=".4"/><rect x="2" y="2" width="16" height="8" rx="2" fill="currentColor"/><rect x="24" y="4" width="1.5" height="4" rx=".75" fill="currentColor" opacity=".4"/></svg></span></div>`; }
+function phTabs(active){
+  const t = (id, icn, label, bdg='') => `<a href="#" class="ph-tab" data-go="${id}" ${active===id?'aria-current="page"':''}>${ic(icn,24)}${bdg?`<span class="bdg">${bdg}</span>`:''}<span>${label}</span></a>`;
+  return `<nav class="ph-tabbar" aria-label="Main">${t('p-inbox','inbox','Inbox','2')}${t('p-pr','pr','PRs')}${t('p-usage','chart','Usage')}${t('p-pairing','server','Hosts')}${t('p-more','gear','Settings')}</nav>`;
+}
+function phone(inner){ return `<div class="device"><div class="ph">${inner}</div><div class="home"></div></div>`; }
+function pInbox(){
+  const rows = THREADS.working.map(t=>`<a href="#" class="ph-row" data-go="${t.id==='auth'?'p-thread':''}"><span class="row-st">${stGlyph(t.st)}</span><span class="row-main"><span class="row-l1"><span class="row-title">${t.title}</span><span class="row-time num">${t.time}</span></span><span class="row-l2"><span class="row-meta">${t.meta}</span><span class="row-status ${t.tone||''}">${t.status}</span></span></span></a>`).join('');
+  return phone(`${phStatus()}
+    <div class="ph-nav"><button class="navbtn">${ic('filter',22)}</button><span class="ttl"></span><button class="navbtn" aria-label="New thread">${ic('compose',22)}</button></div>
+    <div class="ph-lt">Inbox</div>
+    <div class="ph-seg"><div class="seg" role="tablist"><button aria-selected="true">Working <span class="c">6</span></button><button aria-selected="false">Done <span class="c">3</span></button><button aria-selected="false">Settled</button></div></div>
+    <div class="ph-body">${rows}
+      <a href="#" class="ph-row" style="min-height:52px;align-items:center"><span class="row-st faint">${ic('clock',16)}</span><span class="grow" style="flex:1">Snoozed</span><span class="faint num">2</span><span class="faint">${ic('cr',16)}</span></a>
+      <div style="height:16px"></div>
+    </div>
+    ${phTabs('p-inbox')}`);
+}
+function pThreadBody(){
+  return `<div class="ph-nav"><a href="#" class="navbtn" data-go="p-inbox">${ic('cl',24)}Inbox</a><span class="ttl"></span><button class="navbtn" aria-label="Terminal" data-go="p-terminal">${ic('term',22)}</button><button class="navbtn" aria-label="More">${ic('more',22)}</button></div>
+    <div style="padding:0 20px 10px;border-bottom:1px solid var(--line)"><div style="font-size:20px;line-height:26px;font-weight:600;letter-spacing:-0.015em">Fix flaky auth test</div>
+      <div class="muted" style="font-size:14px;margin-top:4px;display:flex;align-items:center;gap:6px">${B.atlas(16)} atlas · ${B.claude(14)} Claude Code <span style="flex:1"></span>${orb('run')} <span style="font-weight:500">Running</span></div></div>
+    <div class="ph-body tail"><div class="ph-stream">
+      <div class="turn you-msg" style="margin:12px 0 22px"><div class="bubble">The auth test fails on CI only. Fix it and add a regression test that pins the clock.</div><div class="you-meta" style="font-size:13px">12:02</div></div>
+      <div class="ag-head" style="font-size:13px">${B.claude(14)} <b>Claude Code</b> · 12:03</div>
+      <p class="prose"><code>createPool()</code> reads <code>Date.now()</code> at import, before the fake clock is installed, so the first lookup races the timer on slow CI runners.</p>
+      <div class="tools" style="font-size:15px">
+        <div class="tool" style="height:36px;font-size:14px"><span class="st">${ic('check',14)}</span><span class="verb">Edit</span><span class="tgt">tests/setup.ts</span><span class="m"><span class="add">+12</span> <span class="del">−4</span></span></div>
+        <div class="tool" style="height:36px;font-size:14px"><span class="st">${ic('check',14)}</span><span class="verb">Edit</span><span class="tgt">session.test.ts</span><span class="m"><span class="add">+6</span></span></div>
+        <div class="tool" style="height:36px;font-size:14px"><span class="st">${orb('held')}</span><span class="verb">Agent</span><span class="tgt" style="font-family:var(--font);font-size:14px">Reproduce CI failure · orion</span></div>
+      </div>
+      <p class="prose">While Codex reproduces it on orion, the regression test advances the clock by 30 s and checks the session at the boundary<span class="caret"></span></p>
+    </div></div>`;
+}
+function pThread(){
+  return phone(`${phStatus()}${pThreadBody()}
+    <div class="ph-dock">
+      <div class="ph-ask"><div style="display:flex;gap:8px;align-items:center;font-size:15px;font-weight:600">${ic('shield',16)} Codex on orion wants to run</div>
+        <div class="mono" style="font-size:13px;line-height:19px;margin:6px 0 10px;color:var(--fg-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">CI=1 pnpm vitest run --project auth --repeat 20</div>
+        <div style="display:flex;gap:10px"><button class="btn secondary sm" style="flex:1" data-go="p-approval">Details</button><button class="btn primary sm" style="flex:1" data-go="p-approval">Review</button></div></div>
+      <div class="ph-comp"><button class="ibtn" style="width:40px;height:40px">${ic('plus',22)}</button><div class="in"><span>Reply to Claude Code</span></div></div>
+      <div class="faint num" style="font-size:12px;text-align:center">18.4k tokens · $0.42 est. · 61 tok/s</div>
+    </div>`);
+}
+function pApproval(){
+  return phone(`${phStatus()}${pThreadBody()}
+    <div class="ph-dock"><div class="ph-comp"><div class="in"><span>Reply to Claude Code</span></div></div></div>
+    <div class="scrim"></div>
+    <div class="ph-sheet" role="dialog" aria-label="Approve command">
+      <div class="grab"></div>
+      <div style="padding:4px 20px 0">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">${B.codex(22)}<div style="flex:1"><div style="font-size:17px;font-weight:600;line-height:22px">Run a command on orion</div><div class="muted" style="font-size:14px">Codex · subagent of Fix flaky auth test</div></div></div>
+        <div class="cmd" style="margin:14px 0 4px;font-size:13.5px;line-height:21px;padding:12px 14px;border-radius:12px">CI=1 pnpm vitest run --project auth --repeat 20</div>
+      </div>
+      <div class="ph-group" style="margin-top:14px">
+        <div class="ph-li"><span class="grow muted">Folder</span><span class="mono" style="font-size:13px">~/code/api</span></div>
+        <div class="ph-li"><span class="grow muted">Worktree</span><span style="font-size:15px">h4rn/repro-ci</span></div>
+        <div class="ph-li"><span class="grow muted">Asked</span><span style="font-size:15px">2 min ago</span></div>
+        <div class="ph-li"><span class="grow">Always allow in this thread</span><span class="switch" role="switch" aria-checked="false"></span></div>
+      </div>
+      <div style="display:flex;gap:12px;padding:0 16px"><button class="btn secondary" style="flex:1">Deny</button><button class="btn primary" style="flex:1">Approve</button></div>
+    </div>`);
+}
+function pTerminal(){
+  return phone(`${phStatus()}
+    <div class="ph-nav"><a href="#" class="navbtn" data-go="p-thread">${ic('cl',24)}Thread</a><span class="ttl">Terminal</span><button class="navbtn">${ic('plus',22)}</button></div>
+    <div style="display:flex;gap:8px;padding:0 16px 10px;align-items:center;font-size:13px" class="muted">${B.atlas(14)} atlas · <span class="mono" style="font-size:12px">~/code/api</span><span style="flex:1"></span><span class="num">46 × 22</span></div>
+    <div class="term-body" style="flex:1;background:var(--bg-sunk);border-top:1px solid var(--line);font-size:12px;line-height:18px;padding:10px 12px"><span class="p">$</span> CI=1 pnpm vitest run \\
+    --project auth --repeat 3
+
+ <span class="d">RUN  v3.2.4 ~/code/api</span>
+
+ <span class="g">${ic('check',12)}</span> src/auth/token.test.ts <span class="d">84ms</span>
+ <span class="g">${ic('check',12)}</span> src/auth/refresh.test.ts <span class="d">96ms</span>
+ <span class="g">${ic('check',12)}</span> src/auth/session.test.ts <span class="d">212ms</span>
+ <span class="g">${ic('check',12)}</span> src/auth/session.test.ts <span class="d">207ms</span>
+ <span class="g">${ic('check',12)}</span> src/auth/session.test.ts <span class="d">219ms</span>
+
+ <span class="d">Test Files</span>  <span class="g">5 passed</span> (5)
+      <span class="d">Tests</span>  <span class="g">45 passed</span> (45)
+   <span class="d">Duration</span>  2.84s
+
+<span class="p">$</span> git status --short
+ M src/auth/session.test.ts
+ M tests/setup.ts
+
+<span class="p">$</span> <span class="term-cur"></span></div>
+    <div style="display:flex;gap:8px;align-items:center;padding:8px 16px;font-size:13px;background:var(--bg-side)" class="muted">${ic('alert',14)}<span>Sized to this phone. Desktop viewers see the same 46 columns.</span></div>
+    <div class="keybar" style="padding-bottom:40px"><span class="key">Esc</span><span class="key">Tab</span><span class="key on">Ctrl</span><span class="key" aria-label="Arrow up">${ic('up',16)}</span><span class="key" aria-label="Arrow down" style="transform:rotate(180deg)">${ic('up',16)}</span><span class="key" aria-label="Arrow left" style="transform:rotate(-90deg)">${ic('up',16)}</span><span class="key" aria-label="Arrow right" style="transform:rotate(90deg)">${ic('up',16)}</span><span class="key">Paste</span></div>`);
+}
+function pPairing(){
+  return phone(`${phStatus()}
+    <div class="ph-nav"><button class="navbtn">Cancel</button><span class="ttl">Pair with atlas</span><span style="width:60px"></span></div>
+    <div class="ph-body">
+      <div style="display:flex;flex-direction:column;align-items:center;text-align:center;padding:18px 24px 24px">${B.atlas(56)}<div style="font-size:22px;font-weight:600;margin-top:12px;letter-spacing:-0.015em">atlas</div><div class="muted" style="font-size:14px;margin-top:2px">Windows 11 · 192.168.1.24 · via relay</div><div class="faint" style="font-size:13px;margin-top:6px">Signed in to h4rn-connect as dev@example.com</div></div>
+      <div class="ph-gh">This phone can</div>
+      <div class="ph-group">
+        <div class="ph-li"><div class="grow">View threads<div class="s">Always included</div></div><span class="switch" role="switch" aria-checked="true" aria-disabled="true"></span></div>
+        <div class="ph-li"><div class="grow">Approve and reply</div><span class="switch" role="switch" aria-checked="true"></span></div>
+        <div class="ph-li"><div class="grow">Terminal<div class="s">Type into shells on atlas</div></div><span class="switch" role="switch" aria-checked="false"></span></div>
+        <div class="ph-li"><div class="grow">Files and edits</div><span class="switch" role="switch" aria-checked="false"></span></div>
+        <div class="ph-li"><div class="grow">Manage hosts and devices</div><span class="switch" role="switch" aria-checked="false"></span></div>
+      </div>
+      <div class="ph-gh">Also included</div>
+      <div class="ph-group"><div class="ph-li">${B.ubuntu(22)}<div class="grow">Ubuntu-24.04<div class="s">WSL 2 on atlas</div></div></div></div>
+      <p class="faint" style="font-size:13px;line-height:18px;padding:0 32px;margin:-8px 0 0">Credentials stay on atlas. You can revoke this phone from any other device.</p>
+    </div>
+    <div style="padding:12px 16px 40px;border-top:1px solid var(--line)"><div class="faint num" style="font-size:13px;text-align:center;margin-bottom:10px">Link expires in <span data-countdown="pair">9:41</span></div><button class="btn primary" style="width:100%">Pair this phone</button></div>`);
+}
+function pUsage(){
+  const mini = (l, v, s) => `<div style="padding:12px 16px"><div class="muted" style="font-size:13px">${l}</div><div class="num" style="font-size:22px;font-weight:600;letter-spacing:-0.015em;margin-top:2px">${v}</div><div class="faint" style="font-size:13px">${s}</div></div>`;
+  const bars = SERIES[0].v.map((_,i)=>SERIES.reduce((a,s)=>a+s.v[i],0));
+  const W=326,H=112; const bw=14, step=W/bars.length;
+  let svg=''; bars.forEach((v,i)=>{ let y=H-16; SERIES.forEach((s,k)=>{ const h=s.v[i]/200*(H-20); if(!h) return; y-=h; svg+=`<rect x="${i*step+(step-bw)/2}" y="${y+(k?1:0)}" width="${bw}" height="${Math.max(0,h-(k?1:0))}" fill="var(${s.c})" ${k===3?'rx="2"':''}/>`; }); });
+  return phone(`${phStatus()}
+    <div class="ph-nav"><span></span><span class="ttl"></span><button class="navbtn">14 days ${ic('cd',16)}</button></div>
+    <div class="ph-lt">Usage</div>
+    <div class="ph-body">
+      <div class="ph-group" style="padding:14px 16px">
+        <div style="display:flex;gap:10px;align-items:flex-start"><span class="t-warn" style="padding-top:2px">${ic('clock',18)}</span><div style="flex:1"><div style="font-weight:600;font-size:16px">Migrate session store is paused</div><div class="muted" style="font-size:14px;line-height:19px;margin-top:2px">Codex on orion hit its 5-hour limit.</div></div></div>
+        <div class="num" style="font-size:30px;line-height:36px;font-weight:600;letter-spacing:-0.02em;margin:12px 0 0" data-countdown="resume">2h 10m 00s</div>
+        <div class="faint" style="font-size:14px;margin-bottom:14px">Auto-resumes at 14:32</div>
+        <div style="display:flex;gap:10px"><button class="btn secondary sm" style="flex:1">Cancel</button><button class="btn primary sm" style="flex:1">Resume now</button></div>
+      </div>
+      <div class="ph-group" style="display:grid;grid-template-columns:1fr 1fr">
+        ${mini('Tokens','1.24M','+12% vs prior')}<div style="border-left:1px solid var(--line)">${mini('Cost','$18.42','estimate')}</div>
+        <div style="border-top:1px solid var(--line)">${mini('Throughput','54 tok/s','p50')}</div><div style="border-top:1px solid var(--line);border-left:1px solid var(--line)">${mini('First token','0.8 s','p50')}</div>
+      </div>
+      <div class="ph-group" style="padding:14px 16px 12px">
+        <div class="seg" style="margin-bottom:14px"><button aria-selected="true" style="height:28px;font-size:13px">Tokens</button><button aria-selected="false" style="height:28px;font-size:13px">Cost</button><button aria-selected="false" style="height:28px;font-size:13px">Speed</button></div>
+        <svg width="100%" viewBox="0 0 ${W} ${H}" role="img" aria-label="Tokens per day, last 14 days">${svg}<line x1="0" x2="${W}" y1="${H-16}" y2="${H-16}" stroke="var(--line-2)"/><text x="2" y="${H-2}" font-size="11" fill="var(--fg-3)">Oct 30</text><text x="${W-2}" y="${H-2}" font-size="11" fill="var(--fg-3)" text-anchor="end">Today</text></svg>
+        <div class="legend" style="margin:10px 0 0;gap:12px;font-size:12px">${SERIES.map(s=>`<span><i style="background:var(${s.c})"></i>${s.k}</span>`).join('')}</div>
+      </div>
+      <div class="ph-gh">Limits</div>
+      <div class="ph-group">
+        <div class="ph-li" style="display:block"><div style="display:flex;justify-content:space-between;margin-bottom:8px"><span>Codex · orion</span><span class="t-danger" style="font-size:14px;font-weight:500">Limited</span></div><div class="meter full"><i style="width:100%"></i></div><div class="faint" style="font-size:13px;margin-top:6px">5-hour · resets 14:32</div></div>
+        <div class="ph-li" style="display:block"><div style="display:flex;justify-content:space-between;margin-bottom:8px"><span>Claude Code · atlas</span><span class="t-warn num" style="font-size:14px;font-weight:500">78%</span></div><div class="meter warn"><i style="width:78%"></i></div><div class="faint" style="font-size:13px;margin-top:6px">Weekly · resets Mon 09:00</div></div>
+      </div>
+    </div>
+    ${phTabs('p-usage')}`);
+}
+
+/* ───────────── Registry ───────────── */
+const SCREENS = [
+  ['Desktop', [
+    ['inbox','Inbox · Working + thread', scrInbox],
+    ['inbox-done','Inbox · Done', scrDone],
+    ['subagents','Thread · subagents', scrSubagents],
+    ['terminal','Thread · terminal', scrTerminal],
+    ['ide','Editor · diff vs agent', scrIDE],
+    ['library','MCP servers & skills', scrLibrary],
+    ['usage','Usage & limits', scrUsage],
+    ['pr','Pull request', scrPR],
+    ['set-hosts','Settings · hosts', scrHosts],
+    ['set-devices','Settings · devices + pairing', scrDevices],
+    ['set-providers','Settings · CLIProxyAPI', scrProviders],
+    ['palette','Command palette', scrPalette],
+    ['state-empty','State · empty', scrEmpty],
+    ['state-loading','State · loading', scrLoading],
+    ['state-offline','State · offline', scrOffline],
+    ['state-error','State · error', scrError],
+  ]],
+  ['Phone', [
+    ['p-inbox','Phone · inbox', pInbox],
+    ['p-thread','Phone · thread', pThread],
+    ['p-approval','Phone · approval', pApproval],
+    ['p-terminal','Phone · terminal', pTerminal],
+    ['p-pairing','Phone · pairing', pPairing],
+    ['p-usage','Phone · usage', pUsage],
+  ]],
+];
+const FLAT = Object.fromEntries(SCREENS.flatMap(([g,l])=>l.map(([id,lab,fn])=>[id,{lab,fn,phone:g==='Phone'}])));
+const ALIAS = { 'set-general':'set-hosts','set-appearance':'set-hosts','set-notif':'set-hosts','set-keys':'set-hosts','set-account':'set-hosts', 'p-pr':'p-inbox','p-more':'p-pairing' };
+const PHONE_MAP = { inbox:'p-inbox', 'inbox-done':'p-inbox', subagents:'p-thread', terminal:'p-terminal', usage:'p-usage', 'set-devices':'p-pairing', palette:'p-inbox' };
+const DESK_MAP = { 'p-inbox':'inbox','p-thread':'inbox','p-approval':'inbox','p-terminal':'terminal','p-pairing':'set-devices','p-usage':'usage' };
+
+/* ───────────── Render + interactions ───────────── */
+const stage = document.getElementById('stage');
+function render(){
+  const id = FLAT[S.screen] ? S.screen : 'inbox';
+  const sc = FLAT[id];
+  if(id!=='inbox-done' && !S._keepTab) S.tab = S.tab || 'working';
+  document.documentElement.dataset.theme = S.theme;
+  document.body.classList.toggle('frame-phone', sc.phone);
+  stage.innerHTML = sc.fn();
+  if(id==='inbox-done') S.tab='working';
+  document.getElementById('pick').value = id;
+  document.getElementById('tgTheme').innerHTML = ic(S.theme==='dark'?'sun':'moon',14);
+  document.getElementById('tgFrame').innerHTML = ic(sc.phone?'monitor':'phone',14);
+  drawChart(); tick(); glyphKbd();
+  document.querySelectorAll('.stream, .ph-body.tail').forEach(e=>e.scrollTop=e.scrollHeight);
+  const u = new URLSearchParams(location.hash.slice(1)); u.set('s',id); u.set('t',S.theme); history.replaceState(null,'','#'+u.toString());
+}
+const KG = { '⌘':P.cmd, '↵':'<polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/>', '⌫':'<path d="M10 5a2 2 0 0 0-1.344.519l-6.328 5.74a1 1 0 0 0 0 1.481l6.328 5.741A2 2 0 0 0 10 19h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z"/><path d="m12 9 6 6"/><path d="m18 9-6 6"/>', '⇧':'<path d="M9 18v-6H5l7-7 7 7h-4v6H9z"/>', '↑':'<path d="m5 12 7-7 7 7"/><path d="M12 19V5"/>', '↓':'<path d="M12 5v14"/><path d="m19 12-7 7-7-7"/>' };
+function glyphKbd(){ document.querySelectorAll('.kbd').forEach(k=>{ if(k.dataset.g) return; k.dataset.g=1; k.innerHTML = [...k.textContent].map(c=>KG[c]?`<svg viewBox="0 0 24 24" aria-hidden="true">${KG[c]}</svg>`:c).join(''); k.setAttribute('aria-label', k.textContent.replace('⌘','Command ').replace('↵','Return').replace('⌫','Backspace').replace('⇧','Shift ')); }); }
+function tick(){
+  const n = nowMs();
+  document.querySelectorAll('[data-countdown="resume"]').forEach(e=>e.textContent = hms(RESUME_AT-n));
+  document.querySelectorAll('[data-countdown="resume-short"]').forEach(e=>e.textContent = hms(RESUME_AT-n,false));
+  document.querySelectorAll('[data-countdown="pair"]').forEach(e=>e.textContent = hms(PAIR_EXP-n));
+}
+setInterval(tick, 1000);
+const pick = document.getElementById('pick');
+pick.innerHTML = SCREENS.map(([g,l])=>`<optgroup label="${g}">${l.map(([id,lab])=>`<option value="${id}">${lab}</option>`).join('')}</optgroup>`).join('');
+pick.onchange = () => { S.screen = pick.value; render(); };
+document.getElementById('tgTheme').onclick = () => { S.theme = S.theme==='dark'?'light':'dark'; render(); };
+document.getElementById('tgFrame').onclick = () => { const ph = FLAT[S.screen]?.phone; S.screen = ph ? (DESK_MAP[S.screen]||'inbox') : (PHONE_MAP[S.screen]||'p-inbox'); render(); };
+document.addEventListener('click', e=>{
+  const go = e.target.closest('[data-go]'); const act = e.target.closest('[data-act]'); const tab = e.target.closest('[data-tab]'); const tool = e.target.closest('.tool');
+  if(go && go.dataset.go){ e.preventDefault(); const g = ALIAS[go.dataset.go] || go.dataset.go; if(FLAT[g]){ S.screen=g; render(); } return; }
+  if(tab){ S.tab = tab.dataset.tab; if(S.screen!=='inbox') S.screen='inbox'; render(); return; }
+  if(act){ const a=act.dataset.act;
+    if(a==='palette'){ S.screen='palette'; render(); }
+    if(a==='closepal'){ S.screen='inbox'; render(); }
+    if(a==='approve'){ const c=act.closest('.ask'); c.classList.add('gone'); document.getElementById('live').textContent='Approved. Codex is running the command on orion.'; setTimeout(()=>{ S.approved=true; render(); }, 200); }
+    if(a==='deny'){ document.getElementById('live').textContent='Denied. The subagent stopped; the parent keeps running.'; }
+    if(a==='undo'){ S.approved=false; render(); }
+    if(a==='charttable'){ S.chartTable=!S.chartTable; render(); }
+    return; }
+  if(tool && tool.hasAttribute('aria-expanded')){ tool.setAttribute('aria-expanded', tool.getAttribute('aria-expanded')!=='true'); }
+});
+document.addEventListener('keydown', e=>{
+  if((e.metaKey||e.ctrlKey) && e.key.toLowerCase()==='k'){ e.preventDefault(); S.screen = S.screen==='palette'?'inbox':'palette'; render(); }
+  if(e.key==='Escape' && S.screen==='palette'){ S.screen='inbox'; render(); }
+  if((e.metaKey||e.ctrlKey) && e.shiftKey && e.key.toLowerCase()==='l'){ e.preventDefault(); S.theme = S.theme==='dark'?'light':'dark'; render(); }
+});
+window.addEventListener('resize', ()=>drawChart());
+(function init(){
+  const u = new URLSearchParams(location.hash.slice(1));
+  if(u.get('s')) S.screen = u.get('s');
+  S.theme = u.get('t') || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  if(u.get('ui')==='0') document.body.classList.add('shot');
+  if(u.get('still')==='1') document.body.classList.add('still');
+  document.fonts?.ready.then(()=>drawChart());
+  render();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,709 @@
+{
+  "errors": [],
+  "audit": [
+    {
+      "screen": "Inbox",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Thread",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Approval",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Subagents",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Terminal",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "IDE",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "MCP servers",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Skills",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Usage",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Pull request",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Hosts",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Pairing",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Providers",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Command palette",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Inbox · Empty",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Inbox · Loading",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Inbox · Offline",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Inbox · Error",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Thread · Empty",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Thread · Loading",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Thread · Offline",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Thread · Error",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Inbox",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Thread",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Approval",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Subagents",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Terminal",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "IDE",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "MCP servers",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Skills",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Usage",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Pull request",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Hosts",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Pairing",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Providers",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Command palette",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Inbox · Empty",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Inbox · Loading",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Inbox · Offline",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Inbox · Error",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Thread · Empty",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Thread · Loading",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Thread · Offline",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Thread · Error",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Inbox",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Thread",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Approval",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Subagents",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Terminal",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "IDE",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "MCP servers",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Skills",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Usage",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Pull request",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Hosts",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Pairing",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Providers",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Command palette",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Inbox · Empty",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Inbox · Loading",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Inbox · Offline",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Inbox · Error",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Thread · Empty",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Thread · Loading",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Thread · Offline",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Thread · Error",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Inbox",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Thread",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Approval",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Subagents",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Terminal",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "IDE",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "MCP servers",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Skills",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Usage",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Pull request",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Hosts",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Pairing",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Providers",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Command palette",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Inbox · Empty",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Inbox · Loading",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Inbox · Offline",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Inbox · Error",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Thread · Empty",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Thread · Loading",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Thread · Offline",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Thread · Error",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    }
+  ]
+}

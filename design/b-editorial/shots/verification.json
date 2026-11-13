@@ -1,0 +1,133 @@
+{
+  "contrasts": {
+    "light": [
+      {
+        "fg": "ink",
+        "bg": "paper",
+        "ratio": 14.54
+      },
+      {
+        "fg": "ink",
+        "bg": "surface",
+        "ratio": 15.43
+      },
+      {
+        "fg": "muted",
+        "bg": "paper",
+        "ratio": 6.51
+      },
+      {
+        "fg": "muted",
+        "bg": "panel",
+        "ratio": 5.96
+      },
+      {
+        "fg": "muted",
+        "bg": "tint",
+        "ratio": 5.46
+      },
+      {
+        "fg": "accent",
+        "bg": "paper",
+        "ratio": 8.55
+      },
+      {
+        "fg": "accent",
+        "bg": "tint",
+        "ratio": 7.18
+      },
+      {
+        "fg": "on",
+        "bg": "accent",
+        "ratio": 9.08
+      },
+      {
+        "fg": "warn",
+        "bg": "warn-bg",
+        "ratio": 6.95
+      },
+      {
+        "fg": "danger",
+        "bg": "danger-bg",
+        "ratio": 7.23
+      },
+      {
+        "fg": "edge",
+        "bg": "surface",
+        "ratio": 4.31
+      },
+      {
+        "fg": "accent",
+        "bg": "panel",
+        "ratio": 7.83
+      }
+    ],
+    "dark": [
+      {
+        "fg": "ink",
+        "bg": "paper",
+        "ratio": 14.33
+      },
+      {
+        "fg": "ink",
+        "bg": "surface",
+        "ratio": 13.29
+      },
+      {
+        "fg": "muted",
+        "bg": "paper",
+        "ratio": 7.4
+      },
+      {
+        "fg": "muted",
+        "bg": "panel",
+        "ratio": 7.87
+      },
+      {
+        "fg": "muted",
+        "bg": "tint",
+        "ratio": 5.43
+      },
+      {
+        "fg": "accent",
+        "bg": "paper",
+        "ratio": 9.47
+      },
+      {
+        "fg": "accent",
+        "bg": "tint",
+        "ratio": 6.95
+      },
+      {
+        "fg": "on",
+        "bg": "accent",
+        "ratio": 9.61
+      },
+      {
+        "fg": "warn",
+        "bg": "warn-bg",
+        "ratio": 7.85
+      },
+      {
+        "fg": "danger",
+        "bg": "danger-bg",
+        "ratio": 6.89
+      },
+      {
+        "fg": "edge",
+        "bg": "surface",
+        "ratio": 4.37
+      },
+      {
+        "fg": "accent",
+        "bg": "panel",
+        "ratio": 10.07
+      }
+    ]
+  },
+  "interactions": "9 core flows passed",
+  "phoneFrame": {
+    "width": 388,
+    "composerVisible": true
+  }
+}

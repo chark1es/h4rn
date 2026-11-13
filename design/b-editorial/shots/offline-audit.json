@@ -1,0 +1,69 @@
+{
+  "errors": [],
+  "audit": [
+    {
+      "screen": "Inbox · Offline",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Thread · Offline",
+      "theme": "light",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Inbox · Offline",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Thread · Offline",
+      "theme": "light",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Inbox · Offline",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Thread · Offline",
+      "theme": "dark",
+      "width": 1440,
+      "overflow": false,
+      "mainWidth": 1256,
+      "fonts": false
+    },
+    {
+      "screen": "Inbox · Offline",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    },
+    {
+      "screen": "Thread · Offline",
+      "theme": "dark",
+      "width": 390,
+      "overflow": false,
+      "mainWidth": 390,
+      "fonts": false
+    }
+  ]
+}

@@ -1,0 +1,543 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-13T06:42:51.422477+00:00",
+  "title": "Design System: h4rn / Direction B",
+  "extensions": {
+    "colorMeta": {
+      "paper": {
+        "role": "neutral",
+        "displayName": "Paper",
+        "canonical": "oklch(97% .009 85)",
+        "tonalRamp": [
+          "oklch(15% 0.0027 85)",
+          "oklch(25% 0.0045 85)",
+          "oklch(35% 0.0063 85)",
+          "oklch(45% 0.0081 85)",
+          "oklch(55% 0.0081 85)",
+          "oklch(65% 0.0063 85)",
+          "oklch(80% 0.0036 85)",
+          "oklch(95% 0.0009 85)"
+        ]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Surface",
+        "canonical": "oklch(99% .004 85)",
+        "tonalRamp": [
+          "oklch(15% 0.0012 85)",
+          "oklch(25% 0.0020 85)",
+          "oklch(35% 0.0028 85)",
+          "oklch(45% 0.0036 85)",
+          "oklch(55% 0.0036 85)",
+          "oklch(65% 0.0028 85)",
+          "oklch(80% 0.0016 85)",
+          "oklch(95% 0.0004 85)"
+        ]
+      },
+      "panel": {
+        "role": "neutral",
+        "displayName": "Panel",
+        "canonical": "oklch(94% .013 85)",
+        "tonalRamp": [
+          "oklch(15% 0.0039 85)",
+          "oklch(25% 0.0065 85)",
+          "oklch(35% 0.0091 85)",
+          "oklch(45% 0.0117 85)",
+          "oklch(55% 0.0117 85)",
+          "oklch(65% 0.0091 85)",
+          "oklch(80% 0.0052 85)",
+          "oklch(95% 0.0013 85)"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Ink",
+        "canonical": "oklch(25% .018 170)",
+        "tonalRamp": [
+          "oklch(15% 0.0054 170)",
+          "oklch(25% 0.0090 170)",
+          "oklch(35% 0.0126 170)",
+          "oklch(45% 0.0162 170)",
+          "oklch(55% 0.0162 170)",
+          "oklch(65% 0.0126 170)",
+          "oklch(80% 0.0072 170)",
+          "oklch(95% 0.0018 170)"
+        ]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Muted",
+        "canonical": "oklch(46% .018 170)",
+        "tonalRamp": [
+          "oklch(15% 0.0054 170)",
+          "oklch(25% 0.0090 170)",
+          "oklch(35% 0.0126 170)",
+          "oklch(45% 0.0162 170)",
+          "oklch(55% 0.0162 170)",
+          "oklch(65% 0.0126 170)",
+          "oklch(80% 0.0072 170)",
+          "oklch(95% 0.0018 170)"
+        ]
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Line",
+        "canonical": "oklch(86% .016 85)",
+        "tonalRamp": [
+          "oklch(15% 0.0048 85)",
+          "oklch(25% 0.0080 85)",
+          "oklch(35% 0.0112 85)",
+          "oklch(45% 0.0144 85)",
+          "oklch(55% 0.0144 85)",
+          "oklch(65% 0.0112 85)",
+          "oklch(80% 0.0064 85)",
+          "oklch(95% 0.0016 85)"
+        ]
+      },
+      "edge": {
+        "role": "neutral",
+        "displayName": "Edge",
+        "canonical": "oklch(57% .018 170)",
+        "tonalRamp": [
+          "oklch(15% 0.0054 170)",
+          "oklch(25% 0.0090 170)",
+          "oklch(35% 0.0126 170)",
+          "oklch(45% 0.0162 170)",
+          "oklch(55% 0.0162 170)",
+          "oklch(65% 0.0126 170)",
+          "oklch(80% 0.0072 170)",
+          "oklch(95% 0.0018 170)"
+        ]
+      },
+      "accent": {
+        "role": "primary",
+        "displayName": "Accent",
+        "canonical": "oklch(39% .065 180)",
+        "tonalRamp": [
+          "oklch(15% 0.0195 180)",
+          "oklch(25% 0.0325 180)",
+          "oklch(35% 0.0455 180)",
+          "oklch(45% 0.0585 180)",
+          "oklch(55% 0.0585 180)",
+          "oklch(65% 0.0455 180)",
+          "oklch(80% 0.0260 180)",
+          "oklch(95% 0.0065 180)"
+        ]
+      },
+      "on": {
+        "role": "neutral",
+        "displayName": "On",
+        "canonical": "oklch(99% .004 85)",
+        "tonalRamp": [
+          "oklch(15% 0.0012 85)",
+          "oklch(25% 0.0020 85)",
+          "oklch(35% 0.0028 85)",
+          "oklch(45% 0.0036 85)",
+          "oklch(55% 0.0036 85)",
+          "oklch(65% 0.0028 85)",
+          "oklch(80% 0.0016 85)",
+          "oklch(95% 0.0004 85)"
+        ]
+      },
+      "tint": {
+        "role": "neutral",
+        "displayName": "Tint",
+        "canonical": "oklch(91% .026 175)",
+        "tonalRamp": [
+          "oklch(15% 0.0078 175)",
+          "oklch(25% 0.0130 175)",
+          "oklch(35% 0.0182 175)",
+          "oklch(45% 0.0234 175)",
+          "oklch(55% 0.0234 175)",
+          "oklch(65% 0.0182 175)",
+          "oklch(80% 0.0104 175)",
+          "oklch(95% 0.0026 175)"
+        ]
+      },
+      "danger": {
+        "role": "semantic",
+        "displayName": "Danger",
+        "canonical": "oklch(43% .14 27)",
+        "tonalRamp": [
+          "oklch(15% 0.0420 27)",
+          "oklch(25% 0.0700 27)",
+          "oklch(35% 0.0980 27)",
+          "oklch(45% 0.1260 27)",
+          "oklch(55% 0.1260 27)",
+          "oklch(65% 0.0980 27)",
+          "oklch(80% 0.0560 27)",
+          "oklch(95% 0.0140 27)"
+        ]
+      },
+      "danger-bg": {
+        "role": "semantic",
+        "displayName": "Danger Bg",
+        "canonical": "oklch(94% .022 27)",
+        "tonalRamp": [
+          "oklch(15% 0.0066 27)",
+          "oklch(25% 0.0110 27)",
+          "oklch(35% 0.0154 27)",
+          "oklch(45% 0.0198 27)",
+          "oklch(55% 0.0198 27)",
+          "oklch(65% 0.0154 27)",
+          "oklch(80% 0.0088 27)",
+          "oklch(95% 0.0022 27)"
+        ]
+      },
+      "warn": {
+        "role": "semantic",
+        "displayName": "Warn",
+        "canonical": "oklch(43% .075 65)",
+        "tonalRamp": [
+          "oklch(15% 0.0225 65)",
+          "oklch(25% 0.0375 65)",
+          "oklch(35% 0.0525 65)",
+          "oklch(45% 0.0675 65)",
+          "oklch(55% 0.0675 65)",
+          "oklch(65% 0.0525 65)",
+          "oklch(80% 0.0300 65)",
+          "oklch(95% 0.0075 65)"
+        ]
+      },
+      "warn-bg": {
+        "role": "semantic",
+        "displayName": "Warn Bg",
+        "canonical": "oklch(94% .036 85)",
+        "tonalRamp": [
+          "oklch(15% 0.0108 85)",
+          "oklch(25% 0.0180 85)",
+          "oklch(35% 0.0252 85)",
+          "oklch(45% 0.0324 85)",
+          "oklch(55% 0.0324 85)",
+          "oklch(65% 0.0252 85)",
+          "oklch(80% 0.0144 85)",
+          "oklch(95% 0.0036 85)"
+        ]
+      },
+      "dark-paper": {
+        "role": "neutral",
+        "displayName": "Dark Paper",
+        "canonical": "oklch(21% .012 170)",
+        "tonalRamp": [
+          "oklch(15% 0.0036 170)",
+          "oklch(25% 0.0060 170)",
+          "oklch(35% 0.0084 170)",
+          "oklch(45% 0.0108 170)",
+          "oklch(55% 0.0108 170)",
+          "oklch(65% 0.0084 170)",
+          "oklch(80% 0.0048 170)",
+          "oklch(95% 0.0012 170)"
+        ]
+      },
+      "dark-surface": {
+        "role": "neutral",
+        "displayName": "Dark Surface",
+        "canonical": "oklch(24% .012 170)",
+        "tonalRamp": [
+          "oklch(15% 0.0036 170)",
+          "oklch(25% 0.0060 170)",
+          "oklch(35% 0.0084 170)",
+          "oklch(45% 0.0108 170)",
+          "oklch(55% 0.0108 170)",
+          "oklch(65% 0.0084 170)",
+          "oklch(80% 0.0048 170)",
+          "oklch(95% 0.0012 170)"
+        ]
+      },
+      "dark-panel": {
+        "role": "neutral",
+        "displayName": "Dark Panel",
+        "canonical": "oklch(18% .012 170)",
+        "tonalRamp": [
+          "oklch(15% 0.0036 170)",
+          "oklch(25% 0.0060 170)",
+          "oklch(35% 0.0084 170)",
+          "oklch(45% 0.0108 170)",
+          "oklch(55% 0.0108 170)",
+          "oklch(65% 0.0084 170)",
+          "oklch(80% 0.0048 170)",
+          "oklch(95% 0.0012 170)"
+        ]
+      },
+      "dark-ink": {
+        "role": "neutral",
+        "displayName": "Dark Ink",
+        "canonical": "oklch(93% .009 85)",
+        "tonalRamp": [
+          "oklch(15% 0.0027 85)",
+          "oklch(25% 0.0045 85)",
+          "oklch(35% 0.0063 85)",
+          "oklch(45% 0.0081 85)",
+          "oklch(55% 0.0081 85)",
+          "oklch(65% 0.0063 85)",
+          "oklch(80% 0.0036 85)",
+          "oklch(95% 0.0009 85)"
+        ]
+      },
+      "dark-muted": {
+        "role": "neutral",
+        "displayName": "Dark Muted",
+        "canonical": "oklch(73% .015 150)",
+        "tonalRamp": [
+          "oklch(15% 0.0045 150)",
+          "oklch(25% 0.0075 150)",
+          "oklch(35% 0.0105 150)",
+          "oklch(45% 0.0135 150)",
+          "oklch(55% 0.0135 150)",
+          "oklch(65% 0.0105 150)",
+          "oklch(80% 0.0060 150)",
+          "oklch(95% 0.0015 150)"
+        ]
+      },
+      "dark-line": {
+        "role": "neutral",
+        "displayName": "Dark Line",
+        "canonical": "oklch(35% .016 170)",
+        "tonalRamp": [
+          "oklch(15% 0.0048 170)",
+          "oklch(25% 0.0080 170)",
+          "oklch(35% 0.0112 170)",
+          "oklch(45% 0.0144 170)",
+          "oklch(55% 0.0144 170)",
+          "oklch(65% 0.0112 170)",
+          "oklch(80% 0.0064 170)",
+          "oklch(95% 0.0016 170)"
+        ]
+      },
+      "dark-edge": {
+        "role": "neutral",
+        "displayName": "Dark Edge",
+        "canonical": "oklch(61% .018 170)",
+        "tonalRamp": [
+          "oklch(15% 0.0054 170)",
+          "oklch(25% 0.0090 170)",
+          "oklch(35% 0.0126 170)",
+          "oklch(45% 0.0162 170)",
+          "oklch(55% 0.0162 170)",
+          "oklch(65% 0.0126 170)",
+          "oklch(80% 0.0072 170)",
+          "oklch(95% 0.0018 170)"
+        ]
+      },
+      "dark-accent": {
+        "role": "primary",
+        "displayName": "Dark Accent",
+        "canonical": "oklch(79% .075 175)",
+        "tonalRamp": [
+          "oklch(15% 0.0225 175)",
+          "oklch(25% 0.0375 175)",
+          "oklch(35% 0.0525 175)",
+          "oklch(45% 0.0675 175)",
+          "oklch(55% 0.0675 175)",
+          "oklch(65% 0.0525 175)",
+          "oklch(80% 0.0300 175)",
+          "oklch(95% 0.0075 175)"
+        ]
+      },
+      "dark-on": {
+        "role": "neutral",
+        "displayName": "Dark On",
+        "canonical": "oklch(20% .025 175)",
+        "tonalRamp": [
+          "oklch(15% 0.0075 175)",
+          "oklch(25% 0.0125 175)",
+          "oklch(35% 0.0175 175)",
+          "oklch(45% 0.0225 175)",
+          "oklch(55% 0.0225 175)",
+          "oklch(65% 0.0175 175)",
+          "oklch(80% 0.0100 175)",
+          "oklch(95% 0.0025 175)"
+        ]
+      },
+      "dark-tint": {
+        "role": "neutral",
+        "displayName": "Dark Tint",
+        "canonical": "oklch(31% .035 175)",
+        "tonalRamp": [
+          "oklch(15% 0.0105 175)",
+          "oklch(25% 0.0175 175)",
+          "oklch(35% 0.0245 175)",
+          "oklch(45% 0.0315 175)",
+          "oklch(55% 0.0315 175)",
+          "oklch(65% 0.0245 175)",
+          "oklch(80% 0.0140 175)",
+          "oklch(95% 0.0035 175)"
+        ]
+      },
+      "dark-danger": {
+        "role": "semantic",
+        "displayName": "Dark Danger",
+        "canonical": "oklch(79% .105 27)",
+        "tonalRamp": [
+          "oklch(15% 0.0315 27)",
+          "oklch(25% 0.0525 27)",
+          "oklch(35% 0.0735 27)",
+          "oklch(45% 0.0945 27)",
+          "oklch(55% 0.0945 27)",
+          "oklch(65% 0.0735 27)",
+          "oklch(80% 0.0420 27)",
+          "oklch(95% 0.0105 27)"
+        ]
+      },
+      "dark-danger-bg": {
+        "role": "semantic",
+        "displayName": "Dark Danger Bg",
+        "canonical": "oklch(30% .043 27)",
+        "tonalRamp": [
+          "oklch(15% 0.0129 27)",
+          "oklch(25% 0.0215 27)",
+          "oklch(35% 0.0301 27)",
+          "oklch(45% 0.0387 27)",
+          "oklch(55% 0.0387 27)",
+          "oklch(65% 0.0301 27)",
+          "oklch(80% 0.0172 27)",
+          "oklch(95% 0.0043 27)"
+        ]
+      },
+      "dark-warn": {
+        "role": "semantic",
+        "displayName": "Dark Warn",
+        "canonical": "oklch(81% .075 85)",
+        "tonalRamp": [
+          "oklch(15% 0.0225 85)",
+          "oklch(25% 0.0375 85)",
+          "oklch(35% 0.0525 85)",
+          "oklch(45% 0.0675 85)",
+          "oklch(55% 0.0675 85)",
+          "oklch(65% 0.0525 85)",
+          "oklch(80% 0.0300 85)",
+          "oklch(95% 0.0075 85)"
+        ]
+      },
+      "dark-warn-bg": {
+        "role": "semantic",
+        "displayName": "Dark Warn Bg",
+        "canonical": "oklch(29% .025 85)",
+        "tonalRamp": [
+          "oklch(15% 0.0075 85)",
+          "oklch(25% 0.0125 85)",
+          "oklch(35% 0.0175 85)",
+          "oklch(45% 0.0225 85)",
+          "oklch(55% 0.0225 85)",
+          "oklch(65% 0.0175 85)",
+          "oklch(80% 0.0100 85)",
+          "oklch(95% 0.0025 85)"
+        ]
+      }
+    },
+    "shadows": [
+      {
+        "name": "dialog-light",
+        "value": "0 16px 50px #172c2630",
+        "purpose": "Focused overlays only"
+      },
+      {
+        "name": "dialog-dark",
+        "value": "0 16px 50px #0006",
+        "purpose": "Dark overlays"
+      }
+    ],
+    "motion": [
+      {
+        "name": "interaction",
+        "value": "180ms cubic-bezier(.16,1,.3,1)",
+        "purpose": "Control state transitions; none under reduced motion"
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "phone",
+        "value": "768px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Primary button as used in the editorial workbench.",
+      "html": "<button class=\"ds-primary\">Review changes</button>",
+      "css": ".ds-primary{font-family:Source Sans 3,sans-serif;font-size:15px;line-height:1.45;background:var(--accent);color:var(--on);border:1px solid transparent;border-radius:6px;padding:7px 11px;min-height:34px;cursor:pointer;transition:background 180ms cubic-bezier(.16,1,.3,1)}.ds-primary:hover{filter:brightness(.94)}.ds-primary:active{transform:translateY(1px)}.ds-primary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}"
+    },
+    {
+      "name": "Secondary button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Secondary button as used in the editorial workbench.",
+      "html": "<button class=\"ds-secondary\">Review changes</button>",
+      "css": ".ds-secondary{font-family:Source Sans 3,sans-serif;font-size:15px;line-height:1.45;background:var(--surface);color:var(--ink);border:1px solid var(--edge);border-radius:6px;padding:7px 11px;min-height:34px;cursor:pointer;transition:background 180ms cubic-bezier(.16,1,.3,1)}.ds-secondary:hover{filter:brightness(.94)}.ds-secondary:active{transform:translateY(1px)}.ds-secondary:focus-visible{outline:2px solid var(--accent);outline-offset:3px}"
+    },
+    {
+      "name": "Text input",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Text input as used in the editorial workbench.",
+      "html": "<label class=\"ds-label\">Endpoint<input class=\"ds-input\" value=\"http://127.0.0.1:8317/v1\"></label>",
+      "css": ".ds-label{font-family:Source Sans 3,sans-serif;font-size:15px;line-height:1.45;display:grid;gap:8px;color:var(--ink)}.ds-input{font-family:Source Sans 3,sans-serif;font-size:15px;line-height:1.45;padding:8px 10px;border:1px solid var(--edge);border-radius:6px;background:var(--surface);color:var(--ink)}.ds-input:focus-visible{outline:2px solid var(--accent);outline-offset:3px}"
+    },
+    {
+      "name": "Active navigation",
+      "kind": "nav",
+      "refersTo": "navigation-selected",
+      "description": "Active navigation as used in the editorial workbench.",
+      "html": "<button class=\"ds-nav\">Inbox <span>4</span></button>",
+      "css": ".ds-nav{font-family:Source Sans 3,sans-serif;font-size:15px;line-height:1.45;display:flex;justify-content:space-between;width:160px;background:var(--tint);color:var(--accent);font-weight:600;border:0;border-radius:6px;padding:9px 12px}.ds-nav:hover{filter:brightness(.96)}.ds-nav:focus-visible{outline:2px solid var(--accent);outline-offset:3px}"
+    },
+    {
+      "name": "Permission label",
+      "kind": "chip",
+      "refersTo": "approval",
+      "description": "Permission label as used in the editorial workbench.",
+      "html": "<span class=\"ds-tag\">Needs approval</span>",
+      "css": ".ds-tag{font-family:Source Sans 3,sans-serif;font-size:15px;line-height:1.45;font-size:12px;padding:2px 7px;border-radius:4px;background:var(--warn-bg);color:var(--warn)}"
+    },
+    {
+      "name": "Approval group",
+      "kind": "card",
+      "refersTo": "approval",
+      "description": "Approval group as used in the editorial workbench.",
+      "html": "<section class=\"ds-approval\"><strong>Allow this command?</strong><p>Runs tests on atlas. This approval applies once.</p><code>CI=1 pnpm test --filter auth</code></section>",
+      "css": ".ds-approval{font-family:Source Sans 3,sans-serif;font-size:15px;line-height:1.45;padding:18px 20px;background:var(--warn-bg);color:var(--ink);border-radius:10px}.ds-approval p{margin:8px 0;font-size:13px}.ds-approval code{display:block;background:var(--surface);padding:12px;border-radius:4px;font:12px Source Code Pro,monospace}"
+    }
+  ],
+  "narrative": {
+    "northStar": "Editorial workbench",
+    "overview": "Mode: Operate. An editorial sensibility expressed through hierarchy, measure and alignment. Warm mineral light surfaces and green-black dark surfaces support long desk sessions and brief phone checks. The interface is a working application, without newspaper styling, serif flourishes, ruled paper, decorative numbering or invented jargon.\n\nThis is an isolated redesign proposal. It supersedes the incumbent look only inside `design/b-editorial/`; it does not update the application's root system. The user explicitly selected Direction B and asked for a self-contained code prototype. Demonstration data and model names are illustrative, not claims of live host connections or real usage. Google Fonts are the only external dependencies; system fallbacks remain usable offline.",
+    "keyCharacteristics": [
+      "A wordmark replaces the orange logo tile so the task owns the strongest visual emphasis.",
+      "A low-chroma warm ground softens bright environments without adding simulated paper texture.",
+      "Deep teal is the single working accent; red and ochre communicate exceptions only.",
+      "Manrope gives headings a compact, clear silhouette; Source Sans 3 carries dense operational text.",
+      "A shared left alignment links titles, tool names, file summaries and reply controls, making scan paths predictable.",
+      "Provenance is a plain sentence beneath the task, not a collection of header badges.",
+      "Inbox rows use title, location and state; removing decorative counters strengthens meaningful ordering.",
+      "Identity marks appear at host, harness and child-agent boundaries; live orbs appear only beside active work.",
+      "Approvals expose the command, machine, directory and permission scope before the action.",
+      "Phone layouts change the navigation and decision flow: one pane, bottom navigation, sheets and large targets."
+    ],
+    "rules": [
+      {
+        "name": "Decision",
+        "body": "Accent signals something actionable, selected or live. Identity color is subdued. Do not use teal as a decorative field.",
+        "section": "Components"
+      },
+      {
+        "name": "Code",
+        "body": "Monospace has semantic work to do. Never use it for navigation, section labels, counters or ornamental technical flavor.",
+        "section": "Components"
+      },
+      {
+        "name": "Provenance",
+        "body": "At a decision, show host and harness. A model without its execution location is incomplete information.",
+        "section": "Components"
+      }
+    ],
+    "dos": [
+      "Do preserve the familiar workbench structure, align operational text, keep location visible, and let the work carry the visual weight."
+    ],
+    "donts": [
+      "Don\u2019t revive stage terminology, cue counters, amber gutters, numbered rows, logo blocks, pill-filled headers or decorative blob fields."
+    ]
+  }
+}
