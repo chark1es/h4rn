@@ -1,0 +1,355 @@
+//! A scriptable harness used by tests in this crate and downstream.
+//!
+//! `FakeHarness` does not pretend to speak a vendor protocol. It emits the
+//! normalized [`HarnessEvent`] values directly, which is exactly what a
+//! projection or lifecycle test needs, and lets a test assert the daemon's
+//! response to any event sequence without a child process.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use async_trait::async_trait;
+use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use futures::stream::{BoxStream, StreamExt};
+use h4rn_protocol::{ApprovalDecision, HarnessKind, TurnStatus, Usage};
+
+use crate::{
+    Harness, HarnessError, HarnessEvent, HarnessInstall, HarnessSession, SessionSpec, UserInput,
+};
+
+/// A fake harness adapter.
+#[derive(Clone, Debug)]
+pub struct FakeHarness {
+    kind: HarnessKind,
+    install: Option<HarnessInstall>,
+    script: Option<Vec<HarnessEvent>>,
+}
+
+impl Default for FakeHarness {
+    fn default() -> Self {
+        Self {
+            kind: HarnessKind::ClaudeCode,
+            install: Some(HarnessInstall {
+                path: PathBuf::from("/usr/local/bin/fake-harness"),
+                version: "0.0.0-fake".into(),
+            }),
+            script: None,
+        }
+    }
+}
+
+impl FakeHarness {
+    /// A detected harness that echoes each message and completes the turn.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A harness that is not installed.
+    pub fn undetected() -> Self {
+        Self {
+            install: None,
+            ..Self::default()
+        }
+    }
+
+    /// A harness that emits exactly [`events`] after `SessionStarted`.
+    ///
+    /// The script is replayed once per session.
+    pub fn with_events(events: Vec<HarnessEvent>) -> Self {
+        Self {
+            script: Some(events),
+            ..Self::default()
+        }
+    }
+
+    /// Overrides the adapter kind.
+    pub fn with_kind(mut self, kind: HarnessKind) -> Self {
+        self.kind = kind;
+        self
+    }
+}
+
+#[async_trait]
+impl Harness for FakeHarness {
+    fn kind(&self) -> HarnessKind {
+        self.kind
+    }
+
+    fn detect(&self) -> Option<HarnessInstall> {
+        self.install.clone()
+    }
+
+    async fn start_session(
+        &self,
+        spec: SessionSpec,
+    ) -> Result<Box<dyn HarnessSession>, HarnessError> {
+        if self.install.is_none() {
+            return Err(HarnessError::NotDetected { kind: self.kind });
+        }
+
+        let (sender, receiver) = unbounded();
+        let session_id = spec
+            .resume_id
+            .clone()
+            .unwrap_or_else(|| format!("fake-{}", uuid_like(&spec.workspace)));
+        send(&sender, HarnessEvent::SessionStarted { session_id });
+
+        if let Some(script) = &self.script {
+            for event in script {
+                send(&sender, event.clone());
+            }
+        }
+
+        Ok(Box::new(FakeSession {
+            kind: self.kind,
+            sender,
+            receiver: Some(receiver),
+            script: self.script.clone(),
+            closed: false,
+        }))
+    }
+}
+
+/// The session returned by [`FakeHarness`].
+pub struct FakeSession {
+    kind: HarnessKind,
+    sender: UnboundedSender<HarnessEvent>,
+    receiver: Option<UnboundedReceiver<HarnessEvent>>,
+    script: Option<Vec<HarnessEvent>>,
+    closed: bool,
+}
+
+#[async_trait]
+impl HarnessSession for FakeSession {
+    async fn send(&mut self, input: UserInput) -> Result<(), HarnessError> {
+        if self.closed {
+            return Err(HarnessError::Transport {
+                harness: self.kind,
+                message: "session is shut down".into(),
+            });
+        }
+
+        if self.script.is_some() {
+            // A scripted session is a complete fixture; `send` is accepted
+            // (the harness contract allows it) but does not replay the script.
+            return Ok(());
+        }
+
+        send(
+            &self.sender,
+            HarnessEvent::TextDelta {
+                text: format!("echo: {}", input.text),
+            },
+        );
+        send(
+            &self.sender,
+            HarnessEvent::TurnCompleted {
+                status: TurnStatus::Completed,
+                usage: Usage::default(),
+            },
+        );
+        Ok(())
+    }
+
+    async fn interrupt(&mut self) -> Result<(), HarnessError> {
+        send(
+            &self.sender,
+            HarnessEvent::TurnCompleted {
+                status: TurnStatus::Interrupted,
+                usage: Usage::default(),
+            },
+        );
+        Ok(())
+    }
+
+    async fn respond_approval(
+        &mut self,
+        approval_id: &str,
+        decision: ApprovalDecision,
+    ) -> Result<(), HarnessError> {
+        send(
+            &self.sender,
+            HarnessEvent::TextDelta {
+                text: format!("approval {approval_id}: {decision:?}"),
+            },
+        );
+        Ok(())
+    }
+
+    fn events(&mut self) -> BoxStream<'static, HarnessEvent> {
+        match self.receiver.take() {
+            Some(receiver) => receiver.boxed(),
+            None => futures::stream::empty().boxed(),
+        }
+    }
+
+    async fn shutdown(&mut self) -> Result<(), HarnessError> {
+        self.closed = true;
+        // Dropping the sender would end the stream; keep it alive until the
+        // session is dropped so an in-flight event is not lost.
+        Ok(())
+    }
+}
+
+fn send(sender: &UnboundedSender<HarnessEvent>, event: HarnessEvent) {
+    // A closed receiver means the consumer went away; that is not an error for
+    // the fake session, and the daemon handles the same case by shutting down.
+    let _ = sender.unbounded_send(event);
+}
+
+fn uuid_like(path: &std::path::Path) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    format!(
+        "{}-{nanos}",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    )
+}
+
+/// A minimal spec for tests.
+pub fn test_spec() -> SessionSpec {
+    SessionSpec {
+        workspace: PathBuf::from("/tmp/h4rn-workspace"),
+        model: "test-model".into(),
+        resume_id: None,
+        mcp_endpoint: Some("http://127.0.0.1:9100/mcp".into()),
+        env_overrides: BTreeMap::new(),
+        attachments: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Harness, HarnessSession, UserInput};
+
+    async fn next(session: &mut dyn HarnessSession) -> HarnessEvent {
+        session.events().next().await.expect("event")
+    }
+
+    #[tokio::test]
+    async fn detects_and_starts_a_session() {
+        let harness = FakeHarness::new();
+        assert!(harness.detect().is_some());
+        assert_eq!(harness.kind(), HarnessKind::ClaudeCode);
+
+        let mut session = harness.start_session(test_spec()).await.unwrap();
+        assert!(matches!(
+            next(session.as_mut()).await,
+            HarnessEvent::SessionStarted { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn undetected_harness_refuses_to_start() {
+        let result = FakeHarness::undetected().start_session(test_spec()).await;
+        assert!(matches!(result, Err(HarnessError::NotDetected { .. })));
+    }
+
+    #[tokio::test]
+    async fn send_echoes_and_completes_the_turn() {
+        let mut session = FakeHarness::new().start_session(test_spec()).await.unwrap();
+        let mut events = session.events();
+        assert!(matches!(
+            events.next().await,
+            Some(HarnessEvent::SessionStarted { .. })
+        ));
+
+        session
+            .send(UserInput {
+                text: "hello".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            events.next().await,
+            Some(HarnessEvent::TextDelta {
+                text: "echo: hello".into()
+            })
+        );
+        assert!(matches!(
+            events.next().await,
+            Some(HarnessEvent::TurnCompleted {
+                status: TurnStatus::Completed,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn interrupt_reports_an_interrupted_turn() {
+        let mut session = FakeHarness::new().start_session(test_spec()).await.unwrap();
+        let mut events = session.events();
+        let _ = events.next().await;
+
+        session.interrupt().await.unwrap();
+        assert!(matches!(
+            events.next().await,
+            Some(HarnessEvent::TurnCompleted {
+                status: TurnStatus::Interrupted,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn approvals_are_answered_through_the_event_stream() {
+        let mut session = FakeHarness::new().start_session(test_spec()).await.unwrap();
+        let mut events = session.events();
+        let _ = events.next().await;
+
+        session
+            .respond_approval("approval-1", ApprovalDecision::Approve)
+            .await
+            .unwrap();
+        assert!(matches!(
+            events.next().await,
+            Some(HarnessEvent::TextDelta { text }) if text.contains("approval-1")
+        ));
+    }
+
+    #[tokio::test]
+    async fn scripted_events_are_replayed_in_order() {
+        let script = vec![
+            HarnessEvent::TextDelta { text: "one".into() },
+            HarnessEvent::TextDelta { text: "two".into() },
+        ];
+        let mut session = FakeHarness::with_events(script)
+            .start_session(test_spec())
+            .await
+            .unwrap();
+        let mut events = session.events();
+        assert!(matches!(
+            events.next().await,
+            Some(HarnessEvent::SessionStarted { .. })
+        ));
+        assert_eq!(
+            events.next().await,
+            Some(HarnessEvent::TextDelta { text: "one".into() })
+        );
+        assert_eq!(
+            events.next().await,
+            Some(HarnessEvent::TextDelta { text: "two".into() })
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_rejects_further_sends() {
+        let mut session = FakeHarness::new().start_session(test_spec()).await.unwrap();
+        session.shutdown().await.unwrap();
+        assert!(
+            session
+                .send(UserInput {
+                    text: "late".into(),
+                    attachments: Vec::new(),
+                })
+                .await
+                .is_err()
+        );
+    }
+}

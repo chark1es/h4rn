@@ -1,0 +1,20 @@
+name: h4rn
+
+services:
+  connect:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: h4rn/connect:dev
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      H4RN_CONNECT_ADDR: 0.0.0.0:8787
+      RUST_LOG: h4rn_connect=info
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

@@ -1,0 +1,11 @@
+[package]
+name = "h4rn-forge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Forge (GitHub/GitLab) operations surfaced to the UI and the agent"
+
+[dependencies]
+h4rn-protocol.workspace = true

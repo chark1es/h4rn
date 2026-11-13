@@ -1,0 +1,16 @@
+[package]
+name = "h4rn-connect"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The self-hostable h4rn relay (axum + Postgres)"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+h4rn-protocol.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -1,0 +1,25 @@
+{
+  "name": "h4rn",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "bun@1.4.4",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "bun run --cwd apps/ui dev",
+    "build": "bun run --cwd apps/ui build",
+    "typecheck": "bun run --cwd apps/ui typecheck",
+    "lint": "bun run --cwd apps/ui lint",
+    "test": "bun run --cwd apps/ui test",
+    "bindings": "cargo test -p h4rn-protocol",
+    "check-bindings": "bash scripts/check-bindings.sh",
+    "web": "bun run --cwd apps/web build",
+    "desktop": "bun run --cwd apps/desktop dev",
+    "desktop:build": "bun run --cwd apps/desktop build",
+    "mobile": "bun run --cwd apps/mobile dev",
+    "android": "bun run --cwd apps/mobile android",
+    "ios": "bun run --cwd apps/mobile ios"
+  }
+}

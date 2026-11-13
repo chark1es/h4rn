@@ -1,0 +1,11 @@
+[package]
+name = "h4rn-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The single local MCP hub injected into every harness (ADR-006)"
+
+[dependencies]
+h4rn-protocol.workspace = true

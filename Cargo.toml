@@ -1,0 +1,64 @@
+[workspace]
+members = ["crates/*"]
+exclude = ["apps/desktop/src-tauri", "apps/mobile/src-tauri"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/chark1es/h4rn"
+authors = ["h4rn contributors"]
+
+[workspace.dependencies]
+# Internal crates
+h4rn-connect = { path = "crates/h4rn-connect" }
+h4rn-core = { path = "crates/h4rn-core" }
+h4rn-daemon = { path = "crates/h4rn-daemon" }
+h4rn-forge = { path = "crates/h4rn-forge" }
+h4rn-harness = { path = "crates/h4rn-harness" }
+h4rn-mcp = { path = "crates/h4rn-mcp" }
+h4rn-meter = { path = "crates/h4rn-meter" }
+h4rn-protocol = { path = "crates/h4rn-protocol" }
+h4rn-proxy = { path = "crates/h4rn-proxy" }
+h4rn-skills = { path = "crates/h4rn-skills" }
+h4rn-transport = { path = "crates/h4rn-transport" }
+h4rn-vt = { path = "crates/h4rn-vt" }
+
+# Shared third-party dependencies. Versions are pinned so every crate in the
+# workspace resolves the same implementation (ADR-017).
+anyhow = "1.0.104"
+async-trait = "0.1.92"
+axum = { version = "0.8.9", features = ["ws"] }
+blake3 = "1.8.7"
+chrono = { version = "0.4.45", features = ["clock", "serde"] }
+futures = "0.3.34"
+keyring = "4.2.0"
+portable-pty = "0.9.0"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+snow = "0.10.0"
+sqlx = { version = "0.8.6", default-features = false, features = [
+    "chrono",
+    "macros",
+    "migrate",
+    "postgres",
+    "runtime-tokio",
+    "sqlite",
+    "tls-rustls",
+] }
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+time = { version = "0.3.55", features = ["serde"] }
+tokio = { version = "1.54.1", features = ["full"] }
+tokio-stream = "0.1.19"
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = [
+    "connect",
+    "rustls-tls-native-roots",
+] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+ts-rs = { version = "11.1.0", features = ["chrono-impl", "serde-json-impl"] }
+uuid = { version = "1.29.2", features = ["serde", "v7"] }

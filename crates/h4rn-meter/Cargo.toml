@@ -1,0 +1,11 @@
+[package]
+name = "h4rn-meter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Durable token and cost ledger (ADR-024)"
+
+[dependencies]
+h4rn-protocol.workspace = true

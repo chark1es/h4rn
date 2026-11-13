@@ -1,0 +1,20 @@
+{
+  "name": "@h4rn/desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.12.4",
+    "@tauri-apps/plugin-deep-link": "2.6.3",
+    "@tauri-apps/plugin-dialog": "2.8.4",
+    "@tauri-apps/plugin-opener": "2.7.3"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.12.4"
+  }
+}

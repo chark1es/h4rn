@@ -1,0 +1,44 @@
+//! The h4rn wire contract.
+//!
+//! `h4rn-protocol` owns every type that crosses the WebSocket between a client
+//! (desktop, mobile or web) and the daemon. JSON frames carry commands, events
+//! and control messages; binary frames carry PTY output and blob chunks
+//! (ADR-001, ADR-002, ADR-007).
+//!
+//! TypeScript bindings are generated from these types by `ts-rs` and checked
+//! into `apps/ui/src/gen`. The `export_typescript_bindings` test is the single
+//! writer of that directory; `scripts/check-bindings.sh` fails when it drifts.
+//!
+//! Conventions:
+//! - JSON enums are internally tagged (`type` or `kind`) with snake_case
+//!   discriminants so the generated TypeScript is a stable union.
+//! - Timestamps are RFC 3339 strings (`chrono::DateTime<Utc>`).
+//! - 64-bit counters are serialised as JSON numbers and typed as `number` in
+//!   TypeScript. Every value h4rn counts (tokens, cost, sequence) is far below
+//!   `Number.MAX_SAFE_INTEGER`.
+
+#![deny(missing_docs)]
+
+mod binary;
+mod client;
+mod common;
+mod ids;
+mod server;
+
+pub use binary::{
+    BINARY_HEADER_LEN, BINARY_MAGIC, BINARY_VERSION, BinaryFrame, BinaryFrameError, BinaryKind,
+};
+pub use client::{ClientFrame, ClientRequest};
+pub use common::{
+    AgentState, ApprovalDecision, ApprovalKind, ApprovalOption, DeviceInfo, HarnessKind,
+    HostSummary, Item, MessageRole, ThreadFilter, ThreadSummary, ThreadTab, ToolCall,
+    ToolCallStatus, Topic, TurnStatus, Usage,
+};
+pub use ids::{AttachmentId, AttachmentIdError, DeviceId, HostId, SubagentId, ThreadId, TurnId};
+pub use server::{Event, ProtoError, ProtoErrorCode, ResponseBody, ServerFrame};
+
+/// Version of the wire protocol implemented by this crate.
+///
+/// The client sends this in [`ClientRequest::Hello`]; a daemon rejects an
+/// incompatible major version with [`ProtoErrorCode::Unsupported`].
+pub const PROTOCOL_VERSION: u32 = 1;

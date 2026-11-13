@@ -1,0 +1,11 @@
+[package]
+name = "h4rn-skills"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Skill discovery and per-harness enablement"
+
+[dependencies]
+h4rn-protocol.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "h4rn-proxy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLIProxyAPI feature detection and per-harness routing (ADR-015)"
+
+[dependencies]
+h4rn-protocol.workspace = true

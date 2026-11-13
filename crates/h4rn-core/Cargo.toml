@@ -1,0 +1,21 @@
+[package]
+name = "h4rn-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Thread lifecycle state machine and event store for h4rn"
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+h4rn-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

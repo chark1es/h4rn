@@ -1,0 +1,11 @@
+[package]
+name = "h4rn-vt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Headless VT abstraction over alacritty_terminal (ADR-007)"
+
+[dependencies]
+h4rn-protocol.workspace = true

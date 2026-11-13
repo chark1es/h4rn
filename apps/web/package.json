@@ -1,0 +1,10 @@
+{
+  "name": "@h4rn/web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "bun run scripts/build.ts",
+    "clean": "rm -rf dist"
+  }
+}
