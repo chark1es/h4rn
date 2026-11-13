@@ -1,0 +1,52 @@
+data: {"id":"evt_0001","type":"server.connected","data":{}}
+
+data: {"id":"evt_0002","created":1794549922975,"type":"session.inbox.enqueued","location":{"directory":"/workspace"},"data":{"inboxID":"msg_user_1","sessionID":"ses_000000000000000000000000","item":{"type":"user","payload":{"text":"Use the bash tool to run: echo h4rn-perm-test"},"delivery":"steer"}},"durable":{"aggregateID":"ses_000000000000000000000000","seq":15,"version":1}}
+
+data: {"id":"evt_0003","created":1794549922976,"type":"session.execution.started","data":{"sessionID":"ses_000000000000000000000000"},"durable":{"aggregateID":"ses_000000000000000000000000","seq":16,"version":1}}
+
+data: {"id":"evt_0004","created":1794549922982,"type":"session.inbox.delivered","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","inboxID":"msg_user_1"},"durable":{"aggregateID":"ses_000000000000000000000000","seq":17,"version":1}}
+
+data: {"id":"evt_0005","created":1794549923858,"type":"session.step.started","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","agent":"build","model":{"id":"deepseek-v4.1-flash","providerID":"cliproxy","variant":"default"},"assistantMessageID":"msg_assistant_1","snapshot":"0000000000000000000000000000000000000000","started":1794549922991},"durable":{"aggregateID":"ses_000000000000000000000000","seq":18,"version":1}}
+
+data: {"id":"evt_0006","created":1794549923860,"type":"session.reasoning.started","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","ordinal":0,"native":{"reasoningField":"reasoning"}},"durable":{"aggregateID":"ses_000000000000000000000000","seq":19,"version":1}}
+
+data: {"id":"evt_0007","created":1794549923962,"type":"session.reasoning.delta","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","ordinal":0,"delta":"The user wants me to use bash tool to run echo. I have shell tool. Let me run it."}}
+
+data: {"id":"evt_0008","created":1794549923980,"type":"session.tool.input.started","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","id":"call_1","name":"shell"},"durable":{"aggregateID":"ses_000000000000000000000000","seq":20,"version":1}}
+
+data: {"id":"evt_0009","created":1794549924155,"type":"session.reasoning.ended","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","ordinal":0,"text":"The user wants me to use bash tool to run echo. I have shell tool. Let me run it.","native":{"reasoningField":"reasoning"}},"durable":{"aggregateID":"ses_000000000000000000000000","seq":21,"version":1}}
+
+data: {"id":"evt_0010","created":1794549924158,"type":"session.tool.input.ended","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","id":"call_1","text":"{\"command\": \"echo h4rn-perm-test\"}"},"durable":{"aggregateID":"ses_000000000000000000000000","seq":22,"version":1}}
+
+data: {"id":"evt_0011","created":1794549924160,"type":"session.tool.called","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","id":"call_1","input":{"command":"echo h4rn-perm-test"},"executed":false},"durable":{"aggregateID":"ses_000000000000000000000000","seq":23,"version":1}}
+
+data: {"id":"evt_0012","created":1794549924162,"type":"session.step.streamed","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1"},"durable":{"aggregateID":"ses_000000000000000000000000","seq":24,"version":1}}
+
+data: {"id":"evt_0013","created":1794549924169,"type":"shell.created","location":{"directory":"/workspace"},"data":{"info":{"id":"sh_redacted","status":"running","command":"echo h4rn-perm-test","cwd":"/workspace","shell":"/bin/bash","file":"/workspace/.opencode/shell/sh_redacted.out","metadata":{"sessionID":"ses_000000000000000000000000"},"time":{"started":1794549924167}}}}
+
+data: {"id":"evt_0014","created":1794549924169,"type":"session.tool.progress","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","id":"call_1","metadata":{"shellID":"sh_redacted"}}}
+
+data: {"id":"evt_0015","created":1794549924173,"type":"shell.exited","location":{"directory":"/workspace"},"data":{"id":"sh_redacted","exit":0,"status":"exited"}}
+
+data: {"id":"evt_0016","created":1794549924174,"type":"session.tool.success","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","id":"call_1","content":[{"type":"text","text":"h4rn-perm-test\n"}],"metadata":{"status":"completed","truncated":false,"exit":0},"executed":false},"durable":{"aggregateID":"ses_000000000000000000000000","seq":25,"version":2}}
+
+data: {"id":"evt_0017","created":1794549924182,"type":"session.step.ended","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","finish":"tool-calls","rawFinish":"tool_calls","tokens":{"input":8253,"output":44,"reasoning":22,"cache":{"read":256,"write":0}},"cost":0,"snapshot":"0000000000000000000000000000000000000000","files":[]},"durable":{"aggregateID":"ses_000000000000000000000000","seq":26,"version":1}}
+
+data: {"id":"evt_0018","created":1794549924185,"type":"session.usage.updated","data":{"sessionID":"ses_000000000000000000000000","cost":0,"tokens":{"input":16957,"output":55,"reasoning":105,"cache":{"read":512,"write":0}}}}
+
+data: {"id":"evt_0019","created":1794549925687,"type":"session.step.started","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","agent":"build","model":{"id":"deepseek-v4.1-flash","providerID":"cliproxy","variant":"default"},"assistantMessageID":"msg_assistant_1","snapshot":"0000000000000000000000000000000000000000","started":1794549924195},"durable":{"aggregateID":"ses_000000000000000000000000","seq":27,"version":1}}
+
+data: {"id":"evt_0020","created":1794549925689,"type":"session.text.started","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","ordinal":0},"durable":{"aggregateID":"ses_000000000000000000000000","seq":28,"version":1}}
+
+data: {"id":"evt_0021","created":1794549925725,"type":"session.text.delta","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","ordinal":0,"delta":"h4rn-perm-test"}}
+
+data: {"id":"evt_0022","created":1794549925725,"type":"session.text.ended","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","ordinal":0,"text":"h4rn-perm-test"},"durable":{"aggregateID":"ses_000000000000000000000000","seq":29,"version":1}}
+
+data: {"id":"evt_0023","created":1794549925728,"type":"session.step.streamed","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1"},"durable":{"aggregateID":"ses_000000000000000000000000","seq":30,"version":1}}
+
+data: {"id":"evt_0024","created":1794549925734,"type":"session.step.ended","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","finish":"stop","rawFinish":"stop","tokens":{"input":145,"output":8,"reasoning":0,"cache":{"read":8448,"write":0}},"cost":0,"snapshot":"0000000000000000000000000000000000000000","files":[]},"durable":{"aggregateID":"ses_000000000000000000000000","seq":31,"version":1}}
+
+data: {"id":"evt_0025","created":1794549925736,"type":"session.usage.updated","data":{"sessionID":"ses_000000000000000000000000","cost":0,"tokens":{"input":17102,"output":63,"reasoning":105,"cache":{"read":8960,"write":0}}}}
+
+data: {"id":"evt_0026","created":1794549925737,"type":"session.execution.succeeded","data":{"sessionID":"ses_000000000000000000000000"},"durable":{"aggregateID":"ses_000000000000000000000000","seq":32,"version":1}}
+

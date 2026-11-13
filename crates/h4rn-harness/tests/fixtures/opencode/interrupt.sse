@@ -1,0 +1,10 @@
+data: {"id":"evt_0001","created":1794549920000,"type":"session.execution.started","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000"},"durable":{"aggregateID":"ses_000000000000000000000000","seq":0,"version":1}}
+
+data: {"id":"evt_0002","created":1794549920010,"type":"session.step.started","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","agent":"build","model":{"id":"deepseek-v4.1-flash","providerID":"cliproxy"},"started":1794549920000},"durable":{"aggregateID":"ses_000000000000000000000000","seq":1,"version":1}}
+
+data: {"id":"evt_0003","created":1794549920020,"type":"session.text.started","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","ordinal":0},"durable":{"aggregateID":"ses_000000000000000000000000","seq":2,"version":1}}
+
+data: {"id":"evt_0004","created":1794549920030,"type":"session.text.delta","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","ordinal":0,"delta":"partial answer"}}
+
+data: {"id":"evt_0005","created":1794549920100,"type":"session.execution.interrupted","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","reason":"user"},"durable":{"aggregateID":"ses_000000000000000000000000","seq":4,"version":1}}
+

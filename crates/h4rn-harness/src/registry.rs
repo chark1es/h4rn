@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use h4rn_protocol::HarnessKind;
 
-use crate::{ClaudeCodeHarness, CodexHarness, Harness, HarnessInstall};
+use crate::{ClaudeCodeHarness, CodexHarness, Harness, HarnessInstall, OpenCodeHarness};
 
 /// Returns one adapter instance per built-in harness.
 ///
@@ -18,6 +18,7 @@ pub fn builtin_adapters() -> Vec<Arc<dyn Harness>> {
     vec![
         Arc::new(ClaudeCodeHarness::new()),
         Arc::new(CodexHarness::new()),
+        Arc::new(OpenCodeHarness::new()),
     ]
 }
 
@@ -91,5 +92,14 @@ mod tests {
         let registry = HarnessRegistry::new();
         let adapter = registry.get(HarnessKind::Codex).expect("codex adapter");
         assert_eq!(adapter.kind(), HarnessKind::Codex);
+    }
+
+    #[test]
+    fn the_registry_exposes_opencode() {
+        let registry = HarnessRegistry::new();
+        let adapter = registry
+            .get(HarnessKind::Opencode)
+            .expect("opencode adapter");
+        assert_eq!(adapter.kind(), HarnessKind::Opencode);
     }
 }

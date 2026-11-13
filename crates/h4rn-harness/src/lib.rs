@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 mod claude_code;
 mod codex;
 mod fake;
+mod opencode;
 pub mod registry;
 
 pub use claude_code::{
@@ -41,6 +42,11 @@ pub use codex::{
     approval_from_request, approval_response, build_turn_input, detect_codex,
 };
 pub use fake::{FakeHarness, FakeSession, test_spec};
+pub use opencode::{
+    ENV_CLIPROXY_API_KEY, ENV_CLIPROXY_BASE_URL, ENV_OPENCODE_API_KEY, ENV_OPENCODE_BASE_URL,
+    ENV_OPENCODE_MODELS, ENV_OPENCODE_PACKAGE, ENV_OPENCODE_PROVIDER, MINIMUM_OPENCODE_VERSION,
+    OpenCodeHarness, OpenCodeParser, OpenCodeSession, detect_opencode,
+};
 pub use registry::{HarnessRegistry, builtin_adapters};
 
 /// A detected harness installation on this host.
