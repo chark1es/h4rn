@@ -29,6 +29,7 @@ pub mod hosts;
 pub mod journal;
 pub mod server;
 pub mod supervisor;
+pub mod terminal;
 pub mod threads;
 
 pub use cli::{Cli, Command};

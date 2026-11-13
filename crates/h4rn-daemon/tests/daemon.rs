@@ -196,7 +196,7 @@ impl Client {
         loop {
             match self.read_frame().await {
                 ServerFrame::Event { seq, event } => return (seq, event),
-                ServerFrame::Response { .. } => {}
+                ServerFrame::Response { .. } | ServerFrame::TerminalEvent { .. } => {}
             }
         }
     }
@@ -684,7 +684,7 @@ async fn get_thread_reports_not_found_and_binary_frames_are_rejected() {
         .wait_event(|event| matches!(event, Event::Error { .. }))
         .await;
     match event {
-        Event::Error { message, .. } => assert!(message.contains("reserved")),
+        Event::Error { message, .. } => assert!(message.contains("not accepted from clients")),
         _ => unreachable!(),
     }
 

@@ -2,6 +2,7 @@
 import type { Event } from "./Event";
 import type { ProtoError } from "./ProtoError";
 import type { ResponseBody } from "./ResponseBody";
+import type { TerminalExitNotice } from "./TerminalExitNotice";
 
 /**
  * One frame sent by the daemon.
@@ -25,4 +26,8 @@ seq: number,
 /**
  * The event itself.
  */
-event: Event, };
+event: Event, } | { "kind": "terminal_event", 
+/**
+ * The terminal that changed.
+ */
+event: TerminalExitNotice, };

@@ -9,12 +9,15 @@ import type {
   ResponseBody,
   SeqEvent,
   ServerFrame,
+  TerminalExit,
+  TerminalInfo,
   ThreadSummary,
   ToolCall,
   TurnStatus,
   Usage,
 } from "@/gen";
 
+import { BinaryKind, decodeBinaryFrame, encodeBinaryFrame } from "./binary";
 import type { Transport, TransportHandlers } from "./types";
 
 type MockThread = {
@@ -27,6 +30,13 @@ type MockApproval = {
   threadId: string;
   approvalId: string;
   turnId: string;
+};
+
+type MockTerminal = {
+  info: TerminalInfo;
+  seq: number;
+  scrollback: string;
+  line: string;
 };
 
 const HOUR = 3_600_000;
@@ -511,7 +521,10 @@ class MockDaemon {
   private readonly timers = new Set<ReturnType<typeof setTimeout>>();
   private readonly approvals = new Map<string, MockApproval>();
   private readonly startedStreams = new Set<string>();
+  private readonly terminals = new Map<string, MockTerminal>();
   private created = 0;
+  private nextTerminal = 0;
+  private nextStream = 0;
 
   constructor(
     private readonly handlers: TransportHandlers,
@@ -533,7 +546,17 @@ class MockDaemon {
     this.timers.clear();
   }
 
-  receive(data: string): void {
+  receive(data: string | Uint8Array): void {
+    if (typeof data !== "string") {
+      const frame = decodeBinaryFrame(data);
+      if (!frame || frame.kind !== BinaryKind.PtyInput) return;
+      const payload = new TextDecoder().decode(frame.payload);
+      this.later(8, () => {
+        if (!this.disposed) this.handleInput(frame.streamId, payload);
+      });
+      return;
+    }
+
     let frame: ClientFrame;
     try {
       frame = JSON.parse(data) as ClientFrame;
@@ -545,6 +568,81 @@ class MockDaemon {
       if (this.disposed) return;
       this.handle(frame);
     });
+  }
+
+  /** Echoes keystrokes and answers the handful of commands the mock knows. */
+  private handleInput(streamId: number, input: string): void {
+    const terminal = [...this.terminals.values()].find(
+      (entry) => entry.info.stream_id === streamId,
+    );
+    if (!terminal) return;
+    for (const char of input) {
+      if (char === "\r" || char === "\n") {
+        this.emitOutput(terminal, "\r\n");
+        this.emitOutput(terminal, `${this.runCommand(terminal, terminal.line)}\r\n`);
+        terminal.line = "";
+        this.emitOutput(terminal, this.prompt(terminal));
+      } else if (char === "\u0003") {
+        terminal.line = "";
+        this.emitOutput(terminal, "^C\r\n");
+        this.emitOutput(terminal, this.prompt(terminal));
+      } else if (char === "\u007f") {
+        if (terminal.line.length > 0) {
+          terminal.line = terminal.line.slice(0, -1);
+          this.emitOutput(terminal, "\b \b");
+        }
+      } else if (char === "\t") {
+        terminal.line += "  ";
+        this.emitOutput(terminal, "  ");
+      } else if (char === "\u001b") {
+        // Ignore escape sequences (arrow keys) in the mock.
+      } else {
+        terminal.line += char;
+        this.emitOutput(terminal, char);
+      }
+    }
+  }
+
+  private prompt(terminal: MockTerminal): string {
+    const cwd = terminal.info.cwd.replace(/^\/home\/[^/]+/, "~");
+    return `\u001b[38;5;110m${cwd}\u001b[0m \u001b[38;5;180m❯\u001b[0m `;
+  }
+
+  private runCommand(terminal: MockTerminal, line: string): string {
+    const command = line.trim();
+    if (!command) return "";
+    if (command === "clear") {
+      terminal.scrollback = "";
+      return "\u001b[2J\u001b[H";
+    }
+    if (command === "pwd") return terminal.info.cwd;
+    if (command === "ls" || command === "ls -a") {
+      return "AGENTS.md  README.md  apps  crates  docs  package.json  scripts";
+    }
+    if (command.startsWith("echo ")) return command.slice(5);
+    if (command === "git status" || command === "git status -sb") {
+      return "On branch dev\nnothing to commit, working tree clean";
+    }
+    if (command === "help") {
+      return "mock commands: ls, pwd, echo, git status, clear, help";
+    }
+    return `sh: command not found: ${command.split(" ")[0]}`;
+  }
+
+  private emitOutput(terminal: MockTerminal, text: string): void {
+    if (this.disposed) return;
+    terminal.seq += 1;
+    terminal.scrollback += text;
+    if (terminal.scrollback.length > 120_000) {
+      terminal.scrollback = terminal.scrollback.slice(-80_000);
+    }
+    const bytes = encodeBinaryFrame({
+      kind: BinaryKind.PtyOutput,
+      streamId: terminal.info.stream_id,
+      seq: terminal.seq,
+      payload: new TextEncoder().encode(text),
+    });
+    this.handlers.onBinary?.(bytes.buffer as ArrayBuffer);
   }
 
   private handle(frame: ClientFrame): void {
@@ -742,6 +840,88 @@ class MockDaemon {
           last_activity: iso(),
         };
         this.emit(body.thread_id, { type: "thread_upserted", ...entry.summary });
+        return;
+      }
+      case "terminal_open": {
+        this.nextTerminal += 1;
+        this.nextStream += 1;
+        const info: TerminalInfo = {
+          terminal_id: `term_mock_${this.nextTerminal}`,
+          stream_id: this.nextStream,
+          thread_id: body.thread_id,
+          host: body.host,
+          cwd: body.cwd,
+          shell: body.shell ?? "/bin/zsh",
+          cols: body.cols,
+          rows: body.rows,
+          alive: true,
+          viewers: 1,
+          exit: null,
+        };
+        const terminal: MockTerminal = { info, seq: 0, scrollback: "", line: "" };
+        terminal.scrollback =
+          "\u001b[38;5;110mh4rn mock shell\u001b[0m — no daemon is connected.\r\n" +
+          this.prompt(terminal);
+        this.terminals.set(info.terminal_id, terminal);
+        this.ok(frame.id, { type: "terminal_opened", terminal: info });
+        return;
+      }
+      case "terminal_attach": {
+        const terminal = this.terminals.get(body.terminal_id);
+        if (!terminal) {
+          this.err(
+            frame.id,
+            "not_found",
+            "That terminal is no longer open.",
+            "Open a new terminal from the panel.",
+          );
+          return;
+        }
+        terminal.info = {
+          ...terminal.info,
+          cols: body.cols ?? terminal.info.cols,
+          rows: body.rows ?? terminal.info.rows,
+          viewers: 1,
+        };
+        this.ok(frame.id, {
+          type: "terminal_attached",
+          terminal: terminal.info,
+          snapshot: terminal.scrollback,
+          start_seq: terminal.seq,
+        });
+        return;
+      }
+      case "terminal_list": {
+        const terminals = [...this.terminals.values()]
+          .map((entry) => entry.info)
+          .filter((info) => !body.thread_id || info.thread_id === body.thread_id);
+        this.ok(frame.id, { type: "terminals", terminals });
+        return;
+      }
+      case "terminal_resize": {
+        const terminal = this.terminals.get(body.terminal_id);
+        if (terminal) {
+          terminal.info = { ...terminal.info, cols: body.cols, rows: body.rows };
+        }
+        this.ok(frame.id, { type: "ack" });
+        return;
+      }
+      case "terminal_ack": {
+        this.ok(frame.id, { type: "ack" });
+        return;
+      }
+      case "terminal_close": {
+        const terminal = this.terminals.get(body.terminal_id);
+        this.ok(frame.id, { type: "ack" });
+        if (!terminal) return;
+        this.terminals.delete(body.terminal_id);
+        const exit: TerminalExit = { status: 0, signal: null, at: iso() };
+        const notice = {
+          terminal_id: body.terminal_id,
+          thread_id: terminal.info.thread_id,
+          exit,
+        };
+        this.handlers.onMessage(JSON.stringify({ kind: "terminal_event", event: notice }));
         return;
       }
       default:
@@ -1087,7 +1267,7 @@ export function createMockTransport(scenario: string): Transport {
         if (!closed) handlers.onOpen();
       }, 220);
     },
-    send(data) {
+    send(data: string | Uint8Array) {
       daemon?.receive(data);
     },
     close() {

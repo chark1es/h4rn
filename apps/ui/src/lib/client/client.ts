@@ -1,4 +1,11 @@
-import type { ClientFrame, ClientRequest, DeviceInfo, ResponseBody, ServerFrame } from "@/gen";
+import type {
+  ClientFrame,
+  ClientRequest,
+  DeviceInfo,
+  ResponseBody,
+  ServerFrame,
+  TerminalExitNotice,
+} from "@/gen";
 
 import { H4rnRequestError, protoError } from "./errors";
 import type {
@@ -23,7 +30,13 @@ export type ResponseOf<T extends ClientRequest["type"]> = T extends "hello"
           ? Extract<ResponseBody, { type: "thread_created" }>
           : T extends "send_message"
             ? Extract<ResponseBody, { type: "message_accepted" }>
-            : Extract<ResponseBody, { type: "ack" }>;
+            : T extends "terminal_open"
+              ? Extract<ResponseBody, { type: "terminal_opened" }>
+              : T extends "terminal_attach"
+                ? Extract<ResponseBody, { type: "terminal_attached" }>
+                : T extends "terminal_list"
+                  ? Extract<ResponseBody, { type: "terminals" }>
+                  : Extract<ResponseBody, { type: "ack" }>;
 
 type Pending = {
   id: number;
@@ -63,6 +76,8 @@ export class H4rnClient {
   private readonly device: DeviceInfo;
   private readonly statusListeners = new Set<(snapshot: ConnectionSnapshot) => void>();
   private readonly eventListeners = new Set<(event: EventEnvelope) => void>();
+  private readonly binaryListeners = new Set<(data: ArrayBuffer) => void>();
+  private readonly terminalListeners = new Set<(notice: TerminalExitNotice) => void>();
   private readonly readyListeners = new Set<(info: ReadyInfo) => void>();
   private readonly pending = new Map<number, Pending>();
 
@@ -157,6 +172,32 @@ export class H4rnClient {
     return () => this.eventListeners.delete(listener);
   }
 
+  /** Subscribes to PTY output and snapshot frames (ADR-007). */
+  onBinary(listener: (data: ArrayBuffer) => void): () => void {
+    this.binaryListeners.add(listener);
+    return () => this.binaryListeners.delete(listener);
+  }
+
+  /** Subscribes to ephemeral terminal exit notices. */
+  onTerminalEvent(listener: (notice: TerminalExitNotice) => void): () => void {
+    this.terminalListeners.add(listener);
+    return () => this.terminalListeners.delete(listener);
+  }
+
+  /** Sends one framed binary message, such as PTY input. */
+  sendBinary(data: Uint8Array): void {
+    if (!this.socketOpen || !this.transport) {
+      throw new H4rnRequestError(
+        protoError(
+          "internal",
+          "The daemon is not connected.",
+          "Wait until the status bar says online, then try again.",
+        ),
+      );
+    }
+    this.transport.send(data);
+  }
+
   onReady(listener: (info: ReadyInfo) => void): () => void {
     this.readyListeners.add(listener);
     return () => this.readyListeners.delete(listener);
@@ -244,6 +285,7 @@ export class H4rnClient {
         void this.performHello();
       },
       onMessage: (data) => this.handleMessage(data),
+      onBinary: (data) => this.handleBinary(data),
       onClose: (frame) => this.handleClose(frame.code, frame.reason),
       onError: (message) => {
         this.patchSnapshot({
@@ -354,6 +396,12 @@ export class H4rnClient {
     }
   }
 
+  private handleBinary(data: ArrayBuffer): void {
+    // PTY chunks can arrive thousands of times a second; they never change
+    // connection state, so do not churn the app store for each one.
+    for (const listener of this.binaryListeners) listener(data);
+  }
+
   private handleMessage(data: string): void {
     this.patchSnapshot({ lastEventAt: Date.now() });
 
@@ -381,6 +429,11 @@ export class H4rnClient {
       } else {
         pending.reject(new H4rnRequestError(frame.result.Err, frame.id));
       }
+      return;
+    }
+
+    if (frame.kind === "terminal_event") {
+      for (const listener of this.terminalListeners) listener(frame.event);
       return;
     }
 

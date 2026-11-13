@@ -2,6 +2,7 @@
 import type { DeviceId } from "./DeviceId";
 import type { HostSummary } from "./HostSummary";
 import type { SeqEvent } from "./SeqEvent";
+import type { TerminalInfo } from "./TerminalInfo";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadSummary } from "./ThreadSummary";
 import type { TurnId } from "./TurnId";
@@ -69,4 +70,24 @@ turn_id: TurnId,
 /**
  * Durable daemon-global sequence of the last event written for it.
  */
-seq: number, } | { "type": "ack" };
+seq: number, } | { "type": "terminal_opened", 
+/**
+ * The new terminal, including its effective size.
+ */
+terminal: TerminalInfo, } | { "type": "terminal_attached", 
+/**
+ * The terminal as the viewer sees it.
+ */
+terminal: TerminalInfo, 
+/**
+ * ANSI that recreates the screen and scrollback on a fresh grid.
+ */
+snapshot: string, 
+/**
+ * Last output sequence already contained in `snapshot`.
+ */
+start_seq: number, } | { "type": "terminals", 
+/**
+ * Matching terminals.
+ */
+terminals: Array<TerminalInfo>, } | { "type": "ack" };

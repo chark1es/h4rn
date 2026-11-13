@@ -1,0 +1,22 @@
+/*
+ * xterm fits the panel exactly; the surface owns the padding so the WebGL
+ * canvas and the selection layer agree on the grid origin.
+ */
+.terminal-surface {
+  overflow: hidden;
+  background: var(--stage);
+}
+
+.terminal-surface .xterm {
+  height: 100%;
+  padding: 6px 8px;
+}
+
+.terminal-surface .xterm-viewport {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklch, var(--stage-ink-muted) 35%, transparent) transparent;
+}
+
+.terminal-surface .xterm-screen canvas {
+  image-rendering: auto;
+}

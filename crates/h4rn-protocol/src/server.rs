@@ -9,6 +9,7 @@ use crate::common::{
     TurnStatus, Usage,
 };
 use crate::ids::{DeviceId, ThreadId, TurnId};
+use crate::terminal::{TerminalExitNotice, TerminalInfo};
 
 /// One frame sent by the daemon.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
@@ -32,6 +33,15 @@ pub enum ServerFrame {
         seq: u64,
         /// The event itself.
         event: Event,
+    },
+    /// An ephemeral terminal notice, outside the durable thread event log.
+    ///
+    /// Terminal exit carries no durable sequence: the terminal id is scoped to
+    /// one daemon run and a reconnecting client learns the status from
+    /// [`ResponseBody::Terminals`] or [`ResponseBody::TerminalAttached`].
+    TerminalEvent {
+        /// The terminal that changed.
+        event: TerminalExitNotice,
     },
 }
 
@@ -101,6 +111,26 @@ pub enum ResponseBody {
         /// Durable daemon-global sequence of the last event written for it.
         #[ts(type = "number")]
         seq: u64,
+    },
+    /// A terminal was opened.
+    TerminalOpened {
+        /// The new terminal, including its effective size.
+        terminal: TerminalInfo,
+    },
+    /// A viewer attached to a terminal.
+    TerminalAttached {
+        /// The terminal as the viewer sees it.
+        terminal: TerminalInfo,
+        /// ANSI that recreates the screen and scrollback on a fresh grid.
+        snapshot: String,
+        /// Last output sequence already contained in `snapshot`.
+        #[ts(type = "number")]
+        start_seq: u64,
+    },
+    /// Terminals owned by the daemon, oldest first.
+    Terminals {
+        /// Matching terminals.
+        terminals: Vec<TerminalInfo>,
     },
     /// A request with no payload completed successfully.
     Ack,
@@ -306,6 +336,7 @@ pub enum Event {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::terminal::TerminalExit;
 
     #[test]
     fn event_serialises_with_internal_type_and_stable_names() {
@@ -332,6 +363,49 @@ mod tests {
         let json = serde_json::to_string(&frame).unwrap();
         assert!(json.contains("\"kind\":\"event\""));
         assert!(json.contains("\"type\":\"usage_limit_hit\""));
+    }
+
+    #[test]
+    fn terminal_frames_have_stable_tags() {
+        let frame = ServerFrame::TerminalEvent {
+            event: TerminalExitNotice {
+                terminal_id: crate::TerminalId::new("term_1"),
+                thread_id: None,
+                exit: TerminalExit {
+                    status: 0,
+                    signal: None,
+                    at: Utc::now(),
+                },
+            },
+        };
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(json.contains("\"kind\":\"terminal_event\""), "{json}");
+        assert!(json.contains("\"terminal_id\":\"term_1\""), "{json}");
+
+        let response = ResponseBody::TerminalAttached {
+            terminal: TerminalInfo {
+                terminal_id: crate::TerminalId::new("term_1"),
+                stream_id: 1,
+                thread_id: None,
+                host: crate::HostId::new("host_atlas"),
+                cwd: "/tmp".into(),
+                shell: "/bin/sh".into(),
+                cols: 80,
+                rows: 24,
+                alive: true,
+                viewers: 1,
+                exit: None,
+            },
+            snapshot: "hello".into(),
+            start_seq: 3,
+        };
+        let value = serde_json::to_value(ServerFrame::Response {
+            id: 1,
+            result: Ok(response),
+        })
+        .unwrap();
+        assert_eq!(value["result"]["Ok"]["type"], "terminal_attached");
+        assert_eq!(value["result"]["Ok"]["start_seq"], 3);
     }
 
     #[test]

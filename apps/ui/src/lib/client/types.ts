@@ -42,6 +42,8 @@ export type EventEnvelope = {
 export type TransportHandlers = {
   onOpen: () => void;
   onMessage: (data: string) => void;
+  /** One binary frame: PTY output or snapshots (ADR-007). */
+  onBinary?: (data: ArrayBuffer) => void;
   onClose: (frame: { code: number; reason: string; wasClean: boolean }) => void;
   onError: (message: string) => void;
 };
@@ -50,7 +52,7 @@ export type TransportHandlers = {
 export interface Transport {
   readonly kind: "websocket" | "mock";
   connect: (handlers: TransportHandlers) => void;
-  send: (data: string) => void;
+  send: (data: string | Uint8Array) => void;
   close: () => void;
 }
 

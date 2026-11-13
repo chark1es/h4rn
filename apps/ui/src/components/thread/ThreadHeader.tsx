@@ -6,6 +6,7 @@ import {
   PinIcon,
   Share2Icon,
   SquareIcon,
+  SquareTerminalIcon,
   SunMoonIcon,
 } from "lucide-react";
 import type * as React from "react";
@@ -63,10 +64,14 @@ export function ThreadHeader({
   summary,
   host,
   onBack,
+  terminalOpen = false,
+  onToggleTerminal,
 }: {
   summary: ThreadSummary;
   host: HostSummary | undefined;
   onBack: () => void;
+  terminalOpen?: boolean;
+  onToggleTerminal?: () => void;
 }) {
   const hostOnline = host?.online ?? false;
   const glyph = glyphForThread(summary, hostOnline);
@@ -122,6 +127,20 @@ export function ThreadHeader({
             <AgentGlyph glyph={glyph} size={18} />
             <span className={cn(summary.needs_attention && "text-cue-ink")}>{glyph.label}</span>
           </span>
+
+          {onToggleTerminal ? (
+            <Button
+              size="icon"
+              variant="ghost"
+              aria-label="Toggle terminal"
+              aria-pressed={terminalOpen}
+              title="Toggle terminal"
+              className={cn(terminalOpen && "bg-panel text-ink")}
+              onClick={onToggleTerminal}
+            >
+              <SquareTerminalIcon className="size-3.5" />
+            </Button>
+          ) : null}
 
           {working ? (
             <Button

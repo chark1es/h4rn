@@ -8,7 +8,7 @@ use crate::common::{
     ApprovalDecision, DeviceInfo, HarnessKind, RuntimeMode, ThreadFilter, ThreadTab, Topic,
     WorktreeRequest,
 };
-use crate::ids::{AttachmentId, HostId, ThreadId};
+use crate::ids::{AttachmentId, HostId, TerminalId, ThreadId};
 
 /// One request sent by a client.
 ///
@@ -136,35 +136,67 @@ pub enum ClientRequest {
     // TODO(phase 2+): terminal, filesystem, MCP, skills, proxy, usage and
     // forge requests. Their payloads are intentionally minimal placeholders.
     // ------------------------------------------------------------------
-    /// TODO(phase 2): open a PTY attached to a thread.
+    /// Open a PTY on `host` in `cwd`, optionally from a thread.
+    ///
+    /// `shell` defaults to the daemon user's `$SHELL` (or `%ComSpec%` /
+    /// `pwsh` on Windows); `args` are passed to it verbatim.
     TerminalOpen {
-        /// Owning thread.
-        thread_id: ThreadId,
+        /// Owning thread, when opened from one.
+        #[serde(default)]
+        thread_id: Option<ThreadId>,
+        /// Host that runs the PTY.
+        host: HostId,
+        /// Absolute working directory.
+        cwd: String,
+        /// Executable to spawn; `None` uses the host default shell.
+        #[serde(default)]
+        shell: Option<String>,
+        /// Extra arguments for the shell executable.
+        #[serde(default)]
+        args: Vec<String>,
         /// Initial columns.
         cols: u16,
         /// Initial rows.
         rows: u16,
     },
-    /// TODO(phase 2): write user keystrokes to a PTY.
-    TerminalInput {
-        /// Terminal stream id.
-        terminal_id: String,
-        /// Raw input bytes, base64-encoded until binary framing lands.
-        data: String,
+    /// Attach a viewer, returning a snapshot and the sequence it replaces.
+    TerminalAttach {
+        /// Terminal to attach.
+        terminal_id: TerminalId,
+        /// Viewer width, when known; participates in smallest-viewer sizing.
+        #[serde(default)]
+        cols: Option<u16>,
+        /// Viewer height, when known.
+        #[serde(default)]
+        rows: Option<u16>,
     },
-    /// TODO(phase 2): resize a PTY.
+    /// List terminals owned by this daemon.
+    TerminalList {
+        /// Filter to one thread, or every terminal when `None`.
+        #[serde(default)]
+        thread_id: Option<ThreadId>,
+    },
+    /// Resize one viewer's viewport. The effective size is the smallest viewer.
     TerminalResize {
-        /// Terminal stream id.
-        terminal_id: String,
-        /// New columns.
+        /// Terminal to resize.
+        terminal_id: TerminalId,
+        /// New columns for this viewer.
         cols: u16,
-        /// New rows.
+        /// New rows for this viewer.
         rows: u16,
     },
-    /// TODO(phase 2): close a PTY.
+    /// Acknowledge output through `up_to_chunk`, opening credit for more.
+    TerminalAck {
+        /// Terminal whose output is acknowledged.
+        terminal_id: TerminalId,
+        /// Highest contiguous chunk sequence the client applied.
+        #[ts(type = "number")]
+        up_to_chunk: u64,
+    },
+    /// Close a terminal and kill its process group.
     TerminalClose {
-        /// Terminal stream id.
-        terminal_id: String,
+        /// Terminal to close.
+        terminal_id: TerminalId,
     },
     /// TODO(phase 3): list a directory on a host.
     FsList {

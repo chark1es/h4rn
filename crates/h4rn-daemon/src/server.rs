@@ -26,8 +26,8 @@ use axum::routing::get;
 use axum::{Router, serve};
 use futures::{SinkExt, StreamExt};
 use h4rn_protocol::{
-    BinaryFrame, ClientFrame, ClientRequest, DeviceId, Event, PROTOCOL_VERSION, ProtoError,
-    ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame, Topic,
+    BinaryFrame, BinaryKind, ClientFrame, ClientRequest, DeviceId, DeviceInfo, Event,
+    PROTOCOL_VERSION, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame, Topic,
 };
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -36,6 +36,7 @@ use tokio::task::JoinHandle;
 
 use crate::auth::{TokenStore, authorize};
 use crate::hosts::HostInventory;
+use crate::terminal::{Attached, OpenSpec, TerminalManager, run_viewer};
 use crate::threads::ThreadManager;
 
 /// Capacity of one connection's outbound queue.
@@ -51,6 +52,8 @@ pub struct AppState {
     pub manager: Arc<ThreadManager>,
     /// Host inventory.
     pub hosts: Arc<HostInventory>,
+    /// Daemon-owned PTY terminals.
+    pub terminals: Arc<TerminalManager>,
     /// Local access token.
     pub tokens: TokenStore,
     /// Server boot time, for `/healthz`.
@@ -105,9 +108,16 @@ async fn ws_handler(
     upgrade.on_upgrade(move |socket| handle_socket(socket, state))
 }
 
+/// One WebSocket message queued for a connection.
+///
+/// The writer task owns the socket and turns these into text or binary
+/// messages, so terminal viewers can enqueue output without touching the sink.
 #[derive(Debug)]
-enum Outbound {
+pub enum Outbound {
+    /// A JSON protocol frame.
     Text(String),
+    /// A framed binary message (PTY output, snapshots).
+    Binary(Vec<u8>),
 }
 
 struct Connection {
@@ -116,8 +126,15 @@ struct Connection {
     topics: Arc<RwLock<Vec<Topic>>>,
     ready: Arc<AtomicBool>,
     last_seq: Arc<AtomicU64>,
-    device_id: Option<DeviceId>,
+    device: Option<DeviceInfo>,
+    viewer_id: crate::terminal::ViewerId,
     tx: mpsc::Sender<Outbound>,
+}
+
+impl Connection {
+    fn device_id(&self) -> Option<DeviceId> {
+        self.device.as_ref().map(|device| device.device_id.clone())
+    }
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState) {
@@ -148,13 +165,15 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         Arc::clone(&last_seq),
     ));
 
+    let viewer_id = state.terminals.next_viewer_id();
     let mut connection = Connection {
         state,
         hello_done: false,
         topics,
         ready,
         last_seq,
-        device_id: None,
+        device: None,
+        viewer_id,
         tx: tx.clone(),
     };
 
@@ -172,33 +191,10 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
                 }
             }
             Message::Binary(bytes) => {
-                let reply = match BinaryFrame::decode(&bytes) {
-                    Ok(frame) => ServerFrame::Event {
-                        seq: connection.last_seq.load(Ordering::Relaxed),
-                        event: Event::Error {
-                            thread_id: None,
-                            message: format!(
-                                "binary {:?} frames are reserved for PTY and blob streams",
-                                frame.kind
-                            ),
-                            hint: Some("Terminal support arrives in phase 2".into()),
-                            retryable: false,
-                        },
-                    },
-                    Err(error) => ServerFrame::Event {
-                        seq: connection.last_seq.load(Ordering::Relaxed),
-                        event: Event::Error {
-                            thread_id: None,
-                            message: format!("malformed binary frame: {error}"),
-                            hint: Some("The binary header is 16 bytes; see protocol docs".into()),
-                            retryable: false,
-                        },
-                    },
-                };
-                if let Ok(text) = serde_json::to_string(&reply)
-                    && connection.send(Outbound::Text(text)).await.is_err()
-                {
-                    break;
+                if let Some(reply) = connection.handle_binary(&bytes) {
+                    if connection.send(Outbound::Text(reply)).await.is_err() {
+                        break;
+                    }
                 }
             }
             Message::Close(_) => break,
@@ -207,6 +203,12 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
     }
 
     forward.abort();
+    // Detaching a socket never kills a terminal; it only removes this
+    // connection's viewers so the PTY keeps running for the next attach.
+    connection
+        .state
+        .terminals
+        .detach_viewer(connection.viewer_id);
     drop(connection);
     drop(tx);
     let _ = writer.await;
@@ -257,7 +259,7 @@ impl Connection {
                 } else {
                     self.hello_done = true;
                     self.ready.store(true, Ordering::Relaxed);
-                    self.device_id = Some(device.device_id.clone());
+                    self.device = Some(device.clone());
                     *self
                         .topics
                         .write()
@@ -362,7 +364,7 @@ impl Connection {
                     &approval_id,
                     decision,
                     option_id,
-                    self.device_id.clone(),
+                    self.device_id(),
                 )
                 .await
                 .map(|()| ResponseBody::Ack)
@@ -424,6 +426,98 @@ impl Connection {
                     }
                 }
             }
+            ClientRequest::TerminalOpen {
+                thread_id,
+                host,
+                cwd,
+                shell,
+                args,
+                cols,
+                rows,
+            } => match self.require_device() {
+                Ok(device) => self
+                    .state
+                    .terminals
+                    .open(
+                        OpenSpec {
+                            thread_id,
+                            host,
+                            cwd,
+                            shell,
+                            args,
+                            cols,
+                            rows,
+                        },
+                        &device,
+                    )
+                    .await
+                    .map(|terminal| ResponseBody::TerminalOpened { terminal })
+                    .map_err(crate::terminal::TerminalError::into_proto),
+                Err(error) => Err(error),
+            },
+            ClientRequest::TerminalAttach {
+                terminal_id,
+                cols,
+                rows,
+            } => self
+                .state
+                .terminals
+                .attach(&terminal_id, self.viewer_id, self.tx.clone(), cols, rows)
+                .map(|attached| {
+                    let Attached {
+                        terminal,
+                        snapshot,
+                        output,
+                        viewer,
+                        session,
+                    } = attached;
+                    let start_seq = snapshot.seq;
+                    let ansi = snapshot.ansi;
+                    // The viewer task frames output and applies backpressure
+                    // until this connection closes or the terminal exits.
+                    tokio::spawn(run_viewer(
+                        session,
+                        self.viewer_id,
+                        viewer,
+                        output,
+                        start_seq,
+                    ));
+                    ResponseBody::TerminalAttached {
+                        terminal,
+                        snapshot: ansi,
+                        start_seq,
+                    }
+                })
+                .map_err(crate::terminal::TerminalError::into_proto),
+            ClientRequest::TerminalList { thread_id } => Ok(ResponseBody::Terminals {
+                terminals: self.state.terminals.list(thread_id.as_ref()),
+            }),
+            ClientRequest::TerminalResize {
+                terminal_id,
+                cols,
+                rows,
+            } => self
+                .state
+                .terminals
+                .resize(&terminal_id, self.viewer_id, cols, rows)
+                .map(|()| ResponseBody::Ack)
+                .map_err(crate::terminal::TerminalError::into_proto),
+            ClientRequest::TerminalAck {
+                terminal_id,
+                up_to_chunk,
+            } => self
+                .state
+                .terminals
+                .ack(&terminal_id, self.viewer_id, up_to_chunk)
+                .map(|()| ResponseBody::Ack)
+                .map_err(crate::terminal::TerminalError::into_proto),
+            ClientRequest::TerminalClose { terminal_id } => self
+                .state
+                .terminals
+                .close(&terminal_id)
+                .await
+                .map(|()| ResponseBody::Ack)
+                .map_err(crate::terminal::TerminalError::into_proto),
             other => Err(not_implemented(&other)),
         };
 
@@ -431,6 +525,58 @@ impl Connection {
             Ok(body) => response_frame(id, body),
             Err(error) => error_frame(id, error),
         })
+    }
+
+    fn require_device(&self) -> Result<DeviceInfo, ProtoError> {
+        self.device.clone().ok_or_else(|| {
+            ProtoError::new(
+                ProtoErrorCode::Unauthorized,
+                "the connection has not completed the Hello handshake",
+                "Send Hello with the device identity before opening a terminal",
+            )
+        })
+    }
+
+    /// Handles one client-to-daemon binary frame.
+    ///
+    /// PTY input is the only binary frame a client sends today. It is applied
+    /// directly and errors are reported as events because the frame carries no
+    /// request id to answer.
+    fn handle_binary(&mut self, bytes: &[u8]) -> Option<String> {
+        let seq = self.last_seq.load(Ordering::Relaxed);
+        let frame = match BinaryFrame::decode(bytes) {
+            Ok(frame) => frame,
+            Err(error) => {
+                return Some(binary_error_frame(
+                    seq,
+                    ProtoError::new(
+                        ProtoErrorCode::InvalidRequest,
+                        format!("malformed binary frame: {error}"),
+                        "The binary header is 16 bytes; see the protocol docs",
+                    ),
+                ));
+            }
+        };
+        match frame.kind {
+            BinaryKind::PtyInput => {
+                match self
+                    .state
+                    .terminals
+                    .input_by_stream(frame.stream_id, &frame.payload)
+                {
+                    Ok(()) => None,
+                    Err(error) => Some(binary_error_frame(seq, error.into_proto())),
+                }
+            }
+            other => Some(binary_error_frame(
+                seq,
+                ProtoError::new(
+                    ProtoErrorCode::InvalidRequest,
+                    format!("binary {other:?} frames are not accepted from clients"),
+                    "Clients send only pty_input; output is daemon-to-client",
+                ),
+            )),
+        }
     }
 
     async fn send(&self, message: Outbound) -> Result<(), mpsc::error::SendError<Outbound>> {
@@ -524,6 +670,17 @@ async fn writer_loop(
                             break;
                         }
                     }
+                    Outbound::Binary(bytes) => {
+                        let sent = tokio::time::timeout(
+                            WRITE_TIMEOUT,
+                            sink.send(Message::Binary(bytes.into())),
+                        )
+                        .await;
+                        if sent.is_err() {
+                            tracing::warn!("client write timed out; closing the connection");
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -565,6 +722,19 @@ fn error_frame(id: u64, error: ProtoError) -> String {
     .unwrap_or_default()
 }
 
+fn binary_error_frame(seq: u64, error: ProtoError) -> String {
+    serde_json::to_string(&ServerFrame::Event {
+        seq,
+        event: Event::Error {
+            thread_id: None,
+            message: error.message,
+            hint: error.hint,
+            retryable: false,
+        },
+    })
+    .unwrap_or_default()
+}
+
 /// Names a request that this phase intentionally does not implement.
 ///
 /// These are part of the wire contract but no code path serves them yet, so
@@ -576,10 +746,6 @@ fn not_implemented(request: &ClientRequest) -> ProtoError {
 
 fn request_name(request: &ClientRequest) -> &'static str {
     match request {
-        ClientRequest::TerminalOpen { .. } => "terminal_open",
-        ClientRequest::TerminalInput { .. } => "terminal_input",
-        ClientRequest::TerminalResize { .. } => "terminal_resize",
-        ClientRequest::TerminalClose { .. } => "terminal_close",
         ClientRequest::FsList { .. } => "fs_list",
         ClientRequest::FsRead { .. } => "fs_read",
         ClientRequest::FsWrite { .. } => "fs_write",

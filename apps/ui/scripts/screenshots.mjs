@@ -45,6 +45,25 @@ const SHOTS = [
     wait: '[aria-label="Thread stream"]',
   },
   {
+    name: "terminal",
+    path: "/t/thr_b",
+    wait: '[aria-label="Thread stream"]',
+    settle: 2200,
+    action: async (page) => {
+      await page.getByRole("button", { name: "Toggle terminal" }).click();
+      const panel = page.locator('[aria-label="Terminal panel"]');
+      await panel.waitFor({ state: "visible" });
+      await panel.locator(".xterm-screen").first().waitFor({ state: "visible" });
+      // The panel mounts before the attach response; input is dropped until the
+      // stream id arrives, so give the mock session a beat to finish opening.
+      await page.waitForTimeout(700);
+      await panel.locator(".terminal-surface").click();
+      await page.keyboard.type("ls");
+      await page.keyboard.press("Enter");
+      await page.waitForTimeout(900);
+    },
+  },
+  {
     name: "palette",
     path: "/",
     wait: "text=Fix the flaky auth test",
