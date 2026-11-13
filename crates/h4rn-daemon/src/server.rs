@@ -20,6 +20,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use axum::Json;
+use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{HeaderMap, StatusCode, header::SEC_WEBSOCKET_PROTOCOL};
@@ -29,8 +30,8 @@ use axum::{Router, serve};
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use h4rn_protocol::{
     BINARY_HEADER_LEN, BinaryFrame, BinaryKind, ClientFrame, ClientRequest, DeviceId, DeviceInfo,
-    Event, PROTOCOL_VERSION, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame,
-    Topic,
+    Event, McpRequest, PROTOCOL_VERSION, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent,
+    ServerFrame, Topic,
 };
 use h4rn_transport::server::{AcceptOutcome, Link, LinkError, SecureService, SessionSender};
 use h4rn_transport::session::AppFrame;
@@ -43,6 +44,7 @@ use crate::auth::{TokenStore, authorize};
 use crate::blobs::{BlobError, BlobStore};
 use crate::fs::{FsError, FsService};
 use crate::hosts::HostInventory;
+use crate::mcp::McpService;
 use crate::remote::{RemoteAudit, SessionOrigin};
 use crate::terminal::{Attached, OpenSpec, TerminalManager, run_viewer};
 use crate::threads::ThreadManager;
@@ -72,6 +74,8 @@ pub struct AppState {
     pub secure: Option<Arc<SecureService>>,
     /// Remote-action audit trail, when the daemon is signed in to connect.
     pub remote: Option<Arc<RemoteAudit>>,
+    /// The daemon-owned MCP hub (ADR-006).
+    pub mcp: Arc<McpService>,
     /// Server boot time, for `/healthz`.
     pub started: Instant,
 }
@@ -86,7 +90,48 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/ws", get(ws_handler))
         .route("/secure", get(secure_handler))
+        .route("/secure-mcp", get(secure_mcp_handler))
+        .route(
+            "/mcp",
+            get(mcp_http_get)
+                .post(mcp_http_post)
+                .delete(mcp_http_delete),
+        )
         .with_state(state)
+}
+
+/// Streamable-HTTP MCP endpoint for harness sessions (ADR-006).
+async fn mcp_http_post(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    crate::mcp::http_post(state.mcp.http_state(), headers, body).await
+}
+
+async fn mcp_http_get(State(state): State<AppState>) -> Response {
+    crate::mcp::http_get(state.mcp.http_state()).await
+}
+
+async fn mcp_http_delete(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    crate::mcp::http_delete(state.mcp.http_state(), headers).await
+}
+
+/// Owner half of cross-machine MCP sharing (ADR-006).
+///
+/// The peer authenticates with the same Noise identity it uses for `/secure`;
+/// the hub then applies the `server -> machine` grant and audits each call.
+async fn secure_mcp_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
+    let Some(service) = state.secure.clone() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": "the secure transport is not enabled on this daemon",
+            })),
+        )
+            .into_response();
+    };
+    let mcp = Arc::clone(&state.mcp);
+    ws.on_upgrade(move |socket| async move {
+        let link = Box::new(WsLink { socket });
+        mcp.serve_secure_mcp(service, link).await;
+    })
 }
 
 /// Unauthenticated liveness response.
@@ -380,6 +425,13 @@ where
         Arc::clone(&notify),
         Arc::clone(&last_seq),
     ));
+    let mcp_forward = tokio::spawn(mcp_event_loop(
+        state.mcp.hub().subscribe(),
+        tx.clone(),
+        Arc::clone(&topics),
+        Arc::clone(&ready),
+        Arc::clone(&last_seq),
+    ));
 
     let viewer_id = state.terminals.next_viewer_id();
     let mut connection = Connection {
@@ -421,6 +473,7 @@ where
     }
 
     forward.abort();
+    mcp_forward.abort();
     // Detaching a socket never kills a terminal; it only removes this
     // connection's viewers so the PTY keeps running for the next attach.
     connection
@@ -1144,6 +1197,18 @@ impl Connection {
                 }
                 Err(error) => Err(error.into_proto()),
             },
+            // ------------------------------------------------------------------
+            // MCP hub (ADR-006): one envelope for every operation, plus the
+            // three legacy requests kept for older clients.
+            // ------------------------------------------------------------------
+            ClientRequest::Mcp { request } => self.state.mcp.handle(request).await,
+            ClientRequest::McpList => self.state.mcp.handle(McpRequest::ListServers).await,
+            ClientRequest::McpUpsert { input } => {
+                self.state.mcp.handle(McpRequest::Upsert { input }).await
+            }
+            ClientRequest::McpRemove { name } => {
+                self.state.mcp.handle(McpRequest::Remove { name }).await
+            }
             other => Err(not_implemented(&other)),
         };
 
@@ -1280,6 +1345,94 @@ async fn forward_loop(
                 return;
             }
             Err(mpsc::error::TrySendError::Closed(_)) => return,
+        }
+    }
+}
+
+/// Forwards transient MCP hub events to a client subscribed to `Topic::Mcp`.
+///
+/// These events carry no durable sequence (the hub can start or fail a server
+/// with no client turn in flight); they reuse the last sequence the connection
+/// saw so clients can keep ordering them relative to their own replay cursor,
+/// exactly like `FsChanged`.
+async fn mcp_event_loop(
+    mut subscription: tokio::sync::broadcast::Receiver<h4rn_mcp::hub::HubEvent>,
+    tx: mpsc::Sender<Outbound>,
+    topics: Arc<RwLock<Vec<Topic>>>,
+    ready: Arc<AtomicBool>,
+    last_seq: Arc<AtomicU64>,
+) {
+    loop {
+        let event = match subscription.recv().await {
+            Ok(event) => event,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                tracing::warn!(missed, "client fell behind MCP hub events");
+                continue;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        };
+        if !ready.load(Ordering::Relaxed) {
+            continue;
+        }
+        let subscribed = {
+            let topics = topics
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            topics
+                .iter()
+                .any(|topic| matches!(topic, Topic::All | Topic::Mcp))
+        };
+        if !subscribed {
+            continue;
+        }
+        let event = match event {
+            h4rn_mcp::hub::HubEvent::Status {
+                server,
+                status,
+                tool_count,
+                message,
+                at,
+            } => Event::McpServerStatus {
+                server,
+                status,
+                tool_count,
+                message,
+                at,
+            },
+            h4rn_mcp::hub::HubEvent::ToolCalled {
+                server,
+                tool,
+                qualified_name,
+                caller,
+                ok,
+                duration_ms,
+                error,
+                at,
+            } => Event::McpToolCalled {
+                server,
+                tool,
+                qualified_name,
+                caller,
+                ok,
+                duration_ms,
+                error,
+                at,
+            },
+            // Cache invalidation is internal; the UI learns the new list when
+            // it asks for it.
+            h4rn_mcp::hub::HubEvent::ToolsChanged { .. } => continue,
+        };
+        let frame = ServerFrame::Event {
+            seq: last_seq.load(Ordering::Relaxed),
+            event,
+        };
+        let Ok(text) = serde_json::to_string(&frame) else {
+            continue;
+        };
+        if tx.try_send(Outbound::Text(text)).is_err() {
+            // A transient event is never worth disconnecting a client for;
+            // dropping it is the same as the client reconnecting and listing.
+            continue;
         }
     }
 }

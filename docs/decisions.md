@@ -585,3 +585,35 @@ its `ring` default resolver; keeping those in the wasm crate avoids pulling
 browser-only features into the daemon. The tradeoff is a wasm build step and a
 second adapter to keep compiling, which is cheaper than two implementations of
 a state machine where a one-byte divergence is a security bug.
+
+## ADR-034: MCP is implemented in-tree, with `server__tool` names and deterministic collisions
+
+**Status:** Accepted
+
+`h4rn-mcp` implements the MCP streamable-HTTP, stdio and legacy-SSE transports directly on
+`axum`, `reqwest` and `tokio` rather than depending on an SDK. The hub needs control the general
+purpose `rmcp` surface does not expose at this revision: per-session bearer tokens with scopes,
+per-server enable matrices, a single reserved `h4rn` namespace shared with in-process providers,
+owner-enforced share policies, deterministic collision renaming and redacted diagnostics. The
+protocol is small (initialize, tools, resources, prompts, list-changed, cancellation), so owning
+it costs less than adapting every one of those policies to an external type model. Names are
+`server__tool`, server names are lowercased and normalised, `h4rn` is reserved, and collisions
+get `_2`, `_3` in sorted-namespace order so the same configuration always exposes the same names.
+The tradeoff is that new MCP revisions are our work; `negotiate_protocol_version` keeps the
+accepted list explicit and tests pin the handshake.
+
+## ADR-035: MCP configuration and secrets live apart; sharing is owner-executed
+
+**Status:** Accepted
+
+The MCP registry is a separate `mcp.db` in the daemon data directory. It stores transports,
+enable matrices, imports, shares and only *references* to secret values
+(`mcp/<server id>/<kind>/<NAME>`); values go through the `SecretStore` trait into the OS keychain,
+with an encrypted file fallback for headless hosts. The registry never sees a plaintext value, so
+a copied database, a log line, a protocol view or a `Debug` format cannot leak one — the same
+boundary ADR-016 sets for other credentials. Cross-machine sharing follows the same rule: the
+owning machine executes the server and keeps the secret, a second secure session on
+`/secure-mcp` carries JSON-RPC, and the owner re-checks the share policy and audits every call
+with the authenticated device key. A proxy cannot be re-shared, so a chain cannot be used to
+launder access. The tradeoff is one extra encrypted hop for remote calls and the need to clean up
+secret references on update and removal; both are covered by tests.

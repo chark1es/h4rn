@@ -6,6 +6,8 @@ import type { DeviceId } from "./DeviceId";
 import type { FsChangeKind } from "./FsChangeKind";
 import type { FsSearchMatch } from "./FsSearchMatch";
 import type { Item } from "./Item";
+import type { McpCaller } from "./McpCaller";
+import type { McpServerStatusKind } from "./McpServerStatusKind";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadSummary } from "./ThreadSummary";
 import type { ToolCall } from "./ToolCall";
@@ -197,4 +199,56 @@ done: boolean,
 /**
  * True when the daemon hit its result cap.
  */
-truncated: boolean, } | { "type": "transport_status" } & TransportStatus;
+truncated: boolean, } | { "type": "transport_status" } & TransportStatus | { "type": "mcp_server_status", 
+/**
+ * Server name.
+ */
+server: string, 
+/**
+ * New status.
+ */
+status: McpServerStatusKind, 
+/**
+ * Cached tool count.
+ */
+tool_count: number, 
+/**
+ * Redacted failure or restart reason.
+ */
+message: string | null, 
+/**
+ * When the hub observed it.
+ */
+at: string, } | { "type": "mcp_tool_called", 
+/**
+ * Server namespace.
+ */
+server: string, 
+/**
+ * Unqualified tool name.
+ */
+tool: string, 
+/**
+ * Fully qualified name the model used.
+ */
+qualified_name: string, 
+/**
+ * Who invoked it.
+ */
+caller: McpCaller, 
+/**
+ * Whether the call succeeded.
+ */
+ok: boolean, 
+/**
+ * Round trip in milliseconds.
+ */
+duration_ms: bigint, 
+/**
+ * Redacted failure message.
+ */
+error: string | null, 
+/**
+ * When the call returned.
+ */
+at: string, };

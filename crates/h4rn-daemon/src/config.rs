@@ -67,6 +67,17 @@ impl Config {
         self.data_dir.join("events.db")
     }
 
+    /// Path of the MCP server and share registry (ADR-006).
+    pub fn mcp_db_path(&self) -> PathBuf {
+        self.data_dir.join("mcp.db")
+    }
+
+    /// Path of the encrypted fallback secret store used when no OS keychain is
+    /// available. Values never live in [`Self::mcp_db_path`].
+    pub fn mcp_secrets_path(&self) -> PathBuf {
+        self.data_dir.join("mcp-secrets")
+    }
+
     /// Path of the Noise transport identity.
     pub fn transport_identity_path(&self) -> PathBuf {
         self.data_dir.join("transport-identity")

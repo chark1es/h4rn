@@ -29,6 +29,7 @@ pub mod fs;
 pub mod harnesses;
 pub mod hosts;
 pub mod journal;
+pub mod mcp;
 pub mod remote;
 pub mod server;
 pub mod supervisor;

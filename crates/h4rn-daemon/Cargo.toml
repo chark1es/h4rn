@@ -25,6 +25,7 @@ grep-regex.workspace = true
 grep-searcher.workspace = true
 h4rn-core.workspace = true
 h4rn-harness.workspace = true
+h4rn-mcp.workspace = true
 h4rn-protocol.workspace = true
 h4rn-transport.workspace = true
 h4rn-vt.workspace = true

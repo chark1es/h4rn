@@ -10,6 +10,10 @@ import type { FsListing } from "./FsListing";
 import type { FsTurnChanges } from "./FsTurnChanges";
 import type { FsWriteResult } from "./FsWriteResult";
 import type { HostSummary } from "./HostSummary";
+import type { McpImportPreview } from "./McpImportPreview";
+import type { McpServerView } from "./McpServerView";
+import type { McpTestCallResult } from "./McpTestCallResult";
+import type { McpToolInfo } from "./McpToolInfo";
 import type { SeqEvent } from "./SeqEvent";
 import type { TerminalInfo } from "./TerminalInfo";
 import type { ThreadId } from "./ThreadId";
@@ -161,4 +165,28 @@ upload: UploadState, } | { "type": "blob",
 /**
  * Metadata and the binary stream id to collect.
  */
-download: BlobDownload, } | { "type": "ack" };
+download: BlobDownload, } | { "type": "mcp_servers", 
+/**
+ * Servers in configuration order.
+ */
+servers: Array<McpServerView>, } | { "type": "mcp_server", 
+/**
+ * Current view.
+ */
+server: McpServerView, } | { "type": "mcp_import_preview", 
+/**
+ * Entries and conflicts; nothing was written.
+ */
+preview: McpImportPreview, } | { "type": "mcp_tools", 
+/**
+ * Server name.
+ */
+server: string, 
+/**
+ * Qualified tools.
+ */
+tools: Array<McpToolInfo>, } | { "type": "mcp_call", 
+/**
+ * Flattened result.
+ */
+result: McpTestCallResult, } | { "type": "ack" };

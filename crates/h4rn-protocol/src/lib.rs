@@ -35,6 +35,7 @@ mod common;
 pub mod connect;
 mod fs;
 mod ids;
+pub mod mcp;
 mod server;
 mod terminal;
 mod transport;
@@ -57,6 +58,12 @@ pub use fs::{
 };
 pub use ids::{
     AttachmentId, AttachmentIdError, DeviceId, HostId, SubagentId, TerminalId, ThreadId, TurnId,
+};
+pub use mcp::{
+    McpCaller, McpConflictResolution, McpEnabledMatrix, McpHarnessToggle, McpImportCandidate,
+    McpImportConflict, McpImportPreview, McpMachineToggle, McpRequest, McpSecretInput,
+    McpServerInput, McpServerStatusKind, McpServerView, McpSharePolicy, McpShareView,
+    McpTestCallResult, McpToolInfo, McpTransportInput, McpTransportView,
 };
 pub use server::{Event, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame};
 pub use terminal::{
