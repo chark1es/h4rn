@@ -427,17 +427,7 @@ impl OidcRegistry {
         let id_token = response.id_token().ok_or_else(|| {
             AppError::upstream("id_token_missing", "provider did not return an ID token")
         })?;
-        let nonce = Nonce::new(nonce.to_string());
-        let claims = id_token
-            .claims(&provider.client.id_token_verifier(), &nonce)
-            .map_err(|error| {
-                AppError::unauthorized(
-                    "id_token_invalid",
-                    format!("ID token verification failed: {error}"),
-                )
-            })?;
-
-        let mut profile = profile_from_id_token(claims);
+        let mut profile = verify_id_token_claims(&provider, &id_token.to_string(), Some(nonce))?;
         if profile.email.is_none() || profile.display_name.is_none() {
             if let Some(endpoint) = &provider.discovery.userinfo_endpoint {
                 let userinfo =
@@ -593,21 +583,7 @@ impl OidcRegistry {
         let id_token = token.id_token.as_deref().ok_or_else(|| {
             AppError::upstream("id_token_missing", "provider did not return an ID token")
         })?;
-        let id_token = openidconnect::core::CoreIdToken::from_str(id_token).map_err(|error| {
-            AppError::upstream(
-                "id_token_invalid",
-                format!("ID token is malformed: {error}"),
-            )
-        })?;
-        let claims = id_token
-            .claims(&provider.client.id_token_verifier(), accept_any_nonce)
-            .map_err(|error| {
-                AppError::unauthorized(
-                    "id_token_invalid",
-                    format!("ID token verification failed: {error}"),
-                )
-            })?;
-        let mut profile = profile_from_id_token(claims);
+        let mut profile = verify_id_token_claims(&provider, id_token, None)?;
         if profile.email.is_none() || profile.display_name.is_none() {
             if let Some(endpoint) = &provider.discovery.userinfo_endpoint {
                 let userinfo = fetch_userinfo(&self.http, endpoint, &token.access_token).await?;
@@ -656,6 +632,23 @@ impl OidcRegistry {
         }
     }
 
+    /// Verifies an ID token against the configured provider's discovery
+    /// metadata.
+    ///
+    /// `nonce` must be the flow nonce for an authorization-code login. `None`
+    /// accepts any nonce, which is what the device grant needs because it has
+    /// no browser session to bind one to. Exposed so the live OrbitID test can
+    /// prove that a token claiming a different issuer is rejected.
+    pub async fn verify_id_token(
+        &self,
+        provider_id: &str,
+        id_token: &str,
+        nonce: Option<&str>,
+    ) -> Result<UserProfile> {
+        let provider = self.provider(provider_id).await?;
+        verify_id_token_claims(&provider, id_token, nonce)
+    }
+
     /// Whether the provider advertises RP-initiated logout (quirk 10).
     pub async fn end_session_endpoint(&self, provider_id: &str) -> Option<String> {
         self.provider(provider_id)
@@ -665,10 +658,57 @@ impl OidcRegistry {
     }
 }
 
-fn accept_any_nonce(_nonce: Option<&Nonce>) -> std::result::Result<(), String> {
-    // The device grant has no browser session and therefore no nonce to bind.
-    // Discovery, signature, issuer, audience and expiry are still verified.
-    Ok(())
+fn verify_id_token_claims(
+    provider: &ProviderRuntime,
+    raw: &str,
+    nonce: Option<&str>,
+) -> Result<UserProfile> {
+    let id_token = openidconnect::core::CoreIdToken::from_str(raw).map_err(|error| {
+        AppError::upstream(
+            "id_token_invalid",
+            format!("ID token is malformed: {error}"),
+        )
+    })?;
+    let expected = nonce.map(ToOwned::to_owned);
+    let claims = id_token
+        .claims(
+            &provider.client.id_token_verifier(),
+            move |value: Option<&Nonce>| match &expected {
+                Some(expected) if value.is_some_and(|value| value.secret() == expected) => Ok(()),
+                Some(_) => Err("nonce mismatch".to_string()),
+                None => Ok(()),
+            },
+        )
+        .map_err(|error| {
+            // Verification has already failed. Reporting the issuer claim
+            // separately turns OrbitID's "token from another instance" mistake
+            // into an actionable error instead of an opaque signature failure.
+            if let Some(claimed) = unverified_issuer(raw) {
+                if claimed.trim_end_matches('/') != provider.config.issuer {
+                    return AppError::unauthorized(
+                        "issuer_mismatch",
+                        format!(
+                            "ID token issuer `{claimed}` does not match the configured issuer `{}`",
+                            provider.config.issuer
+                        ),
+                    );
+                }
+            }
+            AppError::unauthorized(
+                "id_token_invalid",
+                format!("ID token verification failed: {error}"),
+            )
+        })?;
+    Ok(profile_from_id_token(claims))
+}
+
+/// Reads the `iss` claim without verifying the token. Only used to enrich the
+/// error after verification has already failed.
+fn unverified_issuer(token: &str) -> Option<String> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = crate::crypto::b64_decode(payload)?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    value.get("iss")?.as_str().map(ToOwned::to_owned)
 }
 
 fn retry_after(response: &reqwest::Response) -> Option<i64> {
