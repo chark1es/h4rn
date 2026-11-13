@@ -8,6 +8,7 @@ use h4rn_harness::Harness;
 use tokio::net::TcpListener;
 
 use crate::auth::TokenStore;
+use crate::blobs::{AttachmentResolver, BlobStore};
 use crate::config::Config;
 use crate::fs::FsService;
 use crate::harnesses::{HarnessCatalog, StaticHarnessCatalog};
@@ -114,12 +115,26 @@ impl DaemonBuilder {
             hosts.local_id(),
             Arc::new(FileAudit::new(&self.config.data_dir)),
         ));
+        let blobs = Arc::new(
+            BlobStore::open(
+                self.config.blob_dir(),
+                self.config.attachments_dir(),
+                self.config.max_blob_bytes(),
+                self.config.blob_gc_grace(),
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("open attachment store: {error}"))?,
+        );
+        crate::blobs::spawn_gc(&blobs, self.config.blob_gc_interval());
+        let resolver: Arc<dyn AttachmentResolver> =
+            Arc::clone(&blobs) as Arc<dyn AttachmentResolver>;
         let manager = Arc::new(
             ThreadManager::open(
                 journal,
                 Arc::clone(&catalog),
                 hosts.local_id(),
                 self.options,
+                Some(resolver),
             )
             .await
             .map_err(|error| anyhow::anyhow!("open thread manager: {error}"))?,
@@ -147,6 +162,7 @@ impl DaemonBuilder {
             manager,
             hosts,
             terminals,
+            blobs,
             tokens,
             fs,
             supervisor: self.supervisor,
@@ -160,6 +176,7 @@ pub struct Daemon {
     manager: Arc<ThreadManager>,
     hosts: Arc<HostInventory>,
     terminals: Arc<TerminalManager>,
+    blobs: Arc<BlobStore>,
     tokens: TokenStore,
     fs: Arc<FsService>,
     supervisor: Arc<ProcessSupervisor>,
@@ -206,6 +223,7 @@ impl Daemon {
             manager: Arc::clone(&self.manager),
             hosts: self.hosts,
             terminals: Arc::clone(&self.terminals),
+            blobs: Arc::clone(&self.blobs),
             tokens: self.tokens,
             fs: self.fs,
             started: std::time::Instant::now(),

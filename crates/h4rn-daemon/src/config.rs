@@ -62,6 +62,51 @@ impl Config {
         self.data_dir.join("events.db")
     }
 
+    /// Directory holding content-addressed attachment blobs (ADR-008).
+    pub fn blob_dir(&self) -> PathBuf {
+        self.data_dir.join("blobs")
+    }
+
+    /// Directory holding per-thread materialised attachment copies.
+    pub fn attachments_dir(&self) -> PathBuf {
+        self.data_dir.join("attachments")
+    }
+
+    /// Largest attachment this daemon accepts, in bytes.
+    ///
+    /// Defaults to 50 MiB. `H4RN_MAX_BLOB_BYTES` overrides it for hosts that
+    /// need a different ceiling; the UI reads the limit from the daemon's error
+    /// rather than duplicating the number.
+    pub fn max_blob_bytes(&self) -> u64 {
+        std::env::var("H4RN_MAX_BLOB_BYTES")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .unwrap_or(50 * 1024 * 1024)
+    }
+
+    /// How long an unreferenced blob or an abandoned upload survives.
+    ///
+    /// Defaults to 24 hours. The grace window is what keeps a just-committed
+    /// upload from being swept before the message that references it lands.
+    pub fn blob_gc_grace(&self) -> std::time::Duration {
+        std::env::var("H4RN_BLOB_GRACE_SECS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(std::time::Duration::from_secs(24 * 60 * 60))
+    }
+
+    /// How often the attachment GC runs.
+    pub fn blob_gc_interval(&self) -> std::time::Duration {
+        std::env::var("H4RN_BLOB_GC_SECS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .filter(|value| *value > 0)
+            .map(std::time::Duration::from_secs)
+            .unwrap_or(std::time::Duration::from_secs(60 * 60))
+    }
+
     /// Creates the data directory if it does not exist.
     ///
     /// On Unix the directory is created with `0700`; it holds the access token
@@ -142,6 +187,11 @@ mod tests {
         assert_eq!(
             config.event_db_path(),
             PathBuf::from("/tmp/h4rn-test/events.db")
+        );
+        assert_eq!(config.blob_dir(), PathBuf::from("/tmp/h4rn-test/blobs"));
+        assert_eq!(
+            config.attachments_dir(),
+            PathBuf::from("/tmp/h4rn-test/attachments")
         );
     }
 

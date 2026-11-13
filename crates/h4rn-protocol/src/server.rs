@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::blob::{BlobDownload, BlobInfo, UploadState, UploadTicket};
 use crate::common::{
     AgentState, ApprovalKind, ApprovalOption, HostSummary, Item, ThreadSummary, ToolCall,
     TurnStatus, Usage,
@@ -183,6 +184,26 @@ pub enum ResponseBody {
     FsTurnChanges {
         /// Turn change set.
         changes: crate::fs::FsTurnChanges,
+    },
+    /// An upload stream is ready for binary chunks.
+    UploadStarted {
+        /// Opaque upload id and its binary stream id.
+        upload: UploadTicket,
+    },
+    /// An upload was committed and the blob is now addressable.
+    UploadCommitted {
+        /// Metadata of the committed (or deduplicated) blob.
+        blob: BlobInfo,
+    },
+    /// Resumable progress of one upload.
+    UploadStatus {
+        /// Received bytes and commit state.
+        upload: UploadState,
+    },
+    /// A blob stream follows as binary `blob_chunk` frames.
+    Blob {
+        /// Metadata and the binary stream id to collect.
+        download: BlobDownload,
     },
     /// A request with no payload completed successfully.
     Ack,

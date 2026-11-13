@@ -60,6 +60,7 @@ use crate::acp::{
     AcpPermissionRequest, AcpServerInfo, AcpSessionInfo, AcpToolCall, AcpToolKind, AcpToolStatus,
     AcpUpdate, AcpUsage, AgentCapabilities, ENV_MCP_STDIO_BRIDGE, PromptContent,
 };
+use crate::attachments::{self, AttachmentClass, AttachmentDelivery};
 use crate::{
     AttachmentRef, ENV_MCP_AUTH_TOKEN, ENV_MCP_BEARER_TOKEN, Harness, HarnessError, HarnessEvent,
     HarnessInstall, HarnessSession, SessionSpec, TurnReport, UserInput, detect_limit,
@@ -1213,9 +1214,12 @@ fn build_prompt(
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| attachment.id.to_string());
-        let media_type = resolved_media_type(attachment);
+        let media_type = attachments::media_type(attachment);
+        let class = AttachmentClass::of(&media_type, &attachment.path);
 
-        if media_type.starts_with("image/") {
+        if attachments::strategy(HarnessKind::Antigravity, class)
+            == AttachmentDelivery::AcpImageBlock
+        {
             if capabilities.image
                 && let Ok(bytes) = std::fs::read(&attachment.path)
                 && bytes.len() <= MAX_IMAGE_BYTES
@@ -1234,10 +1238,7 @@ fn build_prompt(
                     attachment.path.display()
                 ));
             } else {
-                notes.push(format!(
-                    "[Attached image \"{name}\" is saved at: {}]",
-                    attachment.path.display()
-                ));
+                notes.push(attachments::path_line(attachment));
             }
             continue;
         }
@@ -1268,10 +1269,7 @@ fn build_prompt(
                 size,
             ));
         } else {
-            notes.push(format!(
-                "[Attached file \"{name}\" is saved at: {}]",
-                attachment.path.display()
-            ));
+            notes.push(attachments::path_line(attachment));
         }
     }
 
@@ -1307,32 +1305,6 @@ fn is_text_media(media_type: &str) -> bool {
                 | "application/yaml"
                 | "application/x-yaml"
         )
-}
-
-fn resolved_media_type(attachment: &AttachmentRef) -> String {
-    if !attachment.media_type.is_empty() {
-        return attachment.media_type.clone();
-    }
-    let extension = attachment
-        .path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(str::to_ascii_lowercase);
-    match extension.as_deref() {
-        Some("png") => "image/png",
-        Some("jpg" | "jpeg") => "image/jpeg",
-        Some("gif") => "image/gif",
-        Some("webp") => "image/webp",
-        Some("pdf") => "application/pdf",
-        Some("json") => "application/json",
-        Some("md" | "markdown") => "text/markdown",
-        Some(
-            "txt" | "rs" | "toml" | "yaml" | "yml" | "js" | "ts" | "tsx" | "jsx" | "py" | "go"
-            | "java" | "c" | "h" | "cpp" | "hpp" | "css" | "html" | "sh",
-        ) => "text/plain",
-        _ => "",
-    }
-    .to_string()
 }
 
 fn millis(duration: Duration) -> u64 {

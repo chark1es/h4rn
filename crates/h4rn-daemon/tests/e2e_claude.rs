@@ -159,6 +159,7 @@ async fn real_claude_daemon_round_trip_and_resume() {
             workspace_path: repo.path().display().to_string(),
             model: "default".into(),
             prompt: PROMPT.into(),
+            attachments: Vec::new(),
             runtime_mode: RuntimeMode::ApprovalRequired,
             worktree: None,
         })
@@ -208,7 +209,11 @@ async fn real_claude_daemon_round_trip_and_resume() {
 
     let events = manager.subscribe();
     manager
-        .send_message(&created.thread_id, "Reply with exactly: pong again".into())
+        .send_message(
+            &created.thread_id,
+            "Reply with exactly: pong again".into(),
+            Vec::new(),
+        )
         .await
         .expect("send second turn");
     let events = wait_for_turn(events, &created.thread_id).await;

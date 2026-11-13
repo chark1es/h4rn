@@ -74,7 +74,7 @@ export class WebSocketTransport implements Transport {
     };
   }
 
-  send(data: string | Uint8Array): void {
+  send(data: string | ArrayBuffer | Uint8Array): void {
     if (this.socket?.readyState !== WebSocket.OPEN) {
       throw new Error("The socket is not open.");
     }

@@ -31,7 +31,7 @@ class FakeTransport implements Transport {
     handlers.onOpen();
   }
 
-  send(data: string | Uint8Array): void {
+  send(data: string | ArrayBuffer | Uint8Array): void {
     if (typeof data !== "string") return;
     const frame = JSON.parse(data) as ClientFrame;
     this.sent.push(frame);

@@ -1,4 +1,4 @@
-import { ArrowRightIcon, GitBranchIcon, PlusIcon } from "lucide-react";
+import { ArrowRightIcon, GitBranchIcon, PaperclipIcon, PlusIcon } from "lucide-react";
 import type * as React from "react";
 import { useEffect, useMemo, useState } from "react";
 
@@ -14,6 +14,9 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { AttachmentTray } from "@/features/attachments/AttachmentTray";
+import { FILE_ACCEPT } from "@/features/attachments/picker";
+import { useAttachmentDrafts } from "@/features/attachments/use-attachments";
 import type { HarnessKind, HostId, RuntimeMode } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { HARNESS_LABELS, HARNESS_SLUGS } from "@/lib/entities";
@@ -82,9 +85,20 @@ export function NewThreadDialog() {
 
   const selectedHost = host ? hosts[host] : undefined;
   const harnessChoices = selectedHost?.harnesses.length ? selectedHost.harnesses : HARNESSES;
+  const offline = connection !== "online";
+  const attachments = useAttachmentDrafts("new-thread", {
+    enabled: !offline && Boolean(host),
+    disabledReason: offline ? "Reconnect to attach files." : "Pick an online host first.",
+  });
+
+  useEffect(() => {
+    if (!open) attachments.clear();
+    // Clearing on close drops stale drafts between dialog sessions.
+  }, [open, attachments.clear]);
 
   const submit = async () => {
-    if (!host || !prompt.trim() || starting) return;
+    if (!host || starting || attachments.blockedReason) return;
+    if (!prompt.trim() && attachments.attachments.length === 0) return;
     setStarting(true);
     const ok = await createThread({
       host,
@@ -92,16 +106,16 @@ export function NewThreadDialog() {
       workspacePath: workspace.trim() || "~/code",
       model,
       prompt: prompt.trim(),
+      attachments: attachments.attachments,
       runtimeMode,
     });
     setStarting(false);
     if (ok) {
       closeNewThread();
       setPrompt("");
+      attachments.clear();
     }
   };
-
-  const offline = connection !== "online";
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : closeNewThread())}>
@@ -219,24 +233,71 @@ export function NewThreadDialog() {
         </div>
 
         <div className="flex flex-col gap-1">
-          <FieldLabel
-            htmlFor="new-thread-task"
-            hint={prompt.trim() ? `${prompt.trim().length} chars` : undefined}
-          >
-            Task
-          </FieldLabel>
+          <div className="flex items-center justify-between">
+            <FieldLabel
+              htmlFor="new-thread-task"
+              hint={prompt.trim() ? `${prompt.trim().length} chars` : undefined}
+            >
+              Task
+            </FieldLabel>
+            <button
+              type="button"
+              disabled={offline || !host}
+              onClick={attachments.openPicker}
+              aria-label="Attach files"
+              title={offline ? "Reconnect to attach files." : "Attach files (Ctrl/Cmd U)"}
+              className="flex h-8 items-center gap-1 rounded-sm px-1.5 text-micro text-ink-muted transition-colors duration-[var(--dur-instant)] hover:bg-panel hover:text-ink focus-visible:ring-2 focus-visible:ring-cue/40 focus-visible:outline-none"
+            >
+              <PaperclipIcon className="size-3.5" aria-hidden />
+              {attachments.attachments.length > 0
+                ? `${attachments.attachments.length} attached`
+                : "Attach"}
+            </button>
+          </div>
+
+          <input
+            ref={attachments.inputRef}
+            type="file"
+            multiple
+            accept={FILE_ACCEPT}
+            aria-label="Attach files"
+            className="sr-only"
+            tabIndex={-1}
+            onChange={(event) => attachments.onInputChange(event.target.files)}
+          />
+
+          {attachments.tasks.length > 0 ? (
+            <div className="rounded-sm border border-line">
+              <AttachmentTray
+                tasks={attachments.tasks}
+                onRemove={attachments.remove}
+                onRetry={attachments.retry}
+              />
+            </div>
+          ) : null}
+
           <Textarea
             id="new-thread-task"
             autoFocus
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
+            onPaste={(event) => {
+              const files = Array.from(event.clipboardData.files);
+              if (files.length > 0) {
+                event.preventDefault();
+                attachments.addFiles(files);
+                return;
+              }
+              const pasted = event.clipboardData.getData("text/plain");
+              if (attachments.addPastedText(pasted)) event.preventDefault();
+            }}
             onKeyDown={(event) => {
               if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
                 event.preventDefault();
                 void submit();
               }
             }}
-            placeholder="Describe the task. Use @ for files and hosts, / for commands."
+            placeholder="Describe the task. Use @ for files and hosts, / for commands. Paste or drop images too."
             className="min-h-32"
           />
         </div>
@@ -265,16 +326,23 @@ export function NewThreadDialog() {
               Cancel
             </Button>
             <Button
-              disabled={offline || !host || !prompt.trim() || starting}
+              disabled={
+                offline ||
+                !host ||
+                starting ||
+                Boolean(attachments.blockedReason) ||
+                (!prompt.trim() && attachments.attachments.length === 0)
+              }
               onClick={() => void submit()}
               title={
-                offline
+                attachments.blockedReason ??
+                (offline
                   ? "Reconnect to start a thread."
                   : !host
                     ? "No online host is available."
-                    : !prompt.trim()
+                    : !prompt.trim() && attachments.attachments.length === 0
                       ? "Describe the task first."
-                      : undefined
+                      : undefined)
               }
             >
               {starting ? <PlusIcon aria-hidden /> : <ArrowRightIcon aria-hidden />}

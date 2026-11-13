@@ -73,6 +73,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::attachments::{self, AttachmentClass, AttachmentDelivery};
 use crate::claude_code::process::{GroupSignal, StderrRing, signal_group};
 use crate::{
     AttachmentRef, Harness, HarnessError, HarnessEvent, HarnessInstall, HarnessSession,
@@ -632,33 +633,37 @@ pub fn config_content_for(spec: &SessionSpec) -> String {
 
 /// Builds the prompt text and the `files` array for the prompt API.
 ///
-/// Existing files become `file://` parts, which OpenCode reads and inlines on
-/// the server (images and documents alike). A missing path degrades to a line
-/// in the prompt, because silently dropping an attachment is worse.
+/// Images become `file://` parts, which OpenCode reads and inlines on the
+/// server; every other attachment degrades to a path line in the prompt so it
+/// is never silently dropped (ADR-008).
 pub fn build_prompt(text: &str, attachments: &[AttachmentRef]) -> (String, Vec<Value>) {
     let mut text = text.to_string();
     let mut files = Vec::new();
     for attachment in attachments {
+        let media_type = attachments::media_type(attachment);
+        let class = AttachmentClass::of(&media_type, &attachment.path);
         let name = attachment
             .path
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("attachment");
-        if attachment.path.is_file() {
-            if let Ok(url) = reqwest::Url::from_file_path(&attachment.path) {
-                let uri = url.as_str().to_string();
-                files.push(json!({
-                    "uri": uri,
-                    "source": { "type": "uri", "uri": uri },
-                    "name": name,
-                }));
-                continue;
-            }
+        // OpenCode reads a `file://` part on the server, so images ride that
+        // channel when the file is local. Everything else degrades to a path
+        // mention, matching the ADR-008 matrix.
+        if attachments::strategy(HarnessKind::Opencode, class) == AttachmentDelivery::FileUrl
+            && attachment.path.is_file()
+            && let Ok(url) = reqwest::Url::from_file_path(&attachment.path)
+        {
+            let uri = url.as_str().to_string();
+            files.push(json!({
+                "uri": uri,
+                "source": { "type": "uri", "uri": uri },
+                "name": name,
+            }));
+            continue;
         }
-        text.push_str(&format!(
-            "\n[Attached file \"{name}\" is saved at: {}]",
-            attachment.path.display()
-        ));
+        text.push('\n');
+        text.push_str(&attachments::path_line(attachment));
     }
     (text, files)
 }
@@ -1358,14 +1363,14 @@ mod tests {
     }
 
     #[test]
-    fn attachments_become_file_uri_parts() {
+    fn images_become_file_uri_parts() {
         let directory = tempfile::tempdir().expect("tempdir");
-        let path = directory.path().join("notes.txt");
-        std::fs::write(&path, "hello").expect("write");
+        let path = directory.path().join("pixel.png");
+        std::fs::write(&path, [0x89, b'P', b'N', b'G']).expect("write");
         let attachment = AttachmentRef {
-            id: AttachmentId::from_content(b"hello"),
+            id: AttachmentId::from_content(b"png"),
             path,
-            media_type: "text/plain".into(),
+            media_type: "image/png".into(),
         };
         let (text, files) = build_prompt("read this", &[attachment]);
         assert_eq!(text, "read this");
@@ -1375,7 +1380,24 @@ mod tests {
                 .as_str()
                 .is_some_and(|uri| uri.starts_with("file://"))
         );
-        assert_eq!(files[0]["name"], "notes.txt");
+        assert_eq!(files[0]["name"], "pixel.png");
+    }
+
+    #[test]
+    fn non_images_fall_back_to_a_path_mention() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("notes.txt");
+        std::fs::write(&path, "hello").expect("write");
+        let attachment = AttachmentRef {
+            id: AttachmentId::from_content(b"hello"),
+            path,
+            media_type: "text/plain".into(),
+        };
+        let path_text = attachment.path.display().to_string();
+        let (text, files) = build_prompt("read this", &[attachment]);
+        assert!(files.is_empty());
+        assert!(text.starts_with("read this\n[Attached file \"notes.txt\" is saved at: "));
+        assert!(text.contains(&path_text));
     }
 
     #[test]

@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::blob::BlobRange;
 use crate::common::{
     ApprovalDecision, DeviceInfo, HarnessKind, RuntimeMode, ThreadFilter, ThreadTab, Topic,
     WorktreeRequest,
@@ -131,6 +132,54 @@ pub enum ClientRequest {
         #[serde(default)]
         #[ts(type = "number | null")]
         since_seq: Option<u64>,
+    },
+    /// Start a chunked attachment upload (ADR-008).
+    ///
+    /// The daemon answers with a [`crate::UploadTicket`]; bytes follow as
+    /// binary `blob_chunk` frames on its stream id, and
+    /// [`Self::CommitUpload`] makes the blob addressable.
+    BeginUpload {
+        /// Original file name; the daemon sanitizes it before storing.
+        name: String,
+        /// Declared size in bytes; the daemon rejects a larger blob.
+        #[ts(type = "number")]
+        size: u64,
+        /// Client's best guess at the media type; the daemon sniffs the bytes.
+        #[serde(default)]
+        mime_hint: Option<String>,
+    },
+    /// Verify and finish an upload.
+    ///
+    /// `blake3` is the 64-character lowercase hex BLAKE3 digest of the whole
+    /// file. A mismatch keeps the upload open so the client can resume or
+    /// abort; a matching digest returns the content address and dedupes
+    /// against an existing blob.
+    CommitUpload {
+        /// Upload opened by [`Self::BeginUpload`].
+        upload_id: String,
+        /// Declared BLAKE3 digest.
+        blake3: String,
+    },
+    /// Discard an upload and its partial bytes.
+    AbortUpload {
+        /// Upload opened by [`Self::BeginUpload`].
+        upload_id: String,
+    },
+    /// Ask how many bytes an upload has accepted, so it can resume.
+    QueryUpload {
+        /// Upload opened by [`Self::BeginUpload`].
+        upload_id: String,
+    },
+    /// Stream a committed blob back as binary `blob_chunk` frames.
+    GetBlob {
+        /// Content address from a [`crate::Attachment`].
+        id: AttachmentId,
+        /// Byte range to read; `None` reads the whole blob.
+        #[serde(default)]
+        range: Option<BlobRange>,
+        /// Read the generated 256 px thumbnail instead of the original.
+        #[serde(default)]
+        thumbnail: bool,
     },
     // ------------------------------------------------------------------
     // TODO(phase 2+): terminal, filesystem, MCP, skills, proxy, usage and

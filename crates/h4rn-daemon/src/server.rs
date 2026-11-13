@@ -26,8 +26,9 @@ use axum::routing::get;
 use axum::{Router, serve};
 use futures::{SinkExt, StreamExt};
 use h4rn_protocol::{
-    BinaryFrame, BinaryKind, ClientFrame, ClientRequest, DeviceId, DeviceInfo, Event,
-    PROTOCOL_VERSION, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame, Topic,
+    BINARY_HEADER_LEN, BinaryFrame, BinaryKind, ClientFrame, ClientRequest, DeviceId, DeviceInfo,
+    Event, PROTOCOL_VERSION, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame,
+    Topic,
 };
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -35,6 +36,7 @@ use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::auth::{TokenStore, authorize};
+use crate::blobs::{BlobError, BlobStore};
 use crate::fs::{FsError, FsService};
 use crate::hosts::HostInventory;
 use crate::terminal::{Attached, OpenSpec, TerminalManager, run_viewer};
@@ -55,6 +57,8 @@ pub struct AppState {
     pub hosts: Arc<HostInventory>,
     /// Daemon-owned PTY terminals.
     pub terminals: Arc<TerminalManager>,
+    /// Content-addressed attachment blobs (ADR-008).
+    pub blobs: Arc<BlobStore>,
     /// Local access token.
     pub tokens: TokenStore,
     /// Workspace-scoped filesystem and git service for IDE mode.
@@ -119,7 +123,7 @@ async fn ws_handler(
 pub enum Outbound {
     /// A JSON protocol frame.
     Text(String),
-    /// A framed binary message (PTY output, snapshots).
+    /// A framed binary message (PTY output, snapshot, blob chunk or ack).
     Binary(Vec<u8>),
 }
 
@@ -198,7 +202,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
             }
             Message::Binary(bytes) => {
                 if let Some(reply) = connection.handle_binary(&bytes) {
-                    if connection.send(Outbound::Text(reply)).await.is_err() {
+                    if connection.send(reply).await.is_err() {
                         break;
                     }
                 }
@@ -259,6 +263,7 @@ impl Connection {
             }
         };
         let id = frame.id;
+        let reply_id = id;
         let body = frame.body;
 
         if !self.hello_done && !matches!(&body, ClientRequest::Hello { .. }) {
@@ -334,7 +339,7 @@ impl Connection {
                 workspace_path,
                 model,
                 prompt,
-                attachments: _,
+                attachments,
                 runtime_mode,
                 worktree,
             } => {
@@ -344,6 +349,7 @@ impl Connection {
                     workspace_path: workspace_path.clone(),
                     model,
                     prompt,
+                    attachments,
                     runtime_mode,
                     worktree,
                 };
@@ -367,11 +373,11 @@ impl Connection {
             ClientRequest::SendMessage {
                 thread_id,
                 text,
-                attachments: _,
+                attachments,
             } => self
                 .state
                 .manager
-                .send_message(&thread_id, text)
+                .send_message(&thread_id, text, attachments)
                 .await
                 .map(|accepted| ResponseBody::MessageAccepted {
                     thread_id: accepted.thread_id,
@@ -842,6 +848,67 @@ impl Connection {
                 .await
                 .map(|changes| ResponseBody::FsTurnChanges { changes })
             }
+            ClientRequest::BeginUpload {
+                name,
+                size,
+                mime_hint,
+            } => self
+                .state
+                .blobs
+                .begin_upload(&name, size, mime_hint)
+                .map(|upload| ResponseBody::UploadStarted { upload })
+                .map_err(BlobError::into_proto),
+            ClientRequest::CommitUpload { upload_id, blake3 } => self
+                .state
+                .blobs
+                .commit_upload(&upload_id, &blake3)
+                .await
+                .map(|blob| ResponseBody::UploadCommitted { blob })
+                .map_err(BlobError::into_proto),
+            ClientRequest::AbortUpload { upload_id } => self
+                .state
+                .blobs
+                .abort_upload(&upload_id)
+                .map(|()| ResponseBody::Ack)
+                .map_err(BlobError::into_proto),
+            ClientRequest::QueryUpload { upload_id } => self
+                .state
+                .blobs
+                .query_upload(&upload_id)
+                .map(|upload| ResponseBody::UploadStatus { upload })
+                .map_err(BlobError::into_proto),
+            ClientRequest::GetBlob {
+                id,
+                range,
+                thumbnail,
+            } => match self.state.blobs.download(&id, range, thumbnail).await {
+                Ok((download, bytes)) => {
+                    let reply = response_frame(
+                        reply_id,
+                        ResponseBody::Blob {
+                            download: download.clone(),
+                        },
+                    );
+                    if self.send(Outbound::Text(reply)).await.is_err() {
+                        return None;
+                    }
+                    for (seq, chunk) in bytes.chunks(crate::blobs::DOWNLOAD_CHUNK_SIZE).enumerate()
+                    {
+                        let frame = BinaryFrame {
+                            kind: BinaryKind::BlobChunk,
+                            stream_id: download.stream_id,
+                            seq: seq as u64,
+                            payload: chunk.to_vec(),
+                        }
+                        .encode();
+                        if self.send(Outbound::Binary(frame)).await.is_err() {
+                            return None;
+                        }
+                    }
+                    return None;
+                }
+                Err(error) => Err(error.into_proto()),
+            },
             other => Err(not_implemented(&other)),
         };
 
@@ -866,22 +933,25 @@ impl Connection {
     /// PTY input is the only binary frame a client sends today. It is applied
     /// directly and errors are reported as events because the frame carries no
     /// request id to answer.
-    fn handle_binary(&mut self, bytes: &[u8]) -> Option<String> {
+    fn handle_binary(&mut self, bytes: &[u8]) -> Option<Outbound> {
         let seq = self.last_seq.load(Ordering::Relaxed);
         let frame = match BinaryFrame::decode(bytes) {
             Ok(frame) => frame,
             Err(error) => {
-                return Some(binary_error_frame(
+                return Some(Outbound::Text(binary_error_frame(
                     seq,
                     ProtoError::new(
                         ProtoErrorCode::InvalidRequest,
                         format!("malformed binary frame: {error}"),
-                        "The binary header is 16 bytes; see the protocol docs",
+                        format!(
+                            "The binary header is {BINARY_HEADER_LEN} bytes; see the protocol docs"
+                        ),
                     ),
-                ));
+                )));
             }
         };
         match frame.kind {
+            // A viewer typing into a PTY.
             BinaryKind::PtyInput => {
                 match self
                     .state
@@ -889,17 +959,31 @@ impl Connection {
                     .input_by_stream(frame.stream_id, &frame.payload)
                 {
                     Ok(()) => None,
-                    Err(error) => Some(binary_error_frame(seq, error.into_proto())),
+                    Err(error) => Some(Outbound::Text(binary_error_frame(seq, error.into_proto()))),
                 }
             }
-            other => Some(binary_error_frame(
+            // An attachment uploader sending the next chunk. Acknowledge on the
+            // same stream so the sender can advance without a round trip.
+            BinaryKind::BlobChunk => {
+                match self
+                    .state
+                    .blobs
+                    .append_chunk(frame.stream_id, frame.seq, &frame.payload)
+                {
+                    Ok(_) => Some(Outbound::Binary(
+                        BinaryFrame::new(BinaryKind::Ack, frame.stream_id, frame.seq).encode(),
+                    )),
+                    Err(error) => Some(Outbound::Text(binary_error_frame(seq, error.into_proto()))),
+                }
+            }
+            other => Some(Outbound::Text(binary_error_frame(
                 seq,
                 ProtoError::new(
                     ProtoErrorCode::InvalidRequest,
                     format!("binary {other:?} frames are not accepted from clients"),
-                    "Clients send only pty_input; output is daemon-to-client",
+                    "Clients send only pty_input and blob_chunk; output is daemon-to-client",
                 ),
-            )),
+            ))),
         }
     }
 

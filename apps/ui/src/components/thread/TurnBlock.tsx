@@ -4,6 +4,7 @@ import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ALT, Kbd, SHIFT } from "@/components/common/Kbd";
 import { Button } from "@/components/ui/button";
+import { MessageAttachments } from "@/features/attachments/MessageAttachments";
 import type { ThreadSummary } from "@/gen";
 import { useSmoothText } from "@/hooks/use-smooth-text";
 import { glyphForAgentState } from "@/lib/agent";
@@ -27,9 +28,12 @@ function UserMessage({ item, at }: { item: MessageItem; at: string }) {
         <span className="font-medium text-ink-muted">You</span>
         <span className="font-mono tabular">{absoluteTime(at)}</span>
       </div>
-      <div className="max-w-[68ch] rounded-md border border-line bg-panel px-3 py-2 text-compact leading-relaxed whitespace-pre-wrap text-ink">
-        {item.text}
-      </div>
+      {item.text ? (
+        <div className="max-w-[68ch] rounded-md border border-line bg-panel px-3 py-2 text-compact leading-relaxed whitespace-pre-wrap text-ink">
+          {item.text}
+        </div>
+      ) : null}
+      <MessageAttachments attachments={item.attachments} align="end" />
     </div>
   );
 }

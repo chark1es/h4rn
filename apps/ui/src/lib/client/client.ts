@@ -57,7 +57,15 @@ export type ResponseOf<T extends ClientRequest["type"]> = T extends "hello"
                                     ? Extract<ResponseBody, { type: "fs_diff" }>
                                     : T extends "fs_turn_changes"
                                       ? Extract<ResponseBody, { type: "fs_turn_changes" }>
-                                      : Extract<ResponseBody, { type: "ack" }>;
+                                      : T extends "begin_upload"
+                                        ? Extract<ResponseBody, { type: "upload_started" }>
+                                        : T extends "commit_upload"
+                                          ? Extract<ResponseBody, { type: "upload_committed" }>
+                                          : T extends "query_upload"
+                                            ? Extract<ResponseBody, { type: "upload_status" }>
+                                            : T extends "get_blob"
+                                              ? Extract<ResponseBody, { type: "blob" }>
+                                              : Extract<ResponseBody, { type: "ack" }>;
 
 /**
  * Events that carry no durable position: `seq` is the daemon's current
@@ -202,7 +210,12 @@ export class H4rnClient {
     return () => this.eventListeners.delete(listener);
   }
 
-  /** Subscribes to PTY output and snapshot frames (ADR-007). */
+  /**
+   * Delivers raw binary frames (PTY output, blob chunks, acks).
+   *
+   * The protocol header is feature-owned so the client stays a byte pipe; see
+   * `lib/client/binary.ts` and `features/attachments/frames.ts` for decoders.
+   */
   onBinary(listener: (data: ArrayBuffer) => void): () => void {
     this.binaryListeners.add(listener);
     return () => this.binaryListeners.delete(listener);
@@ -214,8 +227,8 @@ export class H4rnClient {
     return () => this.terminalListeners.delete(listener);
   }
 
-  /** Sends one framed binary message, such as PTY input. */
-  sendBinary(data: Uint8Array): void {
+  /** Sends one binary frame, such as PTY input or a blob chunk. */
+  sendBinary(data: Uint8Array | ArrayBuffer): void {
     if (!this.socketOpen || !this.transport) {
       throw new H4rnRequestError(
         protoError(
@@ -427,8 +440,9 @@ export class H4rnClient {
   }
 
   private handleBinary(data: ArrayBuffer): void {
-    // PTY chunks can arrive thousands of times a second; they never change
-    // connection state, so do not churn the app store for each one.
+    // PTY chunks and blob chunks can arrive thousands of times a second; they
+    // never change connection state, so only touch the activity timestamp.
+    this.patchSnapshot({ lastEventAt: Date.now() });
     for (const listener of this.binaryListeners) listener(data);
   }
 

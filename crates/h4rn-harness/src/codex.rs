@@ -51,6 +51,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::attachments::{self, AttachmentClass, AttachmentDelivery};
 use crate::claude_code::process::{GroupSignal, signal_group};
 use crate::{
     AttachmentRef, Harness, HarnessError, HarnessEvent, HarnessInstall, HarnessSession,
@@ -951,17 +952,23 @@ pub fn build_turn_input(text: &str, attachments: &[AttachmentRef]) -> Vec<Value>
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| attachment.id.to_string());
         let path = attachment.path.display().to_string();
-        if attachment.media_type.starts_with("image/") {
-            input.push(json!({ "type": "localImage", "path": path }));
-            path_lines.push(format!("[Attached image \"{name}\" is saved at: {path}]"));
-        } else {
-            input.push(json!({
-                "type": "mention",
-                "name": name,
-                "path": path,
-            }));
-            path_lines.push(format!("[Attached file \"{name}\" is saved at: {path}]"));
+        let media_type = attachments::media_type(attachment);
+        let class = AttachmentClass::of(&media_type, &attachment.path);
+        match attachments::strategy(HarnessKind::Codex, class) {
+            // Codex reads the file itself; the path rides the item.
+            AttachmentDelivery::LocalImagePath => {
+                input.push(json!({ "type": "localImage", "path": path }));
+            }
+            // Everything else becomes an @path mention.
+            _ => {
+                input.push(json!({
+                    "type": "mention",
+                    "name": name,
+                    "path": path,
+                }));
+            }
         }
+        path_lines.push(attachments::path_line(attachment));
     }
 
     if !path_lines.is_empty() {

@@ -80,6 +80,7 @@ describe("foldEvent", () => {
         item_id: "item_1",
         role: "assistant",
         text: "final text",
+        attachments: [],
       },
     });
 
@@ -95,6 +96,7 @@ describe("foldEvent", () => {
     log.pending.push({
       id: "local_1",
       text: "ship it",
+      attachments: [],
       at: "2026-01-01T00:00:00.000Z",
       sending: true,
     });
@@ -108,6 +110,7 @@ describe("foldEvent", () => {
         item_id: "server_1",
         role: "user",
         text: "ship it",
+        attachments: [],
       },
     });
 
@@ -128,6 +131,7 @@ describe("foldEvent", () => {
         item_id: "server_1",
         role: "user" as const,
         text: "ship it",
+        attachments: [],
       },
     };
     let log = foldEvent(createThreadLog(), event);

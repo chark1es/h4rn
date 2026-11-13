@@ -78,3 +78,11 @@ grep-regex = "0.1.13"
 grep-searcher = "0.1.15"
 ignore = "0.4.23"
 notify = "8.2.0"
+# Added by the content-addressed attachment store (Phase 2, ADR-008).
+image = { version = "0.25.10", default-features = false, features = [
+    "gif",
+    "jpeg",
+    "png",
+    "webp",
+] }
+infer = "0.22.0"

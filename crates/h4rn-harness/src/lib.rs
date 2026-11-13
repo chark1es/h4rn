@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod acp;
 mod antigravity;
+mod attachments;
 mod claude_code;
 mod codex;
 mod fake;
@@ -37,6 +38,7 @@ pub use antigravity::{
     AgyStreamParser, AntigravityHarness, ENV_AGY_MODE, ENV_AGY_PATH, ENV_AGY_TRANSPORT,
     ENV_APP_DATA_DIR, ENV_CLOUD_CODE_ENDPOINT, ENV_GEMINI_DIR, detect_agy,
 };
+pub use attachments::{AttachmentClass, AttachmentDelivery, media_type, path_line, strategy};
 pub use claude_code::{
     ClaudeCodeHarness, ClaudeCodeSession, ClaudeStreamParser, ENV_MCP_AUTH_TOKEN,
     ENV_MCP_BEARER_TOKEN, ENV_PERMISSION_MODE, ENV_PERMISSION_PROMPT_TOOL, LimitSignal, TurnReport,
