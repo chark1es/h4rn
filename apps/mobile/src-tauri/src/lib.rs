@@ -1,18 +1,231 @@
 //! h4rn mobile shell.
 //!
-//! Same contract as the desktop shell: a thin Tauri layer over the shared
-//! React bundle, with QR scanning, deep links, dialogs and URL opening as the
-//! only native additions.
+//! Same contract as the desktop shell (ADR-001): a thin Tauri layer over the
+//! shared React bundle. Product behaviour stays behind the daemon's WebSocket
+//! protocol; the native side only owns what a WebView cannot do:
+//!
+//! - `secret_get` / `secret_set` / `secret_delete`: Android Keystore-backed
+//!   storage for the daemon pairing token (ADR-016);
+//! - `deep_link_current`: the `h4rn://` URL that cold-started the app, so the
+//!   connect screen can pair from `h4rn://connect?daemon=…&token=…` and the
+//!   OIDC callback can be forwarded to the UI;
+//! - QR scanning through the barcode-scanner plugin (called by the UI);
+//! - the Android back button, mapped onto WebView history in MainActivity.
+//!
+//! The daemon itself does not run on the phone; the app connects to a daemon on
+//! another host over ws/wss. `scripts/mobile-android.sh` wires up the emulator.
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+use tauri::Manager;
+#[cfg(target_os = "android")]
+use tauri::plugin::PluginHandle;
+
+/// Upper bound for a logical secret key.
+const MAX_SECRET_KEY: usize = 256;
+/// Upper bound for one secret, matching the desktop keychain command.
+const MAX_SECRET_VALUE: usize = 64 * 1024;
+
+#[cfg(target_os = "android")]
+struct SecretStore(PluginHandle<tauri::Wry>);
+
+#[cfg(target_os = "android")]
+#[derive(serde::Serialize)]
+struct SecretArgs<'a> {
+    key: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    value: Option<&'a str>,
+}
+
+#[cfg(target_os = "android")]
+#[derive(serde::Deserialize)]
+struct SecretValue {
+    value: Option<String>,
+}
+
+fn validate_secret_key(key: &str) -> Result<(), String> {
+    if key.is_empty() {
+        return Err("the secret key must not be empty".into());
+    }
+    if key.len() > MAX_SECRET_KEY {
+        return Err(format!(
+            "the secret key is longer than {MAX_SECRET_KEY} bytes"
+        ));
+    }
+    Ok(())
+}
+
+/// Reads a secret from the platform keystore.
+#[tauri::command]
+fn secret_get(app: tauri::AppHandle, key: String) -> Result<Option<String>, String> {
+    validate_secret_key(&key)?;
+
+    #[cfg(target_os = "android")]
+    {
+        let store = app.state::<SecretStore>();
+        store
+            .0
+            .run_mobile_plugin::<SecretValue>(
+                "secretGet",
+                SecretArgs {
+                    key: &key,
+                    value: None,
+                },
+            )
+            .map(|secret| secret.value)
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("secret storage is only implemented on Android in this build".into())
+    }
+}
+
+/// Writes or replaces a secret in the platform keystore.
+#[tauri::command]
+fn secret_set(app: tauri::AppHandle, key: String, value: String) -> Result<(), String> {
+    validate_secret_key(&key)?;
+    if value.len() > MAX_SECRET_VALUE {
+        return Err(format!(
+            "the secret is larger than {MAX_SECRET_VALUE} bytes"
+        ));
+    }
+
+    #[cfg(target_os = "android")]
+    {
+        let store = app.state::<SecretStore>();
+        store
+            .0
+            .run_mobile_plugin::<()>(
+                "secretSet",
+                SecretArgs {
+                    key: &key,
+                    value: Some(&value),
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, value);
+        Err("secret storage is only implemented on Android in this build".into())
+    }
+}
+
+/// Deletes a secret; missing keys are not an error.
+#[tauri::command]
+fn secret_delete(app: tauri::AppHandle, key: String) -> Result<(), String> {
+    validate_secret_key(&key)?;
+
+    #[cfg(target_os = "android")]
+    {
+        let store = app.state::<SecretStore>();
+        store
+            .0
+            .run_mobile_plugin::<()>(
+                "secretDelete",
+                SecretArgs {
+                    key: &key,
+                    value: None,
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("secret storage is only implemented on Android in this build".into())
+    }
+}
+
+/// Returns the `h4rn://` URLs that launched this process, if any.
+///
+/// Android delivers a cold-start deep link through the launching intent rather
+/// than the plugin's new-URL event, so the connect screen asks for it once at
+/// startup.
+#[tauri::command]
+fn deep_link_current(app: tauri::AppHandle) -> Vec<String> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        use tauri_plugin_deep_link::DeepLinkExt;
+        app.deep_link()
+            .get_current()
+            .ok()
+            .flatten()
+            .map(|urls| urls.into_iter().map(|url| url.to_string()).collect())
+            .unwrap_or_default()
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = app;
+        Vec::new()
+    }
+}
 
 /// Build and run the mobile shell.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_barcode_scanner::init())
-        .setup(|_app| Ok(()))
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry>::new("h4rn-secret-store")
+                .setup(|app, api| {
+                    #[cfg(target_os = "android")]
+                    {
+                        let handle =
+                            api.register_android_plugin("dev.h4rn.app", "SecretStorePlugin")?;
+                        app.manage(SecretStore(handle));
+                    }
+                    #[cfg(not(target_os = "android"))]
+                    {
+                        let _ = (app, api);
+                    }
+                    Ok(())
+                })
+                .build(),
+        )
+        .invoke_handler(tauri::generate_handler![
+            secret_get,
+            secret_set,
+            secret_delete,
+            deep_link_current
+        ])
+        .setup(|_app| {
+            // Warm-start deep links are pushed into the WebView as a DOM event
+            // (and a Tauri event for future listeners) instead of relying on
+            // the UI importing the deep-link JS package.
+            #[cfg(any(target_os = "android", target_os = "ios"))]
+            {
+                use tauri::Emitter;
+                use tauri_plugin_deep_link::DeepLinkExt;
+
+                let handle = _app.handle().clone();
+                _app.deep_link().on_open_url(move |event| {
+                    let urls: Vec<String> =
+                        event.urls().into_iter().map(|url| url.to_string()).collect();
+                    if let Some(window) = handle.get_webview_window("main") {
+                        let _ = window.emit("h4rn://deep-link", urls.clone());
+                        if let Ok(detail) = serde_json::to_string(&urls) {
+                            let _ = window.eval(format!(
+                                "window.dispatchEvent(new CustomEvent('h4rn-deep-link', {{ detail: {detail} }}));"
+                            ));
+                        }
+                    }
+                });
+            }
+            Ok(())
+        });
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    let builder = builder.plugin(tauri_plugin_barcode_scanner::init());
+
+    builder
         .run(tauri::generate_context!())
         .expect("error while running the h4rn mobile shell");
 }

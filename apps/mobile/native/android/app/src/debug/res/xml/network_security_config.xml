@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Debug-only policy: the daemon may live on another machine on the LAN while
+  developing, so any host is allowed to speak cleartext from a debug APK.
+  Release builds use src/main/res/xml/network_security_config.xml, which only
+  permits loopback and the emulator host aliases.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

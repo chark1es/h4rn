@@ -6,3 +6,4 @@ dist/
 .DS_Store
 apps/*/src-tauri/gen/
 apps/desktop/screenshots/
+apps/mobile/screenshots/logcat.txt

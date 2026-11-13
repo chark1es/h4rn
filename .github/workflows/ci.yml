@@ -65,6 +65,51 @@ jobs:
             libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
 
+  mobile-android:
+    name: Android APKs build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/mobile/src-tauri
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: android-actions/setup-android@v3
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;27.1.12297006"
+      - run: bun install --frozen-lockfile
+      # The script installs the Rust Android targets, runs `tauri android init`
+      # into the ignored gen/ tree, applies native/android over the result and
+      # builds one debug APK per ABI (x86_64 emulator + aarch64 devices).
+      - run: scripts/mobile-android.sh build
+
+  mobile-ios:
+    name: iOS simulator build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/mobile/src-tauri
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+      - run: bun install --frozen-lockfile
+      # Simulator builds need no Apple credentials and are therefore the part
+      # CI can verify. TestFlight signing requirements are in docs/mobile.md.
+      - run: bun run --cwd apps/mobile tauri ios init --ci
+      - run: bun run --cwd apps/mobile tauri ios build --debug --ci --target aarch64-sim
+
   docker:
     name: Docker image builds
     runs-on: ubuntu-latest

@@ -1,0 +1,186 @@
+# Mobile
+
+h4rn ships one Tauri v2 shell for Android and iOS. The shell is deliberately thin: it loads the
+same React bundle as the desktop app, and every product behaviour still goes through the daemon's
+WebSocket protocol (ADR-001). What the native side adds is the small set of things a WebView
+cannot do on its own:
+
+| Concern | Implementation |
+|---|---|
+| Pairing secret | Android Keystore (AES-256/GCM) behind `secret_get` / `secret_set` / `secret_delete` (ADR-016) |
+| QR pairing | `tauri-plugin-barcode-scanner` (ML Kit on Android, Vision on iOS) |
+| `h4rn://` links | `tauri-plugin-deep-link`, generated intent filter / `CFBundleURLTypes` from `tauri.conf.json` |
+| Android back button | `MainActivity` maps back onto WebView history, which the React router already owns |
+| Edge-to-edge | `enableEdgeToEdge()` + `windowLayoutInDisplayCutoutMode=shortEdges` + `viewport-fit=cover`; the UI can read `env(safe-area-inset-*)` (also exposed as `--h4rn-safe-area-*`) |
+| Cleartext dev traffic | `network_security_config.xml`: loopback and emulator aliases in release, LAN in debug builds only |
+| Pairing screen | `apps/ui/src/lib/platform/mobile.ts`, the only mobile branch in the shared UI |
+
+The pairing screen is a small DOM overlay rather than a React route because the UI is a pure view
+over the daemon and its first screen assumes it already knows where the daemon is. The adapter
+runs before React and only activates inside a Tauri mobile WebView (`__TAURI_INTERNALS__` plus a
+mobile user-agent), so desktop and browser builds are unchanged.
+
+## Why the Android build runs in WSL
+
+The desktop Windows build exists because Tauri's Linux window stack (WebKitGTK) is not installed
+here; Android has no such constraint. The Linux side already has the Android SDK at
+`~/Android/Sdk` (build-tools 36/37, platform `android-37.0`, NDK 27.1.12297006) and the Rust
+Android targets, while a Windows build would have to mirror the worktree off `\\wsl$` first, as
+`scripts/desktop-build-windows.sh` does, and would need a second Rust target installation. The
+script therefore:
+
+1. downloads Temurin JDK 21 into `~/.local/jdk` when no JDK is present (no `sudo` needed);
+2. builds the APK in place with Gradle and the Linux SDK/NDK;
+3. uses the **Windows** `adb.exe` only for device operations, because the emulator runs on
+   Windows.
+
+That keeps the slow path (Rust + Gradle) on a filesystem and toolchain that support it and keeps
+the device path where the device actually is.
+
+## Android: first run
+
+Prerequisites (all present on the current development machine):
+
+- Bun 1.4.4, Rust 1.99.1 with `aarch64-linux-android`, `armv7-linux-androideabi`,
+  `i686-linux-android`, `x86_64-linux-android`.
+- Android SDK with platform `android-37.0`, build-tools 36, NDK 27.1.12297006.
+- A JDK 21. `scripts/mobile-android.sh` downloads Temurin 21 into `~/.local/jdk` if `JAVA_HOME`
+  is unset.
+- On Windows: Android Studio's emulator and `adb.exe`, plus an AVD (default
+  `Medium_Phone_API_36.0`).
+
+```sh
+# Generate src-tauri/gen/android and apply the native overlay (rarely needed;
+# `build` and `run` do it automatically when the project is missing).
+scripts/mobile-android.sh init
+
+# Build a debug APK per ABI: x86_64 for the emulator and aarch64 for phones.
+scripts/mobile-android.sh build
+
+# Restrict the build to one ABI when iterating.
+H4RN_ANDROID_TARGETS=x86_64 scripts/mobile-android.sh build
+
+# Start the emulator if needed, start a fake-harness daemon, wire adb reverse,
+# install, launch with a pairing deep link, wait, screenshot and dump logcat.
+scripts/mobile-android.sh run
+
+scripts/mobile-android.sh screenshot inbox.png
+scripts/mobile-android.sh logs
+```
+
+`gen/android` is generated and ignored by git. The parts h4rn owns live in
+`apps/mobile/native/android/` and are copied over the generated project on every `init`, `build`
+and `run`. This is the same pattern the repository already uses for generated protocol
+bindings: the source is checked in, the generated tree is not. The overlay manifest carries the
+`h4rn://` `<intent-filter>` inside the `DEEP LINK PLUGIN. AUTO-GENERATED` comment block:
+`tauri-plugin-deep-link` rewrites that block from `plugins.deep-link.mobile` whenever its build
+script runs, and the filter survives when cargo decides the plugin is already up to date.
+
+## How the emulator reaches the daemon
+
+```
+Android app ──ws://127.0.0.1:47800/ws──▶ emulator loopback
+        │
+        ▼ adb reverse tcp:47800 tcp:47800
+Windows adb server ──▶ Windows 127.0.0.1:47800
+        │
+        ▼ WSL2 localhost forwarding
+WSL2 h4rnd (127.0.0.1:47800)
+```
+
+`adb reverse` is preferred over the emulator's `10.0.2.2` host alias because the resulting URL is
+identical to the desktop and browser URL (`ws://127.0.0.1:47800/ws`), so a pairing token copied
+from `h4rnd token` works everywhere without editing. Run `h4rnd serve --bind 0.0.0.0:47800` and
+pair against `ws://10.0.2.2:47800/ws` only when `networkingMode=mirrored` or
+`localhostForwarding` is disabled in `.wslconfig`.
+
+`scripts/mobile-android.sh` verifies the whole path: it checks `/healthz` from WSL, then from
+Windows through `curl.exe`, before launching the app.
+
+## Pairing
+
+The app needs two values: a WebSocket URL and the daemon's 256-bit access token
+(`h4rnd token`). They can arrive through any of these paths:
+
+```text
+h4rn://connect?daemon=ws%3A%2F%2F127.0.0.1%3A47800%2Fws&token=<token>
+h4rn://pair?daemon=...&token=...
+```
+
+- Cold start: `am start -a android.intent.action.VIEW -d 'h4rn://connect?…' dev.h4rn.app` (what
+  the script does).
+- Warm start: the deep-link plugin delivers the URL; the shell forwards it to the WebView as a
+  `h4rn-deep-link` DOM event.
+- Typed or scanned in the pairing screen.
+- Reused from the Android Keystore on later launches.
+
+The token is not kept in the URL: the adapter stores it in localStorage (which the UI already
+reads) and in the Keystore, then rewrites the URL with only `?daemon=`. OIDC callbacks are
+registered under the same scheme (`h4rn://oidc/callback`, `h4rn://callback`) and forwarded as a
+`h4rn-oidc-callback` event; the auth flow itself is a later phase.
+
+### QR format
+
+A pairing QR is just the deep link, for example:
+
+```text
+h4rn://connect?daemon=ws%3A%2F%2F10.0.2.2%3A47800%2Fws&token=<token>
+```
+
+The scanner accepts QR codes only and repopulates the same form, so a scanned link is never
+trusted differently from a typed one.
+
+## Native notes
+
+- **Keystore.** `SecretStorePlugin` generates a non-exportable AES-256 key in the Android
+  Keystore, encrypts each value with a fresh GCM IV, binds the logical key as AAD and stores the
+  ciphertext in private SharedPreferences. A key invalidated by a lock-screen change is dropped
+  so the app can pair again. There is no biometric prompt yet; the key is Keystore-backed, which
+  is the Phase 3 requirement, and a `BiometricPrompt` gate can wrap reads later without changing
+  the Tauri command surface.
+- **Back button.** `MainActivity` installs an `OnBackPressedCallback` that calls
+  `WebView.goBack()` while history remains. The React app listens for `popstate`, so
+  thread → inbox works and the app exits only at the root.
+- **Network security.** Release builds permit cleartext only to `localhost`, `127.0.0.1`,
+  `10.0.2.2` and `10.0.3.2` (the emulator host aliases). Debug builds permit any cleartext host
+  so a daemon on the LAN can be used; production must use `wss://`.
+- **Icons and id.** `dev.h4rn.app`, product name `h4rn`, scaffold icons, min SDK 26, target SDK
+  37.
+
+## iOS
+
+iOS is configured in `apps/mobile/src-tauri/tauri.conf.json` (bundle id, minimum iOS 16,
+`h4rn` URL scheme via `plugins.deep-link.mobile`) but **cannot be initialised or built on
+Linux**: every `tauri ios` command is macOS-only. The CI job `tauri-ios` runs on
+`macos-latest` and does:
+
+```sh
+bun run --cwd apps/mobile tauri ios init --ci
+bun run --cwd apps/mobile tauri ios build --debug --ci --target aarch64-sim
+```
+
+The simulator build is unsigned, which is all CI can do without the owner's Apple credentials.
+The first `ios init` generates `src-tauri/gen/apple`; it is ignored like `gen/android`.
+
+### What TestFlight needs from the owner
+
+Nothing in this repository can complete an App Store upload without account credentials. Before
+a signed/TestFlight build:
+
+1. **Apple Developer Program** membership for the account that owns `dev.h4rn.app` (or a new
+   bundle id registered in Certificates, Identifiers & Profiles).
+2. An **App Store Connect app record** for `dev.h4rn.app` and the display name `h4rn`.
+3. A **distribution certificate** (`.p12` + password) and a **provisioning profile** for that
+   bundle id, or an App Store Connect API key (`.p8`, key id, issuer id) with App Manager access.
+4. The **team id**, and in CI: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
+   `APPLE_SIGNING_IDENTITY`, `APPLE_TEAM_ID`, plus `APPLE_ID` and `APPLE_PASSWORD` (app-specific
+   password) for notarisation/upload. These belong in repository secrets, never in the tree.
+5. A monotonically increasing build number — pass `tauri ios build --build-number <n>` or use
+   `bundle.iOS.bundleVersion`.
+6. A signed build for TestFlight:
+   `tauri ios build --export-method release-testing --build-number <n>`, then upload the
+   resulting `.ipa` with `xcrun altool`/Transporter.
+
+iOS secret storage is not implemented in this phase. The Rust commands return an explicit
+"only implemented on Android" error rather than falling back to plaintext; the plan is a
+Swift Keychain plugin behind the same `secret_get`/`secret_set`/`secret_delete` commands.
