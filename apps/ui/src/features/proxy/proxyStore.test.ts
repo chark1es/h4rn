@@ -1,12 +1,21 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ProxyModel, ProxyModelCatalog, ProxyProfile, ProxyProfileId } from "@/gen";
 
+const { request } = vi.hoisted(() => ({ request: vi.fn() }));
+
+vi.mock("@/lib/store/appStore", () => ({
+  getClient: () => ({ request }),
+  useApp: () => undefined,
+}));
+
 import {
+  getProxyState,
   proxyDefaultModel,
   proxyModelsFor,
   proxyOverrideFor,
   resetProxyStoreForTests,
+  setHarnessOverride,
 } from "./proxyStore";
 
 function model(id: string): ProxyModel {
@@ -142,5 +151,71 @@ describe("proxy harness overrides", () => {
     });
     expect(proxyModelsFor("codex")).toEqual([]);
     expect(proxyDefaultModel("codex")).toBe("gpt-5");
+  });
+});
+
+describe("proxy harness override toggles", () => {
+  beforeEach(() => {
+    request.mockReset();
+    resetProxyStoreForTests({
+      profiles: [
+        profile({
+          id: "proxy_a",
+          harnesses: [
+            {
+              harness: "claude_code",
+              enabled: false,
+              default_model: null,
+              verified: true,
+              note: null,
+            },
+          ],
+        }),
+      ],
+    });
+  });
+
+  it("flips immediately, then adopts the daemon's projection", async () => {
+    const saved = profile({
+      id: "proxy_a",
+      harnesses: [
+        {
+          harness: "claude_code",
+          enabled: true,
+          default_model: "claude-sonnet-5-5",
+          verified: true,
+          note: "Routed",
+        },
+      ],
+    });
+    request.mockResolvedValue({ type: "proxy_profile", profile: saved });
+
+    const call = setHarnessOverride("proxy_a", "claude_code", true, "claude-sonnet-5-5");
+    // Optimistic: the switch is already on before the round trip finishes.
+    expect(getProxyState().profiles[0]?.harnesses[0]?.enabled).toBe(true);
+    await call;
+
+    expect(request).toHaveBeenCalledWith({
+      type: "set_proxy_harness_override",
+      profile_id: "proxy_a",
+      harness: "claude_code",
+      enabled: true,
+      default_model: "claude-sonnet-5-5",
+    });
+    expect(getProxyState().profiles[0]?.harnesses[0]?.note).toBe("Routed");
+    expect(getProxyState().overridesSaving["proxy_a:claude_code"]).toBe(false);
+    expect(getProxyState().saveError).toBeNull();
+  });
+
+  it("rolls the toggle back when the daemon rejects the write", async () => {
+    request.mockRejectedValue(new Error("no credential store"));
+
+    const call = setHarnessOverride("proxy_a", "claude_code", true, "claude-sonnet-5-5");
+    expect(getProxyState().profiles[0]?.harnesses[0]?.enabled).toBe(true);
+    await call;
+
+    expect(getProxyState().profiles[0]?.harnesses[0]?.enabled).toBe(false);
+    expect(getProxyState().saveError?.message).toContain("no credential store");
+    expect(getProxyState().overridesSaving["proxy_a:claude_code"]).toBe(false);
   });
 });

@@ -1202,8 +1202,8 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
     unread: false,
     resume_at: null,
     limit: null,
-    ttft_ms: 0,
-    context_window: 0,
+    ttft_ms: null,
+    context_window: null,
   };
 
   setState({

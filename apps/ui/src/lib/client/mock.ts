@@ -93,6 +93,16 @@ const DAY = 24 * HOUR;
 
 const iso = (offsetMs = 0) => new Date(Date.now() + offsetMs).toISOString();
 
+/**
+ * Encodes a mock frame the way the daemon does: `u64` fields arrive as JSON
+ * numbers, never as `bigint`, so the browser decodes them with `JSON.parse`.
+ */
+function wire(frame: unknown): string {
+  return JSON.stringify(frame, (_key, value) =>
+    typeof value === "bigint" ? Number(value) : value,
+  );
+}
+
 function uid(prefix: string): string {
   return `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 }
@@ -1106,7 +1116,7 @@ class MockDaemon {
         {
           thread_id: limited.thread_id,
           harness: limited.harness,
-          account: "orion · codex",
+          account: "orion",
           provider: "openai",
           model: limited.model,
           reset_at: limited.limit?.reset_at ?? null,
@@ -1119,7 +1129,7 @@ class MockDaemon {
         {
           thread_id: null,
           harness: "claude_code",
-          account: "atlas · anthropic",
+          account: "atlas",
           provider: "anthropic",
           model: "claude-sonnet-5-5",
           reset_at: iso(3 * 24 * 60 * 60_000),
@@ -1132,7 +1142,7 @@ class MockDaemon {
         {
           thread_id: null,
           harness: "antigravity",
-          account: "orion · google",
+          account: "orion",
           provider: "google",
           model: "gemini-3-pro",
           reset_at: iso(11 * 60 * 60_000),
@@ -1156,7 +1166,7 @@ class MockDaemon {
             prompt: this.resumePolicy.prompt,
             failover: {
               model: "claude-sonnet-5-5",
-              account: "atlas · anthropic",
+              account: "atlas",
               reason: "Same family, warmer credential",
             },
             last_error: null,
@@ -1603,7 +1613,7 @@ class MockDaemon {
           thread_id: terminal.info.thread_id,
           exit,
         };
-        this.handlers.onMessage(JSON.stringify({ kind: "terminal_event", event: notice }));
+        this.handlers.onMessage(wire({ kind: "terminal_event", event: notice }));
         return;
       }
       case "begin_upload": {
@@ -1968,7 +1978,7 @@ class MockDaemon {
     const status: LimitStatus = {
       thread_id: threadId,
       harness: entry.summary.harness,
-      account: "mock · provider",
+      account: "orion",
       provider: "anthropic",
       model: entry.summary.model,
       reset_at: resetAt,
@@ -1991,7 +2001,7 @@ class MockDaemon {
       failover: this.resumePolicy.failover
         ? {
             model: "claude-sonnet-5-5",
-            account: "atlas · anthropic",
+            account: "atlas",
             reason: "Same family, warmer credential",
           }
         : null,
@@ -2036,7 +2046,7 @@ class MockDaemon {
   private sendUsage(event: import("@/gen").UsageStreamEvent): void {
     if (this.disposed) return;
     const frame: ServerFrame = { kind: "usage_event", event };
-    this.handlers.onMessage(JSON.stringify(frame));
+    this.handlers.onMessage(wire(frame));
   }
 
   private usageReport(body: Extract<ClientRequest, { type: "get_usage" }>): UsageReport {
@@ -2533,7 +2543,7 @@ class MockDaemon {
 
   private sendEvent(seq: number, event: Event): void {
     const frame: ServerFrame = { kind: "event", seq, event };
-    this.handlers.onMessage(JSON.stringify(frame));
+    this.handlers.onMessage(wire(frame));
   }
 
   /** Sends a non-journaled event at the current watermark (fs hints, search). */
@@ -2545,13 +2555,13 @@ class MockDaemon {
   private ok(id: number, result: ResponseBody): void {
     if (this.disposed) return;
     const frame: ServerFrame = { kind: "response", id, result: { Ok: result } };
-    this.handlers.onMessage(JSON.stringify(frame));
+    this.handlers.onMessage(wire(frame));
   }
 
   private err(id: number, code: ProtoError["code"], message: string, hint: string | null): void {
     if (this.disposed) return;
     const frame: ServerFrame = { kind: "response", id, result: { Err: { code, message, hint } } };
-    this.handlers.onMessage(JSON.stringify(frame));
+    this.handlers.onMessage(wire(frame));
   }
 
   private later(ms: number, fn: () => void): void {

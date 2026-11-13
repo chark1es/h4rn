@@ -18,6 +18,8 @@ import { getClient, useApp } from "@/lib/store/appStore";
 
 export type ProxyState = {
   profiles: ProxyProfile[];
+  /** A profile list has been read, even when the daemon reported none. */
+  loaded: boolean;
   loading: boolean;
   error: ProtoError | null;
   selectedId: ProxyProfileId | null;
@@ -34,6 +36,7 @@ export type ProxyState = {
 
 const initialState: ProxyState = {
   profiles: [],
+  loaded: false,
   loading: false,
   error: null,
   selectedId: null,
@@ -92,6 +95,7 @@ export async function loadProxyProfiles(): Promise<void> {
     setState({
       ...state,
       profiles: response.profiles,
+      loaded: true,
       loading: false,
       error: null,
       selectedId: selected,
@@ -101,7 +105,9 @@ export async function loadProxyProfiles(): Promise<void> {
       void loadProxyLimits(selected);
     }
   } catch (error) {
-    patch({ loading: false, error: toProtoError(error) });
+    // Mark the attempt so the composer's lazy hook does not hammer a daemon
+    // that answered with an error; Settings offers an explicit retry.
+    patch({ loaded: true, loading: false, error: toProtoError(error) });
   }
 }
 
@@ -320,11 +326,11 @@ export function proxyDefaultModel(harness: HarnessKind): string | null {
 export function useProxyCatalog(): void {
   const status = useApp((view) => view.connection.status);
   const loading = useProxy((value) => value.loading);
-  const count = useProxy((value) => value.profiles.length);
+  const loaded = useProxy((value) => value.loaded);
   useEffect(() => {
-    if (status !== "online" || loading || count > 0) return;
+    if (status !== "online" || loading || loaded) return;
     void loadProxyProfiles();
-  }, [status, loading, count]);
+  }, [status, loading, loaded]);
 }
 
 let watching = false;

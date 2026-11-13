@@ -4094,3 +4094,30 @@
     animation: none;
   }
 }
+
+/* Usage on a phone: the design shows a 2×2 stat card, not six columns. */
+@media (max-width: 639px) {
+  .q-ph .q-stats {
+    grid-template-columns: 1fr 1fr;
+    border: 0;
+  }
+  .q-ph .q-stats .q-stat {
+    padding: 12px 16px;
+  }
+  .q-ph .q-stats .q-stat + .q-stat {
+    border-left: 1px solid var(--line);
+  }
+  .q-ph .q-stats .q-stat:nth-child(odd) {
+    border-left: 0;
+  }
+  .q-ph .q-stats .q-stat:nth-child(n + 3) {
+    border-top: 1px solid var(--line);
+  }
+  .q-ph .q-stats .q-spark {
+    display: none;
+  }
+  .q-ph .q-stats .q-stat .v {
+    font-size: 22px;
+    line-height: 28px;
+  }
+}

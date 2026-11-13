@@ -320,6 +320,8 @@ function UsageChart({ report, metric }: { report: UsageReport; metric: ChartMetr
 }
 
 function Legend({ report }: { report: UsageReport }) {
+  const label = (key: string) =>
+    report.series_group_by === "harness" ? harnessLabel(key as never) : key;
   return (
     <div className="q-legend">
       {report.series.map((series: UsageSeries, index) => {
@@ -330,7 +332,7 @@ function Legend({ report }: { report: UsageReport }) {
         return (
           <span key={series.key}>
             <i style={{ background: seriesColor(series.key, index) }} />
-            {series.key} <b className="num">{tokens(total)}</b>
+            {label(series.key)} <b className="num">{tokens(total)}</b>
           </span>
         );
       })}
@@ -352,7 +354,9 @@ function SeriesTable({ report, metric }: { report: UsageReport; metric: ChartMet
           <th>{report.bucket === "hour" ? "Hour" : "Day"}</th>
           {report.series.map((series) => (
             <th key={series.key} className="r">
-              {series.key}
+              {report.series_group_by === "harness"
+                ? harnessLabel(series.key as never)
+                : series.key}
             </th>
           ))}
           <th className="r">Total</th>
@@ -567,11 +571,12 @@ function ResetHistory() {
   );
 }
 
-function Stats({ report }: { report: UsageReport | null }) {
+function Stats({ report, phone = false }: { report: UsageReport | null; phone?: boolean }) {
+  const marginBottom = phone ? 0 : 32;
   if (!report) {
     return (
-      <div className="q-stats" style={{ marginBottom: 32 }} aria-hidden>
-        {SKELETON_STATS.map((key) => (
+      <div className="q-stats" style={{ marginBottom }} aria-hidden>
+        {(phone ? SKELETON_STATS.slice(0, 4) : SKELETON_STATS).map((key) => (
           <div className="q-stat" key={key}>
             <div className="q-skel" style={{ height: 9, width: 64 }} />
             <div className="q-skel" style={{ height: 18, width: 86, marginTop: 10 }} />
@@ -586,7 +591,7 @@ function Stats({ report }: { report: UsageReport | null }) {
     report.buckets.map((point) => pick(point.totals));
   const activeRatio = percent(totals.active_ms, totals.active_ms + totals.idle_ms);
   return (
-    <div className="q-stats" style={{ marginBottom: 32 }}>
+    <div className="q-stats" style={{ marginBottom }}>
       <Stat
         label="Tokens"
         value={tokens(totals.input_tokens + totals.output_tokens).replace(/[a-zA-Z]+$/, "")}
@@ -613,17 +618,21 @@ function Stats({ report }: { report: UsageReport | null }) {
         detail="mean across turns"
         spark={spark((point) => point.ttft_ms)}
       />
-      <Stat
-        label="Active"
-        value={duration(totals.active_ms)}
-        detail={`${activeRatio}% active · idle ${duration(totals.idle_ms)}`}
-      />
-      <Stat
-        label="Runtime"
-        value={duration(totals.runtime_ms)}
-        detail="first start to last completion"
-        spark={spark((point) => point.wall_ms)}
-      />
+      {phone ? null : (
+        <Stat
+          label="Active"
+          value={duration(totals.active_ms)}
+          detail={`${activeRatio}% active · idle ${duration(totals.idle_ms)}`}
+        />
+      )}
+      {phone ? null : (
+        <Stat
+          label="Runtime"
+          value={duration(totals.runtime_ms)}
+          detail="first start to last completion"
+          spark={spark((point) => point.wall_ms)}
+        />
+      )}
     </div>
   );
 }
@@ -730,10 +739,13 @@ export function UsagePage() {
   const thread = useApp((state) =>
     state.ui.selectedThreadId ? state.threads[state.ui.selectedThreadId] : undefined,
   );
+  const connection = useApp((state) => state.connection.status);
 
+  // A direct link mounts the page before the handshake finishes; asking then
+  // would surface a spurious "not connected" error, so wait for online.
   useEffect(() => {
-    startPage();
-  }, []);
+    if (connection === "online") startPage();
+  }, [connection]);
 
   useEffect(() => {
     if (scope === "global") return;
@@ -769,13 +781,12 @@ export function UsagePage() {
         <div className="q-ph-body">
           <div style={{ padding: "0 16px 10px" }}>
             <RangePicker compact />
-            <p className="q-faint" style={{ fontSize: 12, margin: "8px 0 0" }}>
-              {context}
-            </p>
           </div>
           <OfflineNote />
           <AutoResumeCards compact />
-          <Stats report={report} />
+          <div className="q-ph-group">
+            <Stats report={report} phone />
+          </div>
           <div className="q-ph-group" style={{ padding: "14px 16px" }}>
             <div
               style={{

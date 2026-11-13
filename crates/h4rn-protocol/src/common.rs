@@ -317,11 +317,11 @@ pub struct ThreadSummary {
     pub usage: Usage,
     /// Time to first token of the most recent metered turn (ADR-024).
     #[serde(default)]
-    #[ts(type = "number")]
+    #[ts(type = "number | null")]
     pub ttft_ms: Option<u64>,
     /// Context window of the active model, when the proxy catalog reports it.
     #[serde(default)]
-    #[ts(type = "number")]
+    #[ts(type = "number | null")]
     pub context_window: Option<u64>,
     /// Whether the thread is raising a hand.
     pub needs_attention: bool,

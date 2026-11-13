@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { AutoResumePolicy } from "@/gen";
 
 import { duration } from "@/lib/format";
+import { useApp } from "@/lib/store/appStore";
 
 import { loadLimits, setAutoResumePolicy, useUsage } from "./usageStore";
 
@@ -41,11 +42,12 @@ export function AutoResumeSettings() {
   const limits = useUsage((state) => state.limits);
   const saving = useUsage((state) => state.policySaving);
   const error = useUsage((state) => state.policyError);
+  const connection = useApp((state) => state.connection.status);
   const [draft, setDraft] = useState<AutoResumePolicy | null>(null);
 
   useEffect(() => {
-    void loadLimits();
-  }, []);
+    if (connection === "online") void loadLimits();
+  }, [connection]);
 
   useEffect(() => {
     if (limits?.policy && !draft) setDraft(limits.policy);

@@ -69,11 +69,11 @@ usage: Usage,
 /**
  * Time to first token of the most recent metered turn (ADR-024).
  */
-ttft_ms: number, 
+ttft_ms: number | null, 
 /**
  * Context window of the active model, when the proxy catalog reports it.
  */
-context_window: number, 
+context_window: number | null, 
 /**
  * Whether the thread is raising a hand.
  */

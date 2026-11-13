@@ -2007,7 +2007,10 @@ impl Inner {
                 }
                 HarnessEvent::TurnCompleted { status, usage } => {
                     completed = true;
-                    if status == TurnStatus::Completed {
+                    // A completed turn clears a stale limit unless this turn
+                    // armed an auto-resume: that schedule still explains why
+                    // the thread is paused, so the row keeps its reset time.
+                    if status == TurnStatus::Completed && record.scheduled_limit.is_none() {
                         record.limit = None;
                     }
                     // The summary footer shows TTFT after the turn ends, so

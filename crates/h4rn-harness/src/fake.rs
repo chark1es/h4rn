@@ -377,6 +377,10 @@ mod tests {
         );
         assert!(matches!(
             events.next().await,
+            Some(HarnessEvent::Usage { .. })
+        ));
+        assert!(matches!(
+            events.next().await,
             Some(HarnessEvent::TurnCompleted {
                 status: TurnStatus::Completed,
                 ..
@@ -439,6 +443,46 @@ mod tests {
             events.next().await,
             Some(HarnessEvent::TextDelta { text: "two".into() })
         );
+    }
+
+    #[tokio::test]
+    async fn limit_marker_emits_a_limit_before_completion() {
+        let mut session = FakeHarness::new().start_session(test_spec()).await.unwrap();
+        let mut events = session.events();
+        assert!(matches!(
+            events.next().await,
+            Some(HarnessEvent::SessionStarted { .. })
+        ));
+
+        session
+            .send(UserInput {
+                text: "[h4rn-limit]".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .unwrap();
+
+        let mut saw_usage = false;
+        let mut reset_at = None;
+        loop {
+            match events.next().await.expect("event") {
+                HarnessEvent::Usage { .. } => saw_usage = true,
+                HarnessEvent::LimitHit {
+                    reset_at: at,
+                    auto_resume,
+                } => {
+                    assert!(auto_resume);
+                    reset_at = at;
+                }
+                HarnessEvent::TurnCompleted { status, .. } => {
+                    assert_eq!(status, TurnStatus::Completed);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_usage, "limit marker still reports usage");
+        assert!(reset_at.is_some(), "limit carries a reset time");
     }
 
     #[tokio::test]

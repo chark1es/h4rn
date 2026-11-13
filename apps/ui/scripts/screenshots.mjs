@@ -365,7 +365,7 @@ const SHOTS = [
     name: "p-usage",
     device: "phone",
     path: "/usage",
-    wait: "text=Migrate session store is paused",
+    wait: "text=until auto-resume",
     settle: 1200,
   },
 ];

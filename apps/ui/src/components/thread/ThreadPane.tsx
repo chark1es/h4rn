@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { PhonePanelSheet } from "@/components/panel/PhonePanelSheet";
 import { TerminalPanel } from "@/features/terminal/TerminalPanel";
+import { AutoResumeCards } from "@/features/usage/AutoResumeCard";
 import { UsageFooter } from "@/features/usage/UsageFooter";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { glyphForAgentState } from "@/lib/agent";
@@ -351,6 +352,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
           <div className="q-col">
             {isPhone ? (
               <>
+                <AutoResumeCards threadId={threadId} compact />
                 {firstApproval ? (
                   <PhoneApprovalSummary
                     thread={summary}
@@ -364,6 +366,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
               </>
             ) : (
               <>
+                <AutoResumeCards threadId={threadId} />
                 <ApprovalCard threadId={threadId} />
                 <Composer summary={summary} />
                 <UsageFooter threadId={threadId} />

@@ -17,6 +17,7 @@ import type {
 } from "@/gen";
 import { HARNESS_LABELS } from "@/lib/entities";
 import { relativeAge } from "@/lib/format";
+import { useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 
 import {
@@ -467,7 +468,7 @@ function SecretField({
 function HarnessRow({ profile, harness }: { profile: ProxyProfile; harness: HarnessKind }) {
   const override = profile.harnesses.find((candidate) => candidate.harness === harness);
   const enabled = override?.enabled ?? false;
-  const catalog = useProxy((state) => state.catalogs[profile.id]?.models ?? []);
+  const catalog = useProxy((state) => state.catalogs[profile.id])?.models ?? [];
   const saving = useProxy((state) => state.overridesSaving[`${profile.id}:${harness}`] ?? false);
   const defaultModel = override?.default_model ?? proxyDefaultModel(harness) ?? "";
   return (
@@ -753,11 +754,12 @@ export function ProxySettings() {
   const loading = useProxy((state) => state.loading);
   const error = useProxy((state) => state.error);
   const saveError = useProxy((state) => state.saveError);
+  const connection = useApp((state) => state.connection.status);
   const [pickerOpen, setPickerOpen] = useState(false);
 
   useEffect(() => {
-    void loadProxyProfiles();
-  }, []);
+    if (connection === "online") void loadProxyProfiles();
+  }, [connection]);
 
   const selected = useMemo(
     () => profiles.find((profile) => profile.id === selectedId) ?? profiles[0] ?? null,
