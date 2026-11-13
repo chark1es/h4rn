@@ -46,6 +46,7 @@ pub fn run() {
         .manage(DaemonState::default())
         .invoke_handler(tauri::generate_handler![
             commands::daemon_endpoints,
+            commands::auth_loopback,
             commands::open_external,
             commands::keychain_get,
             commands::keychain_set,

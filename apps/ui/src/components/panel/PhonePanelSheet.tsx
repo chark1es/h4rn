@@ -1,14 +1,21 @@
-import { CheckIcon, ChevronDownIcon, CircleXIcon, FileIcon } from "lucide-react";
+import { CheckIcon, ChevronDownIcon, CircleXIcon, FileIcon, PlusIcon } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { MOD } from "@/components/common/Kbd";
-import { subagentCount } from "@/features/subagents/SubagentsPanel";
-import type { ThreadSummary } from "@/gen";
+import { DelegateDialog } from "@/features/subagents/DelegateDialog";
+import {
+  loadSubagents,
+  openDelegate,
+  useSubagentCount,
+  useSubagentViews,
+} from "@/features/subagents/subagentStore";
+import type { SubagentView, ThreadSummary } from "@/gen";
+import { glyphForAgentState } from "@/lib/agent";
 import { harnessLabel, harnessSeed, machineSeed, subagentSeed } from "@/lib/entities";
-import { absoluteTime } from "@/lib/format";
-import { openInIde, pushToast, setPanelTab } from "@/lib/store/appStore";
+import { absoluteTime, tokens } from "@/lib/format";
+import { openInIde, openThread, setPanelTab } from "@/lib/store/appStore";
 import { FileDiff } from "./FileDiff";
 import { usePanelChanges } from "./usePanelChanges";
 
@@ -35,7 +42,7 @@ function SubagentRow({
   title: string;
   byline: ReactNode;
   status: ReactNode;
-  tone?: "accent" | "danger";
+  tone?: "accent" | "danger" | undefined;
   muted?: boolean;
   child?: boolean;
   selected?: boolean;
@@ -60,6 +67,81 @@ function SubagentRow({
   );
 }
 
+function phoneState(view: SubagentView): string {
+  if (view.state === "awaiting_approval") {
+    return `Needs approval${view.budget.max_turns ? ` · turn ${view.progress.turns_started + 1} of ${view.budget.max_turns}` : ""}`;
+  }
+  if (view.state === "failed" || view.state === "budget_exceeded") {
+    return view.result?.error ?? (view.state === "failed" ? "Failed" : "Budget exceeded");
+  }
+  if (view.state === "completed") return `Done · ${tokens(view.progress.tokens)} tokens`;
+  if (view.state === "cancelled") return "Cancelled";
+  if (view.state === "starting") return "Starting";
+  return `Running · ${tokens(view.progress.tokens)} tokens`;
+}
+
+function PhoneSubagent({
+  view,
+  parentThreadId,
+  onReview,
+}: {
+  view: SubagentView;
+  parentThreadId: string;
+  onReview: () => void;
+}) {
+  const waiting = view.state === "awaiting_approval";
+  const failed = view.state === "failed" || view.state === "budget_exceeded";
+  return (
+    <SubagentRow
+      child
+      selected={waiting}
+      glyph={
+        failed ? (
+          <CircleXIcon className="q-icon s16 q-danger" strokeWidth={1.5} aria-hidden />
+        ) : view.state === "completed" ? (
+          <CheckIcon className="q-icon s16" strokeWidth={1.5} aria-hidden />
+        ) : (
+          <AgentGlyph glyph={glyphForAgentState(view.agent_state)} size={14} />
+        )
+      }
+      title={view.task}
+      byline={
+        <>
+          <EntityAvatar
+            seed={subagentSeed(view.host, parentThreadId, view.subagent_id)}
+            kind="subagent"
+            label="subagent"
+            size={14}
+          />
+          <EntityAvatar seed={machineSeed(view.host)} kind="machine" label={view.host} size={14} />
+          {view.host} · {harnessLabel(view.harness)}
+        </>
+      }
+      status={phoneState(view)}
+      tone={waiting ? "accent" : failed ? "danger" : undefined}
+    >
+      <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
+        <button
+          type="button"
+          className="q-btn secondary sm"
+          style={{ flex: 1 }}
+          disabled={!view.child_thread_id}
+          onClick={() => {
+            if (view.child_thread_id) openThread(view.child_thread_id);
+          }}
+        >
+          Open thread
+        </button>
+        {waiting ? (
+          <button type="button" className="q-btn primary sm" style={{ flex: 1 }} onClick={onReview}>
+            Review
+          </button>
+        ) : null}
+      </div>
+    </SubagentRow>
+  );
+}
+
 /**
  * On a phone the right panel becomes one sheet: Changes and Subagents share a
  * segmented control. Files and the editor are desktop surfaces, and the sheet
@@ -79,9 +161,13 @@ export function PhonePanelSheet({
   const [tab, setTab] = useState(initialTab);
   const changes = usePanelChanges(thread);
   const files = changes.changes?.files ?? [];
-  const subagents = subagentCount(thread.thread_id);
+  const subagents = useSubagentCount(thread.thread_id);
+  const views = useSubagentViews(thread.thread_id);
 
   useEffect(() => setTab(initialTab), [initialTab]);
+  useEffect(() => {
+    if (tab === "subagents") void loadSubagents(thread.thread_id);
+  }, [tab, thread.thread_id]);
 
   const openFile = (path: string) => {
     // Editing is a desktop task, but a file can still be handed to the IDE for
@@ -131,8 +217,9 @@ export function PhonePanelSheet({
                 setTab("subagents");
               }}
             >
-              Subagents {subagents > 0 ? <span className="c q-num">{subagents}</span> : null}
-              {subagents > 0 && thread.needs_attention ? (
+              Subagents{" "}
+              {subagents.total > 0 ? <span className="c q-num">{subagents.total}</span> : null}
+              {subagents.waiting > 0 ? (
                 <span className="q-pip" role="img" aria-label="needs you" />
               ) : null}
             </button>
@@ -140,142 +227,71 @@ export function PhonePanelSheet({
         </div>
 
         {tab === "subagents" ? (
-          subagents > 0 ? (
-            <div className="q-ph-body">
-              <div className="q-ph-gh">{subagents} subagents · 1 waiting on you</div>
-              <div className="q-ph-group">
-                <SubagentRow
-                  glyph={
-                    <AgentGlyph
-                      glyph={{ kind: "orb", state: "working", label: "Running" }}
-                      size={14}
-                    />
-                  }
-                  title={thread.title}
-                  byline={
-                    <>
-                      <EntityAvatar
-                        seed={machineSeed(thread.host)}
-                        kind="machine"
-                        label={thread.host}
-                        size={14}
-                      />
-                      {thread.host} · {harnessLabel(thread.harness)}
-                    </>
-                  }
-                  status="Running · 18.4k tokens"
-                />
-                <SubagentRow
-                  child
-                  selected
-                  glyph={
-                    <AgentGlyph
-                      glyph={{ kind: "orb", state: "breathing", paused: true, label: "Held" }}
-                      size={14}
-                    />
-                  }
-                  title="Reproduce CI failure"
-                  byline={
-                    <>
-                      <EntityAvatar
-                        seed={subagentSeed("orion", thread.thread_id, "r2")}
-                        kind="subagent"
-                        label="subagent"
-                        size={14}
-                      />
-                      <EntityAvatar
-                        seed={machineSeed("orion")}
-                        kind="machine"
-                        label="orion"
-                        size={14}
-                      />
-                      orion · Codex
-                    </>
-                  }
-                  status="Needs approval · turn 3 of 20"
-                  tone="accent"
-                >
-                  <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
-                    <button
-                      type="button"
-                      className="q-btn secondary sm"
-                      style={{ flex: 1 }}
-                      onClick={() =>
-                        pushToast({
-                          title: "Subagent details arrive with the wire protocol.",
-                          variant: "info",
-                        })
-                      }
-                    >
-                      Details
-                    </button>
-                    <button
-                      type="button"
-                      className="q-btn primary sm"
-                      style={{ flex: 1 }}
-                      onClick={() => {
+          <div className="q-ph-body">
+            <div className="q-ph-gh" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span>
+                {subagents.total === 0
+                  ? "No subagents"
+                  : `${subagents.total} subagent${subagents.total === 1 ? "" : "s"}${
+                      subagents.waiting > 0 ? ` · ${subagents.waiting} waiting on you` : ""
+                    }`}
+              </span>
+              <span className="grow" />
+              <button type="button" className="q-btn ghost sm" onClick={openDelegate}>
+                <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                Delegate
+              </button>
+            </div>
+            {views.length === 0 ? (
+              <div className="q-empty q-sub-empty">
+                <h3>Nothing delegated</h3>
+                <p>
+                  When {harnessLabel(thread.harness)} hands work to a subagent, it shows here with
+                  where it runs, its budget, and what it’s waiting on.
+                </p>
+                <button type="button" className="q-btn secondary" onClick={openDelegate}>
+                  <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                  Delegate
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className="q-ph-group">
+                  <SubagentRow
+                    glyph={<AgentGlyph glyph={glyphForAgentState(thread.agent_state)} size={14} />}
+                    title={thread.title}
+                    byline={
+                      <>
+                        <EntityAvatar
+                          seed={machineSeed(thread.host)}
+                          kind="machine"
+                          label={thread.host}
+                          size={14}
+                        />
+                        {thread.host} · {harnessLabel(thread.harness)}
+                      </>
+                    }
+                    status={`Parent · ${thread.agent_state.replace(/_/g, " ")}`}
+                  />
+                  {views.map((view) => (
+                    <PhoneSubagent
+                      key={view.subagent_id}
+                      view={view}
+                      parentThreadId={thread.thread_id}
+                      onReview={() => {
                         onClose();
                         onReview?.();
                       }}
-                    >
-                      Review
-                    </button>
-                  </div>
-                </SubagentRow>
-                <SubagentRow
-                  child
-                  glyph={<CheckIcon className="q-icon s16" strokeWidth={1.5} aria-hidden />}
-                  title="Audit test helpers"
-                  byline={
-                    <>
-                      <EntityAvatar
-                        seed={subagentSeed("atlas", thread.thread_id, "a1")}
-                        kind="subagent"
-                        label="subagent"
-                        size={14}
-                      />
-                      atlas · Codex
-                    </>
-                  }
-                  status="Done · 6.2k tokens"
-                />
-                <SubagentRow
-                  child
-                  muted
-                  glyph={
-                    <CircleXIcon className="q-icon s16 q-danger" strokeWidth={1.5} aria-hidden />
-                  }
-                  title="Check clock skew on buildbox"
-                  byline={
-                    <>
-                      <EntityAvatar
-                        seed={subagentSeed("buildbox", thread.thread_id, "c3")}
-                        kind="subagent"
-                        label="subagent"
-                        size={14}
-                      />
-                      buildbox · Codex
-                    </>
-                  }
-                  status="Couldn’t start: buildbox is offline"
-                />
-              </div>
-              <p className="q-ph-note" style={{ marginTop: -8 }}>
-                A subagent’s approval always comes to its parent thread, so it also shows above the
-                composer.
-              </p>
-            </div>
-          ) : (
-            <div className="q-ph-body">
-              <div className="q-empty q-sub-empty">
-                <h3>No subagents in this thread</h3>
-                <p>
-                  Delegated work will appear here with its host, harness, budget and inherited
-                  approvals. Delegation is not exposed by the daemon yet.
+                    />
+                  ))}
+                </div>
+                <p className="q-ph-note" style={{ marginTop: -8 }}>
+                  A subagent’s approval always comes to its parent thread, so it also shows above
+                  the composer.
                 </p>
-              </div>
-            </div>
-          )
+              </>
+            )}
+          </div>
         ) : (
           <div className="q-ph-body">
             <div className="q-ph-sum">
@@ -378,6 +394,7 @@ export function PhonePanelSheet({
           </div>
         )}
       </div>
+      <DelegateDialog thread={thread} />
     </>
   );
 }

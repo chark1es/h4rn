@@ -1,12 +1,13 @@
 import type { TransportStatus } from "@/gen";
 import type { SecureTransport as WasmSecureTransport } from "@/gen/transport-wasm/h4rn_transport_wasm";
-import initWasm, {
+import {
   connect as connectTransport,
   generate_identity,
   parse_pairing,
 } from "@/gen/transport-wasm/h4rn_transport_wasm";
 
 import type { Transport, TransportContext, TransportFactory, TransportHandlers } from "./types";
+import { loadTransportWasm } from "./wasm";
 
 /**
  * Browser adapter for the Rust Noise/multipath transport.
@@ -46,9 +47,28 @@ type StoredSession = {
   resumeToken?: string | null;
 };
 
-type PathConfig = {
+export type PathConfig = {
   kind: "direct" | "tailscale" | "relay";
   endpoint: string;
+};
+
+/**
+ * A machine selected from h4rn-connect.
+ *
+ * Unlike a QR pairing this carries no one-time PSK: the device's Noise key was
+ * already allowlisted by the daemon when the pairing was claimed. The relay
+ * URL is minted fresh for every attempt because its access token and DPoP proof
+ * are short-lived.
+ */
+export type RemoteTransportConfig = {
+  /** Daemon X25519 static public key, hex. */
+  daemonPublic: string;
+  /** Candidate paths; a `relay` path's endpoint is replaced per attempt. */
+  paths: PathConfig[];
+  /** Machine id sent in the relay's `open` frame. */
+  machineId: string;
+  /** Storage key for the resume ticket, so machines do not share tickets. */
+  sessionKey?: string;
 };
 
 export type SecureTransportOptions = {
@@ -56,16 +76,16 @@ export type SecureTransportOptions = {
   pairing?: string | null;
   /** Optional relay standby endpoint (`host:port` or `wss://...`). */
   relay?: string | null;
+  /** Explicit remote machine, bypassing the local pairing pin. */
+  remote?: RemoteTransportConfig | null;
+  /**
+   * Mints an authenticated `wss://.../relay` URL. Called before every attempt
+   * so an expired access token never becomes a dead transport.
+   */
+  mintRelayUrl?: (() => Promise<string | null>) | null;
   /** Injectable storage for tests. */
   storage?: Pick<Storage, "getItem" | "setItem" | "removeItem"> | null;
 };
-
-let wasmReady: Promise<unknown> | null = null;
-
-function loadWasm(): Promise<unknown> {
-  wasmReady ??= initWasm();
-  return wasmReady;
-}
 
 /**
  * Creates a factory that `H4rnClient` calls once per reconnect attempt.
@@ -103,6 +123,10 @@ export class SecureTransport implements Transport {
   private closedByUs = false;
   private closedSockets = 0;
   private openedOnce = false;
+  /** Relay session id for the single relay path, chosen once per transport. */
+  private relayConnId: string | null = null;
+  /** Per-machine resume-ticket key; the local pairing uses the default. */
+  private sessionKey: string = SESSION_KEY;
 
   constructor(
     private readonly context: TransportContext,
@@ -153,17 +177,26 @@ export class SecureTransport implements Transport {
     if (!handlers) return;
 
     try {
-      await loadWasm();
+      await loadTransportWasm();
       if (this.closedByUs) return;
 
-      const resolved = this.resolveConfig();
+      const resolved = await this.resolveConfig();
       if (!resolved) {
-        this.finishClose(
-          4401,
-          "This browser is not paired with a daemon.",
-          true,
-          "Scan the daemon's pairing code, then reopen the app.",
-        );
+        if (this.options.remote) {
+          this.finishClose(
+            1011,
+            "No route to this machine is available.",
+            false,
+            "The machine's daemon may be offline. Check the hosts list, then reconnect.",
+          );
+        } else {
+          this.finishClose(
+            4401,
+            "This browser is not paired with a daemon.",
+            true,
+            "Scan the daemon's pairing code, then reopen the app.",
+          );
+        }
         return;
       }
       this.paths = resolved.paths;
@@ -208,15 +241,19 @@ export class SecureTransport implements Transport {
 
   private pinned: PairingPin | null = null;
 
-  private resolveConfig(): {
+  private async resolveConfig(): Promise<{
     identity: string;
     daemonPublic: string;
     psk: string | undefined;
     sessionId: string;
     resumeToken: string | undefined;
     paths: PathConfig[];
-    pin: PairingPin;
-  } | null {
+    pin: PairingPin | null;
+  } | null> {
+    if (this.options.remote) {
+      return this.resolveRemote(this.options.remote);
+    }
+
     const storedPin = readJson<PairingPin>(this.storage, PIN_KEY);
     const pending = readJson<PendingPairing>(this.storage, PENDING_KEY);
     let pin = storedPin;
@@ -280,6 +317,53 @@ export class SecureTransport implements Transport {
     };
   }
 
+  /**
+   * Resolves a connect-selected machine.
+   *
+   * Relay endpoints are minted per attempt; a failed mint drops that path
+   * rather than poisoning the whole transport, so a reachable direct address
+   * still works when the relay is down.
+   */
+  private async resolveRemote(remote: RemoteTransportConfig): Promise<{
+    identity: string;
+    daemonPublic: string;
+    psk: string | undefined;
+    sessionId: string;
+    resumeToken: string | undefined;
+    paths: PathConfig[];
+    pin: PairingPin | null;
+  } | null> {
+    const paths: PathConfig[] = [];
+    for (const path of remote.paths) {
+      if (path.kind !== "relay" || !this.options.mintRelayUrl) {
+        paths.push(path);
+        continue;
+      }
+      try {
+        const endpoint = await this.options.mintRelayUrl();
+        if (endpoint) paths.push({ kind: "relay", endpoint });
+      } catch {
+        // No relay this attempt; a direct or tailnet path may still connect.
+      }
+    }
+    if (paths.length === 0) return null;
+
+    this.sessionKey = remote.sessionKey ?? SESSION_KEY;
+    const session = readJson<StoredSession>(this.storage, this.sessionKey);
+    if (paths.some((path) => path.kind === "relay")) {
+      this.relayConnId = randomHex(16);
+    }
+    return {
+      identity: readIdentity(this.storage),
+      daemonPublic: remote.daemonPublic,
+      psk: undefined,
+      sessionId: session?.sessionId ?? "00".repeat(16),
+      resumeToken: session?.resumeToken ?? undefined,
+      paths,
+      pin: null,
+    };
+  }
+
   // ---------------------------------------------------------------------
   // Socket plumbing
   // ---------------------------------------------------------------------
@@ -307,6 +391,9 @@ export class SecureTransport implements Transport {
 
       socket.onopen = () => {
         if (this.closedByUs) return;
+        // The relay routes by conn_id, so the open frame must precede the
+        // first Noise packet on the same socket.
+        if (this.isRelay(index)) this.sendRelayOpen(socket);
         try {
           this.wasm?.path_open(index, nowMs());
         } catch (error) {
@@ -314,10 +401,18 @@ export class SecureTransport implements Transport {
           return;
         }
         const queued = this.outbound[index]?.splice(0) ?? [];
-        for (const packet of queued) sendSocket(socket, packet);
+        for (const packet of queued) this.sendPathPacket(index, socket, packet);
       };
       socket.onmessage = (message) => {
         if (this.closedByUs) return;
+        if (this.isRelay(index)) {
+          if (typeof message.data !== "string") {
+            this.handlers?.onError("The relay sent a binary frame; only JSON is expected.");
+            return;
+          }
+          this.handleRelayEvent(index, socket, message.data);
+          return;
+        }
         if (typeof message.data === "string") {
           this.handlers?.onError("The daemon sent plaintext on the secure path.");
           return;
@@ -356,9 +451,92 @@ export class SecureTransport implements Transport {
     const socket = this.sockets[index];
     if (!socket || socket.readyState === WebSocket.CLOSED) return;
     if (socket.readyState === WebSocket.OPEN) {
-      sendSocket(socket, bytes);
+      this.sendPathPacket(index, socket, bytes);
     } else {
       this.outbound[index]?.push(bytes);
+    }
+  }
+
+  private isRelay(index: number): boolean {
+    return this.paths[index]?.kind === "relay";
+  }
+
+  /** Writes one Noise packet directly or inside a relay `data` frame. */
+  private sendPathPacket(index: number, socket: WebSocket, bytes: Uint8Array): void {
+    if (!this.isRelay(index)) {
+      sendSocket(socket, bytes);
+      return;
+    }
+    try {
+      socket.send(
+        JSON.stringify({
+          conn_id: this.relayConnId ?? "",
+          kind: "data",
+          payload: encodeBase64Url(bytes),
+        }),
+      );
+    } catch {
+      // A racing close is handled by `onclose`.
+    }
+  }
+
+  private sendRelayOpen(socket: WebSocket): void {
+    const machineId = this.options.remote?.machineId ?? "";
+    const payload = encodeBase64Url(
+      new TextEncoder().encode(JSON.stringify({ machine_id: machineId })),
+    );
+    try {
+      socket.send(JSON.stringify({ conn_id: this.relayConnId ?? "", kind: "open", payload }));
+    } catch {
+      // The socket may have closed immediately; `onclose` will report it.
+    }
+  }
+
+  private handleRelayEvent(index: number, socket: WebSocket, text: string): void {
+    type RelayEvent = {
+      type?: string;
+      frame?: { conn_id?: string; kind?: string; payload?: string };
+      error?: { code?: string; message?: string; hint?: string | null };
+    };
+    let event: RelayEvent;
+    try {
+      event = JSON.parse(text) as RelayEvent;
+    } catch {
+      this.handlers?.onError("The relay sent a frame that was not JSON.");
+      return;
+    }
+    if (event.type === "error") {
+      this.handlers?.onError(
+        event.error?.hint ?? event.error?.message ?? "The relay reported an error.",
+      );
+      return;
+    }
+    if (event.type !== "frame" || !event.frame) return;
+    if (event.frame.conn_id && event.frame.conn_id !== this.relayConnId) return;
+    switch (event.frame.kind) {
+      case "data": {
+        const bytes = decodeBase64Url(event.frame.payload ?? "");
+        if (!bytes) {
+          this.handlers?.onError("The relay sent an invalid data payload.");
+          return;
+        }
+        const buffer = bytes.buffer.slice(
+          bytes.byteOffset,
+          bytes.byteOffset + bytes.byteLength,
+        ) as ArrayBuffer;
+        this.receive(index, buffer);
+        break;
+      }
+      case "close":
+        try {
+          socket.close(1000, "relay closed");
+        } catch {
+          // Already gone.
+        }
+        break;
+      default:
+        // `ping` is a relay keepalive, not a transport event.
+        break;
     }
   }
 
@@ -498,7 +676,7 @@ export class SecureTransport implements Transport {
   }
 
   private persistSession(session: StoredSession): void {
-    writeJson(this.storage, SESSION_KEY, session);
+    writeJson(this.storage, this.sessionKey, session);
   }
 }
 
@@ -557,12 +735,58 @@ function defaultStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> |
   }
 }
 
+/**
+ * The stable device identity used for Noise and DPoP.
+ *
+ * It is generated once and kept on this device. Only the wasm module ever
+ * sees the secret halves.
+ */
+export function ensureDeviceIdentity(
+  storage: SecureTransportOptions["storage"] = defaultStorage(),
+): string {
+  return readIdentity(storage);
+}
+
 function readIdentity(storage: SecureTransportOptions["storage"]): string {
   const existing = storage?.getItem(IDENTITY_KEY);
   if (existing) return existing;
   const identity = generate_identity();
   storage?.setItem(IDENTITY_KEY, identity);
   return identity;
+}
+
+/** URL-safe base64 without padding, matching the relay's wire format. */
+export function encodeBase64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** Decodes URL-safe base64 without padding; `null` means malformed. */
+export function decodeBase64Url(value: string): Uint8Array | null {
+  try {
+    const padded = value.replace(/-/g, "+").replace(/_/g, "/");
+    const binary = atob(padded.padEnd(Math.ceil(padded.length / 4) * 4, "="));
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return bytes;
+  } catch {
+    return null;
+  }
+}
+
+function randomHex(bytes: number): string {
+  const buffer = new Uint8Array(bytes);
+  if (typeof crypto !== "undefined" && crypto.getRandomValues) {
+    crypto.getRandomValues(buffer);
+  } else {
+    for (let index = 0; index < bytes; index += 1) {
+      buffer[index] = Math.floor(Math.random() * 256);
+    }
+  }
+  return [...buffer].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function readJson<T>(storage: SecureTransportOptions["storage"], key: string): T | null {

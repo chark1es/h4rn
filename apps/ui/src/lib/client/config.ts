@@ -1,3 +1,6 @@
+import { readActiveRemote } from "@/features/remote/active";
+import { createRemoteTransportFactory } from "@/features/remote/remoteTransport";
+
 import { H4rnClient } from "./client";
 import { createMockTransport } from "./mock";
 import { createSecureTransportFactory, hasStoredSecurity } from "./secure";
@@ -18,6 +21,10 @@ export type BootConfig = {
   pairing: string | null;
   /** Optional relay standby endpoint from `?relay=`. */
   relay: string | null;
+  /** A connect deployment to sign in against, from `?connect=`. */
+  connectUrl: string | null;
+  /** Whether a machine selected through connect is the active transport. */
+  remote: boolean;
 };
 
 export function readBootConfig(): BootConfig {
@@ -31,12 +38,15 @@ export function readBootConfig(): BootConfig {
       secure: false,
       pairing: null,
       relay: null,
+      connectUrl: null,
+      remote: false,
     };
   }
 
   const params = new URLSearchParams(window.location.search);
   const queryTheme = params.get("theme");
   const pairing = params.get("pair");
+  const active = readActiveRemote();
   return {
     mock: params.get("mock") === "1",
     scenario: params.get("scenario") ?? "default",
@@ -48,9 +58,12 @@ export function readBootConfig(): BootConfig {
         : null,
     // A pairing link or a previously pinned daemon selects Noise. Plain
     // `?daemon=` stays on the loopback WebSocket for backwards compatibility.
-    secure: Boolean(pairing) || params.get("secure") === "1" || hasStoredSecurity(),
+    secure:
+      Boolean(pairing) || params.get("secure") === "1" || hasStoredSecurity() || active !== null,
     pairing,
     relay: params.get("relay"),
+    connectUrl: params.get("connect"),
+    remote: active !== null,
   };
 }
 
@@ -102,6 +115,17 @@ export function createClientFromEnv(): H4rnClient {
             : { baseMs: 300, maxMs: 4_000, jitter: 0.2, maxAttempts: 8 },
     };
     return new H4rnClient(options);
+  }
+
+  if (config.remote) {
+    return new H4rnClient({
+      url: config.daemonUrl ?? DEFAULT_WS_URL,
+      token: null,
+      transportLabel: "encrypted",
+      transportFactory: createRemoteTransportFactory(),
+      requestTimeoutMs: 10_000,
+      reconnect: { baseMs: 400, maxMs: 8_000, jitter: 0.2, maxAttempts: 10 },
+    });
   }
 
   if (config.secure) {

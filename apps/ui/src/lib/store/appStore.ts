@@ -525,14 +525,76 @@ export function takePendingIdePath(): string | null {
 
 let client: H4rnClient | null = null;
 let started = false;
+let windowHooked = false;
 
 export function getClient(): H4rnClient {
   client ??= createClientFromEnv();
   return client;
 }
 
+/**
+ * Replaces the client and reconnects.
+ *
+ * Signing in, pairing and switching hosts all change the transport (plain WS,
+ * Noise direct, or the relay), so the whole client is rebuilt rather than
+ * trying to swap a live transport underneath an established session.
+ */
+export function restartConnection(): void {
+  const previous = client;
+  client = null;
+  started = false;
+  try {
+    previous?.stop();
+  } catch {
+    // A client that never started has nothing to stop.
+  }
+  startConnection();
+}
+
+const PATH_KINDS = new Set(["direct", "tailscale", "relay"]);
+
+/** Overlays the live transport path and RTT onto the online host rows. */
+function overlayTransport(
+  hosts: Record<HostId, HostSummary>,
+  connection: ConnectionSnapshot,
+): Record<HostId, HostSummary> {
+  if (connection.status !== "online") return hosts;
+  const path = PATH_KINDS.has(connection.transport)
+    ? (connection.transport as HostSummary["path"])
+    : null;
+  let changed = false;
+  const next: Record<HostId, HostSummary> = {};
+  for (const [id, host] of Object.entries(hosts)) {
+    if (!host.online) {
+      next[id] = host;
+      continue;
+    }
+    const merged: HostSummary = {
+      ...host,
+      latency_ms: connection.latencyMs ?? host.latency_ms ?? null,
+      path: path ?? host.path ?? null,
+    };
+    if (merged.latency_ms !== host.latency_ms || merged.path !== host.path) changed = true;
+    next[id] = merged;
+  }
+  return changed ? next : hosts;
+}
+
 const eventQueue: EventEnvelope[] = [];
+const appEventListeners = new Set<(event: EventEnvelope) => void>();
 let flushScheduled = false;
+
+/**
+ * Subscribes to raw protocol events before projection.
+ *
+ * Feature stores use this for data that the thread projection summarises away,
+ * such as a subagent's live budget counters. Listeners survive a reconnect
+ * because `startConnection` keeps its set across client rebuilds.
+ */
+export function onAppEvent(listener: (event: EventEnvelope) => void): () => void {
+  appEventListeners.add(listener);
+  return () => appEventListeners.delete(listener);
+}
 
 function scheduleFlush(): void {
   if (flushScheduled) return;
@@ -572,11 +634,17 @@ export function startConnection(): void {
   const app = getClient();
 
   app.onStatus((connection) => {
-    setState({ ...getState(), connection });
+    const state = getState();
+    setState({
+      ...state,
+      connection,
+      hosts: overlayTransport(state.hosts, connection),
+    });
   });
 
   app.onEvent((envelope) => {
     enqueueEvent(envelope);
+    for (const listener of appEventListeners) listener(envelope);
   });
 
   app.onReady((info) => {
@@ -603,7 +671,8 @@ export function startConnection(): void {
     });
   });
 
-  if (typeof window !== "undefined") {
+  if (typeof window !== "undefined" && !windowHooked) {
+    windowHooked = true;
     window.addEventListener("popstate", () => {
       const route = readRoute();
       const state = getState();

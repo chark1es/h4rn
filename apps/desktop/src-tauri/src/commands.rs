@@ -7,6 +7,7 @@
 
 use tauri::AppHandle;
 use tauri_plugin_opener::OpenerExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::daemon::{self, DaemonEndpoint};
 use crate::diagnostics;
@@ -47,6 +48,81 @@ pub fn open_external(app: AppHandle, url: String) -> Result<(), String> {
     app.opener()
         .open_url(parsed.as_str().to_owned(), None::<String>)
         .map_err(|error| format!("could not open the link: {error}"))
+}
+
+/// Opens an OIDC authorize URL and returns the loopback callback's query.
+///
+/// The sign-in provider redirects to `http://127.0.0.1:<port><path>?...`; this
+/// command binds that one-shot listener, opens the system browser, and resolves
+/// with the raw query string (without the leading `?`). The view validates the
+/// OIDC `state`, so the shell never inspects or stores tokens. The listener is
+/// loopback-only and accepts a single request.
+#[tauri::command]
+pub async fn auth_loopback(
+    app: AppHandle,
+    url: String,
+    path: String,
+    port: u16,
+) -> Result<String, String> {
+    let parsed = tauri::Url::parse(&url).map_err(|_| "the sign-in link is not a URL".to_owned())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("only http and https sign-in links can be opened".to_owned());
+    }
+    if !path.starts_with('/') || path.len() > 256 {
+        return Err("the callback path must start with /".to_owned());
+    }
+    if port == 0 {
+        return Err("the callback port is required".to_owned());
+    }
+
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .map_err(|error| format!("could not listen on 127.0.0.1:{port}: {error}"))?;
+
+    app.opener()
+        .open_url(parsed.as_str().to_owned(), None::<String>)
+        .map_err(|error| format!("could not open the sign-in page: {error}"))?;
+
+    let accept = tokio::time::timeout(std::time::Duration::from_secs(300), listener.accept())
+        .await
+        .map_err(|_| "the sign-in window timed out".to_owned())?
+        .map_err(|error| format!("the callback listener failed: {error}"))?;
+    let (mut socket, _) = accept;
+
+    let mut buffer = vec![0_u8; 8 * 1024];
+    let read = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        socket.read(&mut buffer),
+    )
+    .await
+    .map_err(|_| "the sign-in callback did not send a request".to_owned())?
+    .map_err(|error| format!("could not read the sign-in callback: {error}"))?;
+    if read == 0 {
+        return Err("the sign-in callback was empty".to_owned());
+    }
+    let request = String::from_utf8_lossy(&buffer[..read]);
+    let target = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .ok_or_else(|| "the sign-in callback was not HTTP".to_owned())?;
+    let (request_path, query) = target.split_once('?').unwrap_or((target, ""));
+    if request_path != path {
+        let response = "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+        let _ = socket.write_all(response.as_bytes()).await;
+        return Err("the sign-in callback used an unexpected path".to_owned());
+    }
+
+    let body = "<!doctype html><meta charset=\"utf-8\"><title>h4rn</title><body style=\"font:14px system-ui;padding:40px\">Signed in. You can close this tab and return to h4rn.</body>";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let _ = socket.write_all(response.as_bytes()).await;
+    let _ = socket.shutdown().await;
+    diagnostics::info("completed an OIDC loopback sign-in");
+    Ok(query.to_owned())
 }
 
 /// Reads a secret from the OS keychain.

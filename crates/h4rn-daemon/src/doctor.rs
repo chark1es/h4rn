@@ -313,6 +313,8 @@ mod tests {
                 online: true,
                 last_seen: chrono::Utc::now(),
                 harnesses: Vec::new(),
+                latency_ms: None,
+                path: None,
             }],
             harnesses: vec![HarnessStatus {
                 kind: HarnessKind::Codex,

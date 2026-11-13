@@ -66,7 +66,12 @@ export type ResponseOf<T extends ClientRequest["type"]> = T extends "hello"
                                             ? Extract<ResponseBody, { type: "upload_status" }>
                                             : T extends "get_blob"
                                               ? Extract<ResponseBody, { type: "blob" }>
-                                              : Extract<ResponseBody, { type: "ack" }>;
+                                              : T extends "subagent"
+                                                ? Extract<
+                                                    ResponseBody,
+                                                    { type: "subagents" } | { type: "subagent" }
+                                                  >
+                                                : Extract<ResponseBody, { type: "ack" }>;
 
 /**
  * Events that carry no durable position: `seq` is the daemon's current

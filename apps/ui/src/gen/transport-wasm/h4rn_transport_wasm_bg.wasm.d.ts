@@ -3,7 +3,9 @@
 export const memory: WebAssembly.Memory;
 export const __wbg_securetransport_free: (a: number, b: number) => void;
 export const connect: (a: number, b: number) => [number, number, number];
+export const connect_proof: (a: number, b: number, c: number, d: number, e: number, f: number, g: bigint, h: number, i: number) => [number, number, number, number];
 export const generate_identity: () => [number, number, number, number];
+export const identity_public: (a: number, b: number) => [number, number, number, number];
 export const parse_pairing: (a: number, b: number) => [number, number, number, number];
 export const securetransport_close: (a: number, b: number) => void;
 export const securetransport_on_closed: (a: number, b: any) => void;

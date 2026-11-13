@@ -11,6 +11,7 @@ description = "wasm-bindgen wrapper around the h4rn encrypted multipath transpor
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+base64.workspace = true
 getrandom = { workspace = true, features = ["wasm_js"] }
 h4rn-protocol.workspace = true
 h4rn-transport = { workspace = true, default-features = false }

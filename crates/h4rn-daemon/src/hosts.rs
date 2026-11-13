@@ -42,6 +42,8 @@ impl HostInventory {
             online: true,
             last_seen: now,
             harnesses: catalog.available(),
+            latency_ms: None,
+            path: None,
         };
 
         let mut extra = Vec::new();
@@ -60,6 +62,8 @@ impl HostInventory {
                     online: false,
                     last_seen: now,
                     harnesses: Vec::new(),
+                    latency_ms: None,
+                    path: None,
                 });
             }
         }
