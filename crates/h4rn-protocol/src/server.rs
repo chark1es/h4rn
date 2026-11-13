@@ -53,6 +53,15 @@ pub enum ServerFrame {
         /// The change.
         event: crate::proxy::ProxyEvent,
     },
+    /// A live metering frame, outside the durable thread log.
+    ///
+    /// Counters are throttled to about one per second and a reconnecting client
+    /// learns the authoritative totals from the ledger (`GetUsage`) or from
+    /// the thread summary instead.
+    UsageEvent {
+        /// The tick, limit status or schedule change.
+        event: crate::usage::UsageStreamEvent,
+    },
 }
 
 /// One durable event with its daemon-global sequence number.
@@ -243,6 +252,26 @@ pub enum ResponseBody {
     ProxyFailover {
         /// The chosen candidate.
         choice: Option<crate::proxy::ProxyFailoverChoice>,
+    },
+    /// Aggregated usage from the durable ledger.
+    UsageReport {
+        /// The report.
+        report: crate::usage::UsageReport,
+    },
+    /// Known limits and the auto-resume policy.
+    Limits {
+        /// Limits and policy.
+        report: crate::usage::LimitsReport,
+    },
+    /// Persisted schedules and limit history.
+    Resets {
+        /// Schedules and history.
+        resets: crate::usage::Resets,
+    },
+    /// A schedule was armed, moved or cleared.
+    ResumeChanged {
+        /// The current schedule, or `None` when none remains.
+        schedule: Option<crate::usage::ResumeSchedule>,
     },
     /// A request with no payload completed successfully.
     Ack,

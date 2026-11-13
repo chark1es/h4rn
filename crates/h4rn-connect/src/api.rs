@@ -27,7 +27,8 @@ use h4rn_protocol::{
     LoginCompleteRequest, LoginCompleteResponse, LoginStartRequest, LoginStartResponse,
     LogoutRequest, MachineAddressesUpdate, MachineHost, MachineHostsUpdate, MachineSummary,
     PairingClaimRequest, PairingClaimResponse, PairingCreateRequest, PairingCreateResponse,
-    PairingInfo, ProviderInfo, RefreshRequest,
+    PairingInfo, ProviderInfo, RefreshRequest, UsageBucket, UsageGroupBy, UsageReport, UsageScope,
+    UsageSyncRequest, UsageSyncResponse,
 };
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
@@ -130,6 +131,8 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/pairings/claim", post(claim_pairing))
         .route("/v1/pairings/{id}", delete(revoke_pairing))
         .route("/v1/audit", get(audit).post(ingest_audit))
+        .route("/v1/usage", post(ingest_usage))
+        .route("/v1/usage/aggregate", get(usage_aggregate))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             api_rate_limit,
@@ -1302,6 +1305,67 @@ async fn ingest_audit(
         )
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Usage ledger sync
+// ---------------------------------------------------------------------------
+
+async fn ingest_usage(
+    State(state): State<AppState>,
+    authed: Authed,
+    Json(request): Json<UsageSyncRequest>,
+) -> Result<Json<UsageSyncResponse>> {
+    if request.rows.len() > 500 {
+        return Err(AppError::bad_request(
+            "usage_batch_too_large",
+            "a usage batch may contain at most 500 rows",
+        ));
+    }
+    let response = state
+        .store
+        .sync_usage(authed.user.id, authed.device.machine_id, &request.rows)
+        .await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct UsageAggregateQuery {
+    scope: Option<UsageScope>,
+    scope_id: Option<String>,
+    since: Option<chrono::DateTime<Utc>>,
+    until: Option<chrono::DateTime<Utc>>,
+    group_by: Option<UsageGroupBy>,
+    bucket: Option<UsageBucket>,
+}
+
+async fn usage_aggregate(
+    State(state): State<AppState>,
+    authed: Authed,
+    Query(query): Query<UsageAggregateQuery>,
+) -> Result<Json<UsageReport>> {
+    let scope = query.scope.unwrap_or(UsageScope::Global);
+    if matches!(scope, UsageScope::Thread | UsageScope::Workspace)
+        && query.scope_id.as_deref().is_none_or(str::is_empty)
+    {
+        return Err(AppError::bad_request(
+            "usage_scope_id_missing",
+            "a thread or workspace usage query needs scope_id",
+        ));
+    }
+    let report = state
+        .store
+        .aggregate_usage(
+            authed.user.id,
+            scope,
+            query.scope_id.as_deref(),
+            query.since,
+            query.until,
+            query.group_by.unwrap_or(UsageGroupBy::None),
+            query.bucket,
+        )
+        .await?;
+    Ok(Json(report))
 }
 
 // ---------------------------------------------------------------------------

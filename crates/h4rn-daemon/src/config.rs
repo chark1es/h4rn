@@ -67,6 +67,11 @@ impl Config {
         self.data_dir.join("events.db")
     }
 
+    /// Path of the durable usage ledger.
+    pub fn meter_db_path(&self) -> PathBuf {
+        self.data_dir.join("meter.db")
+    }
+
     /// Path of the Noise transport identity.
     pub fn transport_identity_path(&self) -> PathBuf {
         self.data_dir.join("transport-identity")

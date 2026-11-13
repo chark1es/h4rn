@@ -21,7 +21,7 @@ use h4rn_protocol::{
     DeviceGrantPollRequest, DeviceGrantPollResponse, DeviceGrantStartRequest,
     DeviceGrantStartResponse, DeviceGrantStatus, DeviceRegistration, MachineAddressesUpdate,
     MachineHostInput, MachineHostsUpdate, PairingClaimRequest, PairingClaimResponse,
-    PairingCreateRequest, PairingCreateResponse,
+    PairingCreateRequest, PairingCreateResponse, UsageSyncRequest, UsageSyncResponse,
 };
 use h4rn_transport::keys::DeviceIdentity;
 use reqwest::Method;
@@ -501,6 +501,12 @@ impl ConnectClient {
     /// Mirrors one remote-action audit entry.
     pub async fn post_audit(&self, request: AuditIngestRequest) -> Result<()> {
         self.authorized_empty(Method::POST, "/v1/audit", Some(&request))
+            .await
+    }
+
+    /// Pushes one idempotent usage batch to connect.
+    pub async fn post_usage(&self, request: &UsageSyncRequest) -> Result<UsageSyncResponse> {
+        self.authorized_json(Method::POST, "/v1/usage", Some(request))
             .await
     }
 

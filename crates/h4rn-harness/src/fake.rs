@@ -7,6 +7,8 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
@@ -23,6 +25,28 @@ pub struct FakeHarness {
     kind: HarnessKind,
     install: Option<HarnessInstall>,
     script: Option<Vec<HarnessEvent>>,
+    /// Per-session scripts, consumed in order; the last one repeats.
+    session_scripts: Option<Arc<SessionScripts>>,
+}
+
+#[derive(Debug)]
+struct SessionScripts {
+    next: AtomicUsize,
+    scripts: Vec<Vec<HarnessEvent>>,
+}
+
+impl SessionScripts {
+    /// The next script, repeating the last one once the list is exhausted.
+    fn next_script(&self) -> Vec<HarnessEvent> {
+        if self.scripts.is_empty() {
+            return Vec::new();
+        }
+        let index = self
+            .next
+            .fetch_add(1, Ordering::SeqCst)
+            .min(self.scripts.len() - 1);
+        self.scripts[index].clone()
+    }
 }
 
 impl Default for FakeHarness {
@@ -34,6 +58,7 @@ impl Default for FakeHarness {
                 version: "0.0.0-fake".into(),
             }),
             script: None,
+            session_scripts: None,
         }
     }
 }
@@ -58,6 +83,21 @@ impl FakeHarness {
     pub fn with_events(events: Vec<HarnessEvent>) -> Self {
         Self {
             script: Some(events),
+            ..Self::default()
+        }
+    }
+
+    /// A harness that emits a different script for each new turn.
+    ///
+    /// The first script runs when the session starts; later scripts run when
+    /// the daemon sends another input, so a test can model "first turn hits a
+    /// limit, the resumed turn succeeds". The last script repeats.
+    pub fn with_session_scripts(scripts: Vec<Vec<HarnessEvent>>) -> Self {
+        Self {
+            session_scripts: Some(Arc::new(SessionScripts {
+                next: AtomicUsize::new(0),
+                scripts,
+            })),
             ..Self::default()
         }
     }
@@ -94,8 +134,15 @@ impl Harness for FakeHarness {
             .unwrap_or_else(|| format!("fake-{}", uuid_like(&spec.workspace)));
         send(&sender, HarnessEvent::SessionStarted { session_id });
 
-        if let Some(script) = &self.script {
-            for event in script {
+        let session_scripts = self.session_scripts.clone();
+        let primed = session_scripts.is_some();
+        let initial = match &session_scripts {
+            Some(scripts) => scripts.next_script(),
+            None => self.script.clone().unwrap_or_default(),
+        };
+        let scripted = session_scripts.is_some() || self.script.is_some();
+        if scripted {
+            for event in &initial {
                 send(&sender, event.clone());
             }
         }
@@ -105,6 +152,8 @@ impl Harness for FakeHarness {
             sender,
             receiver: Some(receiver),
             script: self.script.clone(),
+            session_scripts,
+            primed,
             closed: false,
         }))
     }
@@ -116,6 +165,9 @@ pub struct FakeSession {
     sender: UnboundedSender<HarnessEvent>,
     receiver: Option<UnboundedReceiver<HarnessEvent>>,
     script: Option<Vec<HarnessEvent>>,
+    session_scripts: Option<Arc<SessionScripts>>,
+    /// The daemon's first `send` is the input that started the scripted turn.
+    primed: bool,
     closed: bool,
 }
 
@@ -127,6 +179,17 @@ impl HarnessSession for FakeSession {
                 harness: self.kind,
                 message: "session is shut down".into(),
             });
+        }
+
+        if let Some(scripts) = &self.session_scripts {
+            if self.primed {
+                self.primed = false;
+                return Ok(());
+            }
+            for event in scripts.next_script() {
+                send(&self.sender, event);
+            }
+            return Ok(());
         }
 
         if self.script.is_some() {

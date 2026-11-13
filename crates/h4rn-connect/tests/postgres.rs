@@ -464,3 +464,131 @@ async fn secrets_audit_hosts_and_device_revocation_work_through_the_store() {
     .unwrap();
     assert_eq!(live, 0);
 }
+
+fn usage_row(row_id: &str, started: &str, output: u64, deduped: bool) -> serde_json::Value {
+    serde_json::json!({
+        "row_id": row_id,
+        "thread_id": "th_meter",
+        "run_id": format!("run_{row_id}"),
+        "workspace": "/repo",
+        "machine": "host",
+        "account": null,
+        "harness": "claude-code",
+        "model": "claude-sonnet-5",
+        "provider": "anthropic",
+        "credential": null,
+        "source": if deduped { "proxy_reported" } else { "self_metered" },
+        "correlation_id": format!("req_{row_id}"),
+        "tokens_in": 100,
+        "tokens_out": output,
+        "tokens_cached_read": 50,
+        "tokens_cached_creation": 10,
+        "cost_micros": 1234,
+        "cost_source": "price_table",
+        "price_table": "2026-11",
+        "ttft_ms": 100,
+        "tps": 20.0,
+        "generation_ms": 10_000,
+        "wall_ms": 12_000,
+        "started_at": started,
+        "completed_at": started,
+        "ts": started,
+        "raw": {"source": "test"},
+        "deduped": deduped
+    })
+}
+
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn usage_sync_is_idempotent_and_aggregates_by_bucket() {
+    let state = test_state().await;
+    let daemon = actor(&state, ConnectDeviceKind::Daemon, Some("meter-machine")).await;
+
+    let first = usage_row("usage_1", "2026-11-13T12:05:00Z", 200, false);
+    let second = usage_row("usage_2", "2026-11-13T12:35:00Z", 6, false);
+    let deduped = usage_row("usage_3", "2026-11-13T12:40:00Z", 9_999, true);
+    let batch = serde_json::json!({"rows": [first, second]});
+
+    let (status, body) = send(
+        &state,
+        request(
+            Method::POST,
+            "/v1/usage",
+            Some(&daemon),
+            Some(batch.clone()),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["accepted"], 2);
+    assert_eq!(body["duplicates"], 0);
+
+    // A retried batch must not double count.
+    let (status, body) = send(
+        &state,
+        request(Method::POST, "/v1/usage", Some(&daemon), Some(batch)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["accepted"], 0);
+    assert_eq!(body["duplicates"], 2);
+
+    let (status, body) = send(
+        &state,
+        request(
+            Method::POST,
+            "/v1/usage",
+            Some(&daemon),
+            Some(serde_json::json!({"rows": [deduped]})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["accepted"], 1);
+
+    let (status, report) = send(
+        &state,
+        request(
+            Method::GET,
+            "/v1/usage/aggregate?scope=thread&scope_id=th_meter&group_by=model&bucket=hour&since=2026-11-13T00:00:00Z&until=2026-11-14T00:00:00Z",
+            Some(&daemon),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report["totals"]["turns"], 2);
+    assert_eq!(report["totals"]["input_tokens"], 200);
+    assert_eq!(report["totals"]["output_tokens"], 206);
+    assert_eq!(report["totals"]["cached_input_tokens"], 100);
+    assert_eq!(report["totals"]["cost_micros"], 2_468);
+    assert_eq!(report["groups"].as_array().unwrap().len(), 1);
+    assert_eq!(report["groups"][0]["key"], "claude-sonnet-5");
+    let buckets = report["buckets"].as_array().unwrap();
+    assert_eq!(buckets.len(), 1, "both turns are in the same hour");
+    assert_eq!(buckets[0]["totals"]["turns"], 2);
+
+    // Another account cannot see the first account's rows.
+    let stranger = actor(&state, ConnectDeviceKind::Desktop, None).await;
+    let (status, report) = send(
+        &state,
+        request(
+            Method::GET,
+            "/v1/usage/aggregate?scope=global",
+            Some(&stranger),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{report}");
+    assert_eq!(report["totals"]["turns"], 0);
+
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM usage_events WHERE user_id = $1 AND row_id LIKE 'usage_%'",
+    )
+    .bind(daemon.user.id)
+    .fetch_one(state.store.pool())
+    .await
+    .unwrap();
+    assert_eq!(stored, 3, "idempotent retries store one row per row_id");
+}

@@ -252,7 +252,8 @@ impl Client {
                 ServerFrame::Event { event, .. } => return event,
                 ServerFrame::Response { .. }
                 | ServerFrame::TerminalEvent { .. }
-                | ServerFrame::ProxyEvent { .. } => {}
+                | ServerFrame::ProxyEvent { .. }
+                | ServerFrame::UsageEvent { .. } => {}
             }
         }
     }

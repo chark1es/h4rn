@@ -1,0 +1,143 @@
+# Metering and auto-resume
+
+Phase 5 adds a durable usage ledger, provider-limit tracking and automatic
+resume after a rate limit (ADR-024). The ledger is local first: every turn is
+metered from the harness event stream, stored in SQLite next to the daemon's
+other data, and only then synced to h4rn-connect. Proxy reports are enrichment,
+never the source of truth.
+
+## What is measured
+
+| Metric | Definition |
+| --- | --- |
+| Input tokens | Prompt tokens reported by the harness for the turn, including cached input. |
+| Output tokens | Completion tokens for the turn. |
+| Cached input (read) | Prompt tokens served from the provider's cache. |
+| Cached creation | Prompt tokens written to the provider's cache. |
+| TTFT | Turn start to the first `TextDelta`, in milliseconds. |
+| Generation time | First token to turn end, minus the union of tool-call intervals. |
+| TPS | Output tokens divided by generation time. Tool time never counts. |
+| Wall time | Turn start to the turn's `TurnCompleted`. |
+| Active | Sum of turn wall time for the queried threads. |
+| Idle | Runtime minus active: the gap between the first turn start and the last turn completion. |
+| Runtime | First turn start to last turn completion across the queried threads. |
+| Cost | See [Cost provenance](#cost-provenance). |
+| Turns | Counted ledger rows, after dedupe. |
+
+TTFT and TPS are zero until the first token arrives. A turn that never emits a
+token still contributes tokens, cost and wall time but has no TTFT/TPS mean. A
+turn that completes while a tool is still running counts the tool time up to
+that moment.
+
+The same arithmetic applies before a row exists: `UsageTick` frames are
+throttled to about one per second per running turn and carry the live counters,
+TTFT, TPS, elapsed and tool time. Ticks are ephemeral and carry no sequence
+number; the durable row is written when the turn completes.
+
+## Where the numbers come from
+
+1. **Harness stream (always).** `Usage` events within a turn are merged;
+   `TurnCompleted.usage` replaces the accumulated counters when it carries
+   accounting. The adapter's own turn report fills gaps when the completion
+   event has no usage. This is the self-metered row and it always counts.
+2. **CLIProxyAPI performance fork (optional).** When the profile's capabilities
+   include `/v8/management/performance`, the daemon polls the last hour every
+   60 seconds and stores one `proxy_reported` row per call with a stable
+   `proxy_<profile>_<request-id>` row id. Retries of the same call update
+   nothing.
+3. **Harness cost.** If the turn reports `cost_micros`, that value wins and the
+   row's provenance is `harness_reported`.
+
+### Dedupe rule
+
+Self-metered rows always count. A proxy-reported row counts only when it is
+**not** already covered by a self-metered row, matched in this order:
+
+1. the same `(thread_id, run_id)`, or
+2. the same `correlation_id` (the proxy request id when the fork echoes one),
+   or
+3. the same `provider` and `model` within ±120 seconds of the self-metered
+   turn completion.
+
+Matched proxy rows are stored with `deduped = true` for reconciliation and are
+excluded from every report and from the synced total. This is what prevents a
+turn from being counted twice when the harness and the proxy both observe it.
+
+## Cost provenance
+
+Each row records a `cost_source`:
+
+- `harness_reported` — the adapter supplied a cost. It wins over any estimate.
+- `price_table` — estimated from the built-in price table; `price_table`
+  records the table version used.
+- `proxy_reported` — supplied by the proxy.
+- `unknown` — no price is known. The cost is zero, not free; the UI shows the
+  provenance so an unpriced model is visible.
+
+Prices are per million tokens and split plain input, output, cached read and
+cached creation. Unknown models are deliberately unpriced rather than silently
+assigned a default.
+
+## Limits and resets
+
+A harness limit becomes a `LimitHit` with the harness, provider/account, model,
+`reset_at` (when the provider says), any consumption numbers and the provider's
+message. The daemon records it, keeps the thread in Working and sets
+`AgentState::Scheduled` when auto-resume is armed. `GetLimits` returns the
+history plus the current policy, and `ListResets` returns schedules and history.
+
+### Scheduling
+
+- **Known reset inside `max_wait`**: resume exactly at the reset plus
+  deterministic jitter.
+- **Known reset beyond `max_wait`**: retry at the cap and say why, instead of
+  abandoning the thread.
+- **Unknown reset**: capped exponential backoff
+  `min(30 s × 2^attempt, 15 min, max_wait)`; the reason says the provider did
+  not report a reset. h4rn never invents a provider reset it did not observe.
+
+Schedules are persisted in SQLite and replayed after a daemon restart. While a
+schedule is armed the thread stays in Working, queued input is held, and the
+schedule can be cancelled (`CancelResume`) or fired immediately (`ResumeNow`).
+
+When a schedule fires, the daemon starts a new turn with the policy prompt and
+marks the schedule `Fired`. With `failover = true` and an active proxy profile,
+it asks the proxy for another model/account that is not cooling down, records
+that choice on the schedule (and emits it in `ScheduleChanged`), and uses the
+model for the resumed session. A failed resume moves to `Waiting` with
+`last_error` instead of silently losing the thread.
+
+## Requests and events
+
+Client requests: `GetUsage`, `GetLimits`, `ListResets`, `CancelResume`,
+`ResumeNow`, `SetAutoResumePolicy`.
+
+Ephemeral server frames (`ServerFrame::UsageEvent`): `UsageTick`,
+`LimitStatus`, `ScheduleChanged`. Durable lifecycle changes
+(`usage_limit_hit`, `thread_upserted`) stay in the sequenced event log.
+
+`GetUsage` supports thread, workspace, machine and global scopes, grouping by
+thread/workspace/machine/harness/model, and optional hour or day buckets.
+
+## Syncing to connect
+
+The daemon pushes unsynced rows in batches of up to 200 every 30 seconds when
+signed in. `row_id` is the idempotency key: the connect schema enforces one row
+per `(user_id, row_id)` and a retried batch reports duplicates instead of
+storing twice. Rows are marked synced only after a successful response.
+
+`POST /v1/usage` ingests a batch; `GET /v1/usage/aggregate` returns the same
+report shape as `GetUsage` and excludes `deduped` rows. The connect migration
+adds the Phase 5 columns and the unique row index to the existing
+`usage_events` table, plus indexes for per-user series and per-workspace
+queries. Hour and day buckets come from Postgres `date_trunc`, so global
+aggregates use the same definitions as the local ledger.
+
+## Files and configuration
+
+- `h4rn-meter` — pure turn math, price table, scheduler, ledger, hub.
+- `h4rn-protocol/src/usage.rs` — wire types for reports, limits, schedules and
+  sync.
+- Daemon `meter.db` (under the data directory) — ledger, limits and schedules;
+  separate from `events.db`.
+- `Config::meter_db_path()` — override point for the ledger location.

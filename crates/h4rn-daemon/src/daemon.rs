@@ -172,6 +172,15 @@ impl DaemonBuilder {
         );
         manager.set_proxy(Arc::clone(&proxy));
 
+        // Durable metering and auto-resume share the daemon data directory but
+        // own a separate SQLite file so ledger writes never block the journal.
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(self.config.meter_db_path())
+                .await
+                .map_err(|error| anyhow::anyhow!("open usage ledger: {error}"))?,
+        );
+        manager.set_meter(Arc::clone(&meter));
+
         let fs = Arc::new(
             FsService::new(&self.config.data_dir)
                 .map_err(|error| anyhow::anyhow!("open filesystem service: {error}"))?,
@@ -234,6 +243,7 @@ impl DaemonBuilder {
             remote,
             supervisor: self.supervisor,
             proxy,
+            meter,
         })
     }
 }
@@ -251,6 +261,7 @@ pub struct Daemon {
     remote: Option<Arc<RemoteState>>,
     supervisor: Arc<ProcessSupervisor>,
     proxy: Arc<h4rn_proxy::ProxyService>,
+    meter: Arc<h4rn_meter::MeterHub>,
 }
 
 impl Daemon {
@@ -277,6 +288,11 @@ impl Daemon {
     /// CLIProxyAPI profile service (tests and diagnostics).
     pub fn proxy(&self) -> Arc<h4rn_proxy::ProxyService> {
         Arc::clone(&self.proxy)
+    }
+
+    /// Durable metering hub (tests and diagnostics).
+    pub fn meter(&self) -> Arc<h4rn_meter::MeterHub> {
+        Arc::clone(&self.meter)
     }
 
     /// Binds the primary and optional extra listener.
@@ -338,9 +354,21 @@ impl Daemon {
             remote: remote.as_ref().map(|remote| Arc::clone(&remote.audit)),
             started: std::time::Instant::now(),
             proxy: Arc::clone(&self.proxy),
+            meter: Arc::clone(&self.meter),
         };
 
         let mut remote_tasks = Vec::new();
+        remote_tasks.push(tokio::spawn(proxy_usage_ingest_loop(
+            Arc::clone(&self.proxy),
+            Arc::clone(&self.meter),
+            self.hosts.local_id().as_str().to_owned(),
+        )));
+        if let Some(remote) = &remote {
+            remote_tasks.push(tokio::spawn(usage_sync_loop(
+                Arc::clone(&self.meter),
+                Arc::clone(&remote.client),
+            )));
+        }
         if let Some(remote) = &remote
             && let Some(service) = &secure
         {
@@ -466,6 +494,145 @@ fn secure_from_env(
         options = options.with_psk(psk);
     }
     Ok(Some(Arc::new(SecureService::new(options))))
+}
+
+/// Periodically ingests the fork's per-call performance records.
+///
+/// Rows get a stable proxy-derived id, so polling the same window twice is
+/// idempotent. Dedupe against h4rn's own observation lives in the ledger, not
+/// here: this loop never decides to skip a record on its own.
+async fn proxy_usage_ingest_loop(
+    proxy: Arc<h4rn_proxy::ProxyService>,
+    meter: Arc<h4rn_meter::MeterHub>,
+    machine: String,
+) {
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        let until = chrono::Utc::now();
+        let since = until - chrono::Duration::hours(1);
+        for profile in proxy.profiles() {
+            let supports = profile
+                .capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.performance);
+            if !supports {
+                continue;
+            }
+            match proxy.performance(&profile.id, since, until, 500).await {
+                Ok(calls) => {
+                    for call in calls {
+                        let model = call.model.clone().unwrap_or_default();
+                        let estimate = meter.prices().estimate(
+                            &model,
+                            call.output_tokens.saturating_mul(3),
+                            call.output_tokens,
+                            0,
+                            0,
+                        );
+                        let row = h4rn_meter::UsageRow {
+                            row_id: format!("proxy_{}_{}", profile.id.as_str(), call.stable_id()),
+                            thread_id: None,
+                            run_id: None,
+                            workspace: None,
+                            machine: Some(machine.clone()),
+                            account: None,
+                            harness: None,
+                            model: call.model.clone(),
+                            provider: provider_label(call.provider.as_deref(), &model),
+                            credential: None,
+                            source: h4rn_protocol::UsageProvenance::ProxyReported,
+                            correlation_id: Some(call.stable_id()),
+                            tokens_in: 0,
+                            tokens_out: call.output_tokens,
+                            tokens_cached_read: 0,
+                            tokens_cached_creation: 0,
+                            cost_micros: estimate.cost_micros,
+                            cost_source: estimate.source,
+                            price_table: estimate.price_table,
+                            ttft_ms: call.ttft_ms,
+                            tps: call.tps,
+                            generation_ms: call.duration_ms.unwrap_or(0),
+                            wall_ms: call.duration_ms.unwrap_or(0),
+                            started_at: call.requested_at,
+                            completed_at: call.completed_at(),
+                            ts: call.completed_at(),
+                            raw: serde_json::to_value(&call).ok(),
+                            deduped: false,
+                            synced: false,
+                        };
+                        if let Err(error) = meter.record_proxy_row(row).await {
+                            tracing::warn!(%error, "could not record a proxy performance row");
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        profile = %profile.id,
+                        %error,
+                        "proxy performance ingest skipped"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A normalised provider label, preferring the model family so a proxy row and
+/// a self-metered row agree even when one side reports a vendor alias.
+fn provider_label(proxy_provider: Option<&str>, model: &str) -> Option<String> {
+    let model = model.to_ascii_lowercase();
+    if model.contains("claude") || model.contains("sonnet") || model.contains("opus") {
+        Some("anthropic".into())
+    } else if model.starts_with("gpt") || model.contains("o3") || model.contains("o4") {
+        Some("openai".into())
+    } else if model.contains("gemini") {
+        Some("google".into())
+    } else if model.contains("grok") {
+        Some("xai".into())
+    } else {
+        proxy_provider.map(str::to_owned)
+    }
+}
+
+/// Pushes unsynced ledger rows to h4rn-connect in idempotent batches.
+async fn usage_sync_loop(meter: Arc<h4rn_meter::MeterHub>, client: Arc<ConnectClient>) {
+    let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        ticker.tick().await;
+        if !client.is_logged_in() {
+            continue;
+        }
+        let rows = match meter.unsynced(200).await {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(%error, "could not read unsynced usage rows");
+                continue;
+            }
+        };
+        if rows.is_empty() {
+            continue;
+        }
+        let request = h4rn_protocol::UsageSyncRequest {
+            rows: rows.iter().map(|row| row.to_sync_row()).collect(),
+        };
+        match client.post_usage(&request).await {
+            Ok(response) => {
+                let ids: Vec<String> = rows.iter().map(|row| row.row_id.clone()).collect();
+                if let Err(error) = meter.mark_synced(&ids).await {
+                    tracing::warn!(%error, "could not mark synced usage rows");
+                }
+                tracing::debug!(
+                    accepted = response.accepted,
+                    duplicates = response.duplicates,
+                    "synced the usage ledger"
+                );
+            }
+            Err(error) => tracing::warn!(%error, "usage sync failed; the rows stay queued"),
+        }
+    }
 }
 
 /// Reports hosts and address candidates, then keeps presence fresh.

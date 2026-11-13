@@ -8,9 +8,12 @@
 
 use chrono::{DateTime, Duration, Utc};
 use h4rn_protocol::{
-    ConnectDevice, ConnectDeviceKind, ConnectSessionTokens, ConnectUser, MachineHost,
-    MachineHostKind, MachineSummary, PairingState, PresenceUpdate, UsageEvent,
+    ConnectDevice, ConnectDeviceKind, ConnectSessionTokens, ConnectUser, CostSource, MachineHost,
+    MachineHostKind, MachineSummary, PairingState, PresenceUpdate, UsageBucket, UsageBucketPoint,
+    UsageEvent, UsageGroup, UsageGroupBy, UsageProvenance, UsageReport, UsageScope,
+    UsageSyncResponse, UsageSyncRow, UsageTotals,
 };
+use sqlx::Row as _;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{FromRow, PgPool, Postgres, Transaction};
 use uuid::Uuid;
@@ -1716,6 +1719,287 @@ impl Store {
         .fetch_one(&self.pool)
         .await?;
         Ok(id)
+    }
+
+    /// Stores a ledger batch idempotently by `(user_id, row_id)`.
+    pub async fn sync_usage(
+        &self,
+        user_id: Uuid,
+        machine_id: Option<Uuid>,
+        rows: &[UsageSyncRow],
+    ) -> Result<UsageSyncResponse> {
+        let mut response = UsageSyncResponse::default();
+        let mut transaction = self.pool.begin().await?;
+        for row in rows {
+            let result = sqlx::query(
+                "INSERT INTO usage_events
+                 (user_id, machine_id, row_id, thread_id, run_id, workspace, machine, account,
+                  harness, model, provider, credential_id, source, correlation_id, tokens_in,
+                  tokens_out, tokens_cached, tokens_cached_creation, cost_micros, cost_source,
+                  price_table, ttft_ms, tps, generation_ms, wall_ms, started_at, completed_at,
+                  ts, raw, deduped, synced_at)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,
+                         $19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,now())
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(user_id)
+            .bind(machine_id)
+            .bind(&row.row_id)
+            .bind(&row.thread_id)
+            .bind(&row.run_id)
+            .bind(&row.workspace)
+            .bind(&row.machine)
+            .bind(&row.account)
+            .bind(&row.harness)
+            .bind(&row.model)
+            .bind(&row.provider)
+            .bind(&row.credential)
+            .bind(provenance_label(row.source))
+            .bind(&row.correlation_id)
+            .bind(row.tokens_in as i64)
+            .bind(row.tokens_out as i64)
+            .bind(row.tokens_cached_read as i64)
+            .bind(row.tokens_cached_creation as i64)
+            .bind(row.cost_micros as i64)
+            .bind(cost_source_label(row.cost_source))
+            .bind(&row.price_table)
+            .bind(row.ttft_ms.map(|value| value as i64))
+            .bind(row.tps)
+            .bind(row.generation_ms as i64)
+            .bind(row.wall_ms as i64)
+            .bind(row.started_at)
+            .bind(row.completed_at)
+            .bind(row.ts)
+            .bind(&row.raw)
+            .bind(row.deduped)
+            .execute(&mut *transaction)
+            .await?;
+            if result.rows_affected() > 0 {
+                response.accepted += 1;
+            } else {
+                response.duplicates += 1;
+            }
+        }
+        transaction.commit().await?;
+        Ok(response)
+    }
+
+    /// Aggregates the account's synced ledger.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn aggregate_usage(
+        &self,
+        user_id: Uuid,
+        scope: UsageScope,
+        scope_id: Option<&str>,
+        since: Option<DateTime<Utc>>,
+        until: Option<DateTime<Utc>>,
+        group_by: UsageGroupBy,
+        bucket: Option<UsageBucket>,
+    ) -> Result<UsageReport> {
+        let (thread, workspace, machine) = match scope {
+            UsageScope::Thread => (scope_id, None, None),
+            UsageScope::Workspace => (None, scope_id, None),
+            UsageScope::Machine => (None, None, scope_id),
+            UsageScope::Global => (None, None, None),
+        };
+        let filter = "FROM usage_events
+             WHERE user_id = $1
+               AND NOT deduped
+               AND ($2::text IS NULL OR thread_id = $2)
+               AND ($3::text IS NULL OR workspace = $3)
+               AND ($4::text IS NULL OR machine = $4)
+               AND ($5::timestamptz IS NULL OR ts >= $5)
+               AND ($6::timestamptz IS NULL OR ts < $6)";
+        let query = format!(
+            "SELECT
+                COALESCE(SUM(tokens_in), 0)::bigint AS input_tokens,
+                COALESCE(SUM(tokens_out), 0)::bigint AS output_tokens,
+                COALESCE(SUM(tokens_cached), 0)::bigint AS cached_input_tokens,
+                COALESCE(SUM(tokens_cached_creation), 0)::bigint AS cached_creation_tokens,
+                COALESCE(SUM(cost_micros), 0)::bigint AS cost_micros,
+                COALESCE(AVG(ttft_ms) FILTER (WHERE ttft_ms IS NOT NULL), 0)::float8 AS ttft_ms,
+                COALESCE(AVG(tps) FILTER (WHERE tps IS NOT NULL), 0)::float8 AS tps,
+                COALESCE(SUM(wall_ms), 0)::bigint AS wall_ms,
+                COALESCE(SUM(generation_ms), 0)::bigint AS generation_ms,
+                COUNT(*)::bigint AS turns,
+                MIN(COALESCE(started_at, ts)) AS first_at,
+                MAX(COALESCE(completed_at, ts)) AS last_at
+             {filter}"
+        );
+        let total = sqlx::query(&query)
+            .bind(user_id)
+            .bind(thread)
+            .bind(workspace)
+            .bind(machine)
+            .bind(since)
+            .bind(until)
+            .fetch_one(&self.pool)
+            .await?;
+        let totals = totals_from_pg(&total);
+
+        let mut groups = Vec::new();
+        if let Some(expression) = group_expression(group_by) {
+            let query = format!(
+                "SELECT {expression} AS group_key,
+                    COALESCE(SUM(tokens_in), 0)::bigint AS input_tokens,
+                    COALESCE(SUM(tokens_out), 0)::bigint AS output_tokens,
+                    COALESCE(SUM(tokens_cached), 0)::bigint AS cached_input_tokens,
+                    COALESCE(SUM(tokens_cached_creation), 0)::bigint AS cached_creation_tokens,
+                    COALESCE(SUM(cost_micros), 0)::bigint AS cost_micros,
+                    COALESCE(AVG(ttft_ms) FILTER (WHERE ttft_ms IS NOT NULL), 0)::float8 AS ttft_ms,
+                    COALESCE(AVG(tps) FILTER (WHERE tps IS NOT NULL), 0)::float8 AS tps,
+                    COALESCE(SUM(wall_ms), 0)::bigint AS wall_ms,
+                    COALESCE(SUM(generation_ms), 0)::bigint AS generation_ms,
+                    COUNT(*)::bigint AS turns,
+                    MIN(COALESCE(started_at, ts)) AS first_at,
+                    MAX(COALESCE(completed_at, ts)) AS last_at
+                 {filter}
+                 GROUP BY group_key
+                 ORDER BY group_key ASC"
+            );
+            let rows = sqlx::query(&query)
+                .bind(user_id)
+                .bind(thread)
+                .bind(workspace)
+                .bind(machine)
+                .bind(since)
+                .bind(until)
+                .fetch_all(&self.pool)
+                .await?;
+            groups = rows
+                .iter()
+                .map(|row| UsageGroup {
+                    key: row.try_get::<String, _>("group_key").unwrap_or_default(),
+                    totals: totals_from_pg(row),
+                })
+                .collect();
+        }
+
+        let mut buckets = Vec::new();
+        if let Some(width) = bucket {
+            let unit = match width {
+                UsageBucket::Hour => "hour",
+                UsageBucket::Day => "day",
+            };
+            let query = format!(
+                "SELECT date_trunc($7, COALESCE(ts, completed_at)) AS bucket_at,
+                    COALESCE(SUM(tokens_in), 0)::bigint AS input_tokens,
+                    COALESCE(SUM(tokens_out), 0)::bigint AS output_tokens,
+                    COALESCE(SUM(tokens_cached), 0)::bigint AS cached_input_tokens,
+                    COALESCE(SUM(tokens_cached_creation), 0)::bigint AS cached_creation_tokens,
+                    COALESCE(SUM(cost_micros), 0)::bigint AS cost_micros,
+                    COALESCE(AVG(ttft_ms) FILTER (WHERE ttft_ms IS NOT NULL), 0)::float8 AS ttft_ms,
+                    COALESCE(AVG(tps) FILTER (WHERE tps IS NOT NULL), 0)::float8 AS tps,
+                    COALESCE(SUM(wall_ms), 0)::bigint AS wall_ms,
+                    COALESCE(SUM(generation_ms), 0)::bigint AS generation_ms,
+                    COUNT(*)::bigint AS turns,
+                    MIN(COALESCE(started_at, ts)) AS first_at,
+                    MAX(COALESCE(completed_at, ts)) AS last_at
+                 {filter}
+                 GROUP BY bucket_at
+                 ORDER BY bucket_at ASC"
+            );
+            let rows = sqlx::query(&query)
+                .bind(user_id)
+                .bind(thread)
+                .bind(workspace)
+                .bind(machine)
+                .bind(since)
+                .bind(until)
+                .bind(unit)
+                .fetch_all(&self.pool)
+                .await?;
+            buckets = rows
+                .iter()
+                .filter_map(|row| {
+                    let start: DateTime<Utc> = row.try_get("bucket_at").ok()?;
+                    let end = match width {
+                        UsageBucket::Hour => start + Duration::hours(1),
+                        UsageBucket::Day => start + Duration::days(1),
+                    };
+                    Some(UsageBucketPoint {
+                        start,
+                        end,
+                        totals: totals_from_pg(row),
+                    })
+                })
+                .collect();
+        }
+
+        Ok(UsageReport {
+            scope,
+            scope_id: scope_id.map(str::to_owned),
+            range: h4rn_protocol::UsageRange { since, until },
+            group_by,
+            bucket,
+            totals,
+            buckets,
+            groups,
+        })
+    }
+}
+
+fn group_expression(group_by: UsageGroupBy) -> Option<&'static str> {
+    match group_by {
+        UsageGroupBy::None => None,
+        UsageGroupBy::Thread => Some("COALESCE(thread_id, 'unscoped')"),
+        UsageGroupBy::Workspace => Some("COALESCE(workspace, 'unscoped')"),
+        UsageGroupBy::Machine => Some("COALESCE(machine, 'unscoped')"),
+        UsageGroupBy::Harness => Some("COALESCE(harness, 'unknown')"),
+        UsageGroupBy::Model => Some("COALESCE(model, 'unknown')"),
+    }
+}
+
+fn totals_from_pg(row: &sqlx::postgres::PgRow) -> UsageTotals {
+    let wall_ms = row.try_get::<i64, _>("wall_ms").unwrap_or(0).max(0) as u64;
+    let first_at = row
+        .try_get::<Option<DateTime<Utc>>, _>("first_at")
+        .ok()
+        .flatten();
+    let last_at = row
+        .try_get::<Option<DateTime<Utc>>, _>("last_at")
+        .ok()
+        .flatten();
+    let runtime_ms = match (first_at, last_at) {
+        (Some(first), Some(last)) => (last - first).num_milliseconds().max(0) as u64,
+        _ => wall_ms,
+    };
+    UsageTotals {
+        input_tokens: row.try_get::<i64, _>("input_tokens").unwrap_or(0).max(0) as u64,
+        output_tokens: row.try_get::<i64, _>("output_tokens").unwrap_or(0).max(0) as u64,
+        cached_input_tokens: row
+            .try_get::<i64, _>("cached_input_tokens")
+            .unwrap_or(0)
+            .max(0) as u64,
+        cached_creation_tokens: row
+            .try_get::<i64, _>("cached_creation_tokens")
+            .unwrap_or(0)
+            .max(0) as u64,
+        cost_micros: row.try_get::<i64, _>("cost_micros").unwrap_or(0).max(0) as u64,
+        ttft_ms: row.try_get::<f64, _>("ttft_ms").unwrap_or(0.0).max(0.0) as u64,
+        tps: row.try_get::<f64, _>("tps").unwrap_or(0.0),
+        wall_ms,
+        generation_ms: row.try_get::<i64, _>("generation_ms").unwrap_or(0).max(0) as u64,
+        active_ms: wall_ms,
+        idle_ms: runtime_ms.saturating_sub(wall_ms),
+        runtime_ms,
+        turns: row.try_get::<i64, _>("turns").unwrap_or(0).max(0) as u64,
+    }
+}
+
+fn provenance_label(source: UsageProvenance) -> &'static str {
+    match source {
+        UsageProvenance::SelfMetered => "self_metered",
+        UsageProvenance::ProxyReported => "proxy_reported",
+    }
+}
+
+fn cost_source_label(source: CostSource) -> &'static str {
+    match source {
+        CostSource::HarnessReported => "harness_reported",
+        CostSource::PriceTable => "price_table",
+        CostSource::ProxyReported => "proxy_reported",
+        CostSource::Unknown => "unknown",
     }
 }
 

@@ -74,6 +74,8 @@ pub struct AppState {
     pub remote: Option<Arc<RemoteAudit>>,
     /// CLIProxyAPI profiles and routing (ADR-015).
     pub proxy: Arc<h4rn_proxy::ProxyService>,
+    /// Durable metering, limits and auto-resume (ADR-024).
+    pub meter: Arc<h4rn_meter::MeterHub>,
     /// Server boot time, for `/healthz`.
     pub started: Instant,
 }
@@ -389,6 +391,13 @@ where
         Arc::clone(&overflowed),
         Arc::clone(&notify),
     ));
+    let usage_forward = tokio::spawn(usage_forward_loop(
+        state.meter.subscribe(),
+        tx.clone(),
+        Arc::clone(&ready),
+        Arc::clone(&overflowed),
+        Arc::clone(&notify),
+    ));
 
     let viewer_id = state.terminals.next_viewer_id();
     let mut connection = Connection {
@@ -431,6 +440,7 @@ where
 
     forward.abort();
     proxy_forward.abort();
+    usage_forward.abort();
     // Detaching a socket never kills a terminal; it only removes this
     // connection's viewers so the PTY keeps running for the next attach.
     connection
@@ -1155,6 +1165,73 @@ impl Connection {
                 Err(error) => Err(error.into_proto()),
             },
             // ----------------------------------------------------------
+            // Phase 5: metering, limits and auto-resume (ADR-024).
+            // ----------------------------------------------------------
+            ClientRequest::GetUsage {
+                scope,
+                scope_id,
+                range,
+                group_by,
+                bucket,
+            } => {
+                if matches!(
+                    scope,
+                    h4rn_protocol::UsageScope::Thread | h4rn_protocol::UsageScope::Workspace
+                ) && scope_id.is_none()
+                {
+                    Err(ProtoError::new(
+                        ProtoErrorCode::InvalidRequest,
+                        "a thread or workspace usage query needs a scope_id",
+                        "Pass the thread id or workspace path in scope_id",
+                    ))
+                } else {
+                    self.state
+                        .manager
+                        .usage_report(h4rn_meter::ReportQuery {
+                            scope,
+                            scope_id,
+                            range,
+                            group_by,
+                            bucket,
+                        })
+                        .await
+                        .map(|report| ResponseBody::UsageReport { report })
+                        .map_err(crate::threads::ManagerError::into_proto)
+                }
+            }
+            ClientRequest::GetLimits => self
+                .state
+                .manager
+                .limits_report()
+                .await
+                .map(|report| ResponseBody::Limits { report })
+                .map_err(crate::threads::ManagerError::into_proto),
+            ClientRequest::ListResets => self
+                .state
+                .manager
+                .resets()
+                .await
+                .map(|resets| ResponseBody::Resets { resets })
+                .map_err(crate::threads::ManagerError::into_proto),
+            ClientRequest::CancelResume { thread_id } => self
+                .state
+                .manager
+                .cancel_resume(&thread_id)
+                .await
+                .map(|schedule| ResponseBody::ResumeChanged { schedule })
+                .map_err(crate::threads::ManagerError::into_proto),
+            ClientRequest::ResumeNow { thread_id } => self
+                .state
+                .manager
+                .resume_now(&thread_id)
+                .await
+                .map(|schedule| ResponseBody::ResumeChanged { schedule })
+                .map_err(crate::threads::ManagerError::into_proto),
+            ClientRequest::SetAutoResumePolicy { policy } => {
+                self.state.manager.set_auto_resume_policy(policy);
+                Ok(ResponseBody::Ack)
+            }
+            // ----------------------------------------------------------
             // Phase 5: CLIProxyAPI profiles (ADR-015).
             // ----------------------------------------------------------
             ClientRequest::ListProxyProfiles => Ok(ResponseBody::ProxyProfiles {
@@ -1383,6 +1460,44 @@ async fn proxy_forward_loop(
             continue;
         }
         let frame = ServerFrame::ProxyEvent { event };
+        let Ok(text) = serde_json::to_string(&frame) else {
+            continue;
+        };
+        match tx.try_send(Outbound::Text(text)) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!("client outbound queue is full; dropping the connection");
+                overflowed.store(true, Ordering::Relaxed);
+                notify.notify_waiters();
+                return;
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => return,
+        }
+    }
+}
+
+async fn usage_forward_loop(
+    mut subscription: tokio::sync::broadcast::Receiver<h4rn_protocol::UsageStreamEvent>,
+    tx: mpsc::Sender<Outbound>,
+    ready: Arc<AtomicBool>,
+    overflowed: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+) {
+    loop {
+        let event = match subscription.recv().await {
+            Ok(event) => event,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                tracing::warn!(missed, "client fell behind the usage event broadcast");
+                overflowed.store(true, Ordering::Relaxed);
+                notify.notify_waiters();
+                return;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        };
+        if !ready.load(Ordering::Relaxed) {
+            continue;
+        }
+        let frame = ServerFrame::UsageEvent { event };
         let Ok(text) = serde_json::to_string(&frame) else {
             continue;
         };
