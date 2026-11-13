@@ -291,6 +291,27 @@ pub async fn upgrade(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response> {
+    match upgrade_inner(state, client, query, headers, ws).await {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            // Metadata only: the code is stable and contains no token or proof.
+            tracing::warn!(
+                code = %error.body().code,
+                message = %error.body().message,
+                "relay connection rejected"
+            );
+            Err(error)
+        }
+    }
+}
+
+async fn upgrade_inner(
+    state: AppState,
+    client: ClientIp,
+    query: RelayAuthQuery,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Result<Response> {
     state.rate.check(
         "relay_connect",
         &client.0,

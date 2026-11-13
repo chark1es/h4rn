@@ -28,4 +28,10 @@ daemon_device_id: string | null,
 /**
  * Addressable hosts, including WSL distributions.
  */
-hosts: Array<MachineHost>, };
+hosts: Array<MachineHost>, 
+/**
+ * Advertised connection candidates (LAN, tailnet, relay), most preferred
+ * first. A client probes them in this order after the relay tells it the
+ * machine is online.
+ */
+addresses: Array<string>, };

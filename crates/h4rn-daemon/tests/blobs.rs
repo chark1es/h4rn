@@ -49,6 +49,7 @@ async fn boot() -> TestDaemon {
         bind: "127.0.0.1:0".parse().expect("bind"),
         extra_bind: None,
         log_level: "off".to_owned(),
+        tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
     };
     let daemon = DaemonBuilder::new(config)
         .with_harness(Arc::new(FakeHarness::new()))

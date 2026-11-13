@@ -64,6 +64,7 @@ async fn boot_with(options: ThreadManagerOptions, harness: FakeHarness) -> TestD
         bind: "127.0.0.1:0".parse().expect("bind"),
         extra_bind: None,
         log_level: "off".to_owned(),
+        tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
     };
 
     let daemon = DaemonBuilder::new(config)
@@ -875,6 +876,7 @@ async fn restored_threads_replay_after_a_daemon_restart() {
         bind: "127.0.0.1:0".parse().expect("bind"),
         extra_bind: None,
         log_level: "off".to_owned(),
+        tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
     };
     let options = ThreadManagerOptions {
         settings: LifecycleSettings::default()

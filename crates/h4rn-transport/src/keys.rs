@@ -11,9 +11,12 @@
 //! documented fallback, and in an injected store on wasm (the JS side persists
 //! the encoded identity and hands it back on boot).
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use thiserror::Error;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -327,12 +330,298 @@ impl KeyStore for FileKeyStore {
     }
 }
 
+/// Prefix of an encrypted secret file.
+const ENCRYPTED_PREFIX: &str = "h4rn-encv1";
+
+/// Associated data binding ciphertext to the h4rn secret-file format.
+const SECRET_AAD: &[u8] = b"h4rn-secret-v1";
+
+/// A `0600` file store encrypted with ChaCha20-Poly1305.
+///
+/// This is the fallback for headless Linux and WSL, where no OS credential
+/// store is available. The encryption key lives in a sibling `<path>.key`
+/// file, also `0600`. That defeats accidental disclosure — a file copied into a
+/// backup, sync folder or terminal scrollback is useless on its own — but it is
+/// **not** a defence against an attacker who can already read the user's data
+/// directory: they can read both files. The OS keychain remains the preferred
+/// backend; [`KeychainOrFile`] uses it whenever
+/// [`keyring::Entry::store_status`] reports a working credential store.
+#[derive(Clone, Debug)]
+pub struct EncryptedFileKeyStore {
+    path: PathBuf,
+}
+
+impl EncryptedFileKeyStore {
+    /// Creates a store rooted at `path`.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// Path of the identity file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl KeyStore for EncryptedFileKeyStore {
+    fn load(&self) -> Result<Option<DeviceIdentity>, KeyStoreError> {
+        match read_secret_file(&self.path)? {
+            Some(bytes) => {
+                let value = String::from_utf8(bytes)
+                    .map_err(|_| KeyStoreError::Malformed("identity is not UTF-8".into()))?;
+                DeviceIdentity::decode(&value).map(Some)
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn store(&self, identity: &DeviceIdentity) -> Result<(), KeyStoreError> {
+        write_secret_file(&self.path, identity.encode().as_bytes())
+    }
+
+    fn clear(&self) -> Result<(), KeyStoreError> {
+        remove_secret_file(&self.path)
+    }
+}
+
+/// Prefers the OS keychain and falls back to an encrypted file.
+///
+/// The daemon runs on desktops (keychain available) and on headless Linux or
+/// WSL (usually no secret service). Selecting once at construction keeps
+/// every later read/write on the same backend, so an identity cannot be split
+/// across two stores mid-flight.
+#[cfg(feature = "keychain")]
+#[derive(Clone, Debug)]
+pub struct KeychainOrFile {
+    keyring: Option<KeyringStore>,
+    file: EncryptedFileKeyStore,
+}
+
+#[cfg(feature = "keychain")]
+impl KeychainOrFile {
+    /// Opens the store, probing the OS keychain for `service`/`account`.
+    ///
+    /// `file_path` is used only when no credential store is available.
+    pub fn new(
+        service: impl Into<String>,
+        account: impl Into<String>,
+        file_path: impl Into<PathBuf>,
+    ) -> Self {
+        let keyring = keyring::Entry::store_status()
+            .is_ok()
+            .then(|| KeyringStore::new(service, account));
+        Self {
+            keyring,
+            file: EncryptedFileKeyStore::new(file_path),
+        }
+    }
+
+    /// Which backend was selected, for diagnostics.
+    pub fn backend(&self) -> &'static str {
+        if self.keyring.is_some() {
+            "os-keychain"
+        } else {
+            "encrypted-file"
+        }
+    }
+
+    /// Path of the encrypted fallback.
+    pub fn file_path(&self) -> &Path {
+        self.file.path()
+    }
+}
+
+#[cfg(feature = "keychain")]
+impl KeyStore for KeychainOrFile {
+    fn load(&self) -> Result<Option<DeviceIdentity>, KeyStoreError> {
+        match &self.keyring {
+            Some(store) => match store.load() {
+                Ok(identity) => Ok(identity),
+                // A broken keychain should not brick a headless host: fall back
+                // to the encrypted file, which may already hold the identity.
+                Err(_) => self.file.load(),
+            },
+            None => self.file.load(),
+        }
+    }
+
+    fn store(&self, identity: &DeviceIdentity) -> Result<(), KeyStoreError> {
+        match &self.keyring {
+            Some(store) => store.store(identity),
+            None => self.file.store(identity),
+        }
+    }
+
+    fn clear(&self) -> Result<(), KeyStoreError> {
+        match &self.keyring {
+            Some(store) => {
+                let result = store.clear();
+                let _ = self.file.clear();
+                result
+            }
+            None => self.file.clear(),
+        }
+    }
+}
+
+/// Writes `plaintext` to `path`, encrypted under a sibling key file.
+///
+/// Used for the transport identity and by the daemon for its connect session
+/// (refresh token). The file is `0600` on Unix and written atomically enough
+/// for a single-user daemon: truncate, write, `fsync`.
+pub fn write_secret_file(path: &Path, plaintext: &[u8]) -> Result<(), KeyStoreError> {
+    let key = load_or_create_file_key(path)?;
+    let cipher = ChaCha20Poly1305::new((&key).into());
+    let mut nonce_bytes = [0u8; 12];
+    getrandom::fill(&mut nonce_bytes).map_err(|_| KeyStoreError::NoRandomness)?;
+    let ciphertext = cipher
+        .encrypt(
+            Nonce::from_slice(&nonce_bytes),
+            Payload {
+                msg: plaintext,
+                aad: SECRET_AAD,
+            },
+        )
+        .map_err(|_| KeyStoreError::Backend("encrypting the secret failed".into()))?;
+    let encoded = format!(
+        "{ENCRYPTED_PREFIX}:{}:{}",
+        hex::encode(nonce_bytes),
+        hex::encode(ciphertext)
+    );
+    write_private_file(path, encoded.as_bytes())
+}
+
+/// Reads and decrypts a file written by [`write_secret_file`].
+///
+/// Returns `Ok(None)` when the file does not exist.
+pub fn read_secret_file(path: &Path) -> Result<Option<Vec<u8>>, KeyStoreError> {
+    let encoded = match std::fs::read_to_string(path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(KeyStoreError::Backend(error.to_string())),
+    };
+    let mut parts = encoded.trim().split(':');
+    if parts.next() != Some(ENCRYPTED_PREFIX) {
+        return Err(KeyStoreError::Malformed(
+            "unknown secret-file prefix".into(),
+        ));
+    }
+    let nonce = parts
+        .next()
+        .ok_or_else(|| KeyStoreError::Malformed("missing secret nonce".into()))?;
+    let ciphertext = parts
+        .next()
+        .ok_or_else(|| KeyStoreError::Malformed("missing secret ciphertext".into()))?;
+    if parts.next().is_some() {
+        return Err(KeyStoreError::Malformed("trailing secret-file data".into()));
+    }
+    let nonce = hex::decode(nonce).map_err(|error| KeyStoreError::Malformed(error.to_string()))?;
+    if nonce.len() != 12 {
+        return Err(KeyStoreError::Malformed(
+            "secret nonce is not 12 bytes".into(),
+        ));
+    }
+    let ciphertext =
+        hex::decode(ciphertext).map_err(|error| KeyStoreError::Malformed(error.to_string()))?;
+    let key = load_or_create_file_key(path)?;
+    let cipher = ChaCha20Poly1305::new((&key).into());
+    cipher
+        .decrypt(
+            Nonce::from_slice(&nonce),
+            Payload {
+                msg: &ciphertext,
+                aad: SECRET_AAD,
+            },
+        )
+        .map(Some)
+        .map_err(|_| KeyStoreError::Malformed("secret file failed to decrypt".into()))
+}
+
+/// Reads a paired-device allowlist written by the daemon.
+///
+/// Each line is one hex-encoded X25519 public key. A missing file is an empty
+/// allowlist, and malformed lines are skipped so a corrupt entry cannot lock
+/// every already-paired device out.
+pub fn read_allowlist(path: &Path) -> Result<Vec<[u8; KEY_LEN]>, KeyStoreError> {
+    let Some(bytes) = read_secret_file(path)? else {
+        return Ok(Vec::new());
+    };
+    let text = String::from_utf8(bytes)
+        .map_err(|_| KeyStoreError::Malformed("allowlist is not UTF-8".into()))?;
+    let mut keys = Vec::new();
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        match hex::decode(line) {
+            Ok(bytes) if bytes.len() == KEY_LEN => {
+                let mut key = [0u8; KEY_LEN];
+                key.copy_from_slice(&bytes);
+                keys.push(key);
+            }
+            _ => tracing::warn!("skipping a malformed allowlist entry"),
+        }
+    }
+    Ok(keys)
+}
+
+/// Removes a secret file and its key file.
+pub fn remove_secret_file(path: &Path) -> Result<(), KeyStoreError> {
+    for target in [path.to_path_buf(), key_path(path)] {
+        match std::fs::remove_file(&target) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(KeyStoreError::Backend(error.to_string())),
+        }
+    }
+    Ok(())
+}
+
+fn key_path(path: &Path) -> PathBuf {
+    let mut value = path.as_os_str().to_owned();
+    value.push(".key");
+    PathBuf::from(value)
+}
+
+fn load_or_create_file_key(path: &Path) -> Result<[u8; KEY_LEN], KeyStoreError> {
+    let key_path = key_path(path);
+    match std::fs::read_to_string(&key_path) {
+        Ok(value) => parse_key(value.trim()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut key = [0u8; KEY_LEN];
+            getrandom::fill(&mut key).map_err(|_| KeyStoreError::NoRandomness)?;
+            write_private_file(&key_path, hex::encode(key).as_bytes())?;
+            Ok(key)
+        }
+        Err(error) => Err(KeyStoreError::Backend(error.to_string())),
+    }
+}
+
+fn write_private_file(path: &Path, bytes: &[u8]) -> Result<(), KeyStoreError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| KeyStoreError::Backend(error.to_string()))?;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|error| KeyStoreError::Backend(error.to_string()))?;
+    file.write_all(bytes)
+        .map_err(|error| KeyStoreError::Backend(error.to_string()))?;
+    file.sync_all()
+        .map_err(|error| KeyStoreError::Backend(error.to_string()))?;
+    Ok(())
+}
+
 /// OS keychain storage (ADR-016).
 ///
 /// Enabled by the `keychain` feature because the Linux backend links a secret
 /// service client. The daemon and desktop shell prefer this store and fall back
-/// to [`FileKeyStore`] when [`keyring::Entry::store_status`] reports that no
-/// credential store is available.
+/// to [`EncryptedFileKeyStore`] when [`keyring::Entry::store_status`] reports
+/// that no credential store is available.
 #[cfg(feature = "keychain")]
 #[derive(Clone, Debug)]
 pub struct KeyringStore {

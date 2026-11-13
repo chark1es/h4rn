@@ -20,5 +20,11 @@ serde.workspace = true
 serde_json.workspace = true
 wasm-bindgen.workspace = true
 
+# `x25519-dalek`/`rand_core` still pull getrandom 0.2, whose `js` feature must
+# also be on for wasm32-unknown-unknown; getrandom 0.3 uses the backend cfg in
+# `.cargo/config.toml` instead.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
 [dev-dependencies]
 wasm-bindgen-test.workspace = true

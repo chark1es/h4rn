@@ -21,13 +21,13 @@ use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use chrono::Utc;
 use h4rn_protocol::{
-    AuditEntry, AuditPage, ConnectDevice, ConnectMeResponse, ConnectSessionTokens,
-    DeviceGrantPollRequest, DeviceGrantPollResponse, DeviceGrantStartRequest,
+    AuditEntry, AuditIngestRequest, AuditPage, ConnectDevice, ConnectMeResponse,
+    ConnectSessionTokens, DeviceGrantPollRequest, DeviceGrantPollResponse, DeviceGrantStartRequest,
     DeviceGrantStartResponse, DeviceGrantStatus, DeviceRegistration, DeviceRenameRequest,
     LoginCompleteRequest, LoginCompleteResponse, LoginStartRequest, LoginStartResponse,
-    LogoutRequest, MachineHost, MachineHostsUpdate, MachineSummary, PairingClaimRequest,
-    PairingClaimResponse, PairingCreateRequest, PairingCreateResponse, PairingInfo, ProviderInfo,
-    RefreshRequest,
+    LogoutRequest, MachineAddressesUpdate, MachineHost, MachineHostsUpdate, MachineSummary,
+    PairingClaimRequest, PairingClaimResponse, PairingCreateRequest, PairingCreateResponse,
+    PairingInfo, ProviderInfo, RefreshRequest,
 };
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
@@ -125,10 +125,11 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/devices/{id}", delete(revoke_device))
         .route("/v1/machines", get(list_machines))
         .route("/v1/machines/{id}/hosts", put(update_hosts))
+        .route("/v1/machines/{id}/addresses", put(update_addresses))
         .route("/v1/pairings", get(list_pairings).post(create_pairing))
         .route("/v1/pairings/claim", post(claim_pairing))
         .route("/v1/pairings/{id}", delete(revoke_pairing))
-        .route("/v1/audit", get(audit))
+        .route("/v1/audit", get(audit).post(ingest_audit))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             api_rate_limit,
@@ -1113,9 +1114,45 @@ async fn update_hosts(
     Ok(Json(rows.iter().map(|row| row.to_wire()).collect()))
 }
 
-// ---------------------------------------------------------------------------
-// Pairings
-// ---------------------------------------------------------------------------
+async fn update_addresses(
+    State(state): State<AppState>,
+    authed: Authed,
+    Path(id): Path<String>,
+    Json(request): Json<MachineAddressesUpdate>,
+) -> Result<Json<Vec<String>>> {
+    let machine_id = Uuid::parse_str(&id)
+        .map_err(|_| AppError::bad_request("machine_invalid", "machine id is not a UUID"))?;
+    if authed.device.machine_id != Some(machine_id) {
+        return Err(AppError::forbidden(
+            "addresses_forbidden",
+            "only the machine's daemon may report its addresses",
+        ));
+    }
+    let addresses: Vec<String> = request
+        .addresses
+        .into_iter()
+        .map(|address| address.trim().to_string())
+        .filter(|address| !address.is_empty())
+        .take(32)
+        .collect();
+    let stored = state
+        .store
+        .replace_addresses(machine_id, &addresses)
+        .await?;
+    state
+        .store
+        .audit(
+            Some(authed.user.id),
+            Some(authed.device.id),
+            "machine.addresses_updated",
+            Some("machine"),
+            Some(&machine_id.to_string()),
+            serde_json::json!({"addresses": stored.len()}),
+        )
+        .await
+        .ok();
+    Ok(Json(stored))
+}
 
 async fn list_pairings(
     State(state): State<AppState>,
@@ -1222,6 +1259,49 @@ async fn audit(
             .collect(),
         next_before_id,
     }))
+}
+
+async fn ingest_audit(
+    State(state): State<AppState>,
+    authed: Authed,
+    Json(request): Json<AuditIngestRequest>,
+) -> Result<StatusCode> {
+    let action = request.action.trim();
+    if action.is_empty() || action.len() > 120 {
+        return Err(AppError::bad_request(
+            "audit_action_invalid",
+            "audit action must be 1-120 characters",
+        ));
+    }
+    let target_type = request
+        .target_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(60).collect::<String>());
+    let target_id = request
+        .target_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(200).collect::<String>());
+    let metadata = if request.metadata.is_null() {
+        serde_json::json!({})
+    } else {
+        request.metadata
+    };
+    state
+        .store
+        .audit(
+            Some(authed.user.id),
+            Some(authed.device.id),
+            action,
+            target_type.as_deref(),
+            target_id.as_deref(),
+            metadata,
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---------------------------------------------------------------------------

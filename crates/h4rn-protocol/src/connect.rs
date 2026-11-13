@@ -351,6 +351,41 @@ pub struct MachineSummary {
     pub daemon_device_id: Option<String>,
     /// Addressable hosts, including WSL distributions.
     pub hosts: Vec<MachineHost>,
+    /// Advertised connection candidates (LAN, tailnet, relay), most preferred
+    /// first. A client probes them in this order after the relay tells it the
+    /// machine is online.
+    #[serde(default)]
+    pub addresses: Vec<String>,
+}
+
+/// Body of `PUT /v1/machines/:id/addresses`.
+///
+/// The daemon replaces the full list on each report: a laptop changes networks
+/// and a tailnet address appears or disappears, so a merge would leave stale
+/// candidates that clients keep probing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct MachineAddressesUpdate {
+    /// Complete address list for the machine, preferred first.
+    pub addresses: Vec<String>,
+}
+
+/// Body of `POST /v1/audit`.
+///
+/// The daemon writes the entry locally first and mirrors it here when the relay
+/// is reachable. Metadata must never contain prompts, payloads or secrets.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct AuditIngestRequest {
+    /// Action name, e.g. `thread.created`.
+    pub action: String,
+    /// Target type, e.g. `thread`.
+    pub target_type: Option<String>,
+    /// Target id.
+    pub target_id: Option<String>,
+    /// Extra structured metadata. Never contains payloads or secrets.
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+    /// When it happened; the relay uses its own clock when absent.
+    pub at: Option<DateTime<Utc>>,
 }
 
 /// A presence change broadcast to the owner's devices.

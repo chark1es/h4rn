@@ -136,6 +136,7 @@ async fn real_claude_daemon_round_trip_and_resume() {
         bind: "127.0.0.1:0".parse().expect("bind"),
         extra_bind: None,
         log_level: "off".to_owned(),
+        tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
     };
 
     let catalog = real_catalog();

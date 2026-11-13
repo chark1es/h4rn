@@ -62,6 +62,14 @@ impl PairingPolicy {
         !self.revoked.contains(key) && self.allowed.contains(key)
     }
 
+    /// Every device key currently allowed, in stable order.
+    pub fn allowed_keys(&self) -> impl Iterator<Item = [u8; KEY_LEN]> + '_ {
+        self.allowed
+            .iter()
+            .copied()
+            .filter(|key| !self.revoked.contains(key))
+    }
+
     /// Decides whether a completed handshake may attach.
     ///
     /// Returns `Ok(true)` when the device is newly paired through the PSK and
@@ -223,6 +231,8 @@ pub struct ServerSession {
     pub session_id: SessionId,
     /// Resume token. Compared in constant time.
     pub token: [u8; TOKEN_LEN],
+    /// Authenticated device key, once a path has completed the handshake.
+    pub device: Option<[u8; KEY_LEN]>,
     /// Reliability state shared by every attached path.
     pub layer: SessionLayer,
     /// Path currently used for outbound frames.
@@ -243,6 +253,7 @@ impl ServerSession {
         Ok(Self {
             session_id,
             token,
+            device: None,
             layer: SessionLayer::new(),
             active_path: None,
             attached: BTreeSet::new(),
@@ -256,12 +267,18 @@ impl ServerSession {
         Self {
             session_id,
             token,
+            device: None,
             layer: SessionLayer::new(),
             active_path: None,
             attached: BTreeSet::new(),
             created_ms: now_ms,
             last_seen_ms: now_ms,
         }
+    }
+
+    /// Records the authenticated device for this session.
+    pub fn set_device(&mut self, device: [u8; KEY_LEN]) {
+        self.device = Some(device);
     }
 
     /// Constant-time token check.
