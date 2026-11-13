@@ -1,11 +1,12 @@
-//! `h4rn-daemon` process entry point.
+//! `h4rnd` process entry point.
 
-fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "h4rn_daemon=info".into()),
-        )
-        .init();
-    h4rn_daemon::run()
+use clap::Parser;
+use h4rn_daemon::{Cli, init_tracing};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    let (config, command) = cli.into_parts()?;
+    init_tracing(&config.log_level);
+    h4rn_daemon::run(config, command).await
 }

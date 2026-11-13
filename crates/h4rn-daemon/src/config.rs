@@ -1,0 +1,154 @@
+//! Daemon configuration: data directory, listeners and logging.
+//!
+//! Configuration comes from CLI flags (see [`crate::cli`]), environment
+//! variables and platform defaults, in that order. There is deliberately no
+//! config file yet: Phase 1b needs one unambiguous source of truth for the
+//! data directory so `serve`, `token` and `doctor` cannot disagree.
+
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+
+/// The loopback address a fresh daemon listens on.
+pub const DEFAULT_BIND: &str = "127.0.0.1:47800";
+
+/// The desktop application directory name.
+pub const APP_DIR: &str = "h4rn";
+
+/// Resolved daemon configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Config {
+    /// Directory holding the SQLite cache, access token and future blobs.
+    pub data_dir: PathBuf,
+    /// Primary listen address.
+    pub bind: SocketAddr,
+    /// Extra address to listen on (for example a Tailscale IP); loopback only
+    /// by default because remote access arrives through the transport crate.
+    pub extra_bind: Option<SocketAddr>,
+    /// `tracing` filter directive.
+    pub log_level: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            data_dir: default_data_dir(),
+            bind: DEFAULT_BIND
+                .parse()
+                .expect("the default bind address is valid"),
+            extra_bind: None,
+            log_level: "h4rn_daemon=info".to_owned(),
+        }
+    }
+}
+
+impl Config {
+    /// Builds a configuration rooted at `data_dir` with the default listener.
+    pub fn with_data_dir(data_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            data_dir: data_dir.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Path of the local access token.
+    pub fn access_token_path(&self) -> PathBuf {
+        self.data_dir.join("access_token")
+    }
+
+    /// Path of the SQLite event cache.
+    pub fn event_db_path(&self) -> PathBuf {
+        self.data_dir.join("events.db")
+    }
+
+    /// Creates the data directory if it does not exist.
+    ///
+    /// On Unix the directory is created with `0700`; it holds the access token
+    /// and, later, harness credentials and blob paths.
+    pub fn ensure_data_dir(&self) -> Result<()> {
+        create_private_dir(&self.data_dir)
+    }
+}
+
+/// The platform data directory for h4rn.
+///
+/// `dirs::data_dir` is XDG on Linux (`$XDG_DATA_HOME` or
+/// `~/.local/share`), `~/Library/Application Support` on macOS and
+/// `%APPDATA%` on Windows. `H4RN_DATA_DIR` wins when the CLI does not pass one.
+pub fn default_data_dir() -> PathBuf {
+    if let Some(value) = std::env::var_os("H4RN_DATA_DIR") {
+        return PathBuf::from(value);
+    }
+    dirs::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(APP_DIR)
+}
+
+/// Creates a directory with private permissions on Unix.
+pub fn create_private_dir(path: &Path) -> Result<()> {
+    if path.as_os_str().is_empty() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(path)
+        .with_context(|| format!("create data directory {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(path)?.permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(path, permissions)
+            .with_context(|| format!("tighten permissions on {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Parses a listen address, accepting a bare port for convenience.
+pub fn parse_addr(value: &str) -> Result<SocketAddr> {
+    let value = value.trim();
+    if let Ok(addr) = value.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+    if let Ok(port) = value.parse::<u16>() {
+        return Ok(SocketAddr::from(([127, 0, 0, 1], port)));
+    }
+    anyhow::bail!("invalid listen address {value:?}; expected HOST:PORT, e.g. 127.0.0.1:47800")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_full_and_bare_ports() {
+        assert_eq!(
+            parse_addr("127.0.0.1:47800").unwrap(),
+            "127.0.0.1:47800".parse().unwrap()
+        );
+        assert_eq!(
+            parse_addr("47801").unwrap(),
+            "127.0.0.1:47801".parse().unwrap()
+        );
+        assert!(parse_addr("not-an-address").is_err());
+    }
+
+    #[test]
+    fn token_and_database_live_in_the_data_dir() {
+        let config = Config::with_data_dir("/tmp/h4rn-test");
+        assert_eq!(
+            config.access_token_path(),
+            PathBuf::from("/tmp/h4rn-test/access_token")
+        );
+        assert_eq!(
+            config.event_db_path(),
+            PathBuf::from("/tmp/h4rn-test/events.db")
+        );
+    }
+
+    #[test]
+    fn default_bind_is_loopback() {
+        let config = Config::default();
+        assert!(config.bind.ip().is_loopback());
+        assert_eq!(config.bind.port(), 47800);
+    }
+}

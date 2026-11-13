@@ -1,0 +1,986 @@
+import { useSyncExternalStore } from "react";
+import type {
+  ApprovalDecision,
+  ClientRequest,
+  HarnessKind,
+  HostId,
+  HostSummary,
+  ProtoError,
+  ThreadId,
+  ThreadSummary,
+  ThreadTab,
+} from "@/gen";
+import type { H4rnClient } from "@/lib/client/client";
+import { createClientFromEnv, readBootConfig } from "@/lib/client/config";
+import { toProtoError } from "@/lib/client/errors";
+import type { ConnectionSnapshot, EventEnvelope } from "@/lib/client/types";
+import { pushRoute, type Route, readRoute, replaceRoute, routePath } from "@/lib/router";
+import { createThreadLog, foldEvent, type ThreadLog } from "./projection";
+
+export type Theme = "light" | "dark" | "system";
+
+export type ThreadFilterState = {
+  host: HostId | null;
+  harness: HarnessKind | null;
+  needsAttention: boolean;
+  unread: boolean;
+};
+
+export type UiState = {
+  route: Route;
+  tab: ThreadTab;
+  query: string;
+  selectedThreadId: ThreadId | null;
+  paletteOpen: boolean;
+  shortcutsOpen: boolean;
+  newThreadOpen: boolean;
+  theme: Theme;
+  snoozedOpen: boolean;
+  filter: ThreadFilterState;
+  filterOpen: boolean;
+  moreOpen: boolean;
+  limitsOpen: boolean;
+  sequenceHint: string | null;
+  focusSearchNonce: number;
+  focusComposerNonce: number;
+  pendingRouteFocus: boolean;
+};
+
+export type ToastVariant = "error" | "info" | "success";
+
+export type Toast = {
+  id: number;
+  title: string;
+  description?: string;
+  variant: ToastVariant;
+};
+
+export type PendingCreate = {
+  tempId: ThreadId;
+  prompt: string;
+  at: number;
+};
+
+export type AppState = {
+  connection: ConnectionSnapshot;
+  hosts: Record<HostId, HostSummary>;
+  threads: Record<ThreadId, ThreadSummary>;
+  logs: Record<ThreadId, ThreadLog>;
+  threadErrors: Record<ThreadId, ProtoError>;
+  loadingThreads: boolean;
+  threadsError: ProtoError | null;
+  lastSyncAt: number | null;
+  serverVersion: string | null;
+  lastEventThread: ThreadId | null;
+  pendingCreates: PendingCreate[];
+  pendingActions: Record<ThreadId, string | undefined>;
+  toasts: Toast[];
+  ui: UiState;
+};
+
+const initialTheme = (): Theme => {
+  const config = readBootConfig();
+  if (config.theme) return config.theme;
+  try {
+    const stored = window.localStorage.getItem("h4rn.theme");
+    if (stored === "light" || stored === "dark" || stored === "system") return stored;
+  } catch {
+    // localStorage may be unavailable in a locked-down webview.
+  }
+  return "system";
+};
+
+function createInitialState(): AppState {
+  return {
+    connection: {
+      status: "connecting",
+      attempt: 0,
+      transport: "direct",
+      lastConnectedAt: null,
+      lastEventAt: null,
+      latencyMs: null,
+      error: null,
+    },
+    hosts: {},
+    threads: {},
+    logs: {},
+    threadErrors: {},
+    loadingThreads: true,
+    threadsError: null,
+    lastSyncAt: null,
+    serverVersion: null,
+    lastEventThread: null,
+    pendingCreates: [],
+    pendingActions: {},
+    toasts: [],
+    ui: {
+      route: readRoute(),
+      tab: "working",
+      query: "",
+      selectedThreadId: null,
+      paletteOpen: false,
+      shortcutsOpen: false,
+      newThreadOpen: false,
+      theme: initialTheme(),
+      snoozedOpen: false,
+      filter: { host: null, harness: null, needsAttention: false, unread: false },
+      filterOpen: false,
+      moreOpen: false,
+      limitsOpen: false,
+      sequenceHint: null,
+      focusSearchNonce: 0,
+      focusComposerNonce: 0,
+      pendingRouteFocus: true,
+    },
+  };
+}
+
+type Store = {
+  getState: () => AppState;
+  setState: (next: AppState) => void;
+  subscribe: (listener: () => void) => () => void;
+};
+
+function createStore(initial: AppState): Store {
+  let state = initial;
+  const listeners = new Set<() => void>();
+  return {
+    getState: () => state,
+    setState: (next) => {
+      state = next;
+      for (const listener of listeners) listener();
+    },
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+  };
+}
+
+export const store = createStore(createInitialState());
+
+export function useApp<T>(selector: (state: AppState) => T): T {
+  return useSyncExternalStore(
+    store.subscribe,
+    () => selector(store.getState()),
+    () => selector(store.getState()),
+  );
+}
+
+export function getState(): AppState {
+  return store.getState();
+}
+
+function setState(next: AppState): void {
+  store.setState(next);
+}
+
+// ---------------------------------------------------------------------------
+// Theme
+// ---------------------------------------------------------------------------
+
+export function resolvedTheme(theme: Theme): "light" | "dark" {
+  if (theme !== "system") return theme;
+  if (typeof window === "undefined") return "light";
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}
+
+export function applyTheme(theme: Theme): void {
+  if (typeof document === "undefined") return;
+  const resolved = resolvedTheme(theme);
+  document.documentElement.classList.toggle("dark", resolved === "dark");
+  document.documentElement.classList.toggle("light", resolved === "light");
+  document.documentElement.dataset.theme = resolved;
+}
+
+export function setTheme(theme: Theme): void {
+  try {
+    window.localStorage.setItem("h4rn.theme", theme);
+  } catch {
+    // Non-fatal: the theme still applies for this session.
+  }
+  applyTheme(theme);
+  setState({ ...getState(), ui: { ...getState().ui, theme } });
+}
+
+export function toggleTheme(): void {
+  setTheme(resolvedTheme(getState().ui.theme) === "dark" ? "light" : "dark");
+}
+
+// ---------------------------------------------------------------------------
+// Toasts
+// ---------------------------------------------------------------------------
+
+let toastId = 0;
+
+export function pushToast(input: {
+  title: string;
+  description?: string;
+  variant?: ToastVariant;
+  ttlMs?: number;
+}): void {
+  const toast: Toast = {
+    id: ++toastId,
+    title: input.title,
+    variant: input.variant ?? "info",
+    ...(input.description ? { description: input.description } : {}),
+  };
+  const state = getState();
+  setState({ ...state, toasts: [...state.toasts.slice(-2), toast] });
+  const ttl = input.ttlMs ?? 4_500;
+  setTimeout(() => dismissToast(toast.id), ttl);
+}
+
+export function dismissToast(id: number): void {
+  const state = getState();
+  setState({ ...state, toasts: state.toasts.filter((toast) => toast.id !== id) });
+}
+
+// ---------------------------------------------------------------------------
+// UI actions
+// ---------------------------------------------------------------------------
+
+export function navigate(route: Route): void {
+  pushRoute(route);
+  const state = getState();
+  setState({
+    ...state,
+    ui: {
+      ...state.ui,
+      route,
+      selectedThreadId: route.kind === "thread" ? route.threadId : state.ui.selectedThreadId,
+      pendingRouteFocus: true,
+      paletteOpen: false,
+    },
+  });
+  if (route.kind === "thread") void ensureThread(route.threadId);
+}
+
+export function openThread(threadId: ThreadId): void {
+  navigate({ kind: "thread", threadId });
+}
+
+export function setTab(tab: ThreadTab): void {
+  const state = getState();
+  setState({ ...state, ui: { ...state.ui, tab, filterOpen: false } });
+}
+
+export function setQuery(query: string): void {
+  const state = getState();
+  setState({ ...state, ui: { ...state.ui, query } });
+}
+
+export function setSelectedThread(threadId: ThreadId | null): void {
+  const state = getState();
+  setState({ ...state, ui: { ...state.ui, selectedThreadId: threadId } });
+}
+
+export function setUi(patch: Partial<UiState>): void {
+  const state = getState();
+  setState({ ...state, ui: { ...state.ui, ...patch } });
+}
+
+export function togglePalette(): void {
+  const state = getState();
+  setState({ ...state, ui: { ...state.ui, paletteOpen: !state.ui.paletteOpen } });
+}
+
+export function closePalette(): void {
+  setUi({ paletteOpen: false });
+}
+
+export function openShortcuts(): void {
+  setUi({ shortcutsOpen: true, paletteOpen: false });
+}
+
+export function closeShortcuts(): void {
+  setUi({ shortcutsOpen: false });
+}
+
+export function openNewThread(): void {
+  setUi({ newThreadOpen: true, paletteOpen: false });
+}
+
+export function closeNewThread(): void {
+  setUi({ newThreadOpen: false });
+}
+
+export function requestSearchFocus(): void {
+  setUi({ focusSearchNonce: getState().ui.focusSearchNonce + 1 });
+}
+
+export function requestComposerFocus(): void {
+  setUi({ focusComposerNonce: getState().ui.focusComposerNonce + 1 });
+}
+
+export function setFilter(patch: Partial<ThreadFilterState>): void {
+  const state = getState();
+  setState({ ...state, ui: { ...state.ui, filter: { ...state.ui.filter, ...patch } } });
+}
+
+export function clearFilter(): void {
+  setFilter({ host: null, harness: null, needsAttention: false, unread: false });
+}
+
+// ---------------------------------------------------------------------------
+// Connection bootstrap
+// ---------------------------------------------------------------------------
+
+let client: H4rnClient | null = null;
+let started = false;
+
+export function getClient(): H4rnClient {
+  client ??= createClientFromEnv();
+  return client;
+}
+
+const eventQueue: EventEnvelope[] = [];
+let flushScheduled = false;
+
+function scheduleFlush(): void {
+  if (flushScheduled) return;
+  flushScheduled = true;
+  const run = () => {
+    flushScheduled = false;
+    flushEvents();
+  };
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(run);
+  } else {
+    setTimeout(run, 16);
+  }
+}
+
+/** Exposed for tests and for the pause/resume path. */
+export function flushEvents(): void {
+  if (eventQueue.length === 0) return;
+  const batch = eventQueue.splice(0, eventQueue.length);
+  const before = getState();
+  let next = before;
+  for (const envelope of batch) {
+    next = applyEvent(next, envelope);
+  }
+  setState(next);
+  if (routePath(before.ui.route) !== routePath(next.ui.route)) replaceRoute(next.ui.route);
+}
+
+function enqueueEvent(envelope: EventEnvelope): void {
+  eventQueue.push(envelope);
+  scheduleFlush();
+}
+
+export function startConnection(): void {
+  if (started) return;
+  started = true;
+  const app = getClient();
+
+  app.onStatus((connection) => {
+    setState({ ...getState(), connection });
+  });
+
+  app.onEvent((envelope) => {
+    enqueueEvent(envelope);
+  });
+
+  app.onReady((info) => {
+    const hosts = Object.fromEntries(info.hosts.map((host) => [host.host_id, host]));
+    const state = getState();
+    setState({
+      ...state,
+      hosts,
+      serverVersion: info.serverVersion,
+      connection: { ...state.connection, error: null },
+    });
+    void loadThreads().then(() => {
+      const current = getState();
+      if (info.reconnected) {
+        for (const [threadId, log] of Object.entries(current.logs)) {
+          if (log.loaded) void loadThread(threadId, log.nextSeq);
+        }
+      }
+      if (current.ui.route.kind === "thread") {
+        const threadId = current.ui.route.threadId;
+        const log = current.logs[threadId];
+        if (!log?.loaded) void loadThread(threadId, log?.nextSeq ?? 0);
+      }
+    });
+  });
+
+  if (typeof window !== "undefined") {
+    window.addEventListener("popstate", () => {
+      const route = readRoute();
+      const state = getState();
+      setState({
+        ...state,
+        ui: {
+          ...state.ui,
+          route,
+          selectedThreadId: route.kind === "thread" ? route.threadId : state.ui.selectedThreadId,
+          pendingRouteFocus: true,
+        },
+      });
+      if (route.kind === "thread") void ensureThread(route.threadId);
+    });
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    media.addEventListener("change", () => {
+      if (getState().ui.theme === "system") applyTheme("system");
+    });
+  }
+
+  applyTheme(getState().ui.theme);
+  app.start();
+}
+
+// ---------------------------------------------------------------------------
+// Loading
+// ---------------------------------------------------------------------------
+
+export async function loadThreads(): Promise<void> {
+  const state = getState();
+  if (!state.loadingThreads) setState({ ...state, loadingThreads: true });
+  try {
+    const response = await getClient().request({
+      type: "list_threads",
+      filter: {
+        tabs: [],
+        host: null,
+        harness: null,
+        search: null,
+        include_snoozed: true,
+      },
+    });
+    if (response.type !== "threads") return;
+    const current = getState();
+    const threads: Record<ThreadId, ThreadSummary> = {
+      ...response.threads.reduce<Record<ThreadId, ThreadSummary>>((acc, thread) => {
+        acc[thread.thread_id] = thread;
+        return acc;
+      }, {}),
+    };
+    for (const pending of current.pendingCreates) {
+      const optimistic = current.threads[pending.tempId];
+      if (optimistic) threads[pending.tempId] = optimistic;
+    }
+    setState({
+      ...current,
+      threads,
+      loadingThreads: false,
+      threadsError: null,
+      lastSyncAt: Date.now(),
+    });
+  } catch (error) {
+    const current = getState();
+    setState({
+      ...current,
+      loadingThreads: false,
+      threadsError: toProtoError(error),
+    });
+  }
+}
+
+export async function loadThread(threadId: ThreadId, sinceSeq = 0): Promise<void> {
+  const state = getState();
+  const existing = state.logs[threadId] ?? createThreadLog();
+  if (existing.loading) return;
+  setState({
+    ...state,
+    logs: { ...state.logs, [threadId]: { ...existing, loading: true } },
+    threadErrors: omitKey(state.threadErrors, threadId),
+  });
+
+  try {
+    const response = await getClient().request({
+      type: "get_thread",
+      thread_id: threadId,
+      since_seq: sinceSeq,
+    });
+    if (response.type !== "thread") return;
+
+    let log = getState().logs[threadId] ?? createThreadLog();
+    for (const event of response.events) {
+      log = foldEvent(log, event, { threadHint: threadId });
+    }
+    log = { ...log, loading: false, loaded: true, nextSeq: response.next_seq };
+
+    const current = getState();
+    setState({
+      ...current,
+      threads: { ...current.threads, [threadId]: response.summary },
+      logs: { ...current.logs, [threadId]: log },
+      threadErrors: omitKey(current.threadErrors, threadId),
+    });
+  } catch (error) {
+    const current = getState();
+    const proto = toProtoError(error);
+    setState({
+      ...current,
+      logs: {
+        ...current.logs,
+        [threadId]: { ...(current.logs[threadId] ?? existing), loading: false },
+      },
+      threadErrors: { ...current.threadErrors, [threadId]: proto },
+    });
+  }
+}
+
+export function ensureThread(threadId: ThreadId): void {
+  const state = getState();
+  const log = state.logs[threadId];
+  if (log?.loaded || log?.loading) return;
+  // ThreadPane mounts before the first hello; onReady loads the active thread.
+  if (state.connection.status !== "online") return;
+  if (state.threadErrors[threadId]) return;
+  void loadThread(threadId, log?.nextSeq ?? 0);
+}
+
+export function retryThread(threadId: ThreadId): void {
+  const state = getState();
+  setState({ ...state, threadErrors: omitKey(state.threadErrors, threadId) });
+  void loadThread(threadId, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Event projection
+// ---------------------------------------------------------------------------
+
+function omitKey<T>(record: Record<string, T>, key: string): Record<string, T> {
+  if (!(key in record)) return record;
+  const next = { ...record };
+  delete next[key];
+  return next;
+}
+
+function ownThreadForItem(state: AppState, event: EventEnvelope["event"]): ThreadId | null {
+  if (event.type !== "item_completed") return null;
+  if (event.kind === "message") {
+    for (const [threadId, log] of Object.entries(state.logs)) {
+      if (
+        log.turns.some((turn) =>
+          turn.items.some((item) => item.kind === "message" && item.itemId === event.item_id),
+        )
+      ) {
+        return threadId;
+      }
+    }
+    return null;
+  }
+  for (const [threadId, log] of Object.entries(state.logs)) {
+    if (
+      log.turns.some((turn) =>
+        turn.items.some(
+          (item) => item.kind === "tool" && item.itemId === `tool:${event.tool_call.tool_call_id}`,
+        ),
+      )
+    ) {
+      return threadId;
+    }
+  }
+  return null;
+}
+
+function applyEvent(state: AppState, envelope: EventEnvelope): AppState {
+  const { event } = envelope;
+
+  if (event.type === "thread_upserted") {
+    const { type: _type, ...summary } = event;
+    let threads = { ...state.threads, [summary.thread_id]: summary };
+    let logs = state.logs;
+    let pendingCreates = state.pendingCreates;
+    let ui = state.ui;
+
+    if (!state.threads[summary.thread_id]) {
+      const match = pendingCreates.find((pending) =>
+        summary.title.toLowerCase().startsWith(pending.prompt.slice(0, 24).toLowerCase()),
+      );
+      const consumed = match ?? pendingCreates[0];
+      if (consumed) {
+        threads = { ...threads };
+        logs = { ...logs };
+        delete threads[consumed.tempId];
+        delete logs[consumed.tempId];
+        pendingCreates = pendingCreates.filter((pending) => pending.tempId !== consumed.tempId);
+        if (ui.route.kind === "thread" && ui.route.threadId === consumed.tempId) {
+          ui = {
+            ...ui,
+            route: { kind: "thread", threadId: summary.thread_id },
+            selectedThreadId: summary.thread_id,
+          };
+        }
+      }
+    }
+
+    return {
+      ...state,
+      threads,
+      logs,
+      pendingCreates,
+      ui,
+    };
+  }
+
+  const threadId =
+    "thread_id" in event && event.thread_id
+      ? event.thread_id
+      : (ownThreadForItem(state, event) ??
+        (event.type === "item_completed" ? state.lastEventThread : null));
+
+  if (!threadId) {
+    return state;
+  }
+
+  const currentLog = state.logs[threadId] ?? createThreadLog();
+  const log = foldEvent(currentLog, event, { threadHint: threadId });
+  const summary = state.threads[threadId];
+  let nextSummary = summary;
+
+  if (summary) {
+    nextSummary = { ...summary };
+    if (event.type === "agent_state_changed") {
+      nextSummary.agent_state = event.state;
+      if (event.state === "awaiting_approval") nextSummary.needs_attention = true;
+    }
+    if (event.type === "turn_started") {
+      nextSummary.tab = "working";
+      nextSummary.unread = false;
+      nextSummary.last_activity = event.started_at;
+    }
+    if (event.type === "approval_requested") {
+      nextSummary.agent_state = "awaiting_approval";
+      nextSummary.needs_attention = true;
+    }
+    if (event.type === "usage_limit_hit") {
+      nextSummary.agent_state = "rate_limited";
+      nextSummary.needs_attention = !event.auto_resume;
+    }
+    if (event.type === "error") {
+      nextSummary.needs_attention = true;
+    }
+    if (event.type === "turn_completed") {
+      nextSummary.last_activity = new Date().toISOString();
+    }
+  }
+
+  return {
+    ...state,
+    threads: nextSummary ? { ...state.threads, [threadId]: nextSummary } : state.threads,
+    logs: { ...state.logs, [threadId]: log },
+    lastEventThread: threadId,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Thread actions
+// ---------------------------------------------------------------------------
+
+async function runThreadAction(
+  threadId: ThreadId,
+  label: string,
+  body: Extract<ClientRequest, { type: "set_thread_tab" | "snooze" | "interrupt" }>,
+): Promise<boolean> {
+  const state = getState();
+  setState({
+    ...state,
+    pendingActions: { ...state.pendingActions, [threadId]: label },
+  });
+  try {
+    await getClient().request(body);
+    return true;
+  } catch (error) {
+    const proto = toProtoError(error);
+    pushToast({
+      variant: "error",
+      title: `${label} failed on ${getState().threads[threadId]?.host ?? "the host"}.`,
+      description: proto.hint ?? proto.message,
+    });
+    return false;
+  } finally {
+    const current = getState();
+    setState({
+      ...current,
+      pendingActions: { ...current.pendingActions, [threadId]: undefined },
+    });
+  }
+}
+
+export async function setThreadTab(
+  threadId: ThreadId,
+  tab: ThreadTab,
+  pinned = false,
+): Promise<void> {
+  const label =
+    tab === "settled" ? "Settling" : tab === "done" ? "Moving to Done" : "Moving to Working";
+  await runThreadAction(threadId, label, {
+    type: "set_thread_tab",
+    thread_id: threadId,
+    tab,
+    pinned,
+  });
+}
+
+export async function acknowledgeThread(threadId: ThreadId): Promise<void> {
+  await runThreadAction(threadId, "Acknowledging", {
+    type: "set_thread_tab",
+    thread_id: threadId,
+    tab: "settled",
+    pinned: false,
+  });
+}
+
+export async function settleThread(threadId: ThreadId): Promise<void> {
+  await runThreadAction(threadId, "Settling", {
+    type: "set_thread_tab",
+    thread_id: threadId,
+    tab: "settled",
+    pinned: false,
+  });
+}
+
+export async function togglePin(threadId: ThreadId): Promise<void> {
+  const summary = getState().threads[threadId];
+  if (!summary) return;
+  await runThreadAction(threadId, summary.pinned ? "Unpinning" : "Pinning", {
+    type: "set_thread_tab",
+    thread_id: threadId,
+    tab: "working",
+    pinned: !summary.pinned,
+  });
+}
+
+export async function snoozeThread(threadId: ThreadId, until: string | null): Promise<void> {
+  await runThreadAction(threadId, until ? "Snoozing" : "Waking", {
+    type: "snooze",
+    thread_id: threadId,
+    until,
+  });
+}
+
+export async function interruptThread(threadId: ThreadId): Promise<void> {
+  await runThreadAction(threadId, "Interrupting", { type: "interrupt", thread_id: threadId });
+}
+
+export async function respondApproval(
+  threadId: ThreadId,
+  approvalId: string,
+  decision: ApprovalDecision,
+): Promise<void> {
+  const state = getState();
+  const log = state.logs[threadId];
+  if (!log) return;
+  setState({
+    ...state,
+    logs: {
+      ...state.logs,
+      [threadId]: {
+        ...log,
+        approvals: {
+          ...log.approvals,
+          [approvalId]: { status: "sending" },
+        },
+      },
+    },
+  });
+
+  try {
+    await getClient().request({
+      type: "respond_approval",
+      thread_id: threadId,
+      approval_id: approvalId,
+      decision,
+    });
+    const current = getState();
+    const currentLog = current.logs[threadId];
+    if (currentLog) {
+      setState({
+        ...current,
+        logs: {
+          ...current.logs,
+          [threadId]: {
+            ...currentLog,
+            approvals: {
+              ...currentLog.approvals,
+              [approvalId]: { status: "resolved", decision },
+            },
+          },
+        },
+      });
+    }
+  } catch (error) {
+    const proto = toProtoError(error);
+    const current = getState();
+    const currentLog = current.logs[threadId];
+    if (currentLog) {
+      setState({
+        ...current,
+        logs: {
+          ...current.logs,
+          [threadId]: {
+            ...currentLog,
+            approvals: { ...currentLog.approvals, [approvalId]: { status: "error" } },
+          },
+        },
+      });
+    }
+    pushToast({
+      variant: "error",
+      title: `Couldn't send ${decision === "approve" ? "Go" : "Hold"} to ${current.threads[threadId]?.host ?? "the host"}.`,
+      description: `${proto.message} The approval is still pending.`,
+    });
+  }
+}
+
+let localCounter = 0;
+
+export async function sendMessage(threadId: ThreadId, text: string): Promise<boolean> {
+  const body = text.trim();
+  if (!body) return false;
+  const state = getState();
+  const log = state.logs[threadId] ?? createThreadLog();
+  const localId = `local-${++localCounter}`;
+  const at = new Date().toISOString();
+  setState({
+    ...state,
+    logs: {
+      ...state.logs,
+      [threadId]: {
+        ...log,
+        pending: [...log.pending, { id: localId, text: body, at, sending: true }],
+      },
+    },
+  });
+
+  try {
+    await getClient().request({
+      type: "send_message",
+      thread_id: threadId,
+      text: body,
+      attachments: [],
+    });
+    const current = getState();
+    const currentLog = current.logs[threadId];
+    if (currentLog) {
+      setState({
+        ...current,
+        logs: {
+          ...current.logs,
+          [threadId]: {
+            ...currentLog,
+            pending: currentLog.pending.map((message) =>
+              message.id === localId ? { ...message, sending: false } : message,
+            ),
+          },
+        },
+      });
+    }
+    return true;
+  } catch (error) {
+    const proto = toProtoError(error);
+    const current = getState();
+    const currentLog = current.logs[threadId];
+    if (currentLog) {
+      setState({
+        ...current,
+        logs: {
+          ...current.logs,
+          [threadId]: {
+            ...currentLog,
+            pending: currentLog.pending.filter((message) => message.id !== localId),
+          },
+        },
+      });
+    }
+    pushToast({
+      variant: "error",
+      title: `Couldn't send the reply to ${current.threads[threadId]?.host ?? "the host"}.`,
+      description: `${proto.message} Your draft is still in the composer.`,
+    });
+    return false;
+  }
+}
+
+export type CreateThreadInput = {
+  host: HostId;
+  harness: HarnessKind;
+  workspacePath: string;
+  model: string;
+  prompt: string;
+};
+
+export async function createThread(input: CreateThreadInput): Promise<boolean> {
+  const state = getState();
+  const tempId = `local-thread-${++localCounter}`;
+  const title = input.prompt.split("\n")[0]?.slice(0, 56) || "New thread";
+  const now = new Date().toISOString();
+  const optimistic: ThreadSummary = {
+    thread_id: tempId,
+    host: input.host,
+    harness: input.harness,
+    title,
+    workspace_path: input.workspacePath,
+    model: input.model,
+    tab: "working",
+    pinned: false,
+    snoozed_until: null,
+    last_activity: now,
+    agent_state: "thinking",
+    usage: {
+      input_tokens: 0,
+      output_tokens: 0,
+      cached_input_tokens: 0,
+      cost_micros: 0,
+      duration_ms: 0,
+    },
+    needs_attention: false,
+    unread: false,
+  };
+
+  setState({
+    ...state,
+    threads: { ...state.threads, [tempId]: optimistic },
+    logs: { ...state.logs, [tempId]: { ...createThreadLog(), loaded: true } },
+    pendingCreates: [...state.pendingCreates, { tempId, prompt: input.prompt, at: Date.now() }],
+  });
+  navigate({ kind: "thread", threadId: tempId });
+
+  try {
+    await getClient().request({
+      type: "create_thread",
+      host: input.host,
+      harness: input.harness,
+      workspace_path: input.workspacePath,
+      model: input.model,
+      prompt: input.prompt,
+      attachments: [],
+    });
+    return true;
+  } catch (error) {
+    const proto = toProtoError(error);
+    const current = getState();
+    setState({
+      ...current,
+      threads: omitKey(current.threads, tempId),
+      logs: omitKey(current.logs, tempId),
+      pendingCreates: current.pendingCreates.filter((pending) => pending.tempId !== tempId),
+    });
+    navigate({ kind: "inbox" });
+    pushToast({
+      variant: "error",
+      title: `Couldn't start the thread on ${getState().hosts[input.host]?.name ?? input.host}.`,
+      description: `${proto.message} Nothing is running.`,
+    });
+    return false;
+  }
+}
+
+export async function refreshHosts(): Promise<void> {
+  try {
+    const response = await getClient().request({ type: "list_hosts" });
+    if (response.type !== "hosts") return;
+    const state = getState();
+    setState({
+      ...state,
+      hosts: Object.fromEntries(response.hosts.map((host) => [host.host_id, host])),
+    });
+  } catch {
+    // Presence is refreshed again on reconnect.
+  }
+}

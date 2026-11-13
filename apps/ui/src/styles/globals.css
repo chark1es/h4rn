@@ -1,2 +1,312 @@
+/* biome-ignore-all lint/complexity/noImportantStyles: shiki + reduced-motion overrides must win the cascade */
 @import "tailwindcss";
 @import "./tokens.css";
+
+#root {
+  height: 100dvh;
+  min-height: 0;
+}
+
+/* Browser surfaces belong to the system: scrollbars, caret, selection. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--ink-faint);
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+@layer components {
+  .pb-safe {
+    padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+  }
+
+  .h-safe-nav {
+    height: calc(64px + env(safe-area-inset-bottom));
+  }
+
+  .stream-prose {
+    max-width: 68ch;
+    color: var(--ink);
+    font-size: 0.875rem;
+    line-height: 1.6;
+    overflow-wrap: anywhere;
+  }
+
+  .stream-prose > * + * {
+    margin-top: 0.75rem;
+  }
+
+  .stream-prose p {
+    margin: 0;
+  }
+
+  .stream-prose h1,
+  .stream-prose h2,
+  .stream-prose h3 {
+    margin: 1.25rem 0 0;
+    font-weight: 600;
+    line-height: 1.3;
+    letter-spacing: -0.01em;
+  }
+
+  .stream-prose h1 {
+    font-size: 1.125rem;
+  }
+
+  .stream-prose h2 {
+    font-size: 1rem;
+  }
+
+  .stream-prose h3 {
+    font-size: 0.875rem;
+  }
+
+  .stream-prose ul,
+  .stream-prose ol {
+    margin: 0;
+    padding-left: 1.25rem;
+  }
+
+  .stream-prose ul {
+    list-style: disc;
+  }
+
+  .stream-prose ol {
+    list-style: decimal;
+  }
+
+  .stream-prose li + li {
+    margin-top: 0.25rem;
+  }
+
+  .stream-prose a {
+    color: var(--prompt);
+    text-underline-offset: 3px;
+    text-decoration: underline;
+    text-decoration-thickness: 1px;
+  }
+
+  .stream-prose strong {
+    font-weight: 600;
+  }
+
+  .stream-prose blockquote {
+    margin: 0;
+    padding-left: 0.75rem;
+    border-left: 2px solid var(--line);
+    color: var(--ink-muted);
+  }
+
+  .stream-prose hr {
+    margin: 1rem 0;
+    border: 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .stream-prose table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8125rem;
+  }
+
+  .stream-prose th,
+  .stream-prose td {
+    border: 1px solid var(--line);
+    padding: 0.25rem 0.5rem;
+    text-align: left;
+  }
+
+  .stream-prose th {
+    background: var(--panel);
+    font-weight: 600;
+  }
+
+  .stream-prose :not(pre) > code {
+    font-family: var(--font-code);
+    font-size: 0.8125em;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 0.05em 0.3em;
+  }
+
+  .stream-prose pre {
+    margin: 0;
+    overflow-x: auto;
+  }
+
+  .stream-prose pre code {
+    display: block;
+    min-width: max-content;
+    padding: 0.75rem;
+    font-family: var(--font-code);
+    font-size: 0.78125rem;
+    line-height: 1.6;
+  }
+
+  .shiki,
+  .shiki span {
+    background: transparent !important;
+  }
+
+  .shiki {
+    color: var(--ink);
+  }
+
+  /* Radix state animation utilities used by the shadcn skins. */
+  [data-slot="dialog-overlay"][data-state="open"],
+  [data-slot="sheet-overlay"][data-state="open"] {
+    animation: h4rn-fade-in var(--dur-fast) var(--ease-out);
+  }
+
+  [data-slot="dialog-overlay"][data-state="closed"],
+  [data-slot="sheet-overlay"][data-state="closed"] {
+    animation: h4rn-fade-out var(--dur-fast) var(--ease-in) forwards;
+  }
+
+  [data-slot="dialog-content"][data-state="open"] {
+    animation: h4rn-dialog-in var(--dur-base) var(--ease-out);
+  }
+
+  [data-slot="dialog-content"][data-state="closed"] {
+    animation: h4rn-fade-out var(--dur-fast) var(--ease-in) forwards;
+  }
+
+  [data-slot="dropdown-menu-content"][data-state="open"] {
+    animation: h4rn-pop-in var(--dur-fast) var(--ease-out);
+  }
+
+  [data-slot="sheet-content"][data-side="bottom"][data-state="open"] {
+    animation: h4rn-sheet-up var(--dur-slow) var(--ease-out);
+  }
+
+  [data-slot="sheet-content"][data-side="bottom"][data-state="closed"] {
+    animation: h4rn-sheet-down var(--dur-fast) var(--ease-in) forwards;
+  }
+
+  [data-slot="sheet-content"][data-side="right"][data-state="open"] {
+    animation: h4rn-sheet-right var(--dur-slow) var(--ease-out);
+  }
+
+  [data-slot="skeleton"] {
+    animation: h4rn-skeleton 1.5s ease-in-out infinite;
+  }
+}
+
+@keyframes h4rn-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes h4rn-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes h4rn-dialog-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+  }
+}
+
+@keyframes h4rn-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes h4rn-sheet-up {
+  from {
+    transform: translateY(12px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes h4rn-sheet-down {
+  from {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateY(12px);
+    opacity: 0;
+  }
+}
+
+@keyframes h4rn-sheet-right {
+  from {
+    transform: translateX(12px);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes h4rn-skeleton {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-slot="dialog-content"],
+  [data-slot="dialog-overlay"],
+  [data-slot="sheet-content"],
+  [data-slot="sheet-overlay"],
+  [data-slot="dropdown-menu-content"] {
+    animation: none !important;
+  }
+
+  [data-slot="skeleton"] {
+    animation: none !important;
+    opacity: 0.6;
+  }
+}

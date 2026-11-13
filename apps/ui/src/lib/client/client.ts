@@ -1,0 +1,489 @@
+import type { ClientFrame, ClientRequest, DeviceInfo, ResponseBody, ServerFrame } from "@/gen";
+
+import { H4rnRequestError, protoError } from "./errors";
+import type {
+  ClientOptions,
+  ConnectionSnapshot,
+  EventEnvelope,
+  ReadyInfo,
+  Transport,
+  TransportHandlers,
+} from "./types";
+import { WebSocketTransport } from "./ws";
+
+export type ResponseOf<T extends ClientRequest["type"]> = T extends "hello"
+  ? Extract<ResponseBody, { type: "hello" }>
+  : T extends "list_hosts"
+    ? Extract<ResponseBody, { type: "hosts" }>
+    : T extends "list_threads"
+      ? Extract<ResponseBody, { type: "threads" }>
+      : T extends "get_thread"
+        ? Extract<ResponseBody, { type: "thread" }>
+        : Extract<ResponseBody, { type: "ack" }>;
+
+type Pending = {
+  id: number;
+  body: ClientRequest;
+  resolve: (body: ResponseBody) => void;
+  reject: (error: H4rnRequestError) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+const DEFAULT_DEVICE: DeviceInfo = {
+  device_id: "web",
+  name: "h4rn web",
+  platform: "web",
+  app_version: "0.1.0",
+};
+
+const FATAL_CLOSE_CODES = new Map<number, { message: string; hint: string }>([
+  [4401, { message: "The daemon rejected this device token.", hint: "Pair this device again." }],
+  [
+    4403,
+    { message: "This device is not allowed to do that.", hint: "Ask the host owner for access." },
+  ],
+]);
+
+/**
+ * The protocol client: request/response correlation, ordered event delivery,
+ * and reconnection with exponential backoff and resume metadata.
+ *
+ * All protocol knowledge lives here and in `projection.ts`; components only
+ * consume the store.
+ */
+export class H4rnClient {
+  private readonly options: Required<
+    Pick<ClientOptions, "url" | "transportLabel" | "requestTimeoutMs">
+  > &
+    ClientOptions;
+  private readonly device: DeviceInfo;
+  private readonly statusListeners = new Set<(snapshot: ConnectionSnapshot) => void>();
+  private readonly eventListeners = new Set<(event: EventEnvelope) => void>();
+  private readonly readyListeners = new Set<(info: ReadyInfo) => void>();
+  private readonly pending = new Map<number, Pending>();
+
+  private transport: Transport | null = null;
+  private frameId = 0;
+  private lastSeq = 0;
+  private attempt = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private stopped = false;
+  private fatal = false;
+  private socketOpen = false;
+  private everReady = false;
+  private snapshot: ConnectionSnapshot;
+  private readonly transportFactory: (context: {
+    url: string;
+    token: string | null;
+    attempt: number;
+  }) => Transport;
+
+  constructor(options: ClientOptions = {}) {
+    this.options = {
+      ...options,
+      url: options.url ?? "ws://127.0.0.1:47800/ws",
+      transportLabel: options.transportLabel ?? "direct",
+      requestTimeoutMs: options.requestTimeoutMs ?? 10_000,
+    };
+    this.device = options.device ?? DEFAULT_DEVICE;
+    this.transportFactory =
+      options.transportFactory ?? ((context) => new WebSocketTransport(context.url, context.token));
+    this.snapshot = {
+      status: "connecting",
+      attempt: 0,
+      transport: this.options.transportLabel,
+      lastConnectedAt: null,
+      lastEventAt: null,
+      latencyMs: null,
+      error: null,
+    };
+  }
+
+  start(): void {
+    this.stopped = false;
+    this.fatal = false;
+    this.setSnapshot({ status: "connecting", attempt: 0, error: null });
+    this.openSocket();
+  }
+
+  stop(): void {
+    this.stopped = true;
+    this.clearReconnect();
+    this.stopPing();
+    this.rejectPending(
+      new H4rnRequestError(
+        protoError("internal", "The client stopped.", "Start it again to reconnect."),
+      ),
+    );
+    this.transport?.close();
+    this.transport = null;
+    this.socketOpen = false;
+    this.setSnapshot({ status: "offline" });
+  }
+
+  /** Reset the backoff budget after the user asks to retry. */
+  reconnectNow(): void {
+    this.clearReconnect();
+    this.stopped = false;
+    this.fatal = false;
+    this.attempt = 0;
+    this.setSnapshot({ status: "connecting", attempt: 0, error: null });
+    if (this.socketOpen) {
+      void this.performHello();
+      return;
+    }
+    this.openSocket();
+  }
+
+  getSnapshot(): ConnectionSnapshot {
+    return this.snapshot;
+  }
+
+  onStatus(listener: (snapshot: ConnectionSnapshot) => void): () => void {
+    this.statusListeners.add(listener);
+    return () => this.statusListeners.delete(listener);
+  }
+
+  onEvent(listener: (event: EventEnvelope) => void): () => void {
+    this.eventListeners.add(listener);
+    return () => this.eventListeners.delete(listener);
+  }
+
+  onReady(listener: (info: ReadyInfo) => void): () => void {
+    this.readyListeners.add(listener);
+    return () => this.readyListeners.delete(listener);
+  }
+
+  async request<T extends ClientRequest["type"]>(
+    body: Extract<ClientRequest, { type: T }>,
+    options: { timeoutMs?: number } = {},
+  ): Promise<ResponseOf<T>> {
+    if (!this.socketOpen || !this.transport) {
+      throw new H4rnRequestError(
+        protoError(
+          "internal",
+          "The daemon is not connected.",
+          "Wait until the status bar says online, then try again.",
+        ),
+      );
+    }
+
+    const id = ++this.frameId;
+    const frame: ClientFrame = { id, body };
+    const timeoutMs = options.timeoutMs ?? this.options.requestTimeoutMs;
+    const pending: Pending = {
+      id,
+      body,
+      resolve: () => undefined,
+      reject: () => undefined,
+      timer: setTimeout(() => undefined, 0),
+    };
+    clearTimeout(pending.timer);
+
+    const promise = new Promise<ResponseBody>((resolve, reject) => {
+      pending.resolve = resolve;
+      pending.reject = reject;
+      pending.timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(
+          new H4rnRequestError(
+            protoError(
+              "internal",
+              `The daemon did not answer \`${body.type}\` within ${Math.round(timeoutMs / 1000)} s.`,
+              "The daemon may be busy. Try again, or check the connection in the status bar.",
+            ),
+            id,
+          ),
+        );
+      }, timeoutMs);
+    });
+
+    this.pending.set(id, pending);
+
+    try {
+      this.transport.send(JSON.stringify(frame));
+    } catch (error) {
+      clearTimeout(pending.timer);
+      this.pending.delete(id);
+      throw new H4rnRequestError(
+        protoError(
+          "internal",
+          error instanceof Error ? error.message : "The frame could not be sent.",
+          "Wait for the connection to recover, then try again.",
+        ),
+        id,
+      );
+    }
+
+    return (await promise) as ResponseOf<T>;
+  }
+
+  // ---------------------------------------------------------------------
+  // Socket lifecycle
+  // ---------------------------------------------------------------------
+
+  private openSocket(): void {
+    if (this.stopped || this.fatal) return;
+
+    this.socketOpen = false;
+    const handlers: TransportHandlers = {
+      onOpen: () => {
+        this.socketOpen = true;
+        this.lastSeq = 0;
+        void this.performHello();
+      },
+      onMessage: (data) => this.handleMessage(data),
+      onClose: (frame) => this.handleClose(frame.code, frame.reason),
+      onError: (message) => {
+        this.patchSnapshot({
+          error: protoError(
+            "internal",
+            message,
+            "Check that the daemon is running, then reconnect.",
+          ),
+        });
+      },
+    };
+
+    try {
+      this.transport = this.transportFactory({
+        url: this.options.url,
+        token: this.options.token ?? null,
+        attempt: this.attempt,
+      });
+      this.transport.connect(handlers);
+    } catch (error) {
+      this.patchSnapshot({
+        error: protoError(
+          "internal",
+          error instanceof Error ? error.message : "The transport could not be created.",
+          "Check the daemon URL and try again.",
+        ),
+      });
+      this.scheduleReconnect();
+    }
+  }
+
+  private async performHello(): Promise<void> {
+    try {
+      const hello = await this.request(
+        {
+          type: "hello",
+          protocol_version: 1,
+          device: this.device,
+        },
+        { timeoutMs: 6_000 },
+      );
+
+      if (hello.type !== "hello") {
+        throw new H4rnRequestError(
+          protoError(
+            "internal",
+            "The daemon answered hello with an unexpected response.",
+            "Update h4rn on both ends.",
+          ),
+        );
+      }
+
+      const reconnected = this.everReady;
+      this.everReady = true;
+      this.attempt = 0;
+      this.stopPing();
+      this.setSnapshot({
+        status: "online",
+        attempt: 0,
+        lastConnectedAt: Date.now(),
+        error: null,
+      });
+      this.startPing();
+
+      try {
+        await this.request({ type: "subscribe", topics: ["all"] }, { timeoutMs: 6_000 });
+      } catch {
+        // Subscriptions are best-effort; list and detail requests still work.
+      }
+
+      const ready: ReadyInfo = {
+        reconnected,
+        hosts: hello.hosts,
+        serverVersion: hello.server_version,
+        deviceId: hello.device_id,
+      };
+      for (const listener of this.readyListeners) listener(ready);
+    } catch (error) {
+      const proto = error instanceof H4rnRequestError ? error.proto : null;
+      if (proto?.code === "unauthorized" || proto?.code === "forbidden") {
+        this.fatal = true;
+        this.setSnapshot({ status: "offline", error: proto });
+        this.transport?.close();
+        return;
+      }
+      this.patchSnapshot({
+        error:
+          proto ??
+          protoError(
+            "internal",
+            "The hello handshake did not complete.",
+            "Check the daemon version, then reconnect.",
+          ),
+      });
+      this.transport?.close();
+    }
+  }
+
+  private handleMessage(data: string): void {
+    this.patchSnapshot({ lastEventAt: Date.now() });
+
+    let frame: ServerFrame;
+    try {
+      frame = JSON.parse(data) as ServerFrame;
+    } catch {
+      this.patchSnapshot({
+        error: protoError(
+          "internal",
+          "The daemon sent a frame that was not JSON.",
+          "Update h4rn on both ends; the connection will retry.",
+        ),
+      });
+      return;
+    }
+
+    if (frame.kind === "response") {
+      const pending = this.pending.get(frame.id);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      this.pending.delete(frame.id);
+      if ("Ok" in frame.result) {
+        pending.resolve(frame.result.Ok);
+      } else {
+        pending.reject(new H4rnRequestError(frame.result.Err, frame.id));
+      }
+      return;
+    }
+
+    if (frame.kind === "event") {
+      if (frame.seq <= this.lastSeq) return;
+      this.lastSeq = frame.seq;
+      for (const listener of this.eventListeners) {
+        listener({ seq: frame.seq, event: frame.event });
+      }
+    }
+  }
+
+  private handleClose(code: number, reason: string): void {
+    this.socketOpen = false;
+    this.transport = null;
+    this.stopPing();
+    this.rejectPending(
+      new H4rnRequestError(
+        protoError(
+          "internal",
+          reason || "The daemon closed the connection.",
+          "The client reconnects automatically. Requests sent during the gap are not retried.",
+        ),
+      ),
+    );
+
+    const fatal = FATAL_CLOSE_CODES.get(code);
+    if (fatal) {
+      this.fatal = true;
+      this.setSnapshot({
+        status: "offline",
+        error: protoError(code === 4401 ? "unauthorized" : "forbidden", fatal.message, fatal.hint),
+      });
+      return;
+    }
+
+    if (this.stopped) return;
+    this.scheduleReconnect();
+  }
+
+  private scheduleReconnect(): void {
+    if (this.stopped || this.fatal || this.reconnectTimer) return;
+
+    this.attempt += 1;
+    const maxAttempts = this.options.reconnect?.maxAttempts ?? 12;
+    if (this.attempt > maxAttempts) {
+      this.setSnapshot({
+        status: "offline",
+        attempt: this.attempt,
+        error:
+          this.snapshot.error ??
+          protoError(
+            "internal",
+            "The daemon has not answered after repeated attempts.",
+            "Start the daemon or check the network, then press Reconnect.",
+          ),
+      });
+      return;
+    }
+
+    this.setSnapshot({
+      status: "degraded",
+      attempt: this.attempt,
+      latencyMs: null,
+    });
+
+    const base = this.options.reconnect?.baseMs ?? 500;
+    const max = this.options.reconnect?.maxMs ?? 15_000;
+    const jitter = this.options.reconnect?.jitter ?? 0.3;
+    const nominal = Math.min(max, base * 2 ** (this.attempt - 1));
+    const delay = Math.round(nominal * (1 + (Math.random() * 2 - 1) * jitter));
+
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.openSocket();
+    }, delay);
+  }
+
+  private clearReconnect(): void {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+
+  private startPing(): void {
+    this.stopPing();
+    this.pingTimer = setInterval(() => {
+      if (!this.socketOpen) return;
+      const started = Date.now();
+      void this.request({ type: "list_hosts" }, { timeoutMs: 5_000 })
+        .then(() => {
+          this.patchSnapshot({ latencyMs: Date.now() - started });
+        })
+        .catch(() => {
+          this.patchSnapshot({ latencyMs: null });
+        });
+    }, 15_000);
+  }
+
+  private stopPing(): void {
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    this.pingTimer = null;
+  }
+
+  private rejectPending(error: H4rnRequestError): void {
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+    }
+    this.pending.clear();
+  }
+
+  private setSnapshot(next: Partial<ConnectionSnapshot>): void {
+    this.snapshot = { ...this.snapshot, ...next };
+    for (const listener of this.statusListeners) listener(this.snapshot);
+  }
+
+  private patchSnapshot(next: Partial<ConnectionSnapshot>): void {
+    const changed = (Object.keys(next) as Array<keyof ConnectionSnapshot>).some(
+      (key) => this.snapshot[key] !== next[key],
+    );
+    if (!changed) return;
+    this.setSnapshot(next);
+  }
+}
+
+export function createH4rnClient(options: ClientOptions): H4rnClient {
+  return new H4rnClient(options);
+}
