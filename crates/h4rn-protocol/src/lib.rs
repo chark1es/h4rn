@@ -40,6 +40,7 @@ pub mod mcp;
 mod proxy;
 mod server;
 pub mod skills;
+mod subagents;
 mod terminal;
 mod transport;
 mod usage;
@@ -78,6 +79,12 @@ pub use skills::{
     SkillInstallState, SkillInventory, SkillManifest, SkillSource, SkillSummary, SkillSyncAck,
     SkillSyncConflict, SkillSyncEntry, SkillSyncPull, SkillSyncPullResponse, SkillSyncPush,
     SkillSyncPushResponse, SkillSyncState, SkillSyncStatus, SkillVersionVector,
+};
+pub use subagents::{
+    DEFAULT_MAX_DEPTH, DEFAULT_MAX_TOKENS, DEFAULT_MAX_TURNS, DEFAULT_MAX_WALL_TIME_SECS,
+    SpawnSubagentRequest, SubagentBudget, SubagentContext, SubagentContextKind, SubagentCredential,
+    SubagentFileChange, SubagentIsolation, SubagentProgress, SubagentRequest, SubagentResult,
+    SubagentState, SubagentView,
 };
 pub use terminal::{
     CREDIT_MAX_BYTES, CREDIT_MAX_CHUNKS, TerminalExit, TerminalExitNotice, TerminalInfo,

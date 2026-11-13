@@ -12,6 +12,8 @@ import type { Item } from "./Item";
 import type { McpCaller } from "./McpCaller";
 import type { McpServerStatusKind } from "./McpServerStatusKind";
 import type { SkillSyncStatus } from "./SkillSyncStatus";
+import type { SubagentId } from "./SubagentId";
+import type { SubagentView } from "./SubagentView";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadSummary } from "./ThreadSummary";
 import type { ToolCall } from "./ToolCall";
@@ -92,6 +94,13 @@ turn_id: TurnId,
  * Opaque approval id.
  */
 approval_id: string, 
+/**
+ * Subagent that raised the hand, when it belongs to one.
+ *
+ * The approval is emitted on the parent thread with a namespaced
+ * approval id; this names the child so the UI can attribute it.
+ */
+subagent_id: SubagentId | null, 
 /**
  * What kind of hand is raised.
  */
@@ -275,4 +284,28 @@ error: string | null,
 /**
  * When the call returned.
  */
-at: string, };
+at: string, } | { "type": "subagent_spawned", 
+/**
+ * Thread that delegated the work.
+ */
+parent_thread_id: ThreadId, 
+/**
+ * The new child.
+ */
+subagent: SubagentView, } | { "type": "subagent_updated", 
+/**
+ * Thread that delegated the work.
+ */
+parent_thread_id: ThreadId, 
+/**
+ * Current view.
+ */
+subagent: SubagentView, } | { "type": "subagent_finished", 
+/**
+ * Thread that delegated the work.
+ */
+parent_thread_id: ThreadId, 
+/**
+ * Final view, including the result.
+ */
+subagent: SubagentView, };

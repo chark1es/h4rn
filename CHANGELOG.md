@@ -66,6 +66,37 @@ All notable changes to h4rn are recorded here. The format follows
   transient `McpServerStatus`/`McpToolCalled` events on `Topic::Mcp`.
 - **Docs and tests**: `docs/mcp.md`, ADR-036/037, real stdio-fixture and two-daemon tunnel tests,
   secret non-leak tests, and ignored real Claude/Codex injection tests (`h4rn__echo`).
+### Phase 4 — cross-harness subagents
+
+- **Child threads** (`h4rn-daemon`): `spawn_subagent` creates a normal thread
+  with `parent_thread_id` and a pre-allocated `SubagentId`, so delegation reuses
+  the journal, resume, usage and approval machinery. `Delegated` items and
+  `SubagentSpawned`/`SubagentUpdated`/`SubagentFinished` events project the
+  parent's view; child rows stay out of the top-level list and inbox.
+- **Supervisor**: one daemon-wide watcher enforces turn, wall-clock and token
+  budgets, maps terminal turns to `completed`/`failed`/`cancelled`/
+  `budget_exceeded`, folds the last assistant text, usage and changed files into
+  a result, and cleans worktrees on settle. Nesting is capped at depth 2 by
+  default and harness availability is checked against the installed catalog.
+- **Isolation and context**: shared workspace or a git worktree under
+  `<data_dir>/subagents/<id>/worktree` on `h4rn/sa-<short id>`; context handoff
+  is none, a caller summary, or selected workspace files (128 KiB cap, path
+  confinement).
+- **Approvals**: a child inherits the parent runtime mode; its approvals are
+  mirrored to the parent as `sa:<id>` with `[Subagent]` attribution and either
+  side answers both. Settling a child clears stale mirrored hands.
+- **MCP tools**: `h4rn__spawn_subagent`, `get_subagent_status`,
+  `get_subagent_result` (bounded wait), `cancel_subagent` and `list_subagents`,
+  scoped by the parent session token. The registry now supports multiple
+  providers per namespace so these coexist with `h4rn__echo`.
+- **Protocol**: `ClientRequest::Subagent { SubagentRequest }`,
+  `SubagentView`/budget/context/result types, `ThreadSummary.parent_thread_id`,
+  `ThreadFilter.include_children`, `ResponseBody::Subagents/Subagent`,
+  `ApprovalRequested.subagent_id`, and TypeScript bindings.
+- **Docs and tests**: `docs/subagents.md`, ADR-038/039, unit tests for budgets
+  and depth, an MCP-HTTP integration test with `FakeHarness` parent and child,
+  and an ignored real Claude Code → Codex delegation test.
+
 ### Phase 5 — metering and auto-resume
 
 - **Ledger** (`h4rn-meter`): durable, append-only SQLite rows per turn with

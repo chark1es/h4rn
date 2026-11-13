@@ -15,6 +15,7 @@ pub(super) mod forge;
 pub(super) mod mcp;
 pub(super) mod proxy;
 pub(super) mod skills;
+pub(super) mod subagents;
 pub(super) mod usage;
 
 /// Generates the service enum, request classification, dispatch and forwarder
@@ -71,6 +72,7 @@ declare_services! {
     Forge => forge,
     Skills => skills,
     Mcp => mcp,
+    Subagents => subagents,
     Usage => usage,
 }
 

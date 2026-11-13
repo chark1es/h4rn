@@ -628,6 +628,9 @@ impl ForgeService {
                 })?;
                 let created = manager
                     .create_thread(NewThread {
+                        thread_id: None,
+                        parent_thread_id: None,
+                        subagent_id: None,
                         host: target.host,
                         harness: target.harness,
                         workspace_path: target.workspace_path,

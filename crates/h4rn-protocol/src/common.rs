@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ts_rs::TS;
 
-use crate::ids::{DeviceId, HostId, ThreadId};
+use crate::ids::{DeviceId, HostId, SubagentId, ThreadId};
+use crate::subagents::SubagentState;
 
 /// The coding harness driving a thread (ADR-005).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
@@ -286,6 +287,12 @@ impl Usage {
 pub struct ThreadSummary {
     /// Thread id.
     pub thread_id: ThreadId,
+    /// Thread that delegated this one, when this is a subagent.
+    ///
+    /// Child threads are hidden from the top-level list unless the filter asks
+    /// for them; the subagent panel reads the tree through this field.
+    #[serde(default)]
+    pub parent_thread_id: Option<ThreadId>,
     /// Host running the thread.
     pub host: HostId,
     /// Harness driving the thread.
@@ -343,6 +350,31 @@ pub enum Item {
         /// The completed tool call.
         tool_call: ToolCall,
     },
+    /// A parent delegated work to a child thread.
+    ///
+    /// Rendered inline on the parent transcript as the subagent orb plus its
+    /// task and live state. The child thread itself is a normal thread with
+    /// `parent_thread_id` set.
+    Delegated {
+        /// Stable item id.
+        item_id: String,
+        /// Subagent record this row follows.
+        subagent_id: SubagentId,
+        /// Child thread, once its row exists.
+        thread_id: Option<ThreadId>,
+        /// Task text.
+        task: String,
+        /// Harness driving the child.
+        harness: HarnessKind,
+        /// Host running the child.
+        host: HostId,
+        /// Model slug.
+        model: String,
+        /// Delegation lifecycle state.
+        state: SubagentState,
+        /// Orb/glyph state of the child.
+        agent_state: AgentState,
+    },
 }
 
 /// Author of a stream message.
@@ -391,6 +423,13 @@ pub struct ThreadFilter {
     pub search: Option<String>,
     /// Include snoozed threads in the result set.
     pub include_snoozed: bool,
+    /// Include subagent child threads in the result set.
+    ///
+    /// Child rows are hidden by default so the top-level list and inbox stay
+    /// about the user's own conversations; opening a parent asks for them
+    /// explicitly.
+    #[serde(default)]
+    pub include_children: bool,
 }
 
 #[cfg(test)]
@@ -425,6 +464,7 @@ mod tests {
     ) -> ThreadSummary {
         ThreadSummary {
             thread_id: ThreadId::new("th_summary"),
+            parent_thread_id: None,
             host: HostId::new("host_test"),
             harness: HarnessKind::ClaudeCode,
             title: "usage limit".into(),

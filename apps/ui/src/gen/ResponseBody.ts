@@ -41,6 +41,7 @@ import type { SkillImportPreview } from "./SkillImportPreview";
 import type { SkillInventory } from "./SkillInventory";
 import type { SkillSummary } from "./SkillSummary";
 import type { SkillSyncStatus } from "./SkillSyncStatus";
+import type { SubagentView } from "./SubagentView";
 import type { TerminalInfo } from "./TerminalInfo";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadSummary } from "./ThreadSummary";
@@ -344,4 +345,12 @@ resets: Resets, } | { "type": "resume_changed",
 /**
  * The current schedule, or `None` when none remains.
  */
-schedule: ResumeSchedule | null, } | { "type": "ack" };
+schedule: ResumeSchedule | null, } | { "type": "subagents", 
+/**
+ * Matching subagents, newest first.
+ */
+subagents: Array<SubagentView>, } | { "type": "subagent", 
+/**
+ * Current view.
+ */
+subagent: SubagentView, } | { "type": "ack" };

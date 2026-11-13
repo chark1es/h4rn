@@ -248,6 +248,9 @@ async fn real_harness_calls_h4rn_echo(harness: HarnessKind) {
     let created = daemon
         .manager
         .create_thread(NewThread {
+            thread_id: None,
+            parent_thread_id: None,
+            subagent_id: None,
             host,
             harness,
             workspace_path: repo.path().display().to_string(),

@@ -1,0 +1,158 @@
+# Cross-harness subagents
+
+A subagent is a **child thread**: an ordinary h4rn conversation with a
+`parent_thread_id`. It gets its own harness session, journal, usage accounting,
+approvals and resume id, and can run on any harness this daemon can launch —
+Claude Code, Codex, OpenCode or Antigravity — regardless of the parent's
+harness. The design is recorded in
+[ADR-038](decisions.md#adr-038-a-subagent-is-a-child-thread-not-a-second-session-type)
+and
+[ADR-039](decisions.md#adr-039-delegation-policy-is-enforced-by-the-daemon-not-the-parent).
+
+## Using it
+
+### From a parent agent
+
+Every harness session is injected with the `h4rn` MCP server. A model calls the
+five delegation tools under that namespace, for example `h4rn__spawn_subagent`:
+
+| Tool | Purpose |
+| --- | --- |
+| `spawn_subagent` | Create the child, start its first turn, return its id immediately. |
+| `get_subagent_status` | Read state, budget counters and the current activity. |
+| `get_subagent_result` | Wait up to `wait_secs` (default 30, max 180) and return the handoff. |
+| `cancel_subagent` | Interrupt the child and clean up its worktree. |
+| `list_subagents` | List this thread's children, newest first. |
+
+Spawn arguments:
+
+```json
+{
+  "task": "Add the retry loop and run the tests",
+  "harness": "codex",
+  "model": "gpt-5-codex",
+  "isolation": "worktree",
+  "context": {"kind": "files", "paths": ["src/retry.rs"], "summary": "See the failing test"},
+  "budget": {"max_turns": 12, "max_wall_time_secs": 600, "max_tokens": 20000}
+}
+```
+
+`harness` defaults to the parent's harness; `model` defaults to the parent's
+model; `isolation` is `shared` (default) or `worktree`. Context is one of:
+
+- `{"kind":"none"}` — only the task text;
+- `{"kind":"summary","summary":"..."}` — the task plus a caller-written handoff;
+- `{"kind":"files","paths":[...],"summary":"..."}` — the task plus selected
+  workspace files (128 KiB total, paths may not escape the workspace).
+
+The child does **not** see the parent conversation. The parent must put
+everything the child needs into `task` or `context`.
+
+### From the app
+
+The subagents panel on a thread uses the same daemon operations through the
+protocol envelope `ClientRequest::Subagent`:
+
+- `ListSubagents { parent_thread, include_finished }`
+- `GetSubagent { subagent_id }`
+- `CancelSubagent { subagent_id }`
+- `SpawnSubagent { request }` — the Delegate button
+
+Live progress arrives as `SubagentUpdated`; the parent's journal receives a
+durable `Delegated` item when the child is created and `SubagentFinished` when
+it settles. Child threads are hidden from the top-level thread list and inbox
+unless a client asks for `include_children` (or opens the parent). The parent
+stays in **Working** while its own turn is blocked in a delegation tool, which
+is what "waiting on a child" means.
+
+## Identity and visibility
+
+- `SubagentId` is stable (`sa_` + UUID v7) and stored on the child thread's
+  metadata, so the child thread and its journal survive a daemon restart.
+- The supervisor's live record (budget counters, current activity, result) is
+  in memory in this phase: after a restart the child is still a normal thread
+  with `parent_thread_id`, but `list_subagents` does not reconstruct its
+  delegation card. (TODO: rebuild views from thread metadata on startup.)
+- The child thread id is pre-allocated so early harness events can be matched to
+  the record even before `create_thread` returns.
+- `ThreadSummary.parent_thread_id` is persisted in the event journal's thread
+  metadata; `ThreadFilter.include_children` is the only way a top-level listing
+  sees child rows.
+
+## Isolation
+
+- **shared** — the child runs in the parent's workspace. Edits are visible to
+  both immediately. Use this for read-only investigation and for work the
+  parent will review as it happens.
+- **worktree** — the child gets `git worktree` at
+  `<data_dir>/subagents/<subagent id>/worktree` on branch `h4rn/sa-<short id>`.
+  On success the worktree is removed and the branch is kept so the parent can
+  merge or inspect it. On cancel or a budget overrun the branch is deleted too.
+
+There is no automatic merge. A parent that wants the work uses the branch name
+shown in the subagent view.
+
+## Policy
+
+The daemon, not the parent model, enforces:
+
+- **Harness availability** — the harness must have an installed adapter on this
+  daemon's host. Failures list the available harnesses.
+- **Nesting depth** — `DEFAULT_MAX_DEPTH` is 2: a top-level thread may spawn
+  children and grandchildren, not great-grandchildren. The depth is derived
+  from persisted `parent_thread_id` links.
+- **Budgets** — every child has `max_turns`, `max_wall_time_secs` and
+  `max_tokens`. Omitted fields use daemon defaults (20 turns, 900 s, 50k
+  tokens); `0` is rejected. A run that exceeds any budget is interrupted and
+  marked `BudgetExceeded` with a redacted reason in its result.
+- **Hosts** — only the local host is supported in this phase. A non-local host
+  returns a clear `not_implemented`-style unsupported error with a TODO for the
+  remote path.
+- **Approvals** — the child inherits the parent's runtime mode. A child's
+  approval is mirrored onto the parent thread as `sa:<approval id>` with a
+  `[Subagent]` prompt prefix and the child's `SubagentId`. Answering either the
+  child's id or the parent's namespaced id reaches the same harness session and
+  resolves both. When a child settles, any still-pending mirrored hand is
+  cleared so the parent inbox cannot get stuck.
+- **Credentials** — the child reuses the parent session's credential and model
+  account. It never receives the parent's MCP bearer token; the daemon mints a
+  token for the child session because the child is a normal thread.
+
+## Budget accounting
+
+`SubagentProgress` carries turns started/completed, cumulative tokens and
+elapsed milliseconds. Turns are counted from the child's `TurnStarted`; tokens
+come from the child thread's merged usage on each `ThreadUpserted`; the
+wall-clock is refreshed by the supervisor tick. When the child settles, its
+last assistant message, usage and worktree file changes are folded into
+`SubagentResult`.
+
+## Failure modes
+
+| State | Meaning |
+| --- | --- |
+| `starting` | The thread row exists; the harness session has not started. |
+| `running` | The child is working. |
+| `awaiting_approval` | The child is blocked on a hand shown on the parent. |
+| `completed` | The child finished; `result` is available. |
+| `failed` | The child's turn failed or the harness errored. |
+| `cancelled` | The user or parent cancelled it. |
+| `budget_exceeded` | A turn, token or wall-time cap was hit. |
+
+`spawn_subagent` validates the task, harness, budget and isolation before it
+creates anything. A worktree spawn on a non-repository workspace fails with a
+hint instead of silently running shared.
+
+## Tests
+
+`crates/h4rn-daemon/tests/e2e_subagents.rs` drives the real `/mcp` endpoint with
+a token minted for the parent thread and covers spawn, status, result, cancel,
+approval mirroring/cleanup, worktree create/remove and wall-time enforcement
+using `FakeHarness`. The ignored
+`real_claude_delegates_to_codex` test runs a real Claude Code parent delegating
+"Reply with exactly: pong" to a real Codex child.
+
+```text
+cargo test -p h4rn-daemon --test e2e_subagents
+cargo test -p h4rn-daemon --test e2e_subagents -- --ignored --nocapture
+```

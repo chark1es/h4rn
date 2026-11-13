@@ -637,3 +637,43 @@ owning machine executes the server and keeps the secret, a second secure session
 with the authenticated device key. A proxy cannot be re-shared, so a chain cannot be used to
 launder access. The tradeoff is one extra encrypted hop for remote calls and the need to clean up
 secret references on update and removal; both are covered by tests.
+
+## ADR-038: A subagent is a child thread, not a second session type
+
+**Status:** Accepted
+
+Delegation creates an ordinary h4rn thread with `parent_thread_id` set, rather
+than a parallel "task" object with its own lifecycle. That reuses everything
+threads already do — durable event journal and replay, resume ids, usage
+accounting, approvals, the harness registry, worktree-safe workspaces and the
+MCP hub — and makes the child openable in the same conversation UI as any other
+thread. The deltas are small and explicit: two metadata columns
+(`parent_thread_id`, `subagent_id`), a `Delegated` item and spawn/finish events
+on the parent, child rows hidden from top-level listings, and approvals mirrored
+from the child onto the parent as `sa:<id>` with the child's `SubagentId` in the
+event. A pre-allocated child id lets the supervisor record a spawn before the
+first harness event can race past it. The tradeoff is that a subagent inherits
+thread semantics wholesale (it can have many turns, its own inbox row and its own
+resume id), which is exactly the property that lets a child run on a different
+harness without inventing a second state machine.
+
+## ADR-039: Delegation policy is enforced by the daemon, not the parent
+
+**Status:** Accepted
+
+`spawn_subagent` is a tool call from a model, so nothing it supplies is trusted.
+The daemon independently validates the harness against its installed catalog,
+derives nesting depth from persisted parent links (default maximum 2), rejects
+zero or malformed budgets, confines `context.files` to the parent workspace
+under a 128 KiB cap, and accepts only the local host in this phase. Every child
+gets turn, wall-clock and token caps; omitted fields take daemon defaults rather
+than meaning unlimited, because an unbounded delegation loop is the failure mode
+that matters. The supervisor watches the child's journal, interrupts the harness
+when a cap is exceeded, records `BudgetExceeded` (distinct from `Cancelled`) and
+folds the terminal turn into a bounded `SubagentResult`. Worktree isolation lives
+under the daemon data directory, and cleanup is state-dependent: keep the branch
+on success, delete it on cancel or budget overrun. The parent's MCP token scopes
+every operation to its own thread, so a token cannot read or cancel another
+thread's children. The tradeoff is that policy lives in one daemon-side module
+with no per-call escape hatch; a caller that needs a different bound must ask
+for it explicitly and still pass validation.
