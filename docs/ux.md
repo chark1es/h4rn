@@ -1245,6 +1245,7 @@ Covered structurally in flow (d). Additional rules:
 - **CodeMirror 6** carries the theme tokens: paper ground, ink text, cue cursor, cue-tint selection, standby/strike for diff gutters. No minimap, no breadcrumbs beyond the path bar, no activity bar.
 - **Read-only mode** when the device lacks file scope: a lock chip in the header explains “File access was not granted to this device.” Editing is disabled, diffs still work if the thread grants read.
 - **Phone:** single pane; file tree is a sheet; tabs are a horizontal strip; search is a full-screen sheet; diff is a full-screen mode with a unified view and a file picker. The key bar offers Tab, Esc, arrows, undo, save. “Open on desktop” is offered for long edits but is never required to inspect a diff.
+- **Not in Phase 2:** no language servers (ADR-013), no debuggers, and no extension host. The IDE is a viewer and a light editor for files the agent touched; heavy editing still belongs in the user's own IDE, and h4rn says so in the empty state rather than pretending.
 
 ### 6.7 Pull request view
 

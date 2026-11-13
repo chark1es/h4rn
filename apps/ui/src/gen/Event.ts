@@ -3,6 +3,8 @@ import type { AgentState } from "./AgentState";
 import type { ApprovalKind } from "./ApprovalKind";
 import type { ApprovalOption } from "./ApprovalOption";
 import type { DeviceId } from "./DeviceId";
+import type { FsChangeKind } from "./FsChangeKind";
+import type { FsSearchMatch } from "./FsSearchMatch";
 import type { Item } from "./Item";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadSummary } from "./ThreadSummary";
@@ -162,4 +164,36 @@ hint: string | null,
 /**
  * Whether a retry is safe.
  */
-retryable: boolean, };
+retryable: boolean, } | { "type": "fs_changed", 
+/**
+ * Canonical workspace root.
+ */
+workspace: string, 
+/**
+ * Workspace-relative path that changed.
+ */
+path: string, 
+/**
+ * What happened.
+ */
+change: FsChangeKind, 
+/**
+ * When the daemon observed it.
+ */
+at: string, } | { "type": "fs_search_batch", 
+/**
+ * Correlation id from `FsSearchStarted`.
+ */
+search_id: string, 
+/**
+ * Matches in this batch.
+ */
+results: Array<FsSearchMatch>, 
+/**
+ * True on the last batch.
+ */
+done: boolean, 
+/**
+ * True when the daemon hit its result cap.
+ */
+truncated: boolean, };

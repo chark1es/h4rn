@@ -9,6 +9,7 @@ use tokio::net::TcpListener;
 
 use crate::auth::TokenStore;
 use crate::config::Config;
+use crate::fs::FsService;
 use crate::harnesses::{HarnessCatalog, StaticHarnessCatalog};
 use crate::hosts::HostInventory;
 use crate::journal::{Journal, SqliteJournal};
@@ -125,6 +126,18 @@ impl DaemonBuilder {
         );
         manager.start_ticker();
 
+        let fs = Arc::new(
+            FsService::new(&self.config.data_dir)
+                .map_err(|error| anyhow::anyhow!("open filesystem service: {error}"))?,
+        );
+        fs.allow_configured_roots();
+        for workspace in manager.workspace_paths().await {
+            if let Err(error) = fs.allow_root(&workspace) {
+                tracing::warn!(workspace, %error, "skipping unauthorised thread workspace");
+            }
+        }
+        manager.set_snapshot_store(fs.snapshots());
+
         let tokens = TokenStore::new(&self.config.data_dir);
         // Provision on first serve so a client has a token to read.
         let _ = tokens.load_or_create()?;
@@ -135,6 +148,7 @@ impl DaemonBuilder {
             hosts,
             terminals,
             tokens,
+            fs,
             supervisor: self.supervisor,
         })
     }
@@ -147,6 +161,7 @@ pub struct Daemon {
     hosts: Arc<HostInventory>,
     terminals: Arc<TerminalManager>,
     tokens: TokenStore,
+    fs: Arc<FsService>,
     supervisor: Arc<ProcessSupervisor>,
 }
 
@@ -192,6 +207,7 @@ impl Daemon {
             hosts: self.hosts,
             terminals: Arc::clone(&self.terminals),
             tokens: self.tokens,
+            fs: self.fs,
             started: std::time::Instant::now(),
         };
 

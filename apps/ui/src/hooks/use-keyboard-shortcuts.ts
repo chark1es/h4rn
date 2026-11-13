@@ -169,7 +169,7 @@ export function useKeyboardShortcuts(): void {
           h: { kind: "hosts" },
           l: { kind: "placeholder", surface: "library", path: "/library" },
           u: { kind: "placeholder", surface: "usage", path: "/usage" },
-          e: { kind: "placeholder", surface: "ide", path: "/ide" },
+          e: { kind: "ide" },
           p: { kind: "placeholder", surface: "pulls", path: "/pulls" },
         };
         const target = targets[lower];

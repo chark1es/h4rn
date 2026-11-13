@@ -232,9 +232,11 @@ WebKitGTK; CodeMirror 6 is modular, works in every Tauri WebView, and its merge/
 enough for reviewing agent edits. The scope is deliberately "look at and lightly edit the file the
 agent touched", with diffs scoped to a checkpoint or run exactly as T3 Code scopes them, rather
 than a general IDE. **LSP is out of scope** for v1: no language servers, no completions, no
-diagnostics beyond what the agent's own tooling reports. The tradeoff is that users who want an
-IDE will open their IDE, and h4rn will not compete there — which is correct, because the product's
-value is orchestration, not editing. Reconsider LSP only if the editor becomes a primary surface.
+diagnostics beyond what the agent's own tooling reports. The same holds for a debugger and an
+extension host — Phase 2 ships read, write, search and diffs, and leaves those to the user's IDE.
+The tradeoff is that users who want an IDE will open their IDE, and h4rn will not compete there —
+which is correct, because the product's value is orchestration, not editing. Reconsider LSP only
+if the editor becomes a primary surface.
 
 ## ADR-014: React 19 + Vite + Tailwind v4 + shadcn/ui + `motion`; orbs and blobatars for state and identity
 

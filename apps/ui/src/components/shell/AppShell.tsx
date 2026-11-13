@@ -15,6 +15,7 @@ import { StatusBar } from "@/components/shell/StatusBar";
 import { Toasts } from "@/components/shell/Toasts";
 import { ThreadPane } from "@/components/thread/ThreadPane";
 import { Button } from "@/components/ui/button";
+import { IdePane } from "@/features/ide/IdePane";
 import { useIsPhone, useIsWide } from "@/hooks/use-media-query";
 import { openNewThread, setUi, useApp } from "@/lib/store/appStore";
 
@@ -52,18 +53,22 @@ export function AppShell() {
   const isPhone = useIsPhone();
   const isWide = useIsWide();
   const isThread = route.kind === "thread";
+  const isIde = route.kind === "ide";
 
-  const surface =
-    route.kind === "hosts" ? (
-      <HostsPane />
-    ) : route.kind === "placeholder" ? (
-      <PlaceholderPane surface={route.surface} />
-    ) : null;
+  const surface = isIde ? (
+    <IdePane />
+  ) : route.kind === "hosts" ? (
+    <HostsPane />
+  ) : route.kind === "placeholder" ? (
+    <PlaceholderPane surface={route.surface} />
+  ) : null;
 
   let body: React.ReactNode;
   if (isPhone) {
     body = isThread ? (
       <ThreadPane threadId={route.threadId} />
+    ) : isIde ? (
+      <IdePane />
     ) : (
       <div className="flex min-h-0 flex-1 flex-col">
         {surface ?? <InboxPane />}
@@ -90,7 +95,7 @@ export function AppShell() {
 
   return (
     <div className="flex h-dvh min-h-0 flex-col bg-paper text-ink">
-      {isPhone && !isThread ? <PhoneTopBar /> : null}
+      {isPhone && !isThread && !isIde ? <PhoneTopBar /> : null}
       <div className="flex min-h-0 flex-1">
         {!isPhone ? <Rail /> : null}
         <div className="flex min-w-0 flex-1 flex-col">

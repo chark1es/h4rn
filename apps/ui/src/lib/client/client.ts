@@ -2,6 +2,7 @@ import type {
   ClientFrame,
   ClientRequest,
   DeviceInfo,
+  Event,
   ResponseBody,
   ServerFrame,
   TerminalExitNotice,
@@ -36,7 +37,36 @@ export type ResponseOf<T extends ClientRequest["type"]> = T extends "hello"
                 ? Extract<ResponseBody, { type: "terminal_attached" }>
                 : T extends "terminal_list"
                   ? Extract<ResponseBody, { type: "terminals" }>
-                  : Extract<ResponseBody, { type: "ack" }>;
+                  : T extends "fs_list"
+                    ? Extract<ResponseBody, { type: "fs_listing" }>
+                    : T extends "fs_read"
+                      ? Extract<ResponseBody, { type: "fs_file" }>
+                      : T extends "fs_write"
+                        ? Extract<ResponseBody, { type: "fs_written" }>
+                        : T extends "fs_create" | "fs_rename"
+                          ? Extract<ResponseBody, { type: "fs_entry_created" }>
+                          : T extends "fs_delete"
+                            ? Extract<ResponseBody, { type: "fs_deleted" }>
+                            : T extends "fs_restore"
+                              ? Extract<ResponseBody, { type: "fs_restored" }>
+                              : T extends "fs_search"
+                                ? Extract<ResponseBody, { type: "fs_search_started" }>
+                                : T extends "fs_watch"
+                                  ? Extract<ResponseBody, { type: "fs_watching" }>
+                                  : T extends "fs_diff"
+                                    ? Extract<ResponseBody, { type: "fs_diff" }>
+                                    : T extends "fs_turn_changes"
+                                      ? Extract<ResponseBody, { type: "fs_turn_changes" }>
+                                      : Extract<ResponseBody, { type: "ack" }>;
+
+/**
+ * Events that carry no durable position: `seq` is the daemon's current
+ * watermark, not a new record, so they must not advance the client cursor or
+ * be dropped by sequence deduplication.
+ */
+export function isTransientEvent(event: Event): boolean {
+  return event.type === "fs_changed" || event.type === "fs_search_batch";
+}
 
 type Pending = {
   id: number;
@@ -438,6 +468,14 @@ export class H4rnClient {
     }
 
     if (frame.kind === "event") {
+      if (isTransientEvent(frame.event)) {
+        // File-watch hints and streamed search batches reuse the current
+        // watermark; deliver them live without moving `lastSeq`.
+        for (const listener of this.eventListeners) {
+          listener({ seq: frame.seq, event: frame.event });
+        }
+        return;
+      }
       if (frame.seq <= this.lastSeq) return;
       if (this.replaying) {
         // Hold replay frames until the subscribe reply marks the gap closed,

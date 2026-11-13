@@ -35,6 +35,7 @@ use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::auth::{TokenStore, authorize};
+use crate::fs::{FsError, FsService};
 use crate::hosts::HostInventory;
 use crate::terminal::{Attached, OpenSpec, TerminalManager, run_viewer};
 use crate::threads::ThreadManager;
@@ -56,6 +57,8 @@ pub struct AppState {
     pub terminals: Arc<TerminalManager>,
     /// Local access token.
     pub tokens: TokenStore,
+    /// Workspace-scoped filesystem and git service for IDE mode.
+    pub fs: Arc<FsService>,
     /// Server boot time, for `/healthz`.
     pub started: Instant,
 }
@@ -129,6 +132,8 @@ struct Connection {
     device: Option<DeviceInfo>,
     viewer_id: crate::terminal::ViewerId,
     tx: mpsc::Sender<Outbound>,
+    /// One filesystem watcher subscription per requested workspace.
+    watches: HashMap<String, JoinHandle<()>>,
 }
 
 impl Connection {
@@ -175,6 +180,7 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         device: None,
         viewer_id,
         tx: tx.clone(),
+        watches: HashMap::new(),
     };
 
     while let Some(message) = stream.next().await {
@@ -209,12 +215,35 @@ async fn handle_socket(socket: WebSocket, state: AppState) {
         .state
         .terminals
         .detach_viewer(connection.viewer_id);
+    connection.stop_watches();
     drop(connection);
     drop(tx);
     let _ = writer.await;
 }
 
 impl Connection {
+    /// Aborts every filesystem watcher task owned by this connection.
+    ///
+    /// Watcher tasks hold a sender clone, so they would otherwise outlive the
+    /// socket and keep pushing into a queue nobody reads.
+    fn stop_watches(&mut self) {
+        for (_, handle) in self.watches.drain() {
+            handle.abort();
+        }
+    }
+
+    /// Returns an error when the request names a host this daemon does not run.
+    fn local_host_error(&self, host: &h4rn_protocol::HostId) -> Option<ProtoError> {
+        if self.state.hosts.local_id() == *host {
+            None
+        } else {
+            Some(ProtoError::new(
+                ProtoErrorCode::Unsupported,
+                "that host is not this daemon",
+                "Open the IDE on the host that owns the workspace",
+            ))
+        }
+    }
     async fn handle_text(&mut self, text: &str) -> Option<String> {
         let frame: ClientFrame = match serde_json::from_str(text) {
             Ok(frame) => frame,
@@ -312,22 +341,28 @@ impl Connection {
                 let request = crate::threads::NewThread {
                     host,
                     harness,
-                    workspace_path,
+                    workspace_path: workspace_path.clone(),
                     model,
                     prompt,
                     runtime_mode,
                     worktree,
                 };
-                self.state
-                    .manager
-                    .create_thread(request)
-                    .await
-                    .map(|created| ResponseBody::ThreadCreated {
-                        thread_id: created.thread_id,
-                        turn_id: created.turn_id,
-                        summary: created.summary,
-                    })
-                    .map_err(crate::threads::ManagerError::into_proto)
+                match self.state.manager.create_thread(request).await {
+                    Ok(created) => {
+                        // A thread's workspace becomes an authorised IDE root.
+                        // This is the only way a workspace is added at runtime,
+                        // so IDE mode cannot reach a path the user never opened.
+                        if let Err(error) = self.state.fs.allow_root(&workspace_path) {
+                            tracing::warn!(%workspace_path, %error, "IDE root not authorised");
+                        }
+                        Ok(ResponseBody::ThreadCreated {
+                            thread_id: created.thread_id,
+                            turn_id: created.turn_id,
+                            summary: created.summary,
+                        })
+                    }
+                    Err(error) => Err(error.into_proto()),
+                }
             }
             ClientRequest::SendMessage {
                 thread_id,
@@ -518,6 +553,295 @@ impl Connection {
                 .await
                 .map(|()| ResponseBody::Ack)
                 .map_err(crate::terminal::TerminalError::into_proto),
+            // ------------------------------------------------------------------
+            // IDE mode: workspace-scoped filesystem, search, watch and git.
+            // Every path is resolved daemon-side; the client never sends an
+            // absolute target.
+            // ------------------------------------------------------------------
+            ClientRequest::FsList {
+                host,
+                workspace,
+                path,
+            } => {
+                if let Some(error) = self.local_host_error(&host) {
+                    return Some(error_frame(id, error));
+                }
+                let fs = Arc::clone(&self.state.fs);
+                fs_block(fs, move |fs| fs.list(&workspace, &path))
+                    .await
+                    .map(|listing| ResponseBody::FsListing { listing })
+            }
+            ClientRequest::FsRead {
+                host,
+                workspace,
+                path,
+            } => {
+                if let Some(error) = self.local_host_error(&host) {
+                    return Some(error_frame(id, error));
+                }
+                let fs = Arc::clone(&self.state.fs);
+                fs_block(fs, move |fs| fs.read(&workspace, &path))
+                    .await
+                    .map(|file| ResponseBody::FsFile { file })
+            }
+            ClientRequest::FsWrite {
+                host,
+                workspace,
+                path,
+                content,
+                base_etag,
+            } => {
+                if let Some(error) = self.local_host_error(&host) {
+                    return Some(error_frame(id, error));
+                }
+                let fs = Arc::clone(&self.state.fs);
+                let device = self.device_id().map(|id| id.as_str().to_owned());
+                fs_block(fs, move |fs| {
+                    fs.write(
+                        &workspace,
+                        &path,
+                        &content,
+                        base_etag.as_deref(),
+                        device.as_deref(),
+                    )
+                })
+                .await
+                .map(|result| ResponseBody::FsWritten { result })
+            }
+            ClientRequest::FsCreate {
+                host,
+                workspace,
+                path,
+                kind,
+            } => {
+                if let Some(error) = self.local_host_error(&host) {
+                    return Some(error_frame(id, error));
+                }
+                let fs = Arc::clone(&self.state.fs);
+                let device = self.device_id().map(|id| id.as_str().to_owned());
+                fs_block(fs, move |fs| {
+                    fs.create(&workspace, &path, kind, device.as_deref())
+                })
+                .await
+                .map(|entry| ResponseBody::FsEntryCreated { entry })
+            }
+            ClientRequest::FsRename {
+                host,
+                workspace,
+                from,
+                to,
+            } => {
+                if let Some(error) = self.local_host_error(&host) {
+                    return Some(error_frame(id, error));
+                }
+                let fs = Arc::clone(&self.state.fs);
+                let device = self.device_id().map(|id| id.as_str().to_owned());
+                fs_block(fs, move |fs| {
+                    fs.rename(&workspace, &from, &to, device.as_deref())
+                })
+                .await
+                .map(|entry| ResponseBody::FsEntryCreated { entry })
+            }
+            ClientRequest::FsDelete {
+                host,
+                workspace,
+                path,
+            } => {
+                if let Some(error) = self.local_host_error(&host) {
+                    return Some(error_frame(id, error));
+                }
+                let fs = Arc::clone(&self.state.fs);
+                let device = self.device_id().map(|id| id.as_str().to_owned());
+                fs_block(fs, move |fs| {
+                    fs.delete(&workspace, &path, device.as_deref())
+                })
+                .await
+                .map(|result| ResponseBody::FsDeleted { result })
+            }
+            ClientRequest::FsRestore {
+                host,
+                workspace,
+                trash_id,
+            } => {
+                if let Some(error) = self.local_host_error(&host) {
+                    return Some(error_frame(id, error));
+                }
+                let fs = Arc::clone(&self.state.fs);
+                let device = self.device_id().map(|id| id.as_str().to_owned());
+                fs_block(fs, move |fs| {
+                    fs.restore(&workspace, &trash_id, device.as_deref())
+                })
+                .await
+                .map(|path| ResponseBody::FsRestored { path })
+            }
+            ClientRequest::FsSearch {
+                host,
+                workspace,
+                query,
+                regex,
+                case_sensitive,
+                glob,
+                max_results,
+            } => {
+                if let Some(error) = self.local_host_error(&host) {
+                    return Some(error_frame(id, error));
+                }
+                let fs = Arc::clone(&self.state.fs);
+                let searched = tokio::task::spawn_blocking(move || {
+                    fs.search(
+                        &workspace,
+                        &query,
+                        regex,
+                        case_sensitive,
+                        glob.as_deref(),
+                        max_results,
+                    )
+                })
+                .await;
+                let (search_id, mut rx) = match searched {
+                    Ok(Ok(value)) => value,
+                    Ok(Err(error)) => return Some(error_frame(id, error.into_proto())),
+                    Err(error) => {
+                        return Some(error_frame(
+                            id,
+                            ProtoError::plain(
+                                ProtoErrorCode::Internal,
+                                format!("search task failed: {error}"),
+                            ),
+                        ));
+                    }
+                };
+
+                let tx = self.tx.clone();
+                let seq = self.last_seq.load(Ordering::Relaxed);
+                let response_id = search_id.clone();
+                tokio::spawn(async move {
+                    while let Some(batch) = rx.recv().await {
+                        let frame = ServerFrame::Event {
+                            seq,
+                            event: Event::FsSearchBatch {
+                                search_id: batch.search_id,
+                                results: batch.results,
+                                done: batch.done,
+                                truncated: batch.truncated,
+                            },
+                        };
+                        let Ok(text) = serde_json::to_string(&frame) else {
+                            continue;
+                        };
+                        if tx.send(Outbound::Text(text)).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+                Ok(ResponseBody::FsSearchStarted {
+                    search_id: response_id,
+                })
+            }
+            ClientRequest::FsWatch {
+                host,
+                workspace,
+                paths,
+            } => {
+                if let Some(error) = self.local_host_error(&host) {
+                    return Some(error_frame(id, error));
+                }
+                let fs = Arc::clone(&self.state.fs);
+                let requested = workspace.clone();
+                let watched = tokio::task::spawn_blocking(move || fs.watch(&requested)).await;
+                let root = match watched {
+                    Ok(Ok(value)) => value,
+                    Ok(Err(error)) => return Some(error_frame(id, error.into_proto())),
+                    Err(error) => {
+                        return Some(error_frame(
+                            id,
+                            ProtoError::plain(
+                                ProtoErrorCode::Internal,
+                                format!("watcher task failed: {error}"),
+                            ),
+                        ));
+                    }
+                };
+                let canonical = root.display().to_string();
+                let mut rx = self.state.fs.subscribe();
+                let tx = self.tx.clone();
+                let seq = self.last_seq.load(Ordering::Relaxed);
+                let filter = paths.clone();
+                let event_workspace = canonical.clone();
+                if let Some(previous) = self.watches.remove(&workspace) {
+                    previous.abort();
+                }
+                let handle = tokio::spawn(async move {
+                    while let Ok(change) = rx.recv().await {
+                        if change.workspace != root {
+                            continue;
+                        }
+                        let inside = filter.is_empty()
+                            || filter.iter().any(|path| {
+                                change.path == *path || change.path.starts_with(&format!("{path}/"))
+                            });
+                        if !inside {
+                            continue;
+                        }
+                        let frame = ServerFrame::Event {
+                            seq,
+                            event: Event::FsChanged {
+                                workspace: event_workspace.clone(),
+                                path: change.path,
+                                change: change.change,
+                                at: chrono::Utc::now(),
+                            },
+                        };
+                        let Ok(text) = serde_json::to_string(&frame) else {
+                            continue;
+                        };
+                        if tx.send(Outbound::Text(text)).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+                self.watches.insert(workspace, handle);
+                Ok(ResponseBody::FsWatching {
+                    workspace: canonical,
+                    paths,
+                })
+            }
+            ClientRequest::FsUnwatch { workspace } => {
+                if let Some(handle) = self.watches.remove(&workspace) {
+                    handle.abort();
+                }
+                Ok(ResponseBody::Ack)
+            }
+            ClientRequest::FsDiff {
+                host,
+                workspace,
+                path,
+                against,
+            } => {
+                if let Some(error) = self.local_host_error(&host) {
+                    return Some(error_frame(id, error));
+                }
+                let fs = Arc::clone(&self.state.fs);
+                fs_block(fs, move |fs| fs.diff(&workspace, &path, &against))
+                    .await
+                    .map(|diff| ResponseBody::FsDiff { diff })
+            }
+            ClientRequest::FsTurnChanges {
+                host,
+                workspace,
+                thread_id,
+                turn_id,
+            } => {
+                if let Some(error) = self.local_host_error(&host) {
+                    return Some(error_frame(id, error));
+                }
+                let fs = Arc::clone(&self.state.fs);
+                fs_block(fs, move |fs| {
+                    fs.turn_changes(&workspace, &thread_id, &turn_id)
+                })
+                .await
+                .map(|changes| ResponseBody::FsTurnChanges { changes })
+            }
             other => Err(not_implemented(&other)),
         };
 
@@ -704,6 +1028,23 @@ fn resume_hint(last_seq: u64) -> String {
         r#"{"kind":"event","seq":0,"event":{"type":"error","thread_id":null,"message":"fell behind","hint":null,"retryable":true}}"#
             .to_owned()
     })
+}
+
+/// Runs one blocking filesystem operation off the async runtime.
+async fn fs_block<T, F>(fs: Arc<FsService>, work: F) -> Result<T, ProtoError>
+where
+    T: Send + 'static,
+    F: FnOnce(&FsService) -> Result<T, FsError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || work(&fs))
+        .await
+        .map_err(|error| {
+            ProtoError::plain(
+                ProtoErrorCode::Internal,
+                format!("filesystem task failed: {error}"),
+            )
+        })?
+        .map_err(FsError::into_proto)
 }
 
 fn response_frame(id: u64, body: ResponseBody) -> String {

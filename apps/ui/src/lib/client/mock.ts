@@ -1,3 +1,4 @@
+import { createMockFs } from "@/features/ide/mockFs";
 import type {
   AgentState,
   ClientFrame,
@@ -522,6 +523,7 @@ class MockDaemon {
   private readonly approvals = new Map<string, MockApproval>();
   private readonly startedStreams = new Set<string>();
   private readonly terminals = new Map<string, MockTerminal>();
+  private readonly fs = createMockFs();
   private created = 0;
   private nextTerminal = 0;
   private nextStream = 0;
@@ -924,13 +926,21 @@ class MockDaemon {
         this.handlers.onMessage(JSON.stringify({ kind: "terminal_event", event: notice }));
         return;
       }
-      default:
+      default: {
+        const handled = this.fs.handle(body, {
+          ok: (response) => this.ok(frame.id, response),
+          err: (code, message, hint) => this.err(frame.id, code, message, hint),
+          later: (ms, fn) => this.later(ms, fn),
+          transient: (event) => this.sendTransient(event),
+        });
+        if (handled) return;
         this.err(
           frame.id,
           "unsupported",
           `The mock daemon does not implement \`${body.type}\`.`,
-          "Phase 1b only exercises threads and approvals.",
+          "Phase 2 exercises threads, approvals and the IDE.",
         );
+      }
     }
   }
 
@@ -1229,6 +1239,12 @@ class MockDaemon {
   private sendEvent(seq: number, event: Event): void {
     const frame: ServerFrame = { kind: "event", seq, event };
     this.handlers.onMessage(JSON.stringify(frame));
+  }
+
+  /** Sends a non-journaled event at the current watermark (fs hints, search). */
+  private sendTransient(event: Event): void {
+    if (this.disposed) return;
+    this.sendEvent(this.seq, event);
   }
 
   private ok(id: number, result: ResponseBody): void {

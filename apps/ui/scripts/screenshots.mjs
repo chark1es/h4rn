@@ -1,5 +1,5 @@
 /**
- * Capture the Phase 1b surfaces in mock mode.
+ * Capture the Phase 1b and Phase 2 (IDE) surfaces in mock mode.
  *
  * Usage: node scripts/screenshots.mjs [baseURL]
  *
@@ -73,13 +73,50 @@ const SHOTS = [
       await page.waitForTimeout(350);
     },
   },
+  {
+    name: "ide",
+    path: "/ide",
+    wait: '[aria-label="IDE"]',
+    settle: 1600,
+  },
+  {
+    name: "ide-diff",
+    path: "/ide",
+    wait: '[aria-label="IDE"]',
+    settle: 1600,
+    action: async (page) => {
+      await page.getByRole("button", { name: "Toggle diff" }).click();
+      await page.locator('section[aria-label="Diff"]').waitFor({ timeout: 10_000 });
+      await page.waitForTimeout(500);
+    },
+  },
+  {
+    name: "ide-search",
+    path: "/ide",
+    wait: '[aria-label="IDE"]',
+    settle: 1600,
+    action: async (page) => {
+      await page.getByRole("button", { name: "Search workspace" }).click();
+      const input = page.getByLabel("Find in workspace");
+      await input.waitFor({ timeout: 10_000 });
+      await input.fill("verifySession");
+      await input.press("Enter");
+      await page.waitForTimeout(600);
+    },
+  },
 ];
 
 const browser = await chromium.launch({ executablePath: EXECUTABLE, args: ["--no-sandbox"] });
 await mkdir(OUT, { recursive: true });
 
+// H4RN_SHOTS=ide,ide-diff re-captures a subset while iterating on one screen.
+const only = process.env.H4RN_SHOTS?.split(",")
+  .map((name) => name.trim())
+  .filter(Boolean);
+const selected = only?.length ? SHOTS.filter((shot) => only.includes(shot.name)) : SHOTS;
+
 let failures = 0;
-for (const shot of SHOTS) {
+for (const shot of selected) {
   for (const [sizeName, size] of [
     ["1440", DESKTOP],
     ["390", PHONE],

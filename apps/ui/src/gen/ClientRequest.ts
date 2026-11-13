@@ -2,6 +2,8 @@
 import type { ApprovalDecision } from "./ApprovalDecision";
 import type { AttachmentId } from "./AttachmentId";
 import type { DeviceInfo } from "./DeviceInfo";
+import type { DiffAgainst } from "./DiffAgainst";
+import type { FsCreateKind } from "./FsCreateKind";
 import type { HarnessKind } from "./HarnessKind";
 import type { HostId } from "./HostId";
 import type { RuntimeMode } from "./RuntimeMode";
@@ -10,6 +12,7 @@ import type { ThreadFilter } from "./ThreadFilter";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadTab } from "./ThreadTab";
 import type { Topic } from "./Topic";
+import type { TurnId } from "./TurnId";
 import type { WorktreeRequest } from "./WorktreeRequest";
 
 /**
@@ -210,7 +213,11 @@ terminal_id: TerminalId, } | { "type": "fs_list",
  */
 host: HostId, 
 /**
- * Absolute directory path.
+ * Canonical workspace root.
+ */
+workspace: string, 
+/**
+ * Workspace-relative directory path.
  */
 path: string, } | { "type": "fs_read", 
 /**
@@ -218,7 +225,11 @@ path: string, } | { "type": "fs_read",
  */
 host: HostId, 
 /**
- * Absolute file path.
+ * Canonical workspace root.
+ */
+workspace: string, 
+/**
+ * Workspace-relative file path.
  */
 path: string, } | { "type": "fs_write", 
 /**
@@ -226,13 +237,153 @@ path: string, } | { "type": "fs_write",
  */
 host: HostId, 
 /**
- * Absolute file path.
+ * Canonical workspace root.
+ */
+workspace: string, 
+/**
+ * Workspace-relative file path.
  */
 path: string, 
 /**
- * Full replacement contents.
+ * Full replacement content.
  */
-contents: string, } | { "type": "mcp_list" } | { "type": "mcp_upsert", 
+content: string, 
+/**
+ * Etag the edit was based on; `None` writes only when the file is new.
+ */
+base_etag: string | null, } | { "type": "fs_create", 
+/**
+ * Host that owns the filesystem.
+ */
+host: HostId, 
+/**
+ * Canonical workspace root.
+ */
+workspace: string, 
+/**
+ * Workspace-relative path to create.
+ */
+path: string, 
+/**
+ * File or directory.
+ */
+kind: FsCreateKind, } | { "type": "fs_rename", 
+/**
+ * Host that owns the filesystem.
+ */
+host: HostId, 
+/**
+ * Canonical workspace root.
+ */
+workspace: string, 
+/**
+ * Current workspace-relative path.
+ */
+from: string, 
+/**
+ * New workspace-relative path.
+ */
+to: string, } | { "type": "fs_delete", 
+/**
+ * Host that owns the filesystem.
+ */
+host: HostId, 
+/**
+ * Canonical workspace root.
+ */
+workspace: string, 
+/**
+ * Workspace-relative path.
+ */
+path: string, } | { "type": "fs_restore", 
+/**
+ * Host that owns the filesystem.
+ */
+host: HostId, 
+/**
+ * Canonical workspace root.
+ */
+workspace: string, 
+/**
+ * Trash id returned by `FsDelete`.
+ */
+trash_id: string, } | { "type": "fs_search", 
+/**
+ * Host that owns the filesystem.
+ */
+host: HostId, 
+/**
+ * Canonical workspace root.
+ */
+workspace: string, 
+/**
+ * Text or regular expression to find.
+ */
+query: string, 
+/**
+ * Treat `query` as a regular expression.
+ */
+regex: boolean, 
+/**
+ * Match case exactly.
+ */
+case_sensitive: boolean, 
+/**
+ * Optional glob filter such as `*.ts` or `src/**`.
+ */
+glob: string | null, 
+/**
+ * Result cap; the daemon clamps it.
+ */
+max_results: number | null, } | { "type": "fs_watch", 
+/**
+ * Host that owns the filesystem.
+ */
+host: HostId, 
+/**
+ * Canonical workspace root.
+ */
+workspace: string, 
+/**
+ * Workspace-relative files or directories to report.
+ */
+paths: Array<string>, } | { "type": "fs_unwatch", 
+/**
+ * Canonical workspace root.
+ */
+workspace: string, } | { "type": "fs_diff", 
+/**
+ * Host that owns the filesystem.
+ */
+host: HostId, 
+/**
+ * Canonical workspace root.
+ */
+workspace: string, 
+/**
+ * Workspace-relative file path.
+ */
+path: string, 
+/**
+ * Which scope to compare against.
+ */
+against: DiffAgainst, } | { "type": "fs_turn_changes", 
+/**
+ * Host that owns the filesystem.
+ */
+host: HostId, 
+/**
+ * Canonical workspace root.
+ */
+workspace: string, 
+/**
+ * Thread that owns the turn.
+ */
+thread_id: ThreadId, 
+/**
+ * Turn whose pre-turn snapshots are the base.
+ */
+turn_id: TurnId, } | { "type": "mcp_list" } | { "type": "mcp_upsert", 
 /**
  * Server name.
  */

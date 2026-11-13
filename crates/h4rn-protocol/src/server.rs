@@ -132,6 +132,58 @@ pub enum ResponseBody {
         /// Matching terminals.
         terminals: Vec<TerminalInfo>,
     },
+    /// One directory listing for IDE mode.
+    FsListing {
+        /// The listing.
+        listing: crate::fs::FsListing,
+    },
+    /// One file read for IDE mode.
+    FsFile {
+        /// The file and its etag.
+        file: crate::fs::FsFileContent,
+    },
+    /// A write completed or lost the etag race.
+    FsWritten {
+        /// Result, including any conflict payload.
+        result: crate::fs::FsWriteResult,
+    },
+    /// A path was created.
+    FsEntryCreated {
+        /// The new entry.
+        entry: crate::fs::FileEntry,
+    },
+    /// A path was moved into the trash directory.
+    FsDeleted {
+        /// Trash id and destination.
+        result: crate::fs::FsDeleteResult,
+    },
+    /// A path was restored from the trash directory.
+    FsRestored {
+        /// Workspace-relative path that is back on disk.
+        path: String,
+    },
+    /// Search started; results follow as `fs_search_batch` events.
+    FsSearchStarted {
+        /// Correlation id for the batches.
+        search_id: String,
+    },
+    /// The connection is now watching this workspace.
+    FsWatching {
+        /// Canonical workspace root.
+        workspace: String,
+        /// Workspace-relative paths being watched; empty means the whole tree.
+        paths: Vec<String>,
+    },
+    /// Both sides of one diff.
+    FsDiff {
+        /// The diff.
+        diff: crate::fs::FsDiff,
+    },
+    /// The files one agent turn touched.
+    FsTurnChanges {
+        /// Turn change set.
+        changes: crate::fs::FsTurnChanges,
+    },
     /// A request with no payload completed successfully.
     Ack,
 }
@@ -330,6 +382,34 @@ pub enum Event {
         hint: Option<String>,
         /// Whether a retry is safe.
         retryable: bool,
+    },
+    /// A watched path changed on disk.
+    ///
+    /// Filesystem events are **transient**: they are not written to the journal
+    /// and carry the current durable sequence number instead of a new one, so a
+    /// client must deliver them without advancing its resume cursor.
+    FsChanged {
+        /// Canonical workspace root.
+        workspace: String,
+        /// Workspace-relative path that changed.
+        path: String,
+        /// What happened.
+        change: crate::fs::FsChangeKind,
+        /// When the daemon observed it.
+        at: DateTime<Utc>,
+    },
+    /// One streamed batch of workspace search results.
+    ///
+    /// Like [`Event::FsChanged`], this is transient and never journaled.
+    FsSearchBatch {
+        /// Correlation id from `FsSearchStarted`.
+        search_id: String,
+        /// Matches in this batch.
+        results: Vec<crate::fs::FsSearchMatch>,
+        /// True on the last batch.
+        done: bool,
+        /// True when the daemon hit its result cap.
+        truncated: bool,
     },
 }
 
