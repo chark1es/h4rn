@@ -1,0 +1,614 @@
+//! End-to-end coverage for the daemon-owned MCP hub.
+//!
+//! The tests boot real daemons and drive the protocol; upstreams are real MCP
+//! servers (HTTP in-process, or the stdio fixture exercised by `h4rn-mcp`'s own
+//! integration test). The cross-machine test runs two daemons and carries
+//! JSON-RPC through the Noise-encrypted `/secure-mcp` tunnel.
+
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::Router;
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::post;
+use futures::{SinkExt, StreamExt};
+use h4rn_core::LifecycleSettings;
+use h4rn_daemon::auth::TokenStore;
+use h4rn_daemon::config::Config;
+use h4rn_daemon::daemon::DaemonBuilder;
+use h4rn_daemon::mcp::{TransportMcpTunnel, TunnelConnection};
+use h4rn_daemon::threads::ThreadManagerOptions;
+use h4rn_harness::FakeHarness;
+use h4rn_mcp::session::McpScope;
+use h4rn_protocol::{
+    ClientFrame, ClientRequest, DeviceId, DeviceInfo, Event, HarnessKind, McpConflictResolution,
+    McpEnabledMatrix, McpRequest, McpSecretInput, McpServerInput, McpSharePolicy,
+    McpTransportInput, ResponseBody, ServerFrame,
+};
+use h4rn_transport::keys::DeviceIdentity;
+use h4rn_transport::server::{SecureOptions, SecureService};
+use h4rn_transport::server_session::PairingPolicy;
+use h4rn_transport::wire::SESSION_ID_LEN;
+use serde_json::{Value, json};
+use tokio::net::TcpStream;
+use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
+
+struct TestDaemon {
+    addr: std::net::SocketAddr,
+    token: String,
+    dir: Option<tempfile::TempDir>,
+    shutdown: Option<oneshot::Sender<()>>,
+    task: JoinHandle<anyhow::Result<()>>,
+    mcp: Arc<h4rn_daemon::mcp::McpService>,
+}
+
+impl TestDaemon {
+    fn data_dir(&self) -> &std::path::Path {
+        self.dir.as_ref().expect("temporary data dir").path()
+    }
+
+    async fn stop(mut self) {
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
+        let _ = self.task.await;
+    }
+}
+
+async fn boot_with_secure(secure: Option<Arc<SecureService>>) -> TestDaemon {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = Config {
+        data_dir: dir.path().to_path_buf(),
+        bind: "127.0.0.1:0".parse().expect("bind"),
+        extra_bind: None,
+        log_level: "off".to_owned(),
+        tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
+    };
+    let options = ThreadManagerOptions {
+        settings: LifecycleSettings::default()
+            .with_working_exit_grace(chrono::TimeDelta::milliseconds(80))
+            .with_stale_bypass(chrono::TimeDelta::seconds(60)),
+        tick_interval: Duration::from_millis(20),
+    };
+    let mut builder = DaemonBuilder::new(config)
+        .with_harness(Arc::new(FakeHarness::new()))
+        .with_lifecycle(options);
+    if let Some(secure) = secure {
+        builder = builder.with_secure(secure);
+    }
+    let daemon = builder.build().await.expect("build daemon");
+    let token = TokenStore::new(dir.path())
+        .load()
+        .expect("read token")
+        .expect("token exists");
+    let mcp = daemon.mcp();
+    let bound = daemon.bind().await.expect("bind daemon");
+    let addr = bound.local_addr();
+    let (shutdown, rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        bound
+            .serve(async move {
+                let _ = rx.await;
+            })
+            .await
+    });
+
+    TestDaemon {
+        addr,
+        token,
+        dir: Some(dir),
+        shutdown: Some(shutdown),
+        task,
+        mcp,
+    }
+}
+
+async fn boot() -> TestDaemon {
+    boot_with_secure(None).await
+}
+
+struct Client {
+    ws: WebSocketStream<MaybeTlsStream<TcpStream>>,
+    next_id: u64,
+    pending: VecDeque<Event>,
+}
+
+impl Client {
+    async fn connect(daemon: &TestDaemon) -> Self {
+        let url = format!("ws://{}/ws?token={}", daemon.addr, daemon.token);
+        let (ws, _) = connect_async(url).await.expect("connect");
+        Self {
+            ws,
+            next_id: 1,
+            pending: VecDeque::new(),
+        }
+    }
+
+    async fn send(&mut self, body: ClientRequest) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        let frame = ClientFrame { id, body };
+        self.ws
+            .send(Message::Text(serde_json::to_string(&frame).unwrap().into()))
+            .await
+            .expect("send frame");
+        id
+    }
+
+    async fn hello(&mut self) {
+        let response = self
+            .request(ClientRequest::Hello {
+                protocol_version: h4rn_protocol::PROTOCOL_VERSION,
+                device: DeviceInfo {
+                    device_id: DeviceId::new("dev_mcp"),
+                    name: "mcp integration test".into(),
+                    platform: "linux".into(),
+                    app_version: "0.1.0".into(),
+                },
+            })
+            .await
+            .expect("hello");
+        assert!(
+            matches!(response, ResponseBody::Hello { .. }),
+            "{response:?}"
+        );
+    }
+
+    async fn response(&mut self, id: u64) -> Result<ResponseBody, h4rn_protocol::ProtoError> {
+        loop {
+            let message = tokio::time::timeout(Duration::from_secs(10), self.ws.next())
+                .await
+                .expect("timed out waiting for a response")
+                .expect("socket closed")
+                .expect("websocket error");
+            match message {
+                Message::Text(text) => match serde_json::from_str::<ServerFrame>(&text).unwrap() {
+                    ServerFrame::Response {
+                        id: response_id,
+                        result,
+                    } if response_id == id => return result,
+                    ServerFrame::Event { event, .. } => self.pending.push_back(event),
+                    _ => {}
+                },
+                Message::Close(_) => panic!("daemon closed the connection"),
+                _ => {}
+            }
+        }
+    }
+
+    async fn request(
+        &mut self,
+        body: ClientRequest,
+    ) -> Result<ResponseBody, h4rn_protocol::ProtoError> {
+        let id = self.send(body).await;
+        self.response(id).await
+    }
+
+    async fn mcp(
+        &mut self,
+        request: McpRequest,
+    ) -> Result<ResponseBody, h4rn_protocol::ProtoError> {
+        self.request(ClientRequest::Mcp { request }).await
+    }
+}
+
+/// A minimal streamable-HTTP MCP server; one echo tool and empty resources.
+async fn start_http_upstream(name: &'static str) -> String {
+    let app = Router::new().route(
+        "/mcp",
+        post(move |body: String| async move { http_mcp(name, &body).await }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let address = listener.local_addr().expect("upstream address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{address}/mcp")
+}
+
+async fn http_mcp(name: &str, body: &str) -> Response {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let Some(id) = value.get("id").cloned() else {
+        return StatusCode::ACCEPTED.into_response();
+    };
+    let method = value
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let params = value.get("params").cloned().unwrap_or(Value::Null);
+    let result = match method {
+        "initialize" => json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": {"tools": {"listChanged": false}},
+            "serverInfo": {"name": name, "version": "0.1.0"}
+        }),
+        "ping" => json!({}),
+        "tools/list" => json!({
+            "tools": [{
+                "name": "echo",
+                "description": "Echo a message.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"message": {"type": "string"}},
+                    "required": ["message"]
+                }
+            }]
+        }),
+        "tools/call" => {
+            let message = params
+                .get("arguments")
+                .and_then(|arguments| arguments.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            json!({
+                "content": [{"type": "text", "text": format!("{name}:{message}")}],
+                "isError": false
+            })
+        }
+        "resources/list" => json!({"resources": []}),
+        "prompts/list" => json!({"prompts": []}),
+        other => {
+            return (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {"code": -32601, "message": format!("no method {other}")}
+                })
+                .to_string(),
+            )
+                .into_response();
+        }
+    };
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
+    )
+        .into_response()
+}
+
+fn http_server(url: String) -> McpServerInput {
+    McpServerInput {
+        name: "local".into(),
+        transport: McpTransportInput::Http {
+            url,
+            headers: Vec::new(),
+        },
+        tags: Vec::new(),
+        enabled: McpEnabledMatrix::default(),
+    }
+}
+
+#[tokio::test]
+async fn mcp_servers_round_trip_through_the_protocol() {
+    let daemon = boot().await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+
+    match client.mcp(McpRequest::ListServers).await.expect("list") {
+        ResponseBody::McpServers { servers } => assert!(servers.is_empty()),
+        other => panic!("unexpected list response: {other:?}"),
+    }
+
+    let url = start_http_upstream("upstream").await;
+    let server = match client
+        .mcp(McpRequest::Upsert {
+            input: http_server(url),
+        })
+        .await
+        .expect("upsert")
+    {
+        ResponseBody::McpServer { server } => server,
+        other => panic!("unexpected upsert response: {other:?}"),
+    };
+    assert_eq!(server.name, "local");
+    assert_eq!(server.imported_from, None);
+
+    let tools = match client
+        .mcp(McpRequest::ListTools {
+            name: "local".into(),
+        })
+        .await
+        .expect("list tools")
+    {
+        ResponseBody::McpTools { server, tools } => {
+            assert_eq!(server, "local");
+            tools
+        }
+        other => panic!("unexpected tools response: {other:?}"),
+    };
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].name, "local__echo");
+
+    let call = match client
+        .mcp(McpRequest::TestCall {
+            name: "local".into(),
+            tool: "echo".into(),
+            arguments: json!({"message": "from the daemon"}),
+        })
+        .await
+        .expect("test call")
+    {
+        ResponseBody::McpCall { result } => result,
+        other => panic!("unexpected call response: {other:?}"),
+    };
+    assert_eq!(call.content, "upstream:from the daemon");
+    assert!(!call.is_error);
+
+    match client
+        .mcp(McpRequest::Remove {
+            name: "local".into(),
+        })
+        .await
+    {
+        Ok(ResponseBody::Ack) => {}
+        other => panic!("unexpected remove response: {other:?}"),
+    }
+    match client.mcp(McpRequest::ListServers).await.expect("list") {
+        ResponseBody::McpServers { servers } => assert!(servers.is_empty()),
+        other => panic!("unexpected list response: {other:?}"),
+    }
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn imports_preview_conflicts_and_resolve_them() {
+    let daemon = boot().await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let url = start_http_upstream("imported").await;
+
+    // A local server with the same name makes the project entry a conflict.
+    client
+        .mcp(McpRequest::Upsert {
+            input: McpServerInput {
+                name: "project_server".into(),
+                transport: McpTransportInput::Stdio {
+                    command: "true".into(),
+                    args: Vec::new(),
+                    cwd: None,
+                    env: Vec::new(),
+                },
+                tags: Vec::new(),
+                enabled: McpEnabledMatrix::default(),
+            },
+        })
+        .await
+        .expect("seed local server");
+    std::fs::write(
+        workspace.path().join(".mcp.json"),
+        json!({
+            "mcpServers": {
+                "project_server": {"type": "http", "url": url}
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let preview = match client
+        .mcp(McpRequest::Import {
+            harness: HarnessKind::ClaudeCode,
+            workspace: Some(workspace.path().to_string_lossy().into_owned()),
+        })
+        .await
+        .expect("preview")
+    {
+        ResponseBody::McpImportPreview { preview } => preview,
+        other => panic!("unexpected preview response: {other:?}"),
+    };
+    assert!(
+        preview
+            .conflicts
+            .iter()
+            .any(|conflict| conflict.name == "project_server"),
+        "expected a project_server conflict: {preview:?}"
+    );
+    assert!(
+        preview
+            .candidates
+            .iter()
+            .all(|candidate| candidate.name != "project_server"),
+        "a conflicting entry must not also be a candidate"
+    );
+
+    let resolved = match client
+        .mcp(McpRequest::ResolveConflict {
+            harness: HarnessKind::ClaudeCode,
+            name: "project_server".into(),
+            resolution: McpConflictResolution::UseTheirs,
+            workspace: Some(workspace.path().to_string_lossy().into_owned()),
+        })
+        .await
+        .expect("resolve")
+    {
+        ResponseBody::McpServer { server } => server,
+        other => panic!("unexpected resolve response: {other:?}"),
+    };
+    assert_eq!(resolved.name, "project_server");
+    assert!(matches!(
+        resolved.transport,
+        h4rn_protocol::McpTransportView::Http { .. }
+    ));
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn secret_values_never_reach_the_protocol_or_sqlite() {
+    const SECRET: &str = "mcp-super-secret-value-4711";
+    let daemon = boot().await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+
+    let url = start_http_upstream("secretive").await;
+    let response = client
+        .mcp(McpRequest::Upsert {
+            input: McpServerInput {
+                name: "secretive".into(),
+                transport: McpTransportInput::Http {
+                    url,
+                    headers: vec![McpSecretInput {
+                        name: "Authorization".into(),
+                        value: Some(format!("Bearer {SECRET}")),
+                    }],
+                },
+                tags: Vec::new(),
+                enabled: McpEnabledMatrix::default(),
+            },
+        })
+        .await
+        .expect("upsert");
+    let body = serde_json::to_string(&response).unwrap();
+    assert!(body.contains("Authorization"));
+    assert!(!body.contains(SECRET), "the view leaked the secret: {body}");
+
+    let listed = client.mcp(McpRequest::ListServers).await.expect("list");
+    let body = serde_json::to_string(&listed).unwrap();
+    assert!(!body.contains(SECRET), "the list leaked the secret: {body}");
+
+    // The registry runs in WAL mode, so a just-written row may still live in
+    // the sidecar file. Only the reference must appear; the value must not.
+    let mut db = Vec::new();
+    for suffix in ["", "-wal"] {
+        let path = daemon.data_dir().join(format!("mcp.db{suffix}"));
+        if let Ok(mut bytes) = std::fs::read(path) {
+            db.append(&mut bytes);
+        }
+    }
+    let db = String::from_utf8_lossy(&db).into_owned();
+    assert!(!db.contains(SECRET), "the registry leaked the secret");
+    assert!(db.contains("mcp/srv_"), "the registry stores a reference");
+
+    let secrets_path = daemon.data_dir().join("mcp-secrets");
+    if let Ok(bytes) = std::fs::read(&secrets_path) {
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        assert!(
+            !text.contains(SECRET),
+            "the fallback secret file stores plaintext"
+        );
+    }
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_remote_hub_proxies_a_shared_server_over_the_secure_tunnel() {
+    let a_identity = DeviceIdentity::generate().expect("A identity");
+    let b_identity = DeviceIdentity::generate().expect("B identity");
+
+    // A admits B's device key on `/secure-mcp`.
+    let a_secure = Arc::new(SecureService::new(
+        SecureOptions::new(a_identity.clone())
+            .with_policy(PairingPolicy::new([b_identity.public().noise_public])),
+    ));
+    let a = boot_with_secure(Some(Arc::clone(&a_secure))).await;
+    let b_secure = Arc::new(SecureService::new(SecureOptions::new(b_identity.clone())));
+    let b = boot_with_secure(Some(b_secure)).await;
+
+    let a_host = a.mcp.hub().local_host().clone();
+    let b_host = b.mcp.hub().local_host().clone();
+
+    // A owns a server and shares it with B's machine id.
+    let upstream = start_http_upstream("owner").await;
+    let mut a_client = Client::connect(&a).await;
+    a_client.hello().await;
+    a_client
+        .mcp(McpRequest::Upsert {
+            input: http_server(upstream),
+        })
+        .await
+        .expect("upsert on A");
+    a_client
+        .mcp(McpRequest::Share {
+            name: "local".into(),
+            to_machine: b_host.clone(),
+            policy: McpSharePolicy::default(),
+        })
+        .await
+        .expect("share");
+
+    // B proxies it through the encrypted tunnel.
+    let tunnel = TransportMcpTunnel::new(TunnelConnection {
+        url: format!("ws://{}/secure-mcp", a.addr),
+        identity: b_identity,
+        daemon_public: a_secure.public_identity().noise_public,
+        session_id: [7u8; SESSION_ID_LEN],
+        machine: b_host.clone(),
+        device_id: Some("dev_b".into()),
+    });
+    b.mcp
+        .hub()
+        .register_remote("local", a_host.clone(), Arc::new(tunnel))
+        .await;
+
+    // B's own HTTP endpoint exposes the remote tool under the same namespace.
+    let endpoint = b.mcp.hub().endpoint().await.expect("B endpoint");
+    let token = b
+        .mcp
+        .hub()
+        .issue_session(McpScope::client(b_host.clone()))
+        .token;
+    let http = reqwest::Client::new();
+    let listed: Value = http
+        .post(&endpoint)
+        .bearer_auth(&token)
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+        .send()
+        .await
+        .expect("tools/list on B")
+        .json()
+        .await
+        .expect("JSON");
+    let names: Vec<&str> = listed["result"]["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert!(
+        names.contains(&"local__echo"),
+        "B should see A's shared tool: {names:?}"
+    );
+
+    let called: Value = http
+        .post(&endpoint)
+        .bearer_auth(&token)
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "local__echo", "arguments": {"message": "over the wire"}}
+        }))
+        .send()
+        .await
+        .expect("tools/call on B")
+        .json()
+        .await
+        .expect("JSON");
+    assert_eq!(
+        called["result"]["content"][0]["text"],
+        "owner:over the wire"
+    );
+    assert_eq!(called["result"]["isError"], false);
+
+    // The share is visible on A's side.
+    let view = a.mcp.hub().server("local").await.expect("A server");
+    assert!(view.shared_to.contains(&b_host));
+
+    b.stop().await;
+    a.stop().await;
+}

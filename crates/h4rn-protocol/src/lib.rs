@@ -36,6 +36,7 @@ pub mod connect;
 pub mod forge;
 mod fs;
 mod ids;
+pub mod mcp;
 mod proxy;
 mod server;
 pub mod skills;
@@ -61,6 +62,12 @@ pub use fs::{
 };
 pub use ids::{
     AttachmentId, AttachmentIdError, DeviceId, HostId, SubagentId, TerminalId, ThreadId, TurnId,
+};
+pub use mcp::{
+    McpCaller, McpConflictResolution, McpEnabledMatrix, McpHarnessToggle, McpImportCandidate,
+    McpImportConflict, McpImportPreview, McpMachineToggle, McpRequest, McpSecretInput,
+    McpServerInput, McpServerStatusKind, McpServerView, McpSharePolicy, McpShareView,
+    McpTestCallResult, McpToolInfo, McpTransportInput, McpTransportView,
 };
 pub use proxy::*;
 pub use server::{Event, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame};

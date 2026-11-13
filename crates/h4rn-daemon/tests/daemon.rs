@@ -633,18 +633,17 @@ async fn unimplemented_requests_and_bad_hello_have_clear_errors() {
     let error = client
         .request(ClientRequest::McpList)
         .await
-        .expect_err("McpList is phase 4");
+        .expect_err("requests before Hello are rejected");
     assert_eq!(error.code, ProtoErrorCode::Unauthorized);
 
     client.hello().await;
 
-    let error = client
-        .request(ClientRequest::McpList)
-        .await
-        .expect_err("McpList is phase 4");
-    assert_eq!(error.code, ProtoErrorCode::NotImplemented);
-    assert!(error.message.contains("not implemented"));
-    assert!(error.hint.unwrap_or_default().contains("mcp_list"));
+    // MCP list is implemented in phase 4 and starts empty. Real coverage of
+    // the MCP operations lives in `tests/mcp.rs`.
+    match client.request(ClientRequest::McpList).await.expect("list") {
+        ResponseBody::McpServers { servers } => assert!(servers.is_empty()),
+        other => panic!("unexpected MCP response: {other:?}"),
+    }
 
     // A fresh connection with a newer protocol major is rejected and stays
     // unauthenticated for later requests.

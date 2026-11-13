@@ -345,6 +345,33 @@ pub enum ResponseBody {
         /// Thread, turn and the exact markdown sent.
         handoff: crate::forge::ForgeHandoff,
     },
+    /// MCP servers known to this daemon, with the status of each (ADR-006).
+    McpServers {
+        /// Servers in configuration order.
+        servers: Vec<crate::mcp::McpServerView>,
+    },
+    /// One MCP server after a mutation.
+    McpServer {
+        /// Current view.
+        server: crate::mcp::McpServerView,
+    },
+    /// Preview of a harness's native MCP configuration.
+    McpImportPreview {
+        /// Entries and conflicts; nothing was written.
+        preview: crate::mcp::McpImportPreview,
+    },
+    /// Tools one server exposes through the hub.
+    McpTools {
+        /// Server name.
+        server: String,
+        /// Qualified tools.
+        tools: Vec<crate::mcp::McpToolInfo>,
+    },
+    /// Result of one diagnostic tool call.
+    McpCall {
+        /// Flattened result.
+        result: crate::mcp::McpTestCallResult,
+    },
     /// A request with no payload completed successfully.
     Ack,
 }
@@ -608,6 +635,46 @@ pub enum Event {
     /// carrying the session, its RTT, and that the session is encrypted. Like
     /// [`Event::FsChanged`], it is transient and carries no durable sequence.
     TransportStatus(crate::transport::TransportStatus),
+    /// One MCP server changed runtime status (ADR-006).
+    ///
+    /// This is a **transient** event: the hub can start, fail and restart a
+    /// server without a client turn, so it must not consume a durable
+    /// sequence. A client reconnecting learns the current state from
+    /// [`crate::ClientRequest::McpList`].
+    McpServerStatus {
+        /// Server name.
+        server: String,
+        /// New status.
+        status: crate::mcp::McpServerStatusKind,
+        /// Cached tool count.
+        tool_count: u32,
+        /// Redacted failure or restart reason.
+        message: Option<String>,
+        /// When the hub observed it.
+        at: DateTime<Utc>,
+    },
+    /// One MCP tool call passed through the hub, for the live audit view.
+    ///
+    /// Transient for the same reason as [`Event::McpServerStatus`]. The
+    /// daemon's durable `RemoteAudit` trail records the authoritative entry.
+    McpToolCalled {
+        /// Server namespace.
+        server: String,
+        /// Unqualified tool name.
+        tool: String,
+        /// Fully qualified name the model used.
+        qualified_name: String,
+        /// Who invoked it.
+        caller: crate::mcp::McpCaller,
+        /// Whether the call succeeded.
+        ok: bool,
+        /// Round trip in milliseconds.
+        duration_ms: u64,
+        /// Redacted failure message.
+        error: Option<String>,
+        /// When the call returned.
+        at: DateTime<Utc>,
+    },
 }
 
 #[cfg(test)]

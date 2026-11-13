@@ -125,7 +125,8 @@ impl ForwardFrame {
 ///
 /// `map` turns a channel item into a protocol frame. The current `last_seq` is
 /// passed in so a transient frame can echo the durable cursor, and the closure
-/// may capture service context such as the local host id.
+/// may capture service context such as the local host id. Returning `None`
+/// drops the item, which services use for internal events the UI never sees.
 pub(super) async fn forward_loop<T, F>(
     mut subscription: broadcast::Receiver<T>,
     context: ForwardContext,
@@ -133,7 +134,7 @@ pub(super) async fn forward_loop<T, F>(
     map: F,
 ) where
     T: Clone + Send + 'static,
-    F: Fn(T, &AtomicU64) -> ForwardFrame + Send + 'static,
+    F: Fn(T, &AtomicU64) -> Option<ForwardFrame> + Send + 'static,
 {
     loop {
         let item = match subscription.recv().await {
@@ -168,7 +169,9 @@ pub(super) async fn forward_loop<T, F>(
             }
         }
 
-        let forwarded = map(item, &context.last_seq);
+        let Some(forwarded) = map(item, &context.last_seq) else {
+            continue;
+        };
         if let Some(seq) = forwarded.advance_to {
             context.last_seq.store(seq, Ordering::Relaxed);
         }

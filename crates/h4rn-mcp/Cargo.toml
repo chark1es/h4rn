@@ -8,4 +8,32 @@ repository.workspace = true
 description = "The single local MCP hub injected into every harness (ADR-006)"
 
 [dependencies]
+async-trait.workspace = true
+axum.workspace = true
+blake3.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+futures.workspace = true
 h4rn-protocol.workspace = true
+h4rn-transport = { workspace = true, default-features = false }
+hex.workspace = true
+keyring.workspace = true
+rand.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[[bin]]
+name = "mcp-fixture"
+path = "src/bin/mcp_fixture.rs"
+test = false
+
+[dev-dependencies]
+tempfile.workspace = true

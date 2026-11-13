@@ -20,6 +20,7 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use axum::Json;
+use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{HeaderMap, StatusCode, header::SEC_WEBSOCKET_PROTOCOL};
@@ -44,6 +45,7 @@ use crate::blobs::{BlobError, BlobStore};
 use crate::forge::ForgeService;
 use crate::fs::{FsError, FsService};
 use crate::hosts::HostInventory;
+use crate::mcp::McpService;
 use crate::remote::{RemoteAudit, SessionOrigin};
 use crate::terminal::{Attached, OpenSpec, TerminalManager, run_viewer};
 use crate::threads::ThreadManager;
@@ -82,6 +84,8 @@ pub struct AppState {
     pub remote: Option<Arc<RemoteAudit>>,
     /// CLIProxyAPI profiles and routing (ADR-015).
     pub proxy: Arc<h4rn_proxy::ProxyService>,
+    /// The daemon-owned MCP hub (ADR-006).
+    pub mcp: Arc<McpService>,
     /// Server boot time, for `/healthz`.
     pub started: Instant,
 }
@@ -96,7 +100,48 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/ws", get(ws_handler))
         .route("/secure", get(secure_handler))
+        .route("/secure-mcp", get(secure_mcp_handler))
+        .route(
+            "/mcp",
+            get(mcp_http_get)
+                .post(mcp_http_post)
+                .delete(mcp_http_delete),
+        )
         .with_state(state)
+}
+
+/// Streamable-HTTP MCP endpoint for harness sessions (ADR-006).
+async fn mcp_http_post(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    crate::mcp::http_post(state.mcp.http_state(), headers, body).await
+}
+
+async fn mcp_http_get(State(state): State<AppState>) -> Response {
+    crate::mcp::http_get(state.mcp.http_state()).await
+}
+
+async fn mcp_http_delete(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    crate::mcp::http_delete(state.mcp.http_state(), headers).await
+}
+
+/// Owner half of cross-machine MCP sharing (ADR-006).
+///
+/// The peer authenticates with the same Noise identity it uses for `/secure`;
+/// the hub then applies the `server -> machine` grant and audits each call.
+async fn secure_mcp_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
+    let Some(service) = state.secure.clone() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": "the secure transport is not enabled on this daemon",
+            })),
+        )
+            .into_response();
+    };
+    let mcp = Arc::clone(&state.mcp);
+    ws.on_upgrade(move |socket| async move {
+        let link = Box::new(WsLink { socket });
+        mcp.serve_secure_mcp(service, link).await;
+    })
 }
 
 /// Unauthenticated liveness response.
@@ -404,13 +449,13 @@ where
         forward::ForwardContext::for_connection(&connection),
         forward::ForwardConfig::JOURNAL,
         |event: crate::journal::WireEvent, _last| {
-            forward::ForwardFrame::durable(
+            Some(forward::ForwardFrame::durable(
                 ServerFrame::Event {
                     seq: event.seq,
                     event: event.event,
                 },
                 event.seq,
-            )
+            ))
         },
     ));
     let service_forwards = handlers::spawn_forwarders(&connection);

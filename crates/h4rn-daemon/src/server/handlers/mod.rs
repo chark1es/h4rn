@@ -3,7 +3,7 @@
 //! The core request match in [`crate::server`] owns protocol plumbing (hello,
 //! subscriptions, terminals, filesystem, blobs). Everything a feature adds on
 //! top lives in a module here and is registered exactly once in
-//! [`declare_services`]. Adding MCP or metering means a new `handlers/<name>.rs`
+//! [`declare_services`]. Adding metering means a new `handlers/<name>.rs`
 //! with `matches`, `handle` and `spawn`, plus one line in the list below.
 
 use h4rn_protocol::{ClientRequest, ProtoError, ResponseBody};
@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 use crate::server::Connection;
 
 pub(super) mod forge;
+pub(super) mod mcp;
 pub(super) mod proxy;
 pub(super) mod skills;
 
@@ -68,6 +69,7 @@ declare_services! {
     Proxy => proxy,
     Forge => forge,
     Skills => skills,
+    Mcp => mcp,
 }
 
 /// Spawns every registered service's forwarder for one connection.

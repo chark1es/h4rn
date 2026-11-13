@@ -43,6 +43,25 @@ use crate::journal::{Journal, ThreadMeta, WireEvent};
 /// than this is dropped with a resume hint rather than slowing other clients.
 pub const BROADCAST_CAPACITY: usize = 512;
 
+/// What a harness session needs to reach the daemon's MCP hub.
+#[derive(Clone, Debug)]
+pub struct McpSession {
+    /// Loopback Streamable-HTTP endpoint.
+    pub endpoint: String,
+    /// Bearer token minted for this session only.
+    pub token: String,
+}
+
+/// Supplies the per-session MCP endpoint and token (ADR-006).
+///
+/// Kept as a trait so the thread manager does not depend on the daemon's MCP
+/// service; the daemon installs its hub-backed provider after construction.
+pub trait McpSessionProvider: Send + Sync {
+    /// Returns the injection for one harness session, or `None` before the
+    /// endpoint is bound.
+    fn prepare(&self, harness: HarnessKind, thread_id: &ThreadId) -> Option<McpSession>;
+}
+
 /// Options for the manager.
 #[derive(Clone, Debug)]
 pub struct ThreadManagerOptions {
@@ -197,6 +216,8 @@ struct Inner {
     snapshots: std::sync::OnceLock<Arc<crate::fs::SnapshotStore>>,
     /// CLIProxyAPI routing, when profiles are configured (ADR-015).
     proxy: std::sync::OnceLock<Arc<h4rn_proxy::ProxyService>>,
+    /// MCP endpoint/token injection, installed once the daemon binds.
+    mcp: std::sync::OnceLock<Arc<dyn McpSessionProvider>>,
 }
 
 type ThreadHandle = Arc<Mutex<ThreadRecord>>;
@@ -322,6 +343,7 @@ impl ThreadManager {
                 closed: AtomicBool::new(false),
                 snapshots: std::sync::OnceLock::new(),
                 proxy: std::sync::OnceLock::new(),
+                mcp: std::sync::OnceLock::new(),
             }),
         };
         manager.inner.restore().await?;
@@ -339,6 +361,12 @@ impl ThreadManager {
     /// session cannot observe two different proxy services mid-flight.
     pub fn set_proxy(&self, proxy: Arc<h4rn_proxy::ProxyService>) {
         let _ = self.inner.proxy.set(proxy);
+    }
+
+    /// Installs the MCP endpoint/token provider. Called once by the daemon
+    /// after the hub's loopback endpoint is bound.
+    pub fn set_mcp_provider(&self, provider: Arc<dyn McpSessionProvider>) {
+        let _ = self.inner.mcp.set(provider);
     }
 
     /// Acquires the append lock so a global replay is a gap-free prefix.
@@ -1027,13 +1055,22 @@ impl Inner {
                 .await;
                 return;
             };
+            let injection = self
+                .mcp
+                .get()
+                .and_then(|provider| provider.prepare(harness_kind, &record.meta.thread_id));
+            let mut env_overrides = std::collections::BTreeMap::new();
+            let mcp_endpoint = injection.as_ref().map(|session| session.endpoint.clone());
+            if let Some(session) = injection {
+                env_overrides.insert(h4rn_harness::ENV_MCP_AUTH_TOKEN.to_owned(), session.token);
+            }
             let spec = SessionSpec {
                 workspace: std::path::PathBuf::from(&record.meta.workspace_path),
                 model: record.meta.model.clone(),
                 runtime_mode: record.meta.runtime_mode,
                 resume_id: record.meta.resume_id.clone(),
-                mcp_endpoint: None,
-                env_overrides: std::collections::BTreeMap::new(),
+                mcp_endpoint,
+                env_overrides,
                 attachments: Vec::new(),
             };
             (harness, spec)

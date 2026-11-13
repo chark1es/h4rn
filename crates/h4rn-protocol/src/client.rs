@@ -377,21 +377,30 @@ pub enum ClientRequest {
         /// Turn whose pre-turn snapshots are the base.
         turn_id: crate::ids::TurnId,
     },
-    /// TODO(phase 4): list MCP servers.
+    /// List every MCP server known to this daemon (phase 4).
+    ///
+    /// Kept as a distinct variant because it predates the general
+    /// [`ClientRequest::Mcp`] envelope; it is equivalent to
+    /// `Mcp { request: McpRequest::ListServers }`.
     McpList,
-    /// TODO(phase 4): add or update an MCP server.
+    /// Add or update an MCP server.
     McpUpsert {
-        /// Server name.
-        name: String,
-        /// Transport (`http`, `sse`, `stdio`).
-        transport: String,
-        /// Endpoint URL for HTTP/SSE transports.
-        url: Option<String>,
+        /// Full configuration, including any new secret values.
+        input: crate::mcp::McpServerInput,
     },
-    /// TODO(phase 4): remove an MCP server.
+    /// Remove an MCP server and its secrets.
     McpRemove {
         /// Server name.
         name: String,
+    },
+    /// One MCP hub operation (ADR-006).
+    ///
+    /// Every new operation rides this envelope so the MCP surface can grow
+    /// without adding top-level request variants (and TypeScript
+    /// discriminants) for each one.
+    Mcp {
+        /// Operation to perform.
+        request: crate::mcp::McpRequest,
     },
     /// List skills, the install matrix and per-harness directories.
     SkillsList {

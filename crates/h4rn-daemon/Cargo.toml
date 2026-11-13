@@ -26,6 +26,7 @@ grep-searcher.workspace = true
 h4rn-core.workspace = true
 h4rn-forge.workspace = true
 h4rn-harness.workspace = true
+h4rn-mcp.workspace = true
 h4rn-protocol.workspace = true
 h4rn-proxy.workspace = true
 h4rn-skills.workspace = true

@@ -21,6 +21,10 @@ import type { FsListing } from "./FsListing";
 import type { FsTurnChanges } from "./FsTurnChanges";
 import type { FsWriteResult } from "./FsWriteResult";
 import type { HostSummary } from "./HostSummary";
+import type { McpImportPreview } from "./McpImportPreview";
+import type { McpServerView } from "./McpServerView";
+import type { McpTestCallResult } from "./McpTestCallResult";
+import type { McpToolInfo } from "./McpToolInfo";
 import type { ProxyFailoverChoice } from "./ProxyFailoverChoice";
 import type { ProxyLimits } from "./ProxyLimits";
 import type { ProxyModelCatalog } from "./ProxyModelCatalog";
@@ -296,4 +300,28 @@ pr: ForgePullRequest, } | { "type": "forge_handoff",
 /**
  * Thread, turn and the exact markdown sent.
  */
-handoff: ForgeHandoff, } | { "type": "ack" };
+handoff: ForgeHandoff, } | { "type": "mcp_servers", 
+/**
+ * Servers in configuration order.
+ */
+servers: Array<McpServerView>, } | { "type": "mcp_server", 
+/**
+ * Current view.
+ */
+server: McpServerView, } | { "type": "mcp_import_preview", 
+/**
+ * Entries and conflicts; nothing was written.
+ */
+preview: McpImportPreview, } | { "type": "mcp_tools", 
+/**
+ * Server name.
+ */
+server: string, 
+/**
+ * Qualified tools.
+ */
+tools: Array<McpToolInfo>, } | { "type": "mcp_call", 
+/**
+ * Flattened result.
+ */
+result: McpTestCallResult, } | { "type": "ack" };

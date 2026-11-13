@@ -12,6 +12,8 @@ import type { ForgeRepoRef } from "./ForgeRepoRef";
 import type { FsCreateKind } from "./FsCreateKind";
 import type { HarnessKind } from "./HarnessKind";
 import type { HostId } from "./HostId";
+import type { McpRequest } from "./McpRequest";
+import type { McpServerInput } from "./McpServerInput";
 import type { ProxyFailoverPolicy } from "./ProxyFailoverPolicy";
 import type { ProxyProfileDraft } from "./ProxyProfileDraft";
 import type { ProxyProfileId } from "./ProxyProfileId";
@@ -437,21 +439,17 @@ thread_id: ThreadId,
  */
 turn_id: TurnId, } | { "type": "mcp_list" } | { "type": "mcp_upsert", 
 /**
- * Server name.
+ * Full configuration, including any new secret values.
  */
-name: string, 
-/**
- * Transport (`http`, `sse`, `stdio`).
- */
-transport: string, 
-/**
- * Endpoint URL for HTTP/SSE transports.
- */
-url: string | null, } | { "type": "mcp_remove", 
+input: McpServerInput, } | { "type": "mcp_remove", 
 /**
  * Server name.
  */
-name: string, } | { "type": "skills_list", 
+name: string, } | { "type": "mcp", 
+/**
+ * Operation to perform.
+ */
+request: McpRequest, } | { "type": "skills_list", 
 /**
  * Host to inspect.
  */

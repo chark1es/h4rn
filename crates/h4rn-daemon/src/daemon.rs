@@ -18,13 +18,14 @@ use crate::fs::FsService;
 use crate::harnesses::{HarnessCatalog, StaticHarnessCatalog};
 use crate::hosts::HostInventory;
 use crate::journal::{Journal, SqliteJournal};
+use crate::mcp::{McpService, default_confirmation_gate};
 use crate::remote::{
     ConnectClient, RemoteState, TailscaleMode, advertised_addresses, pairing::read_direct_pairing,
 };
 use crate::server::{self, AppState};
 use crate::supervisor::ProcessSupervisor;
 use crate::terminal::{FileAudit, TerminalManager};
-use crate::threads::{ThreadManager, ThreadManagerOptions};
+use crate::threads::{McpSessionProvider, ThreadManager, ThreadManagerOptions};
 
 /// Builds a daemon with injectable storage, harnesses and lifecycle timings.
 pub struct DaemonBuilder {
@@ -35,6 +36,8 @@ pub struct DaemonBuilder {
     options: ThreadManagerOptions,
     supervisor: Arc<ProcessSupervisor>,
     secure: Option<Arc<SecureService>>,
+    mcp: Option<Arc<McpService>>,
+    mcp_gate: Option<Arc<dyn h4rn_mcp::sharing::ConfirmationGate>>,
 }
 
 impl DaemonBuilder {
@@ -48,7 +51,24 @@ impl DaemonBuilder {
             options: ThreadManagerOptions::default(),
             supervisor: Arc::new(ProcessSupervisor::new()),
             secure: None,
+            mcp: None,
+            mcp_gate: None,
         }
+    }
+
+    /// Replaces the MCP hub (tests and embedders that bring their own storage).
+    pub fn with_mcp(mut self, mcp: Arc<McpService>) -> Self {
+        self.mcp = Some(mcp);
+        self
+    }
+
+    /// Replaces the confirmation gate used for shared tool calls.
+    pub fn with_mcp_confirmation_gate(
+        mut self,
+        gate: Arc<dyn h4rn_mcp::sharing::ConfirmationGate>,
+    ) -> Self {
+        self.mcp_gate = Some(gate);
+        self
     }
 
     /// Enables the Noise-encrypted multipath transport (ADR-009, ADR-010).
@@ -238,6 +258,26 @@ impl DaemonBuilder {
             );
         }
 
+        let gate = self
+            .mcp_gate
+            .clone()
+            .unwrap_or_else(default_confirmation_gate);
+        let mcp = match self.mcp {
+            Some(mcp) => mcp,
+            None => Arc::new(
+                McpService::open(
+                    &self.config,
+                    hosts.local_id().clone(),
+                    remote.as_ref().map(|remote| Arc::clone(&remote.audit)),
+                    gate,
+                )
+                .await?,
+            ),
+        };
+        // The endpoint is unknown until `bind`; until then `prepare` returns
+        // `None` and a session starts without MCP rather than with a bogus URL.
+        manager.set_mcp_provider(Arc::clone(&mcp) as Arc<dyn McpSessionProvider>);
+
         Ok(Daemon {
             config: self.config,
             manager,
@@ -250,6 +290,7 @@ impl DaemonBuilder {
             skills,
             secure,
             remote,
+            mcp,
             supervisor: self.supervisor,
             proxy,
         })
@@ -269,6 +310,7 @@ pub struct Daemon {
     skills: Arc<h4rn_skills::SkillsService>,
     secure: Option<Arc<SecureService>>,
     remote: Option<Arc<RemoteState>>,
+    mcp: Arc<McpService>,
     supervisor: Arc<ProcessSupervisor>,
     proxy: Arc<h4rn_proxy::ProxyService>,
 }
@@ -302,6 +344,11 @@ impl Daemon {
     /// Skill registry handle (tests and diagnostics).
     pub fn skills(&self) -> Arc<h4rn_skills::SkillsService> {
         Arc::clone(&self.skills)
+    }
+
+    /// MCP hub service handle (tests and diagnostics).
+    pub fn mcp(&self) -> Arc<McpService> {
+        Arc::clone(&self.mcp)
     }
 
     /// Binds the primary and optional extra listener.
@@ -348,9 +395,18 @@ impl Daemon {
             }
         }
 
+        // The hub endpoint is always loopback: harness children run on this
+        // machine and must not expose the token over a LAN interface.
+        let mcp_url = format!(
+            "http://{}/mcp",
+            SocketAddr::from(([127, 0, 0, 1], addrs[0].port()))
+        );
+        self.mcp.set_endpoint(mcp_url).await;
+
         let hosts = Arc::clone(&self.hosts);
         let remote = self.remote;
         let secure = self.secure;
+        let mcp = Arc::clone(&self.mcp);
         let config = self.config.clone();
         let state = AppState {
             manager: Arc::clone(&self.manager),
@@ -363,6 +419,7 @@ impl Daemon {
             skills: Arc::clone(&self.skills),
             secure: secure.clone(),
             remote: remote.as_ref().map(|remote| Arc::clone(&remote.audit)),
+            mcp: Arc::clone(&mcp),
             started: std::time::Instant::now(),
             proxy: Arc::clone(&self.proxy),
         };
@@ -395,6 +452,7 @@ impl Daemon {
             manager: self.manager,
             terminals: self.terminals,
             forge: self.forge,
+            mcp: self.mcp,
             supervisor: self.supervisor,
             data_dir: self.config.data_dir,
             remote_tasks,
@@ -410,6 +468,7 @@ pub struct BoundDaemon {
     manager: Arc<ThreadManager>,
     terminals: Arc<TerminalManager>,
     forge: Arc<ForgeService>,
+    mcp: Arc<McpService>,
     supervisor: Arc<ProcessSupervisor>,
     data_dir: PathBuf,
     remote_tasks: Vec<tokio::task::JoinHandle<()>>,
@@ -431,6 +490,11 @@ impl BoundDaemon {
         Arc::clone(&self.manager)
     }
 
+    /// MCP hub service for in-process tests and diagnostics.
+    pub fn mcp(&self) -> Arc<McpService> {
+        Arc::clone(&self.mcp)
+    }
+
     /// Serves until `shutdown` resolves, then interrupts turns and kills
     /// registered harness process groups (ADR-021).
     pub async fn serve(
@@ -444,6 +508,7 @@ impl BoundDaemon {
             manager,
             terminals,
             forge,
+            mcp,
             supervisor,
             data_dir,
             remote_tasks,
@@ -462,6 +527,7 @@ impl BoundDaemon {
             task.abort();
         }
         forge.shutdown();
+        mcp.shutdown().await;
         manager.shutdown().await;
         terminals.shutdown().await;
         supervisor.shutdown().await;

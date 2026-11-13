@@ -105,6 +105,6 @@ pub(super) fn spawn(conn: &Connection) -> JoinHandle<()> {
         conn.state.proxy.subscribe(),
         ForwardContext::for_connection(conn),
         ForwardConfig::always_on("proxy event broadcast"),
-        |event, _last| ForwardFrame::transient(ServerFrame::ProxyEvent { event }),
+        |event, _last| Some(ForwardFrame::transient(ServerFrame::ProxyEvent { event })),
     ))
 }

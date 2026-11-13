@@ -202,10 +202,10 @@ pub(super) fn spawn(conn: &Connection) -> JoinHandle<()> {
                 },
                 h4rn_skills::SkillNotice::Sync(status) => Event::SyncStatus(status),
             };
-            ForwardFrame::transient(ServerFrame::Event {
+            Some(ForwardFrame::transient(ServerFrame::Event {
                 seq: last.load(Ordering::Relaxed),
                 event,
-            })
+            }))
         },
     ))
 }

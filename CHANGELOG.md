@@ -37,6 +37,35 @@ All notable changes to h4rn are recorded here. The format follows
   frontmatter, hashing, installers, import, conflicts and secrets, a real
   Claude Code skill-pickup test behind `--ignored`, and two-registry sync tests
   run against real Postgres by `scripts/test-connect.sh`.
+### Phase 4 — MCP hub
+
+- **One hub per daemon** (`h4rn-mcp`): a loopback streamable-HTTP endpoint at `/mcp` speaking
+  revisions `2025-06-18`, `2025-03-26` and `2024-11-05`, with per-thread bearer tokens stored as
+  BLAKE3 digests, scopes for server and tool narrowing, `Mcp-Session-Id` handling and `DELETE`
+  revocation.
+- **Namespacing and providers**: `server__tool` names with deterministic `_2`/`_3` collisions, a
+  reserved `h4rn` namespace and the `ToolProvider` extension point behind the built-in
+  `h4rn__echo`.
+- **Upstreams**: stdio, streamable HTTP and legacy SSE with lazy start, health ticks, restart
+  backoff, capability caching, list-changed invalidation, timeouts, UTF-8-safe output caps and
+  cancellation.
+- **Durable configuration**: `mcp.db` registry for transports, enable matrices, imports and
+  shares; environment variables and headers stored only as references, with values in the OS
+  keychain or an encrypted-file fallback.
+- **Native import**: Claude Code (`~/.claude.json`, `.mcp.json`), Codex (`config.toml`),
+  OpenCode (`opencode.json`) and Antigravity (`mcp_config.json`), with a conflict preview and
+  `KeepMine`/`UseTheirs`/`Rename`/`Skip` resolution.
+- **Cross-machine sharing**: owner-enforced policies (allowed tools, confirmation, allowed
+  devices), a second secure `/secure-mcp` tunnel carrying JSON-RPC, local audit of every remote
+  call, and no credential forwarding.
+- **Harness injection**: Claude, Codex, OpenCode and Antigravity receive the endpoint and bearer
+  token per session; the token never appears in argv.
+- **Protocol and events**: `ClientRequest::Mcp` with the full MCP operation set, legacy request
+  mapping, `McpServers`/`McpServer`/`McpImportPreview`/`McpTools`/`McpCall` responses and
+  transient `McpServerStatus`/`McpToolCalled` events on `Topic::Mcp`.
+- **Docs and tests**: `docs/mcp.md`, ADR-036/037, real stdio-fixture and two-daemon tunnel tests,
+  secret non-leak tests, and ignored real Claude/Codex injection tests (`h4rn__echo`).
+
 ### Phase 5 — CLIProxyAPI
 
 - **Proxy crate** (`h4rn-proxy`): profiles, capability probes, three-shape model catalogue,

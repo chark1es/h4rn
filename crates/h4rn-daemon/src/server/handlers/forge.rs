@@ -261,7 +261,7 @@ pub(super) fn spawn(conn: &Connection) -> JoinHandle<()> {
             full: FullPolicy::Drop,
         },
         |update: ForgeChecksUpdate, last| {
-            ForwardFrame::transient(ServerFrame::Event {
+            Some(ForwardFrame::transient(ServerFrame::Event {
                 // Checks updates are transient: they carry the durable sequence
                 // this connection has already reached, not a new journal row.
                 seq: last.load(Ordering::Relaxed),
@@ -270,7 +270,7 @@ pub(super) fn spawn(conn: &Connection) -> JoinHandle<()> {
                     number: update.number,
                     checks: update.checks,
                 },
-            })
+            }))
         },
     ))
 }

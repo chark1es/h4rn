@@ -1688,6 +1688,7 @@ dependencies = [
  "h4rn-core",
  "h4rn-forge",
  "h4rn-harness",
+ "h4rn-mcp",
  "h4rn-protocol",
  "h4rn-proxy",
  "h4rn-skills",
@@ -1760,7 +1761,28 @@ dependencies = [
 name = "h4rn-mcp"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "axum",
+ "blake3",
+ "chrono",
+ "dirs",
+ "futures",
  "h4rn-protocol",
+ "h4rn-transport",
+ "hex",
+ "keyring",
+ "rand 0.9.5",
+ "reqwest 0.13.5",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

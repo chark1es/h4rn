@@ -605,3 +605,35 @@ Skill sync reuses h4rn-connect as a per-user mailbox, not as an authority. Each 
 Rows are envelope-encrypted at rest with the connect KEK and an AAD binding `user_id`, `skill_id` and `version`. Metadata (name, description, version, vector, ETag) stays plaintext so the relay can compare causality without reading skill contents. A push uses the server's stored vector: a dominating incoming vector wins, a dominated incoming vector is rejected with a conflict row, and concurrent vectors use `updated_at` as last-writer-wins while recording a conflict on the relay. A daemon whose push is rejected also records a local conflict pointing at its still-stored losing bundle, so the user can restore it; the winner has no equivalent local candidate and keeps the relay-side conflict row. The server returns a cursor derived from `server_updated_at`; a pull returns rows after that cursor, including tombstones. Conflicts are visible until the user resolves one by keeping local, keeping remote or keeping both (the last renames the candidate).
 
 Before the first byte leaves the machine the daemon scans the exact bundle for private keys, cloud and provider tokens, JWTs and credential assignments. A finding blocks the sync with `Blocked` state and a file/line hint; it is a successful, visible refusal rather than a transport error. The tradeoff is a deliberately noisy scanner and a relay that stores opaque bytes, which is the correct bias for a feature whose whole purpose is moving text between machines.
+
+## ADR-036: MCP is implemented in-tree, with `server__tool` names and deterministic collisions
+
+**Status:** Accepted
+
+`h4rn-mcp` implements the MCP streamable-HTTP, stdio and legacy-SSE transports directly on
+`axum`, `reqwest` and `tokio` rather than depending on an SDK. The hub needs control the general
+purpose `rmcp` surface does not expose at this revision: per-session bearer tokens with scopes,
+per-server enable matrices, a single reserved `h4rn` namespace shared with in-process providers,
+owner-enforced share policies, deterministic collision renaming and redacted diagnostics. The
+protocol is small (initialize, tools, resources, prompts, list-changed, cancellation), so owning
+it costs less than adapting every one of those policies to an external type model. Names are
+`server__tool`, server names are lowercased and normalised, `h4rn` is reserved, and collisions
+get `_2`, `_3` in sorted-namespace order so the same configuration always exposes the same names.
+The tradeoff is that new MCP revisions are our work; `negotiate_protocol_version` keeps the
+accepted list explicit and tests pin the handshake.
+
+## ADR-037: MCP configuration and secrets live apart; sharing is owner-executed
+
+**Status:** Accepted
+
+The MCP registry is a separate `mcp.db` in the daemon data directory. It stores transports,
+enable matrices, imports, shares and only *references* to secret values
+(`mcp/<server id>/<kind>/<NAME>`); values go through the `SecretStore` trait into the OS keychain,
+with an encrypted file fallback for headless hosts. The registry never sees a plaintext value, so
+a copied database, a log line, a protocol view or a `Debug` format cannot leak one — the same
+boundary ADR-016 sets for other credentials. Cross-machine sharing follows the same rule: the
+owning machine executes the server and keeps the secret, a second secure session on
+`/secure-mcp` carries JSON-RPC, and the owner re-checks the share policy and audits every call
+with the authenticated device key. A proxy cannot be re-shared, so a chain cannot be used to
+launder access. The tradeoff is one extra encrypted hop for remote calls and the need to clean up
+secret references on update and removal; both are covered by tests.
