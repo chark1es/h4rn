@@ -1,0 +1,3 @@
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"00000000-0000-4000-8000-000000000001","update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"Reply with exactly: ping"}}}}
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"00000000-0000-4000-8000-000000000001","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ping"}}}}
+{"jsonrpc":"2.0","result":{"stopReason":"end_turn","usage":{"inputTokens":2140,"outputTokens":13,"cachedReadTokens":6120,"cachedWriteTokens":0,"thoughtTokens":8,"totalTokens":8273}},"id":4}

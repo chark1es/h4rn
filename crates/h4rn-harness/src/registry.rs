@@ -1,14 +1,15 @@
 //! The adapter registry the daemon resolves harnesses through.
 //!
-//! Phase 1b ships the Claude Code adapter. Codex, OpenCode and Antigravity
-//! become entries here as their adapters land; the daemon must never match on
-//! a concrete adapter type, only on [`h4rn_protocol::HarnessKind`].
+//! Phase 1b ships the Claude Code adapter and Phase 2 adds Antigravity. Codex
+//! and OpenCode become entries here as their adapters land; the daemon must
+//! never match on a concrete adapter type, only on
+//! [`h4rn_protocol::HarnessKind`].
 
 use std::sync::Arc;
 
 use h4rn_protocol::HarnessKind;
 
-use crate::{ClaudeCodeHarness, CodexHarness, Harness, HarnessInstall};
+use crate::{AntigravityHarness, ClaudeCodeHarness, CodexHarness, Harness, HarnessInstall};
 
 /// Returns one adapter instance per built-in harness.
 ///
@@ -18,6 +19,7 @@ pub fn builtin_adapters() -> Vec<Arc<dyn Harness>> {
     vec![
         Arc::new(ClaudeCodeHarness::new()),
         Arc::new(CodexHarness::new()),
+        Arc::new(AntigravityHarness::new()),
     ]
 }
 
@@ -84,6 +86,7 @@ mod tests {
             .get(HarnessKind::ClaudeCode)
             .expect("claude adapter");
         assert_eq!(adapter.kind(), HarnessKind::ClaudeCode);
+        assert!(registry.get(HarnessKind::Antigravity).is_some());
     }
 
     #[test]

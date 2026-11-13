@@ -1,0 +1,1 @@
+{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"00000000-0000-4000-8000-000000000000","update":{"sessionUpdate":"plan","entries":[{"content":"Inspect the repository","priority":"high","status":"completed"},{"content":"Apply the change","priority":"medium","status":"in_progress"}]}}}

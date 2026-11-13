@@ -328,6 +328,7 @@ async fn creates_streams_and_moves_working_done_settled() {
             assert_eq!(hosts[0].host_id, host);
             assert!(hosts[0].harnesses.contains(&HarnessKind::ClaudeCode));
             assert!(hosts[0].harnesses.contains(&HarnessKind::Codex));
+            assert!(hosts[0].harnesses.contains(&HarnessKind::Antigravity));
         }
         other => panic!("unexpected hello: {other:?}"),
     }
