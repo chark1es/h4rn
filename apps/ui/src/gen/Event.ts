@@ -5,7 +5,9 @@ import type { ApprovalOption } from "./ApprovalOption";
 import type { DeviceId } from "./DeviceId";
 import type { FsChangeKind } from "./FsChangeKind";
 import type { FsSearchMatch } from "./FsSearchMatch";
+import type { HostId } from "./HostId";
 import type { Item } from "./Item";
+import type { SkillSyncStatus } from "./SkillSyncStatus";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadSummary } from "./ThreadSummary";
 import type { ToolCall } from "./ToolCall";
@@ -197,4 +199,12 @@ done: boolean,
 /**
  * True when the daemon hit its result cap.
  */
-truncated: boolean, } | { "type": "transport_status" } & TransportStatus;
+truncated: boolean, } | { "type": "skills_changed", 
+/**
+ * Host whose skills changed.
+ */
+host: HostId, 
+/**
+ * When the daemon observed it.
+ */
+at: string, } | { "type": "sync_status" } & SkillSyncStatus | { "type": "transport_status" } & TransportStatus;

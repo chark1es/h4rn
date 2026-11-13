@@ -26,6 +26,7 @@ clap.workspace = true
 ed25519-dalek = { workspace = true, features = ["std", "rand_core"] }
 futures.workspace = true
 h4rn-protocol.workspace = true
+h4rn-skills.workspace = true
 hex.workspace = true
 openidconnect.workspace = true
 rand.workspace = true
@@ -45,6 +46,7 @@ url.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
 http-body-util = "0.1.5"
 tempfile.workspace = true
 tokio-tungstenite.workspace = true

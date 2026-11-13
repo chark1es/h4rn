@@ -11,6 +11,13 @@ import type { FsTurnChanges } from "./FsTurnChanges";
 import type { FsWriteResult } from "./FsWriteResult";
 import type { HostSummary } from "./HostSummary";
 import type { SeqEvent } from "./SeqEvent";
+import type { SkillConflict } from "./SkillConflict";
+import type { SkillDetail } from "./SkillDetail";
+import type { SkillDiff } from "./SkillDiff";
+import type { SkillImportPreview } from "./SkillImportPreview";
+import type { SkillInventory } from "./SkillInventory";
+import type { SkillSummary } from "./SkillSummary";
+import type { SkillSyncStatus } from "./SkillSyncStatus";
 import type { TerminalInfo } from "./TerminalInfo";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadSummary } from "./ThreadSummary";
@@ -145,7 +152,35 @@ diff: FsDiff, } | { "type": "fs_turn_changes",
 /**
  * Turn change set.
  */
-changes: FsTurnChanges, } | { "type": "upload_started", 
+changes: FsTurnChanges, } | { "type": "skills", 
+/**
+ * Inventory the Skills screen renders.
+ */
+inventory: SkillInventory, } | { "type": "skill_detail", 
+/**
+ * Summary and manifest.
+ */
+detail: SkillDetail, } | { "type": "skill_added", 
+/**
+ * New registry row.
+ */
+skill: SkillSummary, } | { "type": "skill_conflicts", 
+/**
+ * Conflicts the user can settle.
+ */
+conflicts: Array<SkillConflict>, } | { "type": "skills_import_preview", 
+/**
+ * Candidates and conflict counts.
+ */
+preview: SkillImportPreview, } | { "type": "skill_diff", 
+/**
+ * Changed files.
+ */
+diff: SkillDiff, } | { "type": "skill_sync_status", 
+/**
+ * State, counters and conflicts.
+ */
+status: SkillSyncStatus, } | { "type": "upload_started", 
 /**
  * Opaque upload id and its binary stream id.
  */

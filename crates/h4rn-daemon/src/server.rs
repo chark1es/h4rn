@@ -68,6 +68,8 @@ pub struct AppState {
     pub tokens: TokenStore,
     /// Workspace-scoped filesystem and git service for IDE mode.
     pub fs: Arc<FsService>,
+    /// Skill registry, installers and connect sync (ADR-034, ADR-035).
+    pub skills: Arc<h4rn_skills::SkillsService>,
     /// Noise-encrypted multipath transport, when enabled.
     pub secure: Option<Arc<SecureService>>,
     /// Remote-action audit trail, when the daemon is signed in to connect.
@@ -380,6 +382,16 @@ where
         Arc::clone(&notify),
         Arc::clone(&last_seq),
     ));
+    let skills_forward = tokio::spawn(skills_forward_loop(
+        state.skills.subscribe(),
+        tx.clone(),
+        Arc::clone(&topics),
+        Arc::clone(&ready),
+        Arc::clone(&overflowed),
+        Arc::clone(&notify),
+        Arc::clone(&last_seq),
+        state.skills.host().clone(),
+    ));
 
     let viewer_id = state.terminals.next_viewer_id();
     let mut connection = Connection {
@@ -421,6 +433,7 @@ where
     }
 
     forward.abort();
+    skills_forward.abort();
     // Detaching a socket never kills a terminal; it only removes this
     // connection's viewers so the PTY keeps running for the next attach.
     connection
@@ -1144,6 +1157,149 @@ impl Connection {
                 }
                 Err(error) => Err(error.into_proto()),
             },
+            ClientRequest::SkillsList { host } => {
+                if let Some(error) = self.local_host_error(&host) {
+                    return Some(error_frame(id, error));
+                }
+                self.state
+                    .skills
+                    .list()
+                    .await
+                    .map(|inventory| ResponseBody::Skills { inventory })
+                    .map_err(h4rn_skills::SkillError::into_proto)
+            }
+            ClientRequest::SkillsAdd {
+                host,
+                source,
+                harnesses,
+                name,
+            } => {
+                if let Some(error) = self.local_host_error(&host) {
+                    return Some(error_frame(id, error));
+                }
+                self.state
+                    .skills
+                    .add(&source, &harnesses, name.as_deref())
+                    .await
+                    .map(|skill| ResponseBody::SkillAdded { skill })
+                    .map_err(h4rn_skills::SkillError::into_proto)
+            }
+            ClientRequest::SkillsUpdate {
+                host,
+                skill_id,
+                source,
+            } => {
+                if let Some(error) = self.local_host_error(&host) {
+                    return Some(error_frame(id, error));
+                }
+                self.state
+                    .skills
+                    .update(&skill_id, &source)
+                    .await
+                    .map(|skill| ResponseBody::SkillAdded { skill })
+                    .map_err(h4rn_skills::SkillError::into_proto)
+            }
+            ClientRequest::SkillsRemove { host, skill_id } => {
+                if let Some(error) = self.local_host_error(&host) {
+                    return Some(error_frame(id, error));
+                }
+                self.state
+                    .skills
+                    .remove(&skill_id)
+                    .await
+                    .map(|()| ResponseBody::Ack)
+                    .map_err(h4rn_skills::SkillError::into_proto)
+            }
+            ClientRequest::SkillsSetEnabled {
+                host,
+                skill_id,
+                harness,
+                enabled,
+            } => {
+                if let Some(error) = self.local_host_error(&host) {
+                    return Some(error_frame(id, error));
+                }
+                self.state
+                    .skills
+                    .set_enabled(&skill_id, harness, enabled)
+                    .await
+                    .map(|skill| ResponseBody::SkillAdded { skill })
+                    .map_err(h4rn_skills::SkillError::into_proto)
+            }
+            ClientRequest::SkillsImportPreview { host } => {
+                if let Some(error) = self.local_host_error(&host) {
+                    return Some(error_frame(id, error));
+                }
+                self.state
+                    .skills
+                    .import_preview()
+                    .await
+                    .map(|preview| ResponseBody::SkillsImportPreview { preview })
+                    .map_err(h4rn_skills::SkillError::into_proto)
+            }
+            ClientRequest::SkillsImportCommit {
+                host,
+                candidate_ids,
+            } => {
+                if let Some(error) = self.local_host_error(&host) {
+                    return Some(error_frame(id, error));
+                }
+                self.state
+                    .skills
+                    .import_commit(&candidate_ids)
+                    .await
+                    .map(|_| ResponseBody::Ack)
+                    .map_err(h4rn_skills::SkillError::into_proto)
+            }
+            ClientRequest::SkillsConflicts { host } => {
+                if let Some(error) = self.local_host_error(&host) {
+                    return Some(error_frame(id, error));
+                }
+                self.state
+                    .skills
+                    .conflicts()
+                    .await
+                    .map(|conflicts| ResponseBody::SkillConflicts { conflicts })
+                    .map_err(h4rn_skills::SkillError::into_proto)
+            }
+            ClientRequest::SkillsResolveConflict {
+                host,
+                conflict_id,
+                resolution,
+            } => {
+                if let Some(error) = self.local_host_error(&host) {
+                    return Some(error_frame(id, error));
+                }
+                self.state
+                    .skills
+                    .resolve_conflict(&conflict_id, resolution)
+                    .await
+                    .map(|()| ResponseBody::Ack)
+                    .map_err(h4rn_skills::SkillError::into_proto)
+            }
+            ClientRequest::SkillsSyncNow => self
+                .state
+                .skills
+                .sync_now()
+                .await
+                .map(|status| ResponseBody::SkillSyncStatus { status })
+                .map_err(h4rn_skills::SkillError::into_proto),
+            ClientRequest::SkillsDiff {
+                host,
+                skill_id,
+                from_version,
+                to_version,
+            } => {
+                if let Some(error) = self.local_host_error(&host) {
+                    return Some(error_frame(id, error));
+                }
+                self.state
+                    .skills
+                    .diff(&skill_id, from_version.as_deref(), to_version.as_deref())
+                    .await
+                    .map(|diff| ResponseBody::SkillDiff { diff })
+                    .map_err(h4rn_skills::SkillError::into_proto)
+            }
             other => Err(not_implemented(&other)),
         };
 
@@ -1267,6 +1423,74 @@ async fn forward_loop(
         let frame = ServerFrame::Event {
             seq: event.seq,
             event: event.event,
+        };
+        let Ok(text) = serde_json::to_string(&frame) else {
+            continue;
+        };
+        match tx.try_send(Outbound::Text(text)) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!("client outbound queue is full; dropping the connection");
+                overflowed.store(true, Ordering::Relaxed);
+                notify.notify_waiters();
+                return;
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => return,
+        }
+    }
+}
+
+/// Forwards skill notifications as transient events.
+///
+/// Skills are not part of the durable thread journal: a client re-lists after
+/// `skills_changed`, so the frame carries the last durable sequence rather than
+/// inventing one (the same rule as [`Event::FsChanged`]).
+#[allow(clippy::too_many_arguments)]
+async fn skills_forward_loop(
+    mut subscription: tokio::sync::broadcast::Receiver<h4rn_skills::SkillNotice>,
+    tx: mpsc::Sender<Outbound>,
+    topics: Arc<RwLock<Vec<Topic>>>,
+    ready: Arc<AtomicBool>,
+    overflowed: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+    last_seq: Arc<AtomicU64>,
+    host: h4rn_protocol::HostId,
+) {
+    loop {
+        let notice = match subscription.recv().await {
+            Ok(notice) => notice,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                tracing::warn!(missed, "client fell behind the skill broadcast");
+                overflowed.store(true, Ordering::Relaxed);
+                notify.notify_waiters();
+                return;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        };
+        if !ready.load(Ordering::Relaxed) {
+            continue;
+        }
+        let subscribed = {
+            let topics = topics
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            topics
+                .iter()
+                .any(|topic| matches!(topic, Topic::All | Topic::Skills))
+        };
+        if !subscribed {
+            continue;
+        }
+        let event = match notice {
+            h4rn_skills::SkillNotice::Changed => Event::SkillsChanged {
+                host: host.clone(),
+                at: chrono::Utc::now(),
+            },
+            h4rn_skills::SkillNotice::Sync(status) => Event::SyncStatus(status),
+        };
+        let frame = ServerFrame::Event {
+            seq: last_seq.load(Ordering::Relaxed),
+            event,
         };
         let Ok(text) = serde_json::to_string(&frame) else {
             continue;
@@ -1414,8 +1638,6 @@ fn request_name(request: &ClientRequest) -> &'static str {
         ClientRequest::McpList => "mcp_list",
         ClientRequest::McpUpsert { .. } => "mcp_upsert",
         ClientRequest::McpRemove { .. } => "mcp_remove",
-        ClientRequest::SkillsList { .. } => "skills_list",
-        ClientRequest::SkillsSetEnabled { .. } => "skills_set_enabled",
         ClientRequest::ProxyProbe { .. } => "proxy_probe",
         ClientRequest::ProxyConfigure { .. } => "proxy_configure",
         ClientRequest::UsageQuery { .. } => "usage_query",

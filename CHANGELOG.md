@@ -5,6 +5,39 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### Phase 4 — skills
+
+- **Skill bundles** (`h4rn-skills`): directories with `SKILL.md` are
+  canonicalised into a BLAKE3-addressed manifest (relative paths, sizes,
+  digests, executable bits) and stored once under `skills/bundles/<version>`,
+  with SQLite metadata in `skills/registry.db`. Frontmatter parsing, git
+  sources pinned to a resolved commit, size/file caps and path-traversal
+  validation are included.
+- **Per-harness installers**: native `SKILL.md` copies for Claude Code, Codex,
+  OpenCode and Antigravity, with user and project roots detected, per-machine
+  enable/disable, upgrade-in-place and a `.h4rn-managed` JSON marker. A
+  user-owned directory is never overwritten or removed; Codex and Antigravity
+  share `.agents/skills` through the marker's harness list.
+- **Import**: preview and commit scans of harness directories with
+  content-hash dedupe, duplicate detection and conflict rows for a different
+  version of the same name.
+- **Cross-machine sync**: `h4rn-connect` endpoints `POST /v1/skills/sync/push`
+  and `/pull`, Postgres migrations `0003_skills.sql`, envelope encryption at
+  rest, version vectors with last-writer-wins and conflict surfacing, pull
+  cursors and tombstones. The daemon refuses to upload a bundle the secret
+  scanner flags and reports `Blocked` with a file/line hint.
+- **Protocol**: `SkillsList/Add/Update/Remove/SetEnabled/ImportPreview/
+  ImportCommit/Conflicts/ResolveConflict/Diff/SyncNow`, response bodies
+  `Skills`, `SkillAdded`, `SkillDetail`, `SkillsImportPreview`,
+  `SkillConflicts`, `SkillDiff`, `SkillSyncStatus`, plus transient
+  `SkillsChanged` and `SyncStatus` events. TypeScript bindings regenerated.
+- **Daemon glue**: `AppState.skills`, all request handlers, transient event
+  forwarding, and a `ConnectClient` implementation of `SkillSyncApi`.
+- **Docs and tests**: `docs/skills.md`, ADR-034/035, hermetic tests for
+  frontmatter, hashing, installers, import, conflicts and secrets, a real
+  Claude Code skill-pickup test behind `--ignored`, and two-registry sync tests
+  run against real Postgres by `scripts/test-connect.sh`.
+
 ### Phase 3 — connect
 
 - **Relay service** (`h4rn-connect`): axum + Postgres, self-hostable image and compose stack

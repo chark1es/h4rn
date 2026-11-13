@@ -183,6 +183,18 @@ impl DaemonBuilder {
         // the secure listener is needed: remote access implies `/secure`.
         let remote = RemoteState::open(&self.config.data_dir, identity.clone())?;
 
+        // The skill registry lives beside the journal and is shared by every
+        // client of this daemon. Sync is only wired when connect is signed in;
+        // the service reports `Offline` otherwise instead of hiding the screen.
+        let sync_api: Option<Arc<dyn h4rn_skills::SkillSyncApi>> = remote
+            .as_ref()
+            .map(|remote| Arc::clone(&remote.client) as Arc<dyn h4rn_skills::SkillSyncApi>);
+        let skills = Arc::new(
+            h4rn_skills::SkillsService::open(&self.config.data_dir, hosts.local_id(), sync_api)
+                .await
+                .map_err(|error| anyhow::anyhow!("open the skill registry: {error}"))?,
+        );
+
         let secure = match self.secure {
             Some(service) => Some(service),
             None => secure_from_env(identity.clone(), remote.is_some())?,
@@ -216,6 +228,7 @@ impl DaemonBuilder {
             blobs,
             tokens,
             fs,
+            skills,
             secure,
             remote,
             supervisor: self.supervisor,
@@ -232,6 +245,7 @@ pub struct Daemon {
     blobs: Arc<BlobStore>,
     tokens: TokenStore,
     fs: Arc<FsService>,
+    skills: Arc<h4rn_skills::SkillsService>,
     secure: Option<Arc<SecureService>>,
     remote: Option<Arc<RemoteState>>,
     supervisor: Arc<ProcessSupervisor>,
@@ -256,6 +270,11 @@ impl Daemon {
     /// Terminal manager handle (tests and diagnostics).
     pub fn terminals(&self) -> Arc<TerminalManager> {
         Arc::clone(&self.terminals)
+    }
+
+    /// Skill registry handle (tests and diagnostics).
+    pub fn skills(&self) -> Arc<h4rn_skills::SkillsService> {
+        Arc::clone(&self.skills)
     }
 
     /// Binds the primary and optional extra listener.
@@ -313,6 +332,7 @@ impl Daemon {
             blobs: Arc::clone(&self.blobs),
             tokens: self.tokens,
             fs: self.fs,
+            skills: Arc::clone(&self.skills),
             secure: secure.clone(),
             remote: remote.as_ref().map(|remote| Arc::clone(&remote.audit)),
             started: std::time::Instant::now(),

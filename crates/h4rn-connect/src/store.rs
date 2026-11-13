@@ -1719,6 +1719,217 @@ impl Store {
     }
 }
 
+/// One stored skill sync entry, including its sealed bundle.
+#[derive(Clone, Debug, FromRow)]
+pub struct SkillEntryRow {
+    /// Owner.
+    pub user_id: Uuid,
+    /// Registry id.
+    pub skill_id: String,
+    /// Skill name.
+    pub name: String,
+    /// Skill description.
+    pub description: String,
+    /// Content version hash.
+    pub version: String,
+    /// Serialised version vector.
+    pub vector_json: String,
+    /// ETag of this entry.
+    pub etag: String,
+    /// Tombstone flag.
+    pub deleted: bool,
+    /// Envelope nonce wrapping the DEK.
+    pub dek_nonce: Vec<u8>,
+    /// Wrapped DEK.
+    pub wrapped_dek: Vec<u8>,
+    /// Payload nonce.
+    pub nonce: Vec<u8>,
+    /// Encrypted bundle payload.
+    pub ciphertext: Vec<u8>,
+    /// Sender's wall clock.
+    pub updated_at: DateTime<Utc>,
+    /// Server receive time, used as the pull cursor.
+    pub server_updated_at: DateTime<Utc>,
+}
+
+/// Input for [`Store::upsert_skill_entry`].
+#[derive(Clone, Debug)]
+pub struct NewSkillEntry<'a> {
+    /// Registry id.
+    pub skill_id: &'a str,
+    /// Skill name.
+    pub name: &'a str,
+    /// Skill description.
+    pub description: &'a str,
+    /// Content version.
+    pub version: &'a str,
+    /// Serialised version vector.
+    pub vector_json: &'a str,
+    /// ETag computed by the handler.
+    pub etag: &'a str,
+    /// Tombstone flag.
+    pub deleted: bool,
+    /// Sealed bundle.
+    pub sealed: SealedSecret,
+    /// Sender's wall clock.
+    pub updated_at: DateTime<Utc>,
+}
+
+/// One sync conflict row.
+#[derive(Clone, Debug, FromRow)]
+pub struct SkillConflictRow {
+    /// Row id.
+    pub id: i64,
+    /// Registry id.
+    pub skill_id: String,
+    /// Version kept by the server.
+    pub local_version: Option<String>,
+    /// Version that lost.
+    pub remote_version: String,
+    /// Why it lost.
+    pub reason: String,
+    /// Detection time.
+    pub created_at: DateTime<Utc>,
+}
+
+impl Store {
+    /// One stored skill entry.
+    pub async fn skill_entry(
+        &self,
+        user_id: Uuid,
+        skill_id: &str,
+    ) -> Result<Option<SkillEntryRow>> {
+        sqlx::query_as::<_, SkillEntryRow>(
+            "SELECT user_id, skill_id, name, description, version, vector_json, etag,
+                    deleted, dek_nonce, wrapped_dek, nonce, ciphertext, updated_at,
+                    server_updated_at
+               FROM skill_sync_entries WHERE user_id = $1 AND skill_id = $2",
+        )
+        .bind(user_id)
+        .bind(skill_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Every entry changed after `since`, or all entries when `since` is `None`.
+    pub async fn skill_entries_since(
+        &self,
+        user_id: Uuid,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<Vec<SkillEntryRow>> {
+        sqlx::query_as::<_, SkillEntryRow>(
+            "SELECT user_id, skill_id, name, description, version, vector_json, etag,
+                    deleted, dek_nonce, wrapped_dek, nonce, ciphertext, updated_at,
+                    server_updated_at
+               FROM skill_sync_entries
+              WHERE user_id = $1 AND ($2::timestamptz IS NULL OR server_updated_at > $2)
+              ORDER BY server_updated_at, skill_id",
+        )
+        .bind(user_id)
+        .bind(since)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Inserts or replaces one entry.
+    pub async fn upsert_skill_entry(
+        &self,
+        user_id: Uuid,
+        device_id: Option<Uuid>,
+        entry: &NewSkillEntry<'_>,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO skill_sync_entries
+                (user_id, skill_id, name, description, version, vector_json, etag, deleted,
+                 dek_nonce, wrapped_dek, nonce, ciphertext, updated_at, server_updated_at,
+                 updated_by_device)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now(), $14)
+             ON CONFLICT(user_id, skill_id) DO UPDATE SET
+                name = excluded.name,
+                description = excluded.description,
+                version = excluded.version,
+                vector_json = excluded.vector_json,
+                etag = excluded.etag,
+                deleted = excluded.deleted,
+                dek_nonce = excluded.dek_nonce,
+                wrapped_dek = excluded.wrapped_dek,
+                nonce = excluded.nonce,
+                ciphertext = excluded.ciphertext,
+                updated_at = excluded.updated_at,
+                server_updated_at = now(),
+                updated_by_device = excluded.updated_by_device",
+        )
+        .bind(user_id)
+        .bind(entry.skill_id)
+        .bind(entry.name)
+        .bind(entry.description)
+        .bind(entry.version)
+        .bind(entry.vector_json)
+        .bind(entry.etag)
+        .bind(entry.deleted)
+        .bind(&entry.sealed.dek_nonce)
+        .bind(&entry.sealed.wrapped_dek)
+        .bind(&entry.sealed.nonce)
+        .bind(&entry.sealed.ciphertext)
+        .bind(entry.updated_at)
+        .bind(device_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Unresolved conflicts for one user.
+    pub async fn skill_conflicts(&self, user_id: Uuid) -> Result<Vec<SkillConflictRow>> {
+        sqlx::query_as::<_, SkillConflictRow>(
+            "SELECT id, skill_id, local_version, remote_version, reason, created_at
+               FROM skill_sync_conflicts
+              WHERE user_id = $1 AND resolved_at IS NULL
+              ORDER BY created_at DESC, id DESC",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Records one sync conflict.
+    pub async fn record_skill_conflict(
+        &self,
+        user_id: Uuid,
+        skill_id: &str,
+        local_version: Option<&str>,
+        remote_version: &str,
+        reason: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO skill_sync_conflicts
+                (user_id, skill_id, local_version, remote_version, reason)
+             VALUES ($1,$2,$3,$4,$5)",
+        )
+        .bind(user_id)
+        .bind(skill_id)
+        .bind(local_version)
+        .bind(remote_version)
+        .bind(reason)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// The newest server receive time, used as the pull cursor.
+    pub async fn skill_cursor(&self, user_id: Uuid) -> Result<Option<DateTime<Utc>>> {
+        sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+            "SELECT MAX(server_updated_at) FROM skill_sync_entries WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+}
+
 /// Inserts or reuses a device within a transaction.
 async fn upsert_device_in(
     tx: &mut Transaction<'_, Postgres>,

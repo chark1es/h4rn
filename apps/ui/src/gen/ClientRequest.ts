@@ -8,6 +8,8 @@ import type { FsCreateKind } from "./FsCreateKind";
 import type { HarnessKind } from "./HarnessKind";
 import type { HostId } from "./HostId";
 import type { RuntimeMode } from "./RuntimeMode";
+import type { SkillConflictResolution } from "./SkillConflictResolution";
+import type { SkillSource } from "./SkillSource";
 import type { TerminalId } from "./TerminalId";
 import type { ThreadFilter } from "./ThreadFilter";
 import type { ThreadId } from "./ThreadId";
@@ -444,7 +446,43 @@ name: string, } | { "type": "skills_list",
 /**
  * Host to inspect.
  */
-host: HostId, } | { "type": "skills_set_enabled", 
+host: HostId, } | { "type": "skills_add", 
+/**
+ * Host that owns the registry and the harness directories.
+ */
+host: HostId, 
+/**
+ * Where to read the skill from.
+ */
+source: SkillSource, 
+/**
+ * Harnesses to install into; empty adds to the registry only.
+ */
+harnesses: Array<HarnessKind>, 
+/**
+ * Override the frontmatter name.
+ */
+name: string | null, } | { "type": "skills_update", 
+/**
+ * Host that owns the registry.
+ */
+host: HostId, 
+/**
+ * Skill to update.
+ */
+skill_id: string, 
+/**
+ * Where to read the new version from.
+ */
+source: SkillSource, } | { "type": "skills_remove", 
+/**
+ * Host that owns the registry.
+ */
+host: HostId, 
+/**
+ * Skill to remove.
+ */
+skill_id: string, } | { "type": "skills_set_enabled", 
 /**
  * Host that owns the skill.
  */
@@ -454,9 +492,57 @@ host: HostId,
  */
 skill_id: string, 
 /**
+ * Harness to toggle. Enabling installs the managed copy when missing.
+ */
+harness: HarnessKind, 
+/**
  * Whether the skill is enabled.
  */
-enabled: boolean, } | { "type": "proxy_probe", 
+enabled: boolean, } | { "type": "skills_import_preview", 
+/**
+ * Host to scan.
+ */
+host: HostId, } | { "type": "skills_import_commit", 
+/**
+ * Host that owns the registry.
+ */
+host: HostId, 
+/**
+ * Candidate ids from [`ResponseBody::SkillsImportPreview`].
+ */
+candidate_ids: Array<string>, } | { "type": "skills_conflicts", 
+/**
+ * Host that owns the registry.
+ */
+host: HostId, } | { "type": "skills_resolve_conflict", 
+/**
+ * Host that owns the registry.
+ */
+host: HostId, 
+/**
+ * Conflict id.
+ */
+conflict_id: string, 
+/**
+ * How to settle it.
+ */
+resolution: SkillConflictResolution, } | { "type": "skills_sync_now" } | { "type": "skills_diff", 
+/**
+ * Host that owns the registry.
+ */
+host: HostId, 
+/**
+ * Skill to compare.
+ */
+skill_id: string, 
+/**
+ * Older version; `None` compares the current version against empty.
+ */
+from_version: string | null, 
+/**
+ * Newer version; `None` uses the current version.
+ */
+to_version: string | null, } | { "type": "proxy_probe", 
 /**
  * Base URL to probe.
  */

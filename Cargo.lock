@@ -1574,6 +1574,7 @@ name = "h4rn-connect"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "base64 0.22.1",
  "blake3",
@@ -1583,6 +1584,7 @@ dependencies = [
  "ed25519-dalek",
  "futures",
  "h4rn-protocol",
+ "h4rn-skills",
  "hex",
  "http-body-util",
  "openidconnect",
@@ -1639,6 +1641,7 @@ dependencies = [
  "h4rn-core",
  "h4rn-harness",
  "h4rn-protocol",
+ "h4rn-skills",
  "h4rn-transport",
  "h4rn-vt",
  "hex",
@@ -1734,7 +1737,20 @@ dependencies = [
 name = "h4rn-skills"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "blake3",
+ "chrono",
  "h4rn-protocol",
+ "hex",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -185,6 +185,41 @@ pub enum ResponseBody {
         /// Turn change set.
         changes: crate::fs::FsTurnChanges,
     },
+    /// The skill registry and the per-harness install matrix.
+    Skills {
+        /// Inventory the Skills screen renders.
+        inventory: crate::skills::SkillInventory,
+    },
+    /// One skill and its canonical manifest.
+    SkillDetail {
+        /// Summary and manifest.
+        detail: crate::skills::SkillDetail,
+    },
+    /// A skill was added or updated.
+    SkillAdded {
+        /// New registry row.
+        skill: crate::skills::SkillSummary,
+    },
+    /// Unresolved skill conflicts.
+    SkillConflicts {
+        /// Conflicts the user can settle.
+        conflicts: Vec<crate::skills::SkillConflict>,
+    },
+    /// Preview of an import scan.
+    SkillsImportPreview {
+        /// Candidates and conflict counts.
+        preview: crate::skills::SkillImportPreview,
+    },
+    /// A diff between two skill versions.
+    SkillDiff {
+        /// Changed files.
+        diff: crate::skills::SkillDiff,
+    },
+    /// Result of the latest sync.
+    SkillSyncStatus {
+        /// State, counters and conflicts.
+        status: crate::skills::SkillSyncStatus,
+    },
     /// An upload stream is ready for binary chunks.
     UploadStarted {
         /// Opaque upload id and its binary stream id.
@@ -432,6 +467,21 @@ pub enum Event {
         /// True when the daemon hit its result cap.
         truncated: bool,
     },
+    /// The skill registry or one installed copy changed.
+    ///
+    /// Transient like [`Event::FsChanged`]: a client re-lists instead of
+    /// trying to replay skill state from the journal.
+    SkillsChanged {
+        /// Host whose skills changed.
+        host: crate::HostId,
+        /// When the daemon observed it.
+        at: DateTime<Utc>,
+    },
+    /// The result of a background skill sync.
+    ///
+    /// Transient; the durable state is the registry itself. Clients render the
+    /// status bar from this event and fall back to `SkillsList` on reconnect.
+    SyncStatus(crate::skills::SkillSyncStatus),
     /// The client's multipath transport changed state (ADR-009).
     ///
     /// The daemon never emits this: the client owns path selection and

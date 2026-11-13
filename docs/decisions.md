@@ -585,3 +585,23 @@ its `ring` default resolver; keeping those in the wasm crate avoids pulling
 browser-only features into the daemon. The tradeoff is a wasm build step and a
 second adapter to keep compiling, which is cheaper than two implementations of
 a state machine where a one-byte divergence is a security bug.
+
+## ADR-034: Skills are content-addressed bundles, installed as marked copies
+
+**Status:** Accepted
+
+A skill is a directory with a `SKILL.md` entry point plus references, scripts and assets. The daemon canonicalises it into a manifest of relative paths, sizes, BLAKE3 digests and executable bits, and derives the version id from a BLAKE3 digest of that manifest encoded as canonical JSON. Absolute paths, mtimes and owners never enter the hash, so importing the same directory on two machines produces one version id. Bundles are stored once under `skills/bundles/<version>`; SQLite (`skills/registry.db`) holds names, sources, revisions, install rows and conflicts. The registry is per user and per daemon data directory.
+
+All four harnesses read a native `SKILL.md` directory, so there is no instructions-file fallback: Claude Code (`~/.claude/skills`), Codex (`$CODEX_HOME/skills`, default `~/.codex/skills`), OpenCode (`$XDG_CONFIG_HOME/opencode/skills`, default `~/.config/opencode/skills`) and Antigravity (`~/.gemini/config/skills`). Project roots are recorded for the UI but installs target the user root, the only path every harness reads without a workspace trust decision.
+
+Installs are copies, not symlinks, because the `.h4rn-managed` marker must travel with the copy and because Codex and Antigravity share `.agents/skills` as a project root. The marker records the owner, registry id, name, version, harness list and install time. A directory without a marker is user-owned and is never overwritten, updated or removed; uninstall removes only a matching managed copy and narrows the marker when another harness still owns the shared directory. The tradeoff is duplicated bytes across harnesses, which is small for documents and scripts and buys a single ownership rule the UI can explain.
+
+## ADR-035: Connect is a sync mailbox; the registry decides causality
+
+**Status:** Accepted
+
+Skill sync reuses h4rn-connect as a per-user mailbox, not as an authority. Each push carries the full bundle and a Lamport-style version vector keyed by the registry's stable machine id. The registry's monotonic `revision` is that machine's clock, so two machines cannot silently reuse a counter. Bundles are validated (`SkillBundle::from_wire`) and must hash to the advertised version before the relay stores anything; the relay never decrypts them.
+
+Rows are envelope-encrypted at rest with the connect KEK and an AAD binding `user_id`, `skill_id` and `version`. Metadata (name, description, version, vector, ETag) stays plaintext so the relay can compare causality without reading skill contents. A push uses the server's stored vector: a dominating incoming vector wins, a dominated incoming vector is rejected with a conflict row, and concurrent vectors use `updated_at` as last-writer-wins while recording a conflict on the relay. A daemon whose push is rejected also records a local conflict pointing at its still-stored losing bundle, so the user can restore it; the winner has no equivalent local candidate and keeps the relay-side conflict row. The server returns a cursor derived from `server_updated_at`; a pull returns rows after that cursor, including tombstones. Conflicts are visible until the user resolves one by keeping local, keeping remote or keeping both (the last renames the candidate).
+
+Before the first byte leaves the machine the daemon scans the exact bundle for private keys, cloud and provider tokens, JWTs and credential assignments. A finding blocks the sync with `Blocked` state and a file/line hint; it is a successful, visible refusal rather than a transport error. The tradeoff is a deliberately noisy scanner and a relay that stores opaque bytes, which is the correct bias for a feature whose whole purpose is moving text between machines.

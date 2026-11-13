@@ -393,19 +393,93 @@ pub enum ClientRequest {
         /// Server name.
         name: String,
     },
-    /// TODO(phase 5): list skills on a host.
+    /// List skills, the install matrix and per-harness directories.
     SkillsList {
         /// Host to inspect.
         host: HostId,
     },
-    /// TODO(phase 5): enable or disable a skill.
+    /// Add a skill from a local folder, a pinned git commit or a harness
+    /// directory, then install it into the selected harnesses.
+    SkillsAdd {
+        /// Host that owns the registry and the harness directories.
+        host: HostId,
+        /// Where to read the skill from.
+        source: crate::skills::SkillSource,
+        /// Harnesses to install into; empty adds to the registry only.
+        #[serde(default)]
+        harnesses: Vec<HarnessKind>,
+        /// Override the frontmatter name.
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /// Replace the current version from a source and reinstall managed copies.
+    SkillsUpdate {
+        /// Host that owns the registry.
+        host: HostId,
+        /// Skill to update.
+        skill_id: String,
+        /// Where to read the new version from.
+        source: crate::skills::SkillSource,
+    },
+    /// Remove a skill and every h4rn-managed installed copy.
+    SkillsRemove {
+        /// Host that owns the registry.
+        host: HostId,
+        /// Skill to remove.
+        skill_id: String,
+    },
+    /// Enable or disable a skill for one harness on this machine.
     SkillsSetEnabled {
         /// Host that owns the skill.
         host: HostId,
         /// Skill id.
         skill_id: String,
+        /// Harness to toggle. Enabling installs the managed copy when missing.
+        harness: HarnessKind,
         /// Whether the skill is enabled.
         enabled: bool,
+    },
+    /// Scan the harness directories and preview what an import would change.
+    SkillsImportPreview {
+        /// Host to scan.
+        host: HostId,
+    },
+    /// Import the selected candidates from the last preview.
+    SkillsImportCommit {
+        /// Host that owns the registry.
+        host: HostId,
+        /// Candidate ids from [`ResponseBody::SkillsImportPreview`].
+        candidate_ids: Vec<String>,
+    },
+    /// List unresolved skill conflicts with the ids `SkillsResolveConflict`
+    /// expects.
+    SkillsConflicts {
+        /// Host that owns the registry.
+        host: HostId,
+    },
+    /// Resolve one content conflict surfaced by an import or a sync.
+    SkillsResolveConflict {
+        /// Host that owns the registry.
+        host: HostId,
+        /// Conflict id.
+        conflict_id: String,
+        /// How to settle it.
+        resolution: crate::skills::SkillConflictResolution,
+    },
+    /// Push local changes to connect and apply remote changes.
+    SkillsSyncNow,
+    /// Compare two versions of one skill.
+    SkillsDiff {
+        /// Host that owns the registry.
+        host: HostId,
+        /// Skill to compare.
+        skill_id: String,
+        /// Older version; `None` compares the current version against empty.
+        #[serde(default)]
+        from_version: Option<String>,
+        /// Newer version; `None` uses the current version.
+        #[serde(default)]
+        to_version: Option<String>,
     },
     /// TODO(phase 6): probe a CLIProxyAPI-compatible endpoint (ADR-015).
     ProxyProbe {
