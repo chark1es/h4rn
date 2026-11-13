@@ -143,6 +143,8 @@ export type AppState = {
   threadsError: ProtoError | null;
   lastSyncAt: number | null;
   serverVersion: string | null;
+  /** Daemon host id of the machine this client is talking to. */
+  localHostId: HostId | null;
   pendingCreates: PendingCreate[];
   pendingActions: Record<ThreadId, string | undefined>;
   toasts: Toast[];
@@ -181,6 +183,7 @@ function createInitialState(): AppState {
     threadsError: null,
     lastSyncAt: null,
     serverVersion: null,
+    localHostId: null,
     pendingCreates: [],
     pendingActions: {},
     toasts: [],
@@ -586,6 +589,7 @@ export function startConnection(): void {
       ...state,
       hosts,
       serverVersion: info.serverVersion,
+      localHostId: info.localHostId,
       connection: { ...state.connection, error: null },
     });
     void loadThreads().then(() => {

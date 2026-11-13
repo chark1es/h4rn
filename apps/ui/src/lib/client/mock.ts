@@ -14,14 +14,30 @@ import type {
   Attachment,
   BlobInfo,
   ClientFrame,
+  ClientRequest,
   Event,
   HarnessKind,
   HostSummary,
   Item,
+  McpImportPreview,
+  McpRequest,
+  McpServerInput,
+  McpServerView,
+  McpTestCallResult,
+  McpToolInfo,
+  McpTransportView,
   ProtoError,
   ResponseBody,
   SeqEvent,
   ServerFrame,
+  SkillConflict,
+  SkillDiff,
+  SkillImportPreview,
+  SkillInstallState,
+  SkillInventory,
+  SkillSource,
+  SkillSummary,
+  SkillSyncStatus,
   TerminalExit,
   TerminalInfo,
   ThreadSummary,
@@ -71,6 +87,8 @@ type MockUpload = {
   nextSeq: number;
   committed: string | null;
 };
+
+type SkillsBody = Extract<ClientRequest, { type: `skills_${string}` }>;
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -759,6 +777,508 @@ function buildHosts(scenario: string): HostSummary[] {
   ];
 }
 
+// ---------------------------------------------------------------------------
+// Settings → Tools seeds
+// ---------------------------------------------------------------------------
+
+const MOCK_HARNESSES: HarnessKind[] = ["claude_code", "codex", "opencode", "antigravity"];
+
+function mcpServer(
+  view: Omit<McpServerView, "id" | "updated_at"> & { updated_at?: string },
+): McpServerView {
+  return {
+    id: `srv_${view.name.replace(/[^a-z0-9]+/gi, "_")}`,
+    updated_at: iso(-2 * DAY),
+    ...view,
+  };
+}
+
+function buildMcpServers(): McpServerView[] {
+  return [
+    mcpServer({
+      name: "playwright",
+      transport: {
+        type: "http",
+        url: "http://127.0.0.1:8931/mcp",
+        header_keys: ["Authorization"],
+      },
+      tags: ["browser", "e2e"],
+      enabled: {
+        by_harness: [
+          { harness: "claude_code", enabled: true },
+          { harness: "codex", enabled: true },
+          { harness: "opencode", enabled: false },
+        ],
+        by_machine: [{ machine: "orion", enabled: true }],
+      },
+      status: "ready",
+      tool_count: 21,
+      last_error: "orion already has a server named playwright with a different configuration.",
+      runs_on: null,
+      shared_to: ["orion"],
+      imported_from: "user",
+    }),
+    mcpServer({
+      name: "linear",
+      transport: { type: "http", url: "http://127.0.0.1:8932/mcp", header_keys: [] },
+      tags: ["issues"],
+      enabled: {
+        by_harness: [
+          { harness: "claude_code", enabled: true },
+          { harness: "codex", enabled: true },
+        ],
+        by_machine: [],
+      },
+      status: "ready",
+      tool_count: 8,
+      last_error: null,
+      runs_on: null,
+      shared_to: [],
+      imported_from: "user",
+    }),
+    mcpServer({
+      name: "postgres-dev",
+      transport: {
+        type: "stdio",
+        command: "mcp-postgres",
+        args: ["--readonly"],
+        cwd: null,
+        env_keys: ["DATABASE_URL"],
+      },
+      tags: ["database"],
+      enabled: {
+        by_harness: [{ harness: "codex", enabled: true }],
+        by_machine: [],
+      },
+      status: "remote",
+      tool_count: 6,
+      last_error: null,
+      runs_on: "orion",
+      shared_to: [],
+      imported_from: "orion",
+    }),
+    mcpServer({
+      name: "sentry",
+      transport: { type: "http", url: "http://127.0.0.1:8933/mcp", header_keys: [] },
+      tags: ["observability"],
+      enabled: {
+        by_harness: [
+          { harness: "claude_code", enabled: true },
+          { harness: "codex", enabled: false },
+          { harness: "opencode", enabled: false },
+        ],
+        by_machine: [],
+      },
+      status: "error",
+      tool_count: 1,
+      last_error: "Health check failed: connection refused on 127.0.0.1:8933.",
+      runs_on: null,
+      shared_to: [],
+      imported_from: "user",
+    }),
+    mcpServer({
+      name: "github",
+      transport: {
+        type: "stdio",
+        command: "npx",
+        args: ["-y", "@modelcontextprotocol/server-github"],
+        cwd: null,
+        env_keys: ["GITHUB_TOKEN"],
+      },
+      tags: ["source"],
+      enabled: {
+        by_harness: [
+          { harness: "claude_code", enabled: true },
+          { harness: "codex", enabled: true },
+          { harness: "opencode", enabled: false },
+        ],
+        by_machine: [],
+      },
+      status: "stopped",
+      tool_count: 4,
+      last_error: "GITHUB_TOKEN is not configured on atlas.",
+      runs_on: null,
+      shared_to: [],
+      imported_from: "claude_code",
+    }),
+  ];
+}
+
+const MOCK_MCP_TOOLS: Record<string, McpToolInfo[]> = {
+  playwright: [
+    tool("playwright", "open_page", "Open a URL and return the page state.", true),
+    tool("playwright", "click", "Click an element by accessible name.", false),
+    tool("playwright", "screenshot", "Capture the current viewport.", true),
+    tool("playwright", "snapshot", "Return an accessibility snapshot.", true),
+    tool("playwright", "fill", "Fill an input field.", false),
+  ],
+  linear: [
+    tool("linear", "list_issues", "List issues for a team or project.", true),
+    tool("linear", "create_issue", "Create an issue with a title and body.", false),
+    tool("linear", "comment", "Add a comment to an issue.", false),
+  ],
+  "postgres-dev": [
+    tool("postgres-dev", "query", "Run a read-only SQL query.", true),
+    tool("postgres-dev", "tables", "List tables in the current schema.", true),
+  ],
+  sentry: [tool("sentry", "list_projects", "List projects the token can read.", true)],
+  github: [
+    tool("github", "search_issues", "Search issues and pull requests.", true),
+    tool("github", "get_file", "Read a file from a repository.", true),
+    tool("github", "create_pr", "Open a pull request.", false),
+  ],
+};
+
+function tool(server: string, name: string, description: string, readOnly: boolean): McpToolInfo {
+  return {
+    name: `${server}__${name}`,
+    server,
+    tool: name,
+    description,
+    input_schema: { type: "object", properties: {} },
+    read_only: readOnly,
+  };
+}
+
+function install(
+  harness: HarnessKind,
+  version: string | null,
+  options: { missing?: boolean; enabled?: boolean; managed?: boolean } = {},
+): SkillInstallState {
+  const suffix =
+    harness === "claude_code"
+      ? ".claude/skills"
+      : harness === "codex"
+        ? ".codex/skills"
+        : harness === "opencode"
+          ? ".config/opencode/skills"
+          : ".gemini/antigravity/skills";
+  const installed = !options.missing && version !== null;
+  return {
+    harness,
+    installed,
+    managed: installed && (options.managed ?? true),
+    enabled: options.enabled ?? installed,
+    version: installed ? version : null,
+    path: installed ? `~/${suffix}/SKILL_NAME` : null,
+  };
+}
+
+function skillInstalls(
+  version: string,
+  options: {
+    disabled?: HarnessKind[];
+    missing?: HarnessKind[];
+    versions?: Partial<Record<HarnessKind, string>>;
+  } = {},
+): SkillInstallState[] {
+  return MOCK_HARNESSES.map((harness) =>
+    install(harness, options.versions?.[harness] ?? version, {
+      ...(options.missing?.includes(harness) ? { missing: true } : {}),
+      enabled: !options.disabled?.includes(harness),
+    }),
+  ).map((entry) => ({
+    ...entry,
+    path: entry.path
+      ? entry.path.replace("SKILL_NAME", entry.harness === "codex" ? "codex" : "browser")
+      : null,
+  }));
+}
+
+function buildSkillInventory(): SkillInventory {
+  const rows: Array<{
+    name: string;
+    description: string;
+    version: string;
+    source: SkillSource;
+    bytes: number;
+    installs: SkillInstallState[];
+    conflicts?: number;
+  }> = [
+    {
+      name: "browser",
+      description: "Drive the in-app browser: open pages, click, type and screenshot.",
+      version: "3f6a1c9",
+      source: { type: "local_folder", path: "~/code/h4rn/skills/browser" },
+      bytes: 18_240,
+      installs: skillInstalls("3f6a1c9"),
+    },
+    {
+      name: "docs",
+      description: "Read and edit shared documents without losing comments.",
+      version: "9b2e4d8",
+      source: {
+        type: "git",
+        url: "git@github.com:acme/skills.git",
+        commit: "9b2e4d8a6c1f",
+        subdir: "docs",
+      },
+      bytes: 22_100,
+      installs: skillInstalls("9b2e4d8", {
+        versions: { codex: "1d7f0a2" },
+      }),
+      conflicts: 1,
+    },
+    {
+      name: "pdf",
+      description: "Read, split, merge and fill PDF files.",
+      version: "a4c8e21",
+      source: { type: "harness_dir", harness: "claude_code", path: "~/.claude/skills/pdf" },
+      bytes: 41_600,
+      installs: skillInstalls("a4c8e21"),
+    },
+    {
+      name: "pptx",
+      description: "Build and edit presentations as real PowerPoint files.",
+      version: "6c1d9f4",
+      source: { type: "local_folder", path: "~/code/h4rn/skills/pptx" },
+      bytes: 35_800,
+      installs: skillInstalls("6c1d9f4"),
+    },
+    {
+      name: "xlsx",
+      description: "Work with spreadsheets: formulas, formatting and charts.",
+      version: "e8a3b70",
+      source: { type: "local_folder", path: "~/code/h4rn/skills/xlsx" },
+      bytes: 33_200,
+      installs: skillInstalls("e8a3b70", { disabled: ["opencode"] }),
+    },
+    {
+      name: "impeccable",
+      description: "Review and shape interfaces against a craft floor.",
+      version: "2f7c5a1",
+      source: { type: "local_folder", path: "~/code/h4rn/skills/impeccable" },
+      bytes: 27_400,
+      installs: skillInstalls("2f7c5a1"),
+    },
+    {
+      name: "find-skills",
+      description: "Discover installable skills for a task.",
+      version: "7d4b9e2",
+      source: { type: "connect", skill_id: "skl_find_skills", version: "7d4b9e2" },
+      bytes: 12_800,
+      installs: skillInstalls("7d4b9e2", { missing: ["antigravity"] }),
+    },
+    {
+      name: "deep-research",
+      description: "Research across sources and synthesize a narrative report.",
+      version: "c5e0a17",
+      source: {
+        type: "git",
+        url: "https://github.com/acme/research-skills",
+        commit: "c5e0a17",
+        subdir: null,
+      },
+      bytes: 29_700,
+      installs: skillInstalls("c5e0a17", { disabled: ["codex"] }),
+    },
+    {
+      name: "skill-creator",
+      description: "Author, test and benchmark new skills.",
+      version: "1a9f3c6",
+      source: { type: "local_folder", path: "~/code/h4rn/skills/skill-creator" },
+      bytes: 24_900,
+      installs: skillInstalls("1a9f3c6", { missing: ["opencode", "antigravity"] }),
+    },
+  ];
+
+  return {
+    skills: rows.map((row) => ({
+      id: `skl_${row.name.replace(/-/g, "_")}`,
+      name: row.name,
+      description: row.description,
+      version: row.version,
+      source: row.source,
+      total_bytes: row.bytes,
+      updated_at: iso(-DAY - row.bytes),
+      installs: row.installs,
+      conflicts: row.conflicts ?? 0,
+    })),
+    harnesses: [
+      {
+        harness: "claude_code",
+        detected: true,
+        user_root: "~/.claude/skills",
+        project_root: ".claude/skills",
+      },
+      {
+        harness: "codex",
+        detected: true,
+        user_root: "~/.codex/skills",
+        project_root: ".codex/skills",
+      },
+      {
+        harness: "opencode",
+        detected: true,
+        user_root: "~/.config/opencode/skills",
+        project_root: ".opencode/skills",
+      },
+      {
+        harness: "antigravity",
+        detected: false,
+        user_root: null,
+        project_root: null,
+      },
+    ],
+  };
+}
+
+function buildSkillConflicts(): SkillConflict[] {
+  return [
+    {
+      id: "cnf_docs_1",
+      skill_id: "skl_docs",
+      name: "docs",
+      local_version: "9b2e4d8",
+      remote_version: "f1a7c30",
+      reason: "a different version already uses this name",
+      detected_at: iso(-HOUR),
+    },
+  ];
+}
+
+function mockSyncStatus(): SkillSyncStatus {
+  return {
+    state: "synced",
+    last_sync: iso(-2 * HOUR),
+    pushed: 2,
+    pulled: 1,
+    conflicts: 1,
+    etag: "mock-etag-7",
+    message: null,
+    hint: null,
+  };
+}
+
+function buildSkillImportPreview(): SkillImportPreview {
+  return {
+    candidates: [
+      {
+        id: "cand_release_notes",
+        name: "release-notes",
+        description: "Draft release notes from merged pull requests.",
+        version: "b7e2d41",
+        source_path: "~/.claude/skills/release-notes",
+        harness: "claude_code",
+        conflict: null,
+        duplicate: false,
+      },
+      {
+        id: "cand_pdf",
+        name: "pdf",
+        description: "Read, split, merge and fill PDF files.",
+        version: "a4c8e21",
+        source_path: "~/.codex/skills/pdf",
+        harness: "codex",
+        conflict: null,
+        duplicate: true,
+      },
+      {
+        id: "cand_docs",
+        name: "docs",
+        description: "Read and edit shared documents without losing comments.",
+        version: "f1a7c30",
+        source_path: "~/.config/opencode/skills/docs",
+        harness: "opencode",
+        conflict: "a different version already uses this name",
+        duplicate: false,
+      },
+    ],
+    conflicts: 1,
+    duplicates: 1,
+  };
+}
+
+function buildMcpImportPreview(existing: McpServerView[]): McpImportPreview {
+  const conflicting = existing.find((server) => server.name === "playwright");
+  const transport: McpTransportView = {
+    type: "stdio",
+    command: "npx",
+    args: ["-y", "@modelcontextprotocol/server-figma"],
+    cwd: null,
+    env_keys: ["FIGMA_TOKEN"],
+  };
+  const incoming: McpTransportView = {
+    type: "http",
+    url: "http://127.0.0.1:8944/mcp",
+    header_keys: [],
+  };
+  return {
+    harness: "claude_code",
+    origins: ["~/.claude.json", "~/code/api/.mcp.json"],
+    candidates: [
+      {
+        name: "figma",
+        transport,
+        origin: "~/.claude.json",
+        existing: false,
+      },
+      {
+        name: "chrome-devtools",
+        transport: incoming,
+        origin: "~/code/api/.mcp.json",
+        existing: false,
+      },
+    ],
+    conflicts: conflicting
+      ? [
+          {
+            name: "playwright",
+            existing: conflicting.transport,
+            incoming,
+            options: [
+              { action: "keep_mine" },
+              { action: "use_theirs" },
+              { action: "rename", name: "playwright-local" },
+              { action: "skip" },
+            ],
+          },
+        ]
+      : [],
+  };
+}
+
+function transportView(input: McpServerInput["transport"]): McpTransportView {
+  if (input.type === "stdio") {
+    return {
+      type: "stdio",
+      command: input.command,
+      args: input.args,
+      cwd: input.cwd,
+      env_keys: input.env.map((entry) => entry.name),
+    };
+  }
+  return {
+    type: input.type,
+    url: input.url,
+    header_keys: input.headers.map((entry) => entry.name),
+  };
+}
+
+function skillFromSource(
+  source: SkillSource,
+  name: string,
+  harnesses: HarnessKind[],
+): SkillSummary {
+  const version = `${Math.random().toString(16).slice(2, 9)}`;
+  const installs = MOCK_HARNESSES.map((harness) =>
+    install(harness, harnesses.includes(harness) ? version : null, {
+      missing: !harnesses.includes(harness),
+    }),
+  );
+  return {
+    id: `skl_${name.replace(/[^a-z0-9]+/gi, "_")}`,
+    name,
+    description: "Added from the mock daemon.",
+    version,
+    source,
+    total_bytes: 8_400,
+    updated_at: iso(),
+    installs,
+    conflicts: 0,
+  };
+}
+
 /** An in-browser daemon used by `?mock=1` for development and screenshots. */
 class MockDaemon {
   private readonly threads: Map<string, MockThread>;
@@ -774,6 +1294,11 @@ class MockDaemon {
   private readonly startedStreams = new Set<string>();
   private readonly terminals = new Map<string, MockTerminal>();
   private readonly fs = createMockFs();
+  private mcpServers: McpServerView[];
+  private skillInventory: SkillInventory;
+  private skillConflicts: SkillConflict[];
+  private skillPreview: SkillImportPreview | null = null;
+  private syncEmitted = false;
   private created = 0;
   private nextTerminal = 0;
   private readonly failLists: boolean;
@@ -788,6 +1313,9 @@ class MockDaemon {
   ) {
     this.hosts = buildHosts(scenario);
     this.threads = buildThreads(scenario);
+    this.mcpServers = buildMcpServers();
+    this.skillInventory = buildSkillInventory();
+    this.skillConflicts = buildSkillConflicts();
     // The error scenario renders the cached inbox, then fails the reload so
     // the partial-host banner and the thread error state are both visible.
     this.failLists = scenario === "error" && this.attempt > 0;
@@ -955,6 +1483,10 @@ class MockDaemon {
     ) {
       return;
     }
+    if (body.type.startsWith("skills_")) {
+      this.handleSkills(frame.id, body as SkillsBody);
+      return;
+    }
     switch (body.type) {
       case "hello":
         this.ok(frame.id, {
@@ -962,6 +1494,7 @@ class MockDaemon {
           protocol_version: 1,
           server_version: "0.1.0-mock",
           device_id: "mock-device",
+          local_host: "atlas",
           hosts: this.hosts,
         });
         return;
@@ -1375,6 +1908,19 @@ class MockDaemon {
         this.streamBlob(streamId, blob.bytes);
         return;
       }
+      case "mcp": {
+        this.handleMcp(frame.id, body.request);
+        return;
+      }
+      case "mcp_list": {
+        this.ok(frame.id, { type: "mcp_servers", servers: this.mcpServers });
+        return;
+      }
+      case "mcp_remove": {
+        this.mcpServers = this.mcpServers.filter((server) => server.name !== body.name);
+        this.ok(frame.id, { type: "ack" });
+        return;
+      }
       default: {
         const handled = this.fs.handle(body, {
           ok: (response) => this.ok(frame.id, response),
@@ -1388,6 +1934,480 @@ class MockDaemon {
           "unsupported",
           `The mock daemon does not implement \`${body.type}\`.`,
           "Phase 2 exercises threads, approvals, the IDE and attachments.",
+        );
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // MCP
+  // -------------------------------------------------------------------------
+
+  private sortedMcp(): McpServerView[] {
+    return [...this.mcpServers].sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  private handleMcp(id: number, request: McpRequest): void {
+    switch (request.type) {
+      case "list_servers": {
+        this.ok(id, { type: "mcp_servers", servers: this.sortedMcp() });
+        return;
+      }
+      case "upsert": {
+        const input = request.input;
+        const existing = this.mcpServers.find((server) => server.name === input.name);
+        const view: McpServerView = {
+          id: existing?.id ?? `srv_${input.name.replace(/[^a-z0-9]+/gi, "_")}`,
+          name: input.name,
+          transport: transportView(input.transport),
+          tags: input.tags,
+          enabled: input.enabled,
+          status: "starting",
+          tool_count: existing?.tool_count ?? 0,
+          last_error: null,
+          runs_on: null,
+          shared_to: existing?.shared_to ?? [],
+          imported_from: existing?.imported_from ?? "user",
+          updated_at: iso(),
+        };
+        this.mcpServers = [
+          ...this.mcpServers.filter((server) => server.name !== input.name),
+          view,
+        ].sort((left, right) => left.name.localeCompare(right.name));
+        this.ok(id, { type: "mcp_server", server: view });
+        const tools = MOCK_MCP_TOOLS[input.name] ?? [];
+        this.later(450, () => {
+          if (this.disposed) return;
+          const index = this.mcpServers.findIndex((server) => server.name === input.name);
+          if (index < 0) return;
+          const current = this.mcpServers[index];
+          if (!current) return;
+          this.mcpServers[index] = {
+            ...current,
+            status: "ready",
+            tool_count: tools.length,
+            last_error: null,
+          };
+          this.emitGlobal({
+            type: "mcp_server_status",
+            server: input.name,
+            status: "ready",
+            tool_count: tools.length,
+            message: null,
+            at: iso(),
+          });
+        });
+        return;
+      }
+      case "remove": {
+        const before = this.mcpServers.length;
+        this.mcpServers = this.mcpServers.filter((server) => server.name !== request.name);
+        if (this.mcpServers.length === before) {
+          this.err(id, "not_found", `${request.name} is not configured.`, "The list is current.");
+          return;
+        }
+        this.ok(id, { type: "ack" });
+        return;
+      }
+      case "set_enabled": {
+        const index = this.mcpServers.findIndex((server) => server.name === request.name);
+        if (index < 0) {
+          this.err(id, "not_found", `${request.name} is not configured.`, "Refresh the list.");
+          return;
+        }
+        const current = this.mcpServers[index];
+        if (!current) return;
+        const enabled = {
+          by_harness: [...current.enabled.by_harness],
+          by_machine: [...current.enabled.by_machine],
+        };
+        if (request.harness) {
+          enabled.by_harness = enabled.by_harness.filter(
+            (entry) => entry.harness !== request.harness,
+          );
+          enabled.by_harness.push({ harness: request.harness, enabled: request.enabled });
+        }
+        if (request.machine) {
+          enabled.by_machine = enabled.by_machine.filter(
+            (entry) => entry.machine !== request.machine,
+          );
+          enabled.by_machine.push({ machine: request.machine, enabled: request.enabled });
+        }
+        const next = { ...current, enabled, updated_at: iso() };
+        this.mcpServers[index] = next;
+        this.ok(id, { type: "mcp_server", server: next });
+        return;
+      }
+      case "import": {
+        this.ok(id, {
+          type: "mcp_import_preview",
+          preview: buildMcpImportPreview(this.mcpServers),
+        });
+        return;
+      }
+      case "apply_import": {
+        const preview = buildMcpImportPreview(this.mcpServers);
+        for (const candidate of preview.candidates) {
+          if (candidate.existing) continue;
+          if (this.mcpServers.some((server) => server.name === candidate.name)) continue;
+          this.mcpServers.push({
+            id: `srv_${candidate.name.replace(/[^a-z0-9]+/gi, "_")}`,
+            name: candidate.name,
+            transport: candidate.transport,
+            tags: ["imported"],
+            enabled: { by_harness: [], by_machine: [] },
+            status: "stopped",
+            tool_count: 0,
+            last_error: null,
+            runs_on: null,
+            shared_to: [],
+            imported_from: "claude_code",
+            updated_at: iso(),
+          });
+        }
+        this.mcpServers.sort((left, right) => left.name.localeCompare(right.name));
+        this.ok(id, { type: "mcp_servers", servers: this.sortedMcp() });
+        return;
+      }
+      case "resolve_conflict": {
+        const index = this.mcpServers.findIndex((server) => server.name === request.name);
+        if (index < 0) {
+          this.err(id, "not_found", `${request.name} is not configured.`, "Refresh the list.");
+          return;
+        }
+        const current = this.mcpServers[index];
+        if (!current) return;
+        const preview = buildMcpImportPreview(this.mcpServers);
+        const conflict = preview.conflicts.find((entry) => entry.name === request.name);
+        let next = { ...current, last_error: null, updated_at: iso() };
+        if (request.resolution.action === "use_theirs" && conflict) {
+          next = { ...next, transport: conflict.incoming, status: "starting" };
+        } else if (request.resolution.action === "rename" && conflict) {
+          const name = request.resolution.name.trim();
+          if (name) {
+            this.mcpServers.push({
+              ...next,
+              id: `srv_${name.replace(/[^a-z0-9]+/gi, "_")}`,
+              name,
+              transport: conflict.incoming,
+              imported_from: request.harness,
+            });
+          }
+        }
+        this.mcpServers[index] = next;
+        this.mcpServers.sort((left, right) => left.name.localeCompare(right.name));
+        this.ok(id, { type: "mcp_server", server: next });
+        return;
+      }
+      case "share": {
+        const index = this.mcpServers.findIndex((server) => server.name === request.name);
+        if (index < 0) {
+          this.err(id, "not_found", `${request.name} is not configured.`, "Refresh the list.");
+          return;
+        }
+        const current = this.mcpServers[index];
+        if (!current) return;
+        const shared_to = Array.from(new Set([...current.shared_to, request.to_machine]));
+        const next = { ...current, shared_to };
+        this.mcpServers[index] = next;
+        this.ok(id, { type: "mcp_server", server: next });
+        return;
+      }
+      case "unshare": {
+        const index = this.mcpServers.findIndex((server) => server.name === request.name);
+        if (index < 0) {
+          this.err(id, "not_found", `${request.name} is not configured.`, "Refresh the list.");
+          return;
+        }
+        const current = this.mcpServers[index];
+        if (!current) return;
+        this.mcpServers[index] = {
+          ...current,
+          shared_to: current.shared_to.filter((machine) => machine !== request.machine),
+        };
+        this.ok(id, { type: "ack" });
+        return;
+      }
+      case "list_tools": {
+        const tools = MOCK_MCP_TOOLS[request.name] ?? [];
+        this.ok(id, { type: "mcp_tools", server: request.name, tools });
+        return;
+      }
+      case "test_call": {
+        const isError = request.tool === "fail";
+        const duration = 18 + Math.floor(Math.random() * 40);
+        const result: McpTestCallResult = {
+          content: isError
+            ? "The tool reported an error: permission denied."
+            : JSON.stringify(
+                { ok: true, tool: request.tool, arguments: request.arguments },
+                null,
+                2,
+              ),
+          is_error: isError,
+          truncated: false,
+          duration_ms: duration as unknown as bigint,
+        };
+        this.ok(id, { type: "mcp_call", result });
+        this.later(80, () => {
+          if (this.disposed) return;
+          this.emitGlobal({
+            type: "mcp_tool_called",
+            server: request.name,
+            tool: request.tool,
+            qualified_name: `${request.name}__${request.tool}`,
+            caller: { kind: "client" },
+            ok: !isError,
+            duration_ms: duration as unknown as bigint,
+            error: isError ? "permission denied" : null,
+            at: iso(),
+          });
+        });
+        return;
+      }
+      default: {
+        this.err(
+          id,
+          "unsupported",
+          `The mock daemon does not implement MCP \`${(request as { type: string }).type}\`.`,
+          "Use the list, upsert, toggle, import, share or call actions.",
+        );
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Skills
+  // -------------------------------------------------------------------------
+
+  private handleSkills(id: number, request: SkillsBody): void {
+    switch (request.type) {
+      case "skills_list": {
+        this.ok(id, { type: "skills", inventory: this.skillInventory });
+        if (!this.syncEmitted) {
+          this.syncEmitted = true;
+          this.later(140, () => {
+            if (this.disposed) return;
+            this.emitGlobal({ type: "sync_status", ...mockSyncStatus() });
+          });
+        }
+        return;
+      }
+      case "skills_add": {
+        const source = request.source;
+        const haystack =
+          source.type === "local_folder"
+            ? source.path
+            : source.type === "git"
+              ? `${source.url}${source.subdir ?? ""}`
+              : source.type === "harness_dir"
+                ? source.path
+                : (request.name ?? "");
+        if (/secret|credential/i.test(`${request.name ?? ""}${haystack}`)) {
+          this.err(
+            id,
+            "invalid_request",
+            "This skill contains what looks like a credential.",
+            "Remove the secret from every file and add the skill again. h4rn will not install it.",
+          );
+          return;
+        }
+        const fallback =
+          source.type === "local_folder"
+            ? (source.path.split("/").filter(Boolean).at(-1) ?? "skill")
+            : source.type === "git"
+              ? (source.subdir?.split("/").filter(Boolean).at(-1) ??
+                source.url
+                  .split("/")
+                  .filter(Boolean)
+                  .at(-1)
+                  ?.replace(/\.git$/, "") ??
+                "skill")
+              : "skill";
+        const name = (request.name?.trim() || fallback).replace(/[^a-z0-9-]+/gi, "-");
+        if (this.skillInventory.skills.some((skill) => skill.name === name)) {
+          this.err(
+            id,
+            "conflict",
+            `${name} already exists at a different version.`,
+            "Open Skills → Conflicts to settle the two versions.",
+          );
+          return;
+        }
+        const skill = skillFromSource(source, name, request.harnesses);
+        this.skillInventory = {
+          ...this.skillInventory,
+          skills: [...this.skillInventory.skills, skill].sort((left, right) =>
+            left.name.localeCompare(right.name),
+          ),
+        };
+        this.ok(id, { type: "skill_added", skill });
+        this.emitGlobal({ type: "skills_changed", host: "atlas", at: iso() });
+        return;
+      }
+      case "skills_update": {
+        const index = this.skillInventory.skills.findIndex(
+          (skill) => skill.id === request.skill_id,
+        );
+        const current = this.skillInventory.skills[index];
+        if (!current) {
+          this.err(id, "not_found", "That skill is not in the registry.", "Refresh the list.");
+          return;
+        }
+        const skill = skillFromSource(request.source, current.name, MOCK_HARNESSES);
+        const next = {
+          ...skill,
+          id: current.id,
+          description: current.description,
+          total_bytes: current.total_bytes,
+        };
+        const skills = [...this.skillInventory.skills];
+        skills[index] = next;
+        this.skillInventory = { ...this.skillInventory, skills };
+        this.ok(id, { type: "skill_added", skill: next });
+        this.emitGlobal({ type: "skills_changed", host: "atlas", at: iso() });
+        return;
+      }
+      case "skills_remove": {
+        this.skillInventory = {
+          ...this.skillInventory,
+          skills: this.skillInventory.skills.filter((skill) => skill.id !== request.skill_id),
+        };
+        this.skillConflicts = this.skillConflicts.filter(
+          (conflict) => conflict.skill_id !== request.skill_id,
+        );
+        this.ok(id, { type: "ack" });
+        this.emitGlobal({ type: "skills_changed", host: "atlas", at: iso() });
+        return;
+      }
+      case "skills_set_enabled": {
+        const index = this.skillInventory.skills.findIndex(
+          (skill) => skill.id === request.skill_id,
+        );
+        const current = this.skillInventory.skills[index];
+        if (!current) {
+          this.err(id, "not_found", "That skill is not in the registry.", "Refresh the list.");
+          return;
+        }
+        const installs = current.installs.map((entry) =>
+          entry.harness === request.harness
+            ? {
+                ...entry,
+                enabled: request.enabled,
+                installed: request.enabled ? true : entry.installed,
+                managed: request.enabled ? true : entry.managed,
+                version: request.enabled ? current.version : entry.version,
+                path: request.enabled && !entry.path ? "~/.claude/skills/mock" : entry.path,
+              }
+            : entry,
+        );
+        const skill = { ...current, installs };
+        const skills = [...this.skillInventory.skills];
+        skills[index] = skill;
+        this.skillInventory = { ...this.skillInventory, skills };
+        this.ok(id, { type: "skill_added", skill });
+        return;
+      }
+      case "skills_import_preview": {
+        const preview = buildSkillImportPreview();
+        this.skillPreview = preview;
+        this.ok(id, { type: "skills_import_preview", preview });
+        return;
+      }
+      case "skills_import_commit": {
+        const preview = this.skillPreview ?? buildSkillImportPreview();
+        const ids = new Set(request.candidate_ids);
+        for (const candidate of preview.candidates) {
+          if (!ids.has(candidate.id) || candidate.duplicate || candidate.conflict) continue;
+          if (this.skillInventory.skills.some((skill) => skill.name === candidate.name)) continue;
+          const skill = skillFromSource(
+            { type: "harness_dir", harness: candidate.harness, path: candidate.source_path },
+            candidate.name,
+            [candidate.harness],
+          );
+          skill.version = candidate.version;
+          skill.description = candidate.description;
+          this.skillInventory = {
+            ...this.skillInventory,
+            skills: [...this.skillInventory.skills, skill].sort((left, right) =>
+              left.name.localeCompare(right.name),
+            ),
+          };
+        }
+        this.ok(id, { type: "ack" });
+        this.emitGlobal({ type: "skills_changed", host: "atlas", at: iso() });
+        return;
+      }
+      case "skills_conflicts": {
+        this.ok(id, { type: "skill_conflicts", conflicts: this.skillConflicts });
+        return;
+      }
+      case "skills_resolve_conflict": {
+        const conflict = this.skillConflicts.find((entry) => entry.id === request.conflict_id);
+        if (conflict) {
+          if (request.resolution === "keep_remote" && conflict.skill_id) {
+            this.skillInventory = {
+              ...this.skillInventory,
+              skills: this.skillInventory.skills.map((skill) =>
+                skill.id === conflict.skill_id
+                  ? { ...skill, version: conflict.remote_version }
+                  : skill,
+              ),
+            };
+          }
+          this.skillConflicts = this.skillConflicts.filter(
+            (entry) => entry.id !== request.conflict_id,
+          );
+        }
+        this.ok(id, { type: "ack" });
+        this.emitGlobal({ type: "skills_changed", host: "atlas", at: iso() });
+        return;
+      }
+      case "skills_sync_now": {
+        this.ok(id, { type: "skill_sync_status", status: mockSyncStatus() });
+        return;
+      }
+      case "skills_diff": {
+        const diff: SkillDiff = {
+          skill_id: request.skill_id,
+          from_version: request.from_version,
+          to_version: request.to_version ?? "9b2e4d8",
+          files: [
+            {
+              path: "SKILL.md",
+              change: "modified",
+              old_blake3: "7c1e",
+              new_blake3: "b4a9",
+              old_size: 1_840,
+              new_size: 2_210,
+            },
+            {
+              path: "references/release-checklist.md",
+              change: "added",
+              old_blake3: null,
+              new_blake3: "0f3d",
+              old_size: null,
+              new_size: 940,
+            },
+            {
+              path: "assets/old-template.png",
+              change: "removed",
+              old_blake3: "a8c2",
+              new_blake3: null,
+              old_size: 18_400,
+              new_size: null,
+            },
+          ],
+        };
+        this.ok(id, { type: "skill_diff", diff });
+        return;
+      }
+      default: {
+        this.err(
+          id,
+          "unsupported",
+          `The mock daemon does not implement \`${(request as { type: string }).type}\`.`,
+          "Phase 2 exercises the skill list, toggles, import, sync and diff.",
         );
       }
     }
@@ -1769,6 +2789,14 @@ class MockDaemon {
   private sendTransient(event: Event): void {
     if (this.disposed) return;
     this.sendEvent(this.seq, event);
+  }
+
+  /** Sends a journaled host event and advances the watermark. */
+  private emitGlobal(event: Event): void {
+    if (this.disposed) return;
+    const seq = this.seq + 1;
+    this.seq = seq;
+    this.sendEvent(seq, event);
   }
 
   private ok(id: number, result: ResponseBody): void {

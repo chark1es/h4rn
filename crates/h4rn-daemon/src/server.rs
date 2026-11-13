@@ -584,6 +584,7 @@ impl Connection {
                             protocol_version: PROTOCOL_VERSION,
                             server_version: crate::version().to_owned(),
                             device_id: device.device_id,
+                            local_host: self.state.hosts.local_id(),
                             hosts: self.state.hosts.summaries(),
                         })
                     }

@@ -380,7 +380,7 @@ function Surface({ surface, path }: { surface: string; path: string }) {
     case "pulls":
       return <PullRequestsPage />;
     case "library":
-      return <LibraryPage />;
+      return <LibraryPage path={path} />;
     case "usage":
       return <UsagePage />;
     case "settings":

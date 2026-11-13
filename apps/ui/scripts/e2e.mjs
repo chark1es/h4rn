@@ -5,7 +5,7 @@
 // watch streamed text, settle it, reload, and confirm the state comes back.
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -99,6 +99,8 @@ function run(command, args, options) {
 async function main() {
   const dataDir = mkdtempSync(join(tmpdir(), "h4rn-e2e-data-"));
   const workspace = mkdtempSync(join(tmpdir(), "h4rn-e2e-work-"));
+  const homeDir = mkdtempSync(join(tmpdir(), "h4rn-e2e-home-"));
+  const skillDir = mkdtempSync(join(tmpdir(), "h4rn-e2e-skill-"));
   const children = [];
   let browser = null;
   let page = null;
@@ -106,10 +108,19 @@ async function main() {
 
   try {
     run("git", ["init", "--quiet", workspace]);
+    mkdirSync(join(homeDir, ".config"), { recursive: true });
+    writeFileSync(
+      join(skillDir, "SKILL.md"),
+      "---\nname: e2e-skill\ndescription: Proves the Skills screen installs a local folder\n---\n\nWhen this skill is invoked, reply with exactly: e2e.\n",
+    );
 
     run(cargoBin, ["build", "--quiet", "-p", "h4rn-daemon", "--bin", "h4rnd"], {
       cwd: repoRoot,
     });
+    run(cargoBin, ["build", "--quiet", "-p", "h4rn-mcp", "--bin", "mcp-fixture"], {
+      cwd: repoRoot,
+    });
+    const fixtureBin = join(repoRoot, "target", "debug", "mcp-fixture");
 
     const [daemonPort, uiPort] = await Promise.all([freePort(), freePort()]);
     const token = run(daemonBin, ["--data-dir", dataDir, "token"]).trim();
@@ -118,7 +129,13 @@ async function main() {
       daemonBin,
       ["--data-dir", dataDir, "--bind", `127.0.0.1:${daemonPort}`, "serve"],
       {
-        env: { ...process.env, H4RN_FAKE_HARNESS: "1" },
+        env: {
+          ...process.env,
+          H4RN_FAKE_HARNESS: "1",
+          HOME: homeDir,
+          XDG_CONFIG_HOME: join(homeDir, ".config"),
+          XDG_DATA_HOME: join(homeDir, ".local", "share"),
+        },
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
@@ -145,6 +162,12 @@ async function main() {
     const executablePath = findChromium();
     browser = await chromium.launch({ executablePath, headless: true });
     page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    page.on("pageerror", (error) => {
+      console.error(`--- page error ---\n${error.stack ?? error.message}`);
+    });
+    page.on("console", (message) => {
+      if (message.type() === "error") console.error(`--- console error ---\n${message.text()}`);
+    });
 
     const url =
       `http://127.0.0.1:${uiPort}/?token=${encodeURIComponent(token)}` +
@@ -207,7 +230,63 @@ async function main() {
       .getByText("Settled", { exact: true })
       .waitFor({ timeout: 20_000 });
 
-    console.log("UI e2e passed: thread streamed, settled, and restored after reload.");
+    // Settings → Tools: add a real stdio server, turn it off for one harness,
+    // then install a local skill from a folder. Both must survive a reload.
+    await page.getByRole("button", { name: "MCP & skills" }).click();
+    await page
+      .getByRole("button", { name: /^MCP servers/ })
+      .first()
+      .click();
+    const addButton = page.getByRole("button", { name: /^Add( server)?$/ }).first();
+    await addButton.waitFor({ timeout: 15_000 });
+    await addButton.click();
+    const addServer = page.getByRole("dialog");
+    await addServer.locator("#mcp-name").fill("e2e-fixture");
+    await addServer.locator("#mcp-command").fill(fixtureBin);
+    await addServer.getByRole("button", { name: "Add server" }).click();
+    await page.getByRole("heading", { name: "e2e-fixture" }).waitFor({ timeout: 20_000 });
+
+    const codexSwitch = page.getByRole("switch", { name: /for Codex/ });
+    if ((await codexSwitch.getAttribute("aria-checked")) !== "true") {
+      throw new Error("a new MCP server should start enabled for Codex");
+    }
+    await codexSwitch.click();
+    await page
+      .locator('button[role="switch"][aria-label*="for Codex"][aria-checked="false"]')
+      .waitFor({ timeout: 20_000 });
+
+    await page.getByRole("button", { name: /^Skills/ }).click();
+    await page.getByRole("heading", { name: "Skills", exact: true }).waitFor({ timeout: 15_000 });
+    await page.getByRole("button", { name: "Add skill" }).first().click();
+    const addSkill = page.getByRole("dialog");
+    await addSkill.locator("#skill-path").fill(skillDir);
+    await addSkill.getByRole("button", { name: "Add skill" }).click();
+    await page
+      .getByRole("button", { name: /e2e-skill/ })
+      .first()
+      .waitFor({ timeout: 20_000 });
+
+    await page.reload();
+
+    await page.getByRole("button", { name: "MCP & skills" }).click();
+    await page
+      .getByRole("button", { name: /^MCP servers/ })
+      .first()
+      .click();
+    await page.getByRole("heading", { name: "e2e-fixture" }).waitFor({ timeout: 20_000 });
+    const restoredCodex = page.getByRole("switch", { name: /for Codex/ });
+    if ((await restoredCodex.getAttribute("aria-checked")) !== "false") {
+      throw new Error("the per-harness MCP switch did not persist");
+    }
+    await page.getByRole("button", { name: /^Skills/ }).click();
+    await page
+      .getByRole("button", { name: /e2e-skill/ })
+      .first()
+      .waitFor({ timeout: 20_000 });
+
+    console.log(
+      "UI e2e passed: thread streamed, settled, and restored; MCP server and skill persisted.",
+    );
   } catch (error) {
     if (page) {
       console.error(`--- page url ---\n${page.url()}`);
@@ -224,6 +303,8 @@ async function main() {
     }
     rmSync(dataDir, { recursive: true, force: true });
     rmSync(workspace, { recursive: true, force: true });
+    rmSync(homeDir, { recursive: true, force: true });
+    rmSync(skillDir, { recursive: true, force: true });
   }
 }
 
