@@ -1275,6 +1275,16 @@ async fn a_limit_hit_stays_working_and_auto_resumes_at_the_provider_reset() {
     let limited = thread_summary(&mut client, &thread_id).await;
     assert_eq!(limited.tab, ThreadTab::Working);
     assert_eq!(limited.agent_state, AgentState::Scheduled);
+    let resume_at = limited
+        .resume_at
+        .expect("a scheduled thread names its resume time");
+    assert!(
+        resume_at >= reset_at,
+        "the resume target is never earlier than the provider reset"
+    );
+    let limit = limited.limit.clone().expect("the limit is summarised");
+    assert_eq!(limit.harness, Some(HarnessKind::ClaudeCode));
+    assert_eq!(limit.reset_at, Some(reset_at));
 
     match client
         .request(ClientRequest::GetLimits)
@@ -1319,6 +1329,14 @@ async fn a_limit_hit_stays_working_and_auto_resumes_at_the_provider_reset() {
 
     let (_, done) = client.wait_for_tab(ThreadTab::Done).await;
     assert_eq!(done.agent_state, AgentState::Done);
+    assert!(
+        done.resume_at.is_none(),
+        "a fired schedule no longer names a resume time"
+    );
+    assert!(
+        done.limit.is_none(),
+        "a completed resume clears the limit summary"
+    );
 
     daemon.stop().await;
 }
@@ -1367,6 +1385,14 @@ async fn cancelling_auto_resume_returns_the_thread_to_rate_limited() {
     let cancelled = thread_summary(&mut client, &thread_id).await;
     assert_eq!(cancelled.tab, ThreadTab::Done);
     assert_eq!(cancelled.agent_state, AgentState::RateLimited);
+    assert!(
+        cancelled.resume_at.is_none(),
+        "a cancelled schedule clears the resume target"
+    );
+    assert!(
+        cancelled.limit.is_some(),
+        "the observed limit stays visible after cancelling"
+    );
 
     let quiet = tokio::time::timeout(
         Duration::from_millis(400),
@@ -1439,8 +1465,85 @@ async fn resume_now_fires_a_scheduled_thread_without_waiting_for_the_reset() {
     assert_eq!(status, TurnStatus::Completed);
     assert_eq!(thread_usage(&mut client, &thread_id).await.totals.turns, 2);
     assert_eq!(schedules(&mut client).await[0].state, ResumeState::Fired);
+    let resumed = thread_summary(&mut client, &thread_id).await;
+    assert!(resumed.resume_at.is_none());
+    assert!(resumed.limit.is_none());
 
     daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_restart_rehydrates_the_summary_resume_target() {
+    let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+    let mut daemon = boot_with(
+        resume_options(),
+        FakeHarness::with_session_scripts(vec![limit_script(Some(reset_at)), resume_script()]),
+    )
+    .await;
+    let dir = daemon._dir.take().expect("temp dir").keep();
+    let host = host_id_for(&daemon).await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    let summary = create_with_model(
+        &mut client,
+        host,
+        "do the thing",
+        HarnessKind::ClaudeCode,
+        "claude-sonnet-5",
+    )
+    .await;
+    let thread_id = summary.thread_id;
+    client
+        .wait_event(|event| matches!(event, Event::UsageLimitHit { .. }))
+        .await;
+    client.wait_for_turn_completed().await;
+    daemon.stop().await;
+
+    let config = Config {
+        data_dir: dir.clone(),
+        bind: "127.0.0.1:0".parse().expect("bind"),
+        extra_bind: None,
+        log_level: "off".to_owned(),
+        tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
+    };
+    let rebooted = DaemonBuilder::new(config)
+        .with_harness(Arc::new(FakeHarness::new()))
+        .with_lifecycle(resume_options())
+        .build()
+        .await
+        .expect("second daemon");
+    let token = TokenStore::new(&dir).load().unwrap().unwrap();
+    let bound = rebooted.bind().await.expect("bind again");
+    let addr = bound.local_addr();
+    let (shutdown, rx) = oneshot::channel();
+    let task = tokio::spawn(async move {
+        bound
+            .serve(async move {
+                let _ = rx.await;
+            })
+            .await
+    });
+    let second = TestDaemon {
+        addr,
+        token,
+        _dir: None,
+        shutdown: Some(shutdown),
+        task,
+    };
+
+    let mut client = Client::connect(&second).await;
+    client.hello().await;
+    let restored = thread_summary(&mut client, &thread_id).await;
+    assert!(
+        restored.resume_at.is_some(),
+        "the persisted schedule is visible before the next tick"
+    );
+    assert!(
+        restored.limit.is_some(),
+        "the limit record survives the restart"
+    );
+
+    second.stop().await;
 }
 
 /// Matches a request that does *not* carry `name`.

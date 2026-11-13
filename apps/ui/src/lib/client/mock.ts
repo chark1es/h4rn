@@ -368,6 +368,8 @@ function summary(input: {
     usage: input.usage ?? usage(12_000, 3_400, 42_000, 31_000),
     needs_attention: input.needsAttention ?? false,
     unread: input.unread ?? false,
+    resume_at: null,
+    limit: null,
   };
 }
 
@@ -800,6 +802,8 @@ class MockDaemon {
           usage: usage(0, 0, 0, 0),
           needs_attention: false,
           unread: false,
+          resume_at: null,
+          limit: null,
         };
         this.threads.set(id, { summary: thread, events: [], wire: [] });
         this.ok(frame.id, {

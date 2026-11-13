@@ -201,6 +201,7 @@ impl DaemonBuilder {
                 .map_err(|error| anyhow::anyhow!("open usage ledger: {error}"))?,
         );
         manager.set_meter(Arc::clone(&meter));
+        manager.resync_meter_state().await;
 
         let fs = Arc::new(
             FsService::new(&self.config.data_dir)

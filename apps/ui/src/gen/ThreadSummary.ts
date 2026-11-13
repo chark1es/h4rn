@@ -2,6 +2,7 @@
 import type { AgentState } from "./AgentState";
 import type { HarnessKind } from "./HarnessKind";
 import type { HostId } from "./HostId";
+import type { LimitBrief } from "./LimitBrief";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadTab } from "./ThreadTab";
 import type { Usage } from "./Usage";
@@ -65,4 +66,12 @@ needs_attention: boolean,
 /**
  * Whether a finished turn has not been acknowledged.
  */
-unread: boolean, };
+unread: boolean, 
+/**
+ * When auto-resume will try this thread again, when scheduled (ADR-024).
+ */
+resume_at: string | null, 
+/**
+ * The limit currently blocking the thread, when one was observed.
+ */
+limit: LimitBrief | null, };

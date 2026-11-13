@@ -44,6 +44,8 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     },
     needs_attention: false,
     unread: false,
+    resume_at: null,
+    limit: null,
     ...overrides,
   };
 }

@@ -950,6 +950,8 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
     },
     needs_attention: false,
     unread: false,
+    resume_at: null,
+    limit: null,
   };
 
   setState({

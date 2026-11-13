@@ -459,6 +459,8 @@ mod tests {
             usage: Usage::default(),
             needs_attention: false,
             unread: false,
+            resume_at: None,
+            limit: None,
         }
     }
 

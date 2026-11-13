@@ -77,6 +77,7 @@ export type * from "./HarnessKind";
 export type * from "./HostId";
 export type * from "./HostSummary";
 export type * from "./Item";
+export type * from "./LimitBrief";
 export type * from "./LimitSource";
 export type * from "./LimitStatus";
 export type * from "./LimitsReport";

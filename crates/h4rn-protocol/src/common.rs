@@ -312,6 +312,12 @@ pub struct ThreadSummary {
     pub needs_attention: bool,
     /// Whether a finished turn has not been acknowledged.
     pub unread: bool,
+    /// When auto-resume will try this thread again, when scheduled (ADR-024).
+    #[serde(default)]
+    pub resume_at: Option<DateTime<Utc>>,
+    /// The limit currently blocking the thread, when one was observed.
+    #[serde(default)]
+    pub limit: Option<crate::usage::LimitBrief>,
 }
 
 /// One completed stream item.
@@ -411,5 +417,60 @@ mod tests {
         assert_eq!(usage.input_tokens, u64::MAX);
         assert_eq!(usage.output_tokens, 2);
         assert_eq!(usage.total_tokens(), u64::MAX);
+    }
+
+    fn summary_with(
+        resume_at: Option<DateTime<Utc>>,
+        limit: Option<crate::usage::LimitBrief>,
+    ) -> ThreadSummary {
+        ThreadSummary {
+            thread_id: ThreadId::new("th_summary"),
+            host: HostId::new("host_test"),
+            harness: HarnessKind::ClaudeCode,
+            title: "usage limit".into(),
+            workspace_path: "/tmp/work".into(),
+            model: "claude-sonnet-5".into(),
+            tab: ThreadTab::Working,
+            pinned: false,
+            snoozed_until: None,
+            last_activity: Utc::now(),
+            agent_state: AgentState::Scheduled,
+            usage: Usage::default(),
+            needs_attention: false,
+            unread: false,
+            resume_at,
+            limit,
+        }
+    }
+
+    #[test]
+    fn thread_summary_round_trips_resume_and_limit_state() {
+        let at = Utc::now();
+        let summary = summary_with(
+            Some(at),
+            Some(crate::usage::LimitBrief {
+                harness: Some(HarnessKind::ClaudeCode),
+                reset_at: Some(at),
+                message: Some("usage limit reached".into()),
+            }),
+        );
+
+        let json = serde_json::to_string(&summary).expect("serialise the summary");
+        let decoded: ThreadSummary = serde_json::from_str(&json).expect("parse the summary");
+        assert_eq!(decoded, summary);
+        assert_eq!(decoded.resume_at, Some(at));
+        assert_eq!(
+            decoded.limit.and_then(|limit| limit.reset_at),
+            Some(at),
+            "the inbox can show the reset without opening the thread"
+        );
+    }
+
+    #[test]
+    fn thread_summary_without_metering_state_omits_it() {
+        let summary = summary_with(None, None);
+        let json = serde_json::to_value(&summary).expect("serialise the summary");
+        assert!(json["resume_at"].is_null());
+        assert!(json["limit"].is_null());
     }
 }

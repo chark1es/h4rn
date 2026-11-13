@@ -216,6 +216,20 @@ pub struct LimitStatus {
     pub source: LimitSource,
 }
 
+/// Compact limit state carried on a thread summary.
+///
+/// The inbox renders "Limit resets 14:32" without opening the thread, so the
+/// full [`LimitStatus`] is too heavy; this keeps only the fields the row uses.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct LimitBrief {
+    /// Harness that hit the limit, when known.
+    pub harness: Option<HarnessKind>,
+    /// When the provider resets, when it said.
+    pub reset_at: Option<DateTime<Utc>>,
+    /// Human-readable provider message.
+    pub message: Option<String>,
+}
+
 /// Auto-resume policy shared by every thread unless overridden.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct AutoResumePolicy {

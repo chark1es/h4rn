@@ -31,7 +31,7 @@ use h4rn_harness::{
 use h4rn_meter::{LimitHit, MeterHub, TurnContext, TurnMeter};
 use h4rn_protocol::{
     AgentState, ApprovalDecision, ApprovalKind, Attachment, AttachmentId, DeviceId, Event,
-    HarnessKind, HostId, Item, LimitSource, MessageRole, ProtoError, ProtoErrorCode,
+    HarnessKind, HostId, Item, LimitBrief, LimitSource, MessageRole, ProtoError, ProtoErrorCode,
     ResumeFailover, ResumeSchedule, ResumeState, RuntimeMode, ThreadFilter, ThreadId,
     ThreadSummary, ThreadTab, ToolCallStatus, TurnId, TurnStatus, Usage, UsageReport,
     WorktreeRequest,
@@ -241,6 +241,10 @@ struct ThreadRecord {
     last_signature: Option<SummarySignature>,
     /// A limit hit whose auto-resume schedule is armed for this thread.
     scheduled_limit: Option<ScheduledLimit>,
+    /// Scheduled auto-resume target shown on the thread summary (ADR-024).
+    resume_at: Option<DateTime<Utc>>,
+    /// Latest limit observation shown on the thread summary (ADR-024).
+    limit: Option<LimitBrief>,
     closed: bool,
 }
 
@@ -266,7 +270,7 @@ struct PendingApproval {
     kind: ApprovalKind,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct SummarySignature {
     tab: ThreadTab,
     pinned: bool,
@@ -274,6 +278,8 @@ struct SummarySignature {
     unread: bool,
     agent_state: AgentState,
     snoozed_until: Option<DateTime<Utc>>,
+    resume_at: Option<DateTime<Utc>>,
+    limit: Option<LimitBrief>,
 }
 
 impl SummarySignature {
@@ -285,6 +291,8 @@ impl SummarySignature {
             unread: summary.unread,
             agent_state: summary.agent_state,
             snoozed_until: summary.snoozed_until,
+            resume_at: summary.resume_at,
+            limit: summary.limit.clone(),
         }
     }
 }
@@ -310,6 +318,8 @@ impl ThreadRecord {
             usage: self.meta.usage.clone(),
             needs_attention: needs_attention(&self.state, now, settings),
             unread: tab == ThreadTab::Done && !self.state.acknowledged,
+            resume_at: self.resume_at,
+            limit: self.limit.clone(),
         }
     }
 
@@ -318,6 +328,10 @@ impl ThreadRecord {
     }
 
     fn begin_turn(&mut self, _at: DateTime<Utc>) -> (TurnId, String) {
+        // A new turn is a fresh attempt: the previous limit and any resume
+        // target no longer describe the thread.
+        self.resume_at = None;
+        self.limit = None;
         let turn_id = TurnId::new_uuid_v7();
         let item_id = assistant_item_id(&turn_id);
         self.active = Some(ActiveTurn {
@@ -405,6 +419,86 @@ impl ThreadManager {
     /// The metering hub, when one has been attached.
     pub fn meter(&self) -> Option<Arc<MeterHub>> {
         self.inner.meter.get().cloned()
+    }
+
+    /// Restores summary-visible schedule and limit state from the ledger.
+    ///
+    /// Schedules and limit history outlive the thread journal, so a restarted
+    /// daemon re-reads them once the hub is attached. Without this the inbox
+    /// would show a scheduled thread as merely rate-limited until its next
+    /// tick writes a fresh projection.
+    pub async fn resync_meter_state(&self) {
+        let Some(meter) = self.meter() else {
+            return;
+        };
+        let schedules = match meter.schedules().await {
+            Ok(schedules) => schedules,
+            Err(error) => {
+                tracing::warn!(%error, "could not re-read auto-resume schedules");
+                return;
+            }
+        };
+        let limits = match meter.limits_report().await {
+            Ok(report) => report.limits,
+            Err(error) => {
+                tracing::warn!(%error, "could not re-read the usage limit history");
+                return;
+            }
+        };
+
+        let mut armed: HashMap<String, (DateTime<Utc>, Option<DateTime<Utc>>)> = HashMap::new();
+        for schedule in schedules {
+            if matches!(
+                schedule.state,
+                ResumeState::Scheduled | ResumeState::Waiting
+            ) {
+                let reset_at = limits
+                    .iter()
+                    .find(|limit| limit.thread_id.as_ref() == Some(&schedule.thread_id))
+                    .and_then(|limit| limit.reset_at);
+                armed
+                    .entry(schedule.thread_id.as_str().to_owned())
+                    .or_insert((schedule.resume_at, reset_at));
+            }
+        }
+        let mut latest: HashMap<String, LimitBrief> = HashMap::new();
+        for limit in limits {
+            let Some(thread_id) = &limit.thread_id else {
+                continue;
+            };
+            latest
+                .entry(thread_id.as_str().to_owned())
+                .or_insert(LimitBrief {
+                    harness: limit.harness,
+                    reset_at: limit.reset_at,
+                    message: limit.message,
+                });
+        }
+
+        let handles: Vec<ThreadHandle> = {
+            let threads = self.inner.threads.lock().await;
+            threads.values().cloned().collect()
+        };
+        for handle in handles {
+            let mut record = handle.lock().await;
+            let key = record.meta.thread_id.as_str().to_owned();
+            if let Some((resume_at, reset_at)) = armed.remove(&key) {
+                record.resume_at = Some(resume_at);
+                record.scheduled_limit = Some(ScheduledLimit {
+                    reset_at,
+                    auto_resume: true,
+                });
+            }
+            // Only show a limit on a thread the limit still explains.
+            record.limit = if record.state.phase == h4rn_core::Phase::RateLimited
+                || record.scheduled_limit.is_some()
+            {
+                latest.remove(&key)
+            } else {
+                None
+            };
+            record.last_signature = None;
+        }
     }
 
     /// Acquires the append lock so a global replay is a gap-free prefix.
@@ -527,6 +621,8 @@ impl ThreadManager {
             queued: VecDeque::new(),
             last_signature: None,
             scheduled_limit: None,
+            resume_at: None,
+            limit: None,
             closed: false,
         };
         let (turn_id, _) = record.begin_turn(now);
@@ -956,6 +1052,7 @@ impl ThreadManager {
         if let Ok(handle) = self.inner.handle(thread_id).await {
             let mut record = handle.lock().await;
             record.scheduled_limit = None;
+            record.resume_at = None;
             if record.state.phase == h4rn_core::Phase::RateLimited {
                 self.inner
                     .emit(
@@ -1154,6 +1251,8 @@ impl Inner {
                 queued: VecDeque::new(),
                 last_signature: None,
                 scheduled_limit: None,
+                resume_at: None,
+                limit: None,
                 closed: false,
             };
 
@@ -1508,6 +1607,11 @@ impl Inner {
                     reset_at,
                     auto_resume,
                 } => {
+                    record.limit = Some(LimitBrief {
+                        harness: Some(record.meta.harness),
+                        reset_at,
+                        message: None,
+                    });
                     if let Some(meter) = self.meter.get() {
                         let hit = LimitHit {
                             thread_id: Some(thread_id.clone()),
@@ -1530,7 +1634,8 @@ impl Inner {
                                 .arm_schedule(&thread_id, reset_at, prompt, None, now)
                                 .await
                             {
-                                Ok(_) => {
+                                Ok(schedule) => {
+                                    record.resume_at = Some(schedule.resume_at);
                                     record.scheduled_limit = Some(ScheduledLimit {
                                         reset_at,
                                         auto_resume,
@@ -1565,6 +1670,9 @@ impl Inner {
                 }
                 HarnessEvent::TurnCompleted { status, usage } => {
                     completed = true;
+                    if status == TurnStatus::Completed {
+                        record.limit = None;
+                    }
                     let mut active = record.active.take();
                     let (turn_id, item_id, text, turn_usage) = match &active {
                         Some(active) => (
@@ -1987,7 +2095,7 @@ impl Inner {
             let mut record = handle.lock().await;
             let summary = record.summary(&self.options.settings);
             let signature = SummarySignature::of(&summary);
-            if record.last_signature == Some(signature) {
+            if record.last_signature.as_ref() == Some(&signature) {
                 continue;
             }
             record.last_signature = Some(signature);
