@@ -217,6 +217,13 @@ const SHOTS = [
     settle: 1200,
   },
   {
+    name: "skills",
+    device: "desktop",
+    path: "/library/skills",
+    wait: "text=Installed skills",
+    settle: 1200,
+  },
+  {
     name: "usage",
     device: "desktop",
     path: "/usage",
@@ -367,6 +374,20 @@ const SHOTS = [
     path: "/usage",
     wait: "text=Migrate session store is paused",
     settle: 1200,
+  },
+  {
+    name: "p-mcp",
+    device: "phone",
+    path: "/library",
+    wait: "text=playwright",
+    settle: 1000,
+  },
+  {
+    name: "p-skills",
+    device: "phone",
+    path: "/library/skills",
+    wait: "text=Installed skills",
+    settle: 1000,
   },
 ];
 

@@ -73,6 +73,7 @@ function SyncBanner() {
     : offline
       ? "Local skills keep working; sync resumes when the daemon is online."
       : "Run a cycle to publish local changes and pull the shared registry.";
+  const summary = sync?.message?.trim() || detail;
 
   return (
     <div
@@ -93,11 +94,15 @@ function SyncBanner() {
         </span>
       )}
       <span className="grow">
-        <b>{label}</b> · {sync?.message ?? detail}
+        <b>{label}</b> · {summary}
         {sync && (sync.conflicts > 0 || sync.hint) ? (
-          <span className="q-faint"> {sync.hint ?? `${sync.conflicts} conflicts to settle.`}</span>
+          <span className="q-faint">
+            {" "}
+            ·{" "}
+            {sync.hint ??
+              `${sync.conflicts} ${sync.conflicts === 1 ? "conflict" : "conflicts"} to settle.`}
+          </span>
         ) : null}
-        {!sync?.message && sync ? <span className="q-faint"> · {detail}</span> : null}
       </span>
       <Button variant="ghost" size="sm" onClick={() => void syncSkillsNow()} disabled={syncing}>
         {syncing ? "Syncing…" : "Sync now"}
@@ -107,6 +112,7 @@ function SyncBanner() {
 }
 
 function Conflicts({ conflicts }: { conflicts: SkillConflict[] }) {
+  const isPhone = useIsPhone();
   const [choices, setChoices] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   if (conflicts.length === 0) return null;
@@ -120,9 +126,9 @@ function Conflicts({ conflicts }: { conflicts: SkillConflict[] }) {
         {conflicts.map((conflict) => {
           const choice = choices[conflict.id] ?? "keep_local";
           return (
-            <div className="q-conflict" key={conflict.id}>
+            <div className="q-conflict" key={conflict.id} style={{ flexWrap: "wrap", rowGap: 8 }}>
               <TriangleAlertIcon className="q-icon q-warn" aria-hidden />
-              <div className="grow">
+              <div className="grow" style={{ minWidth: isPhone ? "calc(100% - 28px)" : undefined }}>
                 <div className="t">{conflict.name}</div>
                 <div className="q-muted" style={{ fontSize: 12, marginTop: 2 }}>
                   {conflict.reason} · local{" "}
@@ -255,7 +261,7 @@ function SkillRow({
         </div>
       </button>
       <HarnessMatrix skill={skill} isPhone={isPhone} />
-      <ChevronRightIcon className="q-icon s14 q-faint" aria-hidden />
+      {isPhone ? null : <ChevronRightIcon className="q-icon s14 q-faint" aria-hidden />}
     </div>
   );
 }
@@ -318,7 +324,9 @@ export function SkillsPage() {
                 <div className="q-muted mt-1">
                   {loading && !inventory
                     ? "Reading the skill registry…"
-                    : `${skills.length} installed · ${detected} harnesses detected · available wherever you choose`}
+                    : isPhone
+                      ? `${skills.length} installed · ${detected} harnesses`
+                      : `${skills.length} installed · ${detected} harnesses detected · available wherever you choose`}
                 </div>
               </div>
               <Button variant="secondary" onClick={() => setImportOpen(true)}>
@@ -350,9 +358,11 @@ export function SkillsPage() {
             <div className="q-sec" style={{ marginTop: conflicts.length > 0 ? 24 : 0 }}>
               <div className="q-sec-h">
                 <h2>Installed skills</h2>
-                <span className="aside">
-                  Each harness gets a managed copy; versions can differ until the next sync
-                </span>
+                {isPhone ? null : (
+                  <span className="aside">
+                    Each harness gets a managed copy; versions can differ until the next sync
+                  </span>
+                )}
               </div>
               {loading && !inventory ? (
                 SkeletonList()

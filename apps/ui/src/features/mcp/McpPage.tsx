@@ -23,7 +23,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import type { HarnessKind, HostId, McpConflictResolution, McpServerView } from "@/gen";
+import type { HarnessKind, HostId, McpConflictResolution, McpServerView, ProtoError } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { useNow } from "@/hooks/use-now";
 import { HARNESS_LABELS, harnessSeed, machineSeed } from "@/lib/entities";
@@ -157,22 +157,31 @@ function matrixRows(server: McpServerView): MatrixRow[] {
     });
   }
   const conflict = conflictText(server);
-  server.enabled.by_machine.forEach((entry, index) => {
+  // Machines where this server is actually reachable: granted shares plus any
+  // explicit switch the daemon already stores. The local machine is the rows
+  // above, so it is not repeated here.
+  const machineIds = new Set<string>([
+    ...server.shared_to,
+    ...server.enabled.by_machine.map((entry) => entry.machine),
+  ]);
+  machineIds.delete(localHost);
+  [...machineIds].forEach((machine, index) => {
     const harness = PRIMARY_HARNESS;
+    const enabled = enabledFor(server, harness, machine);
     rows.push({
-      key: `${entry.machine}:${harness}`,
-      hostId: entry.machine,
+      key: `${machine}:${harness}`,
+      hostId: machine,
       hostName: "",
       harness,
       target: "machine",
       delivery: "Proxied hub entry",
-      enabled: entry.enabled,
-      note: !entry.enabled
+      enabled,
+      note: !enabled
         ? "Off"
         : conflict && index === 0
           ? "Name conflict"
           : "Can call this machine's server",
-      tone: !entry.enabled ? "off" : conflict && index === 0 ? "warn" : "ok",
+      tone: !enabled ? "off" : conflict && index === 0 ? "warn" : "ok",
       busy: false,
       onToggle: () => undefined,
     });
@@ -453,6 +462,23 @@ function SkeletonDetail() {
   );
 }
 
+function ErrorBanner({ error, onRetry }: { error: ProtoError | null; onRetry: () => void }) {
+  if (!error) return null;
+  return (
+    <div className="q-banner err" style={{ margin: "0 0 16px" }}>
+      <span className="ic">
+        <TriangleAlertIcon className="q-icon s14" aria-hidden />
+      </span>
+      <span className="grow">
+        <b>{error.message}</b> {error.hint ?? "The daemon did not answer."}
+      </span>
+      <Button variant="ghost" size="sm" onClick={onRetry}>
+        Retry
+      </Button>
+    </div>
+  );
+}
+
 function EmptyState({ onAdd, onImport }: { onAdd: () => void; onImport: () => void }) {
   return (
     <div className="q-center-empty">
@@ -486,6 +512,8 @@ function ServerList({
 }) {
   const servers = useMcp((state) => state.servers);
   const loading = useMcp((state) => state.loading);
+  const error = useMcp((state) => state.error);
+  const isPhone = useIsPhone();
   return (
     <main className="q-main" aria-label="MCP servers">
       <div className="q-page">
@@ -508,6 +536,8 @@ function ServerList({
             </Button>
           </div>
 
+          <ErrorBanner error={error} onRetry={() => void loadMcpServers({ force: true })} />
+
           {loading && servers.length === 0 ? (
             <div className="q-list" aria-busy="true">
               {[0, 1, 2].map((row) => (
@@ -527,27 +557,33 @@ function ServerList({
             <EmptyState onAdd={onAdd} onImport={onImport} />
           ) : (
             <div className="q-list">
-              {servers.map((server) => (
-                <button
-                  type="button"
-                  className="q-li text-left"
-                  key={server.id}
-                  onClick={() => onSelect(server)}
-                >
-                  <span style={{ width: 20, color: "var(--fg-2)" }}>
-                    <WrenchIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-                  </span>
-                  <span className="grow">
-                    <span className="t block">{server.name}</span>
-                    <span className="s block">
-                      {transportKind(server.transport)} ·{" "}
-                      <span className="q-mono">{transportSummary(server.transport)}</span>
+              {servers.map((server) => {
+                const status = serverStatus(server);
+                return (
+                  <button
+                    type="button"
+                    className="q-li w-full text-left"
+                    key={server.id}
+                    onClick={() => onSelect(server)}
+                  >
+                    <span style={{ width: 20, color: "var(--fg-2)" }}>
+                      <WrenchIcon className="q-icon" strokeWidth={1.5} aria-hidden />
                     </span>
-                  </span>
-                  <Health server={server} />
-                  <ChevronRightIcon className="q-icon s14 q-faint" aria-hidden />
-                </button>
-              ))}
+                    <span className="grow min-w-0">
+                      <span className="t block truncate">{server.name}</span>
+                      <span className="s block truncate">
+                        {transportKind(server.transport)} ·{" "}
+                        <span className="q-mono">{transportSummary(server.transport)}</span>
+                        {isPhone ? ` · ${status.label}` : null}
+                      </span>
+                    </span>
+                    {isPhone ? null : <Health server={server} />}
+                    {isPhone ? null : (
+                      <ChevronRightIcon className="q-icon s14 q-faint" aria-hidden />
+                    )}
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>
@@ -566,6 +602,7 @@ export function McpPage() {
   const checkedAt = useMcp((state) => state.checkedAt);
   const selected = useApp((state) => state.ui.layout.librarySelected);
   const hosts = useApp((state) => state.hosts);
+  const daemonHost = useApp((state) => state.localHostId);
   const now = useNow();
 
   const [phoneOpen, setPhoneOpen] = useState(false);
@@ -578,8 +615,13 @@ export function McpPage() {
 
   useEffect(() => {
     ensureMcpEvents();
-    void loadMcpServers();
   }, []);
+
+  // A deep link can mount this page before the daemon's hello reports its
+  // host; retry as soon as it arrives instead of leaving an empty list up.
+  useEffect(() => {
+    if (daemonHost) void loadMcpServers();
+  }, [daemonHost]);
 
   useEffect(() => {
     if (selected !== NEW_SERVER) return;
@@ -668,6 +710,9 @@ export function McpPage() {
       <>
         <main className="q-main" aria-label="MCP server detail">
           <div className="q-page">
+            <div className="q-wrap" style={{ maxWidth: 860 }}>
+              <ErrorBanner error={error} onRetry={() => void loadMcpServers({ force: true })} />
+            </div>
             <EmptyState onAdd={openAdd} onImport={openImport} />
           </div>
         </main>
@@ -708,21 +753,7 @@ export function McpPage() {
         <div className="q-page">
           <div className="q-wrap" style={{ maxWidth: 860 }}>
             {error ? (
-              <div className="q-banner err" style={{ margin: "0 0 16px" }}>
-                <span className="ic">
-                  <TriangleAlertIcon className="q-icon s14" aria-hidden />
-                </span>
-                <span className="grow">
-                  <b>{error.message}</b> {error.hint ?? "The daemon did not answer."}
-                </span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => void loadMcpServers({ force: true })}
-                >
-                  Retry
-                </Button>
-              </div>
+              <ErrorBanner error={error} onRetry={() => void loadMcpServers({ force: true })} />
             ) : null}
 
             {isPhone ? (

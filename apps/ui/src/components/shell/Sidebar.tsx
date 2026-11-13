@@ -15,14 +15,14 @@ import {
   SquarePenIcon,
   WifiOffIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { KeyGlyphs, MOD, SHIFT } from "@/components/common/Kbd";
 import { ThreadRow } from "@/components/inbox/ThreadRow";
 import { serverStatus } from "@/features/mcp/labels";
-import { useMcp } from "@/features/mcp/store";
-import { useSkills } from "@/features/skills/store";
+import { loadMcpServers, useMcp } from "@/features/mcp/store";
+import { loadSkills, useSkills } from "@/features/skills/store";
 import type { ThreadSummary, ThreadTab } from "@/gen";
 import { useNow } from "@/hooks/use-now";
 import { harnessLabel, machineSeed } from "@/lib/entities";
@@ -760,6 +760,14 @@ function SettingsSidebar() {
   const mcpServers = useMcp((state) => state.servers);
   const skillInventory = useSkills((state) => state.inventory);
   const skills = skillInventory?.skills ?? NO_SKILLS;
+  const daemonHost = useApp((state) => state.localHostId);
+  // The Tools group shows counts for both halves, so read them once the daemon
+  // has reported its host rather than leaving a misleading zero.
+  useEffect(() => {
+    if (!daemonHost) return;
+    void loadMcpServers();
+    void loadSkills();
+  }, [daemonHost]);
   const library = route.kind === "placeholder" && route.surface === "library";
   // The route decides which half of Tools is open; selection only picks a server.
   const skillsActive =
