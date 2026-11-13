@@ -20,7 +20,9 @@ import { useMemo, useState } from "react";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { KeyGlyphs, MOD, SHIFT } from "@/components/common/Kbd";
 import { ThreadRow } from "@/components/inbox/ThreadRow";
-import { SERVERS } from "@/components/pages/LibraryPage";
+import { serverStatus } from "@/features/mcp/labels";
+import { useMcp } from "@/features/mcp/store";
+import { useSkills } from "@/features/skills/store";
 import type { ThreadSummary, ThreadTab } from "@/gen";
 import { useNow } from "@/hooks/use-now";
 import { harnessLabel, machineSeed } from "@/lib/entities";
@@ -268,6 +270,8 @@ function HostsPopover({
     </div>
   );
 }
+
+const NO_SKILLS: never[] = [];
 
 type Destination = "pr" | "library" | "usage" | "settings";
 
@@ -753,12 +757,28 @@ function SettingsSidebar() {
   const connection = useApp((state) => state.connection);
   const loading = useApp((state) => state.loadingThreads);
   const rows = useHostRows();
+  const mcpServers = useMcp((state) => state.servers);
+  const skillInventory = useSkills((state) => state.inventory);
+  const skills = skillInventory?.skills ?? NO_SKILLS;
   const library = route.kind === "placeholder" && route.surface === "library";
+  // The route decides which half of Tools is open; selection only picks a server.
+  const skillsActive =
+    route.kind === "placeholder" && route.path.replace(/\/+$/, "").endsWith("/skills");
   const section = route.kind === "placeholder" ? (route.path.split("/")[2] ?? "hosts") : "hosts";
   const destination: Destination | null = library ? "library" : "settings";
   let group: string | undefined;
 
   const go = (path: string) => navigate({ kind: "placeholder", surface: "settings", path });
+  const goLibrary = (path: string) => navigate({ kind: "placeholder", surface: "library", path });
+  const openMcp = (name: string) => {
+    setLibrarySelected(name);
+    if (!library) goLibrary("/library");
+    else pushLibraryPath("/library");
+  };
+  /** Keep the address bar on the MCP side once a subrow is picked. */
+  const pushLibraryPath = (path: string) => {
+    if (route.kind === "placeholder" && route.path !== path) goLibrary(path);
+  };
 
   return (
     <nav className="q-side q-set-side" aria-label="Settings" style={{ width: layout.sidebarWidth }}>
@@ -809,65 +829,76 @@ function SettingsSidebar() {
                   <span className="ct q-num">{item.key === "hosts" ? rows.length : 4}</span>
                 ) : null}
               </button>
-              {item.key === "shortcuts" ? (
+              {item.key === "providers" ? (
                 <>
                   <div className="q-side-h">
                     <span>Tools</span>
-                    <button type="button" className="q-ibtn s22" aria-label="Add MCP server">
+                    <button
+                      type="button"
+                      className="q-ibtn s22"
+                      aria-label="Add MCP server"
+                      title="Add MCP server"
+                      onClick={() => {
+                        setLibrarySelected("__new");
+                        goLibrary("/library");
+                      }}
+                    >
                       +
                     </button>
                   </div>
                   <button
                     type="button"
-                    className="q-nav"
-                    aria-current={library ? "page" : undefined}
-                    onClick={() =>
-                      navigate({ kind: "placeholder", surface: "library", path: "/library" })
-                    }
+                    className={cn("q-nav", library && !skillsActive && "parent")}
+                    aria-current={library && !skillsActive ? "page" : undefined}
+                    onClick={() => {
+                      setLibrarySelected(mcpServers[0]?.name ?? "");
+                      goLibrary("/library");
+                    }}
                   >
                     <PlugIcon className="q-icon" strokeWidth={1.5} aria-hidden />
                     <span className="lbl">MCP servers</span>
-                    <span className="ct q-num">{SERVERS.length}</span>
+                    <span className="ct q-num">{mcpServers.length}</span>
                   </button>
-                  <div className="q-set-sub">
-                    {SERVERS.map((server) => (
-                      <button
-                        key={server.id}
-                        type="button"
-                        className="q-set-subrow"
-                        aria-current={
-                          library && layout.librarySelected === server.id ? "true" : undefined
-                        }
-                        onClick={() => {
-                          setLibrarySelected(server.id);
-                          if (!library)
-                            navigate({ kind: "placeholder", surface: "library", path: "/library" });
-                        }}
-                      >
-                        <span>{server.id}</span>
-                        <span
-                          className={cn(
-                            "q-dot",
-                            server.health === "healthy" && "on",
-                            server.health === "error" && "danger",
-                            server.health === "credential" && "warn",
-                          )}
-                        />
-                      </button>
-                    ))}
-                  </div>
+                  {library && !skillsActive ? (
+                    <div className="q-set-sub">
+                      {mcpServers.map((server) => {
+                        const status = serverStatus(server);
+                        return (
+                          <button
+                            key={server.name}
+                            type="button"
+                            className="q-set-subrow"
+                            aria-current={
+                              layout.librarySelected === server.name ? "true" : undefined
+                            }
+                            onClick={() => openMcp(server.name)}
+                          >
+                            <span>{server.name}</span>
+                            <span
+                              className={cn(
+                                "q-dot",
+                                status.tone === "ok" && "on",
+                                status.tone === "warn" && "warn",
+                                status.tone === "danger" && "danger",
+                              )}
+                            />
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
                   <button
                     type="button"
                     className="q-nav"
+                    aria-current={skillsActive ? "page" : undefined}
                     onClick={() => {
                       setLibrarySelected("skills");
-                      if (!library)
-                        navigate({ kind: "placeholder", surface: "library", path: "/library" });
+                      goLibrary("/library/skills");
                     }}
                   >
                     <PlugIcon className="q-icon" strokeWidth={1.5} aria-hidden />
                     <span className="lbl">Skills</span>
-                    <span className="ct q-num">9</span>
+                    <span className="ct q-num">{skills.length}</span>
                   </button>
                 </>
               ) : null}

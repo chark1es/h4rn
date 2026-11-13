@@ -1,6 +1,7 @@
 import type {
   DeviceInfo,
   Event,
+  HostId,
   HostSummary,
   ProtoError,
   ServerFrame,
@@ -37,6 +38,8 @@ export type ConnectionSnapshot = {
 export type ReadyInfo = {
   reconnected: boolean;
   hosts: HostSummary[];
+  /** Host id of the daemon's own machine, for host-scoped requests. */
+  localHostId: HostId;
   serverVersion: string;
   deviceId: string;
 };

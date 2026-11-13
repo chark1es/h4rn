@@ -9,7 +9,7 @@ use crate::common::{
     AgentState, ApprovalKind, ApprovalOption, HostSummary, Item, ThreadSummary, ToolCall,
     TurnStatus, Usage,
 };
-use crate::ids::{DeviceId, SubagentId, ThreadId, TurnId};
+use crate::ids::{DeviceId, HostId, SubagentId, ThreadId, TurnId};
 use crate::subagents::SubagentView;
 use crate::terminal::{TerminalExitNotice, TerminalInfo};
 
@@ -87,6 +87,13 @@ pub enum ResponseBody {
         server_version: String,
         /// Device id the daemon resolved for this connection.
         device_id: DeviceId,
+        /// Host id of the machine this daemon runs on.
+        ///
+        /// Every daemon-scoped request that names a host (skills, the
+        /// filesystem, terminals) uses this id for "this machine". Hosts in
+        /// `hosts` that are not this one are entries the daemon can see but
+        /// does not execute on.
+        local_host: HostId,
         /// Hosts this daemon can route to.
         hosts: Vec<HostSummary>,
     },

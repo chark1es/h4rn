@@ -44,6 +44,7 @@ class FakeTransport implements Transport {
         protocol_version: 1,
         server_version: "test",
         device_id: "dev_test",
+        local_host: "host_test",
         hosts: [],
       });
       return;

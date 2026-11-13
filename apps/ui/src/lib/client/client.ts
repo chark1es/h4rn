@@ -66,7 +66,34 @@ export type ResponseOf<T extends ClientRequest["type"]> = T extends "hello"
                                             ? Extract<ResponseBody, { type: "upload_status" }>
                                             : T extends "get_blob"
                                               ? Extract<ResponseBody, { type: "blob" }>
-                                              : Extract<ResponseBody, { type: "ack" }>;
+                                              : T extends "mcp"
+                                                ? ResponseBody
+                                                : T extends "mcp_list"
+                                                  ? Extract<ResponseBody, { type: "mcp_servers" }>
+                                                  : T extends "mcp_upsert"
+                                                    ? Extract<ResponseBody, { type: "mcp_server" }>
+                                                    : T extends "skills_list"
+                                                      ? Extract<ResponseBody, { type: "skills" }>
+                                                      : T extends
+                                                            | "skills_add"
+                                                            | "skills_update"
+                                                            | "skills_set_enabled"
+                                                        ? Extract<
+                                                            ResponseBody,
+                                                            { type: "skill_added" }
+                                                          >
+                                                        : T extends
+                                                              | "skills_import_preview"
+                                                              | "skills_conflicts"
+                                                              | "skills_diff"
+                                                              | "skills_sync_now"
+                                                          ? ResponseBody
+                                                          : T extends "skills_import_commit"
+                                                            ? Extract<ResponseBody, { type: "ack" }>
+                                                            : Extract<
+                                                                ResponseBody,
+                                                                { type: "ack" }
+                                                              >;
 
 /**
  * Events that carry no durable position: `seq` is the daemon's current
@@ -416,6 +443,7 @@ export class H4rnClient {
       const ready: ReadyInfo = {
         reconnected,
         hosts: hello.hosts,
+        localHostId: hello.local_host,
         serverVersion: hello.server_version,
         deviceId: hello.device_id,
       };
