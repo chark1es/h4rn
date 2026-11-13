@@ -5,6 +5,7 @@ import type { DeviceInfo } from "./DeviceInfo";
 import type { HarnessKind } from "./HarnessKind";
 import type { HostId } from "./HostId";
 import type { RuntimeMode } from "./RuntimeMode";
+import type { TerminalId } from "./TerminalId";
 import type { ThreadFilter } from "./ThreadFilter";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadTab } from "./ThreadTab";
@@ -137,9 +138,25 @@ topics: Array<Topic>,
  */
 since_seq: number | null, } | { "type": "terminal_open", 
 /**
- * Owning thread.
+ * Owning thread, when opened from one.
  */
-thread_id: ThreadId, 
+thread_id: ThreadId | null, 
+/**
+ * Host that runs the PTY.
+ */
+host: HostId, 
+/**
+ * Absolute working directory.
+ */
+cwd: string, 
+/**
+ * Executable to spawn; `None` uses the host default shell.
+ */
+shell: string | null, 
+/**
+ * Extra arguments for the shell executable.
+ */
+args: Array<string>, 
 /**
  * Initial columns.
  */
@@ -147,31 +164,47 @@ cols: number,
 /**
  * Initial rows.
  */
-rows: number, } | { "type": "terminal_input", 
+rows: number, } | { "type": "terminal_attach", 
 /**
- * Terminal stream id.
+ * Terminal to attach.
  */
-terminal_id: string, 
+terminal_id: TerminalId, 
 /**
- * Raw input bytes, base64-encoded until binary framing lands.
+ * Viewer width, when known; participates in smallest-viewer sizing.
  */
-data: string, } | { "type": "terminal_resize", 
+cols: number | null, 
 /**
- * Terminal stream id.
+ * Viewer height, when known.
  */
-terminal_id: string, 
+rows: number | null, } | { "type": "terminal_list", 
 /**
- * New columns.
+ * Filter to one thread, or every terminal when `None`.
+ */
+thread_id: ThreadId | null, } | { "type": "terminal_resize", 
+/**
+ * Terminal to resize.
+ */
+terminal_id: TerminalId, 
+/**
+ * New columns for this viewer.
  */
 cols: number, 
 /**
- * New rows.
+ * New rows for this viewer.
  */
-rows: number, } | { "type": "terminal_close", 
+rows: number, } | { "type": "terminal_ack", 
 /**
- * Terminal stream id.
+ * Terminal whose output is acknowledged.
  */
-terminal_id: string, } | { "type": "fs_list", 
+terminal_id: TerminalId, 
+/**
+ * Highest contiguous chunk sequence the client applied.
+ */
+up_to_chunk: number, } | { "type": "terminal_close", 
+/**
+ * Terminal to close.
+ */
+terminal_id: TerminalId, } | { "type": "fs_list", 
 /**
  * Host that owns the filesystem.
  */

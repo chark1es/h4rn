@@ -14,6 +14,7 @@ use crate::hosts::HostInventory;
 use crate::journal::{Journal, SqliteJournal};
 use crate::server::{self, AppState};
 use crate::supervisor::ProcessSupervisor;
+use crate::terminal::{FileAudit, TerminalManager};
 use crate::threads::{ThreadManager, ThreadManagerOptions};
 
 /// Builds a daemon with injectable storage, harnesses and lifecycle timings.
@@ -108,6 +109,10 @@ impl DaemonBuilder {
         };
 
         let hosts = Arc::new(HostInventory::detect(Arc::clone(&catalog)));
+        let terminals = Arc::new(TerminalManager::new(
+            hosts.local_id(),
+            Arc::new(FileAudit::new(&self.config.data_dir)),
+        ));
         let manager = Arc::new(
             ThreadManager::open(
                 journal,
@@ -128,6 +133,7 @@ impl DaemonBuilder {
             config: self.config,
             manager,
             hosts,
+            terminals,
             tokens,
             supervisor: self.supervisor,
         })
@@ -139,6 +145,7 @@ pub struct Daemon {
     config: Config,
     manager: Arc<ThreadManager>,
     hosts: Arc<HostInventory>,
+    terminals: Arc<TerminalManager>,
     tokens: TokenStore,
     supervisor: Arc<ProcessSupervisor>,
 }
@@ -152,6 +159,11 @@ impl Daemon {
     /// Thread manager handle (tests and diagnostics).
     pub fn manager(&self) -> Arc<ThreadManager> {
         Arc::clone(&self.manager)
+    }
+
+    /// Terminal manager handle (tests and diagnostics).
+    pub fn terminals(&self) -> Arc<TerminalManager> {
+        Arc::clone(&self.terminals)
     }
 
     /// Binds the primary and optional extra listener.
@@ -178,6 +190,7 @@ impl Daemon {
         let state = AppState {
             manager: Arc::clone(&self.manager),
             hosts: self.hosts,
+            terminals: Arc::clone(&self.terminals),
             tokens: self.tokens,
             started: std::time::Instant::now(),
         };
@@ -187,6 +200,7 @@ impl Daemon {
             listeners,
             addrs,
             manager: self.manager,
+            terminals: self.terminals,
             supervisor: self.supervisor,
             data_dir: self.config.data_dir,
         })
@@ -199,6 +213,7 @@ pub struct BoundDaemon {
     listeners: Vec<TcpListener>,
     addrs: Vec<SocketAddr>,
     manager: Arc<ThreadManager>,
+    terminals: Arc<TerminalManager>,
     supervisor: Arc<ProcessSupervisor>,
     data_dir: PathBuf,
 }
@@ -230,6 +245,7 @@ impl BoundDaemon {
             listeners,
             addrs,
             manager,
+            terminals,
             supervisor,
             data_dir,
         } = self;
@@ -242,6 +258,7 @@ impl BoundDaemon {
 
         server::serve_all(listeners, app, shutdown).await?;
         manager.shutdown().await;
+        terminals.shutdown().await;
         supervisor.shutdown().await;
         tracing::info!("h4rn daemon stopped");
         Ok(())

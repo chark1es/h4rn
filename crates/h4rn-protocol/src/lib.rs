@@ -33,6 +33,7 @@ mod client;
 mod common;
 mod ids;
 mod server;
+mod terminal;
 
 pub use binary::{
     BINARY_HEADER_LEN, BINARY_MAGIC, BINARY_VERSION, BinaryFrame, BinaryFrameError, BinaryKind,
@@ -43,8 +44,13 @@ pub use common::{
     HostSummary, Item, MessageRole, RuntimeMode, ThreadFilter, ThreadSummary, ThreadTab, ToolCall,
     ToolCallStatus, Topic, TurnStatus, Usage, WorktreeRequest,
 };
-pub use ids::{AttachmentId, AttachmentIdError, DeviceId, HostId, SubagentId, ThreadId, TurnId};
+pub use ids::{
+    AttachmentId, AttachmentIdError, DeviceId, HostId, SubagentId, TerminalId, ThreadId, TurnId,
+};
 pub use server::{Event, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame};
+pub use terminal::{
+    CREDIT_MAX_BYTES, CREDIT_MAX_CHUNKS, TerminalExit, TerminalExitNotice, TerminalInfo,
+};
 
 /// Version of the wire protocol implemented by this crate.
 ///

@@ -105,6 +105,11 @@ string_id!(
     DeviceId,
     "dev_"
 );
+string_id!(
+    /// Identifies one daemon-owned terminal (PTY) session.
+    TerminalId,
+    "term_"
+);
 
 /// The BLAKE3 content address of an attachment blob (ADR-008).
 ///

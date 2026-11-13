@@ -8,4 +8,5 @@ repository.workspace = true
 description = "Headless VT abstraction over alacritty_terminal (ADR-007)"
 
 [dependencies]
+alacritty_terminal.workspace = true
 h4rn-protocol.workspace = true

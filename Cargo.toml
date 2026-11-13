@@ -28,6 +28,7 @@ h4rn-vt = { path = "crates/h4rn-vt" }
 
 # Shared third-party dependencies. Versions are pinned so every crate in the
 # workspace resolves the same implementation (ADR-017).
+alacritty_terminal = "0.26.0"
 anyhow = "1.0.104"
 async-trait = "0.1.92"
 axum = { version = "0.8.9", features = ["ws"] }

@@ -1,9 +1,10 @@
 import { CircleAlertIcon, InboxIcon, RefreshCwIcon, ServerIcon } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EmptyState } from "@/components/common/EmptyState";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { TerminalPanel } from "@/features/terminal/TerminalPanel";
 import { glyphForAgentState } from "@/lib/agent";
 import { harnessLabel } from "@/lib/entities";
 import {
@@ -74,6 +75,9 @@ export function ThreadPane({ threadId }: { threadId: string }) {
   const host = useApp((state) => state.hosts[summary?.host ?? ""]);
   const log = useApp((state) => state.logs[threadId]);
   const threadError = useApp((state) => state.threadErrors[threadId]);
+  const [terminalOpen, setTerminalOpen] = useState(false);
+  // Mount on first open, then keep the panel (and its PTYs) alive while hidden.
+  const [terminalMounted, setTerminalMounted] = useState(false);
 
   useEffect(() => {
     ensureThread(threadId);
@@ -131,7 +135,16 @@ export function ThreadPane({ threadId }: { threadId: string }) {
 
   return (
     <main className="flex h-full min-h-0 flex-1 flex-col bg-paper" aria-label={summary.title}>
-      <ThreadHeader summary={summary} host={host} onBack={() => navigate({ kind: "inbox" })} />
+      <ThreadHeader
+        summary={summary}
+        host={host}
+        onBack={() => navigate({ kind: "inbox" })}
+        terminalOpen={terminalOpen}
+        onToggleTerminal={() => {
+          setTerminalMounted(true);
+          setTerminalOpen((value) => !value);
+        }}
+      />
 
       {!hostOnline && summary.tab === "working" ? (
         <div className="shrink-0 border-b border-strike/30 bg-strike-tint/50 px-4 py-1.5 text-micro text-strike-ink">
@@ -192,6 +205,17 @@ export function ThreadPane({ threadId }: { threadId: string }) {
           onRetry={requestComposerFocus}
         />
       )}
+
+      {terminalMounted ? (
+        <TerminalPanel
+          key={threadId}
+          threadId={threadId}
+          host={summary.host}
+          cwd={summary.workspace_path}
+          hidden={!terminalOpen}
+          onClose={() => setTerminalOpen(false)}
+        />
+      ) : null}
 
       <StandbyBar threadId={threadId} />
       <Composer summary={summary} />
