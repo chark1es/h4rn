@@ -363,6 +363,7 @@ impl MeterHub {
             range: Default::default(),
             group_by,
             bucket: None,
+            series_group_by: None,
             include_children: false,
         })
         .await
@@ -521,6 +522,7 @@ mod tests {
                 range: Default::default(),
                 group_by: UsageGroupBy::None,
                 bucket: None,
+                series_group_by: None,
             })
             .await
             .expect("report");

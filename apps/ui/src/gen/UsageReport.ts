@@ -5,6 +5,7 @@ import type { UsageGroup } from "./UsageGroup";
 import type { UsageGroupBy } from "./UsageGroupBy";
 import type { UsageRange } from "./UsageRange";
 import type { UsageScope } from "./UsageScope";
+import type { UsageSeries } from "./UsageSeries";
 import type { UsageTotals } from "./UsageTotals";
 
 /**
@@ -32,6 +33,10 @@ group_by: UsageGroupBy,
  */
 bucket: UsageBucket | null, 
 /**
+ * Grouping applied to [`Self::series`], when one was requested.
+ */
+series_group_by: UsageGroupBy | null, 
+/**
  * Account-wide totals for the scope.
  */
 totals: UsageTotals, 
@@ -39,6 +44,10 @@ totals: UsageTotals,
  * Time series, oldest first.
  */
 buckets: Array<UsageBucketPoint>, 
+/**
+ * Stacked series, one per `series_group_by` key, aligned with `buckets`.
+ */
+series: Array<UsageSeries>, 
 /**
  * Breakdowns, sorted by key.
  */

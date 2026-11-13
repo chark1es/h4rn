@@ -10,7 +10,6 @@ import { LibraryPage } from "@/components/pages/LibraryPage";
 import { PairingPage } from "@/components/pages/PairingPage";
 import { PullRequestsPage } from "@/components/pages/PullRequestsPage";
 import { SettingsPage } from "@/components/pages/SettingsPage";
-import { UsagePage } from "@/components/pages/UsagePage";
 import { RightPanel } from "@/components/panel/RightPanel";
 import { OfflineBanner } from "@/components/shell/OfflineBanner";
 import { PhoneNav } from "@/components/shell/PhoneNav";
@@ -28,6 +27,13 @@ import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts } from "@/features/attachments/use-attachments";
 import { IdePane } from "@/features/ide/IdePane";
+import {
+  proxyDefaultModel,
+  proxyModelsFor,
+  useProxy,
+  useProxyCatalog,
+} from "@/features/proxy/proxyStore";
+import { UsagePage } from "@/features/usage/UsagePage";
 import type { HarnessKind } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { HARNESS_LABELS, harnessLabel, harnessSeed, machineSeed } from "@/lib/entities";
@@ -60,6 +66,8 @@ function InboxDetailEmpty() {
   const [prompt, setPrompt] = useState("");
   const [starting, setStarting] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  useProxyCatalog();
+  useProxy((state) => state.profiles);
 
   useEffect(() => {
     if (host || onlineHosts.length === 0) return;
@@ -119,7 +127,7 @@ function InboxDetailEmpty() {
 
   const pickHarness = (nextHarness: HarnessKind) => {
     setHarness(nextHarness);
-    setModel(START_MODELS[nextHarness]);
+    setModel(proxyDefaultModel(nextHarness) ?? START_MODELS[nextHarness]);
   };
 
   const canSend =
@@ -128,7 +136,9 @@ function InboxDetailEmpty() {
     !attachments.blockedReason &&
     (prompt.trim().length > 0 || attachments.attachments.length > 0);
 
-  const modelChoices = Array.from(new Set(Object.values(START_MODELS)));
+  const modelChoices = Array.from(
+    new Set([...Object.values(START_MODELS), ...proxyModelsFor(harness).map((model) => model.id)]),
+  );
 
   return (
     <main className="q-main">

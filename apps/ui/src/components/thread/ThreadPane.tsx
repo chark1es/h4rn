@@ -4,11 +4,12 @@ import { useEffect, useState } from "react";
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { PhonePanelSheet } from "@/components/panel/PhonePanelSheet";
 import { TerminalPanel } from "@/features/terminal/TerminalPanel";
-import type { Usage } from "@/gen";
+import { AutoResumeCards } from "@/features/usage/AutoResumeCard";
+import { UsageFooter } from "@/features/usage/UsageFooter";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { glyphForAgentState } from "@/lib/agent";
 import { harnessLabel } from "@/lib/entities";
-import { absoluteTime, cost, duration, tokens, tokensPerSecond } from "@/lib/format";
+import { absoluteTime } from "@/lib/format";
 import {
   ensureThread,
   interruptThread,
@@ -19,7 +20,7 @@ import {
   toggleTerminal,
   useApp,
 } from "@/lib/store/appStore";
-import type { ApprovalItem, StreamTurn } from "@/lib/store/projection";
+import type { ApprovalItem } from "@/lib/store/projection";
 import { cn } from "@/lib/utils";
 import { ApprovalCard } from "./ApprovalCard";
 import { Composer } from "./Composer";
@@ -78,22 +79,6 @@ function WaitingForTurn({
           this outline.
         </p>
       </div>
-    </div>
-  );
-}
-
-function UsageFooter({ turns, fallback }: { turns: StreamTurn[]; fallback: Usage }) {
-  const isPhone = useIsPhone();
-  const usage = [...turns].reverse().find((turn) => turn.usage)?.usage ?? fallback;
-  if (!usage) return null;
-  const total = usage.input_tokens + usage.output_tokens;
-  return (
-    <div className="q-usage-foot q-num">
-      <span>{tokens(total)} tokens</span>
-      <span>{cost(usage.cost_micros)} est.</span>
-      <span>{tokensPerSecond(usage.output_tokens, usage.duration_ms)} tok/s</span>
-      {isPhone ? null : <span>{duration(usage.duration_ms)} active</span>}
-      {isPhone ? null : <span className="grow" />}
     </div>
   );
 }
@@ -367,6 +352,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
           <div className="q-col">
             {isPhone ? (
               <>
+                <AutoResumeCards threadId={threadId} compact />
                 {firstApproval ? (
                   <PhoneApprovalSummary
                     thread={summary}
@@ -376,13 +362,14 @@ export function ThreadPane({ threadId }: { threadId: string }) {
                   />
                 ) : null}
                 <Composer summary={summary} />
-                <UsageFooter turns={turns} fallback={summary.usage} />
+                <UsageFooter threadId={threadId} />
               </>
             ) : (
               <>
+                <AutoResumeCards threadId={threadId} />
                 <ApprovalCard threadId={threadId} />
                 <Composer summary={summary} />
-                <UsageFooter turns={turns} fallback={summary.usage} />
+                <UsageFooter threadId={threadId} />
               </>
             )}
           </div>

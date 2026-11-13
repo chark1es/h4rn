@@ -586,6 +586,9 @@ pub enum ClientRequest {
         group_by: crate::usage::UsageGroupBy,
         /// Optional hour/day series.
         bucket: Option<crate::usage::UsageBucket>,
+        /// Optional grouping for the stacked series, when `bucket` is set.
+        #[serde(default)]
+        series_group_by: Option<crate::usage::UsageGroupBy>,
         /// Include subagent children in a thread-scoped report.
         ///
         /// With this set, `scope_id` names a parent thread and the report adds

@@ -17,6 +17,13 @@ import { Textarea } from "@/components/ui/textarea";
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts } from "@/features/attachments/use-attachments";
+import {
+  proxyDefaultModel,
+  proxyModelsFor,
+  proxyOverrideFor,
+  useProxy,
+  useProxyCatalog,
+} from "@/features/proxy/proxyStore";
 import type { HarnessKind, HostId, RuntimeMode } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { HARNESS_LABELS, HARNESS_SLUGS } from "@/lib/entities";
@@ -54,6 +61,9 @@ export function NewThreadDialog() {
   const hosts = useApp((state) => state.hosts);
   const connection = useApp((state) => state.connection.status);
   const isPhone = useIsPhone();
+  useProxyCatalog();
+  useProxy((state) => state.profiles);
+  useProxy((state) => state.catalogs);
 
   const onlineHosts = useMemo(
     () =>
@@ -78,14 +88,31 @@ export function NewThreadDialog() {
       setHost(first.host_id);
       const nextHarness = first.harnesses[0] ?? "claude_code";
       setHarness(nextHarness);
-      setModel(DEFAULT_MODELS[nextHarness]);
+      setModel(proxyDefaultModel(nextHarness) ?? DEFAULT_MODELS[nextHarness]);
     }
     setStarting(false);
   }, [open, onlineHosts]);
 
+  // The catalogue can arrive after the dialog opens; adopt its default only
+  // while the user has not chosen a model of their own.
+  const proxyActive = proxyOverrideFor(harness);
+  const proxyModels = proxyModelsFor(harness);
+  const proxyProfileId = proxyActive?.profile.id ?? null;
+  const proxyDefault = proxyDefaultModel(harness);
+  const proxyModelKey = proxyModels.map((model) => model.id).join("|");
+  useEffect(() => {
+    if (!open || proxyProfileId === null || proxyModelKey === "") return;
+    setModel((current) =>
+      current === DEFAULT_MODELS[harness] ? (proxyDefault ?? current) : current,
+    );
+  }, [open, harness, proxyDefault, proxyModelKey, proxyProfileId]);
+
   const selectedHost = host ? hosts[host] : undefined;
   const harnessChoices = selectedHost?.harnesses.length ? selectedHost.harnesses : HARNESSES;
   const offline = connection !== "online";
+  const modelChoices = [
+    ...new Set([...Object.values(DEFAULT_MODELS), ...proxyModels.map((candidate) => candidate.id)]),
+  ];
   const attachments = useAttachmentDrafts("new-thread", {
     enabled: !offline && Boolean(host),
     disabledReason: offline ? "Reconnect to attach files." : "Pick an online host first.",
@@ -169,7 +196,7 @@ export function NewThreadDialog() {
               onChange={(event) => {
                 const next = event.target.value as HarnessKind;
                 setHarness(next);
-                setModel(DEFAULT_MODELS[next]);
+                setModel(proxyDefaultModel(next) ?? DEFAULT_MODELS[next]);
               }}
               className="h-7 w-full rounded-[6px] border-0 bg-bg-raised px-2 text-[12.5px] text-fg shadow-[inset_0_0_0_1px_var(--line-2)] outline-none focus-visible:shadow-[inset_0_0_0_1px_var(--accent)]"
             >
@@ -191,10 +218,16 @@ export function NewThreadDialog() {
               className="font-mono"
             />
             <datalist id="h4rn-models">
-              {Object.entries(DEFAULT_MODELS).map(([kind, option]) => (
-                <option key={`${kind}:${option}`} value={option} />
+              {modelChoices.map((option) => (
+                <option key={option} value={option} />
               ))}
             </datalist>
+            {proxyActive ? (
+              <span className="text-small text-fg-3">
+                {proxyModels.length} models from {proxyActive.profile.name}; the harness routes
+                through it.
+              </span>
+            ) : null}
           </div>
         </div>
 

@@ -35,6 +35,7 @@ pub(super) async fn handle(
             range,
             group_by,
             bucket,
+            series_group_by,
             include_children,
         } => {
             if matches!(scope, UsageScope::Thread | UsageScope::Workspace) && scope_id.is_none() {
@@ -52,6 +53,7 @@ pub(super) async fn handle(
                         range,
                         group_by,
                         bucket,
+                        series_group_by,
                         include_children,
                     })
                     .await

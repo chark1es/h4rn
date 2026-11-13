@@ -1212,6 +1212,7 @@ async fn thread_usage(client: &mut Client, thread_id: &ThreadId) -> h4rn_protoco
             range: UsageRange::default(),
             group_by: UsageGroupBy::None,
             bucket: None,
+            series_group_by: None,
         })
         .await
         .expect("get usage")

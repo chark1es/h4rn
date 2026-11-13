@@ -10,6 +10,7 @@ import type {
 } from "@/gen";
 
 import { H4rnRequestError, protoError } from "./errors";
+import { emitProxyFrame, emitUsageFrame } from "./frames";
 import type {
   ClientOptions,
   ConnectionSnapshot,
@@ -90,10 +91,56 @@ export type ResponseOf<T extends ClientRequest["type"]> = T extends "hello"
                                                           ? ResponseBody
                                                           : T extends "skills_import_commit"
                                                             ? Extract<ResponseBody, { type: "ack" }>
-                                                            : Extract<
+                                                            : T extends "get_usage"
+                                                  ? Extract<ResponseBody, { type: "usage_report" }>
+                                                  : T extends "get_limits"
+                                                    ? Extract<ResponseBody, { type: "limits" }>
+                                                    : T extends "list_resets"
+                                                      ? Extract<ResponseBody, { type: "resets" }>
+                                                      : T extends "cancel_resume" | "resume_now"
+                                                        ? Extract<
+                                                            ResponseBody,
+                                                            { type: "resume_changed" }
+                                                          >
+                                                        : T extends
+                                                              | "list_proxy_profiles"
+                                                              | "remove_proxy_profile"
+                                                          ? Extract<
+                                                              ResponseBody,
+                                                              { type: "proxy_profiles" }
+                                                            >
+                                                          : T extends
+                                                                | "add_proxy_profile"
+                                                                | "update_proxy_profile"
+                                                                | "set_proxy_harness_override"
+                                                            ? Extract<
                                                                 ResponseBody,
-                                                                { type: "ack" }
-                                                              >;
+                                                                { type: "proxy_profile" }
+                                                              >
+                                                            : T extends "test_proxy_profile"
+                                                              ? Extract<
+                                                                  ResponseBody,
+                                                                  { type: "proxy_tested" }
+                                                                >
+                                                              : T extends "list_proxy_models"
+                                                                ? Extract<
+                                                                    ResponseBody,
+                                                                    { type: "proxy_models" }
+                                                                  >
+                                                                : T extends "list_proxy_limits"
+                                                                  ? Extract<
+                                                                      ResponseBody,
+                                                                      { type: "proxy_limits" }
+                                                                    >
+                                                                  : T extends "pick_proxy_failover"
+                                                                    ? Extract<
+                                                                        ResponseBody,
+                                                                        { type: "proxy_failover" }
+                                                                      >
+                                                                  : Extract<
+                                                                      ResponseBody,
+                                                                      { type: "ack" }
+                                                                    >;
 
 /**
  * Events that carry no durable position: `seq` is the daemon's current
@@ -517,6 +564,18 @@ export class H4rnClient {
 
     if (frame.kind === "terminal_event") {
       for (const listener of this.terminalListeners) listener(frame.event);
+      return;
+    }
+
+    // Usage ticks and proxy changes are ephemeral by design: they have no
+    // sequence number, so they never advance `lastSeq` or enter the replay.
+    if (frame.kind === "usage_event") {
+      emitUsageFrame(frame.event);
+      return;
+    }
+
+    if (frame.kind === "proxy_event") {
+      emitProxyFrame(frame.event);
       return;
     }
 

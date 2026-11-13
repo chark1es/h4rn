@@ -129,9 +129,12 @@ async function main() {
       daemonBin,
       ["--data-dir", dataDir, "--bind", `127.0.0.1:${daemonPort}`, "serve"],
       {
+        // Keep a scripted limit pending long enough for the countdown card to
+        // be asserted and acted on before it fires.
         env: {
           ...process.env,
           H4RN_FAKE_HARNESS: "1",
+          H4RN_FAKE_LIMIT_MS: "120000",
           HOME: homeDir,
           XDG_CONFIG_HOME: join(homeDir, ".config"),
           XDG_DATA_HOME: join(homeDir, ".local", "share"),
@@ -230,6 +233,78 @@ async function main() {
       .getByText("Settled", { exact: true })
       .waitFor({ timeout: 20_000 });
 
+    // ------------------------------------------------------------------
+    // Usage wiring: the footer and the Usage screen read real ledger rows.
+    // ------------------------------------------------------------------
+    const footer = page.locator(".q-usage-foot");
+    await footer.waitFor({ timeout: 10_000 });
+    const footerText = (await footer.textContent()) ?? "";
+    const footerMatch = footerText.match(/([\d.,]+)\s*([kM]?)\s*tokens/);
+    const footerTokens = footerMatch
+      ? Number(footerMatch[1]?.replace(/,/g, "")) *
+        (footerMatch[2] === "k" ? 1_000 : footerMatch[2] === "M" ? 1_000_000 : 1)
+      : 0;
+    if (!(footerTokens > 0)) {
+      throw new Error(`usage footer did not show metered tokens: ${footerText}`);
+    }
+    if (!footerText.includes("TTFT")) {
+      throw new Error(`usage footer did not show TTFT: ${footerText}`);
+    }
+
+    await page.getByRole("button", { name: "Usage" }).first().click();
+    await page.getByRole("heading", { name: "Usage" }).waitFor({ timeout: 10_000 });
+    await page.getByText("Tokens per day by harness").waitFor({ timeout: 10_000 });
+    const tokenStat = page.locator(".q-stats .q-stat").first();
+    await tokenStat.waitFor({ timeout: 10_000 });
+    const tokenStatText = (await tokenStat.textContent()) ?? "";
+    if (tokenStatText.includes("0") && !/\d{2,}/.test(tokenStatText.replace(/\D/g, ""))) {
+      throw new Error(`Usage screen showed no metered tokens: ${tokenStatText}`);
+    }
+
+    // --------------------------------------------------------------
+    // Limits and auto-resume: a scripted FakeHarness limit arms a schedule.
+    // --------------------------------------------------------------
+    await page.getByRole("button", { name: "New thread" }).first().click();
+    await page.locator("#new-thread-workspace").fill(workspace);
+    await page.locator("#new-thread-harness").selectOption("claude_code");
+    await page.locator("#new-thread-task").fill("Keep going [h4rn-limit]");
+    await page.waitForFunction(() => {
+      const button = [...document.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent?.trim() === "Start",
+      );
+      return button !== undefined && !button.disabled;
+    });
+    await page.getByRole("button", { name: "Start", exact: true }).click();
+
+    const resumeCard = page.locator(".q-resume").first();
+    await resumeCard.waitFor({ timeout: 20_000 });
+    await resumeCard.getByText(/until auto-resume/).waitFor({ timeout: 10_000 });
+    await resumeCard.getByText(/Resume now/).waitFor({ timeout: 10_000 });
+    // The inbox row follows ScheduleChanged without a reload.
+    await page
+      .getByText(/Resumes \d{1,2}:\d{2}/)
+      .first()
+      .waitFor({ timeout: 10_000 });
+
+    await resumeCard.getByRole("button", { name: "Cancel" }).click();
+    await page.locator(".q-resume").first().waitFor({ state: "detached", timeout: 15_000 });
+
+    // Cancel cleared the schedule; a new limited turn arms a fresh one so the
+    // Resume now path can be exercised too.
+    const composer = page.getByRole("textbox", { name: /Reply to/ });
+    await composer.fill("Try once more [h4rn-limit]");
+    await composer.press("Enter");
+    await page.locator(".q-resume").first().waitFor({ timeout: 20_000 });
+
+    await page.getByRole("button", { name: "Usage" }).first().click();
+    await page.getByRole("heading", { name: "Usage" }).waitFor({ timeout: 10_000 });
+    const usageResume = page.locator(".q-resume").first();
+    await usageResume.waitFor({ timeout: 20_000 });
+    await usageResume.getByText(/until auto-resume/).waitFor({ timeout: 10_000 });
+    await usageResume.getByRole("button", { name: "Resume now" }).click();
+    await page.locator(".q-resume").first().waitFor({ state: "detached", timeout: 15_000 });
+
+
     // Settings → Tools: add a real stdio server, turn it off for one harness,
     // then install a local skill from a folder. Both must survive a reload.
     await page.getByRole("button", { name: "MCP & skills" }).click();
@@ -285,12 +360,17 @@ async function main() {
       .waitFor({ timeout: 20_000 });
 
     console.log(
-      "UI e2e passed: thread streamed, settled, and restored; MCP server and skill persisted.",
+      "UI e2e passed: thread streamed, settled, and restored; usage footer and Usage screen show metered tokens; a scripted limit armed, cancelled and resumed a schedule; MCP server and skill persisted.",
     );
   } catch (error) {
     if (page) {
       console.error(`--- page url ---\n${page.url()}`);
-      console.error(`--- page text ---\n${await page.locator("body").textContent()}`);
+      console.error(
+        `--- page text ---\n${await page
+          .locator("body")
+          .textContent({ timeout: 2_000 })
+          .catch(() => "(page unavailable)")}`,
+      );
     }
     if (daemonLog) {
       console.error(`--- daemon/ui logs ---\n${daemonLog}`);

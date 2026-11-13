@@ -614,6 +614,7 @@ async fn parent_usage(
             range: Default::default(),
             group_by: UsageGroupBy::None,
             bucket: None,
+            series_group_by: None,
         })
         .await
         .expect("usage report")

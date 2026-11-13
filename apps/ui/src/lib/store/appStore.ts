@@ -6,7 +6,9 @@ import type {
   HarnessKind,
   HostId,
   HostSummary,
+  LimitStatus,
   ProtoError,
+  ResumeSchedule,
   RuntimeMode,
   ThreadId,
   ThreadSummary,
@@ -754,6 +756,53 @@ export function retryThread(threadId: ThreadId): void {
 }
 
 // ---------------------------------------------------------------------------
+// Live usage frames
+//
+// Usage ticks and schedules arrive outside the journal. Feature stores own
+// those streams, but the thread list still needs a schedule to show "Resumes
+// 14:32" without a full reload.
+// ---------------------------------------------------------------------------
+
+export function patchThreadSummary(threadId: ThreadId, patch: Partial<ThreadSummary>): void {
+  const state = getState();
+  const summary = state.threads[threadId];
+  if (!summary) return;
+  setState({ ...state, threads: { ...state.threads, [threadId]: { ...summary, ...patch } } });
+}
+
+export function applyResumeSchedule(schedule: ResumeSchedule | null): void {
+  if (!schedule) {
+    // A cleared schedule names no thread, so the cheap path is a fresh list.
+    void loadThreads();
+    return;
+  }
+  const summary = getState().threads[schedule.thread_id];
+  if (!summary) return;
+  patchThreadSummary(schedule.thread_id, {
+    resume_at: schedule.resume_at,
+    limit: summary.limit
+      ? { ...summary.limit, reset_at: schedule.resume_at }
+      : {
+          harness: null,
+          reset_at: schedule.resume_at,
+          message: schedule.reason,
+        },
+  });
+}
+
+export function applyLimitObservation(status: LimitStatus): void {
+  if (!status.thread_id) return;
+  patchThreadSummary(status.thread_id, {
+    agent_state: "rate_limited",
+    limit: {
+      harness: status.harness,
+      reset_at: status.reset_at,
+      message: status.message,
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Event projection
 // ---------------------------------------------------------------------------
 
@@ -1157,6 +1206,8 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
     unread: false,
     resume_at: null,
     limit: null,
+    ttft_ms: null,
+    context_window: null,
   };
 
   setState({
