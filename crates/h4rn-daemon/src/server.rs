@@ -86,6 +86,8 @@ pub struct AppState {
     pub proxy: Arc<h4rn_proxy::ProxyService>,
     /// The daemon-owned MCP hub (ADR-006).
     pub mcp: Arc<McpService>,
+    /// Durable metering, limits and auto-resume (ADR-024).
+    pub meter: Arc<h4rn_meter::MeterHub>,
     /// Server boot time, for `/healthz`.
     pub started: Instant,
 }

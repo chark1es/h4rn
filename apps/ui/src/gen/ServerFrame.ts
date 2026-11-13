@@ -4,6 +4,7 @@ import type { ProtoError } from "./ProtoError";
 import type { ProxyEvent } from "./ProxyEvent";
 import type { ResponseBody } from "./ResponseBody";
 import type { TerminalExitNotice } from "./TerminalExitNotice";
+import type { UsageStreamEvent } from "./UsageStreamEvent";
 
 /**
  * One frame sent by the daemon.
@@ -35,4 +36,8 @@ event: TerminalExitNotice, } | { "kind": "proxy_event",
 /**
  * The change.
  */
-event: ProxyEvent, };
+event: ProxyEvent, } | { "kind": "usage_event", 
+/**
+ * The tick, limit status or schedule change.
+ */
+event: UsageStreamEvent, };

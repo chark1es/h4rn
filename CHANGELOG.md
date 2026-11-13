@@ -37,6 +37,7 @@ All notable changes to h4rn are recorded here. The format follows
   frontmatter, hashing, installers, import, conflicts and secrets, a real
   Claude Code skill-pickup test behind `--ignored`, and two-registry sync tests
   run against real Postgres by `scripts/test-connect.sh`.
+
 ### Phase 4 — MCP hub
 
 - **One hub per daemon** (`h4rn-mcp`): a loopback streamable-HTTP endpoint at `/mcp` speaking
@@ -65,6 +66,45 @@ All notable changes to h4rn are recorded here. The format follows
   transient `McpServerStatus`/`McpToolCalled` events on `Topic::Mcp`.
 - **Docs and tests**: `docs/mcp.md`, ADR-036/037, real stdio-fixture and two-daemon tunnel tests,
   secret non-leak tests, and ignored real Claude/Codex injection tests (`h4rn__echo`).
+### Phase 5 — metering and auto-resume
+
+- **Ledger** (`h4rn-meter`): durable, append-only SQLite rows per turn with
+  input/output/cached read/cached creation tokens, cost and provenance, TTFT,
+  TPS excluding tool time, generation and wall time, timestamps, workspace,
+  machine, account, harness, model, provider and raw payload. Prices are a
+  deterministic estimate when the harness reports no cost; unknown models stay
+  visibly unpriced.
+- **Metering**: per-turn observation of harness usage, first-token TTFT, tool
+  call intervals, `TurnCompleted` accounting and a live `UsageTick` throttled to
+  about one per second. Reports aggregate per thread, workspace, machine or
+  globally, with optional hour/day buckets and thread/workspace/machine/model/
+  harness grouping.
+- **Proxy usage**: optional ingestion of CLIProxyAPI `/v8/management/performance`
+  rows with stable ids, deduplicated against self-metered turns by
+  `(thread_id, run_id)`, correlation id or same provider/model within two
+  minutes. Documented in [`docs/metering.md`](docs/metering.md).
+- **Limits and resets**: `LimitHit` records harness, provider/account, model,
+  reset time, consumption and message; the UI can read limits, countdowns and
+  reset history.
+- **Auto-resume**: schedules at the provider reset plus deterministic jitter,
+  capped exponential backoff with an explicit reason when the reset is unknown,
+  persisted schedules across restarts, `CancelResume` and `ResumeNow`, thread
+  stays Working with `AgentState::Scheduled`, queued input held, resumed turn
+  uses a configurable prompt, and optional proxy failover recorded visibly on
+  the schedule.
+- **Protocol and daemon**: `GetUsage`, `GetLimits`, `ListResets`, `CancelResume`,
+  `ResumeNow`, `SetAutoResumePolicy`; ephemeral `UsageTick`, `LimitStatus` and
+  `ScheduleChanged` frames; daemon handlers, meter assembly and background
+  proxy-ingest/usage-sync loops.
+- **Sync**: idempotent batched ledger sync to h4rn-connect (`row_id` unique per
+  account), migration `0004_usage_sync.sql`, `POST /v1/usage` and
+  `GET /v1/usage/aggregate` with real Postgres aggregation.
+- **Tests**: ledger math, price provenance, dedupe, scheduler restart/cancel/
+  resume-now/failover, lifecycle while scheduled, a FakeHarness
+  limit-hit→scheduled→resumed end-to-end test, Postgres sync idempotency and
+  aggregate buckets.
+- **Docs**: [`docs/metering.md`](docs/metering.md) defines every metric, its
+  source and the dedupe rule.
 
 ### Phase 5 — CLIProxyAPI
 

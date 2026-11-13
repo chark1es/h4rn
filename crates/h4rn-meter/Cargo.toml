@@ -8,4 +8,14 @@ repository.workspace = true
 description = "Durable token and cost ledger (ADR-024)"
 
 [dependencies]
+chrono.workspace = true
 h4rn-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

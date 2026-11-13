@@ -42,6 +42,7 @@ mod server;
 pub mod skills;
 mod terminal;
 mod transport;
+mod usage;
 
 pub use binary::{
     BINARY_HEADER_LEN, BINARY_MAGIC, BINARY_VERSION, BinaryFrame, BinaryFrameError, BinaryKind,
@@ -85,6 +86,7 @@ pub use transport::{
     TransportPathKind, TransportPathState, TransportPathStatus, TransportSessionState,
     TransportStatus,
 };
+pub use usage::*;
 
 /// Version of the wire protocol implemented by this crate.
 ///

@@ -561,12 +561,50 @@ pub enum ClientRequest {
         /// Selection policy.
         policy: crate::proxy::ProxyFailoverPolicy,
     },
-    /// TODO(phase 6): query the usage ledger.
+    /// Legacy usage query, kept for wire compatibility.
+    ///
+    /// Superseded by [`Self::GetUsage`]; kept so the wire contract does not
+    /// rename a variant an older client may already know.
     UsageQuery {
         /// Optional lower bound.
         since: Option<DateTime<Utc>>,
         /// Optional host filter.
         host: Option<HostId>,
+    },
+    // ------------------------------------------------------------------
+    // Phase 5: metering, limits and auto-resume (ADR-024).
+    // ------------------------------------------------------------------
+    /// Query the durable usage ledger.
+    GetUsage {
+        /// What to aggregate over.
+        scope: crate::usage::UsageScope,
+        /// Thread id or workspace path, required for those scopes.
+        scope_id: Option<String>,
+        /// Half-open time range.
+        range: crate::usage::UsageRange,
+        /// Breakdown to produce.
+        group_by: crate::usage::UsageGroupBy,
+        /// Optional hour/day series.
+        bucket: Option<crate::usage::UsageBucket>,
+    },
+    /// Read known usage limits and the auto-resume policy.
+    GetLimits,
+    /// List persisted auto-resume schedules and limit history.
+    ListResets,
+    /// Cancel auto-resume for one thread.
+    CancelResume {
+        /// Thread whose schedule is cleared.
+        thread_id: ThreadId,
+    },
+    /// Resume a scheduled thread immediately instead of waiting for its reset.
+    ResumeNow {
+        /// Thread to resume.
+        thread_id: ThreadId,
+    },
+    /// Replace the daemon-wide auto-resume policy.
+    SetAutoResumePolicy {
+        /// New policy.
+        policy: crate::usage::AutoResumePolicy,
     },
     // ------------------------------------------------------------------
     // Forge (pull request) operations. Credentials stay in the daemon's

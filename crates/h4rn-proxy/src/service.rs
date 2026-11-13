@@ -292,6 +292,31 @@ impl ProxyService {
         Ok(self.test(id).await?.capabilities)
     }
 
+    /// Reads per-call throughput from the fork's management API.
+    ///
+    /// Returns an empty list when the profile is reachable but the fork's
+    /// performance route is absent: callers use [`Self::profiles`] capabilities
+    /// to decide whether polling is worthwhile.
+    pub async fn performance(
+        &self,
+        id: &ProxyProfileId,
+        since: chrono::DateTime<Utc>,
+        until: chrono::DateTime<Utc>,
+        limit: u32,
+    ) -> Result<Vec<crate::performance::PerformanceCall>, ProxyError> {
+        let resolved = self.store.get(id).ok_or_else(|| not_found(id))?;
+        let capabilities = self.capabilities(id).await?;
+        if !capabilities.performance {
+            return Err(ProxyError::new(
+                ProxyErrorKind::ManagementUnavailable,
+                "this CLIProxyAPI does not expose /v8/management/performance",
+            )
+            .with_hint("Metering falls back to the harness stream; nothing was counted twice"));
+        }
+        crate::performance::read_performance(&self.http, &target(&resolved), since, until, limit)
+            .await
+    }
+
     /// Drops cached capabilities and catalogue for one profile.
     pub fn invalidate(&self, id: &ProxyProfileId) {
         self.capabilities

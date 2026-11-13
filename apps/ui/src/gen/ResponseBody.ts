@@ -21,6 +21,7 @@ import type { FsListing } from "./FsListing";
 import type { FsTurnChanges } from "./FsTurnChanges";
 import type { FsWriteResult } from "./FsWriteResult";
 import type { HostSummary } from "./HostSummary";
+import type { LimitsReport } from "./LimitsReport";
 import type { McpImportPreview } from "./McpImportPreview";
 import type { McpServerView } from "./McpServerView";
 import type { McpTestCallResult } from "./McpTestCallResult";
@@ -30,6 +31,8 @@ import type { ProxyLimits } from "./ProxyLimits";
 import type { ProxyModelCatalog } from "./ProxyModelCatalog";
 import type { ProxyProfile } from "./ProxyProfile";
 import type { ProxyTestReport } from "./ProxyTestReport";
+import type { Resets } from "./Resets";
+import type { ResumeSchedule } from "./ResumeSchedule";
 import type { SeqEvent } from "./SeqEvent";
 import type { SkillConflict } from "./SkillConflict";
 import type { SkillDetail } from "./SkillDetail";
@@ -44,6 +47,7 @@ import type { ThreadSummary } from "./ThreadSummary";
 import type { TurnId } from "./TurnId";
 import type { UploadState } from "./UploadState";
 import type { UploadTicket } from "./UploadTicket";
+import type { UsageReport } from "./UsageReport";
 
 /**
  * Successful response payloads.
@@ -324,4 +328,20 @@ tools: Array<McpToolInfo>, } | { "type": "mcp_call",
 /**
  * Flattened result.
  */
-result: McpTestCallResult, } | { "type": "ack" };
+result: McpTestCallResult, } | { "type": "usage_report", 
+/**
+ * The report.
+ */
+report: UsageReport, } | { "type": "limits", 
+/**
+ * Limits and policy.
+ */
+report: LimitsReport, } | { "type": "resets", 
+/**
+ * Schedules and history.
+ */
+resets: Resets, } | { "type": "resume_changed", 
+/**
+ * The current schedule, or `None` when none remains.
+ */
+schedule: ResumeSchedule | null, } | { "type": "ack" };

@@ -28,10 +28,13 @@ use h4rn_core::{
 use h4rn_harness::{
     AttachmentRef, HarnessEvent, HarnessInstall, HarnessSession, SessionSpec, UserInput,
 };
+use h4rn_meter::{LimitHit, MeterHub, TurnContext, TurnMeter};
 use h4rn_protocol::{
     AgentState, ApprovalDecision, ApprovalKind, Attachment, AttachmentId, DeviceId, Event,
-    HarnessKind, HostId, Item, MessageRole, ProtoError, ProtoErrorCode, RuntimeMode, ThreadFilter,
-    ThreadId, ThreadSummary, ThreadTab, ToolCallStatus, TurnId, TurnStatus, Usage, WorktreeRequest,
+    HarnessKind, HostId, Item, LimitSource, MessageRole, ProtoError, ProtoErrorCode,
+    ResumeFailover, ResumeSchedule, ResumeState, RuntimeMode, ThreadFilter, ThreadId,
+    ThreadSummary, ThreadTab, ToolCallStatus, TurnId, TurnStatus, Usage, UsageReport,
+    WorktreeRequest,
 };
 use tokio::sync::{Mutex, broadcast};
 use tokio::task::JoinHandle;
@@ -218,6 +221,10 @@ struct Inner {
     proxy: std::sync::OnceLock<Arc<h4rn_proxy::ProxyService>>,
     /// MCP endpoint/token injection, installed once the daemon binds.
     mcp: std::sync::OnceLock<Arc<dyn McpSessionProvider>>,
+    /// Durable metering, limits and auto-resume (ADR-024).
+    meter: std::sync::OnceLock<Arc<MeterHub>>,
+    /// Throttles the due-schedule scan to about once a second.
+    last_schedule_check: std::sync::Mutex<Option<std::time::Instant>>,
 }
 
 type ThreadHandle = Arc<Mutex<ThreadRecord>>;
@@ -232,6 +239,8 @@ struct ThreadRecord {
     pending_approvals: BTreeMap<String, PendingApproval>,
     queued: VecDeque<UserInput>,
     last_signature: Option<SummarySignature>,
+    /// A limit hit whose auto-resume schedule is armed for this thread.
+    scheduled_limit: Option<ScheduledLimit>,
     closed: bool,
 }
 
@@ -240,6 +249,17 @@ struct ActiveTurn {
     item_id: String,
     text: String,
     usage: Usage,
+    meter: TurnMeter,
+    /// Tool call id -> whether the call is currently counted as running.
+    tools: HashMap<String, bool>,
+    last_tick: Option<std::time::Instant>,
+}
+
+/// The limit observation that keeps a thread in `Scheduled`.
+#[derive(Clone, Debug)]
+struct ScheduledLimit {
+    reset_at: Option<DateTime<Utc>>,
+    auto_resume: bool,
 }
 
 struct PendingApproval {
@@ -305,6 +325,9 @@ impl ThreadRecord {
             item_id: item_id.clone(),
             text: String::new(),
             usage: Usage::default(),
+            meter: TurnMeter::new(_at),
+            tools: HashMap::new(),
+            last_tick: None,
         });
         self.last_turn_id = Some(turn_id.clone());
         (turn_id, item_id)
@@ -344,6 +367,8 @@ impl ThreadManager {
                 snapshots: std::sync::OnceLock::new(),
                 proxy: std::sync::OnceLock::new(),
                 mcp: std::sync::OnceLock::new(),
+                meter: std::sync::OnceLock::new(),
+                last_schedule_check: std::sync::Mutex::new(None),
             }),
         };
         manager.inner.restore().await?;
@@ -367,6 +392,19 @@ impl ThreadManager {
     /// after the hub's loopback endpoint is bound.
     pub fn set_mcp_provider(&self, provider: Arc<dyn McpSessionProvider>) {
         let _ = self.inner.mcp.set(provider);
+    }
+
+    /// Attaches durable metering, limits and auto-resume (ADR-024).
+    ///
+    /// Called once during daemon assembly. The ticker keeps running before this
+    /// so a slow ledger open never delays restarted thread projections.
+    pub fn set_meter(&self, meter: Arc<MeterHub>) {
+        let _ = self.inner.meter.set(meter);
+    }
+
+    /// The metering hub, when one has been attached.
+    pub fn meter(&self) -> Option<Arc<MeterHub>> {
+        self.inner.meter.get().cloned()
     }
 
     /// Acquires the append lock so a global replay is a gap-free prefix.
@@ -488,6 +526,7 @@ impl ThreadManager {
             pending_approvals: BTreeMap::new(),
             queued: VecDeque::new(),
             last_signature: None,
+            scheduled_limit: None,
             closed: false,
         };
         let (turn_id, _) = record.begin_turn(now);
@@ -595,6 +634,10 @@ impl ThreadManager {
         }
 
         let (turn_id, _) = record.begin_turn(now);
+        let stale_schedule = record.scheduled_limit.take().is_some();
+        if stale_schedule && let Some(meter) = self.inner.meter.get() {
+            let _ = meter.cancel_schedule(thread_id).await;
+        }
         let domain = vec![
             ThreadEvent::MessageReceived {
                 source: h4rn_core::MessageSource::User,
@@ -855,6 +898,113 @@ impl ThreadManager {
         summaries
     }
 
+    /// Aggregated usage from the local ledger.
+    pub async fn usage_report(
+        &self,
+        query: h4rn_meter::ReportQuery,
+    ) -> Result<UsageReport, ManagerError> {
+        let meter = self
+            .meter()
+            .ok_or_else(|| ManagerError::Unsupported("metering is not enabled".into()))?;
+        meter
+            .report(query)
+            .await
+            .map_err(|error| ManagerError::Internal(error.to_string()))
+    }
+
+    /// Known limits plus the auto-resume policy.
+    pub async fn limits_report(&self) -> Result<h4rn_protocol::LimitsReport, ManagerError> {
+        let meter = self
+            .meter()
+            .ok_or_else(|| ManagerError::Unsupported("metering is not enabled".into()))?;
+        meter
+            .limits_report()
+            .await
+            .map_err(|error| ManagerError::Internal(error.to_string()))
+    }
+
+    /// Persisted schedules and limit history.
+    pub async fn resets(&self) -> Result<h4rn_protocol::Resets, ManagerError> {
+        let meter = self
+            .meter()
+            .ok_or_else(|| ManagerError::Unsupported("metering is not enabled".into()))?;
+        meter
+            .resets()
+            .await
+            .map_err(|error| ManagerError::Internal(error.to_string()))
+    }
+
+    /// Replaces the daemon-wide auto-resume policy.
+    pub fn set_auto_resume_policy(&self, policy: h4rn_protocol::AutoResumePolicy) {
+        if let Some(meter) = self.meter() {
+            meter.set_policy(policy);
+        }
+    }
+
+    /// Cancels auto-resume for one thread.
+    pub async fn cancel_resume(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Option<ResumeSchedule>, ManagerError> {
+        let meter = self
+            .meter()
+            .ok_or_else(|| ManagerError::Unsupported("metering is not enabled".into()))?;
+        let schedule = meter
+            .cancel_schedule(thread_id)
+            .await
+            .map_err(|error| ManagerError::Internal(error.to_string()))?;
+        if let Ok(handle) = self.inner.handle(thread_id).await {
+            let mut record = handle.lock().await;
+            record.scheduled_limit = None;
+            if record.state.phase == h4rn_core::Phase::RateLimited {
+                self.inner
+                    .emit(
+                        &mut record,
+                        vec![ThreadEvent::LimitAutoResumeSet {
+                            auto_resume: false,
+                            at: Utc::now(),
+                        }],
+                        Vec::new(),
+                    )
+                    .await?;
+            }
+        }
+        Ok(schedule)
+    }
+
+    /// Fires a thread's schedule immediately.
+    pub async fn resume_now(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Option<ResumeSchedule>, ManagerError> {
+        let meter = self
+            .meter()
+            .ok_or_else(|| ManagerError::Unsupported("metering is not enabled".into()))?;
+        let mut schedule = meter
+            .schedules()
+            .await
+            .map_err(|error| ManagerError::Internal(error.to_string()))?
+            .into_iter()
+            .find(|schedule| &schedule.thread_id == thread_id)
+            .ok_or_else(|| {
+                ManagerError::NotFound(format!("thread {thread_id} has no resume schedule"))
+            })?;
+        if !matches!(
+            schedule.state,
+            ResumeState::Scheduled | ResumeState::Waiting
+        ) {
+            return Err(ManagerError::Conflict(format!(
+                "thread {thread_id}'s resume schedule is already {:?}",
+                schedule.state
+            )));
+        }
+        schedule.resume_at = Utc::now();
+        self.inner
+            .fire_schedule(schedule)
+            .await
+            .map_err(ManagerError::Internal)
+    }
+
     /// Stops the ticker, interrupts live turns and shuts every harness session.
     pub async fn shutdown(&self) {
         self.inner.closed.store(true, Ordering::Relaxed);
@@ -1003,6 +1153,7 @@ impl Inner {
                 pending_approvals: BTreeMap::new(),
                 queued: VecDeque::new(),
                 last_signature: None,
+                scheduled_limit: None,
                 closed: false,
             };
 
@@ -1233,6 +1384,7 @@ impl Inner {
                 }
                 HarnessEvent::TextDelta { text } => {
                     if let Some(active) = record.active.as_mut() {
+                        active.meter.first_token(now);
                         active.text.push_str(&text);
                         let turn_id = active.turn_id.clone();
                         let item_id = active.item_id.clone();
@@ -1251,6 +1403,24 @@ impl Inner {
                     }
                 }
                 HarnessEvent::ToolCall { tool_call } => {
+                    if let Some(active) = record.active.as_mut() {
+                        match tool_call.status {
+                            ToolCallStatus::Running => {
+                                if active.tools.insert(tool_call.tool_call_id.clone(), true)
+                                    != Some(true)
+                                {
+                                    active.meter.tool_started(now);
+                                }
+                            }
+                            ToolCallStatus::Completed
+                            | ToolCallStatus::Failed
+                            | ToolCallStatus::Denied => {
+                                if active.tools.remove(&tool_call.tool_call_id).is_some() {
+                                    active.meter.tool_finished(now);
+                                }
+                            }
+                        }
+                    }
                     let turn_id = record.turn_id_for_event();
                     wire.push(Event::ToolCall {
                         thread_id: thread_id.clone(),
@@ -1331,12 +1501,57 @@ impl Inner {
                 HarnessEvent::Usage { usage } => {
                     if let Some(active) = record.active.as_mut() {
                         active.usage.merge(&usage);
+                        active.meter.add_usage(&usage);
                     }
                 }
                 HarnessEvent::LimitHit {
                     reset_at,
                     auto_resume,
                 } => {
+                    if let Some(meter) = self.meter.get() {
+                        let hit = LimitHit {
+                            thread_id: Some(thread_id.clone()),
+                            harness: Some(record.meta.harness),
+                            account: None,
+                            provider: provider_for_model(&record.meta.model),
+                            model: Some(record.meta.model.clone()),
+                            reset_at,
+                            message: None,
+                            consumed: None,
+                            limit: None,
+                            source: LimitSource::Harness,
+                        };
+                        if let Err(error) = meter.record_limit(hit).await {
+                            tracing::warn!(%error, "could not record the usage limit");
+                        }
+                        if auto_resume {
+                            let prompt = meter.policy().prompt;
+                            match meter
+                                .arm_schedule(&thread_id, reset_at, prompt, None, now)
+                                .await
+                            {
+                                Ok(_) => {
+                                    record.scheduled_limit = Some(ScheduledLimit {
+                                        reset_at,
+                                        auto_resume,
+                                    });
+                                }
+                                Err(error) => {
+                                    let wire = vec![Event::Error {
+                                        thread_id: Some(thread_id.clone()),
+                                        message: "could not schedule the automatic resume".into(),
+                                        hint: Some(format!(
+                                            "The usage limit is still recorded; retry manually ({error})"
+                                        )),
+                                        retryable: true,
+                                    }];
+                                    let _ = self.emit(&mut record, Vec::new(), wire).await;
+                                }
+                            }
+                        }
+                        // The ledger row itself is written on TurnCompleted;
+                        // the schedule survives the summary re-projection.
+                    }
                     domain.push(ThreadEvent::UsageLimitHit {
                         reset_at,
                         auto_resume,
@@ -1350,9 +1565,14 @@ impl Inner {
                 }
                 HarnessEvent::TurnCompleted { status, usage } => {
                     completed = true;
-                    let active = record.active.take();
-                    let (turn_id, item_id, text, turn_usage) = match active {
-                        Some(active) => (active.turn_id, active.item_id, active.text, active.usage),
+                    let mut active = record.active.take();
+                    let (turn_id, item_id, text, turn_usage) = match &active {
+                        Some(active) => (
+                            active.turn_id.clone(),
+                            active.item_id.clone(),
+                            active.text.clone(),
+                            active.usage.clone(),
+                        ),
                         None => (
                             record.turn_id_for_event(),
                             fresh_item_id("assistant"),
@@ -1364,7 +1584,7 @@ impl Inner {
                         && usage.cost_micros == 0
                         && usage.duration_ms == 0
                     {
-                        turn_usage
+                        turn_usage.clone()
                     } else {
                         usage
                     };
@@ -1388,7 +1608,55 @@ impl Inner {
                         usage
                     };
                     record.meta.usage.merge(&usage);
+
+                    // The ledger row is written before the turn completion is
+                    // projected, so a client that reacts to `TurnCompleted`
+                    // already sees the cost in `GetUsage`.
+                    if let Some(meter) = self.meter.get() {
+                        let context = TurnContext {
+                            thread_id: Some(record.meta.thread_id.as_str().to_owned()),
+                            run_id: Some(turn_id.as_str().to_owned()),
+                            workspace: Some(record.meta.workspace_path.clone()),
+                            machine: Some(self.local_host.as_str().to_owned()),
+                            account: None,
+                            harness: Some(record.meta.harness.slug().to_owned()),
+                            model: Some(record.meta.model.clone()),
+                            provider: provider_for_model(&record.meta.model),
+                            credential: None,
+                        };
+                        let metered = if let Some(active) = &mut active {
+                            active.meter.set_final_usage(&usage);
+                            Some(active.meter.finish(
+                                now,
+                                status,
+                                meter.prices(),
+                                &record.meta.model,
+                            ))
+                        } else {
+                            let mut turn = TurnMeter::new(now);
+                            turn.set_final_usage(&usage);
+                            Some(turn.finish(now, status, meter.prices(), &record.meta.model))
+                        };
+                        if let Some(metered) = metered
+                            && let Err(error) = meter.record_turn(context, &metered).await
+                        {
+                            tracing::warn!(%error, "could not write the usage ledger row");
+                        }
+                    }
+
                     domain.push(ThreadEvent::TurnCompleted { status, at: now });
+                    // A limit hit earlier in this turn must survive the
+                    // completion event: the thread stays Working/Scheduled
+                    // until the scheduled resume starts.
+                    if let Some(limit) = record.scheduled_limit.clone()
+                        && limit.auto_resume
+                    {
+                        domain.push(ThreadEvent::UsageLimitHit {
+                            reset_at: limit.reset_at,
+                            auto_resume: true,
+                            at: now,
+                        });
+                    }
                     if !text.is_empty() {
                         wire.push(Event::ItemCompleted {
                             thread_id: thread_id.clone(),
@@ -1486,6 +1754,11 @@ impl Inner {
             if record.closed || record.active.is_some() {
                 return;
             }
+            // A rate-limited thread keeps its queue until the scheduled resume
+            // starts; otherwise the queued turn would hit the same limit now.
+            if record.scheduled_limit.is_some() {
+                return;
+            }
             let Some(input) = record.queued.pop_front() else {
                 return;
             };
@@ -1513,7 +1786,195 @@ impl Inner {
         }
     }
 
-    async fn tick(&self) {
+    /// Emits at most one `UsageTick` per second for each running turn.
+    async fn emit_usage_ticks(&self) {
+        let Some(meter) = self.meter.get().cloned() else {
+            return;
+        };
+        let handles: Vec<ThreadHandle> = {
+            let threads = self.threads.lock().await;
+            threads.values().cloned().collect()
+        };
+        let now = Utc::now();
+        for handle in handles {
+            let mut record = handle.lock().await;
+            let thread_id = record.meta.thread_id.clone();
+            let Some(active) = record.active.as_mut() else {
+                continue;
+            };
+            let due = active
+                .last_tick
+                .is_none_or(|last| last.elapsed() >= Duration::from_secs(1));
+            if !due {
+                continue;
+            }
+            active.last_tick = Some(std::time::Instant::now());
+            let live = active.meter.live(now);
+            let run_id = Some(active.turn_id.as_str().to_owned());
+            drop(record);
+            meter.tick(&thread_id, run_id, live, now);
+        }
+    }
+
+    /// Fires every schedule whose reset has passed.
+    async fn fire_due_schedules(self: &Arc<Self>) {
+        let Some(meter) = self.meter.get().cloned() else {
+            return;
+        };
+        {
+            let mut last = self
+                .last_schedule_check
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if last.is_some_and(|at| at.elapsed() < Duration::from_secs(1)) {
+                return;
+            }
+            *last = Some(std::time::Instant::now());
+        }
+        let due = match meter.due_schedules(Utc::now()).await {
+            Ok(due) => due,
+            Err(error) => {
+                tracing::warn!(%error, "could not read due auto-resume schedules");
+                return;
+            }
+        };
+        for schedule in due {
+            if let Err(error) = self.fire_schedule(schedule).await {
+                tracing::warn!(%error, "auto-resume failed");
+            }
+        }
+    }
+
+    /// Starts a scheduled thread's resumed turn.
+    async fn fire_schedule(
+        self: &Arc<Self>,
+        mut schedule: ResumeSchedule,
+    ) -> Result<Option<ResumeSchedule>, String> {
+        let Some(meter) = self.meter.get().cloned() else {
+            return Err("metering is not enabled".into());
+        };
+        let handle = match self.handle(&schedule.thread_id).await {
+            Ok(handle) => handle,
+            Err(error) => {
+                let _ = meter
+                    .finish_schedule(
+                        schedule,
+                        ResumeState::Cancelled,
+                        Some(format!("the thread no longer exists: {error}")),
+                    )
+                    .await;
+                return Ok(None);
+            }
+        };
+        let mut record = handle.lock().await;
+        if record.closed {
+            let _ = meter
+                .finish_schedule(
+                    schedule,
+                    ResumeState::Cancelled,
+                    Some("the thread is closed".into()),
+                )
+                .await;
+            return Ok(None);
+        }
+        if record.active.is_some() {
+            let thread_id = record.meta.thread_id.clone();
+            let _ = self
+                .emit(
+                    &mut record,
+                    Vec::new(),
+                    vec![Event::Error {
+                        thread_id: Some(thread_id),
+                        message: "auto-resume found the thread already running".into(),
+                        hint: Some(
+                            "The schedule was left in place; it retries on the next tick".into(),
+                        ),
+                        retryable: true,
+                    }],
+                )
+                .await;
+            return Ok(None);
+        }
+
+        // A failover choice is made when the reset fires, not when the limit is
+        // observed: model cooldowns may have expired in the meantime.
+        let policy = meter.policy();
+        if schedule.failover.is_none()
+            && policy.failover
+            && let Some(proxy) = self.proxy.get()
+            && let Some(applied) = proxy.override_for(record.meta.harness, &record.meta.model)
+            && let Ok(Some(choice)) = proxy
+                .pick_failover(
+                    &applied.profile_id,
+                    &record.meta.model,
+                    &h4rn_protocol::ProxyFailoverPolicy::default(),
+                )
+                .await
+        {
+            record.meta.model = choice.model.clone();
+            schedule.failover = Some(ResumeFailover {
+                model: choice.model,
+                account: choice.account,
+                reason: choice.reason,
+            });
+        }
+
+        let prompt = schedule.prompt.clone();
+        let now = Utc::now();
+        record.scheduled_limit = None;
+        let (turn_id, _) = record.begin_turn(now);
+        let domain = vec![
+            ThreadEvent::MessageReceived {
+                source: h4rn_core::MessageSource::User,
+                at: now,
+            },
+            ThreadEvent::TurnQueued { at: now },
+            ThreadEvent::TurnStarted { at: now },
+        ];
+        let wire = vec![
+            Event::ItemCompleted {
+                thread_id: record.meta.thread_id.clone(),
+                turn_id: turn_id.clone(),
+                item: Item::Message {
+                    item_id: user_item_id(&turn_id),
+                    role: MessageRole::User,
+                    text: prompt.clone(),
+                    attachments: Vec::new(),
+                },
+            },
+            Event::TurnStarted {
+                thread_id: record.meta.thread_id.clone(),
+                turn_id,
+                started_at: now,
+            },
+        ];
+        if let Err(error) = self.emit(&mut record, domain, wire).await {
+            let schedule = meter
+                .finish_schedule(schedule, ResumeState::Waiting, Some(error.to_string()))
+                .await
+                .map_err(|error| error.to_string())?;
+            return Ok(Some(schedule));
+        }
+        let needs_session = record.session.is_none();
+        drop(record);
+
+        let fired = meter
+            .finish_schedule(schedule, ResumeState::Fired, None)
+            .await
+            .map_err(|error| error.to_string())?;
+        let input = UserInput {
+            text: prompt,
+            attachments: Vec::new(),
+        };
+        if needs_session {
+            self.spawn_session(handle, Some(input));
+        } else {
+            self.deliver(handle, input).await;
+        }
+        Ok(Some(fired))
+    }
+
+    async fn tick(self: &Arc<Self>) {
         let handles: Vec<ThreadHandle> = {
             let threads = self.threads.lock().await;
             threads.values().cloned().collect()
@@ -1542,6 +2003,9 @@ impl Inner {
                 Err(error) => tracing::warn!(%error, "failed to append derived tab change"),
             }
         }
+
+        self.emit_usage_ticks().await;
+        self.fire_due_schedules().await;
     }
 }
 
@@ -1622,6 +2086,22 @@ fn tool_call_file_paths(input: Option<&serde_json::Value>) -> Vec<String> {
         }
     }
     paths
+}
+
+/// A best-effort provider label for dedupe and per-provider reporting.
+fn provider_for_model(model: &str) -> Option<String> {
+    let model = model.to_ascii_lowercase();
+    if model.contains("claude") {
+        Some("anthropic".into())
+    } else if model.starts_with("gpt") || model.contains("openai") {
+        Some("openai".into())
+    } else if model.contains("gemini") {
+        Some("google".into())
+    } else if model.contains("grok") {
+        Some("xai".into())
+    } else {
+        None
+    }
 }
 
 fn title_from_prompt(prompt: &str, workspace: &str) -> String {

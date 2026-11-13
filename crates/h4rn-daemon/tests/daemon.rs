@@ -15,9 +15,10 @@ use h4rn_daemon::daemon::DaemonBuilder;
 use h4rn_daemon::threads::ThreadManagerOptions;
 use h4rn_harness::FakeHarness;
 use h4rn_protocol::{
-    ApprovalDecision, ClientFrame, ClientRequest, DeviceId, DeviceInfo, Event, HarnessKind, HostId,
-    ProtoError, ProtoErrorCode, ResponseBody, ServerFrame, ThreadFilter, ThreadId, ThreadTab,
-    Topic, TurnStatus,
+    AgentState, ApprovalDecision, AutoResumePolicy, ClientFrame, ClientRequest, DeviceId,
+    DeviceInfo, Event, HarnessKind, HostId, Item, MessageRole, ProtoError, ProtoErrorCode,
+    ProxyProfileDraft, ResponseBody, ResumeState, ServerFrame, ThreadFilter, ThreadId, ThreadTab,
+    Topic, TurnStatus, UsageGroupBy, UsageRange, UsageScope,
 };
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
@@ -199,7 +200,8 @@ impl Client {
                 ServerFrame::Event { seq, event } => return (seq, event),
                 ServerFrame::Response { .. }
                 | ServerFrame::TerminalEvent { .. }
-                | ServerFrame::ProxyEvent { .. } => {}
+                | ServerFrame::ProxyEvent { .. }
+                | ServerFrame::UsageEvent { .. } => {}
             }
         }
     }
@@ -275,12 +277,22 @@ async fn create_with_host(
     prompt: &str,
     harness: HarnessKind,
 ) -> h4rn_protocol::ThreadSummary {
+    create_with_model(client, host, prompt, harness, "fake-model").await
+}
+
+async fn create_with_model(
+    client: &mut Client,
+    host: HostId,
+    prompt: &str,
+    harness: HarnessKind,
+    model: &str,
+) -> h4rn_protocol::ThreadSummary {
     let result = client
         .request(ClientRequest::CreateThread {
             host,
             harness,
             workspace_path: "/tmp/h4rn-workspace".into(),
-            model: "fake-model".into(),
+            model: model.into(),
             prompt: prompt.into(),
             attachments: Vec::new(),
             runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
@@ -1103,6 +1115,458 @@ async fn skills_list_returns_the_install_matrix_and_conflicts() {
         ResponseBody::SkillConflicts { conflicts } => assert!(conflicts.is_empty()),
         other => panic!("unexpected conflicts response: {other:?}"),
     }
+
+    daemon.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 5: metering, limits and auto-resume (ADR-024).
+// ---------------------------------------------------------------------------
+
+fn limit_script(
+    reset_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Vec<h4rn_harness::HarnessEvent> {
+    use h4rn_harness::HarnessEvent;
+    use h4rn_protocol::Usage;
+
+    vec![
+        HarnessEvent::Usage {
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                ..Usage::default()
+            },
+        },
+        HarnessEvent::LimitHit {
+            reset_at,
+            auto_resume: true,
+        },
+        HarnessEvent::TurnCompleted {
+            status: TurnStatus::Failed,
+            usage: Usage::default(),
+        },
+    ]
+}
+
+fn resume_script() -> Vec<h4rn_harness::HarnessEvent> {
+    use h4rn_harness::HarnessEvent;
+    use h4rn_protocol::Usage;
+
+    vec![
+        HarnessEvent::TextDelta {
+            text: "resumed".into(),
+        },
+        HarnessEvent::TurnCompleted {
+            status: TurnStatus::Completed,
+            usage: Usage {
+                input_tokens: 1,
+                output_tokens: 2,
+                ..Usage::default()
+            },
+        },
+    ]
+}
+
+fn resume_options() -> ThreadManagerOptions {
+    ThreadManagerOptions {
+        settings: LifecycleSettings::default()
+            .with_working_exit_grace(chrono::TimeDelta::milliseconds(80))
+            .with_stale_bypass(chrono::TimeDelta::seconds(60)),
+        tick_interval: Duration::from_millis(20),
+    }
+}
+
+async fn stable_policy(client: &mut Client, failover: bool) {
+    client
+        .request(ClientRequest::SetAutoResumePolicy {
+            policy: AutoResumePolicy {
+                failover,
+                jitter_ms: 0,
+                ..AutoResumePolicy::default()
+            },
+        })
+        .await
+        .expect("set auto-resume policy");
+}
+
+async fn thread_summary(client: &mut Client, thread_id: &ThreadId) -> h4rn_protocol::ThreadSummary {
+    match client
+        .request(ClientRequest::GetThread {
+            thread_id: thread_id.clone(),
+            since_seq: 0,
+        })
+        .await
+        .expect("get thread")
+    {
+        ResponseBody::Thread { summary, .. } => summary,
+        other => panic!("unexpected GetThread response: {other:?}"),
+    }
+}
+
+async fn thread_usage(client: &mut Client, thread_id: &ThreadId) -> h4rn_protocol::UsageReport {
+    match client
+        .request(ClientRequest::GetUsage {
+            scope: UsageScope::Thread,
+            scope_id: Some(thread_id.as_str().to_owned()),
+            range: UsageRange::default(),
+            group_by: UsageGroupBy::None,
+            bucket: None,
+        })
+        .await
+        .expect("get usage")
+    {
+        ResponseBody::UsageReport { report } => report,
+        other => panic!("unexpected GetUsage response: {other:?}"),
+    }
+}
+
+async fn schedules(client: &mut Client) -> Vec<h4rn_protocol::ResumeSchedule> {
+    match client
+        .request(ClientRequest::ListResets)
+        .await
+        .expect("list resets")
+    {
+        ResponseBody::Resets { resets } => resets.schedules,
+        other => panic!("unexpected ListResets response: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_limit_hit_stays_working_and_auto_resumes_at_the_provider_reset() {
+    let reset_at = chrono::Utc::now() + chrono::Duration::milliseconds(200);
+    let daemon = boot_with(
+        resume_options(),
+        FakeHarness::with_session_scripts(vec![limit_script(Some(reset_at)), resume_script()]),
+    )
+    .await;
+    let host = host_id_for(&daemon).await;
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    stable_policy(&mut client, false).await;
+    let summary = create_with_model(
+        &mut client,
+        host,
+        "do the thing",
+        HarnessKind::ClaudeCode,
+        "claude-sonnet-5",
+    )
+    .await;
+    let thread_id = summary.thread_id;
+
+    let (_, event) = client
+        .wait_event(|event| matches!(event, Event::UsageLimitHit { .. }))
+        .await;
+    match event {
+        Event::UsageLimitHit {
+            thread_id: limited,
+            reset_at: Some(at),
+            auto_resume,
+        } => {
+            assert_eq!(limited, thread_id);
+            assert_eq!(at, reset_at);
+            assert!(auto_resume);
+        }
+        other => panic!("unexpected limit event: {other:?}"),
+    }
+
+    let (_, status) = client.wait_for_turn_completed().await;
+    assert_eq!(status, TurnStatus::Failed);
+    let limited = thread_summary(&mut client, &thread_id).await;
+    assert_eq!(limited.tab, ThreadTab::Working);
+    assert_eq!(limited.agent_state, AgentState::Scheduled);
+
+    match client
+        .request(ClientRequest::GetLimits)
+        .await
+        .expect("limits")
+    {
+        ResponseBody::Limits { report } => assert!(!report.limits.is_empty()),
+        other => panic!("unexpected GetLimits response: {other:?}"),
+    }
+    let persisted = schedules(&mut client).await;
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].thread_id, thread_id);
+    assert_eq!(persisted[0].state, ResumeState::Scheduled);
+
+    // The scheduled resume sends the policy prompt and starts a new turn.
+    client
+        .wait_event(|event| {
+            matches!(
+                event,
+                Event::ItemCompleted {
+                    item: Item::Message { role: MessageRole::User, text, .. },
+                    ..
+                } if text.contains("usage limit reset")
+            )
+        })
+        .await;
+    client
+        .wait_event(|event| matches!(event, Event::TurnStarted { .. }))
+        .await;
+    let (_, status) = client.wait_for_turn_completed().await;
+    assert_eq!(status, TurnStatus::Completed);
+
+    let usage = thread_usage(&mut client, &thread_id).await;
+    assert_eq!(usage.totals.turns, 2);
+    assert_eq!(usage.totals.input_tokens, 11);
+    assert_eq!(usage.totals.output_tokens, 7);
+    assert!(usage.totals.cost_micros > 0);
+
+    let resets = schedules(&mut client).await;
+    assert_eq!(resets[0].state, ResumeState::Fired);
+    assert!(resets[0].last_error.is_none());
+
+    let (_, done) = client.wait_for_tab(ThreadTab::Done).await;
+    assert_eq!(done.agent_state, AgentState::Done);
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn cancelling_auto_resume_returns_the_thread_to_rate_limited() {
+    let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+    let daemon = boot_with(
+        resume_options(),
+        FakeHarness::with_session_scripts(vec![limit_script(Some(reset_at)), resume_script()]),
+    )
+    .await;
+    let host = host_id_for(&daemon).await;
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    stable_policy(&mut client, false).await;
+    let summary = create_with_model(
+        &mut client,
+        host,
+        "do the thing",
+        HarnessKind::ClaudeCode,
+        "claude-sonnet-5",
+    )
+    .await;
+    let thread_id = summary.thread_id;
+
+    client
+        .wait_event(|event| matches!(event, Event::UsageLimitHit { .. }))
+        .await;
+    client.wait_for_turn_completed().await;
+
+    match client
+        .request(ClientRequest::CancelResume {
+            thread_id: thread_id.clone(),
+        })
+        .await
+        .expect("cancel resume")
+    {
+        ResponseBody::ResumeChanged {
+            schedule: Some(schedule),
+        } => assert_eq!(schedule.state, ResumeState::Cancelled),
+        other => panic!("unexpected CancelResume response: {other:?}"),
+    }
+
+    let cancelled = thread_summary(&mut client, &thread_id).await;
+    assert_eq!(cancelled.tab, ThreadTab::Done);
+    assert_eq!(cancelled.agent_state, AgentState::RateLimited);
+
+    let quiet = tokio::time::timeout(
+        Duration::from_millis(400),
+        client.wait_event(|event| matches!(event, Event::TurnStarted { .. })),
+    )
+    .await;
+    assert!(quiet.is_err(), "a cancelled schedule must not resume");
+
+    assert_eq!(
+        schedules(&mut client).await[0].state,
+        ResumeState::Cancelled
+    );
+
+    let error = client
+        .request(ClientRequest::ResumeNow {
+            thread_id: thread_id.clone(),
+        })
+        .await
+        .expect_err("a cancelled schedule cannot resume");
+    assert_eq!(error.code, ProtoErrorCode::Conflict);
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn resume_now_fires_a_scheduled_thread_without_waiting_for_the_reset() {
+    let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+    let daemon = boot_with(
+        resume_options(),
+        FakeHarness::with_session_scripts(vec![limit_script(Some(reset_at)), resume_script()]),
+    )
+    .await;
+    let host = host_id_for(&daemon).await;
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    stable_policy(&mut client, false).await;
+    let summary = create_with_model(
+        &mut client,
+        host,
+        "do the thing",
+        HarnessKind::ClaudeCode,
+        "claude-sonnet-5",
+    )
+    .await;
+    let thread_id = summary.thread_id;
+
+    client
+        .wait_event(|event| matches!(event, Event::UsageLimitHit { .. }))
+        .await;
+    client.wait_for_turn_completed().await;
+
+    match client
+        .request(ClientRequest::ResumeNow {
+            thread_id: thread_id.clone(),
+        })
+        .await
+        .expect("resume now")
+    {
+        ResponseBody::ResumeChanged {
+            schedule: Some(schedule),
+        } => assert_eq!(schedule.state, ResumeState::Fired),
+        other => panic!("unexpected ResumeNow response: {other:?}"),
+    }
+
+    client
+        .wait_event(|event| matches!(event, Event::TurnStarted { .. }))
+        .await;
+    let (_, status) = client.wait_for_turn_completed().await;
+    assert_eq!(status, TurnStatus::Completed);
+    assert_eq!(thread_usage(&mut client, &thread_id).await.totals.turns, 2);
+    assert_eq!(schedules(&mut client).await[0].state, ResumeState::Fired);
+
+    daemon.stop().await;
+}
+
+/// Matches a request that does *not* carry `name`.
+struct WithoutHeader(&'static str);
+
+impl wiremock::Match for WithoutHeader {
+    fn matches(&self, request: &wiremock::Request) -> bool {
+        !request.headers.contains_key(self.0)
+    }
+}
+
+async fn mock_proxy_catalog(server: &wiremock::MockServer) {
+    use serde_json::json;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(WithoutHeader("anthropic-version"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {"id": "claude-sonnet-5", "owned_by": "anthropic"},
+                {"id": "claude-opus-5", "owned_by": "anthropic"}
+            ]
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("anthropic-version", "2023-06-01"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "claude-sonnet-5", "type": "model"}]
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1beta/models"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v0/management/auth-files"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": []})))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn a_scheduled_resume_records_the_proxy_failover_choice() {
+    let server = wiremock::MockServer::start().await;
+    mock_proxy_catalog(&server).await;
+
+    let reset_at = chrono::Utc::now() + chrono::Duration::milliseconds(200);
+    let daemon = boot_with(
+        resume_options(),
+        FakeHarness::with_session_scripts(vec![limit_script(Some(reset_at)), resume_script()]),
+    )
+    .await;
+    let host = host_id_for(&daemon).await;
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    let profile = match client
+        .request(ClientRequest::AddProxyProfile {
+            profile: ProxyProfileDraft {
+                name: "mock-failover".into(),
+                base_url: server.uri(),
+                management_key: Some("mgmt-secret".into()),
+                api_key: Some("sk-client".into()),
+                default: true,
+            },
+        })
+        .await
+        .expect("add proxy profile")
+    {
+        ResponseBody::ProxyProfile { profile } => profile,
+        other => panic!("unexpected AddProxyProfile response: {other:?}"),
+    };
+    client
+        .request(ClientRequest::SetProxyHarnessOverride {
+            profile_id: profile.id.clone(),
+            harness: HarnessKind::ClaudeCode,
+            enabled: true,
+            default_model: None,
+        })
+        .await
+        .expect("enable proxy for Claude Code");
+    client
+        .request(ClientRequest::SetAutoResumePolicy {
+            policy: AutoResumePolicy {
+                failover: true,
+                max_wait_ms: 3_600_000,
+                prompt: "continue after the limit".into(),
+                jitter_ms: 0,
+            },
+        })
+        .await
+        .expect("set policy");
+
+    let summary = create_with_model(
+        &mut client,
+        host,
+        "do the thing",
+        HarnessKind::ClaudeCode,
+        "claude-sonnet-5",
+    )
+    .await;
+    let thread_id = summary.thread_id;
+
+    client
+        .wait_event(|event| matches!(event, Event::UsageLimitHit { .. }))
+        .await;
+    client.wait_for_turn_completed().await;
+    client
+        .wait_event(|event| matches!(event, Event::TurnStarted { .. }))
+        .await;
+    client.wait_for_turn_completed().await;
+
+    let schedule = schedules(&mut client).await.remove(0);
+    assert_eq!(schedule.state, ResumeState::Fired);
+    let failover = schedule.failover.expect("a failover choice was recorded");
+    assert_eq!(failover.model, "claude-opus-5");
+    assert!(failover.reason.contains("same family"));
+
+    let resumed = thread_summary(&mut client, &thread_id).await;
+    assert_eq!(resumed.model, "claude-opus-5");
 
     daemon.stop().await;
 }

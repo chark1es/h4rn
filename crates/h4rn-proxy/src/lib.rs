@@ -17,6 +17,7 @@ mod failover;
 mod limits;
 mod models;
 mod overrides;
+mod performance;
 mod probe;
 mod profiles;
 mod secret;
@@ -30,6 +31,7 @@ pub use overrides::{
     CODEX_KEY_ENV, HarnessOverride, ProxyTarget, anthropic_base, for_harness, gemini_base,
     openai_base, provider_id, resolve_model, root_base,
 };
+pub use performance::{PerformanceCall, read_performance};
 pub use probe::{ProbeTarget, probe};
 pub use profiles::{
     ActiveOverride, ProfileStore, ResolvedProfile, harness_kinds, recipe_note, recipe_verified,

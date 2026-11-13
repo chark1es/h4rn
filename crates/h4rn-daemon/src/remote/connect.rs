@@ -21,7 +21,7 @@ use h4rn_protocol::{
     DeviceGrantPollRequest, DeviceGrantPollResponse, DeviceGrantStartRequest,
     DeviceGrantStartResponse, DeviceGrantStatus, DeviceRegistration, MachineAddressesUpdate,
     MachineHostInput, MachineHostsUpdate, PairingClaimRequest, PairingClaimResponse,
-    PairingCreateRequest, PairingCreateResponse,
+    PairingCreateRequest, PairingCreateResponse, UsageSyncRequest, UsageSyncResponse,
 };
 use h4rn_transport::keys::DeviceIdentity;
 use reqwest::Method;
@@ -519,6 +519,12 @@ impl ConnectClient {
         request: &h4rn_protocol::SkillSyncPull,
     ) -> Result<h4rn_protocol::SkillSyncPullResponse> {
         self.authorized_json(Method::POST, "/v1/skills/sync/pull", Some(request))
+            .await
+    }
+
+    /// Pushes one idempotent usage batch to connect.
+    pub async fn post_usage(&self, request: &UsageSyncRequest) -> Result<UsageSyncResponse> {
+        self.authorized_json(Method::POST, "/v1/usage", Some(request))
             .await
     }
 
