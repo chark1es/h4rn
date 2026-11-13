@@ -5,6 +5,39 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### Phase 3 — encrypted multipath transport
+
+- **Noise E2E per path** (`h4rn-transport/src/noise.rs`):
+  `Noise_IK_25519_ChaChaPoly_BLAKE2s`, with `IKpsk2` for one-time pairing,
+  X25519 device identity plus Ed25519 signing key, daemon key pinning from the
+  pairing payload, an explicit allowlist/revocation policy, rekey budgets and a
+  session-bound prologue.
+- **Path-agnostic reliable session** (`src/session.rs`, `src/wire.rs`): 20-byte
+  clear packet header, 40-byte encrypted record header, per-direction 64-bit
+  sequences, cumulative ack plus 64-bit bitmap, bounded retransmit buffer,
+  fragmentation/reassembly, backpressure, 256-byte padding buckets, and an
+  opaque resume token carried inside the encrypted `Open` record.
+- **Client multipath engine** (`src/engine.rs`): parallel Noise probes for
+  direct, Tailscale and relay candidates, health pings, smoothed RTT, immediate
+  failover, hysteretic switch-back, and a transient `TransportStatus` event.
+- **Daemon `/secure` listener** (`h4rn-daemon`): `SecureService` over
+  WebSockets, a `SecureSocket` adapter that feeds the existing protocol loop,
+  detached-session resume, fail-closed `404` when disabled, and a `403` for
+  plaintext `/ws` on non-loopback binds. Enabled with `H4RN_SECURE=1` and
+  optional `H4RN_PAIRING_PSK`.
+- **wasm client** (`h4rn-transport-wasm`, `apps/ui/src/gen/transport-wasm`):
+  the same core compiled to `wasm32-unknown-unknown` with a `wasm-bindgen`
+  API, plus `apps/ui/src/lib/client/secure.ts` implementing the UI `Transport`
+  interface. TypeScript owns only sockets, timers and persisted opaque tokens.
+- **Protocol bindings**: `TransportStatus`, path/session enums and the
+  `transport_status` event, with regenerated TypeScript bindings.
+- **Tests**: handshake, revoked key and PSK pairing; loss/reorder/duplication;
+  failover without loss or duplication in under 2 s; hysteretic switch-back;
+  resume across reconnect; a real daemon Noise `CreateThread` with
+  `FakeHarness`; and a wasm handshake smoke test.
+- **Docs**: ADR-028/029/030 and [`docs/transport.md`](docs/transport.md)
+  covering protocol, threat model and failover.
+
 ### Phase 2 — more harnesses, terminal, attachments and IDE mode
 
 - **Codex adapter** (`h4rn-harness/src/codex.rs`): long-lived `codex app-server` sessions over

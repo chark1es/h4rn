@@ -5,7 +5,57 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Multipath, path-agnostic session transport (ADR-009)"
+description = "Multipath, path-agnostic, end-to-end encrypted session transport (ADR-009, ADR-010)"
 
 [dependencies]
+blake3.workspace = true
+chrono.workspace = true
+ed25519-dalek.workspace = true
+getrandom.workspace = true
 h4rn-protocol.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+snow.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+x25519-dalek.workspace = true
+
+[features]
+default = ["native"]
+# Async WebSocket client/server plumbing, the daemon session registry and the
+# OS keychain. The core state machines compile for wasm without any of it.
+native = [
+  "dep:async-trait",
+  "dep:futures",
+  "dep:tokio",
+  "dep:tokio-tungstenite",
+  "keychain",
+]
+# OS keychain storage for the device identity (ADR-016).
+keychain = ["dep:keyring"]
+
+[dependencies.async-trait]
+workspace = true
+optional = true
+
+[dependencies.futures]
+workspace = true
+optional = true
+
+[dependencies.keyring]
+workspace = true
+optional = true
+
+[dependencies.tokio]
+workspace = true
+optional = true
+
+[dependencies.tokio-tungstenite]
+workspace = true
+optional = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true

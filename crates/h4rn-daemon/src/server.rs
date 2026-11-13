@@ -13,23 +13,27 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{HeaderMap, StatusCode, header::SEC_WEBSOCKET_PROTOCOL};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Router, serve};
-use futures::{SinkExt, StreamExt};
+use futures::{Sink, SinkExt, Stream, StreamExt};
 use h4rn_protocol::{
     BINARY_HEADER_LEN, BinaryFrame, BinaryKind, ClientFrame, ClientRequest, DeviceId, DeviceInfo,
     Event, PROTOCOL_VERSION, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame,
     Topic,
 };
+use h4rn_transport::server::{Link, LinkError, SecureService, SessionSender};
+use h4rn_transport::session::AppFrame;
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio::sync::{Notify, mpsc, watch};
@@ -63,15 +67,22 @@ pub struct AppState {
     pub tokens: TokenStore,
     /// Workspace-scoped filesystem and git service for IDE mode.
     pub fs: Arc<FsService>,
+    /// Noise-encrypted multipath transport, when enabled.
+    pub secure: Option<Arc<SecureService>>,
     /// Server boot time, for `/healthz`.
     pub started: Instant,
 }
 
 /// Builds the daemon router.
+///
+/// `/secure` is always registered so a remote client gets a clear "not enabled"
+/// response instead of a 404, while plain WebSocket access stays loopback-only
+/// (ADR-009).
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/ws", get(ws_handler))
+        .route("/secure", get(secure_handler))
         .with_state(state)
 }
 
@@ -88,10 +99,25 @@ pub async fn healthz(State(state): State<AppState>) -> Json<serde_json::Value> {
 
 async fn ws_handler(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    // Plain WebSocket is unencrypted. It is only allowed on loopback; every
+    // remote path must use `/secure`, where Noise authenticates and encrypts.
+    if !peer.ip().is_loopback() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ProtoError::new(
+                ProtoErrorCode::Unauthorized,
+                "the plain WebSocket endpoint is loopback-only",
+                "Connect remotely over /secure, which requires the Noise handshake",
+            )),
+        )
+            .into_response();
+    }
+
     let protocol_header = headers
         .get(SEC_WEBSOCKET_PROTOCOL)
         .and_then(|value| value.to_str().ok());
@@ -113,6 +139,120 @@ async fn ws_handler(
         None => ws,
     };
     upgrade.on_upgrade(move |socket| handle_socket(socket, state))
+}
+
+/// Upgrades to the Noise-encrypted multipath transport.
+///
+/// A client dials this route on every candidate path; each socket gets a fresh
+/// handshake (ADR-010) and is bound to the logical session named in the packet
+/// header. The decrypted application frames then flow through the same
+/// [`handle_socket`] loop as plain WebSocket traffic.
+async fn secure_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> Response {
+    let Some(service) = state.secure.clone() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": "the secure transport is not enabled on this daemon",
+            })),
+        )
+            .into_response();
+    };
+    ws.on_upgrade(move |socket| async move {
+        let link = Box::new(WsLink { socket });
+        match service.accept(link).await {
+            Ok(handle) => {
+                let (sender, frames) = handle.into_parts();
+                handle_socket(SecureSocket { sender, frames }, state).await;
+            }
+            Err(error) => tracing::warn!(%error, "secure transport handshake failed"),
+        }
+    })
+}
+
+/// Adapts an axum WebSocket to the transport's packet-oriented [`Link`].
+struct WsLink {
+    socket: WebSocket,
+}
+
+#[async_trait::async_trait]
+impl Link for WsLink {
+    async fn send_packet(&mut self, packet: Vec<u8>) -> Result<(), LinkError> {
+        self.socket
+            .send(Message::Binary(packet.into()))
+            .await
+            .map_err(|error| LinkError::Transport(error.to_string()))
+    }
+
+    async fn recv_packet(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
+        loop {
+            match self.socket.recv().await {
+                Some(Ok(Message::Binary(bytes))) => return Ok(Some(bytes.to_vec())),
+                Some(Ok(Message::Close(_))) | None => return Ok(None),
+                // Text/ping frames are not transport packets; keep reading.
+                Some(Ok(_)) => {}
+                Some(Err(error)) => return Err(LinkError::Transport(error.to_string())),
+            }
+        }
+    }
+}
+
+/// Presents an established secure session as a `Sink`/`Stream` of WebSocket
+/// messages, so [`handle_socket`] is reused unchanged.
+struct SecureSocket {
+    sender: SessionSender,
+    frames: mpsc::Receiver<AppFrame>,
+}
+
+impl Stream for SecureSocket {
+    type Item = Result<Message, std::io::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match this.frames.poll_recv(cx) {
+            Poll::Ready(Some(frame)) => Poll::Ready(Some(Ok(if frame.binary {
+                Message::Binary(frame.payload.into())
+            } else {
+                Message::Text(String::from_utf8_lossy(&frame.payload).into_owned().into())
+            }))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl Sink<Message> for SecureSocket {
+    type Error = std::io::Error;
+
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+        let this = self.get_mut();
+        let frame = match item {
+            Message::Text(text) => AppFrame::text(text.as_str()),
+            Message::Binary(bytes) => AppFrame::binary(bytes.to_vec()),
+            // The secure transport carries its own liveness pings; a WebSocket
+            // ping from the application layer has no equivalent here.
+            Message::Ping(_) | Message::Pong(_) => return Ok(()),
+            Message::Close(_) => {
+                this.sender.close();
+                return Ok(());
+            }
+        };
+        this.sender
+            .send(frame)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::BrokenPipe, error.to_string()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.get_mut().sender.close();
+        Poll::Ready(Ok(()))
+    }
 }
 
 /// One WebSocket message queued for a connection.
@@ -146,7 +286,11 @@ impl Connection {
     }
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState) {
+async fn handle_socket<S, E>(socket: S, state: AppState)
+where
+    S: Sink<Message, Error = E> + Stream<Item = Result<Message, E>> + Unpin + Send + 'static,
+    E: std::fmt::Debug + Send + 'static,
+{
     let (sink, mut stream) = socket.split();
     let (tx, rx) = mpsc::channel::<Outbound>(OUTBOUND_CAPACITY);
     let overflowed = Arc::new(AtomicBool::new(false));
@@ -1049,13 +1193,15 @@ async fn forward_loop(
     }
 }
 
-async fn writer_loop(
-    mut sink: futures::stream::SplitSink<WebSocket, Message>,
+async fn writer_loop<S>(
+    mut sink: futures::stream::SplitSink<S, Message>,
     mut rx: mpsc::Receiver<Outbound>,
     overflowed: Arc<AtomicBool>,
     notify: Arc<Notify>,
     last_seq: Arc<AtomicU64>,
-) {
+) where
+    S: Sink<Message> + Unpin + Send + 'static,
+{
     loop {
         tokio::select! {
             biased;
@@ -1194,7 +1340,14 @@ pub async fn serve_listener(
     app: Router,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    serve(listener, app).with_graceful_shutdown(shutdown).await
+    // `ConnectInfo` is what lets `/ws` reject non-loopback peers and force
+    // them onto the Noise transport.
+    serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
 }
 
 /// Wraps a listener address for diagnostics.

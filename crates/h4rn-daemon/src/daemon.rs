@@ -1,10 +1,12 @@
 //! Daemon assembly: builder, bound listeners and graceful shutdown.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use h4rn_harness::Harness;
+use h4rn_transport::keys::{FileKeyStore, KEY_LEN, load_or_create};
+use h4rn_transport::server::{SecureOptions, SecureService};
 use tokio::net::TcpListener;
 
 use crate::auth::TokenStore;
@@ -27,6 +29,7 @@ pub struct DaemonBuilder {
     journal: Option<Arc<dyn Journal>>,
     options: ThreadManagerOptions,
     supervisor: Arc<ProcessSupervisor>,
+    secure: Option<Arc<SecureService>>,
 }
 
 impl DaemonBuilder {
@@ -39,7 +42,17 @@ impl DaemonBuilder {
             journal: None,
             options: ThreadManagerOptions::default(),
             supervisor: Arc::new(ProcessSupervisor::new()),
+            secure: None,
         }
+    }
+
+    /// Enables the Noise-encrypted multipath transport (ADR-009, ADR-010).
+    ///
+    /// Without this (and without `H4RN_SECURE=1`) `/secure` answers 404 and
+    /// remote clients are expected to use an SSH tunnel or Tailscale.
+    pub fn with_secure(mut self, secure: Arc<SecureService>) -> Self {
+        self.secure = Some(secure);
+        self
     }
 
     /// Replaces the harness catalog wholesale.
@@ -157,6 +170,11 @@ impl DaemonBuilder {
         // Provision on first serve so a client has a token to read.
         let _ = tokens.load_or_create()?;
 
+        let secure = match self.secure {
+            Some(service) => Some(service),
+            None => secure_from_env(&self.config.data_dir)?,
+        };
+
         Ok(Daemon {
             config: self.config,
             manager,
@@ -165,6 +183,7 @@ impl DaemonBuilder {
             blobs,
             tokens,
             fs,
+            secure,
             supervisor: self.supervisor,
         })
     }
@@ -179,6 +198,7 @@ pub struct Daemon {
     blobs: Arc<BlobStore>,
     tokens: TokenStore,
     fs: Arc<FsService>,
+    secure: Option<Arc<SecureService>>,
     supervisor: Arc<ProcessSupervisor>,
 }
 
@@ -186,6 +206,11 @@ impl Daemon {
     /// Bound configuration.
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    /// The secure transport service, when enabled.
+    pub fn secure(&self) -> Option<Arc<SecureService>> {
+        self.secure.clone()
     }
 
     /// Thread manager handle (tests and diagnostics).
@@ -226,6 +251,7 @@ impl Daemon {
             blobs: Arc::clone(&self.blobs),
             tokens: self.tokens,
             fs: self.fs,
+            secure: self.secure,
             started: std::time::Instant::now(),
         };
 
@@ -297,6 +323,33 @@ impl BoundDaemon {
         tracing::info!("h4rn daemon stopped");
         Ok(())
     }
+}
+
+/// Builds the secure service when `H4RN_SECURE=1` is set.
+///
+/// The identity lives in the data directory as a `0600` file (the keychain
+/// feature is available to the desktop shell but not required here). An
+/// optional `H4RN_PAIRING_PSK` enables one-time LAN/Tailscale pairing.
+fn secure_from_env(data_dir: &Path) -> anyhow::Result<Option<Arc<SecureService>>> {
+    if std::env::var("H4RN_SECURE").as_deref() != Ok("1") {
+        return Ok(None);
+    }
+    let store = FileKeyStore::new(data_dir.join("transport-identity"));
+    let identity = load_or_create(&store)
+        .map_err(|error| anyhow::anyhow!("load the transport identity: {error}"))?;
+    let mut options = SecureOptions::new(identity);
+    if let Ok(value) = std::env::var("H4RN_PAIRING_PSK") {
+        let value = value.trim();
+        let bytes = hex::decode(value)
+            .map_err(|error| anyhow::anyhow!("H4RN_PAIRING_PSK is not hex: {error}"))?;
+        if bytes.len() != KEY_LEN {
+            anyhow::bail!("H4RN_PAIRING_PSK must be {KEY_LEN} bytes of hex");
+        }
+        let mut psk = [0u8; KEY_LEN];
+        psk.copy_from_slice(&bytes);
+        options = options.with_psk(psk);
+    }
+    Ok(Some(Arc::new(SecureService::new(options))))
 }
 
 /// Starts a production daemon with the default catalog.

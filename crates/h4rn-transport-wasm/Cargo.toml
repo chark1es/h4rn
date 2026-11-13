@@ -1,0 +1,24 @@
+[package]
+name = "h4rn-transport-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "wasm-bindgen wrapper around the h4rn encrypted multipath transport"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+getrandom = { workspace = true, features = ["wasm_js"] }
+h4rn-protocol.workspace = true
+h4rn-transport = { workspace = true, default-features = false }
+hex.workspace = true
+js-sys.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+wasm-bindgen.workspace = true
+
+[dev-dependencies]
+wasm-bindgen-test.workspace = true

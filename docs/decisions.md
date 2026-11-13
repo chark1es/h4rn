@@ -483,3 +483,57 @@ Google's infrastructure. T3 Code pushes richer APNs/Live-Activity payloads, but 
 and can afford to. The tradeoff is a notification that says "a thread needs you" rather than what
 it needs, and a cold-start path that must fetch state before showing anything; both are acceptable
 compared with leaking thread titles to two more vendors.
+
+## ADR-028: One Noise `IK` handshake per path, pinned daemon key and device allowlist
+
+**Status:** Accepted
+
+Every candidate path runs its own `Noise_IK_25519_ChaChaPoly_BLAKE2s` (or
+`IKpsk2` when pairing) handshake, bound to the logical session id in the
+prologue. The device's X25519 static key is its identity in a persistent
+allowlist, the Ed25519 key is kept beside it for device events, and the daemon's
+X25519 public key is pinned from the pairing payload. A one-time PSK makes the
+first handshake mutually authenticating, which is the only moment a new device
+can enter the allowlist; after that the device drops the PSK and proves
+membership with `IK`. Revocation removes the device key and returns an explicit
+`revoked` reason before any session exists. The tradeoff is a handshake per
+path (three instead of one), but it lets a path be added or replaced without
+exposing the session to a new trust decision, and it keeps the relay unable to
+join two paths under one connection. Rekeying is Noise's own rekey after a
+message/byte budget, not a new identity or a new session.
+
+## ADR-029: The session layer owns reliability and resume, not the socket
+
+**Status:** Accepted
+
+Sequence numbers, cumulative and selective acknowledgements, retransmission,
+fragmentation and reassembly live in a path-independent session layer. Sockets
+only carry packets. An `Open`/`Welcome` control exchange binds each fresh Noise
+channel to the logical session and carries an opaque resume token, so a client
+that reconnects or moves from LAN to relay keeps the same sequence space and
+the daemon can retransmit exactly what was lost. Retransmissions are always
+freshly sealed with the next Noise nonce but keep their original session
+sequence and message id; the receiver deduplicates on sequence, never on
+ciphertext. The tradeoff is a bounded retransmit buffer and reassembly window
+(1024 records / 16 MiB by default) and backpressure instead of unbounded
+memory, which is the correct failure mode for a transport that must not lose a
+prompt. A daemon keeps a detached session for a grace period; after that the
+resume token is dead and the application protocol's own `since_seq` replay is
+the recovery path.
+
+## ADR-030: wasm owns the crypto, JavaScript owns sockets and timers
+
+**Status:** Accepted
+
+The Noise handshake, key storage in memory, record sealing, session state and
+path selection run in `h4rn-transport-wasm`; the TypeScript `SecureTransport`
+only creates one WebSocket per candidate and ticks the core every 50 ms. The
+same synchronous, clock-injected core powers the native async client, so browser
+and native code cannot drift on protocol behaviour. TypeScript parses no key
+material and implements no cryptographic primitive; it moves opaque encoded
+identities and resume tokens between wasm and `localStorage`. The wasm target
+needs `uuid`'s `js` feature, `getrandom`'s `wasm_js` backend and snow without
+its `ring` default resolver; keeping those in the wasm crate avoids pulling
+browser-only features into the daemon. The tradeoff is a wasm build step and a
+second adapter to keep compiling, which is cheaper than two implementations of
+a state machine where a one-byte divergence is a security bug.
