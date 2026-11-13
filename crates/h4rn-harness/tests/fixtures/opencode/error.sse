@@ -1,0 +1,14 @@
+data: {"id":"evt_0001","created":1794549900000,"type":"session.execution.started","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000"},"durable":{"aggregateID":"ses_000000000000000000000000","seq":0,"version":1}}
+
+data: {"id":"evt_0002","created":1794549900010,"type":"session.step.started","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","agent":"build","model":{"id":"deepseek-v4.1-flash","providerID":"cliproxy"},"started":1794549900000},"durable":{"aggregateID":"ses_000000000000000000000000","seq":1,"version":1}}
+
+data: {"id":"evt_0003","created":1794549900020,"type":"session.text.started","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","ordinal":0},"durable":{"aggregateID":"ses_000000000000000000000000","seq":2,"version":1}}
+
+data: {"id":"evt_0004","created":1794549900030,"type":"session.text.delta","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","ordinal":0,"delta":"The provider returned an error."}}
+
+data: {"id":"evt_0008","created":1794549900250,"type":"session.step.ended","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","finish":"stop","cost":0.0,"tokens":{"input":1200,"output":9,"reasoning":0,"cache":{"read":0,"write":0}}},"durable":{"aggregateID":"ses_000000000000000000000000","seq":7,"version":1}}
+
+data: {"id":"evt_0009","created":1794549900260,"type":"session.usage.updated","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","cost":0.0,"tokens":{"input":1200,"output":9,"reasoning":0,"cache":{"read":0,"write":0}}}}
+
+data: {"id":"evt_0010","created":1794549900300,"type":"session.execution.failed","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","error":{"type":"provider","message":"upstream returned 500 Internal Server Error","status":500}},"durable":{"aggregateID":"ses_000000000000000000000000","seq":9,"version":1}}
+

@@ -1,0 +1,30 @@
+data: {"id":"evt_0001","type":"server.connected","data":{}}
+
+data: {"id":"evt_0002","created":1794549885161,"type":"session.created","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","slug":"quick-canyon","version":"2.2.7","projectID":"prj_000000000000000000000000","location":{"directory":"/workspace"},"subpath":""},"durable":{"aggregateID":"ses_000000000000000000000000","seq":0,"version":1}}
+
+data: {"id":"evt_0003","created":1794549885176,"type":"session.model.selected","data":{"sessionID":"ses_000000000000000000000000","model":{"id":"deepseek-v4.1-flash","providerID":"cliproxy"}},"durable":{"aggregateID":"ses_000000000000000000000000","seq":1,"version":1}}
+
+data: {"id":"evt_0004","created":1794549885187,"type":"session.inbox.enqueued","location":{"directory":"/workspace"},"data":{"inboxID":"msg_user_1","sessionID":"ses_000000000000000000000000","item":{"type":"user","payload":{"text":"Reply with exactly: pong"},"delivery":"steer"}},"durable":{"aggregateID":"ses_000000000000000000000000","seq":2,"version":1}}
+
+data: {"id":"evt_0005","created":1794549885189,"type":"session.execution.started","data":{"sessionID":"ses_000000000000000000000000"},"durable":{"aggregateID":"ses_000000000000000000000000","seq":3,"version":1}}
+
+data: {"id":"evt_0006","created":1794549885198,"metadata":{"instructions":{"initial":true}},"type":"session.instructions.updated","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","delta":{"core/codemode":"b9321aa27fe3f9eb6662ad886008492dd401333a0049c044c54ac2323b9ead1e","core/skill-guidance":"c25c648b3d20cad2a35c2bf4e679835c1f52d100fcf5b6b9a5d97595d47f26d1","core/date":"a7e13a150687c80c4d0443d32fcf7d9efe5c87e5523d17f39302e1f532dde9d8","core/environment":"c767771efc304eef70056281b38a1ed22b8f6245fa1c8f4cb65509e10ca3a7a8"}},"durable":{"aggregateID":"ses_000000000000000000000000","seq":4,"version":2}}
+
+data: {"id":"evt_0007","created":1794549885201,"type":"session.inbox.delivered","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","inboxID":"msg_user_1"},"durable":{"aggregateID":"ses_000000000000000000000000","seq":5,"version":1}}
+
+data: {"id":"evt_0008","created":1794549886117,"type":"session.step.started","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","agent":"build","model":{"id":"deepseek-v4.1-flash","providerID":"cliproxy","variant":"default"},"assistantMessageID":"msg_assistant_1","snapshot":"0000000000000000000000000000000000000000","started":1794549885223},"durable":{"aggregateID":"ses_000000000000000000000000","seq":6,"version":1}}
+
+data: {"id":"evt_0009","created":1794549886120,"type":"session.text.started","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","ordinal":0},"durable":{"aggregateID":"ses_000000000000000000000000","seq":7,"version":1}}
+
+data: {"id":"evt_0010","created":1794549886124,"type":"session.text.delta","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","ordinal":0,"delta":"pong"}}
+
+data: {"id":"evt_0011","created":1794549886124,"type":"session.text.ended","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","ordinal":0,"text":"pong"},"durable":{"aggregateID":"ses_000000000000000000000000","seq":8,"version":1}}
+
+data: {"id":"evt_0012","created":1794549886126,"type":"session.step.streamed","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1"},"durable":{"aggregateID":"ses_000000000000000000000000","seq":9,"version":1}}
+
+data: {"id":"evt_0013","created":1794549886133,"type":"session.step.ended","location":{"directory":"/workspace"},"data":{"sessionID":"ses_000000000000000000000000","assistantMessageID":"msg_assistant_1","finish":"stop","rawFinish":"stop","tokens":{"input":8232,"output":4,"reasoning":0,"cache":{"read":256,"write":0}},"cost":0,"snapshot":"0000000000000000000000000000000000000000","files":[]},"durable":{"aggregateID":"ses_000000000000000000000000","seq":10,"version":1}}
+
+data: {"id":"evt_0014","created":1794549886136,"type":"session.usage.updated","data":{"sessionID":"ses_000000000000000000000000","cost":0,"tokens":{"input":8232,"output":4,"reasoning":0,"cache":{"read":256,"write":0}}}}
+
+data: {"id":"evt_0015","created":1794549886137,"type":"session.execution.succeeded","data":{"sessionID":"ses_000000000000000000000000"},"durable":{"aggregateID":"ses_000000000000000000000000","seq":11,"version":1}}
+
