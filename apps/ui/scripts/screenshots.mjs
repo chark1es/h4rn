@@ -7,8 +7,8 @@
  * Override the binary with H4RN_CHROMIUM.
  *
  * The shot list mirrors design/a-quiet-native/shots one for one. Desktop
- * screenshots are 1440×900, phone screenshots are 390×844, and every screen is
- * captured in light and dark.
+ * screenshots are 1440×900, phone screenshots are 390×844 (plus the 360×780
+ * floor), and every screen is captured in light and dark.
  */
 import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -43,6 +43,42 @@ const openTerminal = async (page) => {
   await page.waitForTimeout(900);
 };
 
+/** @param {import("playwright-core").Page} page */
+const openPanelTab = async (page, name) => {
+  await page.getByRole("button", { name: "Right panel" }).click();
+  const panel = page.getByRole("complementary", { name: "Thread panel" });
+  await panel.waitFor({ state: "visible" });
+  await panel.getByRole("tab", { name: new RegExp(name) }).click();
+  return panel;
+};
+
+/** Expand a directory row in the right panel's file tree. */
+const expandTree = async (page, path) => {
+  const tree = page.getByRole("tree", { name: "Workspace files" });
+  await tree.waitFor({ timeout: 10_000 });
+  const node = tree.locator(`button[title="${path}"]`).first();
+  if (!(await node.count())) return;
+  if ((await node.getAttribute("aria-expanded")) === "false") {
+    await node.click();
+    await page.waitForTimeout(250);
+  }
+};
+
+/** Open a file from the right panel's file tree. */
+const openTreeFile = async (page, path) => {
+  const tree = page.getByRole("tree", { name: "Workspace files" });
+  await tree.waitFor({ timeout: 10_000 });
+  const node = tree.locator(`button[title="${path}"]`).first();
+  const appeared = await node
+    .waitFor({ state: "visible", timeout: 5_000 })
+    .then(() => true)
+    .catch(() => false);
+  if (appeared) {
+    await node.click();
+    await page.waitForTimeout(250);
+  }
+};
+
 /**
  * Each shot lists the design reference it ports. `device` decides the viewport
  * so a desktop screen is never captured at phone width (or the reverse).
@@ -73,13 +109,24 @@ const SHOTS = [
     },
   },
   {
+    name: "panel-changes",
+    device: "desktop",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      const panel = await openPanelTab(page, "Changes");
+      await panel.getByText("tests/setup.ts").first().waitFor({ timeout: 10_000 });
+      await page.waitForTimeout(500);
+    },
+  },
+  {
     name: "subagents",
     device: "desktop",
     path: "/t/thr_a",
     wait: '[aria-label="Thread stream"]',
     action: async (page) => {
-      await page.getByRole("button", { name: "Toggle subagents" }).click();
-      await page.getByRole("complementary", { name: "Subagents" }).waitFor();
+      const panel = await openPanelTab(page, "Subagents");
+      await panel.getByText("Reproduce CI failure").first().waitFor({ timeout: 10_000 });
       await page.waitForTimeout(400);
     },
   },
@@ -97,29 +144,13 @@ const SHOTS = [
     wait: '[aria-label="IDE"]',
     settle: 1600,
     action: async (page) => {
-      const tree = page.getByRole("tree", { name: "Workspace files" });
-      const expand = async (path) => {
-        const node = tree.locator(`button[title="${path}"]`).first();
-        if (!(await node.count())) return;
-        if ((await node.getAttribute("aria-expanded")) === "false") {
-          await node.click();
-          await page.waitForTimeout(250);
-        }
-      };
-      const open = async (path) => {
-        const node = tree.locator(`button[title="${path}"]`).first();
-        if (await node.count()) {
-          await node.click();
-          await page.waitForTimeout(250);
-        }
-      };
-      await expand("src");
-      await expand("src/auth");
-      await open("src/auth/session.test.ts");
-      await expand("tests");
-      await open("tests/setup.ts");
-      await expand("src/db");
-      await open("src/db/pool.ts");
+      await expandTree(page, "src");
+      await expandTree(page, "src/auth");
+      await openTreeFile(page, "src/auth/session.test.ts");
+      await expandTree(page, "tests");
+      await openTreeFile(page, "tests/setup.ts");
+      await expandTree(page, "src/db");
+      await openTreeFile(page, "src/db/pool.ts");
       const tab = page.getByRole("tab", { name: /session\.test\.ts/ }).first();
       if (await tab.count()) await tab.click();
       // The reference document has an unsaved edit, so the tab shows a dirty
@@ -131,6 +162,51 @@ const SHOTS = [
       await page.keyboard.type(" ");
       await page.getByRole("tab", { name: "vs agent" }).click();
       await page.waitForTimeout(700);
+    },
+  },
+  {
+    name: "ide-switch",
+    device: "desktop",
+    path: "/ide",
+    wait: '[aria-label="IDE"]',
+    settle: 1600,
+    action: async (page) => {
+      const sidebar = page.getByRole("navigation", { name: "Threads" });
+      // Open three files in the relay project, leave, and come back: the
+      // project keeps its tabs and says so quietly.
+      await sidebar.locator('[data-thread-id="thr_b"]').click();
+      await page.getByRole("heading", { name: "h4rn-connect" }).waitFor({ timeout: 10_000 });
+      await expandTree(page, "src");
+      await expandTree(page, "src/auth");
+      await openTreeFile(page, "src/auth/session.test.ts");
+      await expandTree(page, "tests");
+      await openTreeFile(page, "tests/setup.ts");
+      await expandTree(page, "src/db");
+      await openTreeFile(page, "src/db/pool.ts");
+      await page
+        .getByRole("tab", { name: /session\.test\.ts/ })
+        .first()
+        .click();
+      await page.getByRole("tab", { name: "vs agent" }).click();
+      await sidebar.locator('[data-thread-id="thr_a"]').click();
+      await page.getByRole("heading", { name: "api" }).waitFor({ timeout: 10_000 });
+      await sidebar.locator('[data-thread-id="thr_b"]').click();
+      await page.getByRole("heading", { name: "h4rn-connect" }).waitFor({ timeout: 10_000 });
+      await page.getByText(/Restored \d+ tabs/).waitFor({ timeout: 10_000 });
+      await page.getByRole("tab", { name: /Changes/ }).click();
+      await page.getByText("tests/setup.ts").first().waitFor({ timeout: 10_000 });
+      await page.waitForTimeout(500);
+    },
+  },
+  {
+    name: "sidebar-collapsed",
+    device: "desktop",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      await page.getByRole("button", { name: "Hide sidebar" }).click();
+      await page.getByRole("button", { name: /Show sidebar/ }).waitFor({ timeout: 10_000 });
+      await page.waitForTimeout(400);
     },
   },
   {
@@ -190,7 +266,7 @@ const SHOTS = [
     name: "state-empty",
     device: "desktop",
     path: "/?scenario=empty",
-    wait: "text=No threads yet",
+    wait: "text=No projects yet",
     settle: 500,
   },
   {
@@ -214,8 +290,14 @@ const SHOTS = [
     path: "/t/thr_e?scenario=error",
     wait: "text=This thread couldn’t be loaded",
     // The list reload fails after the simulated relay drop (~1.2 s), which is
-    // when the inbox banner appears.
+    // when the sidebar banner appears. The reference also shows the hosts
+    // popover open from the footer trigger.
     settle: 2200,
+    action: async (page) => {
+      await page.getByTitle("Hosts and connection").click();
+      await page.getByRole("menu", { name: "Hosts" }).waitFor();
+      await page.waitForTimeout(350);
+    },
   },
   {
     name: "p-inbox",
@@ -228,6 +310,31 @@ const SHOTS = [
     device: "phone",
     path: "/t/thr_a",
     wait: '[aria-label="Thread stream"]',
+  },
+  {
+    name: "p-changes",
+    device: "phone",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      await page.getByRole("button", { name: "Changes and subagents" }).click();
+      const sheet = page.getByRole("dialog", { name: "Changes and subagents" });
+      await sheet.getByText("tests/setup.ts").first().waitFor({ timeout: 10_000 });
+      await page.waitForTimeout(500);
+    },
+  },
+  {
+    name: "p-subagents",
+    device: "phone",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      await page.getByRole("button", { name: "Changes and subagents" }).click();
+      const sheet = page.getByRole("dialog", { name: "Changes and subagents" });
+      await sheet.getByRole("tab", { name: /Subagents/ }).click();
+      await sheet.getByText("Reproduce CI failure").first().waitFor({ timeout: 10_000 });
+      await page.waitForTimeout(400);
+    },
   },
   {
     name: "p-approval",

@@ -1,25 +1,18 @@
 import {
-  BellIcon,
   CheckIcon,
   ChevronDownIcon,
   CircleCheckIcon,
   CircleDotIcon,
-  CommandIcon,
   CopyIcon,
   KeyRoundIcon,
   LaptopIcon,
-  LayersIcon,
   MonitorIcon,
   MoreHorizontalIcon,
   PlayIcon,
   QrCodeIcon,
   RefreshCwIcon,
-  ServerIcon,
-  SettingsIcon,
   ShieldCheckIcon,
   SmartphoneIcon,
-  SunIcon,
-  UserIcon,
   WifiOffIcon,
 } from "lucide-react";
 import type * as React from "react";
@@ -27,72 +20,9 @@ import type * as React from "react";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ENTER, KeyGlyphs, MOD, SHIFT } from "@/components/common/Kbd";
 import type { HarnessKind } from "@/gen";
-import { useIsPhone } from "@/hooks/use-media-query";
 import { harnessSeed, machineSeed } from "@/lib/entities";
 import { navigate } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
-
-const SECTIONS: Array<{
-  key: string;
-  label: string;
-  icon: typeof SettingsIcon;
-  group?: string;
-}> = [
-  { key: "general", label: "General", icon: SettingsIcon },
-  { key: "appearance", label: "Appearance", icon: SunIcon },
-  { key: "notifications", label: "Notifications", icon: BellIcon },
-  { key: "shortcuts", label: "Shortcuts", icon: CommandIcon },
-  { key: "hosts", label: "Hosts", icon: ServerIcon, group: "Machines" },
-  { key: "devices", label: "Devices", icon: SmartphoneIcon, group: "Machines" },
-  { key: "providers", label: "Providers", icon: LayersIcon, group: "Machines" },
-  { key: "account", label: "Account & relay", icon: UserIcon, group: "Account" },
-];
-
-function settingsHref(section: string): string {
-  return `/settings/${section}`;
-}
-
-function SettingsNav({ section }: { section: string }) {
-  let group: string | undefined;
-  return (
-    <section className="q-pane settings" aria-label="Settings">
-      <div className="q-pane-head">
-        <h2>Settings</h2>
-      </div>
-      <div className="q-settings-nav">
-        {SECTIONS.map((item) => {
-          const header = item.group && item.group !== group ? item.group : null;
-          group = item.group ?? group;
-          return (
-            <div key={item.key} style={{ display: "contents" }}>
-              {header ? (
-                <div className="q-side-h" style={{ paddingTop: 18 }}>
-                  <span>{header}</span>
-                </div>
-              ) : null}
-              <a
-                href={settingsHref(item.key)}
-                className="q-nav"
-                aria-current={section === item.key ? "page" : undefined}
-                onClick={(event) => {
-                  event.preventDefault();
-                  navigate({
-                    kind: "placeholder",
-                    surface: "settings",
-                    path: settingsHref(item.key),
-                  });
-                }}
-              >
-                <item.icon className="q-icon" strokeWidth={1.5} aria-hidden />
-                <span className="lbl">{item.label}</span>
-              </a>
-            </div>
-          );
-        })}
-      </div>
-    </section>
-  );
-}
 
 function Health({ tone, children }: { tone: "on" | "off" | "danger"; children: React.ReactNode }) {
   return (
@@ -1062,18 +992,14 @@ const FORMS: Record<string, () => React.ReactNode> = {
 
 /** Static settings surfaces, ported from the approved prototype. */
 export function SettingsPage({ section }: { section: string }) {
-  const isPhone = useIsPhone();
   const key = FORMS[section] ? section : "hosts";
   const Form = FORMS[key] ?? HostsForm;
 
   return (
-    <>
-      {isPhone ? null : <SettingsNav section={key} />}
-      <main className="q-main" aria-label="Settings">
-        <div className="q-page">
-          <Form />
-        </div>
-      </main>
-    </>
+    <main className="q-main" aria-label="Settings">
+      <div className="q-page">
+        <Form />
+      </div>
+    </main>
   );
 }

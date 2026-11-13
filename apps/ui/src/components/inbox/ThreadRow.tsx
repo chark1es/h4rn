@@ -24,6 +24,7 @@ type ThreadRowProps = {
   tabStop?: boolean;
   resumeAt?: string | null;
   now: number;
+  compact?: boolean;
   onOpen: () => void;
   onAcknowledge: () => void;
   onSettle: () => void;
@@ -81,6 +82,7 @@ export function ThreadRow({
   tabStop = false,
   resumeAt = null,
   now,
+  compact = false,
   onOpen,
   onAcknowledge,
   onSettle,
@@ -126,7 +128,9 @@ export function ThreadRow({
         </span>
         <span className="q-row-l2">
           <span className="q-row-meta">
-            {host?.name ?? thread.host} · {harnessLabel(thread.harness)}
+            {compact
+              ? harnessLabel(thread.harness)
+              : `${host?.name ?? thread.host} · ${harnessLabel(thread.harness)}`}
           </span>
           <span className={cn("q-row-status", status.tone)}>{statusText}</span>
         </span>

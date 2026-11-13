@@ -5,6 +5,25 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### UI: layout v2
+
+- **One left sidebar, one right panel.** The nav rail and inbox column are merged into a single
+  resizable sidebar grouped by project (folder + host), with Working / Done / Settled, Snoozed,
+  search, and a hosts footer that opens presence, pairing and management. Settings, including
+  MCP servers and Skills, temporarily replaces the thread list with its own nav and a back button.
+  The sidebar collapses with ⌘B and keeps a needs-you dot on the reveal button.
+- **Thread | IDE is one segmented toggle** (⌘E). The IDE follows the selected thread's project,
+  keeps its tabs per project, and says "Restored N tabs" when it returns. Its file tree moved into
+  the right panel's Files tab; the header carries a thread chip back to the conversation.
+- **The right panel** is scoped to the selected thread: Changes (vs agent / vs HEAD, by turn),
+  Files, and Subagents. It remembers open state, width and tab, opens with ⌘⌥B, and folds into one
+  Changes | Subagents sheet on a phone, where Files and the IDE are desktop-only.
+- **Pull requests** no longer claims a list column: the main area shows the list and the detail.
+- **Shortcuts** add ⌘B, ⌘E, ⌘⌥B, D, ⌘J, ⌘P and T, and Esc now leaves Settings and MCP & skills.
+- `apps/ui/scripts/screenshots.mjs` captures the new `panel-changes`, `ide-switch`,
+  `sidebar-collapsed`, `p-changes` and `p-subagents` screens alongside the existing set, and the
+  Playwright e2e drives the new view toggle and right panel against the real daemon.
+
 ### Phase 7 — packaging
 
 - **Desktop bundles** ship on Windows (MSI and NSIS), macOS (universal DMG) and Linux

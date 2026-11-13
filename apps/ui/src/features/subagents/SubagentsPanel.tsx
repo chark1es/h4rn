@@ -1,4 +1,4 @@
-import { CheckIcon, CircleXIcon, KeyRoundIcon, PlusIcon, XIcon } from "lucide-react";
+import { CheckIcon, CircleXIcon, KeyRoundIcon, PlusIcon } from "lucide-react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
@@ -11,29 +11,23 @@ import { openNewThread, pushToast, useApp } from "@/lib/store/appStore";
  * the populated tree is mock-mode only; a live thread gets the honest empty
  * state below.
  */
-export function SubagentsInspector({
-  threadId,
-  onClose,
-}: {
-  threadId: string;
-  onClose: () => void;
-}) {
+export function SubagentsPanel({ threadId }: { threadId: string }) {
   const summary = useApp((state) => state.threads[threadId]);
   const mock = readBootConfig().mock;
 
   return (
-    <aside className="q-insp" aria-label="Subagents">
-      <div className="q-insp-head">
-        <h2 style={{ margin: 0, fontSize: 14, fontWeight: 600, flex: 1 }}>Subagents</h2>
+    <>
+      <div className="q-rp-bar">
+        <span className="q-faint" style={{ fontSize: 12 }}>
+          {mock ? "3 subagents · 1 waiting on you" : "No subagents"}
+        </span>
+        <span className="grow" />
         <button type="button" className="q-btn ghost" onClick={openNewThread}>
           <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           Delegate
         </button>
-        <button type="button" className="q-ibtn" aria-label="Close subagents" onClick={onClose}>
-          <XIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-        </button>
       </div>
-      <div className="q-scroll">
+      <div className="q-rp-body q-scroll">
         {mock ? (
           <>
             <div className="q-tree">
@@ -221,7 +215,7 @@ export function SubagentsInspector({
             </div>
           </>
         ) : (
-          <div className="q-empty">
+          <div className="q-empty q-sub-empty">
             <h3>No subagents in this thread</h3>
             <p>
               Delegated work will appear here with its host, harness, budget and inherited
@@ -230,6 +224,11 @@ export function SubagentsInspector({
           </div>
         )}
       </div>
-    </aside>
+    </>
   );
+}
+
+/** The panel header badge: only the mock thread has a populated tree today. */
+export function subagentCount(threadId: string): number {
+  return readBootConfig().mock && threadId === "thr_a" ? 3 : 0;
 }

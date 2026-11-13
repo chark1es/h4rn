@@ -2,7 +2,7 @@ import { CircleAlertIcon, CopyIcon, InboxIcon, RefreshCwIcon, ServerIcon } from 
 import { useEffect, useState } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
-import { SubagentsInspector } from "@/features/subagents/SubagentsInspector";
+import { PhonePanelSheet } from "@/components/panel/PhonePanelSheet";
 import { TerminalPanel } from "@/features/terminal/TerminalPanel";
 import type { Usage } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
@@ -15,6 +15,8 @@ import {
   navigate,
   requestComposerFocus,
   retryThread,
+  setPanelTab,
+  toggleTerminal,
   useApp,
 } from "@/lib/store/appStore";
 import type { ApprovalItem, StreamTurn } from "@/lib/store/projection";
@@ -104,11 +106,11 @@ export function ThreadPane({ threadId }: { threadId: string }) {
   const threadError = useApp((state) => state.threadErrors[threadId]);
   const connection = useApp((state) => state.connection.status);
   const lastSyncAt = useApp((state) => state.lastSyncAt);
+  const terminalOpen = useApp((state) => state.ui.layout.terminalOpen);
   const isPhone = useIsPhone();
-  const [terminalOpen, setTerminalOpen] = useState(false);
   // Mount on first open, then keep the panel (and its PTYs) alive while hidden.
-  const [terminalMounted, setTerminalMounted] = useState(false);
-  const [subagentsOpen, setSubagentsOpen] = useState(false);
+  const [terminalMounted, setTerminalMounted] = useState(terminalOpen);
+  const [phonePanel, setPhonePanel] = useState<"changes" | "subagents" | null>(null);
   const [approvalSheetOpen, setApprovalSheetOpen] = useState(false);
 
   useEffect(() => {
@@ -116,12 +118,16 @@ export function ThreadPane({ threadId }: { threadId: string }) {
     setApprovalSheetOpen(false);
   }, [threadId]);
 
-  // The delegated row in the stream opens the right panel's Subagents tab.
+  // The delegated row in the stream opens the right panel's Subagents tab on
+  // desktop, or the sheet's Subagents segment on a phone.
   useEffect(() => {
-    const handler = () => setSubagentsOpen(true);
+    const handler = () => {
+      if (isPhone) setPhonePanel("subagents");
+      else setPanelTab("subagents");
+    };
     window.addEventListener("h4rn:subagents", handler);
     return () => window.removeEventListener("h4rn:subagents", handler);
-  }, []);
+  }, [isPhone]);
 
   if (!summary && !log && !threadError) {
     return (
@@ -211,10 +217,9 @@ export function ThreadPane({ threadId }: { threadId: string }) {
         terminalOpen={terminalOpen}
         onToggleTerminal={() => {
           setTerminalMounted(true);
-          setTerminalOpen((value) => !value);
+          toggleTerminal();
         }}
-        subagentsOpen={subagentsOpen}
-        onToggleSubagents={() => setSubagentsOpen((value) => !value)}
+        onOpenPanel={() => setPhonePanel("changes")}
         stale={stale}
       />
 
@@ -353,7 +358,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
           host={summary.host}
           cwd={summary.workspace_path}
           hidden={!terminalOpen}
-          onClose={() => setTerminalOpen(false)}
+          onClose={toggleTerminal}
         />
       ) : null}
 
@@ -395,14 +400,21 @@ export function ThreadPane({ threadId }: { threadId: string }) {
     </main>
   );
 
-  if (isPhone) return main;
+  if (isPhone) {
+    return (
+      <>
+        {main}
+        {phonePanel ? (
+          <PhonePanelSheet
+            thread={summary}
+            initialTab={phonePanel}
+            onClose={() => setPhonePanel(null)}
+            onReview={() => setApprovalSheetOpen(true)}
+          />
+        ) : null}
+      </>
+    );
+  }
 
-  return (
-    <>
-      {main}
-      {subagentsOpen ? (
-        <SubagentsInspector threadId={threadId} onClose={() => setSubagentsOpen(false)} />
-      ) : null}
-    </>
-  );
+  return main;
 }

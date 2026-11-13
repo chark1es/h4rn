@@ -6,12 +6,21 @@ import { type IdeTab, isDirty } from "./tabs";
 type TabStripProps = {
   tabs: IdeTab[];
   activePath: string | null;
+  /** Quiet hint after a project switch, e.g. "Restored 3 tabs". */
+  note?: string | null;
   onActivate: (path: string) => void;
   onClose: (path: string) => void;
   onReorder: (path: string, index: number) => void;
 };
 
-export function TabStrip({ tabs, activePath, onActivate, onClose, onReorder }: TabStripProps) {
+export function TabStrip({
+  tabs,
+  activePath,
+  note = null,
+  onActivate,
+  onClose,
+  onReorder,
+}: TabStripProps) {
   if (tabs.length === 0) return null;
 
   return (
@@ -73,6 +82,7 @@ export function TabStrip({ tabs, activePath, onActivate, onClose, onReorder }: T
         );
       })}
       <span style={{ flex: 1 }} />
+      {note ? <span className="q-faint q-etabs-note">{note}</span> : null}
     </div>
   );
 }

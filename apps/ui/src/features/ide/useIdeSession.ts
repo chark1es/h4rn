@@ -60,6 +60,10 @@ export type ConflictState = {
 export type ExternalChange = "modified" | "deleted";
 
 export type IdeState = {
+  /** The host + workspace this state belongs to; guards cross-project hydration. */
+  workspaceKey: string | null;
+  /** Tabs brought back from a previous visit; the quiet "Restored N tabs" note. */
+  restoredTabs: number;
   tabs: TabState;
   listings: Record<string, FsListing>;
   expanded: Record<string, true>;
@@ -94,6 +98,8 @@ const emptySearch: SearchState = {
 
 function initialState(): IdeState {
   return {
+    workspaceKey: null,
+    restoredTabs: 0,
     tabs: { tabs: [], activePath: null },
     listings: {},
     expanded: {},
@@ -151,24 +157,10 @@ const PREFERRED_FILES = [
   "src/app.ts",
   "README.md",
 ];
-const LAST_FILE_KEY = "h4rn.ide.lastFile";
 
-function readLastFile(): string | null {
-  try {
-    return window.localStorage.getItem(LAST_FILE_KEY);
-  } catch {
-    return null;
-  }
-}
-
-function rememberFile(path: string | null): void {
-  if (!path) return;
-  try {
-    window.localStorage.setItem(LAST_FILE_KEY, path);
-  } catch {
-    // Last-file memory is a convenience, never a requirement.
-  }
-}
+/** Open tabs belong to a project, not to the editor component's lifetime. */
+const IDE_CACHE = new Map<string, IdeState>();
+const projectKey = (host: string, path: string) => `${host}\u0000${path}`;
 
 /**
  * Loads and mutates the IDE's daemon state.
@@ -178,19 +170,33 @@ function rememberFile(path: string | null): void {
  * saves and the two diff scopes; components only render.
  */
 export function useIdeSession(workspace: WorkspaceOption | null) {
-  const [state, setState] = useState<IdeState>(initialState);
+  const [state, applyState] = useState<IdeState>(initialState);
   const stateRef = useRef(state);
   stateRef.current = state;
 
   const searchIdRef = useRef<string | null>(null);
   const savingPathRef = useRef<string | null>(null);
   const autoOpenedRef = useRef<string | null>(null);
+  const loadedKeyRef = useRef<string | null>(null);
   const workspaceRef = useRef(workspace);
   workspaceRef.current = workspace;
 
-  const patch = useCallback((next: Partial<IdeState>) => {
-    setState((current) => ({ ...current, ...next }));
+  /** Every accepted edit also refreshes the project's remembered tabs. */
+  const setState = useCallback((next: IdeState | ((current: IdeState) => IdeState)) => {
+    applyState((current) => {
+      const value = typeof next === "function" ? next(current) : next;
+      const key = loadedKeyRef.current;
+      if (key) IDE_CACHE.set(key, value);
+      return value;
+    });
   }, []);
+
+  const patch = useCallback(
+    (next: Partial<IdeState>) => {
+      setState((current) => ({ ...current, ...next }));
+    },
+    [setState],
+  );
 
   const request = workspace ? { host: workspace.host, workspace: workspace.path } : null;
 
@@ -198,161 +204,174 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
   // Tree
   // -------------------------------------------------------------------
 
-  const loadListing = useCallback(async (path: string) => {
-    const target = workspaceRef.current;
-    if (!target) return;
-    try {
-      const response = await getClient().request({
-        type: "fs_list",
-        host: target.host,
-        workspace: target.path,
-        path,
-      });
-      if (response.type !== "fs_listing") return;
-      setState((current) => ({
-        ...current,
-        listings: { ...current.listings, [path]: response.listing },
-        treeLoading: false,
-        treeError: null,
-      }));
-    } catch (error) {
-      setState((current) => ({
-        ...current,
-        treeLoading: false,
-        treeError: toProtoError(error),
-      }));
-    }
-  }, []);
+  const loadListing = useCallback(
+    async (path: string) => {
+      const target = workspaceRef.current;
+      if (!target) return;
+      try {
+        const response = await getClient().request({
+          type: "fs_list",
+          host: target.host,
+          workspace: target.path,
+          path,
+        });
+        if (response.type !== "fs_listing") return;
+        setState((current) => ({
+          ...current,
+          listings: { ...current.listings, [path]: response.listing },
+          treeLoading: false,
+          treeError: null,
+        }));
+      } catch (error) {
+        setState((current) => ({
+          ...current,
+          treeLoading: false,
+          treeError: toProtoError(error),
+        }));
+      }
+    },
+    [setState],
+  );
 
   // -------------------------------------------------------------------
   // Files and tabs
   // -------------------------------------------------------------------
 
-  const readInto = useCallback(async (path: string, line: number | null = null) => {
-    const target = workspaceRef.current;
-    if (!target) return;
-    setState((current) => ({
-      ...current,
-      tabs: openTab(current.tabs, path),
-    }));
-    try {
-      const response = await getClient().request({
-        type: "fs_read",
-        host: target.host,
-        workspace: target.path,
-        path,
-      });
-      if (response.type !== "fs_file") return;
-      const file = response.file;
+  const readInto = useCallback(
+    async (path: string, line: number | null = null) => {
+      const target = workspaceRef.current;
+      if (!target) return;
       setState((current) => ({
         ...current,
-        external: omit(current.external, path),
-        tabs: updateTab(current.tabs, path, {
-          content: file.content ?? "",
-          savedContent: file.content ?? "",
-          etag: file.etag,
-          encoding: file.encoding,
-          loading: false,
-          binary: file.binary,
-          truncated: file.truncated,
-          hint: file.hint,
-          error: null,
-          ...(line === null ? {} : { revealLine: line, revealNonce: Date.now() }),
-        }),
+        tabs: openTab(current.tabs, path),
       }));
-    } catch (error) {
-      setState((current) => ({
-        ...current,
-        tabs: updateTab(current.tabs, path, {
-          loading: false,
-          error: toProtoError(error),
-        }),
-      }));
-    }
-  }, []);
+      try {
+        const response = await getClient().request({
+          type: "fs_read",
+          host: target.host,
+          workspace: target.path,
+          path,
+        });
+        if (response.type !== "fs_file") return;
+        const file = response.file;
+        setState((current) => ({
+          ...current,
+          external: omit(current.external, path),
+          tabs: updateTab(current.tabs, path, {
+            content: file.content ?? "",
+            savedContent: file.content ?? "",
+            etag: file.etag,
+            encoding: file.encoding,
+            loading: false,
+            binary: file.binary,
+            truncated: file.truncated,
+            hint: file.hint,
+            error: null,
+            ...(line === null ? {} : { revealLine: line, revealNonce: Date.now() }),
+          }),
+        }));
+      } catch (error) {
+        setState((current) => ({
+          ...current,
+          tabs: updateTab(current.tabs, path, {
+            loading: false,
+            error: toProtoError(error),
+          }),
+        }));
+      }
+    },
+    [setState],
+  );
 
   const openFile = useCallback(
     (path: string, line: number | null = null) => {
-      rememberFile(path);
       void readInto(path, line);
     },
     [readInto],
   );
 
-  const activateTab = useCallback((path: string) => {
-    setState((current) => ({ ...current, tabs: { ...current.tabs, activePath: path } }));
-    rememberFile(path);
-  }, []);
+  const activateTab = useCallback(
+    (path: string) => {
+      setState((current) => ({ ...current, tabs: { ...current.tabs, activePath: path } }));
+    },
+    [setState],
+  );
 
-  const setTabContent = useCallback((path: string, content: string) => {
-    setState((current) => ({
-      ...current,
-      saveState: "idle",
-      tabs: updateTab(current.tabs, path, { content }),
-    }));
-  }, []);
+  const setTabContent = useCallback(
+    (path: string, content: string) => {
+      setState((current) => ({
+        ...current,
+        saveState: "idle",
+        tabs: updateTab(current.tabs, path, { content }),
+      }));
+    },
+    [setState],
+  );
 
-  const saveTab = useCallback(async (path: string) => {
-    const target = workspaceRef.current;
-    const tab = stateRef.current.tabs.tabs.find((entry) => entry.path === path);
-    if (!target || !tab || tab.loading || tab.binary || tab.truncated || tab.error) return;
-    if (!isDirty(tab)) return;
-    const content = tab.content;
-    const previousSaved = tab.savedContent;
-    const baseEtag = tab.etag;
-    savingPathRef.current = path;
-    setState((current) => ({
-      ...current,
-      saveState: "saving",
-      tabs: updateTab(current.tabs, path, { savedContent: content }),
-    }));
-    try {
-      const response = await getClient().request({
-        type: "fs_write",
-        host: target.host,
-        workspace: target.path,
-        path,
-        content,
-        base_etag: baseEtag,
-      });
-      if (response.type !== "fs_written") return;
-      const result = response.result;
-      if (result.conflict) {
+  const saveTab = useCallback(
+    async (path: string) => {
+      const target = workspaceRef.current;
+      const tab = stateRef.current.tabs.tabs.find((entry) => entry.path === path);
+      if (!target || !tab || tab.loading || tab.binary || tab.truncated || tab.error) return;
+      if (!isDirty(tab)) return;
+      const content = tab.content;
+      const previousSaved = tab.savedContent;
+      const baseEtag = tab.etag;
+      savingPathRef.current = path;
+      setState((current) => ({
+        ...current,
+        saveState: "saving",
+        tabs: updateTab(current.tabs, path, { savedContent: content }),
+      }));
+      try {
+        const response = await getClient().request({
+          type: "fs_write",
+          host: target.host,
+          workspace: target.path,
+          path,
+          content,
+          base_etag: baseEtag,
+        });
+        if (response.type !== "fs_written") return;
+        const result = response.result;
+        if (result.conflict) {
+          setState((current) => ({
+            ...current,
+            saveState: "idle",
+            tabs: updateTab(current.tabs, path, { savedContent: previousSaved }),
+            conflict: {
+              path,
+              mine: content,
+              theirs: result.conflict?.current_content ?? "",
+              expectedEtag: result.conflict?.expected_etag ?? null,
+              currentEtag: result.conflict?.current_etag ?? result.etag,
+            },
+          }));
+          return;
+        }
+        setState((current) => ({
+          ...current,
+          saveState: "saved",
+          savedAt: Date.now(),
+          external: omit(current.external, path),
+          tabs: updateTab(current.tabs, path, {
+            savedContent: content,
+            etag: result.etag,
+          }),
+        }));
+      } catch (error) {
         setState((current) => ({
           ...current,
           saveState: "idle",
           tabs: updateTab(current.tabs, path, { savedContent: previousSaved }),
-          conflict: {
-            path,
-            mine: content,
-            theirs: result.conflict?.current_content ?? "",
-            expectedEtag: result.conflict?.expected_etag ?? null,
-            currentEtag: result.conflict?.current_etag ?? result.etag,
-          },
         }));
-        return;
+        throw error;
+      } finally {
+        savingPathRef.current = null;
       }
-      setState((current) => ({
-        ...current,
-        saveState: "saved",
-        savedAt: Date.now(),
-        external: omit(current.external, path),
-        tabs: updateTab(current.tabs, path, {
-          savedContent: content,
-          etag: result.etag,
-        }),
-      }));
-    } catch (error) {
-      setState((current) => ({
-        ...current,
-        saveState: "idle",
-        tabs: updateTab(current.tabs, path, { savedContent: previousSaved }),
-      }));
-      throw error;
-    } finally {
-      savingPathRef.current = null;
-    }
-  }, []);
+    },
+    [setState],
+  );
 
   /** Writes `content` over the file the diff showed as "before". */
   const revertTo = useCallback(
@@ -410,7 +429,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
     } finally {
       savingPathRef.current = null;
     }
-  }, []);
+  }, [setState]);
 
   const resolveConflictTakeTheirs = useCallback(() => {
     const conflict = stateRef.current.conflict;
@@ -426,25 +445,34 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
         etag: conflict.currentEtag,
       }),
     }));
-  }, []);
+  }, [setState]);
 
-  const requestClose = useCallback((path: string) => {
-    const tab = stateRef.current.tabs.tabs.find((entry) => entry.path === path);
-    if (!tab) return { dirty: false as const };
-    if (!isDirty(tab)) {
+  const requestClose = useCallback(
+    (path: string) => {
+      const tab = stateRef.current.tabs.tabs.find((entry) => entry.path === path);
+      if (!tab) return { dirty: false as const };
+      if (!isDirty(tab)) {
+        setState((current) => ({ ...current, tabs: closeTab(current.tabs, path) }));
+        return { dirty: false as const };
+      }
+      return { dirty: true as const, tab };
+    },
+    [setState],
+  );
+
+  const confirmClose = useCallback(
+    (path: string) => {
       setState((current) => ({ ...current, tabs: closeTab(current.tabs, path) }));
-      return { dirty: false as const };
-    }
-    return { dirty: true as const, tab };
-  }, []);
+    },
+    [setState],
+  );
 
-  const confirmClose = useCallback((path: string) => {
-    setState((current) => ({ ...current, tabs: closeTab(current.tabs, path) }));
-  }, []);
-
-  const moveTab = useCallback((path: string, index: number) => {
-    setState((current) => ({ ...current, tabs: reorderTabs(current.tabs, path, index) }));
-  }, []);
+  const moveTab = useCallback(
+    (path: string, index: number) => {
+      setState((current) => ({ ...current, tabs: reorderTabs(current.tabs, path, index) }));
+    },
+    [setState],
+  );
 
   const toggleDirectory = useCallback(
     (path: string) => {
@@ -457,71 +485,74 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
       });
       if (!stateRef.current.listings[path]) void loadListing(path);
     },
-    [loadListing],
+    [loadListing, setState],
   );
 
   // -------------------------------------------------------------------
   // Diff and agent changes
   // -------------------------------------------------------------------
 
-  const openDiff = useCallback(async (path: string, mode: "head" | "agent") => {
-    const target = workspaceRef.current;
-    if (!target) return;
-    let against: DiffAgainst;
-    if (mode === "head") {
-      against = { kind: "head" };
-    } else if (target.threadId && target.turnId) {
-      against = {
-        kind: "agent_turn",
-        thread_id: target.threadId,
-        turn_id: target.turnId,
-      };
-    } else {
+  const openDiff = useCallback(
+    async (path: string, mode: "head" | "agent") => {
+      const target = workspaceRef.current;
+      if (!target) return;
+      let against: DiffAgainst;
+      if (mode === "head") {
+        against = { kind: "head" };
+      } else if (target.threadId && target.turnId) {
+        against = {
+          kind: "agent_turn",
+          thread_id: target.threadId,
+          turn_id: target.turnId,
+        };
+      } else {
+        setState((current) => ({
+          ...current,
+          diffMode: mode,
+          diffPath: path,
+          diff: null,
+          diffLoading: false,
+          diffError: {
+            code: "invalid_request",
+            message: "This workspace has no agent turn to compare against yet.",
+            hint: "Run a turn first, then open Agent changes.",
+          },
+        }));
+        return;
+      }
       setState((current) => ({
         ...current,
         diffMode: mode,
         diffPath: path,
-        diff: null,
-        diffLoading: false,
-        diffError: {
-          code: "invalid_request",
-          message: "This workspace has no agent turn to compare against yet.",
-          hint: "Run a turn first, then open Agent changes.",
-        },
-      }));
-      return;
-    }
-    setState((current) => ({
-      ...current,
-      diffMode: mode,
-      diffPath: path,
-      diffLoading: true,
-      diffError: null,
-    }));
-    try {
-      const response = await getClient().request({
-        type: "fs_diff",
-        host: target.host,
-        workspace: target.path,
-        path,
-        against,
-      });
-      if (response.type !== "fs_diff") return;
-      setState((current) => ({
-        ...current,
-        diff: response.diff,
-        diffLoading: false,
+        diffLoading: true,
         diffError: null,
       }));
-    } catch (error) {
-      setState((current) => ({
-        ...current,
-        diff: null,
-        diffLoading: false,
-        diffError: toProtoError(error),
-      }));
-    }
-  }, []);
+      try {
+        const response = await getClient().request({
+          type: "fs_diff",
+          host: target.host,
+          workspace: target.path,
+          path,
+          against,
+        });
+        if (response.type !== "fs_diff") return;
+        setState((current) => ({
+          ...current,
+          diff: response.diff,
+          diffLoading: false,
+          diffError: null,
+        }));
+      } catch (error) {
+        setState((current) => ({
+          ...current,
+          diff: null,
+          diffLoading: false,
+          diffError: toProtoError(error),
+        }));
+      }
+    },
+    [setState],
+  );
 
   // -------------------------------------------------------------------
   // Search
@@ -581,12 +612,15 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
         }));
       }
     },
-    [],
+    [setState],
   );
 
-  const setSearchQuery = useCallback((query: string) => {
-    setState((current) => ({ ...current, search: { ...current.search, query } }));
-  }, []);
+  const setSearchQuery = useCallback(
+    (query: string) => {
+      setState((current) => ({ ...current, search: { ...current.search, query } }));
+    },
+    [setState],
+  );
 
   const setSearchOption = useCallback(
     (patchValue: Partial<Pick<SearchState, "regex" | "caseSensitive" | "glob">>) => {
@@ -595,7 +629,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
         search: { ...current.search, ...patchValue },
       }));
     },
-    [],
+    [setState],
   );
 
   // -------------------------------------------------------------------
@@ -604,11 +638,28 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
 
   const workspacePath = workspace?.path ?? null;
   const workspaceHost = workspace?.host ?? null;
+  const workspaceKey =
+    workspacePath && workspaceHost ? projectKey(workspaceHost, workspacePath) : null;
   useEffect(() => {
-    if (!workspacePath || !workspaceHost) return;
+    if (!workspacePath || !workspaceHost || !workspaceKey) return;
     autoOpenedRef.current = null;
-    setState(initialState());
-    void loadListing("");
+    loadedKeyRef.current = workspaceKey;
+    const cached = IDE_CACHE.get(workspaceKey);
+    if (cached) {
+      // A project keeps its tabs. Do not auto-open over them; just refresh the
+      // root listing so new or deleted files still show up.
+      applyState({
+        ...cached,
+        workspaceKey,
+        restoredTabs: cached.tabs.tabs.length,
+        treeLoading: cached.listings[""] === undefined,
+        treeError: null,
+      });
+      if (cached.listings[""] === undefined) void loadListing("");
+    } else {
+      applyState({ ...initialState(), workspaceKey });
+      void loadListing("");
+    }
     void getClient()
       .request({
         type: "fs_watch",
@@ -622,7 +673,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
         .request({ type: "fs_unwatch", workspace: workspacePath })
         .catch(() => undefined);
     };
-  }, [workspacePath, workspaceHost, loadListing]);
+  }, [workspaceKey, workspacePath, workspaceHost, loadListing]);
 
   useEffect(() => {
     if (!workspace?.threadId || !workspace.turnId) {
@@ -664,19 +715,20 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
     return () => {
       cancelled = true;
     };
-  }, [workspace?.path, workspace?.host, workspace?.threadId, workspace?.turnId]);
+  }, [workspace?.path, workspace?.host, workspace?.threadId, workspace?.turnId, setState]);
 
-  // Auto-open the last file, or the first plausible code file in the tree.
+  // Auto-open the first plausible code file the first time a project is
+  // opened. A project with remembered tabs is left exactly as it was.
   // Candidate reads are probes: a miss does not leave an error tab behind.
   useEffect(() => {
-    if (!workspace) return;
+    if (!workspace || !workspaceKey) return;
     const root = state.listings[""];
-    if (!root || autoOpenedRef.current === workspace.path) return;
-    autoOpenedRef.current = workspace.path;
+    if (!root || state.workspaceKey !== workspaceKey) return;
+    if (state.restoredTabs > 0) return;
+    if (autoOpenedRef.current === workspaceKey) return;
+    autoOpenedRef.current = workspaceKey;
     const topLevel = new Set(root.entries.map((entry) => entry.name));
-    const last = readLastFile();
     const candidates = [
-      ...(last ? [last] : []),
       ...PREFERRED_FILES.filter((path) => topLevel.has(path.split("/")[0] ?? "")),
       ...root.entries
         .filter((entry) => entry.kind === "file" && isCodePath(entry.path))
@@ -711,14 +763,13 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
               error: null,
             }),
           }));
-          rememberFile(path);
           return;
         } catch {
           // Try the next candidate.
         }
       }
     })();
-  }, [workspace, state.listings]);
+  }, [workspace, workspaceKey, state.listings, state.workspaceKey, state.restoredTabs, setState]);
 
   // Events: streamed search batches and external file changes.
   const watchedPath = workspace?.path ?? null;
@@ -757,7 +808,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
       void readInto(event.path);
     });
     return off;
-  }, [watchedPath, readInto]);
+  }, [watchedPath, readInto, setState]);
 
   return {
     state,

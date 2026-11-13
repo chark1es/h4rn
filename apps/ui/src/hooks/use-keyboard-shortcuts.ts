@@ -11,15 +11,21 @@ import {
   openShortcuts,
   openThread,
   requestComposerFocus,
+  requestFilesFocus,
   requestSearchFocus,
   respondApproval,
+  setPanelTab,
   setSelectedThread,
   setTab,
   setThreadTab,
   setUi,
   snoozeThread,
+  togglePanel,
   togglePin,
+  toggleSidebar,
+  toggleTerminal,
   toggleTheme,
+  toggleView,
 } from "@/lib/store/appStore";
 
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -91,6 +97,37 @@ export function useKeyboardShortcuts(): void {
         return;
       }
 
+      if (meta && !event.altKey && !event.shiftKey && lower === "e" && !typing) {
+        event.preventDefault();
+        toggleView();
+        return;
+      }
+
+      if (meta && !event.altKey && !event.shiftKey && lower === "b" && !typing) {
+        event.preventDefault();
+        toggleSidebar();
+        return;
+      }
+
+      if (meta && event.altKey && lower === "b") {
+        event.preventDefault();
+        togglePanel();
+        return;
+      }
+
+      if (meta && !event.altKey && lower === "j" && !typing) {
+        event.preventDefault();
+        setPanelTab("subagents");
+        return;
+      }
+
+      if (meta && !event.altKey && lower === "p" && !typing) {
+        event.preventDefault();
+        const id = state.ui.selectedThreadId;
+        if (id && state.threads[id]) requestFilesFocus();
+        return;
+      }
+
       if (meta && key === ",") {
         event.preventDefault();
         navigate({ kind: "placeholder", surface: "settings", path: "/settings" });
@@ -146,7 +183,38 @@ export function useKeyboardShortcuts(): void {
 
       if (key === "Escape") {
         clearSequence();
+        if (state.ui.paletteOpen) {
+          event.preventDefault();
+          setUi({ paletteOpen: false });
+          return;
+        }
+        if (state.ui.shortcutsOpen) {
+          event.preventDefault();
+          setUi({ shortcutsOpen: false });
+          return;
+        }
+        if (
+          route.kind === "hosts" ||
+          (route.kind === "placeholder" &&
+            (route.surface === "settings" || route.surface === "library"))
+        ) {
+          event.preventDefault();
+          navigate({ kind: "inbox" });
+        }
         return;
+      }
+
+      if (route.kind === "thread" || route.kind === "ide") {
+        if (lower === "d" && !event.shiftKey) {
+          event.preventDefault();
+          setPanelTab("changes");
+          return;
+        }
+        if (lower === "t" && !event.shiftKey) {
+          event.preventDefault();
+          toggleTerminal();
+          return;
+        }
       }
 
       if (route.kind === "thread") {
@@ -167,6 +235,7 @@ export function useKeyboardShortcuts(): void {
         const targets: Record<string, Route> = {
           i: { kind: "inbox" },
           h: { kind: "hosts" },
+          m: { kind: "placeholder", surface: "library", path: "/library" },
           l: { kind: "placeholder", surface: "library", path: "/library" },
           u: { kind: "placeholder", surface: "usage", path: "/usage" },
           e: { kind: "ide" },
