@@ -5,6 +5,40 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### Phase 5 — CLIProxyAPI
+
+- **Proxy crate** (`h4rn-proxy`): profiles, capability probes, three-shape model catalogue,
+  per-harness env/config recipes, credential health and failover selection, with secrets behind a
+  narrow `SecretStore` trait.
+- **Profiles**: multiple profiles with one default, per-profile/per-harness toggles and an optional
+  per-toggle default model. The default profile wins when its toggle is on; otherwise profiles are
+  tried in creation order. Metadata is a `0600` JSON file that never contains a key.
+- **Feature detection**: probes only, never version strings. `HEAD /healthz`, a keyless management
+  probe for `X-CPA-*` headers, authenticated route probes (usage queue, legacy usage, v8 config with
+  ETag, fork performance, credentials verify, auth files, quota providers) and header-selected model
+  shapes. Capabilities and catalogues are cached for five minutes and invalidated by writes or a
+  failed read.
+- **Models and aliases**: `/v1/models` is read once in the OpenAI shape and once with
+  `Anthropic-Version` for the Claude shape, plus `/v1beta/models`; entries merge by id with
+  provenance. Management-config aliases (`oauth.model-alias`, `openai-compatibility`,
+  `api-keys.<provider>`) are merged when a management key is available, without copying secrets.
+- **Per-harness routing**: Claude Code (root URL, token, model discovery), Codex
+  (`model_providers` with `env_key` and `wire_api`), OpenCode (generated `OPENCODE_CONFIG_CONTENT`)
+  and Antigravity (marked unverified). Overrides are applied through
+  `SessionSpec.env_overrides`, so keys never enter `argv`.
+- **Health and failover**: credential cooldowns from `auth-files` exposed as `ListProxyLimits`;
+  `PickProxyFailover` implements `same_family_first`, `account_first` and `any_model`, honouring
+  exclusions and active cooldowns.
+- **Protocol and daemon**: new `h4rn-protocol::proxy` wire types, nine client requests, response
+  bodies, ephemeral `ProxyEvent` server frames, a keychain-or-encrypted-file `DaemonSecretStore`,
+  daemon wiring and session-start override application.
+- **Tests**: wiremock coverage for upstream/fork probes, 404/401/403 management and client outcomes,
+  header-selected shapes, ETag, aliases and secret redaction; golden environment/config tests for
+  every harness; an ignored live test that runs a real Claude Code turn through a proxy and asserts
+  the reply.
+- **Docs**: [`docs/cliproxyapi.md`](docs/cliproxyapi.md) covers setup, the upstream-vs-fork
+  capability matrix and the per-harness override table.
+
 ### Phase 3 — connect
 
 - **Relay service** (`h4rn-connect`): axum + Postgres, self-hostable image and compose stack

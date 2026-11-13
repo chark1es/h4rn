@@ -98,6 +98,16 @@ impl Config {
         self.data_dir.join("blobs")
     }
 
+    /// Directory holding CLIProxyAPI profile metadata (ADR-015).
+    pub fn proxy_dir(&self) -> PathBuf {
+        self.data_dir.join("proxy")
+    }
+
+    /// Directory holding encrypted proxy secrets when no keychain is available.
+    pub fn proxy_secret_dir(&self) -> PathBuf {
+        self.proxy_dir().join("secrets")
+    }
+
     /// Directory holding per-thread materialised attachment copies.
     pub fn attachments_dir(&self) -> PathBuf {
         self.data_dir.join("attachments")

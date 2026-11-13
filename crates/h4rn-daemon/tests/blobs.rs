@@ -250,7 +250,9 @@ impl Client {
         loop {
             match self.read_json().await {
                 ServerFrame::Event { event, .. } => return event,
-                ServerFrame::Response { .. } | ServerFrame::TerminalEvent { .. } => {}
+                ServerFrame::Response { .. }
+                | ServerFrame::TerminalEvent { .. }
+                | ServerFrame::ProxyEvent { .. } => {}
             }
         }
     }

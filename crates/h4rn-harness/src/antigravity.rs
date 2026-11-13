@@ -89,6 +89,12 @@ pub const ENV_CLOUD_CODE_ENDPOINT: &str = "H4RN_AGY_CLOUD_CODE_ENDPOINT";
 pub const ENV_AGY_MODE: &str = "H4RN_AGY_MODE";
 /// Forces one transport: `acp`, `stream-json`, or `auto` (the default).
 pub const ENV_AGY_TRANSPORT: &str = "H4RN_AGY_TRANSPORT";
+/// The only API-key variable Antigravity's CLI accepts.
+pub const ENV_GEMINI_API_KEY: &str = "GEMINI_API_KEY";
+/// Documented custom Gemini endpoint override.
+pub const ENV_GOOGLE_GEMINI_BASE_URL: &str = "GOOGLE_GEMINI_BASE_URL";
+/// Model id Antigravity should request.
+pub const ENV_GEMINI_MODEL: &str = "GEMINI_MODEL";
 
 /// Environment variables a nested Antigravity must not inherit.
 const SCRUBBED_ENV: &[&str] = &[

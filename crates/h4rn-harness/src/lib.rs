@@ -36,24 +36,28 @@ pub mod registry;
 
 pub use antigravity::{
     AgyStreamParser, AntigravityHarness, ENV_AGY_MODE, ENV_AGY_PATH, ENV_AGY_TRANSPORT,
-    ENV_APP_DATA_DIR, ENV_CLOUD_CODE_ENDPOINT, ENV_GEMINI_DIR, detect_agy,
+    ENV_APP_DATA_DIR, ENV_CLOUD_CODE_ENDPOINT, ENV_GEMINI_API_KEY, ENV_GEMINI_DIR,
+    ENV_GEMINI_MODEL, ENV_GOOGLE_GEMINI_BASE_URL, detect_agy,
 };
 pub use attachments::{AttachmentClass, AttachmentDelivery, media_type, path_line, strategy};
 pub use claude_code::{
-    ClaudeCodeHarness, ClaudeCodeSession, ClaudeStreamParser, ENV_MCP_AUTH_TOKEN,
-    ENV_MCP_BEARER_TOKEN, ENV_PERMISSION_MODE, ENV_PERMISSION_PROMPT_TOOL, LimitSignal, TurnReport,
-    build_user_frame, detect_claude, detect_limit, parse_reset_time, state_for_tool, tool_paths,
-    tool_summary,
+    ClaudeCodeHarness, ClaudeCodeSession, ClaudeStreamParser, ENV_ANTHROPIC_AUTH_TOKEN,
+    ENV_ANTHROPIC_BASE_URL, ENV_ANTHROPIC_MODEL, ENV_ANTHROPIC_SMALL_FAST_MODEL,
+    ENV_GATEWAY_MODEL_DISCOVERY, ENV_MCP_AUTH_TOKEN, ENV_MCP_BEARER_TOKEN, ENV_PERMISSION_MODE,
+    ENV_PERMISSION_PROMPT_TOOL, LimitSignal, TurnReport, build_user_frame, detect_claude,
+    detect_limit, parse_reset_time, state_for_tool, tool_paths, tool_summary,
 };
 pub use codex::{
-    ApprovalRequest, CodexHarness, CodexParser, CodexSession, ENV_BASE_URL, ENV_MODEL_PROVIDER,
-    approval_from_request, approval_response, build_turn_input, detect_codex,
+    ApprovalRequest, CodexHarness, CodexParser, CodexSession, ENV_API_KEY_ENV, ENV_BASE_URL,
+    ENV_MODEL_PROVIDER, ENV_WIRE_API, approval_from_request, approval_response, build_turn_input,
+    detect_codex,
 };
 pub use fake::{FakeHarness, FakeSession, test_spec};
 pub use opencode::{
     ENV_CLIPROXY_API_KEY, ENV_CLIPROXY_BASE_URL, ENV_OPENCODE_API_KEY, ENV_OPENCODE_BASE_URL,
     ENV_OPENCODE_MODELS, ENV_OPENCODE_PACKAGE, ENV_OPENCODE_PROVIDER, MINIMUM_OPENCODE_VERSION,
-    OpenCodeHarness, OpenCodeParser, OpenCodeSession, detect_opencode,
+    OpenCodeHarness, OpenCodeParser, OpenCodeSession, config_content_for, detect_opencode,
+    provider_config,
 };
 pub use registry::{HarnessRegistry, builtin_adapters};
 

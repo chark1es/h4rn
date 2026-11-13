@@ -85,6 +85,16 @@ pub const ENV_MCP_BEARER_TOKEN: &str = "H4RN_MCP_BEARER_TOKEN";
 pub const ENV_PERMISSION_MODE: &str = "H4RN_CLAUDE_PERMISSION_MODE";
 /// Names the MCP tool the CLI calls for permission prompts.
 pub const ENV_PERMISSION_PROMPT_TOOL: &str = "H4RN_CLAUDE_PERMISSION_PROMPT_TOOL";
+/// Claude Code gateway base URL, **without** a trailing `/v1`.
+pub const ENV_ANTHROPIC_BASE_URL: &str = "ANTHROPIC_BASE_URL";
+/// Bearer token Claude Code sends to a gateway.
+pub const ENV_ANTHROPIC_AUTH_TOKEN: &str = "ANTHROPIC_AUTH_TOKEN";
+/// Main model id.
+pub const ENV_ANTHROPIC_MODEL: &str = "ANTHROPIC_MODEL";
+/// Small/fast model id.
+pub const ENV_ANTHROPIC_SMALL_FAST_MODEL: &str = "ANTHROPIC_SMALL_FAST_MODEL";
+/// Enables `/model` discovery from the gateway's `/v1/models`.
+pub const ENV_GATEWAY_MODEL_DISCOVERY: &str = "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY";
 
 const MCP_TIMEOUT_MS: u64 = 65 * 60 * 1000;
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;

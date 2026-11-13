@@ -44,6 +44,15 @@ pub enum ServerFrame {
         /// The terminal that changed.
         event: TerminalExitNotice,
     },
+    /// An ephemeral CLIProxyAPI change, outside the durable thread log.
+    ///
+    /// Proxy profiles are daemon-global rather than thread-scoped, so they do
+    /// not carry a sequence number. A client re-reads the list with
+    /// [`crate::ClientRequest::ListProxyProfiles`] after a reconnect.
+    ProxyEvent {
+        /// The change.
+        event: crate::proxy::ProxyEvent,
+    },
 }
 
 /// One durable event with its daemon-global sequence number.
@@ -204,6 +213,36 @@ pub enum ResponseBody {
     Blob {
         /// Metadata and the binary stream id to collect.
         download: BlobDownload,
+    },
+    /// Stored CLIProxyAPI profiles, without secrets.
+    ProxyProfiles {
+        /// Every profile, default first.
+        profiles: Vec<crate::proxy::ProxyProfile>,
+    },
+    /// One profile was added or updated.
+    ProxyProfile {
+        /// The profile as clients may see it.
+        profile: crate::proxy::ProxyProfile,
+    },
+    /// A profile capability test finished.
+    ProxyTested {
+        /// The capabilities and diagnostics.
+        report: crate::proxy::ProxyTestReport,
+    },
+    /// One profile's model catalogue.
+    ProxyModels {
+        /// The catalogue.
+        catalog: crate::proxy::ProxyModelCatalog,
+    },
+    /// One profile's credential health.
+    ProxyLimits {
+        /// The health snapshot.
+        limits: crate::proxy::ProxyLimits,
+    },
+    /// A failover candidate, or `None` when the proxy has no other model.
+    ProxyFailover {
+        /// The chosen candidate.
+        choice: Option<crate::proxy::ProxyFailoverChoice>,
     },
     /// A request with no payload completed successfully.
     Ack,

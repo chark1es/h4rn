@@ -7,6 +7,10 @@ import type { DiffAgainst } from "./DiffAgainst";
 import type { FsCreateKind } from "./FsCreateKind";
 import type { HarnessKind } from "./HarnessKind";
 import type { HostId } from "./HostId";
+import type { ProxyFailoverPolicy } from "./ProxyFailoverPolicy";
+import type { ProxyProfileDraft } from "./ProxyProfileDraft";
+import type { ProxyProfileId } from "./ProxyProfileId";
+import type { ProxyProfilePatch } from "./ProxyProfilePatch";
 import type { RuntimeMode } from "./RuntimeMode";
 import type { TerminalId } from "./TerminalId";
 import type { ThreadFilter } from "./ThreadFilter";
@@ -472,7 +476,63 @@ base_url: string | null,
 /**
  * Whether the proxy is enabled for this harness.
  */
-enabled: boolean, } | { "type": "usage_query", 
+enabled: boolean, } | { "type": "list_proxy_profiles" } | { "type": "add_proxy_profile", 
+/**
+ * Profile fields and secrets.
+ */
+profile: ProxyProfileDraft, } | { "type": "update_proxy_profile", 
+/**
+ * Profile to update.
+ */
+profile_id: ProxyProfileId, 
+/**
+ * Field-wise patch.
+ */
+patch: ProxyProfilePatch, } | { "type": "remove_proxy_profile", 
+/**
+ * Profile to remove.
+ */
+profile_id: ProxyProfileId, } | { "type": "test_proxy_profile", 
+/**
+ * Profile to probe.
+ */
+profile_id: ProxyProfileId, } | { "type": "list_proxy_models", 
+/**
+ * Profile to read.
+ */
+profile_id: ProxyProfileId, } | { "type": "set_proxy_harness_override", 
+/**
+ * Profile whose toggle changes.
+ */
+profile_id: ProxyProfileId, 
+/**
+ * Harness affected.
+ */
+harness: HarnessKind, 
+/**
+ * New state.
+ */
+enabled: boolean, 
+/**
+ * Model used when a thread did not pick a proxy model.
+ */
+default_model: string | null, } | { "type": "list_proxy_limits", 
+/**
+ * Profile to read.
+ */
+profile_id: ProxyProfileId, } | { "type": "pick_proxy_failover", 
+/**
+ * Profile that will serve the retry.
+ */
+profile_id: ProxyProfileId, 
+/**
+ * Model that just hit its limit.
+ */
+current_model: string, 
+/**
+ * Selection policy.
+ */
+policy: ProxyFailoverPolicy, } | { "type": "usage_query", 
 /**
  * Optional lower bound.
  */

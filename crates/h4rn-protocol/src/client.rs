@@ -421,6 +421,63 @@ pub enum ClientRequest {
         /// Whether the proxy is enabled for this harness.
         enabled: bool,
     },
+    // ------------------------------------------------------------------
+    // Phase 5: CLIProxyAPI profiles (ADR-015).
+    // ------------------------------------------------------------------
+    /// List stored CLIProxyAPI profiles, without secrets.
+    ListProxyProfiles,
+    /// Add one profile and store its keys in the daemon secret store.
+    AddProxyProfile {
+        /// Profile fields and secrets.
+        profile: crate::proxy::ProxyProfileDraft,
+    },
+    /// Update one profile. `None` fields are left unchanged.
+    UpdateProxyProfile {
+        /// Profile to update.
+        profile_id: crate::proxy::ProxyProfileId,
+        /// Field-wise patch.
+        patch: crate::proxy::ProxyProfilePatch,
+    },
+    /// Remove one profile and its stored secrets.
+    RemoveProxyProfile {
+        /// Profile to remove.
+        profile_id: crate::proxy::ProxyProfileId,
+    },
+    /// Probe one profile and return its capabilities and diagnostics.
+    TestProxyProfile {
+        /// Profile to probe.
+        profile_id: crate::proxy::ProxyProfileId,
+    },
+    /// List the models one profile can serve, with provenance.
+    ListProxyModels {
+        /// Profile to read.
+        profile_id: crate::proxy::ProxyProfileId,
+    },
+    /// Enable or disable routing one harness through one profile.
+    SetProxyHarnessOverride {
+        /// Profile whose toggle changes.
+        profile_id: crate::proxy::ProxyProfileId,
+        /// Harness affected.
+        harness: HarnessKind,
+        /// New state.
+        enabled: bool,
+        /// Model used when a thread did not pick a proxy model.
+        default_model: Option<String>,
+    },
+    /// Read credential health and cooldowns for one profile.
+    ListProxyLimits {
+        /// Profile to read.
+        profile_id: crate::proxy::ProxyProfileId,
+    },
+    /// Pick a model (and account) to retry on after a limit.
+    PickProxyFailover {
+        /// Profile that will serve the retry.
+        profile_id: crate::proxy::ProxyProfileId,
+        /// Model that just hit its limit.
+        current_model: String,
+        /// Selection policy.
+        policy: crate::proxy::ProxyFailoverPolicy,
+    },
     /// TODO(phase 6): query the usage ledger.
     UsageQuery {
         /// Optional lower bound.

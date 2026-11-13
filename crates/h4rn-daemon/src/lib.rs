@@ -30,6 +30,7 @@ pub mod harnesses;
 pub mod hosts;
 pub mod journal;
 pub mod remote;
+pub mod secrets;
 pub mod server;
 pub mod supervisor;
 pub mod terminal;

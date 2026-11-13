@@ -72,6 +72,8 @@ pub struct AppState {
     pub secure: Option<Arc<SecureService>>,
     /// Remote-action audit trail, when the daemon is signed in to connect.
     pub remote: Option<Arc<RemoteAudit>>,
+    /// CLIProxyAPI profiles and routing (ADR-015).
+    pub proxy: Arc<h4rn_proxy::ProxyService>,
     /// Server boot time, for `/healthz`.
     pub started: Instant,
 }
@@ -380,6 +382,13 @@ where
         Arc::clone(&notify),
         Arc::clone(&last_seq),
     ));
+    let proxy_forward = tokio::spawn(proxy_forward_loop(
+        state.proxy.subscribe(),
+        tx.clone(),
+        Arc::clone(&ready),
+        Arc::clone(&overflowed),
+        Arc::clone(&notify),
+    ));
 
     let viewer_id = state.terminals.next_viewer_id();
     let mut connection = Connection {
@@ -421,6 +430,7 @@ where
     }
 
     forward.abort();
+    proxy_forward.abort();
     // Detaching a socket never kills a terminal; it only removes this
     // connection's viewers so the PTY keeps running for the next attach.
     connection
@@ -1144,6 +1154,73 @@ impl Connection {
                 }
                 Err(error) => Err(error.into_proto()),
             },
+            // ----------------------------------------------------------
+            // Phase 5: CLIProxyAPI profiles (ADR-015).
+            // ----------------------------------------------------------
+            ClientRequest::ListProxyProfiles => Ok(ResponseBody::ProxyProfiles {
+                profiles: self.state.proxy.profiles(),
+            }),
+            ClientRequest::AddProxyProfile { profile } => self
+                .state
+                .proxy
+                .add_profile(profile)
+                .map(|profile| ResponseBody::ProxyProfile { profile })
+                .map_err(h4rn_proxy::ProxyError::into_proto),
+            ClientRequest::UpdateProxyProfile { profile_id, patch } => self
+                .state
+                .proxy
+                .update_profile(&profile_id, patch)
+                .map(|profile| ResponseBody::ProxyProfile { profile })
+                .map_err(h4rn_proxy::ProxyError::into_proto),
+            ClientRequest::RemoveProxyProfile { profile_id } => self
+                .state
+                .proxy
+                .remove_profile(&profile_id)
+                .map(|()| ResponseBody::Ack)
+                .map_err(h4rn_proxy::ProxyError::into_proto),
+            ClientRequest::TestProxyProfile { profile_id } => self
+                .state
+                .proxy
+                .test(&profile_id)
+                .await
+                .map(|report| ResponseBody::ProxyTested { report })
+                .map_err(h4rn_proxy::ProxyError::into_proto),
+            ClientRequest::ListProxyModels { profile_id } => self
+                .state
+                .proxy
+                .models(&profile_id)
+                .await
+                .map(|catalog| ResponseBody::ProxyModels { catalog })
+                .map_err(h4rn_proxy::ProxyError::into_proto),
+            ClientRequest::SetProxyHarnessOverride {
+                profile_id,
+                harness,
+                enabled,
+                default_model,
+            } => self
+                .state
+                .proxy
+                .set_harness_override(&profile_id, harness, enabled, default_model)
+                .map(|profile| ResponseBody::ProxyProfile { profile })
+                .map_err(h4rn_proxy::ProxyError::into_proto),
+            ClientRequest::ListProxyLimits { profile_id } => self
+                .state
+                .proxy
+                .limits(&profile_id)
+                .await
+                .map(|limits| ResponseBody::ProxyLimits { limits })
+                .map_err(h4rn_proxy::ProxyError::into_proto),
+            ClientRequest::PickProxyFailover {
+                profile_id,
+                current_model,
+                policy,
+            } => self
+                .state
+                .proxy
+                .pick_failover(&profile_id, &current_model, &policy)
+                .await
+                .map(|choice| ResponseBody::ProxyFailover { choice })
+                .map_err(h4rn_proxy::ProxyError::into_proto),
             other => Err(not_implemented(&other)),
         };
 
@@ -1268,6 +1345,44 @@ async fn forward_loop(
             seq: event.seq,
             event: event.event,
         };
+        let Ok(text) = serde_json::to_string(&frame) else {
+            continue;
+        };
+        match tx.try_send(Outbound::Text(text)) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!("client outbound queue is full; dropping the connection");
+                overflowed.store(true, Ordering::Relaxed);
+                notify.notify_waiters();
+                return;
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => return,
+        }
+    }
+}
+
+async fn proxy_forward_loop(
+    mut subscription: tokio::sync::broadcast::Receiver<h4rn_protocol::ProxyEvent>,
+    tx: mpsc::Sender<Outbound>,
+    ready: Arc<AtomicBool>,
+    overflowed: Arc<AtomicBool>,
+    notify: Arc<Notify>,
+) {
+    loop {
+        let event = match subscription.recv().await {
+            Ok(event) => event,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                tracing::warn!(missed, "client fell behind the proxy event broadcast");
+                overflowed.store(true, Ordering::Relaxed);
+                notify.notify_waiters();
+                return;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        };
+        if !ready.load(Ordering::Relaxed) {
+            continue;
+        }
+        let frame = ServerFrame::ProxyEvent { event };
         let Ok(text) = serde_json::to_string(&frame) else {
             continue;
         };

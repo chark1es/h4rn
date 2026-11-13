@@ -158,6 +158,20 @@ impl DaemonBuilder {
         );
         manager.start_ticker();
 
+        // Profiles and their keys are daemon-global; sessions pick them up
+        // through `ThreadManager::set_proxy` at start time (ADR-015).
+        let proxy = Arc::new(
+            h4rn_proxy::ProxyService::open(
+                self.config.proxy_dir(),
+                Arc::new(crate::secrets::DaemonSecretStore::open(
+                    self.config.proxy_secret_dir(),
+                )?),
+                h4rn_proxy::DEFAULT_CAPABILITY_TTL,
+            )
+            .map_err(|error| anyhow::anyhow!("open CLIProxyAPI profiles: {error}"))?,
+        );
+        manager.set_proxy(Arc::clone(&proxy));
+
         let fs = Arc::new(
             FsService::new(&self.config.data_dir)
                 .map_err(|error| anyhow::anyhow!("open filesystem service: {error}"))?,
@@ -219,6 +233,7 @@ impl DaemonBuilder {
             secure,
             remote,
             supervisor: self.supervisor,
+            proxy,
         })
     }
 }
@@ -235,6 +250,7 @@ pub struct Daemon {
     secure: Option<Arc<SecureService>>,
     remote: Option<Arc<RemoteState>>,
     supervisor: Arc<ProcessSupervisor>,
+    proxy: Arc<h4rn_proxy::ProxyService>,
 }
 
 impl Daemon {
@@ -256,6 +272,11 @@ impl Daemon {
     /// Terminal manager handle (tests and diagnostics).
     pub fn terminals(&self) -> Arc<TerminalManager> {
         Arc::clone(&self.terminals)
+    }
+
+    /// CLIProxyAPI profile service (tests and diagnostics).
+    pub fn proxy(&self) -> Arc<h4rn_proxy::ProxyService> {
+        Arc::clone(&self.proxy)
     }
 
     /// Binds the primary and optional extra listener.
@@ -316,6 +337,7 @@ impl Daemon {
             secure: secure.clone(),
             remote: remote.as_ref().map(|remote| Arc::clone(&remote.audit)),
             started: std::time::Instant::now(),
+            proxy: Arc::clone(&self.proxy),
         };
 
         let mut remote_tasks = Vec::new();

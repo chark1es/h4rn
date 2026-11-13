@@ -10,6 +10,11 @@ import type { FsListing } from "./FsListing";
 import type { FsTurnChanges } from "./FsTurnChanges";
 import type { FsWriteResult } from "./FsWriteResult";
 import type { HostSummary } from "./HostSummary";
+import type { ProxyFailoverChoice } from "./ProxyFailoverChoice";
+import type { ProxyLimits } from "./ProxyLimits";
+import type { ProxyModelCatalog } from "./ProxyModelCatalog";
+import type { ProxyProfile } from "./ProxyProfile";
+import type { ProxyTestReport } from "./ProxyTestReport";
 import type { SeqEvent } from "./SeqEvent";
 import type { TerminalInfo } from "./TerminalInfo";
 import type { ThreadId } from "./ThreadId";
@@ -161,4 +166,28 @@ upload: UploadState, } | { "type": "blob",
 /**
  * Metadata and the binary stream id to collect.
  */
-download: BlobDownload, } | { "type": "ack" };
+download: BlobDownload, } | { "type": "proxy_profiles", 
+/**
+ * Every profile, default first.
+ */
+profiles: Array<ProxyProfile>, } | { "type": "proxy_profile", 
+/**
+ * The profile as clients may see it.
+ */
+profile: ProxyProfile, } | { "type": "proxy_tested", 
+/**
+ * The capabilities and diagnostics.
+ */
+report: ProxyTestReport, } | { "type": "proxy_models", 
+/**
+ * The catalogue.
+ */
+catalog: ProxyModelCatalog, } | { "type": "proxy_limits", 
+/**
+ * The health snapshot.
+ */
+limits: ProxyLimits, } | { "type": "proxy_failover", 
+/**
+ * The chosen candidate.
+ */
+choice: ProxyFailoverChoice | null, } | { "type": "ack" };

@@ -197,7 +197,9 @@ impl Client {
         loop {
             match self.read_frame().await {
                 ServerFrame::Event { seq, event } => return (seq, event),
-                ServerFrame::Response { .. } | ServerFrame::TerminalEvent { .. } => {}
+                ServerFrame::Response { .. }
+                | ServerFrame::TerminalEvent { .. }
+                | ServerFrame::ProxyEvent { .. } => {}
             }
         }
     }

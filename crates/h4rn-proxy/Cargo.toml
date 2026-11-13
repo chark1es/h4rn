@@ -8,4 +8,18 @@ repository.workspace = true
 description = "CLIProxyAPI feature detection and per-harness routing (ADR-015)"
 
 [dependencies]
+chrono.workspace = true
+h4rn-harness.workspace = true
 h4rn-protocol.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+h4rn-harness.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock.workspace = true

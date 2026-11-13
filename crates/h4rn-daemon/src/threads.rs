@@ -195,6 +195,8 @@ struct Inner {
     closed: AtomicBool,
     /// Pre-turn file snapshots for "diff vs agent changes" (IDE mode).
     snapshots: std::sync::OnceLock<Arc<crate::fs::SnapshotStore>>,
+    /// CLIProxyAPI routing, when profiles are configured (ADR-015).
+    proxy: std::sync::OnceLock<Arc<h4rn_proxy::ProxyService>>,
 }
 
 type ThreadHandle = Arc<Mutex<ThreadRecord>>;
@@ -319,6 +321,7 @@ impl ThreadManager {
                 ticker: std::sync::Mutex::new(None),
                 closed: AtomicBool::new(false),
                 snapshots: std::sync::OnceLock::new(),
+                proxy: std::sync::OnceLock::new(),
             }),
         };
         manager.inner.restore().await?;
@@ -328,6 +331,14 @@ impl ThreadManager {
     /// Subscribes to the live projected event stream.
     pub fn subscribe(&self) -> broadcast::Receiver<WireEvent> {
         self.inner.events.subscribe()
+    }
+
+    /// Attaches CLIProxyAPI routing so new sessions receive harness overrides.
+    ///
+    /// Called once during daemon assembly; a second call is ignored so a
+    /// session cannot observe two different proxy services mid-flight.
+    pub fn set_proxy(&self, proxy: Arc<h4rn_proxy::ProxyService>) {
+        let _ = self.inner.proxy.set(proxy);
     }
 
     /// Acquires the append lock so a global replay is a gap-free prefix.
@@ -1027,6 +1038,23 @@ impl Inner {
             };
             (harness, spec)
         };
+
+        // CLIProxyAPI routing is applied only when the harness's toggle is on.
+        // This is synchronous and offline: a probe never delays a session start.
+        let mut spec = spec;
+        if let Some(proxy) = self.proxy.get()
+            && let Some(applied) = proxy.override_for(harness_kind, &spec.model)
+        {
+            tracing::debug!(
+                profile = %applied.profile_id,
+                harness = ?harness_kind,
+                model = %applied.model,
+                verified = applied.verified,
+                "routing a harness session through CLIProxyAPI"
+            );
+            spec.model = applied.model;
+            spec.env_overrides = applied.env;
+        }
 
         let mut session = match harness.start_session(spec).await {
             Ok(session) => session,

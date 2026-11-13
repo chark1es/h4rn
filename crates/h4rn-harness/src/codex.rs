@@ -74,6 +74,13 @@ pub const ENV_MCP_BEARER_TOKEN: &str = "H4RN_MCP_BEARER_TOKEN";
 pub const ENV_MODEL_PROVIDER: &str = "H4RN_CODEX_MODEL_PROVIDER";
 /// Overrides the provider base URL (also accepts `OPENAI_BASE_URL`).
 pub const ENV_BASE_URL: &str = "H4RN_CODEX_BASE_URL";
+/// Names the environment variable that holds the provider key.
+///
+/// The key itself rides the child environment under the named variable, never
+/// argv; Codex resolves `model_providers.<id>.env_key` at request time.
+pub const ENV_API_KEY_ENV: &str = "H4RN_CODEX_API_KEY_ENV";
+/// Overrides `wire_api` (only `responses` is accepted by Codex today).
+pub const ENV_WIRE_API: &str = "H4RN_CODEX_WIRE_API";
 
 const MCP_TOOL_TIMEOUT_SECS: u64 = 3_900;
 const EVENT_CHANNEL_CAPACITY: usize = 512;
@@ -90,6 +97,8 @@ const H4RN_ONLY_ENV: &[&str] = &[
     ENV_MCP_BEARER_TOKEN,
     ENV_MODEL_PROVIDER,
     ENV_BASE_URL,
+    ENV_API_KEY_ENV,
+    ENV_WIRE_API,
 ];
 
 /// The Codex adapter.
@@ -917,16 +926,30 @@ fn provider_arguments(env: &BTreeMap<String, String>) -> Vec<String> {
         .map(String::as_str)
         .map(str::trim)
         .filter(|url| !url.is_empty());
+    let api_key_env = env
+        .get(ENV_API_KEY_ENV)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    let wire_api = env
+        .get(ENV_WIRE_API)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|api| !api.is_empty())
+        .unwrap_or("responses");
 
     let mut arguments = Vec::new();
     match (provider, base_url) {
         (Some(provider), Some(base_url)) => {
             arguments.push(format!("model_provider={provider}"));
             arguments.push(format!("model_providers.{provider}.base_url={base_url}"));
-            arguments.push(format!("model_providers.{provider}.wire_api=responses"));
+            arguments.push(format!("model_providers.{provider}.wire_api={wire_api}"));
             arguments.push(format!(
                 "model_providers.{provider}.requires_openai_auth=false"
             ));
+            if let Some(api_key_env) = api_key_env {
+                arguments.push(format!("model_providers.{provider}.env_key={api_key_env}"));
+            }
         }
         (Some(provider), None) => arguments.push(format!("model_provider={provider}")),
         (None, Some(base_url)) => arguments.push(format!("openai_base_url={base_url}")),
@@ -1183,6 +1206,23 @@ mod tests {
             arguments
                 .contains(&"model_providers.cliproxyapi.requires_openai_auth=false".to_string())
         );
+    }
+
+    #[test]
+    fn a_named_key_env_and_wire_api_are_passed_to_codex() {
+        let mut env = BTreeMap::new();
+        env.insert(ENV_MODEL_PROVIDER.into(), "h4rn-proxy_0".into());
+        env.insert(ENV_BASE_URL.into(), "https://proxy.example/v1".into());
+        env.insert(ENV_API_KEY_ENV.into(), "CLIPROXY_API_KEY".into());
+        env.insert(ENV_WIRE_API.into(), "responses".into());
+        let arguments = provider_arguments(&env);
+        assert!(
+            arguments
+                .contains(&"model_providers.h4rn-proxy_0.env_key=CLIPROXY_API_KEY".to_string())
+        );
+        assert!(arguments.contains(&"model_providers.h4rn-proxy_0.wire_api=responses".to_string()));
+        // The key itself stays in the child environment, never in argv.
+        assert!(!arguments.iter().any(|argument| argument.contains("sk-")));
     }
 
     #[test]
