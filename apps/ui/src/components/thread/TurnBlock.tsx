@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
-import { ALT, KeyGlyphs, SHIFT } from "@/components/common/Kbd";
+import { ALT, KeyCaps, SHIFT } from "@/components/common/Kbd";
 import { MessageAttachments } from "@/features/attachments/MessageAttachments";
 import type { ThreadSummary } from "@/gen";
 import { useSmoothText } from "@/hooks/use-smooth-text";
@@ -193,10 +193,7 @@ export function TurnBlock({
           </span>
           <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onRetry}>
             <RotateCcwIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-            Retry{" "}
-            <span className="q-kbd">
-              <KeyGlyphs value={`${SHIFT} R`} />
-            </span>
+            Retry <KeyCaps value={`${SHIFT} R`} />
           </button>
         </div>
       ) : null}

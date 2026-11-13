@@ -410,11 +410,11 @@ export function UsagePage() {
                 </div>
                 <div
                   className="num"
-                  style={{ fontSize: 22, fontWeight: 600, letterSpacing: "-0.015em", marginTop: 2 }}
+                  style={{ fontSize: 22, fontWeight: 600, letterSpacing: "-0.015em", marginTop: 6 }}
                 >
                   {value}
                 </div>
-                <div className="q-faint" style={{ fontSize: 13 }}>
+                <div className="q-faint" style={{ fontSize: 13, marginTop: 4 }}>
                   {detail}
                 </div>
               </div>

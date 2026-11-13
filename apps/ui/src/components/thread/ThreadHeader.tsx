@@ -60,11 +60,15 @@ export function ThreadHeader({
 }) {
   const hostOnline = host?.online ?? false;
   const working = summary.tab === "working";
+  const unreachable =
+    summary.agent_state === "unreachable" ||
+    summary.agent_state === "error" ||
+    (working && !hostOnline);
   // A dropped connection outranks the last agent state: do not animate work
   // the daemon can no longer confirm.
   const glyph =
     stale && working
-      ? { kind: "offline" as const, label: "Host unreachable" }
+      ? { kind: "offline" as const, label: "Last seen running" }
       : glyphForThread(summary, hostOnline);
   const isPhone = useIsPhone();
   const hostName = host?.name ?? summary.host;
@@ -72,6 +76,9 @@ export function ThreadHeader({
     summary.tab === "done" && summary.agent_state === "done"
       ? `Done · ${relativeAge(summary.last_activity)}`
       : glyph.label;
+  // The prototype's Done and unreachable headers carry only state and the
+  // actions that are actually available; the tool strip belongs to live work.
+  const showToolIcons = summary.tab !== "done" && !unreachable;
 
   const threadMenu = (
     <DropdownMenu>
@@ -227,42 +234,48 @@ export function ThreadHeader({
       </div>
 
       <div className="q-th-actions">
-        {onToggleTerminal ? (
-          <button
-            type="button"
-            className={cn("q-ibtn", terminalOpen && "on")}
-            aria-label="Toggle terminal"
-            aria-pressed={terminalOpen}
-            title="Terminal · T"
-            onClick={onToggleTerminal}
-          >
-            <TerminalIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-          </button>
-        ) : null}
-        {onToggleSubagents ? (
-          <button
-            type="button"
-            className={cn("q-ibtn", subagentsOpen && "on")}
-            aria-label="Toggle subagents"
-            aria-pressed={subagentsOpen}
-            title={`Subagents · ${MOD} J`}
-            onClick={onToggleSubagents}
-          >
-            <ListTreeIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-          </button>
-        ) : null}
-        <button
-          type="button"
-          className="q-ibtn"
-          aria-label="Changes"
-          title="Changes · D"
-          onClick={() => navigate({ kind: "ide" })}
-        >
-          <FileDiffIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-        </button>
-        <span className="q-vsep" />
+        {showToolIcons ? (
+          <>
+            {onToggleTerminal ? (
+              <button
+                type="button"
+                className={cn("q-ibtn", terminalOpen && "on")}
+                aria-label="Toggle terminal"
+                aria-pressed={terminalOpen}
+                title="Terminal · T"
+                onClick={onToggleTerminal}
+              >
+                <TerminalIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+              </button>
+            ) : null}
+            {onToggleSubagents ? (
+              <button
+                type="button"
+                className={cn("q-ibtn", subagentsOpen && "on")}
+                aria-label="Toggle subagents"
+                aria-pressed={subagentsOpen}
+                title={`Subagents · ${MOD} J`}
+                onClick={onToggleSubagents}
+              >
+                <ListTreeIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className="q-ibtn"
+              aria-label="Changes"
+              title="Changes · D"
+              onClick={() => navigate({ kind: "ide" })}
+            >
+              <FileDiffIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+            </button>
+            <span className="q-vsep" />
+          </>
+        ) : (
+          <span className="q-vsep" />
+        )}
 
-        {working && !stale ? (
+        {working && !stale && !unreachable ? (
           <button
             type="button"
             className="q-btn secondary"

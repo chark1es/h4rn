@@ -391,18 +391,6 @@ export function IdePane() {
             {active?.path ?? workspace.path}
           </span>
           <span className="grow" />
-          {!isPhone && active ? (
-            <button
-              type="button"
-              className="q-btn ghost"
-              style={{ height: 24 }}
-              onClick={openNewThread}
-              title="Start a thread with this file in context"
-            >
-              <HandIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-              Hand to agent
-            </button>
-          ) : null}
           {!isPhone ? (
             <div className="q-seg inline" role="tablist" aria-label="Editor mode">
               <button
@@ -432,6 +420,18 @@ export function IdePane() {
                 vs agent
               </button>
             </div>
+          ) : null}
+          {!isPhone && active ? (
+            <button
+              type="button"
+              className="q-btn ghost"
+              style={{ height: 24 }}
+              onClick={openNewThread}
+              title="Start a thread with this file in context"
+            >
+              <HandIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+              Hand to agent
+            </button>
           ) : null}
           {isPhone ? (
             <>

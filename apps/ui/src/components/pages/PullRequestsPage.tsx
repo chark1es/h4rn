@@ -11,7 +11,7 @@ import {
 import { useState } from "react";
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
-import { ENTER, KeyGlyphs, MOD } from "@/components/common/Kbd";
+import { ENTER, KeyCaps, MOD } from "@/components/common/Kbd";
 import { glyphForAgentState } from "@/lib/agent";
 import { harnessSeed, userSeed } from "@/lib/entities";
 
@@ -236,10 +236,7 @@ export function PullRequestsPage() {
                           Cancel
                         </button>
                         <button type="button" className="q-btn primary">
-                          Send to Claude Code{" "}
-                          <span className="q-kbd">
-                            <KeyGlyphs value={`${MOD}${ENTER}`} />
-                          </span>
+                          Send to Claude Code <KeyCaps value={`${MOD} ${ENTER}`} />
                         </button>
                       </div>
                     </div>

@@ -1,7 +1,9 @@
 import { Command as CommandPrimitive } from "cmdk";
 import { SearchIcon } from "lucide-react";
 import type * as React from "react";
+import { Children } from "react";
 
+import { KeyGlyphs } from "@/components/common/Kbd";
 import { cn } from "@/lib/utils";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./dialog";
 
@@ -21,12 +23,16 @@ function CommandDialog({
   children,
   className,
   showCloseButton = false,
+  onOpenAutoFocus,
+  onCloseAutoFocus,
   ...props
 }: React.ComponentProps<typeof Dialog> & {
   title?: string;
   description?: string;
   className?: string;
   showCloseButton?: boolean;
+  onOpenAutoFocus?: React.ComponentProps<typeof DialogContent>["onOpenAutoFocus"];
+  onCloseAutoFocus?: React.ComponentProps<typeof DialogContent>["onCloseAutoFocus"];
 }) {
   return (
     <Dialog {...props}>
@@ -37,6 +43,8 @@ function CommandDialog({
       <DialogContent
         className={cn("q-palette block gap-0 overflow-hidden p-0", className)}
         showCloseButton={showCloseButton}
+        onOpenAutoFocus={onOpenAutoFocus}
+        onCloseAutoFocus={onCloseAutoFocus}
       >
         <Command>{children}</Command>
       </DialogContent>
@@ -124,8 +132,29 @@ function CommandItem({ className, ...props }: React.ComponentProps<typeof Comman
   );
 }
 
-function CommandShortcut({ className, ...props }: React.ComponentProps<"span">) {
-  return <span data-slot="command-shortcut" className={cn("q-pal-kbd", className)} {...props} />;
+function CommandShortcut({ className, children, ...props }: React.ComponentProps<"span">) {
+  const text = Children.toArray(children)
+    .map((child) => (typeof child === "string" ? child : ""))
+    .join("");
+  const keys = text.trim().split(/\s+/).filter(Boolean);
+  const seen = new Map<string, number>();
+  const chips = keys.map((key) => {
+    const ordinal = seen.get(key) ?? 0;
+    seen.set(key, ordinal + 1);
+    return { key, id: `${key}-${ordinal}` };
+  });
+
+  return (
+    <span data-slot="command-shortcut" className={cn("q-pal-kbd", className)} {...props}>
+      {chips.length > 0
+        ? chips.map((chip) => (
+            <span className="q-kbd" key={chip.id}>
+              <KeyGlyphs value={chip.key} />
+            </span>
+          ))
+        : children}
+    </span>
+  );
 }
 
 function CommandFooter({ className, ...props }: React.ComponentProps<"div">) {

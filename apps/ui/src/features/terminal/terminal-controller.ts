@@ -94,7 +94,10 @@ export class TerminalController {
       fontFamily:
         '"Geist Mono Variable", "DejaVu Sans Mono", ui-monospace, SFMono-Regular, monospace',
       fontSize: compact ? 12 : 12.5,
-      lineHeight: compact ? 1.5 : 1.25,
+      // xterm multiplies the measured cell height by this. 1.18 lands on the
+      // prototype's 18 px row pitch at 12 px on phones; 1.12 keeps desktops at
+      // 19 px at 12.5 px.
+      lineHeight: compact ? 1.18 : 1.12,
       letterSpacing: 0,
       cursorBlink: !options.reducedMotion,
       cursorStyle: "bar",

@@ -213,7 +213,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
 
       {loaded && offline && summary.tab === "working" ? (
         <div
-          className="q-banner"
+          className="q-banner wrap"
           style={{ margin: "12px auto 0", maxWidth: 656, width: "calc(100% - 64px)" }}
         >
           <span className="ic">

@@ -5,11 +5,13 @@ import { cn } from "@/lib/utils";
 type EntityKind = "machine" | "harness" | "subagent" | "thread" | "user";
 
 const BACKGROUND: Record<EntityKind, "squircle" | "circle" | false> = {
-  machine: "squircle",
-  harness: "circle",
+  // The prototype draws the creature itself, never a plate. A background tile
+  // turns into a white chip in dark mode and reads as a badge, not an identity.
+  machine: false,
+  harness: false,
   subagent: false,
   thread: false,
-  user: "circle",
+  user: false,
 };
 
 type EntityAvatarProps = {

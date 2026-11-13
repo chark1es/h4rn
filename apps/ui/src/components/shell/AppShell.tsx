@@ -1,7 +1,8 @@
-import { PlusIcon } from "lucide-react";
+import { ArrowUpIcon, AtSignIcon, ChevronDownIcon, PaperclipIcon } from "lucide-react";
 import type * as React from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
+import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { CommandPalette } from "@/components/dialogs/CommandPalette";
 import { NewThreadDialog } from "@/components/dialogs/NewThreadDialog";
 import { ShortcutsDialog } from "@/components/dialogs/ShortcutsDialog";
@@ -16,20 +17,34 @@ import { PhoneNav } from "@/components/shell/PhoneNav";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { Toasts } from "@/components/shell/Toasts";
 import { ThreadPane } from "@/components/thread/ThreadPane";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { AttachmentTray } from "@/features/attachments/AttachmentTray";
+import { FILE_ACCEPT } from "@/features/attachments/picker";
+import { useAttachmentDrafts } from "@/features/attachments/use-attachments";
 import { IdePane } from "@/features/ide/IdePane";
+import type { HarnessKind } from "@/gen";
 import { useIsPhone, useIsWide } from "@/hooks/use-media-query";
-import { HARNESS_LABELS, harnessLabel } from "@/lib/entities";
-import { createThread, useApp } from "@/lib/store/appStore";
+import { HARNESS_LABELS, harnessLabel, harnessSeed, machineSeed } from "@/lib/entities";
+import { createThread, navigate, useApp } from "@/lib/store/appStore";
 
-const START_MODELS: Record<string, string> = {
+const START_MODELS: Record<HarnessKind, string> = {
   claude_code: "claude-sonnet-5-5",
   codex: "gpt-5.1-codex",
   opencode: "claude-sonnet-5-5",
   antigravity: "gemini-4-argon-medium",
 };
 
+const HARNESSES: HarnessKind[] = ["claude_code", "codex", "opencode", "antigravity"];
+
 function InboxDetailEmpty() {
   const hosts = useApp((state) => state.hosts);
+  const connection = useApp((state) => state.connection.status);
   const onlineHosts = useMemo(
     () =>
       Object.values(hosts)
@@ -38,10 +53,12 @@ function InboxDetailEmpty() {
     [hosts],
   );
   const [host, setHost] = useState("");
-  const [harness, setHarness] = useState("claude_code");
+  const [harness, setHarness] = useState<HarnessKind>("claude_code");
+  const [model, setModel] = useState(START_MODELS.claude_code);
   const [workspace, setWorkspace] = useState("~/code");
   const [prompt, setPrompt] = useState("");
   const [starting, setStarting] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
     if (host || onlineHosts.length === 0) return;
@@ -49,91 +66,203 @@ function InboxDetailEmpty() {
   }, [host, onlineHosts]);
 
   const selectedHost = hosts[host];
-  const harnessChoices = selectedHost?.harnesses.length
-    ? selectedHost.harnesses
-    : (Object.keys(HARNESS_LABELS) as Array<keyof typeof HARNESS_LABELS>);
+  const harnessChoices = selectedHost?.harnesses.length ? selectedHost.harnesses : HARNESSES;
   const hostName = selectedHost?.name ?? "a host";
+  const offline = connection !== "online";
+  const writable = !offline && Boolean(host);
+
+  const attachments = useAttachmentDrafts("start-thread", {
+    enabled: writable,
+    disabledReason: offline ? "Reconnect to attach files." : "Pick an online host first.",
+  });
 
   const submit = async () => {
-    if (!host || starting || !prompt.trim()) return;
+    if (!writable || starting || attachments.blockedReason) return;
+    if (!prompt.trim() && attachments.attachments.length === 0) return;
     setStarting(true);
     const ok = await createThread({
       host,
-      harness: harness as never,
+      harness,
       workspacePath: workspace.trim() || "~/code",
-      model: START_MODELS[harness] ?? "claude-sonnet-5-5",
+      model,
       prompt: prompt.trim(),
+      attachments: attachments.attachments,
       runtimeMode: "approval_required",
     });
     setStarting(false);
-    if (ok) setPrompt("");
+    if (ok) {
+      setPrompt("");
+      attachments.clear();
+    }
   };
+
+  const insertMention = () => {
+    const element = textareaRef.current;
+    if (!element || !writable) return;
+    const start = element.selectionStart ?? prompt.length;
+    setPrompt(`${prompt.slice(0, start)}@${prompt.slice(start)}`);
+    requestAnimationFrame(() => {
+      element.focus();
+      element.setSelectionRange(start + 1, start + 1);
+    });
+  };
+
+  const pickHost = (nextHostId: string) => {
+    setHost(nextHostId);
+    const nextHarness = hosts[nextHostId]?.harnesses[0];
+    if (nextHarness) {
+      setHarness(nextHarness);
+      setModel(START_MODELS[nextHarness]);
+    }
+  };
+
+  const pickHarness = (nextHarness: HarnessKind) => {
+    setHarness(nextHarness);
+    setModel(START_MODELS[nextHarness]);
+  };
+
+  const canSend =
+    writable &&
+    !starting &&
+    !attachments.blockedReason &&
+    (prompt.trim().length > 0 || attachments.attachments.length > 0);
+
+  const modelChoices = Array.from(new Set(Object.values(START_MODELS)));
 
   return (
     <main className="q-main">
       <div className="q-center-empty">
-        <div className="q-empty" style={{ width: 520, alignItems: "flex-start", padding: 0 }}>
-          <h3 style={{ fontSize: 17, lineHeight: "24px" }}>Start a thread</h3>
-          <p style={{ margin: 0 }}>
+        <div className="q-empty q-box" style={{ alignItems: "flex-start", padding: 0, gap: 0 }}>
+          <h2 style={{ margin: "0 0 6px", fontSize: 17, lineHeight: "24px", fontWeight: 600 }}>
+            Start a thread
+          </h2>
+          <p className="q-muted" style={{ margin: "0 0 18px", lineHeight: "19px" }}>
             Pick where it runs. The agent works in a worktree on that host, and you can supervise it
             from any paired device.
           </p>
-          <div style={{ display: "flex", gap: 8, margin: "8px 0 10px", flexWrap: "wrap" }}>
-            <select
-              aria-label="Host"
-              className="q-btn secondary"
-              style={{ height: 34, borderRadius: 8, fontSize: 13.5 }}
-              value={host}
-              onChange={(event) => {
-                const nextHost = hosts[event.target.value];
-                setHost(event.target.value);
-                const nextHarness = nextHost?.harnesses[0];
-                if (nextHarness) setHarness(nextHarness);
-              }}
-            >
-              {onlineHosts.length === 0 ? <option value="">No online hosts</option> : null}
-              {onlineHosts.map((option) => (
-                <option key={option.host_id} value={option.host_id}>
-                  {option.name}
-                </option>
-              ))}
-            </select>
-            <select
-              aria-label="Harness"
-              className="q-btn secondary"
-              style={{ height: 34, borderRadius: 8, fontSize: 13.5 }}
-              value={harness}
-              onChange={(event) => setHarness(event.target.value)}
-            >
-              {harnessChoices.map((option) => (
-                <option key={option} value={option}>
-                  {HARNESS_LABELS[option]}
-                </option>
-              ))}
-            </select>
-            <input
-              aria-label="Workspace folder"
-              className="q-btn secondary"
-              style={{
-                height: 34,
-                borderRadius: 8,
-                fontSize: 12,
-                width: 190,
-                textAlign: "left",
-                fontFamily: "var(--mono)",
-              }}
-              value={workspace}
-              onChange={(event) => setWorkspace(event.target.value)}
-              placeholder="~/code/api"
-            />
+
+          <div className="q-chips" style={{ marginBottom: 10 }}>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="q-chip"
+                  aria-label={`Host: ${selectedHost?.name ?? "no online host"}`}
+                >
+                  <EntityAvatar
+                    seed={machineSeed(host)}
+                    kind="machine"
+                    label={selectedHost?.name ?? "Host"}
+                    size={16}
+                  />
+                  <span className="q-chip-label">{selectedHost?.name ?? "No online host"}</span>
+                  <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-52">
+                <DropdownMenuLabel>Host</DropdownMenuLabel>
+                {onlineHosts.length === 0 ? (
+                  <DropdownMenuItem disabled>No online hosts</DropdownMenuItem>
+                ) : (
+                  onlineHosts.map((option) => (
+                    <DropdownMenuItem
+                      key={option.host_id}
+                      onSelect={() => pickHost(option.host_id)}
+                    >
+                      <EntityAvatar
+                        seed={machineSeed(option.host_id)}
+                        kind="machine"
+                        label={option.name}
+                        size={16}
+                      />
+                      {option.name}
+                    </DropdownMenuItem>
+                  ))
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="q-chip"
+                  aria-label={`Harness: ${harnessLabel(harness)}`}
+                >
+                  <EntityAvatar
+                    seed={harnessSeed(host, harness)}
+                    kind="harness"
+                    label={harnessLabel(harness)}
+                    size={16}
+                  />
+                  <span className="q-chip-label">{harnessLabel(harness)}</span>
+                  <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-52">
+                <DropdownMenuLabel>Harness</DropdownMenuLabel>
+                {harnessChoices.map((option) => (
+                  <DropdownMenuItem key={option} onSelect={() => pickHarness(option)}>
+                    <EntityAvatar
+                      seed={harnessSeed(host, option)}
+                      kind="harness"
+                      label={harnessLabel(option)}
+                      size={16}
+                    />
+                    {HARNESS_LABELS[option]}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+
+            <label className="q-chip q-chip-field">
+              <span className="sr-only">Workspace folder</span>
+              <input
+                value={workspace}
+                onChange={(event) => setWorkspace(event.target.value)}
+                placeholder="~/code/api"
+                spellCheck={false}
+              />
+            </label>
           </div>
-          <div className="q-composer" style={{ width: "100%" }}>
+
+          <fieldset
+            aria-label="Start a thread composer"
+            className="q-composer"
+            style={{ margin: 0, minWidth: 0, width: "100%", position: "relative" }}
+            onDragOver={(event) => {
+              if (writable) event.preventDefault();
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              if (!writable) return;
+              const files = Array.from(event.dataTransfer.files);
+              if (files.length > 0) attachments.addFiles(files);
+            }}
+          >
+            <AttachmentTray
+              tasks={attachments.tasks}
+              onRemove={attachments.remove}
+              onRetry={attachments.retry}
+            />
             <textarea
+              ref={textareaRef}
               aria-label="Describe the task"
-              rows={3}
-              placeholder={`Describe the task for ${harnessLabel(harness as never)} on ${hostName}`}
+              placeholder={`Describe the task for ${harnessLabel(harness)} on ${hostName}`}
               value={prompt}
+              disabled={!writable}
               onChange={(event) => setPrompt(event.target.value)}
+              onPaste={(event) => {
+                if (!writable) return;
+                const files = Array.from(event.clipboardData.files);
+                if (files.length > 0) {
+                  event.preventDefault();
+                  attachments.addFiles(files);
+                  return;
+                }
+                const pasted = event.clipboardData.getData("text/plain");
+                if (attachments.addPastedText(pasted)) event.preventDefault();
+              }}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
                   event.preventDefault();
@@ -141,28 +270,103 @@ function InboxDetailEmpty() {
                 }
               }}
             />
+            <input
+              ref={attachments.inputRef}
+              type="file"
+              multiple
+              accept={FILE_ACCEPT}
+              aria-label="Attach files"
+              className="sr-only"
+              tabIndex={-1}
+              onChange={(event) => attachments.onInputChange(event.target.files)}
+            />
             <div className="q-comp-f">
-              <span className="grow" />
               <button
                 type="button"
-                className={`q-send${prompt.trim() && host ? " ready" : ""}`}
-                disabled={!host || !prompt.trim() || starting}
+                disabled={!writable}
+                onClick={attachments.openPicker}
+                aria-label="Attach files"
+                title="Attach files (Ctrl/Cmd U)"
+                className="q-ibtn"
+              >
+                <PaperclipIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+              </button>
+              <button
+                type="button"
+                disabled={!writable}
+                onClick={insertMention}
+                aria-label="Mention a file"
+                title="Mention a file"
+                className="q-ibtn"
+              >
+                <AtSignIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+              </button>
+              <span className="grow" />
+
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type="button"
+                    className="q-model"
+                    aria-label="Model"
+                    title={`${harnessLabel(harness)} · ${model}`}
+                  >
+                    <span className="truncate" style={{ maxWidth: 210 }}>
+                      {model}
+                    </span>
+                    <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-60">
+                  <DropdownMenuLabel>Model</DropdownMenuLabel>
+                  {modelChoices.map((option) => (
+                    <DropdownMenuItem key={option} onSelect={() => setModel(option)}>
+                      <span className="font-mono">{option}</span>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+
+              <button
+                type="button"
+                className={`q-send${canSend ? " ready" : ""}`}
+                disabled={!canSend}
                 onClick={() => void submit()}
+                title={
+                  attachments.blockedReason ??
+                  (offline
+                    ? "Reconnect to start a thread."
+                    : !host
+                      ? "No online host is available."
+                      : !prompt.trim() && attachments.attachments.length === 0
+                        ? "Describe the task first."
+                        : starting
+                          ? "Starting…"
+                          : "Start (Enter)")
+                }
                 aria-label="Start thread"
               >
-                <PlusIcon className="q-icon" strokeWidth={2} aria-hidden />
+                <ArrowUpIcon className="q-icon" strokeWidth={2} aria-hidden />
               </button>
             </div>
-          </div>
+          </fieldset>
+
           <p className="q-faint" style={{ fontSize: 12, margin: "12px 0 0" }}>
-            {onlineHosts.length === 0 ? (
-              <>
-                No host yet? Pair a device in Settings or run{" "}
-                <span className="q-mono">h4rn host</span> on the machine.
-              </>
-            ) : (
-              <>Everything after Start is visible in the stream.</>
-            )}
+            No host yet?{" "}
+            <button
+              type="button"
+              className="q-link"
+              onClick={() =>
+                navigate({
+                  kind: "placeholder",
+                  surface: "settings",
+                  path: "/settings/devices",
+                })
+              }
+            >
+              Pair a device
+            </button>{" "}
+            or run <span className="q-mono">h4rn host</span> on the machine.
           </p>
         </div>
       </div>

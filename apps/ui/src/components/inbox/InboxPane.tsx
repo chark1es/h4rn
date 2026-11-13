@@ -12,7 +12,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
-import { KeyGlyphs, MOD, SHIFT } from "@/components/common/Kbd";
+import { KeyCaps, MOD, SHIFT } from "@/components/common/Kbd";
 import { OfflineBanner } from "@/components/shell/OfflineBanner";
 import {
   DropdownMenu,
@@ -36,7 +36,6 @@ import {
   openThread,
   setFilter,
   setQuery,
-  setSelectedThread,
   setTab,
   setThreadTab,
   setUi,
@@ -274,6 +273,7 @@ export function InboxPane() {
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [focusedId, setFocusedId] = useState<string | null>(null);
 
   const state = useApp((s) => s);
   const counts = useMemo(() => tabCounts(state, now), [state, now]);
@@ -325,19 +325,37 @@ export function InboxPane() {
     return null;
   };
 
-  // Roving tabindex: Tab enters on the selected row, arrows walk the list.
-  const moveSelection = (delta: number) => {
+  // Roving tabindex: Tab enters on the selected row; arrow keys move focus
+  // without moving the open-thread selection, which stays put.
+  useEffect(() => {
+    if (selectedId && visible.some((thread) => thread.thread_id === selectedId)) {
+      setFocusedId(selectedId);
+      return;
+    }
+    setFocusedId(visible[0]?.thread_id ?? null);
+  }, [selectedId, visible]);
+
+  const moveFocus = (delta: number) => {
     if (visible.length === 0) return;
-    const current = visible.findIndex((thread) => thread.thread_id === selectedId);
-    const start = current < 0 ? 0 : current;
-    const next = visible[Math.max(0, Math.min(visible.length - 1, start + delta))];
+    const currentIndex = visible.findIndex((thread) => thread.thread_id === focusedId);
+    const fallback = visible.findIndex((thread) => thread.thread_id === selectedId);
+    const start = currentIndex >= 0 ? currentIndex : Math.max(fallback, 0);
+    const nextIndex = Math.max(0, Math.min(visible.length - 1, start + delta));
+    const next = visible[nextIndex];
     if (!next) return;
-    setSelectedThread(next.thread_id);
+    setFocusedId(next.thread_id);
+    virtualizer.scrollToIndex(nextIndex, { align: "auto" });
     requestAnimationFrame(() => {
       document
         .querySelector<HTMLElement>(`[data-thread-id="${CSS.escape(next.thread_id)}"]`)
         ?.focus();
     });
+  };
+
+  const moveTab = (value: ThreadTab, buttons: HTMLButtonElement[]) => {
+    setTab(value);
+    const index = TAB_ORDER.indexOf(value);
+    requestAnimationFrame(() => buttons[index]?.focus());
   };
 
   const hasFilter =
@@ -346,13 +364,26 @@ export function InboxPane() {
 
   const segment = (
     <div className="q-seg" role="tablist" aria-label="Thread state">
-      {TAB_ORDER.map((value) => (
+      {TAB_ORDER.map((value, index) => (
         <button
           key={value}
           type="button"
           role="tab"
           aria-selected={tab === value}
+          tabIndex={tab === value ? 0 : -1}
           onClick={() => setTab(value)}
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+            event.preventDefault();
+            const buttons = Array.from(
+              event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
+                '[role="tab"]',
+              ) ?? [],
+            );
+            const delta = event.key === "ArrowRight" ? 1 : -1;
+            const next = TAB_ORDER[(index + delta + TAB_ORDER.length) % TAB_ORDER.length];
+            if (next) moveTab(next, buttons);
+          }}
         >
           {TAB_LABELS[value]} <span className="c q-num">{loading ? "—" : counts[value]}</span>
         </button>
@@ -516,10 +547,7 @@ export function InboxPane() {
               </p>
               <button type="button" className="q-btn secondary" onClick={openNewThread}>
                 <SquarePenIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                New thread{" "}
-                <span className="q-kbd">
-                  <KeyGlyphs value={`${MOD} ${SHIFT} N`} />
-                </span>
+                New thread <KeyCaps value={`${MOD} ${SHIFT} N`} />
               </button>
             </div>
           )
@@ -553,16 +581,16 @@ export function InboxPane() {
             onKeyDown={(event) => {
               if (event.key === "ArrowDown") {
                 event.preventDefault();
-                moveSelection(1);
+                moveFocus(1);
               } else if (event.key === "ArrowUp") {
                 event.preventDefault();
-                moveSelection(-1);
+                moveFocus(-1);
               } else if (event.key === "Home") {
                 event.preventDefault();
-                moveSelection(-visible.length);
+                moveFocus(-visible.length);
               } else if (event.key === "End") {
                 event.preventDefault();
-                moveSelection(visible.length);
+                moveFocus(visible.length);
               }
             }}
           >
@@ -584,7 +612,11 @@ export function InboxPane() {
                     host={hosts[thread.host]}
                     index={item.index}
                     selected={selectedId === thread.thread_id}
-                    tabStop={selectedId ? selectedId === thread.thread_id : item.index === 0}
+                    tabStop={
+                      focusedId
+                        ? focusedId === thread.thread_id
+                        : item.index === 0 || selectedId === thread.thread_id
+                    }
                     resumeAt={resumeFor(thread.thread_id)}
                     now={now}
                     onOpen={() => openThread(thread.thread_id)}
@@ -593,6 +625,7 @@ export function InboxPane() {
                     onReopen={() => void setThreadTab(thread.thread_id, "done")}
                     onPin={() => void togglePin(thread.thread_id)}
                     onSnooze={(until) => void snoozeThread(thread.thread_id, until)}
+                    onFocus={() => setFocusedId(thread.thread_id)}
                   />
                 </div>
               );

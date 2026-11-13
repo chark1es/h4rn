@@ -1,4 +1,3 @@
-import { ChevronRightIcon } from "lucide-react";
 import { useState } from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
@@ -30,6 +29,7 @@ function ScopeRow({
         role="switch"
         aria-checked={on}
         aria-label={label}
+        aria-disabled={locked || undefined}
         disabled={locked}
         onClick={onToggle}
       />
@@ -65,7 +65,7 @@ export function PairingPage() {
       </div>
       <div className="q-ph-body q-pair-body">
         <div className="q-pair-hero">
-          <EntityAvatar seed={machineSeed("atlas")} kind="machine" label="atlas" size={56} />
+          <EntityAvatar seed={machineSeed("atlas")} kind="machine" label="atlas" size={48} />
           <div className="ttl">atlas</div>
           <div className="sub">Windows 11 · 192.168.1.24 · via relay</div>
           <div className="note">Signed in to h4rn-connect as dev@example.com</div>
@@ -117,7 +117,6 @@ export function PairingPage() {
           }
         >
           Pair this phone
-          <ChevronRightIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
         </button>
       </div>
     </main>

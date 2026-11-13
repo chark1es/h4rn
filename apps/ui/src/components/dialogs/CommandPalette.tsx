@@ -1,4 +1,5 @@
 import {
+  ArchiveIcon,
   ChartNoAxesColumnIcon,
   CheckIcon,
   Code2Icon,
@@ -16,9 +17,9 @@ import {
   SquareIcon,
   SunMoonIcon,
 } from "lucide-react";
-import { useMemo } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
-import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ALT, ENTER, KeyGlyphs, MOD, SHIFT } from "@/components/common/Kbd";
 import {
   CommandDialog,
@@ -28,11 +29,10 @@ import {
   CommandInput,
   CommandItem,
   CommandList,
-  CommandSeparator,
   CommandShortcut,
 } from "@/components/ui/command";
 import { glyphForThread } from "@/lib/agent";
-import { harnessLabel, machineSeed } from "@/lib/entities";
+import { harnessLabel } from "@/lib/entities";
 import {
   acknowledgeThread,
   closePalette,
@@ -56,17 +56,40 @@ export function CommandPalette() {
   const threads = useApp((state) => state.threads);
   const hosts = useApp((state) => state.hosts);
   const connection = useApp((state) => state.connection.status);
+  const [query, setQuery] = useState("");
+  const lastFocus = useRef<HTMLElement | null>(null);
 
   const currentId = route.kind === "thread" ? route.threadId : null;
   const current = currentId ? threads[currentId] : undefined;
+
+  // The palette opens from a shortcut, not a trigger. Track the last element
+  // focused outside the dialog so Escape can put focus back where it was.
+  useEffect(() => {
+    const record = (event: FocusEvent) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) return;
+      if (target.closest('[data-slot="dialog-content"]')) return;
+      lastFocus.current = target;
+    };
+    document.addEventListener("focusin", record);
+    return () => document.removeEventListener("focusin", record);
+  }, []);
+
+  // Reset the filter each time the palette opens so it always starts at the
+  // prototype's short list rather than a stale search.
+  useEffect(() => {
+    if (open) setQuery("");
+  }, [open]);
+
+  const searching = query.trim().length > 0;
 
   const recent = useMemo(
     () =>
       Object.values(threads)
         .filter((thread) => thread.thread_id !== currentId)
         .sort((a, b) => Date.parse(b.last_activity) - Date.parse(a.last_activity))
-        .slice(0, 3),
-    [threads, currentId],
+        .slice(0, searching ? 5 : 2),
+    [threads, currentId, searching],
   );
 
   const close = (action: () => void) => {
@@ -78,16 +101,26 @@ export function CommandPalette() {
     ? glyphForThread(current, hosts[current.host]?.online ?? false)
     : null;
 
+  // The resting palette mirrors the prototype: three groups, ten rows, which
+  // fit the 454 px list exactly. The long tail appears once the person starts
+  // typing.
+
   return (
     <CommandDialog
       open={open}
       onOpenChange={(value) => (value ? undefined : closePalette())}
       title="Command palette"
       description="Search threads, run a command, or move around h4rn."
+      onCloseAutoFocus={(event) => {
+        event.preventDefault();
+        const target = lastFocus.current;
+        if (target && document.contains(target)) target.focus();
+      }}
     >
       <CommandInput
         placeholder="Search threads, hosts, files, or commands"
         autoFocus
+        onValueChange={setQuery}
         trailing={
           current ? (
             <span className="q-pal-ctx">
@@ -112,7 +145,7 @@ export function CommandPalette() {
         </CommandEmpty>
 
         {current ? (
-          <CommandGroup heading={`This thread · ${current.title}`}>
+          <CommandGroup heading="This thread">
             {current.needs_attention || current.agent_state === "awaiting_approval" ? (
               <CommandItem
                 value="approve pending action go"
@@ -139,22 +172,26 @@ export function CommandPalette() {
               {current.pinned ? "Unpin from Working" : "Keep in Working"}
               <CommandShortcut>P</CommandShortcut>
             </CommandItem>
-            <CommandItem
-              value="acknowledge done"
-              onSelect={() => close(() => void acknowledgeThread(current.thread_id))}
-            >
-              <CheckIcon aria-hidden />
-              Acknowledge
-              <CommandShortcut>A</CommandShortcut>
-            </CommandItem>
-            <CommandItem
-              value="settle now archive"
-              onSelect={() => close(() => void setThreadTab(current.thread_id, "settled"))}
-            >
-              <InboxIcon aria-hidden />
-              Settle now
-              <CommandShortcut>{SHIFT} S</CommandShortcut>
-            </CommandItem>
+            {current.tab === "done" ? (
+              <CommandItem
+                value="acknowledge done"
+                onSelect={() => close(() => void acknowledgeThread(current.thread_id))}
+              >
+                <CheckIcon aria-hidden />
+                Acknowledge
+                <CommandShortcut>A</CommandShortcut>
+              </CommandItem>
+            ) : null}
+            {current.tab !== "settled" ? (
+              <CommandItem
+                value="settle now archive"
+                onSelect={() => close(() => setThreadTab(current.thread_id, "settled"))}
+              >
+                <InboxIcon aria-hidden />
+                Settle now
+                <CommandShortcut>{SHIFT} S</CommandShortcut>
+              </CommandItem>
+            ) : null}
             {current.tab === "working" ? (
               <CommandItem
                 value="interrupt turn stop"
@@ -168,7 +205,6 @@ export function CommandPalette() {
           </CommandGroup>
         ) : null}
 
-        <CommandSeparator />
         <CommandGroup heading="Threads">
           {recent.map((thread) => (
             <CommandItem
@@ -176,14 +212,14 @@ export function CommandPalette() {
               value={`${thread.title} ${thread.host} ${harnessLabel(thread.harness)}`}
               onSelect={() => close(() => openThread(thread.thread_id))}
             >
-              <EntityAvatar
-                seed={machineSeed(thread.host)}
-                kind="machine"
-                label={hosts[thread.host]?.name ?? thread.host}
-                size={14}
-              />
+              <span className="ic inline-flex w-4 justify-center">
+                <AgentGlyph
+                  glyph={glyphForThread(thread, hosts[thread.host]?.online ?? false)}
+                  size={14}
+                />
+              </span>
               <span className="min-w-0 truncate">{thread.title}</span>
-              <span className="ml-auto shrink-0 text-small text-fg-3">
+              <span className="ml-auto shrink-0 text-[12px] text-fg-3">
                 {hosts[thread.host]?.name ?? thread.host} · {harnessLabel(thread.harness)}
               </span>
             </CommandItem>
@@ -195,133 +231,144 @@ export function CommandPalette() {
               {MOD} {SHIFT} N
             </CommandShortcut>
           </CommandItem>
-          <CommandItem
-            value="search threads find"
-            onSelect={() =>
-              close(() => {
-                navigate({ kind: "inbox" });
-                requestSearchFocus();
-              })
-            }
-          >
-            <SearchIcon aria-hidden />
-            Search threads…
-            <CommandShortcut>/</CommandShortcut>
-          </CommandItem>
+          {searching ? (
+            <CommandItem
+              value="search threads find"
+              onSelect={() =>
+                close(() => {
+                  navigate({ kind: "inbox" });
+                  requestSearchFocus();
+                })
+              }
+            >
+              <SearchIcon aria-hidden />
+              Search threads…
+              <CommandShortcut>/</CommandShortcut>
+            </CommandItem>
+          ) : null}
+        </CommandGroup>
+
+        <CommandGroup heading="Go to">
           <CommandItem value="working tab" onSelect={() => close(() => setTab("working"))}>
+            <InboxIcon aria-hidden />
             Go to Working
             <CommandShortcut>{ALT} 1</CommandShortcut>
           </CommandItem>
           <CommandItem value="done tab" onSelect={() => close(() => setTab("done"))}>
+            <CheckIcon aria-hidden />
             Go to Done
             <CommandShortcut>{ALT} 2</CommandShortcut>
           </CommandItem>
           <CommandItem value="settled tab" onSelect={() => close(() => setTab("settled"))}>
+            <ArchiveIcon aria-hidden />
             Go to Settled
             <CommandShortcut>{ALT} 3</CommandShortcut>
           </CommandItem>
-        </CommandGroup>
-
-        <CommandSeparator />
-        <CommandGroup heading="Go to">
-          <CommandItem value="inbox" onSelect={() => close(() => navigate({ kind: "inbox" }))}>
-            <InboxIcon aria-hidden />
-            Inbox
-            <CommandShortcut>G I</CommandShortcut>
-          </CommandItem>
-          <CommandItem
-            value="hosts machines"
-            onSelect={() => close(() => navigate({ kind: "hosts" }))}
-          >
-            <ServerIcon aria-hidden />
-            Hosts
-            <CommandShortcut>G H</CommandShortcut>
-          </CommandItem>
-          <CommandItem
-            value="library mcp skills"
-            onSelect={() =>
-              close(() => navigate({ kind: "placeholder", surface: "library", path: "/library" }))
-            }
-          >
-            <LibraryIcon aria-hidden />
-            Library
-            <CommandShortcut>G L</CommandShortcut>
-          </CommandItem>
-          <CommandItem
-            value="usage limits"
-            onSelect={() =>
-              close(() => navigate({ kind: "placeholder", surface: "usage", path: "/usage" }))
-            }
-          >
-            <ChartNoAxesColumnIcon aria-hidden />
-            Usage &amp; limits
-            <CommandShortcut>G U</CommandShortcut>
-          </CommandItem>
-          <CommandItem value="ide editor" onSelect={() => close(() => navigate({ kind: "ide" }))}>
-            <Code2Icon aria-hidden />
-            IDE
-            <CommandShortcut>G E</CommandShortcut>
-          </CommandItem>
-          <CommandItem
-            value="pull requests prs"
-            onSelect={() =>
-              close(() => navigate({ kind: "placeholder", surface: "pulls", path: "/pulls" }))
-            }
-          >
-            <GitPullRequestIcon aria-hidden />
-            Pull requests
-            <CommandShortcut>G P</CommandShortcut>
-          </CommandItem>
-          <CommandItem
-            value="settings"
-            onSelect={() =>
-              close(() => navigate({ kind: "placeholder", surface: "settings", path: "/settings" }))
-            }
-          >
-            <SettingsIcon aria-hidden />
-            Settings
-            <CommandShortcut>{MOD} ,</CommandShortcut>
-          </CommandItem>
-        </CommandGroup>
-
-        <CommandSeparator />
-        <CommandGroup heading="View">
-          <CommandItem value="toggle theme dark light" onSelect={() => close(toggleTheme)}>
-            <SunMoonIcon aria-hidden />
-            Toggle theme
-            <CommandShortcut>
-              {MOD} {SHIFT} L
-            </CommandShortcut>
-          </CommandItem>
-          <CommandItem value="keyboard shortcuts help" onSelect={() => close(openShortcuts)}>
-            <KeyboardIcon aria-hidden />
-            Keyboard shortcuts
-            <CommandShortcut>?</CommandShortcut>
-          </CommandItem>
-          <CommandItem
-            value="copy thread link"
-            disabled={!current}
-            onSelect={() =>
-              close(() => {
-                if (!current) return;
-                void navigator.clipboard?.writeText(
-                  `${window.location.origin}/t/${current.thread_id}`,
-                );
-              })
-            }
-          >
-            Copy thread link
-          </CommandItem>
-          {connection !== "online" ? (
-            <CommandItem
-              value="reconnect connection"
-              onSelect={() => close(() => getClient().reconnectNow())}
-            >
-              <RefreshCwIcon aria-hidden />
-              Reconnect to the daemon
-            </CommandItem>
+          {searching ? (
+            <>
+              <CommandItem
+                value="hosts machines"
+                onSelect={() => close(() => navigate({ kind: "hosts" }))}
+              >
+                <ServerIcon aria-hidden />
+                Hosts
+                <CommandShortcut>G H</CommandShortcut>
+              </CommandItem>
+              <CommandItem
+                value="library mcp skills"
+                onSelect={() =>
+                  close(() =>
+                    navigate({ kind: "placeholder", surface: "library", path: "/library" }),
+                  )
+                }
+              >
+                <LibraryIcon aria-hidden />
+                Library
+                <CommandShortcut>G L</CommandShortcut>
+              </CommandItem>
+              <CommandItem
+                value="usage limits"
+                onSelect={() =>
+                  close(() => navigate({ kind: "placeholder", surface: "usage", path: "/usage" }))
+                }
+              >
+                <ChartNoAxesColumnIcon aria-hidden />
+                Usage &amp; limits
+                <CommandShortcut>G U</CommandShortcut>
+              </CommandItem>
+              <CommandItem
+                value="ide editor"
+                onSelect={() => close(() => navigate({ kind: "ide" }))}
+              >
+                <Code2Icon aria-hidden />
+                IDE
+                <CommandShortcut>G E</CommandShortcut>
+              </CommandItem>
+              <CommandItem
+                value="pull requests prs"
+                onSelect={() =>
+                  close(() => navigate({ kind: "placeholder", surface: "pulls", path: "/pulls" }))
+                }
+              >
+                <GitPullRequestIcon aria-hidden />
+                Pull requests
+                <CommandShortcut>G P</CommandShortcut>
+              </CommandItem>
+              <CommandItem
+                value="settings"
+                onSelect={() =>
+                  close(() =>
+                    navigate({ kind: "placeholder", surface: "settings", path: "/settings" }),
+                  )
+                }
+              >
+                <SettingsIcon aria-hidden />
+                Settings
+                <CommandShortcut>{MOD} ,</CommandShortcut>
+              </CommandItem>
+            </>
           ) : null}
         </CommandGroup>
+
+        {searching ? (
+          <CommandGroup heading="View">
+            <CommandItem value="toggle theme dark light" onSelect={() => close(toggleTheme)}>
+              <SunMoonIcon aria-hidden />
+              Toggle theme
+              <CommandShortcut>
+                {MOD} {SHIFT} L
+              </CommandShortcut>
+            </CommandItem>
+            <CommandItem value="keyboard shortcuts help" onSelect={() => close(openShortcuts)}>
+              <KeyboardIcon aria-hidden />
+              Keyboard shortcuts
+              <CommandShortcut>?</CommandShortcut>
+            </CommandItem>
+            <CommandItem
+              value="copy thread link"
+              disabled={!current}
+              onSelect={() =>
+                close(() => {
+                  if (!current) return;
+                  void navigator.clipboard?.writeText(
+                    `${window.location.origin}/t/${current.thread_id}`,
+                  );
+                })
+              }
+            >
+              Copy thread link
+            </CommandItem>
+            {connection !== "online" ? (
+              <CommandItem
+                value="reconnect connection"
+                onSelect={() => close(() => getClient().reconnectNow())}
+              >
+                <RefreshCwIcon aria-hidden />
+                Reconnect to the daemon
+              </CommandItem>
+            ) : null}
+          </CommandGroup>
+        ) : null}
       </CommandList>
       <CommandFooter>
         <span>

@@ -1,4 +1,4 @@
-import { RefreshCwIcon, WifiOffIcon } from "lucide-react";
+import { WifiOffIcon } from "lucide-react";
 
 import { absoluteTime } from "@/lib/format";
 import { getClient, useApp } from "@/lib/store/appStore";
@@ -29,23 +29,21 @@ export function OfflineBanner({ inline = false }: { inline?: boolean }) {
           <>
             <b>Reconnecting</b>
             {attempt > 0 ? ` · attempt ${attempt}` : ""}
-            {cached ? ` · threads as of ${cached}` : ""}
+            {cached ? ` · cached ${cached}` : ""}
           </>
         ) : (
           <>
             <b>Offline</b>
-            {cached ? ` · threads as of ${cached}` : " · no cached threads"}
+            {cached ? ` · cached ${cached}` : " · no cached threads"}
           </>
         )}
       </span>
       {status === "offline" ? (
         <button
           type="button"
-          className="q-btn ghost"
-          style={{ height: 24 }}
+          className="q-btn ghost q-offline-action"
           onClick={() => getClient().reconnectNow()}
         >
-          <RefreshCwIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
           Reconnect
         </button>
       ) : null}

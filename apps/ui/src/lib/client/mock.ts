@@ -894,17 +894,17 @@ class MockDaemon {
     if (command.includes("vitest")) {
       return [
         "",
-        " RUN  v3.2.4 /home/dev/code/api",
+        " \u001b[2mRUN  v3.2.4 /home/dev/code/api\u001b[0m",
         "",
-        " ok src/auth/token.test.ts (12 tests) 84ms",
-        " ok src/auth/refresh.test.ts (6 tests) 96ms",
-        " ok src/auth/session.test.ts (9 tests) 212ms  run 1 of 3",
-        " ok src/auth/session.test.ts (9 tests) 207ms  run 2 of 3",
-        " ok src/auth/session.test.ts (9 tests) 219ms  run 3 of 3",
+        " \u001b[32mok\u001b[0m src/auth/token.test.ts \u001b[2m(12 tests) 84ms\u001b[0m",
+        " \u001b[32mok\u001b[0m src/auth/refresh.test.ts \u001b[2m(6 tests) 96ms\u001b[0m",
+        " \u001b[32mok\u001b[0m src/auth/session.test.ts \u001b[2m(9 tests) 212ms\u001b[0m   \u001b[2mrun 1 of 3\u001b[0m",
+        " \u001b[32mok\u001b[0m src/auth/session.test.ts \u001b[2m(9 tests) 207ms\u001b[0m   \u001b[2mrun 2 of 3\u001b[0m",
+        " \u001b[32mok\u001b[0m src/auth/session.test.ts \u001b[2m(9 tests) 219ms\u001b[0m   \u001b[2mrun 3 of 3\u001b[0m",
         "",
-        " Test Files  5 passed (5)",
-        "      Tests  45 passed (45)",
-        "   Duration  2.84s",
+        " \u001b[2mTest Files\u001b[0m  \u001b[32m5 passed\u001b[0m (5)",
+        "      \u001b[2mTests\u001b[0m  \u001b[32m45 passed\u001b[0m (45)",
+        "   \u001b[2mDuration\u001b[0m  2.84s",
       ].join("\r\n");
     }
     if (command === "help") {

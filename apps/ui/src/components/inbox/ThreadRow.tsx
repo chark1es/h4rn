@@ -30,6 +30,7 @@ type ThreadRowProps = {
   onReopen: () => void;
   onPin: () => void;
   onSnooze: (until: string | null) => void;
+  onFocus?: () => void;
 };
 
 function snoozeUntil(hours: number): string {
@@ -86,6 +87,7 @@ export function ThreadRow({
   onReopen,
   onPin,
   onSnooze,
+  onFocus,
 }: ThreadRowProps) {
   const hostOnline = host?.online ?? false;
   const glyph = glyphForThread(thread, hostOnline);
@@ -106,6 +108,7 @@ export function ThreadRow({
       data-thread-id={thread.thread_id}
       className={cn("q-row", selected && "sel", isSettled && "dim")}
       onClick={onOpen}
+      onFocus={onFocus}
       onKeyDown={(event) => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();

@@ -1,6 +1,6 @@
 import { ChevronDownIcon, ShieldCheckIcon } from "lucide-react";
 
-import { BACKSPACE, ENTER, KeyGlyphs, MOD } from "@/components/common/Kbd";
+import { BACKSPACE, ENTER, KeyCaps, MOD } from "@/components/common/Kbd";
 import type { ApprovalKind } from "@/gen";
 import { harnessLabel } from "@/lib/entities";
 import { respondApproval, useApp } from "@/lib/store/appStore";
@@ -35,6 +35,13 @@ export function ApprovalCard({ threadId }: { threadId: string }) {
   const harness = summary ? harnessLabel(summary.harness) : "Agent";
   const hostOnline = hosts[summary?.host ?? ""]?.online ?? false;
   const blocked = connection !== "online" || !hostOnline;
+  const sending = status === "sending";
+  const waiting = blocked || sending;
+
+  const respond = (kind: "approve" | "deny", optionId?: string) => {
+    if (waiting) return;
+    void respondApproval(threadId, first.approvalId, kind, optionId);
+  };
 
   return (
     <section className="q-ask" aria-label="Approval request">
@@ -67,8 +74,9 @@ export function ApprovalCard({ threadId }: { threadId: string }) {
               key={option.id}
               type="button"
               className="q-btn secondary"
-              disabled={blocked || status === "sending"}
-              onClick={() => void respondApproval(threadId, first.approvalId, "approve", option.id)}
+              disabled={blocked}
+              aria-disabled={waiting || undefined}
+              onClick={() => respond("approve", option.id)}
             >
               {option.label}
             </button>
@@ -81,7 +89,13 @@ export function ApprovalCard({ threadId }: { threadId: string }) {
             Reconnect to approve or deny. Nothing runs until you do.
           </span>
         ) : (
-          <button type="button" className="q-btn ghost" disabled title="Not available yet">
+          <button
+            type="button"
+            className="q-btn ghost"
+            aria-disabled="true"
+            title="Not available yet"
+            onClick={(event) => event.preventDefault()}
+          >
             Always allow <ChevronDownIcon className="q-icon s12" strokeWidth={1.75} aria-hidden />
           </button>
         )}
@@ -89,24 +103,27 @@ export function ApprovalCard({ threadId }: { threadId: string }) {
         <button
           type="button"
           className="q-btn secondary"
-          disabled={blocked || status === "sending"}
-          onClick={() => void respondApproval(threadId, first.approvalId, "deny")}
+          disabled={blocked}
+          aria-disabled={waiting || undefined}
+          onClick={() => respond("deny")}
         >
-          Deny{" "}
-          <span className="q-kbd">
-            <KeyGlyphs value={`${MOD} ${BACKSPACE}`} />
-          </span>
+          Deny <KeyCaps value={`${MOD} ${BACKSPACE}`} />
         </button>
         <button
           type="button"
           className="q-btn primary"
-          disabled={blocked || status === "sending"}
-          onClick={() => void respondApproval(threadId, first.approvalId, "approve")}
+          data-approval-action="approve"
+          disabled={blocked}
+          aria-disabled={waiting || undefined}
+          onClick={() => respond("approve")}
         >
-          Approve{" "}
-          <span className="q-kbd">
-            <KeyGlyphs value={`${MOD} ${ENTER}`} />
-          </span>
+          {sending ? (
+            "Approving…"
+          ) : (
+            <>
+              Approve <KeyCaps value={`${MOD} ${ENTER}`} />
+            </>
+          )}
         </button>
       </div>
     </section>

@@ -1,5 +1,20 @@
-import { CircleAlertIcon, RefreshCwIcon, WifiOffIcon } from "lucide-react";
-import { type ButtonHTMLAttributes, useCallback, useEffect, useRef, useState } from "react";
+import {
+  ArrowDownIcon,
+  ArrowLeftIcon,
+  ArrowRightIcon,
+  ArrowUpIcon,
+  CircleAlertIcon,
+  RefreshCwIcon,
+  WifiOffIcon,
+} from "lucide-react";
+import {
+  type ButtonHTMLAttributes,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 import type { H4rnClient } from "@/lib/client/client";
 import { cn } from "@/lib/utils";
@@ -201,10 +216,30 @@ export function TerminalView({
           aria-pressed={ctrlArmed}
           onPress={() => setCtrlArmed((value) => !value)}
         />
-        <KeyButton label="↑" ariaLabel="Up arrow" onPress={() => arrow("ArrowUp")} />
-        <KeyButton label="↓" ariaLabel="Down arrow" onPress={() => arrow("ArrowDown")} />
-        <KeyButton label="←" ariaLabel="Left arrow" onPress={() => arrow("ArrowLeft")} />
-        <KeyButton label="→" ariaLabel="Right arrow" onPress={() => arrow("ArrowRight")} />
+        <KeyButton
+          icon={<ArrowUpIcon strokeWidth={1.75} aria-hidden />}
+          label="↑"
+          ariaLabel="Up arrow"
+          onPress={() => arrow("ArrowUp")}
+        />
+        <KeyButton
+          icon={<ArrowDownIcon strokeWidth={1.75} aria-hidden />}
+          label="↓"
+          ariaLabel="Down arrow"
+          onPress={() => arrow("ArrowDown")}
+        />
+        <KeyButton
+          icon={<ArrowLeftIcon strokeWidth={1.75} aria-hidden />}
+          label="←"
+          ariaLabel="Left arrow"
+          onPress={() => arrow("ArrowLeft")}
+        />
+        <KeyButton
+          icon={<ArrowRightIcon strokeWidth={1.75} aria-hidden />}
+          label="→"
+          ariaLabel="Right arrow"
+          onPress={() => arrow("ArrowRight")}
+        />
         <KeyButton label="Paste" onPress={() => void paste()} />
       </div>
 
@@ -220,12 +255,14 @@ export function TerminalView({
 function KeyButton({
   label,
   ariaLabel,
+  icon,
   active,
   onPress,
   ...rest
 }: {
   label: string;
   ariaLabel?: string;
+  icon?: ReactNode;
   active?: boolean;
   onPress: () => void;
 } & Pick<ButtonHTMLAttributes<HTMLButtonElement>, "aria-pressed">) {
@@ -237,7 +274,7 @@ function KeyButton({
       onClick={onPress}
       {...rest}
     >
-      {label}
+      {icon ?? label}
     </button>
   );
 }

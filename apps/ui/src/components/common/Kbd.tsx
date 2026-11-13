@@ -64,6 +64,20 @@ export function KeyGlyphs({ value }: { value: string }) {
   return <>{nodes}</>;
 }
 
+/** Render one keycap per key in a space-separated shortcut string. */
+export function KeyCaps({ value }: { value: string }) {
+  const keys = value.split(/\s+/).filter(Boolean);
+  return (
+    <>
+      {keys.map((key) => (
+        <span className="q-kbd" key={key}>
+          <KeyGlyphs value={key} />
+        </span>
+      ))}
+    </>
+  );
+}
+
 export function Kbd({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
     <kbd
