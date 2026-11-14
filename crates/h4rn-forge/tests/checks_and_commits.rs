@@ -367,7 +367,16 @@ async fn gitea_commits_are_reversed_to_oldest_first() {
         .list_commits(&repo(ForgeKind::Gitea, &server.uri()), 5)
         .await
         .unwrap();
+    // Recorded from Gitea 1.22, which answers newest first.
     let titles: Vec<&str> = commits.commits.iter().map(|c| c.title.as_str()).collect();
-    assert_eq!(titles, ["Add a failing test", "Fix the panic"]);
-    assert_eq!(commits.commits[1].author_login.as_deref(), Some("alice"));
+    assert_eq!(titles, ["add the feature file", "add the second file"]);
+    assert_eq!(
+        commits.commits[1].body.as_deref(),
+        Some("It has a body line.")
+    );
+    assert_eq!(
+        commits.commits[1].author_login.as_deref(),
+        Some("h4rn-admin")
+    );
+    assert_eq!(commits.commits[1].sha.len(), 40);
 }

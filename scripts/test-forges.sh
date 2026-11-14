@@ -186,6 +186,11 @@ CONTENT="$(printf 'first line\n' | base64 | tr -d '\n')"
 api POST "/api/v1/repos/${REPO}/contents/feature.txt" \
   "{\"content\":\"${CONTENT}\",\"message\":\"add the feature file\",\"new_branch\":\"${FEATURE}\"}" >/dev/null
 
+# A second commit, with a message body, so the Commits tab has an order to show.
+SECOND="$(printf 'second line\n' | base64 | tr -d '\n')"
+api POST "/api/v1/repos/${REPO}/contents/second.txt" \
+  "{\"content\":\"${SECOND}\",\"message\":\"add the second file\\n\\nIt has a body line.\",\"branch\":\"${FEATURE}\"}" >/dev/null
+
 PR_JSON="$(api POST "/api/v1/repos/${REPO}/pulls" \
   "{\"title\":\"Add the feature file\",\"body\":\"Smoke test for the h4rn forge client.\",\"head\":\"${FEATURE}\",\"base\":\"main\"}")"
 PR_NUMBER="$(printf '%s' "$PR_JSON" | json_field number)"
@@ -196,6 +201,18 @@ api POST "/api/v1/repos/${REPO}/statuses/${HEAD_SHA}" \
 
 api POST "/api/v1/repos/${REPO}/issues/${PR_NUMBER}/comments" \
   '{"body":"Seed comment for the h4rn forge smoke test."}' >/dev/null
+
+# Re-record the Gitea fixtures the unit tests replay (opt in; they are checked in).
+if [[ -n "${H4RN_RECORD_FIXTURES:-}" ]]; then
+  mkdir -p "$H4RN_RECORD_FIXTURES"
+  api GET "/api/v1/repos/${REPO}/pulls/${PR_NUMBER}/commits?limit=50&verification=false&files=false" \
+    >"$H4RN_RECORD_FIXTURES/gitea_pr_commits.recorded.json"
+  api GET "/api/v1/repos/${REPO}/commits/${HEAD_SHA}/statuses?limit=100" \
+    >"$H4RN_RECORD_FIXTURES/gitea_statuses.recorded.json"
+  api GET "/api/v1/repos/${REPO}/pulls/${PR_NUMBER}" \
+    >"$H4RN_RECORD_FIXTURES/gitea_pr.recorded.json"
+  echo "--- recorded fixtures into ${H4RN_RECORD_FIXTURES}"
+fi
 
 echo "--- running live ${KIND} tests against ${BASE}"
 H4RN_GITEA_URL="$BASE" \

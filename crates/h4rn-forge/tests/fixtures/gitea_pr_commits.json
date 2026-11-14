@@ -1,12 +1,180 @@
 [
-  {"sha": "2222222222222222222222222222222222222222",
-   "html_url": "https://gitea.example.test/acme/widget/commit/2222222222222222222222222222222222222222",
-   "commit": {"message": "Fix the panic\n",
-              "author": {"name": "Alice Example", "email": "alice@example.test", "date": "2026-11-12T09:30:00Z"}},
-   "author": {"login": "alice"}},
-  {"sha": "1111111111111111111111111111111111111111",
-   "html_url": "https://gitea.example.test/acme/widget/commit/1111111111111111111111111111111111111111",
-   "commit": {"message": "Add a failing test\n\nReproduces the panic on empty input.\n",
-              "author": {"name": "Alice Example", "email": "alice@example.test", "date": "2026-11-12T09:00:00Z"}},
-   "author": {"login": "alice"}}
+ {
+  "url": "http://127.0.0.1:3000/api/v1/repos/h4rn-admin/forge-smoke/git/commits/9daafd729c8bece7769389e792fea8874af2fb82",
+  "sha": "9daafd729c8bece7769389e792fea8874af2fb82",
+  "created": "2026-11-14T05:53:18Z",
+  "html_url": "http://127.0.0.1:3000/h4rn-admin/forge-smoke/commit/9daafd729c8bece7769389e792fea8874af2fb82",
+  "commit": {
+   "url": "http://127.0.0.1:3000/api/v1/repos/h4rn-admin/forge-smoke/git/commits/9daafd729c8bece7769389e792fea8874af2fb82",
+   "author": {
+    "name": "h4rn-admin",
+    "email": "admin@h4rn.test",
+    "date": "2026-11-14T05:53:18Z"
+   },
+   "committer": {
+    "name": "h4rn-admin",
+    "email": "admin@h4rn.test",
+    "date": "2026-11-14T05:53:18Z"
+   },
+   "message": "add the second file\n\nIt has a body line.\n",
+   "tree": {
+    "url": "http://127.0.0.1:3000/api/v1/repos/h4rn-admin/forge-smoke/git/trees/9daafd729c8bece7769389e792fea8874af2fb82",
+    "sha": "9daafd729c8bece7769389e792fea8874af2fb82",
+    "created": "2026-11-14T05:53:18Z"
+   },
+   "verification": null
+  },
+  "author": {
+   "id": 1,
+   "login": "h4rn-admin",
+   "login_name": "",
+   "source_id": 0,
+   "full_name": "",
+   "email": "h4rn-admin@noreply.localhost",
+   "avatar_url": "http://127.0.0.1:3000/avatars/7ac94d367ff384d3c0d552971e748a1d",
+   "html_url": "http://127.0.0.1:3000/h4rn-admin",
+   "language": "",
+   "is_admin": false,
+   "last_login": "0001-01-01T00:00:00Z",
+   "created": "2026-11-14T05:53:17Z",
+   "restricted": false,
+   "active": false,
+   "prohibit_login": false,
+   "location": "",
+   "website": "",
+   "description": "",
+   "visibility": "public",
+   "followers_count": 0,
+   "following_count": 0,
+   "starred_repos_count": 0,
+   "username": "h4rn-admin"
+  },
+  "committer": {
+   "id": 1,
+   "login": "h4rn-admin",
+   "login_name": "",
+   "source_id": 0,
+   "full_name": "",
+   "email": "h4rn-admin@noreply.localhost",
+   "avatar_url": "http://127.0.0.1:3000/avatars/7ac94d367ff384d3c0d552971e748a1d",
+   "html_url": "http://127.0.0.1:3000/h4rn-admin",
+   "language": "",
+   "is_admin": false,
+   "last_login": "0001-01-01T00:00:00Z",
+   "created": "2026-11-14T05:53:17Z",
+   "restricted": false,
+   "active": false,
+   "prohibit_login": false,
+   "location": "",
+   "website": "",
+   "description": "",
+   "visibility": "public",
+   "followers_count": 0,
+   "following_count": 0,
+   "starred_repos_count": 0,
+   "username": "h4rn-admin"
+  },
+  "parents": [
+   {
+    "url": "http://127.0.0.1:3000/api/v1/repos/h4rn-admin/forge-smoke/git/commits/87a13843f1e6ce65273f77b5ffeb18866457468f",
+    "sha": "87a13843f1e6ce65273f77b5ffeb18866457468f",
+    "created": "0001-01-01T00:00:00Z"
+   }
+  ],
+  "files": null,
+  "stats": {
+   "total": 1,
+   "additions": 1,
+   "deletions": 0
+  }
+ },
+ {
+  "url": "http://127.0.0.1:3000/api/v1/repos/h4rn-admin/forge-smoke/git/commits/87a13843f1e6ce65273f77b5ffeb18866457468f",
+  "sha": "87a13843f1e6ce65273f77b5ffeb18866457468f",
+  "created": "2026-11-14T05:53:17Z",
+  "html_url": "http://127.0.0.1:3000/h4rn-admin/forge-smoke/commit/87a13843f1e6ce65273f77b5ffeb18866457468f",
+  "commit": {
+   "url": "http://127.0.0.1:3000/api/v1/repos/h4rn-admin/forge-smoke/git/commits/87a13843f1e6ce65273f77b5ffeb18866457468f",
+   "author": {
+    "name": "h4rn-admin",
+    "email": "admin@h4rn.test",
+    "date": "2026-11-14T05:53:17Z"
+   },
+   "committer": {
+    "name": "h4rn-admin",
+    "email": "admin@h4rn.test",
+    "date": "2026-11-14T05:53:17Z"
+   },
+   "message": "add the feature file\n",
+   "tree": {
+    "url": "http://127.0.0.1:3000/api/v1/repos/h4rn-admin/forge-smoke/git/trees/87a13843f1e6ce65273f77b5ffeb18866457468f",
+    "sha": "87a13843f1e6ce65273f77b5ffeb18866457468f",
+    "created": "2026-11-14T05:53:17Z"
+   },
+   "verification": null
+  },
+  "author": {
+   "id": 1,
+   "login": "h4rn-admin",
+   "login_name": "",
+   "source_id": 0,
+   "full_name": "",
+   "email": "h4rn-admin@noreply.localhost",
+   "avatar_url": "http://127.0.0.1:3000/avatars/7ac94d367ff384d3c0d552971e748a1d",
+   "html_url": "http://127.0.0.1:3000/h4rn-admin",
+   "language": "",
+   "is_admin": false,
+   "last_login": "0001-01-01T00:00:00Z",
+   "created": "2026-11-14T05:53:17Z",
+   "restricted": false,
+   "active": false,
+   "prohibit_login": false,
+   "location": "",
+   "website": "",
+   "description": "",
+   "visibility": "public",
+   "followers_count": 0,
+   "following_count": 0,
+   "starred_repos_count": 0,
+   "username": "h4rn-admin"
+  },
+  "committer": {
+   "id": 1,
+   "login": "h4rn-admin",
+   "login_name": "",
+   "source_id": 0,
+   "full_name": "",
+   "email": "h4rn-admin@noreply.localhost",
+   "avatar_url": "http://127.0.0.1:3000/avatars/7ac94d367ff384d3c0d552971e748a1d",
+   "html_url": "http://127.0.0.1:3000/h4rn-admin",
+   "language": "",
+   "is_admin": false,
+   "last_login": "0001-01-01T00:00:00Z",
+   "created": "2026-11-14T05:53:17Z",
+   "restricted": false,
+   "active": false,
+   "prohibit_login": false,
+   "location": "",
+   "website": "",
+   "description": "",
+   "visibility": "public",
+   "followers_count": 0,
+   "following_count": 0,
+   "starred_repos_count": 0,
+   "username": "h4rn-admin"
+  },
+  "parents": [
+   {
+    "url": "http://127.0.0.1:3000/api/v1/repos/h4rn-admin/forge-smoke/git/commits/ff80ec5a0e642d903227d020ae4e8f3fcb286798",
+    "sha": "ff80ec5a0e642d903227d020ae4e8f3fcb286798",
+    "created": "0001-01-01T00:00:00Z"
+   }
+  ],
+  "files": null,
+  "stats": {
+   "total": 1,
+   "additions": 1,
+   "deletions": 0
+  }
+ }
 ]

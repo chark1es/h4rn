@@ -624,7 +624,26 @@ async fn live_gitea_read_and_write() {
         )
         .await
         .expect("reply");
-    client.list_checks(&repo, number).await.expect("checks");
+    let checks = client.list_checks(&repo, number).await.expect("checks");
+    // Commit statuses carry no re-run API and, for a repo admin's token on an
+    // unprotected branch, no required marks.
+    assert!(!checks.rerun.supported);
+    assert!(matches!(
+        client.rerun_failed_checks(&repo, number).await,
+        Err(ForgeError::Unsupported(_))
+    ));
+    assert!(checks.checks.iter().all(|check| check.required.is_none()));
+
+    // The seed script made two commits on the branch, oldest first: the file
+    // commit, then one whose message has a body.
+    let commits = client.list_commits(&repo, number).await.expect("commits");
+    let titles: Vec<&str> = commits.commits.iter().map(|c| c.title.as_str()).collect();
+    assert_eq!(titles, ["add the feature file", "add the second file"]);
+    assert_eq!(
+        commits.commits[1].body.as_deref(),
+        Some("It has a body line.")
+    );
+    assert!(commits.commits.iter().all(|c| c.sha.len() == 40));
 }
 
 // ---------------------------------------------------------------------------

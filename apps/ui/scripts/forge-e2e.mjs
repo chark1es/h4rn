@@ -211,6 +211,32 @@ async function main() {
       .getByText("Seed comment for the h4rn forge smoke test.")
       .waitFor({ timeout: 20_000 });
 
+    // The Commits tab lists the PR's commits oldest first, straight from the
+    // forge: the seed script made two on the branch.
+    await page.getByRole("tab", { name: /^Commits/ }).click();
+    const commitTitles = await page.locator(".q-commit .t").allTextContents();
+    if (
+      commitTitles.length !== 2 ||
+      commitTitles[0] !== "add the feature file" ||
+      commitTitles[1] !== "add the second file"
+    ) {
+      throw new Error(`unexpected Commits tab: ${JSON.stringify(commitTitles)}`);
+    }
+    const shaLinks = await page.locator(".q-commit .q-commit-sha").count();
+    if (shaLinks !== 2) throw new Error(`expected 2 commit links, found ${shaLinks}`);
+
+    // Checks: the seeded status shows, a Gitea status is not "required" (the
+    // branch has no protection) and Re-run failed is disabled with the reason.
+    await page.getByRole("tab", { name: /^Checks/ }).click();
+    await page.getByText("h4rn/smoke").first().waitFor({ timeout: 10_000 });
+    const rerun = page.getByRole("button", { name: "Re-run failed" }).first();
+    if (!(await rerun.isDisabled())) throw new Error("Re-run failed should be disabled on Gitea");
+    const reason = await rerun.locator("xpath=..").getAttribute("title");
+    if (!reason?.includes("commit statuses")) {
+      throw new Error(`Re-run failed has no reason tooltip: ${reason}`);
+    }
+    await page.getByRole("tab", { name: /^Conversation/ }).click();
+
     // Post a general comment through the daemon.
     const body = `UI e2e comment ${Date.now()}`;
     await page.getByLabel(`Comment on #${prNumber}`).fill(body);
@@ -221,7 +247,9 @@ async function main() {
     await page.getByRole("button", { name: "Hand PR to agent" }).click();
     await page.getByText(new RegExp(`Handed #${prNumber} to`)).waitFor({ timeout: 20_000 });
 
-    console.log("Forge UI e2e passed: account, PR list, detail, comment and handoff.");
+    console.log(
+      "Forge UI e2e passed: account, PR list, detail, commits, checks, comment and handoff.",
+    );
   } catch (error) {
     if (page) {
       console.error(`--- page url ---\n${page.url()}`);
