@@ -137,14 +137,15 @@ async function main() {
       {
         // Keep a scripted limit pending long enough for the countdown card to
         // be asserted and acted on before it fires, and keep an echo turn in
-        // flight long enough to open and cancel a delegated child. The delay
-        // stays under the client's 10 s request timeout because Resume now
-        // waits for the resumed turn's first send.
+        // flight long enough to open and cancel a delegated child. This is a
+        // realistic harness delay (longer than the client's 10 s request
+        // timeout); Resume acknowledges immediately and reports the resumed
+        // turn through events instead of waiting for its first send.
         env: {
           ...process.env,
           H4RN_FAKE_HARNESS: "1",
           H4RN_FAKE_LIMIT_MS: "120000",
-          H4RN_FAKE_HARNESS_DELAY_MS: "8000",
+          H4RN_FAKE_HARNESS_DELAY_MS: "12000",
           HOME: homeDir,
           XDG_CONFIG_HOME: join(homeDir, ".config"),
           XDG_DATA_HOME: join(homeDir, ".local", "share"),

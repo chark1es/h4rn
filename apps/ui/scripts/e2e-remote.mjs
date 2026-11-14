@@ -2,8 +2,9 @@
 //
 // Starts Postgres and a real OrbitID in Docker, runs the real `h4rn-connect`
 // relay and a fake-harness daemon, then drives a headless browser: sign in with
-// a device code, pair this browser with the machine, open a thread over the
-// relay, and revoke the browser's device in Settings.
+// a browser redirect through OrbitID, pair this browser with the machine, open a
+// thread over the relay, revoke the browser's device in Settings, and finally
+// prove the device-code fallback still signs in.
 //
 // Skips cleanly when Docker is not reachable. Everything this script starts is
 // torn down with `docker compose down -v --remove-orphans`.
@@ -163,7 +164,7 @@ function secretB64() {
 }
 
 /** Boots OrbitID's test user, session and OIDC app. */
-async function bootstrapOrbit(orbitBase, encryptionKey) {
+async function bootstrapOrbit(orbitBase, encryptionKey, uiCallback) {
   const secretKey =
     "sk_test_" +
     createHmac("sha256", encryptionKey).update("orbitid/secret-key").digest("base64url");
@@ -201,12 +202,25 @@ async function bootstrapOrbit(orbitBase, encryptionKey) {
   const sessionJwt = activeSession?.last_active_token?.jwt;
   if (!sessionJwt) throw new Error("OrbitID did not return a session JWT");
 
+  // The browser redirect flow needs an OrbitID browser session. The API
+  // sign-in above already created one and set the opaque `__client` cookie;
+  // hand that cookie to Playwright so the authorize step runs headlessly.
+  const setCookie = signIn.headers.getSetCookie
+    ? signIn.headers.getSetCookie().join("\n")
+    : (signIn.headers.get("set-cookie") ?? "");
+  const clientTokens = [...setCookie.matchAll(/(?:^|[\n,;]\s*)__client=([^;,\n]+)/g)].map(
+    (match) => match[1],
+  );
+  const clientCookie = clientTokens.at(-1);
+  if (!clientCookie) throw new Error("OrbitID did not set a __client cookie");
+
   const app = await jsonRequest(`${orbitBase}/v1/oauth_applications`, {
     method: "POST",
     headers: { authorization: `Bearer ${secretKey}`, "content-type": "application/json" },
     body: JSON.stringify({
       name: "h4rn-ui-e2e",
-      redirect_uris: ["h4rn://callback"],
+      // The browser redirect lands on the UI; the mobile flow keeps its scheme.
+      redirect_uris: ["h4rn://callback", uiCallback],
       scopes: "openid profile email offline_access",
       public: false,
       consent_screen_enabled: false,
@@ -231,6 +245,7 @@ async function bootstrapOrbit(orbitBase, encryptionKey) {
   return {
     secretKey,
     sessionJwt,
+    clientCookie,
     clientId: app.body.client_id,
     clientSecret: app.body.client_secret,
   };
@@ -385,7 +400,7 @@ async function main() {
     await waitForHttp(`${orbitBase}/.well-known/openid-configuration`, 120_000);
 
     console.log("--- bootstrapping OrbitID");
-    const orbit = await bootstrapOrbit(orbitBase, orbitEncryptionKey);
+    const orbit = await bootstrapOrbit(orbitBase, orbitEncryptionKey, `${uiOrigin}/auth/callback`);
 
     console.log("--- building the daemon and relay");
     run(
@@ -422,7 +437,7 @@ async function main() {
           client_id: orbit.clientId,
           client_secret: orbit.clientSecret,
           scopes: ["openid", "profile", "email", "offline_access"],
-          redirect_uris: ["h4rn://callback"],
+          redirect_uris: ["h4rn://callback", `${uiOrigin}/auth/callback`],
           device_grant: true,
         },
       ]),
@@ -482,6 +497,17 @@ async function main() {
     const executablePath = findChromium();
     browser = await chromium.launch({ executablePath, headless: true });
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    // The redirect flow authorizes against OrbitID; this is the browser session
+    // the API bootstrap above signed in.
+    await context.addCookies([
+      {
+        name: "__client",
+        value: orbit.clientCookie,
+        url: orbitBase,
+        httpOnly: true,
+        sameSite: "Lax",
+      },
+    ]);
     await context.addInitScript(() => {
       const writeText = async (text) => {
         window.__h4rnCopied = String(text);
@@ -548,7 +574,7 @@ async function main() {
       throw new Error(`the thread did not get a /t/<id> route: ${threadPath}`);
     }
 
-    // Sign in through the shipped Settings UI with a real device grant.
+    // Sign in through the shipped Settings UI with the browser redirect flow.
     const footer = page.locator('[title="Hosts and connection"]');
     await footer.click();
     await page.getByRole("menuitem", { name: /Sign in to h4rn-connect/ }).click();
@@ -556,14 +582,16 @@ async function main() {
     const relayInput = page.getByLabel("h4rn-connect URL");
     await relayInput.fill(relayUrl);
     await page.getByRole("button", { name: "Use", exact: true }).click();
-    await page.getByRole("button", { name: /Use a device code/ }).click();
-    const code = (await page.locator(".q-code-big").textContent())?.trim();
-    if (!code) throw new Error("the sign-in panel did not show a device code");
-    await approveDeviceCode(orbitBase, orbit.sessionJwt, code);
-
+    await page.getByRole("button", { name: /Continue with OrbitID/ }).click();
+    // OrbitID authorizes the pre-seeded browser session, redirects to
+    // /auth/callback, and the app reloads the route it left. Reaching the
+    // signed-in Devices panel proves the full redirect round trip.
     await page.getByRole("heading", { name: /^Pair a device/ }).waitFor({
-      timeout: 30_000,
+      timeout: 60_000,
     });
+    if (new URL(page.url()).origin !== uiOrigin) {
+      throw new Error(`the redirect flow did not return to the UI: ${page.url()}`);
+    }
     const qr = page.getByRole("img", { name: "Pairing QR code for atlas" });
     await qr.waitFor({ timeout: 30_000 });
     await page.getByRole("button", { name: "Copy link", exact: true }).click();
@@ -616,10 +644,20 @@ async function main() {
     // Revoking this device also drops its dead credentials, so the Devices
     // panel returns to the signed-out sign-in affordances.
     await page
-      .getByRole("button", { name: /Use a device code|Continue with OrbitID/ })
+      .getByRole("button", { name: /Sign in on another device|Continue with OrbitID/ })
       .first()
       .waitFor({ timeout: 30_000 });
-    console.log("Remote UI e2e passed: signed in, paired, relayed a thread, revoked the device.");
+
+    // The device-code grant stays available as a fallback for shells without a
+    // usable browser redirect; sign in once more with it.
+    await page.getByRole("button", { name: /Sign in on another device/ }).click();
+    const code = (await page.locator(".q-code-big").textContent())?.trim();
+    if (!code) throw new Error("the sign-in panel did not show a device code");
+    await approveDeviceCode(orbitBase, orbit.sessionJwt, code);
+    await page.getByRole("heading", { name: /^Pair a device/ }).waitFor({ timeout: 30_000 });
+    console.log(
+      "Remote UI e2e passed: browser redirect signed in, paired, relayed a thread, revoked the device, and the device-code fallback signed in again.",
+    );
   } catch (error) {
     if (page) {
       console.error(`--- page url ---\n${page.url()}`);

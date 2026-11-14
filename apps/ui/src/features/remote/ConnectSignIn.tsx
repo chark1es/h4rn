@@ -178,7 +178,7 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
                   disabled={signingIn}
                   onClick={() => void signInWithDeviceCode(primary.id)}
                 >
-                  Use a device code
+                  Sign in on another device
                   <ArrowRightIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                 </button>
               ) : null}
