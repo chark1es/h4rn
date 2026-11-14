@@ -237,48 +237,80 @@ impl SqliteJournal {
     }
 }
 
+/// Upserts a thread row on any connection (a pooled one or a transaction's).
+async fn upsert_thread_on(
+    conn: &mut sqlx::SqliteConnection,
+    meta: &ThreadMeta,
+) -> Result<(), JournalError> {
+    let usage_json = serde_json::to_string(&meta.usage)?;
+    let harness = serde_json::to_string(&meta.harness)?;
+    let harness = harness.trim_matches('"').to_owned();
+    let runtime_mode = serde_json::to_string(&meta.runtime_mode)?;
+    let runtime_mode = runtime_mode.trim_matches('"').to_owned();
+    let worktree_json = serde_json::to_string(&meta.worktree)?;
+    sqlx::query(
+        "INSERT INTO daemon_threads
+            (thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json, parent_thread_id, subagent_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(thread_id) DO UPDATE SET
+            host = excluded.host,
+            harness = excluded.harness,
+            title = excluded.title,
+            workspace_path = excluded.workspace_path,
+            model = excluded.model,
+            usage_json = excluded.usage_json,
+            resume_id = excluded.resume_id,
+            runtime_mode = excluded.runtime_mode,
+            worktree_json = excluded.worktree_json,
+            parent_thread_id = excluded.parent_thread_id,
+            subagent_id = excluded.subagent_id",
+    )
+    .bind(meta.thread_id.as_str())
+    .bind(meta.host.as_str())
+    .bind(harness)
+    .bind(&meta.title)
+    .bind(&meta.workspace_path)
+    .bind(&meta.model)
+    .bind(meta.created_at.to_rfc3339())
+    .bind(usage_json)
+    .bind(meta.resume_id.as_deref())
+    .bind(runtime_mode)
+    .bind(worktree_json)
+    .bind(meta.parent_thread_id.as_ref().map(ThreadId::as_str))
+    .bind(meta.subagent_id.as_ref().map(SubagentId::as_str))
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Inserts wire events on any connection and returns their global sequences.
+async fn append_wire_on(
+    conn: &mut sqlx::SqliteConnection,
+    thread_id: &ThreadId,
+    wire: &[Event],
+) -> Result<Vec<u64>, JournalError> {
+    let recorded_at = Utc::now().to_rfc3339();
+    let mut seqs = Vec::with_capacity(wire.len());
+    for event in wire {
+        let event_json = serde_json::to_string(event)?;
+        let result = sqlx::query(
+            "INSERT INTO daemon_wire_events (thread_id, event_json, recorded_at) VALUES (?, ?, ?)",
+        )
+        .bind(thread_id.as_str())
+        .bind(event_json)
+        .bind(&recorded_at)
+        .execute(&mut *conn)
+        .await?;
+        seqs.push(result.last_insert_rowid() as u64);
+    }
+    Ok(seqs)
+}
+
 #[async_trait]
 impl Journal for SqliteJournal {
     async fn upsert_thread(&self, meta: &ThreadMeta) -> Result<(), JournalError> {
-        let usage_json = serde_json::to_string(&meta.usage)?;
-        let harness = serde_json::to_string(&meta.harness)?;
-        let harness = harness.trim_matches('"').to_owned();
-        let runtime_mode = serde_json::to_string(&meta.runtime_mode)?;
-        let runtime_mode = runtime_mode.trim_matches('"').to_owned();
-        let worktree_json = serde_json::to_string(&meta.worktree)?;
-        sqlx::query(
-            "INSERT INTO daemon_threads
-                (thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json, parent_thread_id, subagent_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(thread_id) DO UPDATE SET
-                host = excluded.host,
-                harness = excluded.harness,
-                title = excluded.title,
-                workspace_path = excluded.workspace_path,
-                model = excluded.model,
-                usage_json = excluded.usage_json,
-                resume_id = excluded.resume_id,
-                runtime_mode = excluded.runtime_mode,
-                worktree_json = excluded.worktree_json,
-                parent_thread_id = excluded.parent_thread_id,
-                subagent_id = excluded.subagent_id",
-        )
-        .bind(meta.thread_id.as_str())
-        .bind(meta.host.as_str())
-        .bind(harness)
-        .bind(&meta.title)
-        .bind(&meta.workspace_path)
-        .bind(&meta.model)
-        .bind(meta.created_at.to_rfc3339())
-        .bind(usage_json)
-        .bind(meta.resume_id.as_deref())
-        .bind(runtime_mode)
-        .bind(worktree_json)
-        .bind(meta.parent_thread_id.as_ref().map(ThreadId::as_str))
-        .bind(meta.subagent_id.as_ref().map(SubagentId::as_str))
-        .execute(&self.pool)
-        .await?;
-        Ok(())
+        let mut conn = self.pool.acquire().await?;
+        upsert_thread_on(&mut conn, meta).await
     }
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>, JournalError> {
@@ -334,11 +366,21 @@ impl Journal for SqliteJournal {
         domain: &[ThreadEvent],
         wire: &[Event],
     ) -> Result<Vec<u64>, JournalError> {
-        self.upsert_thread(meta).await?;
+        // One transaction: the thread row, the domain log and the wire log
+        // commit together or not at all, so a crash or a failed insert cannot
+        // leave a domain event without its wire event.
+        let mut tx = self.pool.begin().await?;
+        upsert_thread_on(&mut tx, meta).await?;
         if !domain.is_empty() {
-            self.store.append(&meta.thread_id, domain).await?;
+            SqliteEventStore::append_in(&mut tx, &meta.thread_id, domain).await?;
         }
-        self.append_wire(&meta.thread_id, wire).await
+        let seqs = if wire.is_empty() {
+            Vec::new()
+        } else {
+            append_wire_on(&mut tx, &meta.thread_id, wire).await?
+        };
+        tx.commit().await?;
+        Ok(seqs)
     }
 
     async fn append_wire(
@@ -349,21 +391,8 @@ impl Journal for SqliteJournal {
         if wire.is_empty() {
             return Ok(Vec::new());
         }
-        let recorded_at = Utc::now().to_rfc3339();
-        let mut seqs = Vec::with_capacity(wire.len());
-        for event in wire {
-            let event_json = serde_json::to_string(event)?;
-            let result = sqlx::query(
-                "INSERT INTO daemon_wire_events (thread_id, event_json, recorded_at) VALUES (?, ?, ?)",
-            )
-            .bind(thread_id.as_str())
-            .bind(event_json)
-            .bind(&recorded_at)
-            .execute(&self.pool)
-            .await?;
-            seqs.push(result.last_insert_rowid() as u64);
-        }
-        Ok(seqs)
+        let mut conn = self.pool.acquire().await?;
+        append_wire_on(&mut conn, thread_id, wire).await
     }
 
     async fn read_wire_since(
@@ -611,5 +640,33 @@ mod tests {
             .unwrap();
         let domain = journal.read_domain(&one.thread_id).await.unwrap();
         assert_eq!(domain.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn append_is_atomic_when_the_wire_insert_fails() {
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let one = meta("th_one");
+        sqlx::query("DROP TABLE daemon_wire_events")
+            .execute(&journal.pool)
+            .await
+            .unwrap();
+
+        let result = journal
+            .append(
+                &one,
+                &[ThreadEvent::TurnStarted { at: Utc::now() }],
+                &[Event::ThreadUpserted(summary())],
+            )
+            .await;
+        assert!(result.is_err(), "the wire insert must fail");
+
+        assert!(
+            journal.read_domain(&one.thread_id).await.unwrap().is_empty(),
+            "a failed append must not leave a domain event behind"
+        );
+        assert!(
+            journal.list_threads().await.unwrap().is_empty(),
+            "a failed append must not leave the thread row behind"
+        );
     }
 }
