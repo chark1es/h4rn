@@ -2353,6 +2353,27 @@ impl Store {
         Ok(())
     }
 
+    /// Reads the entries changed since `since` together with the cursor the
+    /// client must resume from.
+    ///
+    /// The cursor is derived from the rows returned, never from a second query:
+    /// a push that commits between two reads would otherwise advance the
+    /// cursor past a row this pull did not include, and the client would skip
+    /// it forever. With no rows the cursor is `since` unchanged.
+    pub async fn skill_pull(
+        &self,
+        user_id: Uuid,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<(Vec<SkillEntryRow>, Option<DateTime<Utc>>)> {
+        let rows = self.skill_entries_since(user_id, since).await?;
+        let cursor = rows
+            .iter()
+            .map(|row| row.server_updated_at)
+            .max()
+            .or(since);
+        Ok((rows, cursor))
+    }
+
     /// The newest server receive time, used as the pull cursor.
     pub async fn skill_cursor(&self, user_id: Uuid) -> Result<Option<DateTime<Utc>>> {
         sqlx::query_scalar::<_, Option<DateTime<Utc>>>(

@@ -526,7 +526,13 @@ async fn auth_complete(
     }
     let login = state
         .oidc
-        .complete_login(&provider, &request.code, &flow.pkce_verifier, &flow.nonce)
+        .complete_login(
+            &provider,
+            &request.code,
+            &flow.pkce_verifier,
+            &flow.nonce,
+            &flow.redirect_uri,
+        )
         .await?;
     Ok(Json(finish_login(&state, &flow, login).await?))
 }
@@ -646,7 +652,13 @@ async fn auth_callback(
     })?;
     let login = state
         .oidc
-        .complete_login(&provider, code, &flow.pkce_verifier, &flow.nonce)
+        .complete_login(
+            &provider,
+            code,
+            &flow.pkce_verifier,
+            &flow.nonce,
+            &flow.redirect_uri,
+        )
         .await?;
     let complete = finish_login(&state, &flow, login).await?;
 
@@ -1601,10 +1613,7 @@ async fn skills_pull(
                 .with_timezone(&Utc),
         ),
     };
-    let rows = state
-        .store
-        .skill_entries_since(authed.user.id, since)
-        .await?;
+    let (rows, pull_cursor) = state.store.skill_pull(authed.user.id, since).await?;
     let mut entries = Vec::with_capacity(rows.len());
     for row in rows {
         let aad = skill_aad(row.user_id, &row.skill_id, &row.version);
@@ -1639,7 +1648,7 @@ async fn skills_pull(
     let response = SkillSyncPullResponse {
         entries,
         conflicts: user_conflicts(&state, authed.user.id).await?,
-        etag: cursor(&state, authed.user.id).await?,
+        etag: pull_cursor.map(|time| time.to_rfc3339()),
         server_time: Utc::now(),
     };
     Ok(Json(response))
