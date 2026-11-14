@@ -610,6 +610,27 @@ pub enum ClientRequest {
         /// Thread to resume.
         thread_id: ThreadId,
     },
+    /// List the models and accounts a limit-hit thread could fail over to.
+    ///
+    /// The daemon picks the default (`options.default`); the person may choose
+    /// any entry of `options.options` for [`Self::FailOver`].
+    ListFailoverOptions {
+        /// Thread to inspect.
+        thread_id: ThreadId,
+    },
+    /// Resume a limit-hit thread now on another model or account, instead of
+    /// waiting for the reset.
+    ///
+    /// With no `model` the daemon's default is used. A named `model` (and
+    /// optional `account`) must be one of the eligible options.
+    FailOver {
+        /// Thread to move.
+        thread_id: ThreadId,
+        /// Model to resume on, or `None` for the daemon's default.
+        model: Option<String>,
+        /// Account to prefer; only meaningful with `model`.
+        account: Option<String>,
+    },
     /// Replace the daemon-wide auto-resume policy.
     SetAutoResumePolicy {
         /// New policy.
@@ -826,6 +847,7 @@ impl ClientRequest {
             | Self::GetUsage { .. }
             | Self::GetLimits
             | Self::ListResets
+            | Self::ListFailoverOptions { .. }
             | Self::ForgeListAccounts
             | Self::ForgeDetectRepo { .. }
             | Self::ForgeListPrs { .. }
@@ -843,6 +865,7 @@ impl ClientRequest {
             | Self::QueryUpload { .. }
             | Self::CancelResume { .. }
             | Self::ResumeNow { .. }
+            | Self::FailOver { .. }
             | Self::ForgeReply { .. }
             | Self::ForgeComment { .. }
             | Self::ForgeOpenPr { .. }

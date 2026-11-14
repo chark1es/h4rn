@@ -19,6 +19,8 @@ pub(super) fn matches(request: &ClientRequest) -> bool {
             | ClientRequest::ListResets
             | ClientRequest::CancelResume { .. }
             | ClientRequest::ResumeNow { .. }
+            | ClientRequest::ListFailoverOptions { .. }
+            | ClientRequest::FailOver { .. }
             | ClientRequest::SetAutoResumePolicy { .. }
     )
 }
@@ -86,6 +88,24 @@ pub(super) async fn handle(
             .state
             .manager
             .resume_now(&thread_id)
+            .await
+            .map(|schedule| ResponseBody::ResumeChanged { schedule })
+            .map_err(crate::threads::ManagerError::into_proto),
+        ClientRequest::ListFailoverOptions { thread_id } => conn
+            .state
+            .manager
+            .failover_options(&thread_id)
+            .await
+            .map(|options| ResponseBody::FailoverOptions { options })
+            .map_err(crate::threads::ManagerError::into_proto),
+        ClientRequest::FailOver {
+            thread_id,
+            model,
+            account,
+        } => conn
+            .state
+            .manager
+            .fail_over(&thread_id, model, account)
             .await
             .map(|schedule| ResponseBody::ResumeChanged { schedule })
             .map_err(crate::threads::ManagerError::into_proto),

@@ -251,6 +251,23 @@ impl ProxyService {
         Ok(pick_failover(current, policy, &catalog.models, &limits))
     }
 
+    /// Every failover candidate, best first (the head is [`Self::pick_failover`]).
+    pub async fn eligible_failovers(
+        &self,
+        id: &ProxyProfileId,
+        current: &str,
+        policy: &ProxyFailoverPolicy,
+    ) -> Result<Vec<ProxyFailoverChoice>, ProxyError> {
+        let catalog = self.models(id).await?;
+        let limits = self.limits(id).await?;
+        Ok(crate::failover::eligible_failovers(
+            current,
+            policy,
+            &catalog.models,
+            &limits,
+        ))
+    }
+
     /// The override a session of `kind` should receive, if its profile is on.
     ///
     /// This is deliberately synchronous: a session start must not wait for a

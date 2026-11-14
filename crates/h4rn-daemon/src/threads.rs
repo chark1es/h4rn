@@ -1386,6 +1386,130 @@ impl ThreadManager {
             .map_err(ManagerError::Internal)
     }
 
+    /// Where a limit-hit thread could fail over to, default first.
+    ///
+    /// The candidates come from the proxy profile that serves the thread's
+    /// harness. With no such profile there is nothing to fail over to, and the
+    /// reply says why so the UI can hide the action with a reason.
+    pub async fn failover_options(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<h4rn_protocol::FailoverOptions, ManagerError> {
+        let handle = self.inner.handle(thread_id).await?;
+        let (harness, model) = {
+            let record = handle.lock().await;
+            (record.meta.harness, record.meta.model.clone())
+        };
+        let nothing = |reason: String| h4rn_protocol::FailoverOptions {
+            thread_id: thread_id.clone(),
+            current_model: model.clone(),
+            default: None,
+            options: Vec::new(),
+            unavailable: Some(reason),
+        };
+        let Some(proxy) = self.inner.proxy.get() else {
+            return Ok(nothing(
+                "No proxy provider is configured on this host".into(),
+            ));
+        };
+        let Some(applied) = proxy.override_for(harness, &model) else {
+            return Ok(nothing(format!(
+                "No proxy profile routes the `{}` harness through a provider",
+                harness.slug()
+            )));
+        };
+        let options = match proxy
+            .eligible_failovers(
+                &applied.profile_id,
+                &model,
+                &h4rn_protocol::ProxyFailoverPolicy::default(),
+            )
+            .await
+        {
+            Ok(options) => options,
+            Err(error) => return Ok(nothing(format!("The proxy could not be read: {error}"))),
+        };
+        if options.is_empty() {
+            return Ok(nothing(
+                "Every other model is excluded or cooling down".into(),
+            ));
+        }
+        Ok(h4rn_protocol::FailoverOptions {
+            thread_id: thread_id.clone(),
+            current_model: model,
+            default: options.first().cloned(),
+            options,
+            unavailable: None,
+        })
+    }
+
+    /// Resumes a limit-hit thread now on another model or account.
+    ///
+    /// `model` of `None` takes the daemon's default. A named model must be one
+    /// of [`Self::failover_options`]; the schedule keeps the choice (shown on
+    /// the card and in history) and fires immediately.
+    pub async fn fail_over(
+        &self,
+        thread_id: &ThreadId,
+        model: Option<String>,
+        account: Option<String>,
+    ) -> Result<Option<ResumeSchedule>, ManagerError> {
+        let meter = self
+            .meter()
+            .ok_or_else(|| ManagerError::Unsupported("metering is not enabled".into()))?;
+        let options = self.failover_options(thread_id).await?;
+        let choice = match model {
+            None => options.default.clone().ok_or_else(|| {
+                ManagerError::Conflict(
+                    options
+                        .unavailable
+                        .clone()
+                        .unwrap_or_else(|| "there is no model to fail over to".into()),
+                )
+            })?,
+            Some(model) => options
+                .options
+                .iter()
+                .find(|candidate| {
+                    candidate.model == model && (account.is_none() || candidate.account == account)
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    ManagerError::InvalidRequest(format!(
+                        "`{model}` is not an eligible failover for thread {thread_id}"
+                    ))
+                })?,
+        };
+        let mut schedule = meter
+            .schedules()
+            .await
+            .map_err(|error| ManagerError::Internal(error.to_string()))?
+            .into_iter()
+            .find(|schedule| &schedule.thread_id == thread_id)
+            .ok_or_else(|| {
+                ManagerError::NotFound(format!("thread {thread_id} has no resume schedule"))
+            })?;
+        if !matches!(
+            schedule.state,
+            ResumeState::Scheduled | ResumeState::Waiting
+        ) {
+            return Err(ManagerError::Conflict(format!(
+                "thread {thread_id}'s resume schedule is already {:?}",
+                schedule.state
+            )));
+        }
+        schedule.failover = Some(ResumeFailover {
+            model: choice.model,
+            account: choice.account,
+            reason: format!("chosen now: {}", choice.reason),
+        });
+        schedule.resume_at = Utc::now();
+        self.inner
+            .fire_schedule(schedule)
+            .await
+            .map_err(ManagerError::Internal)
+    }
+
     /// Stops the ticker, interrupts live turns and shuts every harness session.
     pub async fn shutdown(&self) {
         self.inner.closed.store(true, Ordering::Relaxed);
@@ -2451,12 +2575,28 @@ impl Inner {
                 )
                 .await
         {
-            record.meta.model = choice.model.clone();
             schedule.failover = Some(ResumeFailover {
                 model: choice.model,
                 account: choice.account,
                 reason: choice.reason,
             });
+        }
+        // Whoever chose it (the policy at reset time, or a person through
+        // `FailOver`), a changed model needs a fresh session: the live one was
+        // started on the limited model.
+        if let Some(failover) = &schedule.failover
+            && record.meta.model != failover.model
+        {
+            record.meta.model = failover.model.clone();
+            if let Some(session) = record.session.take() {
+                let mut session = session.lock().await;
+                if let Err(error) = session.shutdown().await {
+                    tracing::warn!(thread_id = %record.meta.thread_id, %error, "harness shutdown before failover failed");
+                }
+            }
+            if let Some(pump) = record.pump.take() {
+                pump.abort();
+            }
         }
 
         let prompt = schedule.prompt.clone();

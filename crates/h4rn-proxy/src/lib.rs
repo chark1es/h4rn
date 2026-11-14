@@ -24,7 +24,7 @@ mod secret;
 mod service;
 
 pub use error::{ProxyError, ProxyErrorKind};
-pub use failover::pick_failover;
+pub use failover::{eligible_failovers, pick_failover};
 pub use limits::read_limits;
 pub use models::list_models;
 pub use overrides::{

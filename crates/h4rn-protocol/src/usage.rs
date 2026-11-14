@@ -303,6 +303,22 @@ pub struct ResumeFailover {
     pub reason: String,
 }
 
+/// Where a limit-hit thread could go instead of waiting for its reset.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct FailoverOptions {
+    /// Thread the options are for.
+    pub thread_id: ThreadId,
+    /// The model the thread is on now.
+    pub current_model: String,
+    /// What the daemon would pick; the head of `options`.
+    pub default: Option<crate::proxy::ProxyFailoverChoice>,
+    /// Every eligible model and account, best first.
+    pub options: Vec<crate::proxy::ProxyFailoverChoice>,
+    /// Why there are no options, when there are none ("No proxy profile
+    /// serves Claude Code", "Every other model is cooling down").
+    pub unavailable: Option<String>,
+}
+
 /// One persisted auto-resume schedule.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ResumeSchedule {

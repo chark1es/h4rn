@@ -1805,6 +1805,195 @@ async fn a_scheduled_resume_records_the_proxy_failover_choice() {
     daemon.stop().await;
 }
 
+/// The shared setup of the fail-over tests: a mock proxy serving two Claude
+/// models, a Claude Code override through it and a policy that never fires on
+/// its own (the reset is an hour away).
+async fn limited_thread_on_a_proxy(
+    client: &mut Client,
+    host: HostId,
+    server: &wiremock::MockServer,
+) -> ThreadId {
+    let profile = match client
+        .request(ClientRequest::AddProxyProfile {
+            profile: ProxyProfileDraft {
+                name: "mock-failover".into(),
+                base_url: server.uri(),
+                management_key: Some("mgmt-secret".into()),
+                api_key: Some("sk-client".into()),
+                default: true,
+            },
+        })
+        .await
+        .expect("add proxy profile")
+    {
+        ResponseBody::ProxyProfile { profile } => profile,
+        other => panic!("unexpected AddProxyProfile response: {other:?}"),
+    };
+    client
+        .request(ClientRequest::SetProxyHarnessOverride {
+            profile_id: profile.id.clone(),
+            harness: HarnessKind::ClaudeCode,
+            enabled: true,
+            default_model: None,
+        })
+        .await
+        .expect("enable proxy for Claude Code");
+    stable_policy(client, false).await;
+    let summary = create_with_model(
+        client,
+        host,
+        "do the thing",
+        HarnessKind::ClaudeCode,
+        "claude-sonnet-5",
+    )
+    .await;
+    client
+        .wait_event(|event| matches!(event, Event::UsageLimitHit { .. }))
+        .await;
+    client.wait_for_turn_completed().await;
+    summary.thread_id
+}
+
+#[tokio::test]
+async fn a_limit_hit_thread_fails_over_now_to_the_default_or_a_chosen_model() {
+    let server = wiremock::MockServer::start().await;
+    mock_proxy_catalog(&server).await;
+
+    let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+    let daemon = boot_with(
+        resume_options(),
+        FakeHarness::with_session_scripts(vec![limit_script(Some(reset_at)), resume_script()]),
+    )
+    .await;
+    let host = host_id_for(&daemon).await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    let thread_id = limited_thread_on_a_proxy(&mut client, host, &server).await;
+
+    // The daemon names its default and every eligible alternative.
+    let options = match client
+        .request(ClientRequest::ListFailoverOptions {
+            thread_id: thread_id.clone(),
+        })
+        .await
+        .expect("list failover options")
+    {
+        ResponseBody::FailoverOptions { options } => options,
+        other => panic!("unexpected ListFailoverOptions response: {other:?}"),
+    };
+    assert_eq!(options.current_model, "claude-sonnet-5");
+    assert!(options.unavailable.is_none());
+    assert_eq!(
+        options.default.as_ref().map(|choice| choice.model.as_str()),
+        Some("claude-opus-5")
+    );
+    assert_eq!(options.options.first(), options.default.as_ref());
+
+    // A model the daemon did not offer is refused and nothing fires.
+    let refused = client
+        .request(ClientRequest::FailOver {
+            thread_id: thread_id.clone(),
+            model: Some("gpt-not-offered".into()),
+            account: None,
+        })
+        .await
+        .expect_err("an ineligible model is refused");
+    assert_eq!(refused.code, h4rn_protocol::ProtoErrorCode::InvalidRequest);
+    assert_eq!(
+        schedules(&mut client).await.remove(0).state,
+        ResumeState::Scheduled
+    );
+
+    // Choosing an eligible model fires the schedule now, an hour early.
+    let changed = client
+        .request(ClientRequest::FailOver {
+            thread_id: thread_id.clone(),
+            model: Some("claude-opus-5".into()),
+            account: None,
+        })
+        .await
+        .expect("fail over");
+    let ResponseBody::ResumeChanged {
+        schedule: Some(fired),
+    } = changed
+    else {
+        panic!("unexpected FailOver response: {changed:?}");
+    };
+    assert_eq!(fired.state, ResumeState::Fired);
+    assert_eq!(
+        fired
+            .failover
+            .as_ref()
+            .map(|failover| failover.model.as_str()),
+        Some("claude-opus-5")
+    );
+    client
+        .wait_event(|event| matches!(event, Event::TurnStarted { .. }))
+        .await;
+    client.wait_for_turn_completed().await;
+    assert_eq!(
+        thread_summary(&mut client, &thread_id).await.model,
+        "claude-opus-5"
+    );
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn fail_over_without_a_proxy_says_why_instead_of_guessing() {
+    let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+    let daemon = boot_with(
+        resume_options(),
+        FakeHarness::with_session_scripts(vec![limit_script(Some(reset_at))]),
+    )
+    .await;
+    let host = host_id_for(&daemon).await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    stable_policy(&mut client, false).await;
+    let summary = create_with_model(
+        &mut client,
+        host,
+        "do the thing",
+        HarnessKind::ClaudeCode,
+        "claude-sonnet-5",
+    )
+    .await;
+    client
+        .wait_event(|event| matches!(event, Event::UsageLimitHit { .. }))
+        .await;
+    client.wait_for_turn_completed().await;
+
+    let options = match client
+        .request(ClientRequest::ListFailoverOptions {
+            thread_id: summary.thread_id.clone(),
+        })
+        .await
+        .expect("list failover options")
+    {
+        ResponseBody::FailoverOptions { options } => options,
+        other => panic!("unexpected ListFailoverOptions response: {other:?}"),
+    };
+    assert!(options.options.is_empty());
+    assert!(options.default.is_none());
+    assert!(
+        options
+            .unavailable
+            .is_some_and(|reason| reason.contains("proxy"))
+    );
+
+    let refused = client
+        .request(ClientRequest::FailOver {
+            thread_id: summary.thread_id,
+            model: None,
+            account: None,
+        })
+        .await
+        .expect_err("nothing to fail over to");
+    assert_eq!(refused.code, h4rn_protocol::ProtoErrorCode::Conflict);
+    daemon.stop().await;
+}
+
 #[tokio::test]
 async fn turn_completed_carries_the_turns_change_set() {
     let daemon = boot().await;

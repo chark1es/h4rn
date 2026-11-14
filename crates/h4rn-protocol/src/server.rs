@@ -414,6 +414,11 @@ pub enum ResponseBody {
         /// Schedules and history.
         resets: crate::usage::Resets,
     },
+    /// Where a limit-hit thread could fail over to.
+    FailoverOptions {
+        /// The default and the alternatives.
+        options: crate::usage::FailoverOptions,
+    },
     /// A schedule was armed, moved or cleared.
     ResumeChanged {
         /// The current schedule, or `None` when none remains.
