@@ -441,6 +441,7 @@ fn usage_for(text: &str) -> Usage {
         cached_input_tokens: 64,
         cost_micros: 0,
         duration_ms: 0,
+        ..Usage::default()
     }
 }
 

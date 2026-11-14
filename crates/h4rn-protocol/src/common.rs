@@ -272,9 +272,39 @@ pub struct Usage {
     /// Wall-clock duration of the turn.
     #[ts(type = "number")]
     pub duration_ms: u64,
+    /// Time spent generating, wall time minus tool time. Set by the meter
+    /// when a turn closes; adapters leave it zero.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub generation_ms: u64,
+    /// Output tokens per second of generation time (tool time excluded),
+    /// rounded; zero when unknown. Derived by [`Usage::refresh_tps`], never by
+    /// a client.
+    #[serde(default)]
+    #[ts(type = "number")]
+    pub tps: u64,
 }
 
 impl Usage {
+    /// Recomputes [`Usage::tps`] from the output tokens and generation time.
+    pub fn refresh_tps(&mut self) {
+        self.tps = if self.generation_ms == 0 {
+            0
+        } else {
+            let tokens = u128::from(self.output_tokens) * 1000;
+            let millis = u128::from(self.generation_ms);
+            u64::try_from((tokens + millis / 2) / millis).unwrap_or(u64::MAX)
+        };
+    }
+
+    /// Percent (0-100) of `window` the billed tokens fill; `None` without a
+    /// window.
+    pub fn context_fill_percent(&self, window: Option<u64>) -> Option<u8> {
+        let window = window.filter(|window| *window > 0)?;
+        let filled = u128::from(self.total_tokens()) * 100 / u128::from(window);
+        Some(u8::try_from(filled.min(100)).unwrap_or(100))
+    }
+
     /// Total tokens billed for the turn.
     pub fn total_tokens(&self) -> u64 {
         self.input_tokens.saturating_add(self.output_tokens)
@@ -289,6 +319,8 @@ impl Usage {
             .saturating_add(other.cached_input_tokens);
         self.cost_micros = self.cost_micros.saturating_add(other.cost_micros);
         self.duration_ms = self.duration_ms.saturating_add(other.duration_ms);
+        self.generation_ms = self.generation_ms.saturating_add(other.generation_ms);
+        self.refresh_tps();
     }
 }
 
@@ -337,6 +369,11 @@ pub struct ThreadSummary {
     #[serde(default)]
     #[ts(type = "number | null")]
     pub context_window: Option<u64>,
+    /// Share of the context window the thread has filled, 0-100, when the
+    /// window is known. Derived here so clients only format it.
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub context_fill_percent: Option<u8>,
     /// Whether the thread is raising a hand.
     pub needs_attention: bool,
     /// Whether a finished turn has not been acknowledged.
@@ -508,6 +545,24 @@ mod tests {
     }
 
     #[test]
+    fn tps_excludes_tool_time_and_context_fill_is_capped() {
+        let mut usage = Usage {
+            output_tokens: 500,
+            input_tokens: 1_500,
+            duration_ms: 20_000,
+            generation_ms: 5_000,
+            ..Usage::default()
+        };
+        usage.refresh_tps();
+        // 500 tokens over 5 s of generation, not 20 s of wall time.
+        assert_eq!(usage.tps, 100);
+        assert_eq!(usage.context_fill_percent(Some(4_000)), Some(50));
+        assert_eq!(usage.context_fill_percent(Some(100)), Some(100));
+        assert_eq!(usage.context_fill_percent(None), None);
+        assert_eq!(Usage::default().tps, 0);
+    }
+
+    #[test]
     fn usage_merge_saturates_instead_of_overflowing() {
         let mut usage = Usage {
             input_tokens: u64::MAX,
@@ -544,6 +599,7 @@ mod tests {
             usage: Usage::default(),
             ttft_ms: None,
             context_window: None,
+            context_fill_percent: None,
             needs_attention: false,
             unread: false,
             resume_at,
