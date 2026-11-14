@@ -670,7 +670,7 @@ series_group_by: UsageGroupBy | null,
  * With this set, `scope_id` names a parent thread and the report adds
  * every child's turns; without it only the thread's own rows count.
  */
-include_children: boolean, } | { "type": "get_limits" } | { "type": "list_resets" } | { "type": "cancel_resume", 
+include_children: boolean, } | { "type": "pairing_confirmations" } | { "type": "get_limits" } | { "type": "list_resets" } | { "type": "cancel_resume", 
 /**
  * Thread whose schedule is cleared.
  */

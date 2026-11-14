@@ -462,6 +462,23 @@ impl PairScope {
     }
 }
 
+/// A device that paired through a typed code, waiting to be confirmed.
+///
+/// The daemon computes `sas` from the daemon key it holds and the device key
+/// connect gave it. The person compares it with the string the new device
+/// shows after claiming; a mismatch means the relay substituted a key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PairingConfirmation {
+    /// Connect device id of the new device.
+    pub device_id: String,
+    /// Its display name.
+    pub device_name: String,
+    /// Twelve digits in groups of four, derived in Rust.
+    pub sas: String,
+    /// When the daemon first saw the device.
+    pub paired_at: DateTime<Utc>,
+}
+
 /// Alphabet of the pairing short code: Crockford base32 (no I, L, O, U).
 pub const SHORT_CODE_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 /// Characters in a pairing short code (40 bits).

@@ -249,12 +249,26 @@ fn connect_entry(device: &ConnectDevice) -> Option<ConnectEntry> {
 }
 
 /// Adds a paired device's Noise key to the allowlist and the registry.
+///
+/// A device the registry has not seen before is also queued for short
+/// authentication string confirmation: a typed-code pairing hands the phone its
+/// daemon key through the relay, and this is how the person detects a swap.
 fn register_device(service: &SecureService, registry: &DeviceRegistry, device: &ConnectDevice) {
     let Some(entry) = connect_entry(device) else {
         return;
     };
-    registry.insert_scoped(entry.device_id, entry.key, entry.scopes);
+    let is_new = registry.authorization(&entry.key).is_none();
+    registry.insert_scoped(entry.device_id.clone(), entry.key, entry.scopes);
     service.allow(entry.key);
+    if is_new {
+        let daemon_key = service.public_identity().noise_public;
+        registry.note_confirmation(&entry.device_id, &device.name, &entry.key, &daemon_key);
+        tracing::info!(
+            device = %device.name,
+            sas = %h4rn_transport::pairing::short_auth_string(&entry.key, &daemon_key),
+            "new device paired: confirm this code matches the one on its screen"
+        );
+    }
 }
 
 fn decode_key(value: &str) -> Option<[u8; KEY_LEN]> {
@@ -359,6 +373,27 @@ mod tests {
             "direct pairing was dropped"
         );
         assert!(registry.authorization(&[3u8; KEY_LEN]).is_some());
+    }
+
+    #[test]
+    fn a_new_device_is_queued_for_sas_confirmation_with_the_daemons_own_key() {
+        let identity = h4rn_transport::keys::DeviceIdentity::generate().unwrap();
+        let daemon_key = identity.public().noise_public;
+        let service = SecureService::new(h4rn_transport::server::SecureOptions::new(identity));
+        let registry = DeviceRegistry::in_memory();
+        register_device(&service, &registry, &device("d1", 7, vec![PairScope::View]));
+        let pending = registry.pending_confirmations();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].sas,
+            h4rn_transport::pairing::short_auth_string(&[7u8; KEY_LEN], &daemon_key)
+        );
+        // Seeing the same device again (a snapshot) does not re-queue it.
+        register_device(&service, &registry, &device("d1", 7, vec![PairScope::View]));
+        assert_eq!(registry.pending_confirmations().len(), 1);
+        // A revoked device is no longer listed.
+        registry.remove("d1");
+        assert!(registry.pending_confirmations().is_empty());
     }
 
     #[test]

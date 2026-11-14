@@ -605,6 +605,9 @@ pub enum ClientRequest {
         #[serde(default)]
         include_children: bool,
     },
+    /// Devices that paired through a typed code and still await a human
+    /// comparing the short authentication string with the new device's screen.
+    PairingConfirmations,
     /// Read known usage limits and the auto-resume policy.
     GetLimits,
     /// List persisted auto-resume schedules and limit history.
@@ -942,6 +945,7 @@ impl ClientRequest {
             | Self::ForgeRemoveAccount { .. }
             | Self::ForgeDeviceFlowStart { .. }
             | Self::ForgeDeviceFlowPoll { .. }
+            | Self::PairingConfirmations
             | Self::ForgeImportCli { .. } => Admin,
             Self::Mcp { request } => match request {
                 crate::mcp::McpRequest::ListServers | crate::mcp::McpRequest::ListTools { .. } => {
@@ -1063,6 +1067,7 @@ mod tests {
                 Approve,
             ),
             (ClientRequest::McpRemove { name: "x".into() }, Admin),
+            (ClientRequest::PairingConfirmations, Admin),
         ];
         for (request, expected) in cases {
             assert_eq!(request.required_scope(), expected, "{request:?}");

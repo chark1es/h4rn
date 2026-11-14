@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Mutex, RwLock};
 
-use h4rn_protocol::{HostId, PairScope};
+use h4rn_protocol::{HostId, PairScope, PairingConfirmation};
 use h4rn_transport::keys::{KEY_LEN, read_secret_file, write_secret_file};
 use serde::{Deserialize, Serialize};
 
@@ -102,7 +102,12 @@ pub struct DeviceRegistry {
     path: Option<PathBuf>,
     /// Scopes the next direct pairing grants.
     pending_direct: Mutex<Option<Vec<PairScope>>>,
+    /// Typed-code pairings waiting for a human to compare the SAS.
+    confirmations: Mutex<Vec<PairingConfirmation>>,
 }
+
+/// How long a pairing confirmation stays listed.
+pub const CONFIRMATION_TTL: chrono::TimeDelta = chrono::TimeDelta::minutes(10);
 
 impl DeviceRegistry {
     /// An in-memory registry (tests, signed-out tools).
@@ -139,6 +144,7 @@ impl DeviceRegistry {
             entries: RwLock::new(entries),
             path: Some(path),
             pending_direct: Mutex::new(None),
+            confirmations: Mutex::new(Vec::new()),
         }
     }
 
@@ -259,6 +265,52 @@ impl DeviceRegistry {
             .take()
             .unwrap_or_else(|| PairScope::ALL.to_vec());
         self.insert_direct(key, scopes);
+    }
+
+    /// Records a newly connect-paired device so the person can confirm the
+    /// short authentication string.
+    ///
+    /// The string is computed here, in Rust, from the device key connect gave
+    /// this daemon and this daemon's own key. A relay that substituted the
+    /// daemon key shown to the device cannot make the two agree.
+    pub fn note_confirmation(
+        &self,
+        device_id: &str,
+        device_name: &str,
+        device_key: &[u8; KEY_LEN],
+        daemon_key: &[u8; KEY_LEN],
+    ) {
+        let sas = h4rn_transport::pairing::short_auth_string(device_key, daemon_key);
+        let mut list = self
+            .confirmations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        list.retain(|entry| entry.device_id != device_id);
+        list.push(PairingConfirmation {
+            device_id: device_id.to_owned(),
+            device_name: device_name.to_owned(),
+            sas,
+            paired_at: chrono::Utc::now(),
+        });
+    }
+
+    /// Confirmations still worth showing, newest first. Expired ones and those
+    /// of devices that were since revoked are dropped.
+    pub fn pending_confirmations(&self) -> Vec<PairingConfirmation> {
+        let cutoff = chrono::Utc::now() - CONFIRMATION_TTL;
+        let live: std::collections::HashSet<String> = self
+            .read()
+            .values()
+            .filter_map(|entry| entry.device_id.clone())
+            .collect();
+        let mut list = self
+            .confirmations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        list.retain(|entry| entry.paired_at > cutoff && live.contains(&entry.device_id));
+        let mut out = list.clone();
+        out.sort_by(|a, b| b.paired_at.cmp(&a.paired_at));
+        out
     }
 
     /// What `key` is authorised as, or `None` when it has no entry.

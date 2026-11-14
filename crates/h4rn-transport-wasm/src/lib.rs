@@ -336,6 +336,28 @@ pub fn connect_proof(
     .map_err(|error| JsError::new(&error.to_string()))
 }
 
+/// The short authentication string for a typed-code pairing.
+///
+/// Both arguments are 32-byte X25519 keys as hex: `client_public` is this
+/// device's own key, `daemon_public` the daemon key connect handed over. The
+/// daemon derives the same string natively from the keys it holds; the person
+/// compares the two. Computed here so the UI only renders it.
+#[wasm_bindgen]
+pub fn pairing_sas(client_public: &str, daemon_public: &str) -> Result<String, JsError> {
+    let decode = |value: &str, what: &str| -> Result<[u8; KEY_LEN], JsError> {
+        let bytes =
+            hex::decode(value.trim()).map_err(|_| JsError::new(&format!("{what} is not hex")))?;
+        bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| JsError::new(&format!("{what} must be {KEY_LEN} bytes")))
+    };
+    Ok(h4rn_transport::pairing::short_auth_string(
+        &decode(client_public, "the client key")?,
+        &decode(daemon_public, "the daemon key")?,
+    ))
+}
+
 /// Parses a pairing URI into JSON (`endpoint`, `daemonPublic`, `psk`, `label`).
 #[wasm_bindgen]
 pub fn parse_pairing(uri: &str) -> Result<String, JsError> {

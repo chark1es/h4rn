@@ -120,6 +120,7 @@ export type * from "./MessageRole";
 export type * from "./PairScope";
 export type * from "./PairingClaimRequest";
 export type * from "./PairingClaimResponse";
+export type * from "./PairingConfirmation";
 export type * from "./PairingCreateRequest";
 export type * from "./PairingCreateResponse";
 export type * from "./PairingInfo";

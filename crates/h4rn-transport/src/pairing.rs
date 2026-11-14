@@ -22,6 +22,39 @@
 
 use crate::keys::{KEY_LEN, KeyStoreError};
 
+/// Digits in a short authentication string.
+pub const SAS_DIGITS: usize = 12;
+
+/// The short authentication string for a typed-code pairing.
+///
+/// A typed code carries no key, so the daemon's Noise key reaches the new
+/// device from the relay, which could substitute its own. Both ends therefore
+/// derive this string from the two static keys *they* hold and the person
+/// compares them on the two screens: a relay in the middle makes the two sides
+/// disagree.
+///
+/// `client_public` is the new device's key as the daemon holds it,
+/// `daemon_public` the daemon's key as the new device holds it. The result is
+/// [`SAS_DIGITS`] decimal digits in groups of four (about 40 bits). That is
+/// deliberately longer than the usual six: a short string can be ground against
+/// in real time (an attacker generating key pairs until two strings collide),
+/// 40 bits cannot.
+pub fn short_auth_string(client_public: &[u8; KEY_LEN], daemon_public: &[u8; KEY_LEN]) -> String {
+    let mut hasher = blake3::Hasher::new_derive_key("h4rn pairing short authentication string v1");
+    hasher.update(client_public);
+    hasher.update(daemon_public);
+    let mut bytes = [0u8; 8];
+    hasher.finalize_xof().fill(&mut bytes);
+    let value = u64::from_le_bytes(bytes) % 10u64.pow(SAS_DIGITS as u32);
+    let digits = format!("{value:0width$}", width = SAS_DIGITS);
+    digits
+        .as_bytes()
+        .chunks(4)
+        .map(|group| std::str::from_utf8(group).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Scheme prefix of an encoded payload.
 pub const SCHEME: &str = "h4rn://pair";
 
@@ -253,5 +286,41 @@ mod tests {
     fn all_zero_keys_are_rejected() {
         let encoded = format!("{SCHEME}?e=x&d={}&p={}", "00".repeat(32), "11".repeat(32));
         assert!(PairingPayload::decode(&encoded).is_err());
+    }
+
+    #[test]
+    fn the_short_auth_string_is_twelve_digits_in_groups_of_four() {
+        let sas = short_auth_string(&[1u8; KEY_LEN], &[2u8; KEY_LEN]);
+        let groups: Vec<&str> = sas.split(' ').collect();
+        assert_eq!(groups.len(), 3, "{sas}");
+        assert!(
+            groups
+                .iter()
+                .all(|g| g.len() == 4 && g.bytes().all(|b| b.is_ascii_digit()))
+        );
+        // Stable: the phone (wasm) and the daemon (native) must agree.
+        assert_eq!(sas, short_auth_string(&[1u8; KEY_LEN], &[2u8; KEY_LEN]));
+    }
+
+    #[test]
+    fn a_substituted_key_changes_the_string_on_that_side() {
+        let phone = [1u8; KEY_LEN];
+        let daemon = [2u8; KEY_LEN];
+        let relay = [3u8; KEY_LEN];
+        // Honest relay: both screens agree.
+        assert_eq!(
+            short_auth_string(&phone, &daemon),
+            short_auth_string(&phone, &daemon)
+        );
+        // MITM: the phone holds the relay's key for the daemon, the daemon
+        // holds the relay's key for the phone.
+        let on_phone = short_auth_string(&phone, &relay);
+        let on_daemon = short_auth_string(&relay, &daemon);
+        assert_ne!(on_phone, on_daemon);
+        // The roles are not interchangeable.
+        assert_ne!(
+            short_auth_string(&phone, &daemon),
+            short_auth_string(&daemon, &phone)
+        );
     }
 }

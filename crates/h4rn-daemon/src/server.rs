@@ -606,6 +606,9 @@ impl Connection {
                         })
                     }
                 }
+                ClientRequest::PairingConfirmations => Ok(ResponseBody::PairingConfirmations {
+                    confirmations: self.state.devices.pending_confirmations(),
+                }),
                 ClientRequest::ListHosts => Ok(ResponseBody::Hosts {
                     hosts: self.state.hosts.summaries(),
                 }),
