@@ -2203,3 +2203,111 @@ async fn applying_proxy_overrides_drops_the_sessions_of_routed_harnesses() {
 
     daemon.stop().await;
 }
+
+/// A limit hit whose turn never completes: the thread stays active while its
+/// resume schedule comes due.
+fn limit_while_active_script(
+    reset_at: chrono::DateTime<chrono::Utc>,
+) -> Vec<h4rn_harness::HarnessEvent> {
+    let mut script = limit_script(Some(reset_at));
+    script.pop();
+    script
+}
+
+#[tokio::test]
+async fn a_due_schedule_on_an_active_thread_waits_silently_without_a_duplicate_prompt() {
+    let reset_at = chrono::Utc::now() + chrono::Duration::milliseconds(100);
+    let daemon = boot_with(
+        resume_options(),
+        FakeHarness::with_session_scripts(vec![limit_while_active_script(reset_at)]),
+    )
+    .await;
+    let host = host_id_for(&daemon).await;
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    stable_policy(&mut client, false).await;
+    create_with_model(
+        &mut client,
+        host,
+        "do the thing",
+        HarnessKind::ClaudeCode,
+        "claude-sonnet-5",
+    )
+    .await;
+    client
+        .wait_event(|event| matches!(event, Event::UsageLimitHit { .. }))
+        .await;
+
+    // Observe for 3.5 s: the schedule is due the whole time, the turn is active.
+    let mut errors = 0;
+    let mut prompts = 0;
+    let _ = tokio::time::timeout(Duration::from_millis(3500), async {
+        loop {
+            let (_, event) = client.next_event().await;
+            match event {
+                Event::Error { .. } => errors += 1,
+                Event::ItemCompleted {
+                    item:
+                        Item::Message {
+                            role: MessageRole::User,
+                            text,
+                            ..
+                        },
+                    ..
+                } if text.contains("usage limit reset") => prompts += 1,
+                _ => {}
+            }
+        }
+    })
+    .await;
+    assert!(
+        errors <= 1,
+        "an active thread must not emit an Error every tick, got {errors}"
+    );
+    assert_eq!(prompts, 0, "no duplicate resume prompt while active");
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_message_appended_to_an_active_turn_replaces_the_stale_schedule() {
+    let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+    let daemon = boot_with(
+        resume_options(),
+        FakeHarness::with_session_scripts(vec![limit_while_active_script(reset_at)]),
+    )
+    .await;
+    let host = host_id_for(&daemon).await;
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    stable_policy(&mut client, false).await;
+    let summary = create_with_model(
+        &mut client,
+        host,
+        "do the thing",
+        HarnessKind::ClaudeCode,
+        "claude-sonnet-5",
+    )
+    .await;
+    client
+        .wait_event(|event| matches!(event, Event::UsageLimitHit { .. }))
+        .await;
+    assert_eq!(schedules(&mut client).await[0].state, ResumeState::Scheduled);
+
+    client
+        .request(ClientRequest::SendMessage {
+            thread_id: summary.thread_id.clone(),
+            text: "new instructions".into(),
+            attachments: Vec::new(),
+        })
+        .await
+        .expect("send message");
+
+    assert_eq!(
+        schedules(&mut client).await[0].state,
+        ResumeState::Cancelled,
+        "a new message supersedes the stale resume"
+    );
+    daemon.stop().await;
+}
