@@ -913,6 +913,11 @@
   container-type: inline-size;
 }
 
+.q-pr-rows {
+  max-width: 880px;
+  margin: 0 auto;
+}
+
 /* Thread rows */
 .q-rows {
   padding: 2px 6px 8px;

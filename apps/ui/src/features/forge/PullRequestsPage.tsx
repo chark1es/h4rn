@@ -15,6 +15,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
+import { ChipSelect } from "@/components/common/ChipSelect";
 import { Markdown } from "@/components/thread/Markdown";
 import {
   Dialog,
@@ -59,10 +60,9 @@ import type {
   ForgeReviewThread,
   ThreadSummary,
 } from "@/gen";
+import { glyphForThread } from "@/lib/agent";
 import { userSeed } from "@/lib/entities";
 import { relativeAge } from "@/lib/format";
-import { ChipSelect } from "@/components/common/ChipSelect";
-import { glyphForThread } from "@/lib/agent";
 import { getClient, navigate, openThread, pushToast, useApp } from "@/lib/store/appStore";
 
 const api = () => new ForgeApi((request) => getClient().request(request));
@@ -527,7 +527,7 @@ export function PullRequestsPage() {
             </div>
           </div>
         ) : (
-          <div className="q-rows">
+          <div className="q-rows q-pr-rows">
             {prs.map((pr) => {
               const state = stateLabel(pr.state);
               const checks = summaryChecksLabel(pr.checks);
@@ -1225,9 +1225,7 @@ function PrDetail({
                           Resolved
                         </span>
                       ) : (
-                        <span className="q-badge warn" style={{ height: 18 }}>
-                          Open
-                        </span>
+                        <span className="q-faint">Unresolved</span>
                       )}
                       {thread.outdated ? <span className="q-faint">· outdated</span> : null}
                     </div>
@@ -1542,7 +1540,7 @@ function PrDetail({
                 ) : null}
               </div>
             ) : null}
-            <div className="q-side-sec">
+            <div className="q-side-sec" hidden={tab === "checks"}>
               <h3>
                 <span>Checks</span>
                 <span>{checks ? `${passed} of ${total} passed` : "Unknown"}</span>

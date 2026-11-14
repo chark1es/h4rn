@@ -172,26 +172,26 @@ export type ResponseOf<T extends ClientRequest["type"]> = T extends "hello"
                                                                                         type: "proxy_applied";
                                                                                       }
                                                                                     >
-                                                                                : T extends "list_proxy_limits"
-                                                                                  ? Extract<
-                                                                                      ResponseBody,
-                                                                                      {
-                                                                                        type: "proxy_limits";
-                                                                                      }
-                                                                                    >
-                                                                                  : T extends "pick_proxy_failover"
+                                                                                  : T extends "list_proxy_limits"
                                                                                     ? Extract<
                                                                                         ResponseBody,
                                                                                         {
-                                                                                          type: "proxy_failover";
+                                                                                          type: "proxy_limits";
                                                                                         }
                                                                                       >
-                                                                                    : Extract<
-                                                                                        ResponseBody,
-                                                                                        {
-                                                                                          type: "ack";
-                                                                                        }
-                                                                                      >;
+                                                                                    : T extends "pick_proxy_failover"
+                                                                                      ? Extract<
+                                                                                          ResponseBody,
+                                                                                          {
+                                                                                            type: "proxy_failover";
+                                                                                          }
+                                                                                        >
+                                                                                      : Extract<
+                                                                                          ResponseBody,
+                                                                                          {
+                                                                                            type: "ack";
+                                                                                          }
+                                                                                        >;
 
 /**
  * Events that carry no durable position: `seq` is the daemon's current

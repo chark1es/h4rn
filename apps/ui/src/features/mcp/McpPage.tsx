@@ -4,13 +4,13 @@ import {
   ChevronRightIcon,
   KeyRoundIcon,
   MoreHorizontalIcon,
+  PlugIcon,
   PlusIcon,
   RefreshCwIcon,
   Share2Icon,
   Trash2Icon,
   TriangleAlertIcon,
   UploadIcon,
-  PlugIcon,
   WrenchIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -257,21 +257,21 @@ function ResolvePanel({ server, close }: { server: McpServerView; close: () => v
           The other copy comes from {HARNESS_LABELS[harness]}'s own config.
         </div>
       ) : (
-      <div className="q-seg q-resolve-seg" role="radiogroup" aria-label="Harness">
-        {MCP_HARNESSES.map((entry) => (
-          // biome-ignore lint/a11y/useSemanticElements: a segmented radio group, not a form radio
-          <button
-            key={entry}
-            type="button"
-            role="radio"
-            aria-checked={harness === entry}
-            aria-label={HARNESS_LABELS[entry]}
-            onClick={() => setHarness(entry)}
-          >
-            {HARNESS_LABELS[entry]}
-          </button>
-        ))}
-      </div>
+        <div className="q-seg q-resolve-seg" role="radiogroup" aria-label="Harness">
+          {MCP_HARNESSES.map((entry) => (
+            // biome-ignore lint/a11y/useSemanticElements: a segmented radio group, not a form radio
+            <button
+              key={entry}
+              type="button"
+              role="radio"
+              aria-checked={harness === entry}
+              aria-label={HARNESS_LABELS[entry]}
+              onClick={() => setHarness(entry)}
+            >
+              {HARNESS_LABELS[entry]}
+            </button>
+          ))}
+        </div>
       )}
       <div role="radiogroup" aria-label="Resolution">
         {CONFLICT_CHOICES.map((option) => (

@@ -1,6 +1,6 @@
-import { ChipSelect } from "@/components/common/ChipSelect";
 import { FolderIcon, GitBranchIcon, Trash2Icon, TriangleAlertIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { ChipSelect } from "@/components/common/ChipSelect";
 
 import { Button } from "@/components/ui/button";
 import {

@@ -61,7 +61,6 @@ export function AutoResumeCards({
   // Ask the daemon where each paused thread could go as soon as its card
   // shows, so the action can say up front when there is nowhere.
   const pausedIds = schedules.map((schedule) => schedule.thread_id).join(",");
-  // biome-ignore lint/correctness/useExhaustiveDependencies: keyed by the joined ids
   useEffect(() => {
     for (const id of pausedIds.split(",").filter(Boolean)) {
       if (!getUsageState().failover[id]) void loadFailoverOptions(id);
@@ -122,7 +121,9 @@ export function AutoResumeCards({
               </div>
               <div>
                 <div className="q-num cd">{countdownPrecise(schedule.resume_at, now)}</div>
-                <div className="q-muted sub">Auto-resumes at {absoluteTime(schedule.resume_at)}</div>
+                <div className="q-muted sub">
+                  Auto-resumes at {absoluteTime(schedule.resume_at)}
+                </div>
               </div>
               {schedule.last_error ? (
                 <div className="q-danger sub">Last attempt failed: {schedule.last_error}</div>
@@ -150,9 +151,7 @@ export function AutoResumeCards({
               {schedule.failover ? (
                 <div className="q-faint" style={{ marginTop: 6, fontSize: 12 }}>
                   Will fail over to <span className="q-mono">{schedule.failover.model}</span>
-                  {schedule.failover.account_label
-                    ? ` on ${schedule.failover.account_label}`
-                    : ""}
+                  {schedule.failover.account_label ? ` on ${schedule.failover.account_label}` : ""}
                 </div>
               ) : null}
               {schedule.last_error ? (
@@ -222,7 +221,10 @@ function FailOverMenu({
           <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align={compact ? "center" : "end"} className="min-w-[260px] max-w-[360px]">
+      <DropdownMenuContent
+        align={compact ? "center" : "end"}
+        className="min-w-[260px] max-w-[360px]"
+      >
         <DropdownMenuLabel className="font-normal text-fg-3">
           {harness ? harnessLabel(harness) : "The harness"} hit its limit. Resume now on:
         </DropdownMenuLabel>
@@ -239,7 +241,9 @@ function FailOverMenu({
                 ) : null}
                 {index === 0 ? <span className="text-fg-3"> · default</span> : null}
               </span>
-              {perRow ? <span className="block text-[11.5px] text-fg-3">{choice.reason}</span> : null}
+              {perRow ? (
+                <span className="block text-[11.5px] text-fg-3">{choice.reason}</span>
+              ) : null}
             </span>
           </DropdownMenuItem>
         ))}

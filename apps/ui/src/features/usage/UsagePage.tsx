@@ -1,8 +1,7 @@
-import { ChipSelect } from "@/components/common/ChipSelect";
 import { ClockIcon, RefreshCwIcon, TriangleAlertIcon } from "lucide-react";
 import { useEffect } from "react";
-
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
+import { ChipSelect } from "@/components/common/ChipSelect";
 import type {
   UsageBucketPoint,
   UsageGroup,

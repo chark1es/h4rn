@@ -31,9 +31,9 @@ import type {
   McpToolInfo,
   McpTransportView,
   ProtoError,
-  ProxyModel,
   ProxyEnvLine,
   ProxyHarnessOverride,
+  ProxyModel,
   ProxyModelCatalog,
   ProxyProfile,
   ProxyProfilePatch,
@@ -219,7 +219,32 @@ const continuedText = [
   "\n\nOne more check: `session.test.ts` asserts the expiry boundary with `Date.now()` directly. I'd switch that to the injected clock so the test cannot drift when the suite runs near midnight.",
 ].join("");
 
+/**
+ * A thread's history, stamped around the thread's own last activity so a
+ * three-hour-old turn never claims to have started a moment ago.
+ */
 function historyFor(thread: ThreadSummary): Event[] {
+  const shift = Date.parse(thread.last_activity) + 5_000 - Date.now();
+  const move = (value: string | null | undefined) =>
+    value ? new Date(Date.parse(value) + shift).toISOString() : (value ?? null);
+  return buildHistory(thread).map((event) => {
+    if (event.type === "turn_started")
+      return { ...event, started_at: move(event.started_at) ?? "" };
+    if (event.type === "tool_call") {
+      return {
+        ...event,
+        tool_call: {
+          ...event.tool_call,
+          started_at: move(event.tool_call.started_at) ?? "",
+          completed_at: move(event.tool_call.completed_at),
+        },
+      };
+    }
+    return event;
+  });
+}
+
+function buildHistory(thread: ThreadSummary): Event[] {
   const events: Event[] = [];
   const turnId = `turn_${thread.thread_id}_1`;
   const user = userMessage(
@@ -406,8 +431,7 @@ function historyFor(thread: ThreadSummary): Event[] {
       tool_call: toolCall({
         tool_call_id: `tool_${thread.thread_id}_test`,
         name: "Bash",
-        summary:
-          thread.tab === "done" ? "pnpm test --filter session" : "pnpm lint · no findings",
+        summary: thread.tab === "done" ? "pnpm test --filter session" : "pnpm lint · no findings",
         ...(thread.tab === "done" ? { stats: { kind: "tests", passed: 48, failed: 0 } } : {}),
       }),
     });
@@ -2123,7 +2147,11 @@ class MockDaemon {
           this.err(
             frame.id,
             "unsupported",
-            "buildbox stopped answering at 09:14 while this turn was running.",
+            `buildbox stopped answering at ${new Intl.DateTimeFormat(undefined, {
+              hour: "2-digit",
+              minute: "2-digit",
+              hour12: false,
+            }).format(new Date(Date.now() - 2 * HOUR))} while this turn was running.`,
             "The run may still be active there; nothing on this device was lost.",
           );
           return;
@@ -3942,7 +3970,7 @@ class MockDaemon {
   private advanceSubagent(id: string): void {
     this.later(700, () => {
       const view = this.subagents.get(id);
-      if (!view || view.state !== "starting") return;
+      if (view?.state !== "starting") return;
       view.state = "running";
       view.agent_state = "thinking";
       view.started_at = iso();
@@ -3962,7 +3990,7 @@ class MockDaemon {
   private tickSubagent(id: string, turn: number): void {
     this.later(1_400, () => {
       const view = this.subagents.get(id);
-      if (!view || view.state !== "running") return;
+      if (view?.state !== "running") return;
       const turns = turn + 1;
       const tokens = view.progress.tokens + 1_800 + turn * 400;
       const elapsed = view.progress.elapsed_ms + 1_400;

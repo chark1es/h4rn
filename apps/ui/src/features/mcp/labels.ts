@@ -40,7 +40,8 @@ export function secretNames(transport: McpTransportView): string[] {
 }
 
 export function secretLabel(transport: McpTransportView, count = 2): string {
-  if (transport.type === "stdio") return count === 1 ? "environment variable" : "environment variables";
+  if (transport.type === "stdio")
+    return count === 1 ? "environment variable" : "environment variables";
   return count === 1 ? "header" : "headers";
 }
 

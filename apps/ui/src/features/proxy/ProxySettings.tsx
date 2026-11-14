@@ -77,7 +77,11 @@ function summaryRows(capabilities: ProxyCapabilities | null): ProbeRow[] {
   ].filter(Boolean);
   const usageKnown = capabilities.usage_queue || capabilities.legacy_usage;
   return [
-    { label: "Health", value: capabilities.reachable ? "OK" : "Unreachable", ok: capabilities.reachable },
+    {
+      label: "Health",
+      value: capabilities.reachable ? "OK" : "Unreachable",
+      ok: capabilities.reachable,
+    },
     {
       label: "Management",
       value: managementValue(capabilities),
@@ -110,13 +114,41 @@ function detailRows(capabilities: ProxyCapabilities | null): ProbeRow[] {
   return [
     row("Build", buildLabel(capabilities), true),
     ...(capabilities.commit ? [row("Commit", capabilities.commit, true)] : []),
-    row("Usage queue", yesNo(capabilities.usage_queue, "Supported", "Not available"), capabilities.usage_queue),
-    row("Legacy usage", yesNo(capabilities.legacy_usage, "Supported (≤ 6.9)", "Not available"), capabilities.legacy_usage),
-    row("Config v8", yesNo(capabilities.v8_config, "Supported", "Not available"), capabilities.v8_config),
-    row("Performance", yesNo(capabilities.performance, "Route present", "Not available"), capabilities.performance),
-    row("Credentials verify", yesNo(capabilities.credentials_verify, "Route present", "Not available"), capabilities.credentials_verify),
-    row("Cooldowns", yesNo(capabilities.cooldowns, "Reported", "Not reported"), capabilities.cooldowns),
-    row("Quota providers", yesNo(capabilities.quota_providers, "Reported", "Not reported"), capabilities.quota_providers),
+    row(
+      "Usage queue",
+      yesNo(capabilities.usage_queue, "Supported", "Not available"),
+      capabilities.usage_queue,
+    ),
+    row(
+      "Legacy usage",
+      yesNo(capabilities.legacy_usage, "Supported (≤ 6.9)", "Not available"),
+      capabilities.legacy_usage,
+    ),
+    row(
+      "Config v8",
+      yesNo(capabilities.v8_config, "Supported", "Not available"),
+      capabilities.v8_config,
+    ),
+    row(
+      "Performance",
+      yesNo(capabilities.performance, "Route present", "Not available"),
+      capabilities.performance,
+    ),
+    row(
+      "Credentials verify",
+      yesNo(capabilities.credentials_verify, "Route present", "Not available"),
+      capabilities.credentials_verify,
+    ),
+    row(
+      "Cooldowns",
+      yesNo(capabilities.cooldowns, "Reported", "Not reported"),
+      capabilities.cooldowns,
+    ),
+    row(
+      "Quota providers",
+      yesNo(capabilities.quota_providers, "Reported", "Not reported"),
+      capabilities.quota_providers,
+    ),
   ];
 }
 
@@ -512,7 +544,7 @@ function HarnessRow({ profile, harness }: { profile: ProxyProfile; harness: Harn
         </div>
       </div>
       {enabled && override && override.preview.length > 0 ? (
-        <div className="q-envprev" aria-label={`${HARNESS_LABELS[harness]} settings preview`}>
+        <section className="q-envprev" aria-label={`${HARNESS_LABELS[harness]} settings preview`}>
           {override.preview.map((line) => (
             <div key={line.name} className="ln">
               <span className="sg">+</span>
@@ -526,7 +558,7 @@ function HarnessRow({ profile, harness }: { profile: ProxyProfile; harness: Harn
               </span>
             </div>
           ))}
-        </div>
+        </section>
       ) : null}
     </>
   );
@@ -557,19 +589,21 @@ function ApplyBar({ profile }: { profile: ProxyProfile }) {
       RUNNING_STATES.has(thread.agent_state),
   );
   const note =
-    live.length === 1
-      ? (
-          <>
-            Interrupts <em>{live[0]?.title}</em> on {host}.
-          </>
-        )
-      : live.length > 1
-        ? `Interrupts ${live.length} running turns on ${host}.`
-        : applied && !dirty
-          ? applied.restarted > 0
-            ? `Restarted ${applied.restarted} ${applied.restarted === 1 ? "session" : "sessions"}.`
-            : "Applied. Sessions you start next use it."
-          : "Sessions already running keep their old routing until restarted.";
+    live.length === 1 ? (
+      <>
+        Interrupts <em>{live[0]?.title}</em> on {host}.
+      </>
+    ) : live.length > 1 ? (
+      `Interrupts ${live.length} running turns on ${host}.`
+    ) : applied && !dirty ? (
+      applied.restarted > 0 ? (
+        `Restarted ${applied.restarted} ${applied.restarted === 1 ? "session" : "sessions"}.`
+      ) : (
+        "Applied. Sessions you start next use it."
+      )
+    ) : (
+      "Sessions already running keep their old routing until restarted."
+    );
   return (
     <div className="q-applybar">
       <span className="q-faint note" role="status">
@@ -705,7 +739,9 @@ function ProfileDetail({ profile }: { profile: ProxyProfile }) {
               <div className="q-probe" style={{ paddingTop: 2 }}>
                 {rows.map((row) => (
                   <Fragment key={row.label}>
-                    <span className={row.ok === true ? "q-ok" : row.ok === false ? "q-warn" : "q-faint"}>
+                    <span
+                      className={row.ok === true ? "q-ok" : row.ok === false ? "q-warn" : "q-faint"}
+                    >
                       {row.ok === true ? (
                         <CircleCheckIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                       ) : row.ok === false ? (

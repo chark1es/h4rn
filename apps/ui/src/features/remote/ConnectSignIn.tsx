@@ -1,7 +1,8 @@
 import {
   AlertCircleIcon,
   ArrowRightIcon,
-  CopyIcon, KeyRoundIcon,
+  CopyIcon,
+  KeyRoundIcon,
   LoaderIcon,
   LogOutIcon,
 } from "lucide-react";
@@ -50,6 +51,8 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
 
   useEffect(() => setDraftUrl(connectUrl), [connectUrl]);
 
+  // `attempt` is not read in the effect: bumping it re-probes on Retry.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: attempt only re-runs the probe
   useEffect(() => {
     let cancelled = false;
     setProbing(true);
@@ -70,8 +73,6 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
     return () => {
       cancelled = true;
     };
-    // `attempt` re-probes on Retry.
-    // biome-ignore lint/correctness/useExhaustiveDependencies: attempt only re-runs the probe
   }, [connectUrl, attempt]);
 
   const primary = providers[0];

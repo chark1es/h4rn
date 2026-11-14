@@ -1,6 +1,8 @@
 import type { LucideIcon } from "lucide-react";
 import {
+  BlocksIcon,
   ChartNoAxesColumnIcon,
+  CheckIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   CircleAlertIcon,
@@ -12,8 +14,6 @@ import {
   GitPullRequestIcon,
   KeyRoundIcon,
   PanelLeftIcon,
-  BlocksIcon,
-  CheckIcon,
   PlugIcon,
   QrCodeIcon,
   SearchIcon,

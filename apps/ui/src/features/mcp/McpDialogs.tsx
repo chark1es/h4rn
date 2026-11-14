@@ -1,6 +1,6 @@
-import { ChipSelect } from "@/components/common/ChipSelect";
 import { PlusIcon, Trash2Icon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { ChipSelect } from "@/components/common/ChipSelect";
 
 import { Button } from "@/components/ui/button";
 import {

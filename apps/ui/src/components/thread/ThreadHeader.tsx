@@ -26,6 +26,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import type { HostSummary, ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
+import { useViewportWidth } from "@/hooks/use-viewport-width";
 import { glyphForThread } from "@/lib/agent";
 import { harnessLabel, harnessSeed, machineSeed } from "@/lib/entities";
 import { absoluteDateTime, relativeAge } from "@/lib/format";
@@ -33,17 +34,16 @@ import {
   acknowledgeThread,
   interruptThread,
   navigate,
+  panelFits,
   pushToast,
   setThreadTab,
   setView,
   snoozeThread,
-  panelFits,
   togglePanel,
   togglePin,
   toggleTheme,
   useApp,
 } from "@/lib/store/appStore";
-import { useViewportWidth } from "@/hooks/use-viewport-width";
 import { cn } from "@/lib/utils";
 
 export function ViewCluster({

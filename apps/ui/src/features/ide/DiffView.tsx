@@ -1,8 +1,7 @@
-import { ChipSelect } from "@/components/common/ChipSelect";
 import { FileDiffIcon, FileTextIcon, Loader2Icon, TriangleAlertIcon } from "lucide-react";
 import { type ReactNode, useMemo } from "react";
-
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
+import { ChipSelect } from "@/components/common/ChipSelect";
 import type { FsDiff, FsTurnChanges, HarnessKind, HostId, ProtoError } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { harnessLabel, harnessSeed } from "@/lib/entities";
@@ -198,7 +197,7 @@ export function DiffView({
   return (
     <section aria-label="Diff" className="q-main" style={{ flex: 1, minHeight: 0 }}>
       {isPhone && mode === "agent" && files.length > 0 ? (
-        <label
+        <div
           style={{
             display: "flex",
             alignItems: "center",
@@ -223,7 +222,7 @@ export function DiffView({
             }))}
             onChange={onSelectFile}
           />
-        </label>
+        </div>
       ) : null}
       {diff.note ? (
         <p

@@ -56,9 +56,9 @@ import {
   setPanelTab,
   setTab,
   setThreadTab,
-  toggleSidebar,
   togglePanel,
   togglePin,
+  toggleSidebar,
   toggleTerminal,
   toggleTheme,
   toggleView,
@@ -79,7 +79,9 @@ export function CommandPalette() {
   const panelOpen = useApp((state) => state.ui.layout.panelOpen);
   const terminalOpen = useApp((state) => state.ui.layout.terminalOpen);
   const approvalId = useApp((state) =>
-    state.ui.route.kind === "thread" ? pendingApprovalIn(state.logs[state.ui.route.threadId]) : null,
+    state.ui.route.kind === "thread"
+      ? pendingApprovalIn(state.logs[state.ui.route.threadId])
+      : null,
   );
   const [query, setQuery] = useState("");
   const lastFocus = useRef<HTMLElement | null>(null);
@@ -200,7 +202,10 @@ export function CommandPalette() {
                 </CommandItem>
               </>
             ) : null}
-            <CommandItem value="changes diff files" onSelect={() => close(() => setPanelTab("changes"))}>
+            <CommandItem
+              value="changes diff files"
+              onSelect={() => close(() => setPanelTab("changes"))}
+            >
               <FileDiffIcon aria-hidden />
               Open changes
               <CommandShortcut>D</CommandShortcut>
@@ -392,15 +397,10 @@ export function CommandPalette() {
 
         <CommandGroup heading="View">
           {current ? (
-            <CommandItem
-              value="open ide editor project"
-              onSelect={() => close(toggleView)}
-            >
+            <CommandItem value="open ide editor project" onSelect={() => close(toggleView)}>
               <Code2Icon aria-hidden />
               Open {projectName(current.workspace_path)} in the IDE
-              <CommandShortcut>
-                {MOD} E
-              </CommandShortcut>
+              <CommandShortcut>{MOD} E</CommandShortcut>
             </CommandItem>
           ) : null}
           <CommandItem value="toggle right panel" onSelect={() => close(togglePanel)}>

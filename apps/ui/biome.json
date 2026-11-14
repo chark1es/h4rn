@@ -12,7 +12,17 @@
   "linter": {
     "enabled": true,
     "rules": {
-      "preset": "recommended"
+      "preset": "recommended",
+      "correctness": {
+        "noRestrictedElements": {
+          "level": "error",
+          "options": {
+            "elements": {
+              "select": "Use ChipSelect (components/common/ChipSelect) instead of a native <select>; it draws Quiet chrome, not OS chrome."
+            }
+          }
+        }
+      }
     }
   },
   "javascript": {

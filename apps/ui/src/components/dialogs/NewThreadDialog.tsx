@@ -1,7 +1,7 @@
-import { ChipSelect } from "@/components/common/ChipSelect";
 import { ArrowRightIcon, GitBranchIcon, PaperclipIcon, PlusIcon } from "lucide-react";
 import type * as React from "react";
 import { useEffect, useMemo, useState } from "react";
+import { ChipSelect } from "@/components/common/ChipSelect";
 
 import { ENTER, Kbd, MOD } from "@/components/common/Kbd";
 import { Button } from "@/components/ui/button";
