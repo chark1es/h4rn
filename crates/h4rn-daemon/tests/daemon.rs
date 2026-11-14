@@ -1489,6 +1489,66 @@ async fn resume_now_fires_a_scheduled_thread_without_waiting_for_the_reset() {
 }
 
 #[tokio::test]
+async fn resume_now_acknowledges_before_a_slow_first_send() {
+    let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+    let daemon = boot_with(
+        resume_options(),
+        FakeHarness::with_session_scripts(vec![limit_script(Some(reset_at)), resume_script()])
+            // The resumed turn takes seconds to produce its first token; the
+            // ResumeNow request must still be acknowledged immediately.
+            .with_send_delay(std::time::Duration::from_secs(5)),
+    )
+    .await;
+    let host = host_id_for(&daemon).await;
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    stable_policy(&mut client, false).await;
+    let summary = create_with_model(
+        &mut client,
+        host,
+        "do the thing",
+        HarnessKind::ClaudeCode,
+        "claude-sonnet-5",
+    )
+    .await;
+    let thread_id = summary.thread_id;
+    client
+        .wait_event(|event| matches!(event, Event::UsageLimitHit { .. }))
+        .await;
+    client.wait_for_turn_completed().await;
+
+    let started = std::time::Instant::now();
+    match client
+        .request(ClientRequest::ResumeNow {
+            thread_id: thread_id.clone(),
+        })
+        .await
+        .expect("resume now")
+    {
+        ResponseBody::ResumeChanged {
+            schedule: Some(schedule),
+        } => assert_eq!(schedule.state, ResumeState::Fired),
+        other => panic!("unexpected ResumeNow response: {other:?}"),
+    }
+    let acknowledged = started.elapsed();
+    assert!(
+        acknowledged < std::time::Duration::from_secs(2),
+        "ResumeNow waited for the slow harness send: {acknowledged:?}"
+    );
+
+    // The resumed turn still runs and reports progress through events.
+    client
+        .wait_event(|event| matches!(event, Event::TurnStarted { .. }))
+        .await;
+    let (_, status) = client.wait_for_turn_completed().await;
+    assert_eq!(status, TurnStatus::Completed);
+    assert_eq!(thread_usage(&mut client, &thread_id).await.totals.turns, 2);
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn a_restart_rehydrates_the_summary_resume_target() {
     let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
     let mut daemon = boot_with(

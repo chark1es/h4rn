@@ -2459,7 +2459,14 @@ impl Inner {
         if needs_session {
             self.spawn_session(handle, Some(input));
         } else {
-            self.deliver(handle, input).await;
+            // Acknowledge the resume before the harness produces its first
+            // token. `finish_schedule` above already emitted `ScheduleChanged`
+            // and the thread events below report progress, so a slow first
+            // send must not hold the `ResumeNow` request open (ADR-003).
+            let this = Arc::clone(self);
+            tokio::spawn(async move {
+                this.deliver(handle, input).await;
+            });
         }
         Ok(Some(fired))
     }

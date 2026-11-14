@@ -28,6 +28,8 @@ pub struct FakeHarness {
     script: Option<Vec<HarnessEvent>>,
     /// Per-session scripts, consumed in order; the last one repeats.
     session_scripts: Option<Arc<SessionScripts>>,
+    /// A test-only pause before a turn's input is answered.
+    send_delay: Option<Duration>,
 }
 
 #[derive(Debug)]
@@ -60,6 +62,7 @@ impl Default for FakeHarness {
             }),
             script: None,
             session_scripts: None,
+            send_delay: None,
         }
     }
 }
@@ -108,6 +111,15 @@ impl FakeHarness {
         self.kind = kind;
         self
     }
+
+    /// Pauses before answering a turn's input (but not the priming send).
+    ///
+    /// A test uses this to model a slow harness whose first token arrives long
+    /// after the request that started the turn.
+    pub fn with_send_delay(mut self, delay: Duration) -> Self {
+        self.send_delay = Some(delay);
+        self
+    }
 }
 
 #[async_trait]
@@ -150,11 +162,12 @@ impl Harness for FakeHarness {
 
         // A test can slow the echo turn down so a UI e2e has time to cancel a
         // live child. Normal daemon builds never set this.
-        let delay = std::env::var("H4RN_FAKE_HARNESS_DELAY_MS")
+        let env_delay = std::env::var("H4RN_FAKE_HARNESS_DELAY_MS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .map(Duration::from_millis)
             .unwrap_or_default();
+        let delay = self.send_delay.unwrap_or(env_delay);
 
         Ok(Box::new(FakeSession {
             kind: self.kind,
@@ -195,7 +208,9 @@ impl HarnessSession for FakeSession {
             });
         }
 
-        if !self.delay.is_zero() {
+        // The priming send only announces the first script; it is not a turn
+        // whose latency a test is modelling.
+        if !self.delay.is_zero() && !self.primed {
             tokio::time::sleep(self.delay).await;
         }
 
