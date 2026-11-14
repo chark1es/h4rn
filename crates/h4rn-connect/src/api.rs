@@ -30,9 +30,9 @@ use h4rn_protocol::{
     DeviceGrantStartResponse, DeviceGrantStatus, DeviceRegistration, DeviceRenameRequest,
     LoginCompleteRequest, LoginCompleteResponse, LoginStartRequest, LoginStartResponse,
     LogoutRequest, MachineAddressesUpdate, MachineHost, MachineHostsUpdate, MachineSummary,
-    PairingClaimRequest, PairingClaimResponse, PairingCreateRequest, PairingCreateResponse,
-    PairingInfo, ProviderInfo, RefreshRequest, UsageBucket, UsageGroupBy, UsageReport, UsageScope,
-    UsageSyncRequest, UsageSyncResponse,
+    PairScope, PairingClaimCodeRequest, PairingClaimRequest, PairingClaimResponse,
+    PairingCreateRequest, PairingCreateResponse, PairingInfo, ProviderInfo, RefreshRequest,
+    UsageBucket, UsageGroupBy, UsageReport, UsageScope, UsageSyncRequest, UsageSyncResponse,
 };
 use h4rn_skills::SkillBundle;
 use tower_http::cors::{Any, CorsLayer};
@@ -134,6 +134,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/machines/{id}/addresses", put(update_addresses))
         .route("/v1/pairings", get(list_pairings).post(create_pairing))
         .route("/v1/pairings/claim", post(claim_pairing))
+        .route("/v1/pairings/claim-code", post(claim_pairing_code))
         .route("/v1/pairings/{id}", delete(revoke_pairing))
         .route("/v1/audit", get(audit).post(ingest_audit))
         .route("/v1/usage", post(ingest_usage))
@@ -217,6 +218,27 @@ pub struct Authed {
     pub device: DeviceRow,
     /// Session row.
     pub session: SessionRow,
+    /// Scopes the device holds right now, read from the database rather than
+    /// the token so a re-pairing or revocation takes effect immediately.
+    pub scopes: Vec<PairScope>,
+}
+
+impl Authed {
+    /// Fails with `scope_required` unless the device holds `scope`.
+    pub fn require(&self, scope: PairScope) -> Result<()> {
+        if self.scopes.contains(&scope) {
+            Ok(())
+        } else {
+            Err(AppError::forbidden_hint(
+                "scope_required",
+                format!(
+                    "this device was not paired with the `{}` scope",
+                    scope.as_str()
+                ),
+                "Pair the device again and enable that permission.",
+            ))
+        }
+    }
 }
 
 impl FromRequestParts<AppState> for Authed {
@@ -267,11 +289,13 @@ impl FromRequestParts<AppState> for Authed {
                 "this proof was already used",
             ));
         }
+        let scopes = state.store.device_scopes(device.id).await?;
         Ok(Authed {
             claims,
             user,
             device,
             session,
+            scopes,
         })
     }
 }
@@ -890,6 +914,7 @@ async fn approved_poll(
         &session.id.to_string(),
         &session.family_id.to_string(),
         &session.access_jti.to_string(),
+        &state.store.token_scopes(device_id).await?,
         state.config.session_ttl_secs,
     )?;
     Ok(Json(DeviceGrantPollResponse {
@@ -1029,6 +1054,9 @@ async fn rename_device(
 ) -> Result<Json<ConnectDevice>> {
     let device_id = Uuid::parse_str(&id)
         .map_err(|_| AppError::bad_request("device_invalid", "device id is not a UUID"))?;
+    if device_id != authed.device.id {
+        authed.require(PairScope::Admin)?;
+    }
     let device = state
         .store
         .rename_device(authed.user.id, device_id, &request.name)
@@ -1193,7 +1221,7 @@ async fn create_pairing(
     )?;
     let machine_id = Uuid::parse_str(&request.machine_id)
         .map_err(|_| AppError::bad_request("machine_invalid", "machine_id is not a UUID"))?;
-    let response = pairing::create(&state, &authed, machine_id).await?;
+    let response = pairing::create(&state, &authed, machine_id, request.scopes).await?;
     Ok(Json(response))
 }
 
@@ -1213,11 +1241,35 @@ async fn claim_pairing(
     Ok(Json(response))
 }
 
+async fn claim_pairing_code(
+    State(state): State<AppState>,
+    client: ClientIp,
+    authed: Authed,
+    Json(request): Json<PairingClaimCodeRequest>,
+) -> Result<Json<PairingClaimResponse>> {
+    // Every attempt is charged, hit or miss, against the user and the address:
+    // the code is 40 bits and the limit is the brake on guessing it.
+    let limit = state.config.rate_limits.pairing_code_per_hour;
+    let window = Duration::from_secs(60 * 60);
+    state.rate.check(
+        "pairing_code_user",
+        &authed.user.id.to_string(),
+        limit,
+        window,
+    )?;
+    state
+        .rate
+        .check("pairing_code_ip", &client.0, limit, window)?;
+    let response = pairing::claim_by_code(&state, &authed, request).await?;
+    Ok(Json(response))
+}
+
 async fn revoke_pairing(
     State(state): State<AppState>,
     authed: Authed,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
+    authed.require(PairScope::Admin)?;
     let pairing_id = Uuid::parse_str(&id)
         .map_err(|_| AppError::bad_request("pairing_invalid", "pairing id is not a UUID"))?;
     state

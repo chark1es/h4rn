@@ -9,9 +9,9 @@
 use chrono::{DateTime, Duration, Utc};
 use h4rn_protocol::{
     ConnectDevice, ConnectDeviceKind, ConnectSessionTokens, ConnectUser, CostSource, MachineHost,
-    MachineHostKind, MachineSummary, PairingState, PresenceUpdate, UsageBucket, UsageBucketPoint,
-    UsageEvent, UsageGroup, UsageGroupBy, UsageProvenance, UsageReport, UsageScope,
-    UsageSyncResponse, UsageSyncRow, UsageTotals,
+    MachineHostKind, MachineSummary, PairScope, PairingState, PresenceUpdate, UsageBucket,
+    UsageBucketPoint, UsageEvent, UsageGroup, UsageGroupBy, UsageProvenance, UsageReport,
+    UsageScope, UsageSyncResponse, UsageSyncRow, UsageTotals,
 };
 use sqlx::Row as _;
 use sqlx::postgres::PgPoolOptions;
@@ -20,7 +20,8 @@ use uuid::Uuid;
 
 use crate::config::Config;
 use crate::crypto::{
-    Envelope, Keystore, SealedSecret, b64, hash_refresh_token, random_b64, verify_pairing_secret,
+    Envelope, Keystore, SealedSecret, b64, generate_short_code, hash_pairing_code,
+    hash_refresh_token, random_b64, verify_pairing_secret,
 };
 use crate::error::{AppError, Result};
 use crate::jwt::{AccessClaims, issue_access_token};
@@ -103,6 +104,7 @@ impl DeviceRow {
             created_at: self.created_at,
             last_seen: self.last_seen,
             revoked_at: self.revoked_at,
+            scopes: Vec::new(),
         }
     }
 }
@@ -209,6 +211,8 @@ pub struct PairingRow {
     pub attempts: i32,
     /// Creation time.
     pub created_at: DateTime<Utc>,
+    /// Scopes the claiming device will hold.
+    pub scopes: Vec<String>,
 }
 
 impl PairingRow {
@@ -231,8 +235,21 @@ impl PairingRow {
             created_at: self.created_at,
             expires_at: self.expires_at,
             claimed_by_device_id: self.claimed_by_device_id.map(|id| id.to_string()),
+            scopes: parse_scopes(&self.scopes),
         }
     }
+}
+
+/// Parses stored scope spellings, dropping any this build does not know.
+pub fn parse_scopes(values: &[String]) -> Vec<PairScope> {
+    PairScope::normalize(values.iter().filter_map(|value| PairScope::parse(value)))
+}
+
+fn scope_strings(scopes: &[PairScope]) -> Vec<String> {
+    scopes
+        .iter()
+        .map(|scope| scope.as_str().to_owned())
+        .collect()
 }
 
 /// An OIDC login flow.
@@ -723,6 +740,63 @@ impl Store {
         Ok(())
     }
 
+    /// The scopes a device holds, as typed values.
+    ///
+    /// A device paired with machines holds the union of the scopes on its
+    /// links. An unpaired device holds `view` alone when it is a phone (it can
+    /// only claim a pairing) and everything otherwise: the account owner's
+    /// desktop, browser and daemon are not scope-limited until they are paired
+    /// like a remote.
+    pub async fn device_scopes(&self, device_id: Uuid) -> Result<Vec<PairScope>> {
+        let rows: Vec<Vec<String>> =
+            sqlx::query_scalar("SELECT scopes FROM machine_devices WHERE device_id = $1")
+                .bind(device_id)
+                .fetch_all(&self.pool)
+                .await?;
+        if !rows.is_empty() {
+            return Ok(PairScope::normalize(
+                rows.iter().flat_map(|row| parse_scopes(row)),
+            ));
+        }
+        let kind: Option<String> = sqlx::query_scalar("SELECT kind FROM devices WHERE id = $1")
+            .bind(device_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(match kind.as_deref() {
+            Some("mobile") => vec![PairScope::View],
+            _ => PairScope::ALL.to_vec(),
+        })
+    }
+
+    /// [`Self::device_scopes`] spelled for a token claim.
+    pub async fn token_scopes(&self, device_id: Uuid) -> Result<Vec<String>> {
+        Ok(scope_strings(&self.device_scopes(device_id).await?))
+    }
+
+    /// The scopes one machine link carries.
+    pub async fn link_scopes(&self, machine_id: Uuid, device_id: Uuid) -> Result<Vec<PairScope>> {
+        let row: Option<Vec<String>> = sqlx::query_scalar(
+            "SELECT scopes FROM machine_devices WHERE machine_id = $1 AND device_id = $2",
+        )
+        .bind(machine_id)
+        .bind(device_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| parse_scopes(&row)).unwrap_or_default())
+    }
+
+    /// The paired devices of a machine as wire records carrying link scopes.
+    pub async fn paired_device_wires(&self, machine_id: Uuid) -> Result<Vec<ConnectDevice>> {
+        let devices = self.paired_devices(machine_id).await?;
+        let mut out = Vec::with_capacity(devices.len());
+        for device in devices {
+            let mut wire = device.to_wire();
+            wire.scopes = self.link_scopes(machine_id, device.id).await?;
+            out.push(wire);
+        }
+        Ok(out)
+    }
+
     /// Lists the live client devices paired with a machine.
     pub async fn paired_devices(&self, machine_id: Uuid) -> Result<Vec<DeviceRow>> {
         Ok(sqlx::query_as::<_, DeviceRow>(
@@ -911,29 +985,49 @@ impl Store {
         self.hosts(machine_id).await
     }
 
-    /// Creates a pairing.
+    /// Creates a pairing with a fresh single-use short code.
+    ///
+    /// Returns the row and the plaintext code; only its hash is stored. Forty
+    /// random bits among a handful of live pairings makes a collision a
+    /// unique-index violation, so a new code is drawn.
     pub async fn create_pairing(
         &self,
         machine_id: Uuid,
         created_by_device_id: Uuid,
         secret_hash: &str,
+        scopes: &[PairScope],
         ttl: std::time::Duration,
-    ) -> Result<PairingRow> {
+    ) -> Result<(PairingRow, String)> {
         let expires_at =
             Utc::now() + Duration::from_std(ttl).unwrap_or_else(|_| Duration::seconds(300));
-        Ok(sqlx::query_as::<_, PairingRow>(
-            "INSERT INTO pairings (id, machine_id, created_by_device_id, secret_hash, expires_at)
-             VALUES ($1, $2, $3, $4, $5)
-             RETURNING id, machine_id, created_by_device_id, secret_hash, state, expires_at,
-             claimed_by_device_id, claimed_at, attempts, created_at",
-        )
-        .bind(Uuid::now_v7())
-        .bind(machine_id)
-        .bind(created_by_device_id)
-        .bind(secret_hash)
-        .bind(expires_at)
-        .fetch_one(&self.pool)
-        .await?)
+        let scopes = scope_strings(&PairScope::normalize(scopes.iter().copied()));
+        for _ in 0..5 {
+            let code = generate_short_code();
+            let inserted = sqlx::query_as::<_, PairingRow>(
+                "INSERT INTO pairings (id, machine_id, created_by_device_id, secret_hash,
+                 code_hash, scopes, expires_at)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+                 RETURNING id, machine_id, created_by_device_id, secret_hash, state, expires_at,
+                 claimed_by_device_id, claimed_at, attempts, created_at, scopes",
+            )
+            .bind(Uuid::now_v7())
+            .bind(machine_id)
+            .bind(created_by_device_id)
+            .bind(secret_hash)
+            .bind(hash_pairing_code(&code))
+            .bind(&scopes)
+            .bind(expires_at)
+            .fetch_one(&self.pool)
+            .await;
+            match inserted {
+                Ok(row) => return Ok((row, code)),
+                Err(sqlx::Error::Database(error)) if error.is_unique_violation() => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(AppError::internal(
+            "could not allocate a unique pairing code",
+        ))
     }
 
     /// Claims a pairing by machine and secret.
@@ -951,7 +1045,7 @@ impl Store {
         let mut tx = self.pool.begin().await?;
         let candidates = sqlx::query_as::<_, PairingRow>(
             "SELECT id, machine_id, created_by_device_id, secret_hash, state, expires_at,
-             claimed_by_device_id, claimed_at, attempts, created_at
+             claimed_by_device_id, claimed_at, attempts, created_at, scopes
              FROM pairings WHERE machine_id = $1 AND state = 'pending' AND expires_at > now()
              ORDER BY created_at DESC FOR UPDATE",
         )
@@ -996,6 +1090,55 @@ impl Store {
             ));
         }
 
+        let out = Self::finish_claim(&mut tx, matched, user_id, device_id).await?;
+        tx.commit().await?;
+        Ok(out)
+    }
+
+    /// Claims a pairing by its typed short code.
+    ///
+    /// The code identifies the pairing, so there is no machine to burn on a
+    /// wrong guess; the caller's per-user and per-IP rate limits are the
+    /// brake. Another user's pairing answers exactly like an unknown code.
+    pub async fn claim_pairing_by_code(
+        &self,
+        user_id: Uuid,
+        device_id: Uuid,
+        code_hash: &str,
+    ) -> Result<(PairingRow, MachineRow)> {
+        let invalid = || {
+            AppError::bad_request_hint(
+                "pairing_invalid",
+                "pairing code is invalid or expired",
+                "Check the code on the daemon, or generate a new one.",
+            )
+        };
+        let mut tx = self.pool.begin().await?;
+        let matched = sqlx::query_as::<_, PairingRow>(
+            "SELECT p.id, p.machine_id, p.created_by_device_id, p.secret_hash, p.state,
+             p.expires_at, p.claimed_by_device_id, p.claimed_at, p.attempts, p.created_at, p.scopes
+             FROM pairings p JOIN machines m ON m.id = p.machine_id
+             WHERE p.code_hash = $1 AND p.state = 'pending' AND p.expires_at > now()
+             AND m.user_id = $2 FOR UPDATE OF p",
+        )
+        .bind(code_hash)
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(invalid)?;
+        let out = Self::finish_claim(&mut tx, &matched, user_id, device_id).await?;
+        tx.commit().await?;
+        Ok(out)
+    }
+
+    /// Marks `matched` claimed and links the device with the pairing's scopes.
+    async fn finish_claim(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        matched: &PairingRow,
+        user_id: Uuid,
+        device_id: Uuid,
+    ) -> Result<(PairingRow, MachineRow)> {
+        let machine_id = matched.machine_id;
         // The claimant must own the machine.
         let machine = sqlx::query_as::<_, MachineRow>(
             "SELECT id, user_id, name, daemon_device_id, created_at, updated_at
@@ -1003,7 +1146,7 @@ impl Store {
         )
         .bind(machine_id)
         .bind(user_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?
         .ok_or_else(|| {
             AppError::forbidden("machine_forbidden", "machine belongs to another user")
@@ -1013,23 +1156,26 @@ impl Store {
             "UPDATE pairings SET state = 'claimed', claimed_by_device_id = $2, claimed_at = now()
              WHERE id = $1 AND state = 'pending' AND expires_at > now()
              RETURNING id, machine_id, created_by_device_id, secret_hash, state, expires_at,
-             claimed_by_device_id, claimed_at, attempts, created_at",
+             claimed_by_device_id, claimed_at, attempts, created_at, scopes",
         )
         .bind(matched.id)
         .bind(device_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?
         .ok_or_else(|| AppError::conflict("pairing_used", "pairing was already claimed"))?;
 
+        // Re-pairing replaces the scopes: the newest pairing is what the owner
+        // chose last.
         sqlx::query(
-            "INSERT INTO machine_devices (machine_id, device_id) VALUES ($1, $2)
-             ON CONFLICT DO NOTHING",
+            "INSERT INTO machine_devices (machine_id, device_id, scopes) VALUES ($1, $2, $3)
+             ON CONFLICT (machine_id, device_id) DO UPDATE SET scopes = EXCLUDED.scopes,
+             paired_at = now()",
         )
         .bind(machine_id)
         .bind(device_id)
-        .execute(&mut *tx)
+        .bind(&claimed.scopes)
+        .execute(&mut **tx)
         .await?;
-        tx.commit().await?;
         Ok((claimed, machine))
     }
 
@@ -1037,7 +1183,7 @@ impl Store {
     pub async fn pairings(&self, user_id: Uuid) -> Result<Vec<PairingRow>> {
         Ok(sqlx::query_as::<_, PairingRow>(
             "SELECT p.id, p.machine_id, p.created_by_device_id, p.secret_hash, p.state,
-             p.expires_at, p.claimed_by_device_id, p.claimed_at, p.attempts, p.created_at
+             p.expires_at, p.claimed_by_device_id, p.claimed_at, p.attempts, p.created_at, p.scopes
              FROM pairings p JOIN machines m ON m.id = p.machine_id
              WHERE m.user_id = $1 ORDER BY p.created_at DESC LIMIT 100",
         )
@@ -1237,7 +1383,7 @@ impl Store {
              WHERE id = $1 AND state = 'pending'
              AND machine_id IN (SELECT id FROM machines WHERE user_id = $2)
              RETURNING id, machine_id, created_by_device_id, secret_hash, state, expires_at,
-             claimed_by_device_id, claimed_at, attempts, created_at",
+             claimed_by_device_id, claimed_at, attempts, created_at, scopes",
         )
         .bind(pairing_id)
         .bind(user_id)
@@ -1291,6 +1437,7 @@ impl Store {
             &session_id.to_string(),
             &family_id.to_string(),
             &access_jti.to_string(),
+            &self.token_scopes(device_id).await?,
             config.session_ttl_secs,
         )?;
         Ok(IssuedSession {
@@ -1395,6 +1542,7 @@ impl Store {
                     &successor.id.to_string(),
                     &successor.family_id.to_string(),
                     &successor.access_jti.to_string(),
+                    &self.token_scopes(successor.device_id).await?,
                     config.session_ttl_secs,
                 )?;
                 tx.commit().await?;
@@ -1469,6 +1617,7 @@ impl Store {
             &successor.id.to_string(),
             &successor.family_id.to_string(),
             &successor.access_jti.to_string(),
+            &self.token_scopes(successor.device_id).await?,
             config.session_ttl_secs,
         )?;
         tx.commit().await?;

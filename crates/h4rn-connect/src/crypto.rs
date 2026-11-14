@@ -89,6 +89,29 @@ pub fn hash_pairing_secret(secret: &str) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
+/// A fresh single-use pairing short code: 8 Crockford base32 characters
+/// (40 bits) drawn uniformly from the OS RNG.
+pub fn generate_short_code() -> String {
+    let alphabet = h4rn_protocol::SHORT_CODE_ALPHABET;
+    random_bytes(h4rn_protocol::SHORT_CODE_LEN)
+        .into_iter()
+        // 256 is a multiple of 32, so the mask is unbiased.
+        .map(|byte| alphabet[usize::from(byte & 31)] as char)
+        .collect()
+}
+
+/// Hashes a normalised short code for storage and lookup.
+///
+/// Domain-separated from the QR secret hash. The code is only 40 bits, so the
+/// hash is not what protects it: single use, the five-minute expiry and rate
+/// limits are. The hash keeps a database read from yielding live codes.
+pub fn hash_pairing_code(code: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"h4rn-connect/pairing-code/v1\0");
+    hasher.update(code.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
 /// Constant-time pairing-secret comparison.
 pub fn verify_pairing_secret(secret: &str, stored_hash: &str) -> bool {
     let computed = hash_pairing_secret(secret);
@@ -323,6 +346,24 @@ mod tests {
         let hash = hash_pairing_secret(&secret);
         assert!(verify_pairing_secret(&secret, &hash));
         assert!(!verify_pairing_secret(&random_b64(32), &hash));
+    }
+
+    #[test]
+    fn short_codes_are_crockford_and_normalise_to_themselves() {
+        for _ in 0..200 {
+            let code = generate_short_code();
+            assert_eq!(code.len(), 8);
+            assert!(
+                code.bytes()
+                    .all(|byte| h4rn_protocol::SHORT_CODE_ALPHABET.contains(&byte))
+            );
+            assert_eq!(h4rn_protocol::normalize_short_code(&code), Some(code));
+        }
+        assert_ne!(generate_short_code(), generate_short_code());
+        assert_ne!(
+            hash_pairing_code("ABCDEFGH"),
+            hash_pairing_secret("ABCDEFGH")
+        );
     }
 
     #[test]

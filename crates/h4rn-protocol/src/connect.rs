@@ -253,6 +253,11 @@ pub struct ConnectDevice {
     pub last_seen: Option<DateTime<Utc>>,
     /// Revocation time, if revoked.
     pub revoked_at: Option<DateTime<Utc>>,
+    /// Scopes the device was paired with on this machine. Empty means no
+    /// restriction was recorded (a direct pairing or a pre-scope record), which
+    /// the daemon treats as unrestricted.
+    #[serde(default)]
+    pub scopes: Vec<PairScope>,
 }
 
 /// A user account.
@@ -399,6 +404,93 @@ pub struct PresenceUpdate {
     pub last_seen: Option<DateTime<Utc>>,
 }
 
+/// What a paired device may do on a machine.
+///
+/// A pairing grants a set of scopes, connect records them next to the
+/// device-machine link, signs them into the device's access token, and relays
+/// them to the daemon, which enforces them per request. `view` is always held.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum PairScope {
+    /// Read threads, diffs, usage and status. Always granted.
+    View,
+    /// Start and message threads, answer approvals and control runs.
+    Approve,
+    /// Attach to and type into terminals.
+    Terminal,
+    /// Browse, read and edit workspace files.
+    Files,
+    /// Change configuration: MCP, skills, proxy, forge accounts and policy.
+    Admin,
+}
+
+impl PairScope {
+    /// Every scope.
+    pub const ALL: [Self; 5] = [
+        Self::View,
+        Self::Approve,
+        Self::Terminal,
+        Self::Files,
+        Self::Admin,
+    ];
+
+    /// The set granted when a pairing request names none: everything but
+    /// `admin`.
+    pub const DEFAULT: [Self; 4] = [Self::View, Self::Approve, Self::Terminal, Self::Files];
+
+    /// The database/wire spelling.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::View => "view",
+            Self::Approve => "approve",
+            Self::Terminal => "terminal",
+            Self::Files => "files",
+            Self::Admin => "admin",
+        }
+    }
+
+    /// Parses a stored spelling.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|scope| scope.as_str() == value)
+    }
+
+    /// Sorts, de-duplicates and adds the always-held `view`.
+    pub fn normalize(scopes: impl IntoIterator<Item = Self>) -> Vec<Self> {
+        let mut set: std::collections::BTreeSet<Self> = scopes.into_iter().collect();
+        set.insert(Self::View);
+        set.into_iter().collect()
+    }
+}
+
+/// Alphabet of the pairing short code: Crockford base32 (no I, L, O, U).
+pub const SHORT_CODE_ALPHABET: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+/// Characters in a pairing short code (40 bits).
+pub const SHORT_CODE_LEN: usize = 8;
+
+/// Normalises a typed short code to its canonical 8 characters.
+///
+/// Upper-cases, drops hyphens and whitespace and applies Crockford's folding
+/// (`I`, `L` read as `1`; `O` reads as `0`). Returns `None` when the result is
+/// not exactly [`SHORT_CODE_LEN`] alphabet characters.
+pub fn normalize_short_code(input: &str) -> Option<String> {
+    let mut out = String::with_capacity(SHORT_CODE_LEN);
+    for ch in input.chars() {
+        if ch == '-' || ch.is_whitespace() {
+            continue;
+        }
+        let ch = match ch.to_ascii_uppercase() {
+            'I' | 'L' => '1',
+            'O' => '0',
+            other => other,
+        };
+        if !ch.is_ascii() || !SHORT_CODE_ALPHABET.contains(&(ch as u8)) {
+            return None;
+        }
+        out.push(ch);
+    }
+    (out.len() == SHORT_CODE_LEN).then_some(out)
+}
+
 /// Pairing state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -428,6 +520,9 @@ pub struct PairingInfo {
     pub expires_at: DateTime<Utc>,
     /// Device that claimed it, once claimed.
     pub claimed_by_device_id: Option<String>,
+    /// Scopes the claiming device will hold. Always contains `view`.
+    #[serde(default)]
+    pub scopes: Vec<PairScope>,
 }
 
 /// The QR payload a daemon prints and a new device scans.
@@ -518,6 +613,9 @@ pub struct PairingCreateResponse {
     pub pairing: PairingInfo,
     /// The string to render as a QR code.
     pub qr: String,
+    /// Single-use 8-character Crockford base32 code (no separator), a typed
+    /// alternative to the QR. Shown once: only a hash is stored.
+    pub short_code: String,
 }
 
 /// Body of `POST /v1/pairings`.
@@ -525,6 +623,24 @@ pub struct PairingCreateResponse {
 pub struct PairingCreateRequest {
     /// Machine to pair a new device with.
     pub machine_id: String,
+    /// Scopes to grant the paired device. `view` is always added. Omitted
+    /// means [`PairScope::DEFAULT`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub scopes: Option<Vec<PairScope>>,
+}
+
+/// Body of `POST /v1/pairings/claim-code`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PairingClaimCodeRequest {
+    /// The typed short code; case, hyphens and spaces are ignored.
+    pub code: String,
+    /// Claiming device's Ed25519 proof key, base64url.
+    pub device_public_key: String,
+    /// Claiming device's X25519 Noise static key, base64url.
+    pub noise_static_public_key: Option<String>,
+    /// Optional new display name for the claiming device.
+    pub device_name: Option<String>,
 }
 
 /// Body of `POST /v1/pairings/claim`.
@@ -548,6 +664,9 @@ pub struct PairingClaimResponse {
     pub pairing: PairingInfo,
     /// The machine, now reachable by the device.
     pub machine: MachineSummary,
+    /// The daemon's Noise static public key, base64url. A QR carries it; a
+    /// typed code does not, so the response does.
+    pub daemon_noise_public_key: String,
 }
 
 /// Device identity a login flow will register.

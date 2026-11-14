@@ -373,11 +373,13 @@ async fn upgrade_inner(
             "this proof was already used",
         ));
     }
+    let scopes = state.store.device_scopes(device.id).await?;
     let authed = Authed {
         claims,
         user,
         device,
         session,
+        scopes,
     };
 
     Ok(ws.on_upgrade(move |socket| async move {
@@ -411,14 +413,14 @@ async fn handle_socket(state: AppState, socket: WebSocket, authed: Authed) {
             .set_presence(device.id, user_id, machine_id, true)
             .await;
         if let Some(machine_id) = machine_id {
-            if let Ok(devices) = state.store.paired_devices(machine_id).await {
+            if let Ok(devices) = state.store.paired_device_wires(machine_id).await {
                 let _ = state
                     .relay
                     .send(
                         device.id,
                         RelayServerEvent::Snapshot {
                             machine_id: machine_id.to_string(),
-                            devices: devices.iter().map(|row| row.to_wire()).collect(),
+                            devices,
                         },
                     )
                     .await;

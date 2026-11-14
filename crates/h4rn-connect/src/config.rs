@@ -136,6 +136,9 @@ pub struct RateLimits {
     pub relay_connects_per_minute: u32,
     /// Failed pairing claims before a pairing is burned.
     pub pairing_attempts: u32,
+    /// Short-code claim attempts per user and per IP per hour. The code is 40
+    /// bits, so this is what makes guessing it impractical.
+    pub pairing_code_per_hour: u32,
 }
 
 impl Default for RateLimits {
@@ -146,6 +149,7 @@ impl Default for RateLimits {
             pairing_per_hour: 60,
             relay_connects_per_minute: 120,
             pairing_attempts: 10,
+            pairing_code_per_hour: 10,
         }
     }
 }

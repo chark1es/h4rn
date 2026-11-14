@@ -797,6 +797,111 @@ pub enum ClientRequest {
     },
 }
 
+impl ClientRequest {
+    /// The scope a paired device must hold to send this request.
+    ///
+    /// The match is exhaustive on purpose: a new variant will not compile until
+    /// it is classified. Reads of thread state and settings need only `view`.
+    pub fn required_scope(&self) -> crate::connect::PairScope {
+        use crate::connect::PairScope::{Admin, Approve, Files, Terminal, View};
+        match self {
+            Self::Hello { .. }
+            | Self::ListHosts
+            | Self::ListThreads { .. }
+            | Self::GetThread { .. }
+            | Self::SetThreadTab { .. }
+            | Self::Snooze { .. }
+            | Self::Subscribe { .. }
+            | Self::GetBlob { .. }
+            | Self::FsDiff { .. }
+            | Self::FsTurnChanges { .. }
+            | Self::McpList
+            | Self::SkillsList { .. }
+            | Self::SkillsConflicts { .. }
+            | Self::SkillsDiff { .. }
+            | Self::ListProxyProfiles
+            | Self::ListProxyModels { .. }
+            | Self::ListProxyLimits { .. }
+            | Self::UsageQuery { .. }
+            | Self::GetUsage { .. }
+            | Self::GetLimits
+            | Self::ListResets
+            | Self::ForgeListAccounts
+            | Self::ForgeDetectRepo { .. }
+            | Self::ForgeListPrs { .. }
+            | Self::ForgeGetPr { .. }
+            | Self::ForgeGetPrDiff { .. }
+            | Self::ForgeListPrComments { .. }
+            | Self::ForgeListChecks { .. } => View,
+            Self::CreateThread { .. }
+            | Self::SendMessage { .. }
+            | Self::Interrupt { .. }
+            | Self::RespondApproval { .. }
+            | Self::BeginUpload { .. }
+            | Self::CommitUpload { .. }
+            | Self::AbortUpload { .. }
+            | Self::QueryUpload { .. }
+            | Self::CancelResume { .. }
+            | Self::ResumeNow { .. }
+            | Self::ForgeReply { .. }
+            | Self::ForgeComment { .. }
+            | Self::ForgeOpenPr { .. }
+            | Self::ForgeHandPrToAgent { .. } => Approve,
+            Self::TerminalOpen { .. }
+            | Self::TerminalAttach { .. }
+            | Self::TerminalList { .. }
+            | Self::TerminalResize { .. }
+            | Self::TerminalAck { .. }
+            | Self::TerminalClose { .. } => Terminal,
+            Self::FsList { .. }
+            | Self::FsRead { .. }
+            | Self::FsWrite { .. }
+            | Self::FsCreate { .. }
+            | Self::FsRename { .. }
+            | Self::FsDelete { .. }
+            | Self::FsRestore { .. }
+            | Self::FsSearch { .. }
+            | Self::FsWatch { .. }
+            | Self::FsUnwatch { .. } => Files,
+            Self::McpUpsert { .. }
+            | Self::McpRemove { .. }
+            | Self::SkillsAdd { .. }
+            | Self::SkillsUpdate { .. }
+            | Self::SkillsRemove { .. }
+            | Self::SkillsSetEnabled { .. }
+            | Self::SkillsImportPreview { .. }
+            | Self::SkillsImportCommit { .. }
+            | Self::SkillsResolveConflict { .. }
+            | Self::SkillsSyncNow
+            | Self::ProxyProbe { .. }
+            | Self::ProxyConfigure { .. }
+            | Self::AddProxyProfile { .. }
+            | Self::UpdateProxyProfile { .. }
+            | Self::RemoveProxyProfile { .. }
+            | Self::TestProxyProfile { .. }
+            | Self::SetProxyHarnessOverride { .. }
+            | Self::PickProxyFailover { .. }
+            | Self::SetAutoResumePolicy { .. }
+            | Self::ForgeAddAccount { .. }
+            | Self::ForgeRemoveAccount { .. }
+            | Self::ForgeDeviceFlowStart { .. }
+            | Self::ForgeDeviceFlowPoll { .. }
+            | Self::ForgeImportCli { .. } => Admin,
+            Self::Mcp { request } => match request {
+                crate::mcp::McpRequest::ListServers | crate::mcp::McpRequest::ListTools { .. } => {
+                    View
+                }
+                _ => Admin,
+            },
+            Self::Subagent { request } => match request {
+                crate::subagents::SubagentRequest::ListSubagents { .. }
+                | crate::subagents::SubagentRequest::GetSubagent { .. } => View,
+                _ => Approve,
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -40,6 +40,10 @@ pub struct AccessClaims {
     pub family_id: String,
     /// Token kind. Always `access`.
     pub typ: String,
+    /// Scopes the device holds (`view`, `approve`, `terminal`, `files`,
+    /// `admin`). Tokens minted before scopes existed carry none.
+    #[serde(default)]
+    pub scp: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -57,6 +61,7 @@ pub fn issue_access_token(
     session_id: &str,
     family_id: &str,
     jti: &str,
+    scopes: &[String],
     ttl_secs: i64,
 ) -> Result<String> {
     let now = Utc::now();
@@ -71,6 +76,7 @@ pub fn issue_access_token(
         session_id: session_id.to_string(),
         family_id: family_id.to_string(),
         typ: "access".to_string(),
+        scp: scopes.to_vec(),
     };
     let header = JwtHeader {
         alg: "EdDSA",
@@ -184,6 +190,7 @@ mod tests {
             "session-1",
             "family-1",
             "jti-1",
+            &[],
             600,
         )
         .unwrap();
@@ -191,6 +198,16 @@ mod tests {
         assert_eq!(claims.sub, "user-1");
         assert_eq!(claims.device_id, "device-1");
         assert_eq!(claims.jti, "jti-1");
+        assert!(claims.scp.is_empty());
+    }
+
+    #[test]
+    fn access_token_carries_exactly_the_issued_scopes() {
+        let keystore = Keystore::from_seed(&[9u8; 32]);
+        let scopes = vec!["view".to_string(), "approve".to_string()];
+        let token = issue_access_token(&keystore, "u", "d", "s", "f", "j", &scopes, 600).unwrap();
+        let claims = verify_access_token(&keystore, &token, Utc::now()).unwrap();
+        assert_eq!(claims.scp, scopes);
     }
 
     #[test]
@@ -203,6 +220,7 @@ mod tests {
             "session-1",
             "family-1",
             "jti-1",
+            &[],
             60,
         )
         .unwrap();
@@ -222,6 +240,7 @@ mod tests {
             "session-1",
             "family-1",
             "jti-1",
+            &[],
             600,
         )
         .unwrap();

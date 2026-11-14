@@ -66,6 +66,15 @@ impl AppError {
         Self::new(StatusCode::FORBIDDEN, code, message, None)
     }
 
+    /// `403` with a hint.
+    pub fn forbidden_hint(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        hint: impl Into<String>,
+    ) -> Self {
+        Self::new(StatusCode::FORBIDDEN, code, message, Some(hint.into()))
+    }
+
     /// `404`.
     pub fn not_found(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, code, message, None)

@@ -13,13 +13,13 @@
 
 use chrono::Utc;
 use h4rn_protocol::{
-    MachineSummary, PairingClaimRequest, PairingClaimResponse, PairingCreateResponse,
-    PairingPayload,
+    MachineSummary, PairScope, PairingClaimCodeRequest, PairingClaimRequest, PairingClaimResponse,
+    PairingCreateResponse, PairingPayload, normalize_short_code,
 };
 use uuid::Uuid;
 
 use crate::api::{AppState, Authed};
-use crate::crypto::{b64, b64_decode, hash_pairing_secret, random_b64};
+use crate::crypto::{b64, b64_decode, hash_pairing_code, hash_pairing_secret, random_b64};
 use crate::error::{AppError, Result};
 
 /// Creates a pairing and renders its QR payload.
@@ -27,7 +27,12 @@ pub async fn create(
     state: &AppState,
     authed: &Authed,
     machine_id: Uuid,
+    scopes: Option<Vec<PairScope>>,
 ) -> Result<PairingCreateResponse> {
+    // Handing out scopes is itself an admin act: a device cannot mint a
+    // pairing more powerful than the one it holds.
+    authed.require(PairScope::Admin)?;
+    let scopes = PairScope::normalize(scopes.unwrap_or_else(|| PairScope::DEFAULT.to_vec()));
     let machine = state.store.machine(machine_id).await?;
     if machine.user_id != authed.user.id {
         return Err(AppError::forbidden(
@@ -54,12 +59,13 @@ pub async fn create(
         })?;
 
     let secret = random_b64(32);
-    let pairing = state
+    let (pairing, short_code) = state
         .store
         .create_pairing(
             machine_id,
             authed.device.id,
             &hash_pairing_secret(&secret),
+            &scopes,
             state.config.pairing_ttl(),
         )
         .await?;
@@ -81,7 +87,10 @@ pub async fn create(
             "pairing.created",
             Some("machine"),
             Some(&machine_id.to_string()),
-            serde_json::json!({"pairing_id": pairing.id.to_string()}),
+            serde_json::json!({
+                "pairing_id": pairing.id.to_string(),
+                "scopes": pairing.scopes,
+            }),
         )
         .await
         .ok();
@@ -89,6 +98,7 @@ pub async fn create(
     Ok(PairingCreateResponse {
         pairing: pairing.to_wire(Utc::now()),
         qr,
+        short_code,
     })
 }
 
@@ -164,8 +174,74 @@ pub async fn claim(
             state.config.rate_limits.pairing_attempts as i32,
         )
         .await?;
+    finish(
+        state,
+        authed,
+        request.device_name.as_deref(),
+        pairing,
+        machine,
+    )
+    .await
+}
 
-    if let Some(name) = request.device_name.as_deref() {
+/// Claims a pairing by its typed short code for the authenticated device.
+pub async fn claim_by_code(
+    state: &AppState,
+    authed: &Authed,
+    request: PairingClaimCodeRequest,
+) -> Result<PairingClaimResponse> {
+    let code = normalize_short_code(&request.code).ok_or_else(|| {
+        AppError::bad_request_hint(
+            "pairing_code_invalid",
+            "the pairing code must be 8 letters and digits",
+            "Type the code exactly as the daemon shows it.",
+        )
+    })?;
+    let supplied_key = b64_decode(&request.device_public_key).ok_or_else(|| {
+        AppError::bad_request("device_key_invalid", "device_public_key is not base64")
+    })?;
+    if supplied_key != authed.device.proof_public_key {
+        return Err(AppError::forbidden(
+            "device_key_mismatch",
+            "device_public_key does not match the authenticated device",
+        ));
+    }
+    if let Some(value) = request.noise_static_public_key.as_deref() {
+        let key = b64_decode(value).ok_or_else(|| {
+            AppError::bad_request(
+                "device_key_invalid",
+                "noise_static_public_key is not base64",
+            )
+        })?;
+        state
+            .store
+            .set_device_noise_key(authed.device.id, &key)
+            .await?;
+    }
+    let (pairing, machine) = state
+        .store
+        .claim_pairing_by_code(authed.user.id, authed.device.id, &hash_pairing_code(&code))
+        .await?;
+    finish(
+        state,
+        authed,
+        request.device_name.as_deref(),
+        pairing,
+        machine,
+    )
+    .await
+}
+
+/// Shared tail of both claims: name the device, audit and tell the daemon.
+async fn finish(
+    state: &AppState,
+    authed: &Authed,
+    device_name: Option<&str>,
+    pairing: crate::store::PairingRow,
+    machine: crate::store::MachineRow,
+) -> Result<PairingClaimResponse> {
+    let machine_id = machine.id;
+    if let Some(name) = device_name {
         state
             .store
             .rename_device(authed.user.id, authed.device.id, name)
@@ -174,6 +250,7 @@ pub async fn claim(
 
     let device = state.store.device(authed.device.id).await?;
     let summary = machine_summary(state, &machine).await?;
+    let daemon_noise_public_key = daemon_noise_key(state, &machine).await?;
 
     state
         .store
@@ -183,20 +260,45 @@ pub async fn claim(
             "device.paired",
             Some("machine"),
             Some(&machine_id.to_string()),
-            serde_json::json!({"pairing_id": pairing.id.to_string()}),
+            serde_json::json!({
+                "pairing_id": pairing.id.to_string(),
+                "scopes": pairing.scopes,
+            }),
         )
         .await
         .ok();
 
-    state
-        .relay
-        .notify_paired(machine_id, device.to_wire())
-        .await;
+    let mut wire = device.to_wire();
+    wire.scopes = crate::store::parse_scopes(&pairing.scopes);
+    state.relay.notify_paired(machine_id, wire).await;
 
     Ok(PairingClaimResponse {
         pairing: pairing.to_wire(Utc::now()),
         machine: summary,
+        daemon_noise_public_key,
     })
+}
+
+async fn daemon_noise_key(state: &AppState, machine: &crate::store::MachineRow) -> Result<String> {
+    let daemon_device_id = machine.daemon_device_id.ok_or_else(|| {
+        AppError::conflict(
+            "machine_has_no_daemon",
+            "the machine has no daemon to pair with",
+        )
+    })?;
+    state
+        .store
+        .device(daemon_device_id)
+        .await?
+        .noise_static_public_key
+        .as_deref()
+        .map(b64)
+        .ok_or_else(|| {
+            AppError::conflict(
+                "daemon_key_missing",
+                "the daemon did not register a Noise static public key",
+            )
+        })
 }
 
 /// Builds the consistent machine representation used by every endpoint.
