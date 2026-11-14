@@ -1027,10 +1027,10 @@ async fn logout(
 }
 
 async fn me(State(state): State<AppState>, authed: Authed) -> Result<Json<ConnectMeResponse>> {
-    let devices = state.store.devices(authed.user.id).await?;
+    let devices = device_wires(&state, authed.user.id).await?;
     Ok(Json(ConnectMeResponse {
         user: user_to_wire(&authed.user),
-        devices: devices.iter().map(DeviceRow::to_wire).collect(),
+        devices,
     }))
 }
 
@@ -1038,12 +1038,23 @@ async fn me(State(state): State<AppState>, authed: Authed) -> Result<Json<Connec
 // Devices
 // ---------------------------------------------------------------------------
 
+/// The account's devices, each carrying the scopes it holds right now.
+async fn device_wires(state: &AppState, user_id: Uuid) -> Result<Vec<ConnectDevice>> {
+    let rows = state.store.devices(user_id).await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let mut wire = row.to_wire();
+        wire.scopes = state.store.device_scopes(row.id).await?;
+        out.push(wire);
+    }
+    Ok(out)
+}
+
 async fn list_devices(
     State(state): State<AppState>,
     authed: Authed,
 ) -> Result<Json<Vec<ConnectDevice>>> {
-    let devices = state.store.devices(authed.user.id).await?;
-    Ok(Json(devices.iter().map(DeviceRow::to_wire).collect()))
+    Ok(Json(device_wires(&state, authed.user.id).await?))
 }
 
 async fn rename_device(
@@ -1083,6 +1094,9 @@ async fn revoke_device(
 ) -> Result<StatusCode> {
     let device_id = Uuid::parse_str(&id)
         .map_err(|_| AppError::bad_request("device_invalid", "device id is not a UUID"))?;
+    if device_id != authed.device.id {
+        authed.require(PairScope::Admin)?;
+    }
     let machines = state.store.revoke_device(authed.user.id, device_id).await?;
     for machine_id in machines {
         state.relay.notify_revoked(machine_id, device_id).await;

@@ -750,6 +750,23 @@ async fn short_code_pairing_grants_exactly_the_chosen_scopes() {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(body["code"], "scope_required");
+
+    // Nor can it revoke another device, though it may revoke itself.
+    let other = format!("/v1/devices/{}", daemon.device.id);
+    let (status, body) = send(&state, request(Method::DELETE, &other, Some(&phone), None)).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], "scope_required");
+
+    // The Devices list reports the scopes each device holds.
+    let (status, me) = send(&state, request(Method::GET, "/v1/me", Some(&daemon), None)).await;
+    assert_eq!(status, StatusCode::OK, "{me}");
+    let listed = me["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|device| device["id"] == phone.device.id.to_string())
+        .unwrap();
+    assert_eq!(listed["scopes"], serde_json::json!(["view", "approve"]));
 }
 
 #[tokio::test]

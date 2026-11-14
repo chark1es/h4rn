@@ -76,6 +76,7 @@ pub async fn create(
         daemon_noise_public_key: noise_key,
         secret,
         expires_at: pairing.expires_at,
+        scopes: crate::store::parse_scopes(&pairing.scopes),
     };
     let qr = payload.to_url();
 

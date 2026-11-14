@@ -544,6 +544,10 @@ pub struct PairingPayload {
     pub secret: String,
     /// Expiry.
     pub expires_at: DateTime<Utc>,
+    /// Scopes the pairing grants, as a hint for the confirmation screen. Not
+    /// authoritative: connect records and enforces the real set.
+    #[serde(default)]
+    pub scopes: Vec<PairScope>,
 }
 
 impl PairingPayload {
@@ -555,6 +559,10 @@ impl PairingPayload {
         query.append_pair("k", &self.daemon_noise_public_key);
         query.append_pair("s", &self.secret);
         query.append_pair("e", &self.expires_at.timestamp().to_string());
+        if !self.scopes.is_empty() {
+            let hint: Vec<&str> = self.scopes.iter().map(|scope| scope.as_str()).collect();
+            query.append_pair("p", &hint.join(","));
+        }
         format!("h4rn://pair?{}", query.finish())
     }
 
@@ -585,6 +593,10 @@ impl PairingPayload {
             daemon_noise_public_key: take("k")?,
             secret: take("s")?,
             expires_at,
+            scopes: params
+                .get("p")
+                .map(|hint| hint.split(',').filter_map(PairScope::parse).collect())
+                .unwrap_or_default(),
         })
     }
 }
@@ -949,6 +961,7 @@ mod tests {
             daemon_noise_public_key: "abc_DEF-123".to_string(),
             secret: "s3cr3t_value".to_string(),
             expires_at: Utc.with_ymd_and_hms(2026, 11, 12, 12, 0, 0).unwrap(),
+            scopes: vec![PairScope::View, PairScope::Approve],
         };
         let url = payload.to_url();
         assert!(url.starts_with("h4rn://pair?c=https%3A%2F%2Fconnect.example.com&"));
