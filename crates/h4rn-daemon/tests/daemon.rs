@@ -1995,6 +1995,53 @@ async fn fail_over_without_a_proxy_says_why_instead_of_guessing() {
 }
 
 #[tokio::test]
+async fn an_edit_tool_call_reaches_the_client_with_its_diffstat() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    // A file that already exists, so the stat is a real diff and not "all new".
+    std::fs::write(workspace.path().join("notes.txt"), "keep\nold\n").unwrap();
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    client
+        .request(ClientRequest::CreateThread {
+            host,
+            harness: HarnessKind::ClaudeCode,
+            workspace_path: workspace.path().display().to_string(),
+            model: "fake-model".into(),
+            prompt: "edit it [[write:notes.txt]]keep\nnew\nmore".into(),
+            attachments: Vec::new(),
+            runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
+            worktree: None,
+        })
+        .await
+        .expect("create thread");
+
+    let event = client
+        .wait_event(|event| {
+            matches!(
+                event,
+                Event::ToolCall { tool_call, .. }
+                    if tool_call.status == h4rn_protocol::ToolCallStatus::Completed
+            )
+        })
+        .await;
+    let (_, Event::ToolCall { tool_call, .. }) = event else {
+        unreachable!("filtered above");
+    };
+    // `old` became `new` and `more` was added: two lines in, one out.
+    assert_eq!(
+        tool_call.stats,
+        Some(h4rn_protocol::ToolStats::Diff {
+            added: 2,
+            removed: 1
+        })
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn turn_completed_carries_the_turns_change_set() {
     let daemon = boot().await;
     let host = host_id_for(&daemon).await;
