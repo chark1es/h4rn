@@ -587,7 +587,7 @@ async fn auto_settle_moves_a_done_thread_to_settled() {
     let options = ThreadManagerOptions {
         settings: LifecycleSettings::default()
             .with_working_exit_grace(chrono::TimeDelta::milliseconds(30))
-            .with_auto_settle(chrono::TimeDelta::milliseconds(180))
+            .with_auto_settle(chrono::TimeDelta::milliseconds(1_000))
             .with_stale_bypass(chrono::TimeDelta::seconds(60)),
         tick_interval: Duration::from_millis(20),
     };
@@ -616,7 +616,7 @@ async fn snooze_hides_a_thread_and_the_ticker_wakes_it() {
     client.wait_for_turn_completed().await;
     client.wait_for_tab(ThreadTab::Done).await;
 
-    let until = chrono::Utc::now() + chrono::Duration::milliseconds(150);
+    let until = chrono::Utc::now() + chrono::Duration::milliseconds(1_000);
     client
         .request(ClientRequest::Snooze {
             thread_id: thread_id.clone(),
