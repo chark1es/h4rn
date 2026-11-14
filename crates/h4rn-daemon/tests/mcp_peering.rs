@@ -20,9 +20,9 @@ use h4rn_daemon::threads::ThreadManagerOptions;
 use h4rn_harness::FakeHarness;
 use h4rn_mcp::session::McpScope;
 use h4rn_protocol::{
-    ClientFrame, ClientRequest, DeviceId, DeviceInfo, Event, HarnessKind, HostId,
-    McpEnabledMatrix, McpRequest, McpServerView, McpSharePolicy, McpTransportInput,
-    McpServerInput, ResponseBody, ServerFrame,
+    ClientFrame, ClientRequest, DeviceId, DeviceInfo, Event, HarnessKind, HostId, McpEnabledMatrix,
+    McpRequest, McpServerInput, McpServerView, McpSharePolicy, McpTransportInput, ResponseBody,
+    ServerFrame,
 };
 use h4rn_transport::keys::DeviceIdentity;
 use h4rn_transport::server::{SecureOptions, SecureService};
@@ -212,7 +212,11 @@ fn fixture_binary() -> std::path::PathBuf {
             .expect("run cargo build for the MCP fixture");
         assert!(status.success(), "building the MCP fixture failed");
     }
-    assert!(path.exists(), "missing fixture binary at {}", path.display());
+    assert!(
+        path.exists(),
+        "missing fixture binary at {}",
+        path.display()
+    );
     path
 }
 
@@ -295,7 +299,12 @@ async fn a_shared_stdio_server_reaches_the_target_daemon_and_unshare_removes_it(
     assert!(matches!(upserted, ResponseBody::McpServer { .. }));
 
     // Nothing is shared yet, so B sees nothing.
-    assert!(!tool_names(&b).await.iter().any(|name| name == "fixture__echo"));
+    assert!(
+        !tool_names(&b)
+            .await
+            .iter()
+            .any(|name| name == "fixture__echo")
+    );
 
     a_client
         .mcp(McpRequest::Share {

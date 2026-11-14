@@ -32,9 +32,7 @@ use h4rn_mcp::sharing::{
     ConfirmationGate, DenyConfirmation, McpTunnel, ShareAudit, ShareAuthorizer, ShareCall,
     ShareError, TunnelSession,
 };
-use h4rn_mcp::upstream::{
-    DEFAULT_TOOL_TIMEOUT, UpstreamError, UpstreamLimits,
-};
+use h4rn_mcp::upstream::{DEFAULT_TOOL_TIMEOUT, UpstreamError, UpstreamLimits};
 use h4rn_protocol::{
     ClientRequest, HarnessKind, HostId, McpRequest, ProtoError, ResponseBody, ThreadId,
 };

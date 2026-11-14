@@ -132,12 +132,18 @@ impl PeerDirectory {
             .clone()
         {
             for peer in &after {
-                if !before.iter().any(|old| old.noise_public == peer.noise_public) {
+                if !before
+                    .iter()
+                    .any(|old| old.noise_public == peer.noise_public)
+                {
                     service.allow(peer.noise_public);
                 }
             }
             for old in &before {
-                if !after.iter().any(|peer| peer.noise_public == old.noise_public) {
+                if !after
+                    .iter()
+                    .any(|peer| peer.noise_public == old.noise_public)
+                {
                     service.revoke(old.noise_public);
                 }
             }
@@ -457,7 +463,9 @@ async fn follow(
     loop {
         match client.recv().await {
             Some(ClientEvent::Frame(frame)) => {
-                let Some(text) = frame.as_text() else { continue };
+                let Some(text) = frame.as_text() else {
+                    continue;
+                };
                 let Ok(value) = serde_json::from_str::<Value>(text) else {
                     continue;
                 };
@@ -508,7 +516,10 @@ async fn reconcile(
             format!(
                 "{}-{}",
                 grant.server,
-                peer.host.as_str().trim_start_matches("host_").replace('_', "-")
+                peer.host
+                    .as_str()
+                    .trim_start_matches("host_")
+                    .replace('_', "-")
             )
         } else {
             grant.server.clone()
@@ -547,7 +558,7 @@ mod tests {
     #[test]
     fn machines_come_from_the_key_and_sources_are_independent() {
         let directory = PeerDirectory::new();
-        let mut changes = directory.subscribe();
+        let changes = directory.subscribe();
         directory.replace_source("connect", vec![peer("host_a", 1)]);
         directory.replace_source("static", vec![peer("host_b", 2)]);
         assert!(changes.has_changed().unwrap());
