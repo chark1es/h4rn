@@ -14,13 +14,32 @@ use h4rn_protocol::{
 /// Picks a model the proxy can serve that is not the one that just failed.
 ///
 /// Returns `None` when there is no other model, or every candidate is excluded
-/// or cooling down.
+/// or cooling down. It is the head of [`eligible_failovers`].
 pub fn pick_failover(
     current: &str,
     policy: &ProxyFailoverPolicy,
     models: &[ProxyModel],
     limits: &ProxyLimits,
 ) -> Option<ProxyFailoverChoice> {
+    eligible_failovers(current, policy, models, limits)
+        .into_iter()
+        .next()
+}
+
+/// Every model (and account) a thread could fail over to, best first.
+///
+/// The order is the policy's: the head is what [`pick_failover`] returns and
+/// what the daemon uses as the default, and the rest are alternatives a person
+/// may choose instead. Models that are excluded or cooling down are left out.
+/// When a healthy credential could still serve `current` (it has no cooldown
+/// for it), "the same model on another account" is offered too: first under
+/// [`ProxyFailoverStrategy::AccountFirst`], last otherwise.
+pub fn eligible_failovers(
+    current: &str,
+    policy: &ProxyFailoverPolicy,
+    models: &[ProxyModel],
+    limits: &ProxyLimits,
+) -> Vec<ProxyFailoverChoice> {
     let now = Utc::now();
     let cooled = cooled_models(limits, now);
     let candidates: Vec<&ProxyModel> = models
@@ -29,9 +48,6 @@ pub fn pick_failover(
         .filter(|model| !policy.exclude.iter().any(|excluded| excluded == &model.id))
         .filter(|model| !cooled.contains(&model.id))
         .collect();
-    if candidates.is_empty() {
-        return None;
-    }
 
     let family = family_of(current);
     let healthy_account = |model: &str| -> Option<String> {
@@ -53,38 +69,65 @@ pub fn pick_failover(
             })
     };
 
-    let pick = match policy.strategy {
-        ProxyFailoverStrategy::SameFamilyFirst => candidates
-            .iter()
-            .find(|model| family_of(&model.id) == family)
-            .copied()
-            .or_else(|| candidates.first().copied()),
-        ProxyFailoverStrategy::AccountFirst => candidates
-            .iter()
-            .find(|model| healthy_account(&model.id).is_some())
-            .copied()
-            .or_else(|| candidates.first().copied()),
-        ProxyFailoverStrategy::AnyModel => candidates.first().copied(),
-    }?;
-
-    let account = healthy_account(&pick.id);
-    let mut reason = match policy.strategy {
-        ProxyFailoverStrategy::SameFamilyFirst if family_of(&pick.id) == family => {
-            format!("same family as `{current}` and not cooling down")
+    let mut ordered = candidates;
+    match policy.strategy {
+        ProxyFailoverStrategy::SameFamilyFirst => {
+            ordered.sort_by_key(|model| family_of(&model.id) != family);
         }
-        ProxyFailoverStrategy::AccountFirst if account.is_some() => {
-            "a credential can serve this model without a cooldown".to_owned()
+        ProxyFailoverStrategy::AccountFirst => {
+            ordered.sort_by_key(|model| healthy_account(&model.id).is_none());
         }
-        _ => format!("`{current}` was limited; this model has no active cooldown"),
-    };
-    if !limits.available {
-        reason.push_str(" (credential cooldowns were unavailable)");
+        ProxyFailoverStrategy::AnyModel => {}
     }
-    Some(ProxyFailoverChoice {
-        model: pick.id.clone(),
-        account,
-        reason,
-    })
+
+    let mut choices: Vec<ProxyFailoverChoice> = ordered
+        .iter()
+        .map(|pick| {
+            let account = healthy_account(&pick.id);
+            let mut reason = match policy.strategy {
+                ProxyFailoverStrategy::SameFamilyFirst if family_of(&pick.id) == family => {
+                    format!("same family as `{current}` and not cooling down")
+                }
+                ProxyFailoverStrategy::AccountFirst if account.is_some() => {
+                    "a credential can serve this model without a cooldown".to_owned()
+                }
+                _ => format!("`{current}` was limited; this model has no active cooldown"),
+            };
+            if !limits.available {
+                reason.push_str(" (credential cooldowns were unavailable)");
+            }
+            ProxyFailoverChoice {
+                model: pick.id.clone(),
+                account,
+                reason,
+            }
+        })
+        .collect();
+
+    // The same model on an account that is not cooling down for it. It needs
+    // the cooldown snapshot: without one there is nothing to tell accounts
+    // apart.
+    let same_model_elsewhere = (limits.available && !cooled.iter().any(|model| model == current))
+        .then(|| healthy_account(current))
+        .flatten()
+        .filter(|_| {
+            models.iter().any(|model| model.id == current)
+                && !policy.exclude.iter().any(|excluded| excluded == current)
+                && limits.credentials.iter().filter(|c| !c.disabled).count() > 1
+        })
+        .map(|account| ProxyFailoverChoice {
+            model: current.to_owned(),
+            reason: format!("`{current}` on another account that has no cooldown for it"),
+            account: Some(account),
+        });
+    if let Some(choice) = same_model_elsewhere {
+        if matches!(policy.strategy, ProxyFailoverStrategy::AccountFirst) {
+            choices.insert(0, choice);
+        } else {
+            choices.push(choice);
+        }
+    }
+    choices
 }
 
 fn cooled_models(limits: &ProxyLimits, now: chrono::DateTime<Utc>) -> Vec<String> {
@@ -137,6 +180,10 @@ mod tests {
             max_output_tokens: None,
             fork_enriched: false,
         }
+    }
+
+    fn limits_with(credentials: Vec<ProxyCredential>) -> ProxyLimits {
+        limits(credentials)
     }
 
     fn limits(credentials: Vec<ProxyCredential>) -> ProxyLimits {
@@ -215,6 +262,70 @@ mod tests {
         };
         let limits = limits(vec![cooled("a-one"), cooled("b-two")]);
         assert!(pick_failover("a-one", &policy, &models, &limits).is_none());
+    }
+
+    #[test]
+    fn every_eligible_choice_is_listed_best_first() {
+        let models = vec![
+            model("claude-sonnet-5", "anthropic"),
+            model("gpt-6.1-sol", "openai"),
+            model("claude-opus-5", "anthropic"),
+            model("claude-haiku-5", "anthropic"),
+        ];
+        let limits = limits(vec![cooled("claude-haiku-5")]);
+        let all = eligible_failovers(
+            "claude-sonnet-5",
+            &ProxyFailoverPolicy::default(),
+            &models,
+            &limits,
+        );
+        let ids: Vec<&str> = all.iter().map(|choice| choice.model.as_str()).collect();
+        // Same family before other vendors; the cooled model never appears.
+        assert_eq!(ids, ["claude-opus-5", "gpt-6.1-sol"]);
+        assert_eq!(
+            all.first(),
+            pick_failover(
+                "claude-sonnet-5",
+                &ProxyFailoverPolicy::default(),
+                &models,
+                &limits
+            )
+            .as_ref()
+        );
+    }
+
+    #[test]
+    fn another_account_for_the_same_model_is_offered() {
+        let models = vec![model("claude-sonnet-5", "anthropic")];
+        let healthy = |name: &str| ProxyCredential {
+            auth_index: Some(name.into()),
+            name: Some(name.into()),
+            provider: Some("claude".into()),
+            status: None,
+            disabled: false,
+            success: None,
+            failed: None,
+            supports_quota: false,
+            cooldowns: Vec::new(),
+        };
+        let limits = limits_with(vec![healthy("acct-a"), healthy("acct-b")]);
+        let all = eligible_failovers(
+            "claude-sonnet-5",
+            &ProxyFailoverPolicy::default(),
+            &models,
+            &limits,
+        );
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].model, "claude-sonnet-5");
+        assert_eq!(all[0].account.as_deref(), Some("acct-a"));
+        // One account is no alternative.
+        let single = eligible_failovers(
+            "claude-sonnet-5",
+            &ProxyFailoverPolicy::default(),
+            &models,
+            &limits_with(vec![healthy("acct-a")]),
+        );
+        assert!(single.is_empty());
     }
 
     #[test]
