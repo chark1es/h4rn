@@ -167,6 +167,46 @@ describe("foldEvent", () => {
     });
   });
 
+  it("keeps a call's stats when a later update leaves them out", () => {
+    let log = createThreadLog();
+    log = foldEvent(log, {
+      type: "tool_call",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      tool_call: {
+        ...TOOL,
+        name: "edit",
+        status: "running",
+        stats: { kind: "diff", added: 12, removed: 3 },
+      },
+    });
+    log = foldEvent(log, {
+      type: "tool_call",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      tool_call: { ...TOOL, name: "edit", status: "completed" },
+    });
+    expect(log.turns[0]?.items[0]).toMatchObject({
+      kind: "tool",
+      toolCall: { status: "completed", stats: { kind: "diff", added: 12, removed: 3 } },
+    });
+  });
+
+  it("lets a newer count replace an older one", () => {
+    let log = createThreadLog();
+    for (const count of [2, 5]) {
+      log = foldEvent(log, {
+        type: "tool_call",
+        thread_id: "t1",
+        turn_id: "turn_1",
+        tool_call: { ...TOOL, name: "Grep", stats: { kind: "matches", count, unit: "matches" } },
+      });
+    }
+    expect(log.turns[0]?.items[0]).toMatchObject({
+      toolCall: { stats: { kind: "matches", count: 5 } },
+    });
+  });
+
   it("records a delegated item and follows its subagent updates", () => {
     let log = foldEvent(createThreadLog(), {
       type: "item_completed",

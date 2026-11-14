@@ -273,6 +273,7 @@ function historyFor(thread: ThreadSummary): Event[] {
             "src/auth/session.test.ts:12   vi.useFakeTimers();\nsrc/db/pool.ts:28              const openedAt = Date.now();\ntests/setup.ts:9               beforeAll(() => vi.useFakeTimers());",
           started_at: iso(-7_500),
           completed_at: iso(-7_300),
+          stats: { kind: "matches", count: 3, unit: "matches" },
         }),
       },
       {
@@ -304,6 +305,7 @@ function historyFor(thread: ThreadSummary): Event[] {
           summary: "tests/setup.ts",
           started_at: iso(-7_000),
           completed_at: iso(-6_500),
+          stats: { kind: "diff", added: 4, removed: 1 },
         }),
       },
       {
@@ -316,6 +318,7 @@ function historyFor(thread: ThreadSummary): Event[] {
           summary: "src/auth/session.test.ts",
           started_at: iso(-6_400),
           completed_at: iso(-6_000),
+          stats: { kind: "diff", added: 11, removed: 2 },
         }),
       },
       {
@@ -348,7 +351,8 @@ function historyFor(thread: ThreadSummary): Event[] {
         tool_call: toolCall({
           tool_call_id: "tool_b_grep",
           name: "Grep",
-          summary: '"reconnect|since_seq" · 11 matches',
+          summary: '"reconnect|since_seq"',
+          stats: { kind: "matches", count: 11, unit: "matches" },
         }),
       },
       {

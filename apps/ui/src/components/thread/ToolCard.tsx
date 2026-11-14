@@ -4,7 +4,7 @@ import { useState } from "react";
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import type { ToolCall } from "@/gen";
 import { glyphForToolStatus } from "@/lib/agent";
-import { duration } from "@/lib/format";
+import { duration, toolStatsLabel } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 function stringify(value: unknown): string {
@@ -33,6 +33,8 @@ export function ToolCard({ toolCall }: { toolCall: ToolCall }) {
     .join("\n\n");
   const hasDetails = output.length > 0;
   const failed = toolCall.status === "failed" || toolCall.status === "denied";
+  const stats = toolStatsLabel(toolCall.stats);
+  const slow = elapsed !== null && elapsed >= 1000;
 
   return (
     <>
@@ -49,11 +51,22 @@ export function ToolCard({ toolCall }: { toolCall: ToolCall }) {
         <span className="verb">{verbOf(toolCall.name)}</span>
         <span className="tgt">{toolCall.summary}</span>
         <span className={cn("m q-num", failed && "q-danger")}>
-          {elapsed !== null && elapsed >= 1000
+          {stats?.kind === "diff" ? (
+            <span className="pm">
+              <span className="add">+{stats.added}</span>{" "}
+              <span className="del">−{stats.removed}</span>
+            </span>
+          ) : stats ? (
+            stats.text
+          ) : null}
+          {stats && slow ? " · " : null}
+          {slow
             ? duration(elapsed)
-            : elapsed !== null && !failed
+            : !stats && elapsed !== null && !failed
               ? ""
-              : toolCall.status}
+              : !stats
+                ? toolCall.status
+                : null}
         </span>
         <ChevronRightIcon className="q-icon s14 chev" strokeWidth={1.5} aria-hidden />
       </button>

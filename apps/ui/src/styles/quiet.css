@@ -1268,6 +1268,12 @@
   color: var(--fg-3);
   flex: none;
 }
+.q-tool .pm .add {
+  color: var(--add-tx);
+}
+.q-tool .pm .del {
+  color: var(--del-tx);
+}
 .q-tool .st {
   width: 16px;
   display: grid;

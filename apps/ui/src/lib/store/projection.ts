@@ -169,7 +169,15 @@ function messageExists(log: ThreadLog, itemId: string): boolean {
 function upsertTool(turn: StreamTurn, toolCall: ToolCall): void {
   const id = `tool:${toolCall.tool_call_id}`;
   const index = turn.items.findIndex((item) => item.kind === "tool" && item.itemId === id);
-  const item: ToolItem = { kind: "tool", itemId: id, toolCall };
+  const previous = index >= 0 ? turn.items[index] : undefined;
+  // A later update (ACP sends diff content on the first frame only) must not
+  // wipe what an earlier one counted.
+  const stats = toolCall.stats ?? (previous?.kind === "tool" ? previous.toolCall.stats : undefined);
+  const item: ToolItem = {
+    kind: "tool",
+    itemId: id,
+    toolCall: stats === undefined ? toolCall : { ...toolCall, stats },
+  };
   if (index >= 0) {
     turn.items[index] = item;
   } else {

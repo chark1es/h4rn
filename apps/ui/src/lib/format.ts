@@ -1,3 +1,5 @@
+import type { ToolStats } from "@/gen";
+
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
@@ -95,4 +97,28 @@ export function titleFromPrompt(prompt: string): string {
 /** `/home/you/code/api` → `~/code/api`, the form the prototype prints folders in. */
 export function tildePath(path: string): string {
   return path.replace(/^\/(?:home|Users)\/[^/]+(?=\/|$)/, "~");
+}
+
+export type ToolStatsLabel =
+  | { kind: "diff"; added: number; removed: number }
+  | { kind: "text"; text: string };
+
+/**
+ * How a tool row shows what the call did: `+N −M` for an edit, "N matches" or
+ * "N files" for a search. The counts are derived in Rust; this only words them.
+ */
+export function toolStatsLabel(stats: ToolStats | null | undefined): ToolStatsLabel | null {
+  if (!stats) return null;
+  if (stats.kind === "diff") {
+    return { kind: "diff", added: stats.added, removed: stats.removed };
+  }
+  const noun =
+    stats.unit === "files"
+      ? stats.count === 1
+        ? "file"
+        : "files"
+      : stats.count === 1
+        ? "match"
+        : "matches";
+  return { kind: "text", text: `${stats.count} ${noun}` };
 }
