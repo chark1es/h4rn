@@ -1,6 +1,7 @@
 import type {
   HarnessKind,
   McpCaller,
+  McpConflictResolution,
   McpServerStatusKind,
   McpServerView,
   McpTransportView,
@@ -139,6 +140,42 @@ export function callerLabel(caller: McpCaller): string {
     case "remote": {
       const machine = caller.machine ? ` · ${caller.machine}` : "";
       return `Remote${machine}`;
+    }
+  }
+}
+
+/** The four ways to settle a name conflict, in the order the popover lists them. */
+export const CONFLICT_CHOICES = [
+  {
+    value: "keep_mine",
+    label: "Keep mine",
+    hint: "h4rn's server stays; the harness's copy is ignored",
+  },
+  { value: "use_theirs", label: "Use theirs", hint: "The harness's configuration replaces mine" },
+  { value: "rename", label: "Rename theirs", hint: "Import the harness's server under a new name" },
+  { value: "skip", label: "Skip", hint: "Decide later; nothing changes" },
+] as const;
+
+export type ConflictChoice = (typeof CONFLICT_CHOICES)[number]["value"];
+
+/**
+ * The typed resolution for a choice, or `null` when it cannot be sent yet
+ * (a rename with no name). The daemon validates the name itself.
+ */
+export function conflictResolution(
+  choice: ConflictChoice,
+  rename: string,
+): McpConflictResolution | null {
+  switch (choice) {
+    case "keep_mine":
+      return { action: "keep_mine" };
+    case "use_theirs":
+      return { action: "use_theirs" };
+    case "skip":
+      return { action: "skip" };
+    case "rename": {
+      const name = rename.trim();
+      return name ? { action: "rename", name } : null;
     }
   }
 }

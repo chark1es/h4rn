@@ -15,7 +15,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
-import { ChipSelect } from "@/components/common/ChipSelect";
+import { Popover } from "@/components/common/Popover";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -24,7 +24,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import type { HarnessKind, HostId, McpConflictResolution, McpServerView, ProtoError } from "@/gen";
+import type { HarnessKind, HostId, McpServerView, ProtoError } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { useNow } from "@/hooks/use-now";
 import { HARNESS_LABELS, harnessSeed, machineSeed } from "@/lib/entities";
@@ -32,7 +32,10 @@ import { relativeAge } from "@/lib/format";
 import { setLibrarySelected, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 import {
+  CONFLICT_CHOICES,
+  type ConflictChoice,
   callerLabel,
+  conflictResolution,
   conflictText,
   DELIVERY,
   enabledFor,
@@ -191,28 +194,8 @@ function matrixRows(server: McpServerView): MatrixRow[] {
 }
 
 function ConflictCard({ server }: { server: McpServerView }) {
-  const [harness, setHarness] = useState<HarnessKind>(
-    MCP_HARNESSES.includes(server.imported_from as HarnessKind)
-      ? (server.imported_from as HarnessKind)
-      : "claude_code",
-  );
-  const [resolution, setResolution] = useState<string>("keep_mine");
-  const [rename, setRename] = useState("");
-  const [busy, setBusy] = useState(false);
   const text = conflictText(server);
   if (!text) return null;
-
-  const settle = async () => {
-    let target: McpConflictResolution;
-    if (resolution === "use_theirs") target = { action: "use_theirs" };
-    else if (resolution === "rename") target = { action: "rename", name: rename.trim() };
-    else if (resolution === "skip") target = { action: "skip" };
-    else target = { action: "keep_mine" };
-    setBusy(true);
-    await resolveMcpConflict(harness, server.name, target, null);
-    setBusy(false);
-  };
-
   return (
     <div className="q-conflict">
       <TriangleAlertIcon className="q-icon q-warn" aria-hidden />
@@ -222,44 +205,102 @@ function ConflictCard({ server }: { server: McpServerView }) {
           Pick which configuration the harness should see. Nothing is overwritten until you settle
           this.
         </div>
-        <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          <ChipSelect
-            label={`Conflict harness for ${server.name}`}
-            value={harness}
-            options={MCP_HARNESSES.map((entry) => ({ value: entry, label: HARNESS_LABELS[entry] }))}
-            onChange={setHarness}
-          />
-          <ChipSelect
-            label={`Resolution for ${server.name}`}
-            value={resolution}
-            options={[
-              { value: "keep_mine", label: "Keep mine" },
-              { value: "use_theirs", label: "Use theirs" },
-              { value: "rename", label: "Rename theirs" },
-              { value: "skip", label: "Leave unresolved" },
-            ]}
-            onChange={setResolution}
-          />
-          {resolution === "rename" ? (
-            <input
-              className="q-input h-7 max-w-[160px]"
-              value={rename}
-              onChange={(event) => setRename(event.target.value)}
-              placeholder="new name"
-              aria-label={`New name for ${server.name}`}
-            />
-          ) : null}
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => void settle()}
-            disabled={busy || (resolution === "rename" && !rename.trim())}
-          >
-            {busy ? "Resolving…" : "Resolve…"}
-          </Button>
-        </div>
       </div>
+      <Popover
+        label={`Resolve the ${server.name} conflict`}
+        align="end"
+        width={340}
+        trigger={() => "Resolve…"}
+      >
+        {({ close }) => <ResolvePanel server={server} close={close} />}
+      </Popover>
     </div>
+  );
+}
+
+/** The "Resolve…" popover: which harness, which side wins, and a name if renaming. */
+function ResolvePanel({ server, close }: { server: McpServerView; close: () => void }) {
+  const [harness, setHarness] = useState<HarnessKind>(
+    MCP_HARNESSES.includes(server.imported_from as HarnessKind)
+      ? (server.imported_from as HarnessKind)
+      : "claude_code",
+  );
+  const [choice, setChoice] = useState<ConflictChoice>("keep_mine");
+  const [rename, setRename] = useState("");
+  const [busy, setBusy] = useState(false);
+  const target = conflictResolution(choice, rename);
+
+  const settle = async () => {
+    if (!target) return;
+    setBusy(true);
+    const settled = await resolveMcpConflict(harness, server.name, target, null);
+    setBusy(false);
+    if (settled) close();
+  };
+
+  return (
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        void settle();
+      }}
+    >
+      <div style={{ fontWeight: 600, marginBottom: 2 }}>Resolve {server.name}</div>
+      <div className="q-muted" style={{ fontSize: 12, marginBottom: 10 }}>
+        Choose which configuration {HARNESS_LABELS[harness]} should see.
+      </div>
+      <div className="q-seg q-resolve-seg" role="radiogroup" aria-label="Harness">
+        {MCP_HARNESSES.map((entry) => (
+          // biome-ignore lint/a11y/useSemanticElements: a segmented radio group, not a form radio
+          <button
+            key={entry}
+            type="button"
+            role="radio"
+            aria-checked={harness === entry}
+            aria-label={HARNESS_LABELS[entry]}
+            onClick={() => setHarness(entry)}
+          >
+            {HARNESS_LABELS[entry]}
+          </button>
+        ))}
+      </div>
+      <div role="radiogroup" aria-label="Resolution">
+        {CONFLICT_CHOICES.map((option) => (
+          <label key={option.value} className="q-resolve-opt">
+            <input
+              type="radio"
+              name={`resolve-${server.id}`}
+              className="sr-only"
+              checked={choice === option.value}
+              onChange={() => setChoice(option.value)}
+            />
+            <span className={cn("q-radio", choice === option.value && "on")} aria-hidden />
+            <span>
+              <span style={{ fontWeight: 500 }}>{option.label}</span>
+              <span className="q-faint sub">{option.hint}</span>
+            </span>
+          </label>
+        ))}
+      </div>
+      {choice === "rename" ? (
+        <input
+          className="q-input"
+          style={{ marginTop: 8 }}
+          value={rename}
+          onChange={(event) => setRename(event.target.value)}
+          placeholder="New name"
+          aria-label={`New name for ${server.name}`}
+        />
+      ) : null}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 12 }}>
+        <button type="button" className="q-btn ghost" onClick={close}>
+          Cancel
+        </button>
+        <button type="submit" className="q-btn primary" disabled={busy || !target}>
+          {busy ? "Resolving…" : "Resolve"}
+        </button>
+      </div>
+    </form>
   );
 }
 

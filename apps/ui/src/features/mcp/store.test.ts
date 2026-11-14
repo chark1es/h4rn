@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { McpRequest, McpServerView, ResponseBody } from "@/gen";
 import { H4rnRequestError, protoError } from "@/lib/client/errors";
 import { getState, store } from "@/lib/store/appStore";
+import { CONFLICT_CHOICES, conflictResolution } from "./labels";
 import {
   applyMcpEvent,
   getMcpState,
@@ -164,5 +165,30 @@ describe("MCP store", () => {
     });
     expect(await setMcpEnabled("missing", { harness: "codex" }, false)).toBe(false);
     expect(requests).toHaveLength(0);
+  });
+});
+
+describe("conflict resolution", () => {
+  it("lists the four choices the popover offers", () => {
+    expect(CONFLICT_CHOICES.map((choice) => choice.value)).toEqual([
+      "keep_mine",
+      "use_theirs",
+      "rename",
+      "skip",
+    ]);
+  });
+
+  it("maps each choice to the typed request", () => {
+    expect(conflictResolution("keep_mine", "")).toEqual({ action: "keep_mine" });
+    expect(conflictResolution("use_theirs", "ignored")).toEqual({ action: "use_theirs" });
+    expect(conflictResolution("skip", "")).toEqual({ action: "skip" });
+    expect(conflictResolution("rename", "  playwright-2 ")).toEqual({
+      action: "rename",
+      name: "playwright-2",
+    });
+  });
+
+  it("holds a rename back until it has a name", () => {
+    expect(conflictResolution("rename", "   ")).toBeNull();
   });
 });

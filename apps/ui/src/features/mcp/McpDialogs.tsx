@@ -15,7 +15,6 @@ import { Textarea } from "@/components/ui/textarea";
 import type {
   HarnessKind,
   HostId,
-  McpConflictResolution,
   McpImportPreview,
   McpServerInput,
   McpServerView,
@@ -27,6 +26,7 @@ import type {
 } from "@/gen";
 import { HARNESS_LABELS } from "@/lib/entities";
 import { useApp } from "@/lib/store/appStore";
+import { type ConflictChoice, conflictResolution } from "./labels";
 import {
   applyMcpImport,
   loadMcpTools,
@@ -407,14 +407,13 @@ export function McpImportDialog({
     const ok = await applyMcpImport(harness, workspace.trim() || null);
     let conflictOk = true;
     for (const conflict of preview.conflicts) {
-      const choice = resolutions[conflict.name] ?? "skip";
+      const choice = (resolutions[conflict.name] ?? "skip") as ConflictChoice;
       if (choice === "skip") continue;
-      let resolution: McpConflictResolution;
-      if (choice === "use_theirs") resolution = { action: "use_theirs" };
-      else if (choice === "rename") {
-        resolution = { action: "rename", name: (renames[conflict.name] ?? "").trim() };
-      } else if (choice === "keep_mine") resolution = { action: "keep_mine" };
-      else continue;
+      const resolution = conflictResolution(choice, renames[conflict.name] ?? "");
+      if (!resolution) {
+        conflictOk = false;
+        continue;
+      }
       const settled = await resolveMcpConflict(
         harness,
         conflict.name,

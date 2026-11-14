@@ -268,7 +268,8 @@
 .q-seg > button:hover {
   color: var(--fg);
 }
-.q-seg > button[aria-selected="true"] {
+.q-seg > button[aria-selected="true"],
+.q-seg > button[aria-checked="true"] {
   background: var(--bg-raised);
   color: var(--fg);
   box-shadow:
@@ -2696,6 +2697,46 @@
 }
 .q-conflict .t {
   font-weight: 500;
+}
+.q-resolve-seg {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin-bottom: 10px;
+}
+.q-resolve-opt {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 7px 2px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.q-resolve-opt .sub {
+  display: block;
+  font-size: 12px;
+}
+.q-radio {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 1.5px var(--line-2);
+  position: relative;
+}
+.q-radio.on {
+  box-shadow: inset 0 0 0 1.5px var(--accent);
+}
+.q-radio.on::after {
+  content: "";
+  position: absolute;
+  inset: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.q-resolve-opt:has(input:focus-visible) .q-radio {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 
 /* PR */
