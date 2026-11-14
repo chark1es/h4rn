@@ -12,19 +12,18 @@
 //! used only to maintain the allowlist, never to bypass a handshake.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{SinkExt as _, StreamExt as _};
-use h4rn_protocol::{
-    ConnectDevice, PairScope, RelayFrame, RelayFrameKind, RelayOpen, RelayServerEvent,
-};
+use h4rn_protocol::{ConnectDevice, RelayFrame, RelayFrameKind, RelayOpen, RelayServerEvent};
 use h4rn_transport::keys::KEY_LEN;
 use h4rn_transport::server::{Link, LinkError, SecureService};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
+use super::registry::{ConnectEntry, DeviceRegistry};
 use super::{ConnectClient, SessionOrigin};
 use crate::server::{AppState, serve_secure_link};
 
@@ -36,101 +35,6 @@ const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
 /// In-flight relay connections, keyed by `conn_id`.
 type Connections = Arc<Mutex<HashMap<String, mpsc::Sender<Vec<u8>>>>>;
-
-/// Paired devices learned from the relay, keyed by connect device id.
-///
-/// The Noise key is what the transport allowlist and audit trail actually use;
-/// the device id is the human-facing connect id.
-#[derive(Debug, Default)]
-pub struct DeviceRegistry {
-    devices: RwLock<HashMap<String, RegisteredDevice>>,
-}
-
-#[derive(Debug, Clone)]
-struct RegisteredDevice {
-    key: [u8; KEY_LEN],
-    /// Empty means unrestricted (see `ConnectDevice::scopes`).
-    scopes: Vec<PairScope>,
-}
-
-impl DeviceRegistry {
-    /// Registers a device and its Noise key with no scope restriction.
-    pub fn insert(&self, device_id: impl Into<String>, noise_key: [u8; KEY_LEN]) {
-        self.insert_scoped(device_id, noise_key, Vec::new());
-    }
-
-    /// Registers a device with the scopes its pairing granted. Pairing again
-    /// replaces the previous scopes.
-    pub fn insert_scoped(
-        &self,
-        device_id: impl Into<String>,
-        noise_key: [u8; KEY_LEN],
-        scopes: Vec<PairScope>,
-    ) {
-        self.devices
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(
-                device_id.into(),
-                RegisteredDevice {
-                    key: noise_key,
-                    scopes,
-                },
-            );
-    }
-
-    /// The scopes restricting a device, or `None` when it is unrestricted or
-    /// unknown (a direct pairing never passes through connect).
-    pub fn scopes_for(&self, device_id: &str) -> Option<Vec<PairScope>> {
-        self.devices
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(device_id)
-            .filter(|device| !device.scopes.is_empty())
-            .map(|device| device.scopes.clone())
-    }
-
-    /// Removes a device, returning the Noise key that can be revoked.
-    pub fn remove(&self, device_id: &str) -> Option<[u8; KEY_LEN]> {
-        self.devices
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(device_id)
-            .map(|device| device.key)
-    }
-
-    /// The device id owning `key`, for audit attribution.
-    pub fn device_for_key(&self, key: &[u8; KEY_LEN]) -> Option<String> {
-        self.devices
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .find(|(_, candidate)| candidate.key == *key)
-            .map(|(device_id, _)| device_id.clone())
-    }
-
-    /// The Noise key for a device id.
-    pub fn key_for_device(&self, device_id: &str) -> Option<[u8; KEY_LEN]> {
-        self.devices
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(device_id)
-            .map(|device| device.key)
-    }
-
-    /// Number of known devices.
-    pub fn len(&self) -> usize {
-        self.devices
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .len()
-    }
-
-    /// Whether the registry is empty.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
 
 /// Runs the relay connector forever, reconnecting with exponential backoff.
 ///
@@ -245,11 +149,10 @@ async fn handle_event(
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .insert(frame.conn_id.clone(), in_tx);
-                let device_key = open
-                    .device_id
-                    .as_deref()
-                    .and_then(|device_id| registry.key_for_device(device_id));
-                let origin = SessionOrigin::relay(open.device_id, device_key);
+                // The relay's device id is a claim. The session's identity is
+                // the Noise key authenticated by the handshake, resolved in
+                // `serve_secure_link`; a disagreeing claim is discarded there.
+                let origin = SessionOrigin::relay(open.device_id, None);
                 let link = RelayLink {
                     conn_id: frame.conn_id,
                     inbound: in_rx,
@@ -283,8 +186,19 @@ async fn handle_event(
             RelayFrameKind::Ping => {}
         },
         RelayServerEvent::Snapshot { devices, .. } => {
-            for device in devices {
-                register_device(service, registry, &device);
+            // A snapshot is the authoritative list of connect-paired devices:
+            // anything missing was revoked while this daemon was offline.
+            let entries: Vec<ConnectEntry> = devices
+                .iter()
+                .filter_map(|device| connect_entry(device))
+                .collect();
+            let removed = registry.reconcile_connect(&entries);
+            for entry in &entries {
+                service.allow(entry.key);
+            }
+            for key in removed {
+                service.revoke(key);
+                tracing::info!(key = %hex::encode(key), "revoked a device missing from the connect snapshot");
             }
         }
         RelayServerEvent::DevicePaired { device, .. } => {
@@ -315,17 +229,27 @@ async fn handle_event(
     Ok(())
 }
 
-/// Adds a paired device's Noise key to the allowlist.
-fn register_device(service: &SecureService, registry: &DeviceRegistry, device: &ConnectDevice) {
-    let Some(encoded) = device.noise_static_public_key.as_deref() else {
-        return;
-    };
+/// Parses a connect device into a registry entry, skipping malformed keys.
+fn connect_entry(device: &ConnectDevice) -> Option<ConnectEntry> {
+    let encoded = device.noise_static_public_key.as_deref()?;
     let Some(key) = decode_key(encoded) else {
         tracing::warn!(device = %device.id, "paired device has a malformed Noise key");
+        return None;
+    };
+    Some(ConnectEntry {
+        device_id: device.id.clone(),
+        key,
+        scopes: device.scopes.clone(),
+    })
+}
+
+/// Adds a paired device's Noise key to the allowlist and the registry.
+fn register_device(service: &SecureService, registry: &DeviceRegistry, device: &ConnectDevice) {
+    let Some(entry) = connect_entry(device) else {
         return;
     };
-    registry.insert_scoped(device.id.clone(), key, device.scopes.clone());
-    service.allow(key);
+    registry.insert_scoped(entry.device_id, entry.key, entry.scopes);
+    service.allow(entry.key);
 }
 
 fn decode_key(value: &str) -> Option<[u8; KEY_LEN]> {
@@ -370,18 +294,38 @@ impl Drop for RelayLink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use h4rn_protocol::PairScope;
+
+    fn device(id: &str, key: u8, scopes: Vec<PairScope>) -> ConnectDevice {
+        use base64::Engine as _;
+        ConnectDevice {
+            id: id.into(),
+            kind: h4rn_protocol::ConnectDeviceKind::Mobile,
+            name: id.into(),
+            machine_id: None,
+            proof_public_key: String::new(),
+            noise_static_public_key: Some(
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([key; KEY_LEN]),
+            ),
+            platform: None,
+            created_at: chrono::Utc::now(),
+            last_seen: None,
+            revoked_at: None,
+            scopes,
+        }
+    }
 
     #[test]
-    fn the_registry_maps_both_directions() {
-        let registry = DeviceRegistry::default();
-        registry.insert("device-1", [3u8; KEY_LEN]);
-        assert_eq!(registry.len(), 1);
-        assert_eq!(registry.key_for_device("device-1"), Some([3u8; KEY_LEN]));
+    fn register_device_records_scopes_and_allows_the_key() {
+        let service = SecureService::new(h4rn_transport::server::SecureOptions::new(
+            h4rn_transport::keys::DeviceIdentity::generate().unwrap(),
+        ));
+        let registry = DeviceRegistry::in_memory();
+        register_device(&service, &registry, &device("d1", 3, vec![PairScope::View]));
+        assert!(service.is_allowed(&[3u8; KEY_LEN]));
         assert_eq!(
-            registry.device_for_key(&[3u8; KEY_LEN]),
-            Some("device-1".into())
+            registry.scopes_for_key(&[3u8; KEY_LEN]),
+            Some(vec![PairScope::View])
         );
-        assert_eq!(registry.remove("device-1"), Some([3u8; KEY_LEN]));
-        assert!(registry.is_empty());
     }
 }

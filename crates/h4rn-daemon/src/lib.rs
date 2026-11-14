@@ -173,7 +173,7 @@ async fn pair(
     scopes: Vec<h4rn_protocol::PairScope>,
 ) -> anyhow::Result<()> {
     if direct {
-        return direct_pair(config, label);
+        return direct_pair(config, label, scopes);
     }
     let identity = daemon_identity(config)?;
     let client = remote::ConnectClient::new(&config.data_dir, identity)?;
@@ -211,8 +211,23 @@ async fn pair(
     Ok(())
 }
 
+/// The scopes a direct pairing grants: every scope when none were requested
+/// (the owner is at the machine and chose a direct pairing), otherwise exactly
+/// the requested ones plus the always-held `view`.
+pub fn direct_scopes(requested: &[h4rn_protocol::PairScope]) -> Vec<h4rn_protocol::PairScope> {
+    if requested.is_empty() {
+        h4rn_protocol::PairScope::ALL.to_vec()
+    } else {
+        h4rn_protocol::PairScope::normalize(requested.iter().copied())
+    }
+}
+
 /// Writes a LAN/Tailscale pairing for a daemon that is not signed in.
-fn direct_pair(config: &Config, label: Option<String>) -> anyhow::Result<()> {
+fn direct_pair(
+    config: &Config,
+    label: Option<String>,
+    scopes: Vec<h4rn_protocol::PairScope>,
+) -> anyhow::Result<()> {
     use crate::remote::pairing::{
         DEFAULT_DIRECT_TTL_SECS, DirectPairingFile, direct_payload, expiry_hint,
         write_direct_pairing,
@@ -234,6 +249,7 @@ fn direct_pair(config: &Config, label: Option<String>) -> anyhow::Result<()> {
         expires_at,
         endpoints: endpoints.clone(),
         label: label.clone(),
+        scopes: direct_scopes(&scopes),
     };
     let path = write_direct_pairing(&config.data_dir, &pairing)?;
     let payload = direct_payload(&endpoints, identity.public().noise_public, psk, label)?;
@@ -246,6 +262,8 @@ fn direct_pair(config: &Config, label: Option<String>) -> anyhow::Result<()> {
     println!("  {uri}");
     println!();
     println!("  Endpoints: {}", endpoints.join(", "));
+    let granted: Vec<&str> = pairing.scopes.iter().map(|scope| scope.as_str()).collect();
+    println!("  Grants:    {}", granted.join(", "));
     println!("  State:     {}", path.display());
     println!("A running daemon picks this up within a couple of seconds.");
     Ok(())
@@ -253,8 +271,20 @@ fn direct_pair(config: &Config, label: Option<String>) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use h4rn_protocol::PairScope;
+
     #[test]
     fn version_is_not_empty() {
         assert!(!super::version().is_empty());
+    }
+
+    #[test]
+    fn a_direct_pairing_honours_requested_scopes() {
+        // Previously `--scope` was dropped and a direct pairing was always full.
+        assert_eq!(
+            super::direct_scopes(&[PairScope::Files]),
+            vec![PairScope::View, PairScope::Files]
+        );
+        assert_eq!(super::direct_scopes(&[]), PairScope::ALL.to_vec());
     }
 }

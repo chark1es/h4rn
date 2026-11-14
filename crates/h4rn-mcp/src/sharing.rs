@@ -191,8 +191,13 @@ pub trait ConfirmationGate: Send + Sync {
 /// What the owner is asked to approve.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShareCall {
-    /// Verified device id, when the transport supplied one.
+    /// Verified device id of the calling daemon, derived by the owner from the
+    /// authenticated Noise key, never from a caller-supplied claim.
     pub device_id: Option<String>,
+    /// Whether the transport proved the caller holds the registered daemon
+    /// key of `machine`. A call without that proof is never admitted, so
+    /// `allowed_devices: None` means "the target machine's daemon only".
+    pub peer_verified: bool,
     /// Machine that asked.
     pub machine: HostId,
     /// Server name.
@@ -288,6 +293,13 @@ impl ShareAuthorizer {
                     machine: call.machine.clone(),
                 })?;
         let policy = grant.policy;
+        if !call.peer_verified {
+            self.audit
+                .remote_call(call, false, Some("peer is not the target machine"));
+            return Err(ShareError::DeviceNotAllowed {
+                server: record.name.clone(),
+            });
+        }
         if let Some(allowed) = &policy.allowed_devices {
             let admitted = call
                 .device_id
@@ -356,6 +368,7 @@ mod tests {
     fn call(tool: &str) -> ShareCall {
         ShareCall {
             device_id: Some("dev_1".into()),
+            peer_verified: true,
             machine: HostId::new("host_b"),
             server: "github".into(),
             tool: tool.into(),
@@ -415,5 +428,41 @@ mod tests {
         ));
         let (allow, record) = authorizer(policy, Arc::new(AllowConfirmation)).await;
         assert!(allow.authorize(&record, &call("write")).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_policy_without_a_device_list_admits_only_the_verified_machine_daemon() {
+        // `allowed_devices: None` used to admit any caller naming the machine.
+        let (authorizer, record) =
+            authorizer(McpSharePolicy::default(), Arc::new(DenyConfirmation)).await;
+        assert!(authorizer.authorize(&record, &call("read")).await.is_ok());
+        let mut spoofed = call("read");
+        spoofed.peer_verified = false;
+        assert!(matches!(
+            authorizer.authorize(&record, &spoofed).await,
+            Err(ShareError::DeviceNotAllowed { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_explicit_device_list_compares_only_the_verified_id() {
+        let policy = McpSharePolicy {
+            allowed_devices: Some(vec!["dev_1".into()]),
+            ..McpSharePolicy::default()
+        };
+        let (authorizer, record) = authorizer(policy, Arc::new(DenyConfirmation)).await;
+        assert!(authorizer.authorize(&record, &call("read")).await.is_ok());
+        let mut other = call("read");
+        other.device_id = Some("dev_2".into());
+        assert!(matches!(
+            authorizer.authorize(&record, &other).await,
+            Err(ShareError::DeviceNotAllowed { .. })
+        ));
+        let mut anonymous = call("read");
+        anonymous.device_id = None;
+        assert!(matches!(
+            authorizer.authorize(&record, &anonymous).await,
+            Err(ShareError::DeviceNotAllowed { .. })
+        ));
     }
 }

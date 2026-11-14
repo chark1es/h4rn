@@ -860,8 +860,6 @@ impl ClientRequest {
             | Self::ListHosts
             | Self::ListThreads { .. }
             | Self::GetThread { .. }
-            | Self::SetThreadTab { .. }
-            | Self::Snooze { .. }
             | Self::Subscribe { .. }
             | Self::GetBlob { .. }
             | Self::FsDiff { .. }
@@ -894,6 +892,8 @@ impl ClientRequest {
             | Self::CommitUpload { .. }
             | Self::AbortUpload { .. }
             | Self::QueryUpload { .. }
+            | Self::SetThreadTab { .. }
+            | Self::Snooze { .. }
             | Self::CancelResume { .. }
             | Self::ResumeNow { .. }
             | Self::FailOver { .. }
@@ -1045,6 +1045,23 @@ mod tests {
                 Files,
             ),
             (ClientRequest::McpList, View),
+            // Both persist per-thread state, so a view-only device must not
+            // be able to send them.
+            (
+                ClientRequest::SetThreadTab {
+                    thread_id: thread(),
+                    tab: ThreadTab::Working,
+                    pinned: true,
+                },
+                Approve,
+            ),
+            (
+                ClientRequest::Snooze {
+                    thread_id: thread(),
+                    until: None,
+                },
+                Approve,
+            ),
             (ClientRequest::McpRemove { name: "x".into() }, Admin),
         ];
         for (request, expected) in cases {

@@ -269,14 +269,26 @@ impl TerminalManager {
         Ok(())
     }
 
-    /// Writes raw input to a terminal selected by its binary stream id.
-    pub fn input_by_stream(&self, stream_id: u32, data: &[u8]) -> Result<(), TerminalError> {
+    /// Writes raw input to a terminal selected by its binary stream id, on
+    /// behalf of one connection.
+    ///
+    /// The connection must have an attached viewer on that terminal. A stream
+    /// id alone is not a capability: ids are sequential and guessable, so a
+    /// connection that never attached (or is not allowed to) is refused with
+    /// the same error as an unknown stream.
+    pub fn input_by_stream(
+        &self,
+        stream_id: u32,
+        viewer_id: ViewerId,
+        data: &[u8],
+    ) -> Result<(), TerminalError> {
         let terminal_id = lock(&self.stream_ids).get(&stream_id).cloned();
-        let Some(terminal_id) = terminal_id else {
-            return Err(TerminalError::NotFound(TerminalId::new(format!(
-                "stream {stream_id}"
-            ))));
-        };
+        let not_found = || TerminalError::NotFound(TerminalId::new(format!("stream {stream_id}")));
+        let terminal_id = terminal_id.ok_or_else(not_found)?;
+        let session = self.session(&terminal_id)?;
+        if !session.has_viewer(viewer_id) {
+            return Err(not_found());
+        }
         self.input(&terminal_id, data)
     }
 

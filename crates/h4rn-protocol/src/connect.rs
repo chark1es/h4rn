@@ -253,9 +253,9 @@ pub struct ConnectDevice {
     pub last_seen: Option<DateTime<Utc>>,
     /// Revocation time, if revoked.
     pub revoked_at: Option<DateTime<Utc>>,
-    /// Scopes the device was paired with on this machine. Empty means no
-    /// restriction was recorded (a direct pairing or a pre-scope record), which
-    /// the daemon treats as unrestricted.
+    /// Scopes the device was paired with on this machine. An empty list is a
+    /// record without recorded authority, which the daemon reads as `view`
+    /// only: missing authorisation is never widened.
     #[serde(default)]
     pub scopes: Vec<PairScope>,
 }

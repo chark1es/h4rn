@@ -20,7 +20,8 @@ use crate::hosts::HostInventory;
 use crate::journal::{Journal, SqliteJournal};
 use crate::mcp::{McpService, default_confirmation_gate};
 use crate::remote::{
-    ConnectClient, RemoteState, TailscaleMode, advertised_addresses, pairing::read_direct_pairing,
+    ConnectClient, DeviceRegistry, RemoteState, TailscaleMode, advertised_addresses,
+    pairing::read_direct_pairing,
 };
 use crate::server::{self, AppState};
 use crate::subagents::{SubagentManager, SubagentOptions, SubagentProvider};
@@ -40,6 +41,7 @@ pub struct DaemonBuilder {
     mcp: Option<Arc<McpService>>,
     mcp_gate: Option<Arc<dyn h4rn_mcp::sharing::ConfirmationGate>>,
     subagent_options: SubagentOptions,
+    devices: Option<Arc<DeviceRegistry>>,
 }
 
 impl DaemonBuilder {
@@ -56,6 +58,7 @@ impl DaemonBuilder {
             mcp: None,
             mcp_gate: None,
             subagent_options: SubagentOptions::default(),
+            devices: None,
         }
     }
 
@@ -80,6 +83,14 @@ impl DaemonBuilder {
     /// remote clients are expected to use an SSH tunnel or Tailscale.
     pub fn with_secure(mut self, secure: Arc<SecureService>) -> Self {
         self.secure = Some(secure);
+        self
+    }
+
+    /// Supplies the device registry instead of opening `devices.json` in the
+    /// data directory (tests and embedders). Remote access is authorised by
+    /// this registry alone.
+    pub fn with_devices(mut self, devices: Arc<DeviceRegistry>) -> Self {
+        self.devices = Some(devices);
         self
     }
 
@@ -238,7 +249,15 @@ impl DaemonBuilder {
 
         // A signed-in daemon loads its connect session before deciding whether
         // the secure listener is needed: remote access implies `/secure`.
-        let remote = RemoteState::open(&self.config.data_dir, identity.clone())?;
+        let devices = self
+            .devices
+            .clone()
+            .unwrap_or_else(|| Arc::new(DeviceRegistry::open(self.config.devices_path())));
+        let remote = RemoteState::open(
+            &self.config.data_dir,
+            identity.clone(),
+            Arc::clone(&devices),
+        )?;
 
         // The skill registry lives beside the journal and is shared by every
         // client of this daemon. Sync is only wired when connect is signed in;
@@ -257,23 +276,35 @@ impl DaemonBuilder {
             None => secure_from_env(identity.clone(), remote.is_some())?,
         };
 
-        if let Some(service) = &secure
-            && remote.is_some()
-        {
-            // Load the allowlist *before* pointing the service at the file, or
-            // the first persist would overwrite the saved pairings.
+        if let Some(service) = &secure {
+            // The registry is the only source of authorisation, so the
+            // transport allowlist is rebuilt from it. A key the old allowlist
+            // file holds but the registry does not (a pairing from before
+            // scopes were recorded) is not admitted: it must pair again.
+            let known: std::collections::HashSet<_> = devices.keys().into_iter().collect();
+            for key in &known {
+                service.allow(*key);
+            }
             match h4rn_transport::keys::read_allowlist(&self.config.allowlist_path()) {
                 Ok(keys) => {
-                    for key in keys {
-                        service.allow(key);
+                    let orphaned = keys.iter().filter(|key| !known.contains(*key)).count();
+                    if orphaned > 0 {
+                        tracing::warn!(
+                            orphaned,
+                            "ignoring paired devices with no recorded authorisation; pair them again"
+                        );
                     }
                 }
-                Err(error) => tracing::warn!(%error, "could not load the paired-device allowlist"),
+                Err(error) => tracing::debug!(%error, "no legacy allowlist to compare"),
             }
             service.set_allowlist_path(self.config.allowlist_path());
+            // A device that pairs through the one-time secret gets the scopes
+            // the pairing was armed with, recorded before it is allowed.
+            let registry = Arc::clone(&devices);
+            service.set_pairing_hook(Arc::new(move |key| registry.complete_direct(key)));
             tracing::info!(
                 devices = service.allowed_devices().len(),
-                "remote access enabled; joining the relay"
+                "secure transport enabled"
             );
         }
 
@@ -293,6 +324,7 @@ impl DaemonBuilder {
                 .await?,
             ),
         };
+        mcp.set_devices(Arc::clone(&devices));
         // The endpoint is unknown until `bind`; until then `prepare` returns
         // `None` and a session starts without MCP rather than with a bogus URL.
         manager.set_mcp_provider(Arc::clone(&mcp) as Arc<dyn McpSessionProvider>);
@@ -326,6 +358,7 @@ impl DaemonBuilder {
             skills,
             secure,
             remote,
+            devices,
             mcp,
             supervisor: self.supervisor,
             proxy,
@@ -348,6 +381,7 @@ pub struct Daemon {
     skills: Arc<h4rn_skills::SkillsService>,
     secure: Option<Arc<SecureService>>,
     remote: Option<Arc<RemoteState>>,
+    devices: Arc<DeviceRegistry>,
     mcp: Arc<McpService>,
     supervisor: Arc<ProcessSupervisor>,
     proxy: Arc<h4rn_proxy::ProxyService>,
@@ -454,6 +488,7 @@ impl Daemon {
 
         let hosts = Arc::clone(&self.hosts);
         let remote = self.remote;
+        let devices = self.devices;
         let secure = self.secure;
         let mcp = Arc::clone(&self.mcp);
         let config = self.config.clone();
@@ -469,6 +504,7 @@ impl Daemon {
             skills: Arc::clone(&self.skills),
             secure: secure.clone(),
             remote: remote.as_ref().map(|remote| Arc::clone(&remote.audit)),
+            devices: Arc::clone(&devices),
             mcp: Arc::clone(&mcp),
             started: std::time::Instant::now(),
             proxy: Arc::clone(&self.proxy),
@@ -496,14 +532,18 @@ impl Daemon {
                 Arc::clone(&remote.client),
                 Arc::clone(&remote.devices),
             )));
-            remote_tasks.push(tokio::spawn(watch_direct_pairing(
-                Arc::clone(service),
-                config.data_dir.clone(),
-            )));
             remote_tasks.push(tokio::spawn(publish_presence(
                 state.clone(),
                 Arc::clone(&remote.client),
-                config,
+                config.clone(),
+            )));
+        }
+
+        if let Some(service) = &secure {
+            remote_tasks.push(tokio::spawn(watch_direct_pairing(
+                Arc::clone(service),
+                Arc::clone(&devices),
+                config.data_dir.clone(),
             )));
         }
 
@@ -825,7 +865,11 @@ pub(crate) fn machine_hosts(hosts: &HostInventory) -> Vec<MachineHostInput> {
 /// The CLI writes the file; the daemon applies it within a couple of seconds.
 /// The transport clears the PSK after the first successful pairing, so a
 /// second device needs a fresh file. An expired or removed file also clears it.
-async fn watch_direct_pairing(service: Arc<SecureService>, data_dir: PathBuf) {
+async fn watch_direct_pairing(
+    service: Arc<SecureService>,
+    devices: Arc<DeviceRegistry>,
+    data_dir: PathBuf,
+) {
     let mut applied: Option<String> = None;
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(2));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -836,6 +880,9 @@ async fn watch_direct_pairing(service: Arc<SecureService>, data_dir: PathBuf) {
                 if applied.as_deref() != Some(pairing.psk.as_str()) {
                     match pairing.psk() {
                         Ok(psk) => {
+                            // Arm the scopes first: the device that pairs with
+                            // this secret is recorded with exactly these.
+                            devices.arm_direct(pairing.scopes.clone());
                             service.set_psk(psk);
                             applied = Some(pairing.psk.clone());
                             tracing::info!(

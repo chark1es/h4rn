@@ -30,8 +30,8 @@ use axum::{Router, serve};
 use futures::{Sink, SinkExt, Stream, StreamExt};
 use h4rn_protocol::{
     BINARY_HEADER_LEN, BinaryFrame, BinaryKind, ClientFrame, ClientRequest, DeviceId, DeviceInfo,
-    Event, PROTOCOL_VERSION, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame,
-    Topic,
+    Event, PROTOCOL_VERSION, PairScope, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent,
+    ServerFrame, Topic,
 };
 use h4rn_transport::server::{AcceptOutcome, Link, LinkError, SecureService, SessionSender};
 use h4rn_transport::session::AppFrame;
@@ -84,6 +84,8 @@ pub struct AppState {
     pub secure: Option<Arc<SecureService>>,
     /// Remote-action audit trail, when the daemon is signed in to connect.
     pub remote: Option<Arc<RemoteAudit>>,
+    /// Persisted device registry: the only source of remote authorisation.
+    pub devices: Arc<crate::remote::DeviceRegistry>,
     /// CLIProxyAPI profiles and routing (ADR-015).
     pub proxy: Arc<h4rn_proxy::ProxyService>,
     /// The daemon-owned MCP hub (ADR-006).
@@ -223,7 +225,8 @@ async fn secure_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> 
         let link = Box::new(WsLink { socket });
         match service.accept(link).await {
             Ok(AcceptOutcome::New(handle)) => {
-                let origin = SessionOrigin::secure(handle.device);
+                let mut origin = SessionOrigin::secure(handle.device);
+                origin.device_id = state.devices.device_for_key(&handle.device);
                 let (sender, frames) = handle.into_parts();
                 handle_socket(SecureSocket { sender, frames }, state, origin).await;
             }
@@ -254,15 +257,12 @@ pub(crate) async fn serve_secure_link(
 ) {
     match service.accept(link).await {
         Ok(AcceptOutcome::New(handle)) => {
+            // Identity is the key the Noise handshake authenticated. A device id
+            // the relay put in its open frame is only a claim: it is replaced by
+            // the registry's answer for that key, even when they disagree.
             let mut origin = origin;
-            if origin.device_key.is_none() {
-                origin.device_key = Some(handle.device);
-            }
-            if origin.device_id.is_none()
-                && let Some(audit) = &state.remote
-            {
-                origin.device_id = audit.device_id_for_key(&handle.device);
-            }
+            origin.device_key = Some(handle.device);
+            origin.device_id = state.devices.device_for_key(&handle.device);
             let (sender, frames) = handle.into_parts();
             handle_socket(SecureSocket { sender, frames }, state, origin).await;
         }
@@ -557,8 +557,8 @@ impl Connection {
             ));
         }
 
-        if let Some(remote) = &self.state.remote
-            && let Err(error) = remote.authorize(&self.origin, &body)
+        if let Err(error) =
+            crate::remote::authorize_scopes(&self.state.devices, &self.origin, &body)
         {
             tracing::warn!(
                 origin = %self.origin.label(),
@@ -1268,6 +1268,16 @@ impl Connection {
     /// request id to answer.
     fn handle_binary(&mut self, bytes: &[u8]) -> Option<Outbound> {
         let seq = self.last_seq.load(Ordering::Relaxed);
+        if !self.hello_done {
+            return Some(Outbound::Text(binary_error_frame(
+                seq,
+                ProtoError::new(
+                    ProtoErrorCode::Unauthorized,
+                    "the connection has not completed the Hello handshake",
+                    "Send Hello with the device identity before binary frames",
+                ),
+            )));
+        }
         let frame = match BinaryFrame::decode(bytes) {
             Ok(frame) => frame,
             Err(error) => {
@@ -1286,11 +1296,21 @@ impl Connection {
         match frame.kind {
             // A viewer typing into a PTY.
             BinaryKind::PtyInput => {
-                match self
-                    .state
-                    .terminals
-                    .input_by_stream(frame.stream_id, &frame.payload)
-                {
+                // Stream ids are small sequential integers, so possession of
+                // one proves nothing: the same scope a TerminalAttach needs,
+                // and a viewer this very connection attached, are required.
+                if let Err(error) = crate::remote::authorize_scope(
+                    &self.state.devices,
+                    &self.origin,
+                    PairScope::Terminal,
+                ) {
+                    return Some(Outbound::Text(binary_error_frame(seq, error)));
+                }
+                match self.state.terminals.input_by_stream(
+                    frame.stream_id,
+                    self.viewer_id,
+                    &frame.payload,
+                ) {
                     Ok(()) => None,
                     Err(error) => Some(Outbound::Text(binary_error_frame(seq, error.into_proto()))),
                 }
@@ -1298,6 +1318,13 @@ impl Connection {
             // An attachment uploader sending the next chunk. Acknowledge on the
             // same stream so the sender can advance without a round trip.
             BinaryKind::BlobChunk => {
+                if let Err(error) = crate::remote::authorize_scope(
+                    &self.state.devices,
+                    &self.origin,
+                    PairScope::Approve,
+                ) {
+                    return Some(Outbound::Text(binary_error_frame(seq, error)));
+                }
                 match self
                     .state
                     .blobs
