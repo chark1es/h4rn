@@ -148,12 +148,6 @@ export function AutoResumeCards({
                 {absoluteTime(schedule.scheduled_at)}. h4rn resumes the turn at{" "}
                 {absoluteTime(schedule.resume_at)} with its saved context.
               </div>
-              {schedule.failover ? (
-                <div className="q-faint" style={{ marginTop: 6, fontSize: 12 }}>
-                  Will fail over to <span className="q-mono">{schedule.failover.model}</span>
-                  {schedule.failover.account_label ? ` on ${schedule.failover.account_label}` : ""}
-                </div>
-              ) : null}
               {schedule.last_error ? (
                 <div className="q-danger" style={{ marginTop: 6, fontSize: 12 }}>
                   Last attempt failed: {schedule.last_error}

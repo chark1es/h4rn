@@ -5,6 +5,21 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### UI fidelity round 4
+
+- **Apply and restart (Providers).** `ApplyProxyOverrides` interrupts the live turn of every
+  routed harness, drops its session, and the next message starts one with the new routing.
+  Each per-harness override now reports its `config_path` and a redacted `preview` (secrets are
+  `null`, never sent).
+- **Fail over…** options carry an `account_label` (the credential name without directory or
+  extension) and plain-text reasons; the card and the menu name the same account.
+- **Test runs** show `48 passed` / `46 passed · 2 failed` in the tool row's result column
+  (`ToolStats::Tests`, parsed in Rust from the shell output).
+- The phone auto-resume card has its own padded layout; opening the right panel at a narrow
+  width closes the sidebar to make room; every native `<select>` is a `ChipSelect` and a lint
+  rule keeps it that way; the palette gained Deny, Changes, Subagents, IDE, Right panel,
+  Terminal, Sidebar and Pair a device; `bun run lint` reports 0 warnings.
+
 ### Gaps left by UI fidelity round 3
 
 - **Pairing scopes and a real short code (ADR-042).** The Devices checkboxes now choose what the

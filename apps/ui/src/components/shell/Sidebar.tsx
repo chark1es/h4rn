@@ -342,7 +342,7 @@ function HostsPopover({
               </span>
             )}
             {dots(row)}
-            {row.active ? (
+            {row.active && !row.sub ? (
               <CheckIcon className="q-icon s12 q-host-on" strokeWidth={2} aria-label="Active" />
             ) : null}
           </button>

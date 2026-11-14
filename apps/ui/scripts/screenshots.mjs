@@ -446,7 +446,7 @@ const SHOTS = [
     name: "p-usage",
     device: "phone",
     path: "/usage",
-    wait: "text=until auto-resume",
+    wait: "text=Auto-resumes at",
     settle: 1200,
   },
   {

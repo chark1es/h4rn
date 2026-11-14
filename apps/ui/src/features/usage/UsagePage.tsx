@@ -132,7 +132,8 @@ function ScopePicker({ compact = false }: { compact?: boolean }) {
       value={scope}
       options={options}
       onChange={setScope}
-      {...(compact ? { block: true } : { width: 120 })}
+      width={120}
+      {...(compact ? { className: "q-scope-compact" } : {})}
     />
   );
 }
@@ -262,7 +263,7 @@ function UsageChart({ report, metric }: { report: UsageReport; metric: ChartMetr
               transform: "translateY(50%)",
             }}
           >
-            {metric === "cost" ? `$${tick.toFixed(2)}` : tokens(tick)}
+            {metric === "cost" ? `$${tick.toFixed(2)}` : tokens(tick).replace(/\.0(?=[kM]?$)/, "")}
           </span>
         ))}
         {report.buckets.map((point, index) => {

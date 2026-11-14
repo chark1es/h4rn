@@ -253,3 +253,83 @@ There are no gradients, no emoji, no eyebrows and no decorative colour. Type and
    - On `/pairing` with no link, no host name appears, and no two `.q-pair-note` boxes intersect.
    - The palette offers Deny, Terminal, Right panel and Pair a device with an empty query.
    - The approve-chip contrast is ≥ 4.5, and dark `fg-3` on the selected row is ≥ 4.5.
+
+## Round 4 fixes
+
+Measured in headless Chromium against `bun run dev -- --port 1551 --strictPort` with `?mock=1`, at 1440×900, 1100×800, 390×844 and 360×780, light and dark (both themes gave the same result unless a value is listed per theme). `node scripts/screenshots.mjs` captured 98/98 with 0 failures. The dev server is stopped.
+
+### P0
+
+1. **Phone auto-resume card.**
+   - It has its own class, `.q-ph-resume`: 16 px padding, title, 30/36 countdown, "Auto-resumes at 07:20", then a 2-up `Cancel | Resume now` row (44 px) and a full-width `Fail over…` row.
+   - At 390 the card spans 16–374 and the buttons end at 358. At 360 the card spans 16–344 and the buttons end at 328. Every button has `right ≤ card.right − 16`, and `scrollWidth` equals the viewport.
+   - The "Failover ready…" sentence is gone on the phone.
+
+### P1
+
+1. **Right panel at 1100.**
+   - Clicking Right panel (or Ctrl Alt B, or opening the IDE or Files) closes the sidebar when the panel would not fit. Automatic resizes still hide the panel first.
+   - Measured: the panel renders, main is 700 px (floor 560), `aria-pressed="true"`. `aria-pressed` now follows what is on screen (`panelFits`).
+2. **Fail over… copy.**
+   - Rust now sends `account_label` ("anthropic-work", derived in `h4rn-protocol::credential_label`), and the reasons are plain text with no backticks.
+   - The menu reads "Codex hit its limit. Resume now on:", then `claude-sonnet-5-5 · anthropic-work · default`. A reason shows per row only when the reasons differ.
+   - The card no longer shows the warning triangle (0 triangles). The "Failover ready…" line is gone, and the card is 88 px tall (was 130).
+3. **Native selects.**
+   - 0 `<select>` on the 9 routes probed (`/settings/providers`, devices, forges, resume, `/pulls`, `/library`, `/library/skills`, `/usage`, `/ide`) at 1440 and 390 in both themes, and in the ⌘⇧N dialog. That is 38 probes, all 0.
+   - All 12 source sites use `ChipSelect` (added a `block` variant).
+   - `biome.json` enables `correctness/noRestrictedElements` for `select`.
+4. **Providers.**
+   - Capability summary: Health, Management, Model shape, Usage history. The rest is behind "Details".
+   - The host name appears ("CLIProxyAPI on atlas", "Stored on atlas"). "the daemon" appears 0 times and "Provenance" 0 times. The models table shows Model, Maps to, Context, plus a Custom badge on aliases. Cooldowns read "Cooling down · 8 min".
+   - Each enabled override shows its config path (`~/.claude/settings.json`) and a redacted preview. The preview is derived in Rust (`ProxyHarnessOverride.config_path` and `.preview`, secrets are `null`).
+   - **Apply and restart** is new in Rust: `ApplyProxyOverrides` interrupts the live turn of every routed harness and drops the session. The footer reads "Interrupts *Fix flaky auth test* on atlas." and the button enabled after a toggle. Covered by `applying_proxy_overrides_drops_the_sessions_of_routed_harnesses`.
+   - No horizontal overflow at 1440, 390 or 360.
+5. **Phone pair by code.**
+   - With no link the title is "Pair a host" and no host name appears.
+   - Notes: 2 `.q-pair-note` elements, 0 overlap in the normal and error states at 390 and 360.
+   - The code block is centred, the input is full width (342 px at 390), and the body is 15 px.
+   - The hero blobatar is 56 px. Scopes are a read-only check list ("Set on orion.").
+6. **Signed-out Account.**
+   - One danger-soft banner: "Can't reach h4rn-connect at 127.0.0.1:8787. It may not be running." with a Retry button (enabled) and a Details disclosure that holds the browser error.
+   - "Failed to fetch" is not visible outside Details. `Sign in` is a disabled primary button with the reason "Available once the relay is reachable" and becomes "Sign in with {provider}" once the probe succeeds.
+   - The signed-in view has one identity line, "Direct to atlas · 12 ms · encrypted", and the relay URL on its own row.
+7. **Command palette.**
+   - With an empty query and an approval pending it lists Approve, Deny (⌘⌫), Open changes (D), Open subagents (⌘J), Open api in the IDE (⌘E), Show right panel (⌘⌥B), Show terminal (T), Hide sidebar (⌘B) and Pair a device….
+   - Searching "deny", "terminal", "right panel", "changes" and "pair" each puts the matching command first. "deny" lists Deny pending action before *Audit dependency tree*. Ranking is prefix, then word start, then substring, then a last-resort subsequence (unit-tested).
+8. **PR linked thread.** The glyph comes from `glyphForThread(thread, hostOnline)` (the needs-you dot for *Fix flaky auth test*), and the line reads "api · atlas".
+
+### P2
+
+1. **Tool rows.** The completed glyph is a plain 14 px `lucide-check` in `fg-3` (3 of 3 rows). The Bash row shows `48 passed` in the result column from `ToolStats::Tests`, parsed in Rust from the shell output (unit tested), with no `· 48 passed` in the target.
+2. **Contrast.**
+   - Approve chip: 5.09:1 light, 4.66:1 dark (was 3.79 / 3.53).
+   - Selected-row time: 4.82:1 light, 4.73:1 dark (was 4.27 in dark). The selected segment count in dark uses `fg-2`.
+3. **Change-set card.** A 28 px file header ("tests/setup.ts") sits above the inline hunk.
+4. **Dark approval card.** The command well is `oklch(0.172)` on a card of `oklch(0.232)` (was ΔL 0.008).
+5. **Provenance.** At 1100 the `.opt` model is `display:none` (container rule at 820 px).
+6. **Usage.** The axis uses round steps (`niceCeil`: 100k / 50k / 0). Scope is a "Global ▾" chip, so there is 0 scope segment, and on the phone it sits right-aligned above the title. Limit labels read "weekly" or "5-hour" when the message names the window, and otherwise say who reported them.
+7. **MCP.**
+   - "1 header" is singular.
+   - The Resolve… popover locks the harness when the conflict names one.
+   - Skills uses the blocks icon in the settings nav, and the phone MCP list uses the plug icon, a 30 px title and 16 px gutters.
+8. **Devices.** "h4rn web · this device" has no Revoke. The daemon row asks "Disconnect this host?" before revoking.
+9. **Phone pairing consent.** Scopes are a check list, not disabled switches (see P1-5).
+10. **Hosts menu.** No row has a fill (all `rgba(0,0,0,0)`). A trailing check marks only the active machine (`[true,false,false,false]`).
+11. **Phone `/library`.** The Settings tab is `aria-current` (was 0).
+12. **Auto-resume prompt.** `resize:none` with auto-grow.
+13. **Relative time.** "now" replaces "just now" (0 occurrences on the inbox).
+14. **PR.**
+    - Review-thread status reads "Unresolved" in `fg-3`.
+    - The right-column Checks block is `hidden` on the Checks tab.
+    - The list is capped at 880 px.
+15. **Mock clock.**
+    - Turn and tool times derive from each thread's last activity. thr_h now reads "Finished 03:46" at a clock of 06:46, which is 3 h ago and consistent.
+    - The error view reads "stopped answering at 04:46", 2 h before the 06:46 clock, matching the host's "2h".
+
+### Lint
+
+`bun run lint` reports **0 warnings** (was 67: 64 `noDescendingSpecificity`, 2 `useOptionalChain`, 1 unused suppression). The CSS rules were reordered, with no global suppression and no ignore comments added. The only suppression is a justified `useExhaustiveDependencies` on the Retry re-probe effect. The reorder was checked with before/after captures; the only differences were timing noise (clocks, orbs, a loading skeleton).
+
+### Verification
+
+See the commit message of the final commit.
