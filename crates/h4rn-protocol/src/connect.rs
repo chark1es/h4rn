@@ -909,6 +909,39 @@ mod tests {
     }
 
     #[test]
+    fn short_codes_normalise_crockford_style() {
+        assert_eq!(
+            normalize_short_code("abcd-efgh").as_deref(),
+            Some("ABCDEFGH")
+        );
+        assert_eq!(
+            normalize_short_code(" 0o1i lz-23 ").as_deref(),
+            Some("00111Z23")
+        );
+        assert_eq!(normalize_short_code("ABCD-EFG"), None, "too short");
+        assert_eq!(normalize_short_code("ABCD-EFGHJ"), None, "too long");
+        assert_eq!(
+            normalize_short_code("ABCD-EFGU"),
+            None,
+            "U is not in the alphabet"
+        );
+        assert_eq!(normalize_short_code("ABCD-EFG\u{e9}"), None);
+    }
+
+    #[test]
+    fn scopes_always_include_view_and_sort() {
+        let scopes = PairScope::normalize([PairScope::Files, PairScope::Approve, PairScope::Files]);
+        assert_eq!(
+            scopes,
+            vec![PairScope::View, PairScope::Approve, PairScope::Files]
+        );
+        assert_eq!(PairScope::normalize([]), vec![PairScope::View]);
+        assert_eq!(PairScope::parse("admin"), Some(PairScope::Admin));
+        assert_eq!(PairScope::parse("root"), None);
+        assert!(!PairScope::DEFAULT.contains(&PairScope::Admin));
+    }
+
+    #[test]
     fn pairing_payload_roundtrips() {
         let payload = PairingPayload {
             connect_url: "https://connect.example.com".to_string(),

@@ -12,4 +12,9 @@ pairing: PairingInfo,
 /**
  * The string to render as a QR code.
  */
-qr: string, };
+qr: string, 
+/**
+ * Single-use 8-character Crockford base32 code (no separator), a typed
+ * alternative to the QR. Shown once: only a hash is stored.
+ */
+short_code: string, };

@@ -26,6 +26,10 @@ fn database_url() -> String {
 }
 
 async fn test_state() -> AppState {
+    test_state_with(|_| {}).await
+}
+
+async fn test_state_with(tweak: impl FnOnce(&mut Config)) -> AppState {
     let mut config = Config {
         public_base_url: "http://localhost:8787".to_string(),
         database_url: database_url(),
@@ -37,6 +41,7 @@ async fn test_state() -> AppState {
     config.rate_limits.per_ip_per_minute = 10_000;
     config.rate_limits.auth_per_minute = 10_000;
     config.rate_limits.pairing_per_hour = 10_000;
+    tweak(&mut config);
     build_state(config).await.expect("build relay state")
 }
 
@@ -591,4 +596,273 @@ async fn usage_sync_is_idempotent_and_aggregates_by_bucket() {
     .await
     .unwrap();
     assert_eq!(stored, 3, "idempotent retries store one row per row_id");
+}
+
+fn claim_code_body(code: &str, actor: &Actor) -> serde_json::Value {
+    serde_json::json!({
+        "code": code,
+        "device_public_key": b64(SigningKey::from_bytes(&actor.seed).verifying_key().as_bytes()),
+        "noise_static_public_key": b64(&random_bytes(32)),
+        "device_name": "Typed-code phone",
+    })
+}
+
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn short_code_pairing_grants_exactly_the_chosen_scopes() {
+    let state = test_state().await;
+    let subject = Uuid::now_v7().to_string();
+    let daemon =
+        actor_with_subject(&state, ConnectDeviceKind::Daemon, Some("scoped"), &subject).await;
+    let phone = actor_with_subject(&state, ConnectDeviceKind::Mobile, None, &subject).await;
+    let machine_id = daemon.device.machine_id.expect("daemon machine");
+
+    // An unpaired phone holds `view` alone: it can claim, not mint pairings.
+    assert_eq!(
+        state.store.token_scopes(phone.device.id).await.unwrap(),
+        vec!["view".to_string()]
+    );
+    let (status, body) = send(
+        &state,
+        request(
+            Method::POST,
+            "/v1/pairings",
+            Some(&phone),
+            Some(serde_json::json!({"machine_id": machine_id.to_string()})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], "scope_required");
+
+    // The daemon mints a pairing that grants `approve` (and the implied view).
+    let (status, created) = send(
+        &state,
+        request(
+            Method::POST,
+            "/v1/pairings",
+            Some(&daemon),
+            Some(serde_json::json!({
+                "machine_id": machine_id.to_string(),
+                "scopes": ["approve"],
+            })),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(
+        created["pairing"]["scopes"],
+        serde_json::json!(["view", "approve"])
+    );
+    let code = created["short_code"].as_str().unwrap().to_string();
+    assert_eq!(code.len(), 8);
+    assert!(
+        code.bytes()
+            .all(|b| h4rn_protocol::SHORT_CODE_ALPHABET.contains(&b))
+    );
+
+    // A typed code is forgiving about case and separators.
+    let typed = format!(
+        "{}-{}",
+        &code[..4].to_lowercase(),
+        &code[4..].to_lowercase()
+    );
+    let (status, claimed) = send(
+        &state,
+        request(
+            Method::POST,
+            "/v1/pairings/claim-code",
+            Some(&phone),
+            Some(claim_code_body(&typed, &phone)),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{claimed}");
+    assert_eq!(claimed["pairing"]["state"], "claimed");
+    assert_eq!(claimed["machine"]["id"], machine_id.to_string());
+    assert!(
+        claimed["daemon_noise_public_key"]
+            .as_str()
+            .is_some_and(|k| !k.is_empty())
+    );
+
+    // Single use.
+    let (status, again) = send(
+        &state,
+        request(
+            Method::POST,
+            "/v1/pairings/claim-code",
+            Some(&phone),
+            Some(claim_code_body(&code, &phone)),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{again}");
+    assert_eq!(again["code"], "pairing_invalid");
+
+    // The link, the token and the daemon's snapshot all carry exactly the
+    // granted scopes.
+    use h4rn_protocol::PairScope::{Approve, View};
+    assert_eq!(
+        state
+            .store
+            .link_scopes(machine_id, phone.device.id)
+            .await
+            .unwrap(),
+        vec![View, Approve]
+    );
+    let issued = state
+        .store
+        .issue_session(
+            &state.keystore,
+            &state.config,
+            phone.user.id,
+            phone.device.id,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let claims = h4rn_connect::jwt::verify_access_token(
+        &state.keystore,
+        &issued.tokens.access_token,
+        Utc::now(),
+    )
+    .unwrap();
+    assert_eq!(claims.scp, vec!["view".to_string(), "approve".to_string()]);
+    let wires = state.store.paired_device_wires(machine_id).await.unwrap();
+    let wire = wires
+        .iter()
+        .find(|device| device.id == phone.device.id.to_string())
+        .expect("phone in the snapshot");
+    assert_eq!(wire.scopes, vec![View, Approve]);
+
+    // Having claimed without `admin`, the phone can no longer mint pairings.
+    let (status, body) = send(
+        &state,
+        request(
+            Method::POST,
+            "/v1/pairings",
+            Some(&phone),
+            Some(serde_json::json!({"machine_id": machine_id.to_string()})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], "scope_required");
+}
+
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn short_codes_expire_hide_across_users_and_are_rate_limited() {
+    let state = test_state_with(|config| config.rate_limits.pairing_code_per_hour = 4).await;
+    let subject = Uuid::now_v7().to_string();
+    let daemon = actor_with_subject(&state, ConnectDeviceKind::Daemon, Some("m"), &subject).await;
+    let phone = actor_with_subject(&state, ConnectDeviceKind::Mobile, None, &subject).await;
+    let machine_id = daemon.device.machine_id.unwrap();
+
+    let create = |scopes: serde_json::Value| {
+        request(
+            Method::POST,
+            "/v1/pairings",
+            Some(&daemon),
+            Some(serde_json::json!({"machine_id": machine_id.to_string(), "scopes": scopes})),
+        )
+    };
+
+    // An expired pairing's code no longer works.
+    let (_, expired) = send(&state, create(serde_json::json!(["view"]))).await;
+    let pool = sqlx::PgPool::connect(&database_url()).await.unwrap();
+    sqlx::query("UPDATE pairings SET expires_at = now() - interval '1 second' WHERE id = $1")
+        .bind(Uuid::parse_str(expired["pairing"]["id"].as_str().unwrap()).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, body) = send(
+        &state,
+        request(
+            Method::POST,
+            "/v1/pairings/claim-code",
+            Some(&phone),
+            Some(claim_code_body(
+                expired["short_code"].as_str().unwrap(),
+                &phone,
+            )),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "pairing_invalid");
+
+    // Another account's code is indistinguishable from an unknown one.
+    let (_, live) = send(&state, create(serde_json::json!(["view"]))).await;
+    let stranger = actor(&state, ConnectDeviceKind::Mobile, None).await;
+    let (status, body) = send(
+        &state,
+        request(
+            Method::POST,
+            "/v1/pairings/claim-code",
+            Some(&stranger),
+            Some(claim_code_body(
+                live["short_code"].as_str().unwrap(),
+                &stranger,
+            )),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "pairing_invalid");
+
+    // Malformed codes are refused before touching the database.
+    let (status, body) = send(
+        &state,
+        request(
+            Method::POST,
+            "/v1/pairings/claim-code",
+            Some(&phone),
+            Some(claim_code_body("nope", &phone)),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "pairing_code_invalid");
+
+    // Guessing is throttled: after the hourly budget even the live code is
+    // refused, so 40 bits cannot be ground through.
+    let mut refused = None;
+    for attempt in 0..12 {
+        let (status, _) = send(
+            &state,
+            request(
+                Method::POST,
+                "/v1/pairings/claim-code",
+                Some(&phone),
+                Some(claim_code_body("0000-0000", &phone)),
+            ),
+        )
+        .await;
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            refused = Some(attempt);
+            break;
+        }
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    assert!(
+        refused.is_some_and(|n| n < 4),
+        "limit never tripped: {refused:?}"
+    );
+    let (status, body) = send(
+        &state,
+        request(
+            Method::POST,
+            "/v1/pairings/claim-code",
+            Some(&phone),
+            Some(claim_code_body(
+                live["short_code"].as_str().unwrap(),
+                &phone,
+            )),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
 }

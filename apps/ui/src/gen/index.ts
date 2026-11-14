@@ -112,6 +112,7 @@ export type * from "./McpToolInfo";
 export type * from "./McpTransportInput";
 export type * from "./McpTransportView";
 export type * from "./MessageRole";
+export type * from "./PairScope";
 export type * from "./PairingClaimRequest";
 export type * from "./PairingClaimResponse";
 export type * from "./PairingCreateRequest";

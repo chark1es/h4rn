@@ -13,4 +13,9 @@ pairing: PairingInfo,
 /**
  * The machine, now reachable by the device.
  */
-machine: MachineSummary, };
+machine: MachineSummary, 
+/**
+ * The daemon's Noise static public key, base64url. A QR carries it; a
+ * typed code does not, so the response does.
+ */
+daemon_noise_public_key: string, };
