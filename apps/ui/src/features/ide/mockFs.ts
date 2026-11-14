@@ -532,6 +532,20 @@ export class MockFs {
         : request.base_etag === null && current !== null
           ? current
           : null;
+    if (request.base_etag !== null && current === null) {
+      return {
+        path: request.path,
+        etag: "",
+        size_bytes: 0,
+        modified_at: null,
+        conflict: {
+          expected_etag: request.base_etag,
+          current_etag: null,
+          current_content: null,
+          current_encoding: "utf-8",
+        },
+      };
+    }
     if (conflict !== null) {
       return {
         path: request.path,
