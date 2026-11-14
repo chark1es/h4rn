@@ -70,10 +70,9 @@ export function cost(micros: number): string {
   return `$${(micros / 1_000_000).toFixed(2)}`;
 }
 
-export function tokensPerSecond(outputTokens: number, durationMs: number): string {
-  if (durationMs <= 0) return "—";
-  const tps = outputTokens / (durationMs / 1000);
-  if (!Number.isFinite(tps) || tps <= 0) return "—";
+/** The daemon computes tok/s (tool time excluded); this only formats it. */
+export function tokensPerSecond(tps: number | null | undefined): string {
+  if (tps === null || tps === undefined || !Number.isFinite(tps) || tps <= 0) return "—";
   return `${Math.round(tps)}`;
 }
 

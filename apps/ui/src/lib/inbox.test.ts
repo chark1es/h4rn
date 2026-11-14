@@ -42,6 +42,8 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
       cached_input_tokens: 0,
       cost_micros: 0,
       duration_ms: 0,
+      generation_ms: 0,
+      tps: 0,
     },
     needs_attention: false,
     unread: false,
@@ -49,6 +51,7 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     limit: null,
     ttft_ms: null,
     context_window: null,
+    context_fill_percent: null,
     ...overrides,
   };
 }

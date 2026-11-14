@@ -67,7 +67,7 @@ function statusFor(thread: ThreadSummary): { text: string; tone: string } {
     case "idle":
       return { text: thread.tab === "settled" ? "Settled" : "Idle", tone: "" };
     case "running_tool": {
-      const rate = tokensPerSecond(thread.usage.output_tokens, thread.usage.duration_ms);
+      const rate = tokensPerSecond(thread.usage.tps);
       return { text: rate === "—" ? "Running" : `Running · ${rate} tok/s`, tone: "" };
     }
     default:
