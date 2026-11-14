@@ -312,7 +312,7 @@ Measured in headless Chromium against `bun run dev -- --port 1551 --strictPort` 
    - "1 header" is singular.
    - The Resolve… popover locks the harness when the conflict names one.
    - Skills uses the blocks icon in the settings nav, and the phone MCP list uses the plug icon, a 30 px title and 16 px gutters.
-8. **Devices.** "h4rn web · this device" has no Revoke. The daemon row asks "Disconnect this host?" before revoking.
+8. **Devices.** "h4rn web · this device" offers Sign out (the same revoke, with a confirm) instead of Revoke. The daemon row asks "Disconnect this host?" before revoking. The remote e2e signs out through it.
 9. **Phone pairing consent.** Scopes are a check list, not disabled switches (see P1-5).
 10. **Hosts menu.** No row has a fill (all `rgba(0,0,0,0)`). A trailing check marks only the active machine (`[true,false,false,false]`).
 11. **Phone `/library`.** The Settings tab is `aria-current` (was 0).

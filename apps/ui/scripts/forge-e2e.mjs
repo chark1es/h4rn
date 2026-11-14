@@ -172,7 +172,8 @@ async function main() {
     // A thread gives the handoff a workspace and harness.
     await page.getByRole("button", { name: "New thread" }).first().click();
     await page.locator("#new-thread-workspace").fill(workspace);
-    await page.locator("#new-thread-harness").selectOption("claude_code");
+    await page.locator("#new-thread-harness").click();
+    await page.getByRole("menuitem", { name: "Claude Code" }).click();
     await page.locator("#new-thread-task").fill("Reply with exactly: pong");
     await page.waitForFunction(() => {
       const button = [...document.querySelectorAll("button")].find(

@@ -481,7 +481,11 @@ function DeviceRow({
         {editing ? null : confirming ? (
           <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
             <span className="q-faint" style={{ fontSize: 12 }}>
-              {device.kind === "daemon" ? "Disconnect this host?" : "Revoke?"}
+              {current
+                ? "Sign out of this device?"
+                : device.kind === "daemon"
+                  ? "Disconnect this host?"
+                  : "Revoke?"}
             </span>
             <button
               type="button"
@@ -504,7 +508,7 @@ function DeviceRow({
                 });
               }}
             >
-              Revoke
+              {current ? "Sign out" : "Revoke"}
             </button>
           </span>
         ) : (
@@ -517,16 +521,14 @@ function DeviceRow({
             >
               <PencilIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             </button>
-            {current ? null : (
-              <button
-                type="button"
-                className="q-btn danger"
-                style={{ height: 24 }}
-                onClick={() => setConfirming(true)}
-              >
-                Revoke
-              </button>
-            )}
+            <button
+              type="button"
+              className="q-btn danger"
+              style={{ height: 24 }}
+              onClick={() => setConfirming(true)}
+            >
+              {current ? "Sign out" : "Revoke"}
+            </button>
           </span>
         )}
       </td>

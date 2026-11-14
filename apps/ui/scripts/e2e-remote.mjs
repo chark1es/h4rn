@@ -553,7 +553,8 @@ async function main() {
     // the relay; opening it afterwards proves the relay carries real state.
     await page.getByRole("button", { name: "New thread" }).first().click();
     await page.locator("#new-thread-workspace").fill(workspace);
-    await page.locator("#new-thread-harness").selectOption("claude_code");
+    await page.locator("#new-thread-harness").click();
+    await page.getByRole("menuitem", { name: "Claude Code" }).click();
     await page.locator("#new-thread-task").fill("Reply with exactly: remote pong");
     await page.waitForFunction(() => {
       const button = [...document.querySelectorAll("button")].find(
@@ -633,8 +634,9 @@ async function main() {
     const deviceRow = page.getByRole("row").filter({ hasText: "this device" });
     await deviceRow.waitFor({ timeout: 20_000 });
     const logMark = logs.length;
-    await deviceRow.getByRole("button", { name: "Revoke", exact: true }).click();
-    await deviceRow.getByRole("button", { name: "Revoke", exact: true }).click();
+    // This device offers Sign out (the same revoke) instead of Revoke.
+    await deviceRow.getByRole("button", { name: "Sign out", exact: true }).click();
+    await deviceRow.getByRole("button", { name: "Sign out", exact: true }).click();
     await deviceRow.waitFor({ state: "detached", timeout: 20_000 });
 
     // Server-side proof the session ended: the daemon dropped the allowlisted
