@@ -152,9 +152,23 @@ export function AutoResumeSettings() {
               className="q-input"
               value={draft.prompt}
               aria-label="Resume prompt"
-              rows={2}
+              rows={1}
+              ref={(node) => {
+                // Grows with its text instead of showing a resize grip.
+                if (node) {
+                  node.style.height = "auto";
+                  node.style.height = `${node.scrollHeight}px`;
+                }
+              }}
               onChange={(event) => patch({ prompt: event.target.value })}
-              style={{ width: "100%", maxWidth: 520, fontSize: 12.5, padding: 8 }}
+              style={{
+                width: "100%",
+                maxWidth: 520,
+                fontSize: 12.5,
+                padding: 8,
+                resize: "none",
+                overflow: "hidden",
+              }}
             />
           </div>
         </div>

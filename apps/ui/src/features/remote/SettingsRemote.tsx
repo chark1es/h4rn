@@ -70,7 +70,7 @@ function latencyText(ms: number | null | undefined): string {
 function relativeSeen(iso: string | null | undefined, now: number): string {
   if (!iso) return "Never";
   const value = relativeAge(iso, now);
-  return value === "just now" ? "Just now" : `${value} ago`;
+  return value === "now" ? "Just now" : `${value} ago`;
 }
 
 function signedIn(user: unknown): boolean {
@@ -481,7 +481,7 @@ function DeviceRow({
         {editing ? null : confirming ? (
           <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
             <span className="q-faint" style={{ fontSize: 12 }}>
-              Revoke?
+              {device.kind === "daemon" ? "Disconnect this host?" : "Revoke?"}
             </span>
             <button
               type="button"
@@ -517,14 +517,16 @@ function DeviceRow({
             >
               <PencilIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             </button>
-            <button
-              type="button"
-              className="q-btn danger"
-              style={{ height: 24 }}
-              onClick={() => setConfirming(true)}
-            >
-              Revoke
-            </button>
+            {current ? null : (
+              <button
+                type="button"
+                className="q-btn danger"
+                style={{ height: 24 }}
+                onClick={() => setConfirming(true)}
+              >
+                Revoke
+              </button>
+            )}
           </span>
         )}
       </td>

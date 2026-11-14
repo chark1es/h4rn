@@ -85,6 +85,11 @@ export function ChangeSetCard({ turn, summary }: { turn: StreamTurn; summary: Th
         );
       })}
       {first ? (
+        <div className="q-ch-diffhead q-mono" title={first.path}>
+          {first.path}
+        </div>
+      ) : null}
+      {first ? (
         <FileDiff
           path={first.path}
           diff={diff}

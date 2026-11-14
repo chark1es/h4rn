@@ -1,5 +1,5 @@
 //! What a tool call did, as one number: a diffstat for edits, a match count
-//! for searches.
+//! for searches, a pass count for test runs.
 //!
 //! Every adapter normalises its vendor's tool events into
 //! [`h4rn_protocol::ToolCall`]; this module is the one place that reads a
@@ -30,6 +30,7 @@ const MAX_DIFF_LINES: usize = 2_000;
 enum Kind {
     Edit,
     Search,
+    Shell,
     Other,
 }
 
@@ -67,10 +68,20 @@ fn kind_of(name: &str) -> Kind {
         "list_files",
         "find",
     ];
+    const SHELLS: [&str; 6] = [
+        "bash",
+        "shell",
+        "exec_command",
+        "run_command",
+        "run_terminal_cmd",
+        "terminal",
+    ];
     if EDITS.contains(&lower.as_str()) {
         Kind::Edit
     } else if SEARCHES.contains(&lower.as_str()) {
         Kind::Search
+    } else if SHELLS.contains(&lower.as_str()) {
+        Kind::Shell
     } else {
         Kind::Other
     }
@@ -89,8 +100,62 @@ pub fn derive(
     match kind_of(name) {
         Kind::Edit => edit_stats(input, structured),
         Kind::Search => search_stats(output, structured),
+        Kind::Shell => output.and_then(test_stats),
         Kind::Other => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Test runs
+// ---------------------------------------------------------------------------
+
+/// The pass and fail counts a test runner printed ("Tests  48 passed (48)",
+/// "2 failed, 46 passed", "test result: ok. 48 passed; 0 failed"). A command
+/// that printed none of these gets `None`, never a guess.
+fn test_stats(output: &str) -> Option<ToolStats> {
+    // Cargo prints one `test result:` line per test binary; add them up.
+    let cargo: Vec<(u32, u32)> = output
+        .lines()
+        .filter(|line| line.trim_start().starts_with("test result:"))
+        .filter_map(counts_in)
+        .collect();
+    if !cargo.is_empty() {
+        let passed = cargo.iter().map(|(passed, _)| passed).sum();
+        let failed = cargo.iter().map(|(_, failed)| failed).sum();
+        return Some(ToolStats::Tests { passed, failed });
+    }
+    // Everything else prints a summary near the end; the last one wins.
+    output
+        .lines()
+        .rev()
+        .find_map(counts_in)
+        .map(|(passed, failed)| ToolStats::Tests { passed, failed })
+}
+
+/// `(passed, failed)` from one summary line, or `None` when it has neither.
+fn counts_in(line: &str) -> Option<(u32, u32)> {
+    let words: Vec<&str> = line
+        .split(|c: char| c.is_whitespace() || matches!(c, ',' | ';' | '(' | ')' | ':'))
+        .filter(|word| !word.is_empty())
+        .collect();
+    let (mut passed, mut failed, mut seen) = (0u32, 0u32, false);
+    for pair in words.windows(2) {
+        let Ok(count) = pair[0].parse::<u32>() else {
+            continue;
+        };
+        match pair[1] {
+            "passed" => {
+                passed = passed.saturating_add(count);
+                seen = true;
+            }
+            "failed" => {
+                failed = failed.saturating_add(count);
+                seen = true;
+            }
+            _ => {}
+        }
+    }
+    seen.then_some((passed, failed))
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +471,31 @@ mod tests {
 
     fn found(count: u32, unit: MatchUnit) -> Option<ToolStats> {
         Some(ToolStats::Matches { count, unit })
+    }
+
+    #[test]
+    fn test_runs_report_pass_and_fail_counts() {
+        let tests = |passed, failed| Some(ToolStats::Tests { passed, failed });
+        assert_eq!(
+            test_stats(" Test Files  3 passed (3)\n      Tests  48 passed (48)\n"),
+            tests(48, 0)
+        );
+        assert_eq!(
+            test_stats("Tests: 2 failed, 46 passed, 48 total"),
+            tests(46, 2)
+        );
+        assert_eq!(
+            test_stats(
+                "test result: ok. 10 passed; 0 failed; 0 ignored\ntest result: FAILED. 5 passed; 1 failed;"
+            ),
+            tests(15, 1)
+        );
+        assert_eq!(test_stats("compiled in 2s\nno summary here"), None);
+        assert_eq!(
+            derive("Bash", None, Some("Tests  48 passed (48)"), None),
+            tests(48, 0)
+        );
+        assert_eq!(derive("Bash", None, Some("ls -la"), None), None);
     }
 
     #[test]

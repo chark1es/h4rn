@@ -1,4 +1,4 @@
-import { ChevronRightIcon } from "lucide-react";
+import { CheckIcon, ChevronRightIcon } from "lucide-react";
 import { useState } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
@@ -46,7 +46,13 @@ export function ToolCard({ toolCall }: { toolCall: ToolCall }) {
         onClick={() => setOpen((value) => !value)}
       >
         <span className={cn("st", failed && "q-danger")}>
-          <AgentGlyph glyph={glyph} size={14} />
+          {toolCall.status === "completed" ? (
+            // A finished call is a quiet tick. The circled check is the
+            // thread's "done" glyph and must not be read as one.
+            <CheckIcon className="q-icon s14 q-tool-ok" strokeWidth={1.5} aria-label="Completed" />
+          ) : (
+            <AgentGlyph glyph={glyph} size={14} />
+          )}
         </span>
         <span className="verb">{verbOf(toolCall.name)}</span>
         <span className="tgt">{toolCall.summary}</span>

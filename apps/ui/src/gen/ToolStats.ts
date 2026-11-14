@@ -20,4 +20,12 @@ count: number,
 /**
  * What was counted.
  */
-unit: MatchUnit, };
+unit: MatchUnit, } | { "kind": "tests", 
+/**
+ * Tests that passed.
+ */
+passed: number, 
+/**
+ * Tests that failed.
+ */
+failed: number, };

@@ -407,9 +407,8 @@ function historyFor(thread: ThreadSummary): Event[] {
         tool_call_id: `tool_${thread.thread_id}_test`,
         name: "Bash",
         summary:
-          thread.tab === "done"
-            ? "pnpm test --filter session · 48 passed"
-            : "pnpm lint · no findings",
+          thread.tab === "done" ? "pnpm test --filter session" : "pnpm lint · no findings",
+        ...(thread.tab === "done" ? { stats: { kind: "tests", passed: 48, failed: 0 } } : {}),
       }),
     });
     events.push({
@@ -3657,7 +3656,7 @@ class MockDaemon {
           tool_call: toolCall({
             tool_call_id: uid("tool"),
             name: "Bash",
-            summary: "pnpm test --filter auth · 48 passed",
+            summary: "pnpm test --filter auth",
             status: "running",
             completed_at: null,
             started_at: iso(),
@@ -3673,7 +3672,12 @@ class MockDaemon {
               type: "tool_call",
               thread_id: threadId,
               turn_id: turnId,
-              tool_call: { ...lastTool.tool_call, status: "completed", completed_at: iso() },
+              tool_call: {
+                ...lastTool.tool_call,
+                status: "completed",
+                completed_at: iso(),
+                stats: { kind: "tests", passed: 48, failed: 0 },
+              },
             });
           }
           this.emit(threadId, {

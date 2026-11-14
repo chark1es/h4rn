@@ -1,3 +1,4 @@
+import { ChipSelect } from "@/components/common/ChipSelect";
 import { ClockIcon, RefreshCwIcon, TriangleAlertIcon } from "lucide-react";
 import { useEffect } from "react";
 
@@ -121,24 +122,19 @@ function ScopePicker({ compact = false }: { compact?: boolean }) {
   const thread = useApp((state) =>
     state.ui.selectedThreadId ? state.threads[state.ui.selectedThreadId] : undefined,
   );
+  // Scopes that need a thread are offered only when one is open.
+  const options = SCOPES.filter((option) => option.key === "global" || thread).map((option) => ({
+    value: option.key,
+    label: option.label,
+  }));
   return (
-    <div className={cn("q-seg", compact ? undefined : "inline")} role="tablist" aria-label="Scope">
-      {SCOPES.map((option) => (
-        <button
-          key={option.key}
-          type="button"
-          role="tab"
-          aria-selected={scope === option.key}
-          disabled={option.key !== "global" && !thread}
-          title={
-            option.key !== "global" && !thread ? "Open a thread to scope usage to it." : undefined
-          }
-          onClick={() => setScope(option.key)}
-        >
-          {option.label}
-        </button>
-      ))}
-    </div>
+    <ChipSelect
+      label="Scope"
+      value={scope}
+      options={options}
+      onChange={setScope}
+      {...(compact ? { block: true } : { width: 120 })}
+    />
   );
 }
 
@@ -213,6 +209,13 @@ function seriesValue(point: UsageBucketPoint, metric: ChartMetric): number {
   return metric === "cost" ? point.totals.cost_micros / 1_000_000 : bucketTotal(point, metric);
 }
 
+/** Rounds up to 1, 2, 2.5 or 5 times a power of ten, so the axis reads 0 / 50k / 100k. */
+function niceCeil(value: number): number {
+  const power = 10 ** Math.floor(Math.log10(value));
+  const step = [1, 2, 2.5, 5, 10].find((candidate) => candidate * power >= value) ?? 10;
+  return step * power;
+}
+
 function UsageChart({ report, metric }: { report: UsageReport; metric: ChartMetric }) {
   const bucket = report.bucket;
   const labels = report.buckets.map((point) => bucketLabel(point, bucket));
@@ -222,7 +225,7 @@ function UsageChart({ report, metric }: { report: UsageReport; metric: ChartMetr
       return sum + (pointValue ? seriesValue(pointValue, metric) : 0);
     }, 0),
   );
-  const max = Math.max(...totals, 1);
+  const max = niceCeil(Math.max(...totals, 1));
   const ticks = [max, max / 2, 0];
 
   if (report.buckets.length === 0) {
@@ -454,6 +457,19 @@ function Breakdown({ report }: { report: UsageReport }) {
   );
 }
 
+/** Names the window a limit covers when its message does, else who reported it. */
+function limitWindow(limit: import("@/gen").LimitStatus): string {
+  const hours = limit.message?.match(/(\d+)[- ]hour/i);
+  if (hours) return `${hours[1]}-hour`;
+  const named = limit.message?.match(/\b(weekly|daily|monthly)\b/i);
+  if (named?.[1]) return named[1].toLowerCase();
+  return limit.source === "harness"
+    ? "reported by the harness"
+    : limit.source === "proxy"
+      ? "from the proxy"
+      : "from the provider";
+}
+
 function LimitRow({ limit }: { limit: import("@/gen").LimitStatus }) {
   const now = useNow(1_000);
   const thread = useApp((state) => (limit.thread_id ? state.threads[limit.thread_id] : undefined));
@@ -474,7 +490,7 @@ function LimitRow({ limit }: { limit: import("@/gen").LimitStatus }) {
             size={12}
           />
           {harnessLabel(harness)} · {limit.account ?? limit.provider ?? "account"}
-          <span className="q-faint">{limit.source}</span>
+          <span className="q-faint">{limitWindow(limit)}</span>
         </span>
         <span
           className={cn("num", tone ? `q-${tone}` : "")}

@@ -39,8 +39,9 @@ export function secretNames(transport: McpTransportView): string[] {
   return transport.type === "stdio" ? transport.env_keys : transport.header_keys;
 }
 
-export function secretLabel(transport: McpTransportView): string {
-  return transport.type === "stdio" ? "environment variables" : "headers";
+export function secretLabel(transport: McpTransportView, count = 2): string {
+  if (transport.type === "stdio") return count === 1 ? "environment variable" : "environment variables";
+  return count === 1 ? "header" : "headers";
 }
 
 /** The daemon reports missing credentials as a redacted start or call error. */

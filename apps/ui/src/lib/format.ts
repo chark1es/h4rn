@@ -8,7 +8,7 @@ export function relativeAge(iso: string, now = Date.now()): string {
   const then = Date.parse(iso);
   if (!Number.isFinite(then)) return "—";
   const delta = Math.max(0, now - then);
-  if (delta < MINUTE) return "just now";
+  if (delta < MINUTE) return "now";
   if (delta < HOUR) return `${Math.floor(delta / MINUTE)}m`;
   if (delta < DAY) return `${Math.floor(delta / HOUR)}h`;
   return `${Math.floor(delta / DAY)}d`;
@@ -111,6 +111,15 @@ export function toolStatsLabel(stats: ToolStats | null | undefined): ToolStatsLa
   if (!stats) return null;
   if (stats.kind === "diff") {
     return { kind: "diff", added: stats.added, removed: stats.removed };
+  }
+  if (stats.kind === "tests") {
+    return {
+      kind: "text",
+      text:
+        stats.failed > 0
+          ? `${stats.passed} passed · ${stats.failed} failed`
+          : `${stats.passed} passed`,
+    };
   }
   const noun =
     stats.unit === "files"

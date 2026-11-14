@@ -466,6 +466,13 @@ pub enum ToolStats {
         /// What was counted.
         unit: MatchUnit,
     },
+    /// A test run: how many tests passed and failed.
+    Tests {
+        /// Tests that passed.
+        passed: u32,
+        /// Tests that failed.
+        failed: u32,
+    },
 }
 
 /// Filter applied by [`crate::ClientRequest::ListThreads`].

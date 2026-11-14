@@ -12,6 +12,8 @@ import {
   GitPullRequestIcon,
   KeyRoundIcon,
   PanelLeftIcon,
+  BlocksIcon,
+  CheckIcon,
   PlugIcon,
   QrCodeIcon,
   SearchIcon,
@@ -290,7 +292,7 @@ function HostsPopover({
           <button
             key={row.id}
             type="button"
-            className={cn("q-host", row.sub && "sub", row.active && "on")}
+            className={cn("q-host", row.sub && "sub")}
             role="menuitem"
             title={row.harnesses}
             aria-current={row.active ? "true" : undefined}
@@ -340,6 +342,9 @@ function HostsPopover({
               </span>
             )}
             {dots(row)}
+            {row.active ? (
+              <CheckIcon className="q-icon s12 q-host-on" strokeWidth={2} aria-label="Active" />
+            ) : null}
           </button>
         ))
       )}
@@ -1029,7 +1034,7 @@ function SettingsSidebar() {
                       goLibrary("/library/skills");
                     }}
                   >
-                    <PlugIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+                    <BlocksIcon className="q-icon" strokeWidth={1.5} aria-hidden />
                     <span className="lbl">Skills</span>
                     <span className="ct q-num">{skills.length}</span>
                   </button>

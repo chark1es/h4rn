@@ -10,6 +10,7 @@ import {
   Trash2Icon,
   TriangleAlertIcon,
   UploadIcon,
+  PlugIcon,
   WrenchIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -71,7 +72,7 @@ const PRIMARY_HARNESS: HarnessKind = MCP_HARNESSES[0] ?? "claude_code";
 function checkedLabel(checkedAt: number | null, now: number): string {
   if (!checkedAt) return "not checked yet";
   const age = relativeAge(new Date(checkedAt).toISOString(), now);
-  return age === "just now" ? "checked just now" : `checked ${age} ago`;
+  return age === "now" ? "checked just now" : `checked ${age} ago`;
 }
 
 function Health({ server }: { server: McpServerView }) {
@@ -229,6 +230,8 @@ function ResolvePanel({ server, close }: { server: McpServerView; close: () => v
   const [rename, setRename] = useState("");
   const [busy, setBusy] = useState(false);
   const target = conflictResolution(choice, rename);
+  // The conflict names its harness; only an unattributed one asks which.
+  const locked = MCP_HARNESSES.includes(server.imported_from as HarnessKind);
 
   const settle = async () => {
     if (!target) return;
@@ -249,6 +252,11 @@ function ResolvePanel({ server, close }: { server: McpServerView; close: () => v
       <div className="q-muted" style={{ fontSize: 12, marginBottom: 10 }}>
         Choose which configuration {HARNESS_LABELS[harness]} should see.
       </div>
+      {locked ? (
+        <div className="q-faint" style={{ fontSize: 12, marginBottom: 8 }}>
+          The other copy comes from {HARNESS_LABELS[harness]}'s own config.
+        </div>
+      ) : (
       <div className="q-seg q-resolve-seg" role="radiogroup" aria-label="Harness">
         {MCP_HARNESSES.map((entry) => (
           // biome-ignore lint/a11y/useSemanticElements: a segmented radio group, not a form radio
@@ -264,6 +272,7 @@ function ResolvePanel({ server, close }: { server: McpServerView; close: () => v
           </button>
         ))}
       </div>
+      )}
       <div role="radiogroup" aria-label="Resolution">
         {CONFLICT_CHOICES.map((option) => (
           <label key={option.value} className="q-resolve-opt">
@@ -323,7 +332,7 @@ function CredentialField({ server }: { server: McpServerView }) {
               <KeyRoundIcon className="q-icon s12" aria-hidden /> Stored on {remoteHost ?? hostName}
             </span>
             <span className="q-faint" style={{ fontSize: 12 }}>
-              {keys.length} {secretLabel(server.transport)} · values are write-only
+              {keys.length} {secretLabel(server.transport, keys.length)} · values are write-only
             </span>
           </>
         ) : (
@@ -553,10 +562,16 @@ function ServerList({
   return (
     <main className="q-main" aria-label="MCP servers">
       <div className="q-page">
-        <div className="q-wrap" style={{ maxWidth: 860 }}>
+        <div className={cn("q-wrap", isPhone && "q-wrap-phone")} style={{ maxWidth: 860 }}>
           <div className="mb-5 flex items-start gap-3">
             <div className="grow">
-              <h1 className="text-[20px] leading-[26px] font-semibold tracking-[-0.015em]">
+              <h1
+                className={
+                  isPhone
+                    ? "text-[30px] leading-[36px] font-semibold tracking-[-0.02em]"
+                    : "text-[20px] leading-[26px] font-semibold tracking-[-0.015em]"
+                }
+              >
                 MCP servers
               </h1>
               <div className="q-muted mt-1">
@@ -603,7 +618,7 @@ function ServerList({
                     onClick={() => onSelect(server)}
                   >
                     <span style={{ width: 20, color: "var(--fg-2)" }}>
-                      <WrenchIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+                      <PlugIcon className="q-icon" strokeWidth={1.5} aria-hidden />
                     </span>
                     <span className="grow min-w-0">
                       <span className="t block truncate">{server.name}</span>

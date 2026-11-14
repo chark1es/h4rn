@@ -48,8 +48,8 @@ function active(route: Route, key: string): boolean {
   if (key === "settings") {
     return (
       route.kind === "placeholder" &&
-      route.surface === "settings" &&
-      route.path !== "/settings/hosts"
+      (route.surface === "library" ||
+        (route.surface === "settings" && route.path !== "/settings/hosts"))
     );
   }
   return route.kind === "placeholder" && route.surface === key;
