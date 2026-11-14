@@ -599,7 +599,7 @@ function Stats({ report, phone = false }: { report: UsageReport | null; phone?: 
         label="Tokens"
         value={tokens(totals.input_tokens + totals.output_tokens).replace(/[a-zA-Z]+$/, "")}
         unit={tokens(totals.input_tokens + totals.output_tokens).match(/[a-zA-Z]+$/)?.[0]}
-        detail={`${tokens(totals.input_tokens)} in · ${tokens(totals.output_tokens)} out`}
+        detail={`${tokens(totals.input_tokens)} in`}
         spark={spark((point) => point.input_tokens + point.output_tokens)}
       />
       <Stat
@@ -628,7 +628,7 @@ function Stats({ report, phone = false }: { report: UsageReport | null; phone?: 
         <Stat
           label="Runtime"
           value={duration(totals.runtime_ms)}
-          detail="start to finish"
+          detail="wall time"
           spark={spark((point) => point.wall_ms)}
         />
       )}
