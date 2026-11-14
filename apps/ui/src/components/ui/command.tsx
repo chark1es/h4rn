@@ -25,8 +25,10 @@ function CommandDialog({
   showCloseButton = false,
   onOpenAutoFocus,
   onCloseAutoFocus,
+  filter,
   ...props
 }: React.ComponentProps<typeof Dialog> & {
+  filter?: React.ComponentProps<typeof CommandPrimitive>["filter"];
   title?: string;
   description?: string;
   className?: string;
@@ -46,7 +48,7 @@ function CommandDialog({
         onOpenAutoFocus={onOpenAutoFocus}
         onCloseAutoFocus={onCloseAutoFocus}
       >
-        <Command>{children}</Command>
+        <Command {...(filter ? { filter } : {})}>{children}</Command>
       </DialogContent>
     </Dialog>
   );

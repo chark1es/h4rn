@@ -3,10 +3,13 @@ import {
   ChartNoAxesColumnIcon,
   CheckIcon,
   Code2Icon,
+  FileDiffIcon,
   GitPullRequestIcon,
   InboxIcon,
   KeyboardIcon,
   LibraryIcon,
+  PanelLeftIcon,
+  PanelRightIcon,
   PinIcon,
   PlusIcon,
   RefreshCwIcon,
@@ -14,13 +17,17 @@ import {
   ServerIcon,
   SettingsIcon,
   ShieldCheckIcon,
+  SmartphoneIcon,
   SquareIcon,
   SunMoonIcon,
+  TerminalIcon,
+  WorkflowIcon,
+  XIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
-import { ALT, ENTER, KeyGlyphs, MOD, SHIFT } from "@/components/common/Kbd";
+import { ALT, BACKSPACE, ENTER, KeyGlyphs, MOD, SHIFT } from "@/components/common/Kbd";
 import {
   CommandDialog,
   CommandEmpty,
@@ -33,6 +40,7 @@ import {
 } from "@/components/ui/command";
 import { glyphForThread } from "@/lib/agent";
 import { harnessLabel } from "@/lib/entities";
+import { paletteScore } from "@/lib/palette";
 import {
   acknowledgeThread,
   closePalette,
@@ -42,13 +50,24 @@ import {
   openNewThread,
   openShortcuts,
   openThread,
+  pendingApprovalIn,
   requestSearchFocus,
+  respondApproval,
+  setPanelTab,
   setTab,
   setThreadTab,
+  toggleSidebar,
+  togglePanel,
   togglePin,
+  toggleTerminal,
   toggleTheme,
+  toggleView,
   useApp,
 } from "@/lib/store/appStore";
+
+function projectName(path: string): string {
+  return path.split("/").filter(Boolean).pop() ?? path;
+}
 
 export function CommandPalette() {
   const open = useApp((state) => state.ui.paletteOpen);
@@ -56,6 +75,12 @@ export function CommandPalette() {
   const threads = useApp((state) => state.threads);
   const hosts = useApp((state) => state.hosts);
   const connection = useApp((state) => state.connection.status);
+  const sidebarOpen = useApp((state) => state.ui.layout.sidebarOpen);
+  const panelOpen = useApp((state) => state.ui.layout.panelOpen);
+  const terminalOpen = useApp((state) => state.ui.layout.terminalOpen);
+  const approvalId = useApp((state) =>
+    state.ui.route.kind === "thread" ? pendingApprovalIn(state.logs[state.ui.route.threadId]) : null,
+  );
   const [query, setQuery] = useState("");
   const lastFocus = useRef<HTMLElement | null>(null);
 
@@ -111,6 +136,7 @@ export function CommandPalette() {
       onOpenChange={(value) => (value ? undefined : closePalette())}
       title="Command palette"
       description="Search threads, run a command, or move around h4rn."
+      filter={paletteScore}
       onCloseAutoFocus={(event) => {
         event.preventDefault();
         const target = lastFocus.current;
@@ -146,24 +172,47 @@ export function CommandPalette() {
 
         {current ? (
           <CommandGroup heading="This thread">
-            {current.needs_attention || current.agent_state === "awaiting_approval" ? (
-              <CommandItem
-                value="approve pending action go"
-                onSelect={() =>
-                  close(() =>
-                    document
-                      .querySelector<HTMLButtonElement>('[data-approval-action="approve"]')
-                      ?.click(),
-                  )
-                }
-              >
-                <ShieldCheckIcon aria-hidden />
-                Approve pending action
-                <CommandShortcut>
-                  {MOD} {ENTER}
-                </CommandShortcut>
-              </CommandItem>
+            {approvalId ? (
+              <>
+                <CommandItem
+                  value="approve pending action go"
+                  onSelect={() =>
+                    close(() => void respondApproval(current.thread_id, approvalId, "approve"))
+                  }
+                >
+                  <ShieldCheckIcon aria-hidden />
+                  Approve pending action
+                  <CommandShortcut>
+                    {MOD} {ENTER}
+                  </CommandShortcut>
+                </CommandItem>
+                <CommandItem
+                  value="deny pending action refuse"
+                  onSelect={() =>
+                    close(() => void respondApproval(current.thread_id, approvalId, "deny"))
+                  }
+                >
+                  <XIcon aria-hidden />
+                  Deny pending action
+                  <CommandShortcut>
+                    {MOD} {BACKSPACE}
+                  </CommandShortcut>
+                </CommandItem>
+              </>
             ) : null}
+            <CommandItem value="changes diff files" onSelect={() => close(() => setPanelTab("changes"))}>
+              <FileDiffIcon aria-hidden />
+              Open changes
+              <CommandShortcut>D</CommandShortcut>
+            </CommandItem>
+            <CommandItem
+              value="subagents agents tree"
+              onSelect={() => close(() => setPanelTab("subagents"))}
+            >
+              <WorkflowIcon aria-hidden />
+              Open subagents
+              <CommandShortcut>{MOD} J</CommandShortcut>
+            </CommandItem>
             <CommandItem
               value="pin keep working"
               onSelect={() => close(() => void togglePin(current.thread_id))}
@@ -264,6 +313,17 @@ export function CommandPalette() {
             Go to Settled
             <CommandShortcut>{ALT} 3</CommandShortcut>
           </CommandItem>
+          <CommandItem
+            value="pair a device phone qr code"
+            onSelect={() =>
+              close(() =>
+                navigate({ kind: "placeholder", surface: "settings", path: "/settings/devices" }),
+              )
+            }
+          >
+            <SmartphoneIcon aria-hidden />
+            Pair a device…
+          </CommandItem>
           {searching ? (
             <>
               <CommandItem
@@ -330,45 +390,76 @@ export function CommandPalette() {
           ) : null}
         </CommandGroup>
 
-        {searching ? (
-          <CommandGroup heading="View">
-            <CommandItem value="toggle theme dark light" onSelect={() => close(toggleTheme)}>
-              <SunMoonIcon aria-hidden />
-              Toggle theme
+        <CommandGroup heading="View">
+          {current ? (
+            <CommandItem
+              value="open ide editor project"
+              onSelect={() => close(toggleView)}
+            >
+              <Code2Icon aria-hidden />
+              Open {projectName(current.workspace_path)} in the IDE
               <CommandShortcut>
-                {MOD} {SHIFT} L
+                {MOD} E
               </CommandShortcut>
             </CommandItem>
-            <CommandItem value="keyboard shortcuts help" onSelect={() => close(openShortcuts)}>
-              <KeyboardIcon aria-hidden />
-              Keyboard shortcuts
-              <CommandShortcut>?</CommandShortcut>
-            </CommandItem>
-            <CommandItem
-              value="copy thread link"
-              disabled={!current}
-              onSelect={() =>
-                close(() => {
-                  if (!current) return;
-                  void navigator.clipboard?.writeText(
-                    `${window.location.origin}/t/${current.thread_id}`,
-                  );
-                })
-              }
-            >
-              Copy thread link
-            </CommandItem>
-            {connection !== "online" ? (
-              <CommandItem
-                value="reconnect connection"
-                onSelect={() => close(() => getClient().reconnectNow())}
-              >
-                <RefreshCwIcon aria-hidden />
-                Reconnect to the daemon
+          ) : null}
+          <CommandItem value="toggle right panel" onSelect={() => close(togglePanel)}>
+            <PanelRightIcon aria-hidden />
+            {panelOpen ? "Hide right panel" : "Show right panel"}
+            <CommandShortcut>
+              {MOD} {ALT} B
+            </CommandShortcut>
+          </CommandItem>
+          <CommandItem value="toggle terminal shell" onSelect={() => close(toggleTerminal)}>
+            <TerminalIcon aria-hidden />
+            {terminalOpen ? "Hide terminal" : "Show terminal"}
+            <CommandShortcut>T</CommandShortcut>
+          </CommandItem>
+          <CommandItem value="toggle sidebar" onSelect={() => close(toggleSidebar)}>
+            <PanelLeftIcon aria-hidden />
+            {sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+            <CommandShortcut>{MOD} B</CommandShortcut>
+          </CommandItem>
+          {searching ? (
+            <>
+              <CommandItem value="toggle theme dark light" onSelect={() => close(toggleTheme)}>
+                <SunMoonIcon aria-hidden />
+                Toggle theme
+                <CommandShortcut>
+                  {MOD} {SHIFT} L
+                </CommandShortcut>
               </CommandItem>
-            ) : null}
-          </CommandGroup>
-        ) : null}
+              <CommandItem value="keyboard shortcuts help" onSelect={() => close(openShortcuts)}>
+                <KeyboardIcon aria-hidden />
+                Keyboard shortcuts
+                <CommandShortcut>?</CommandShortcut>
+              </CommandItem>
+              <CommandItem
+                value="copy thread link"
+                disabled={!current}
+                onSelect={() =>
+                  close(() => {
+                    if (!current) return;
+                    void navigator.clipboard?.writeText(
+                      `${window.location.origin}/t/${current.thread_id}`,
+                    );
+                  })
+                }
+              >
+                Copy thread link
+              </CommandItem>
+              {connection !== "online" ? (
+                <CommandItem
+                  value="reconnect connection"
+                  onSelect={() => close(() => getClient().reconnectNow())}
+                >
+                  <RefreshCwIcon aria-hidden />
+                  Reconnect to the daemon
+                </CommandItem>
+              ) : null}
+            </>
+          ) : null}
+        </CommandGroup>
       </CommandList>
       <CommandFooter>
         <span>

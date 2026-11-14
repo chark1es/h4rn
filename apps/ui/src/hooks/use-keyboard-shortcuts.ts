@@ -9,6 +9,7 @@ import {
   navigate,
   openNewThread,
   openShortcuts,
+  pendingApprovalIn,
   openThread,
   requestComposerFocus,
   requestFilesFocus,
@@ -44,16 +45,7 @@ function selectedThread(state: ReturnType<typeof getState>) {
 }
 
 function pendingApproval(threadId: string): string | null {
-  const log = getState().logs[threadId];
-  if (!log) return null;
-  for (const turn of log.turns) {
-    for (const item of turn.items) {
-      if (item.kind !== "approval") continue;
-      const status = log.approvals[item.approvalId]?.status ?? "pending";
-      if (status === "pending" || status === "error") return item.approvalId;
-    }
-  }
-  return null;
+  return pendingApprovalIn(getState().logs[threadId]);
 }
 
 /** Global keyboard map from `docs/ux.md`. Sequences never fire inside inputs. */

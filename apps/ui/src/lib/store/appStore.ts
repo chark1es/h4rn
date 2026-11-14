@@ -1059,6 +1059,19 @@ export async function interruptThread(threadId: ThreadId): Promise<void> {
   await runThreadAction(threadId, "Interrupting", { type: "interrupt", thread_id: threadId });
 }
 
+/** The first approval of a thread that still needs an answer, if any. */
+export function pendingApprovalIn(log: ThreadLog | undefined): string | null {
+  if (!log) return null;
+  for (const turn of log.turns) {
+    for (const item of turn.items) {
+      if (item.kind !== "approval") continue;
+      const status = log.approvals[item.approvalId]?.status ?? "pending";
+      if (status === "pending" || status === "error") return item.approvalId;
+    }
+  }
+  return null;
+}
+
 export async function respondApproval(
   threadId: ThreadId,
   approvalId: string,
