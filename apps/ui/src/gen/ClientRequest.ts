@@ -555,23 +555,7 @@ from_version: string | null,
 /**
  * Newer version; `None` uses the current version.
  */
-to_version: string | null, } | { "type": "proxy_probe", 
-/**
- * Base URL to probe.
- */
-base_url: string, } | { "type": "proxy_configure", 
-/**
- * Harness to route.
- */
-harness: HarnessKind, 
-/**
- * Proxy base URL, or `None` to go direct.
- */
-base_url: string | null, 
-/**
- * Whether the proxy is enabled for this harness.
- */
-enabled: boolean, } | { "type": "list_proxy_profiles" } | { "type": "add_proxy_profile", 
+to_version: string | null, } | { "type": "list_proxy_profiles" } | { "type": "add_proxy_profile", 
 /**
  * Profile fields and secrets.
  */

@@ -490,20 +490,6 @@ pub enum ClientRequest {
         #[serde(default)]
         to_version: Option<String>,
     },
-    /// TODO(phase 6): probe a CLIProxyAPI-compatible endpoint (ADR-015).
-    ProxyProbe {
-        /// Base URL to probe.
-        base_url: String,
-    },
-    /// TODO(phase 6): configure proxy routing for one harness.
-    ProxyConfigure {
-        /// Harness to route.
-        harness: HarnessKind,
-        /// Proxy base URL, or `None` to go direct.
-        base_url: Option<String>,
-        /// Whether the proxy is enabled for this harness.
-        enabled: bool,
-    },
     // ------------------------------------------------------------------
     // Phase 5: CLIProxyAPI profiles (ADR-015).
     // ------------------------------------------------------------------
@@ -928,8 +914,6 @@ impl ClientRequest {
             | Self::SkillsImportCommit { .. }
             | Self::SkillsResolveConflict { .. }
             | Self::SkillsSyncNow
-            | Self::ProxyProbe { .. }
-            | Self::ProxyConfigure { .. }
             | Self::AddProxyProfile { .. }
             | Self::UpdateProxyProfile { .. }
             | Self::RemoveProxyProfile { .. }

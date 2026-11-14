@@ -23,4 +23,15 @@ cost_micros: number,
 /**
  * Wall-clock duration of the turn.
  */
-duration_ms: number, };
+duration_ms: number, 
+/**
+ * Time spent generating, wall time minus tool time. Set by the meter
+ * when a turn closes; adapters leave it zero.
+ */
+generation_ms: number, 
+/**
+ * Output tokens per second of generation time (tool time excluded),
+ * rounded; zero when unknown. Derived by [`Usage::refresh_tps`], never by
+ * a client.
+ */
+tps: number, };
