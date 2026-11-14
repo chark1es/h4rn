@@ -3689,6 +3689,23 @@
   color: var(--fg-3);
   margin-top: 6px;
 }
+.q-pair-code {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  max-width: 260px;
+  margin-top: 16px;
+  font-size: 13px;
+  text-align: left;
+}
+.q-pair-code .q-input {
+  height: 44px;
+  font: 500 20px / 28px var(--mono);
+  letter-spacing: 0.08em;
+  text-align: center;
+  text-transform: uppercase;
+}
 .q-pair-note {
   font-size: 13px;
   line-height: 18px;

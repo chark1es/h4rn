@@ -8,7 +8,7 @@
 
 import { useSyncExternalStore } from "react";
 
-import type { ConnectDevice, ConnectUser, MachineSummary, PairingInfo } from "@/gen";
+import type { ConnectDevice, ConnectUser, MachineSummary, PairingInfo, PairScope } from "@/gen";
 import { readBootConfig } from "@/lib/client/config";
 import { takeConnectPair, takeOidcCallback } from "@/lib/platform/pending";
 import {
@@ -38,6 +38,8 @@ import {
   startLogin,
   writeCredentials,
 } from "./connect";
+import { mockOffer, offerFromCreate, type PairingOffer } from "./pairingOffer";
+import { DEFAULT_PAIR_SCOPES, isPairScope, orderedScopes } from "./pairingScopes";
 import { loadConnectClient, resetConnectSession, setConnectClient } from "./session";
 
 export type RemotePhase = "loading" | "signed_out" | "signing_in" | "signed_in" | "error";
@@ -50,11 +52,7 @@ export type DeviceCodeLogin = {
   expiresAt: number;
 };
 
-export type PairingOffer = {
-  id: string;
-  qr: string;
-  expiresAt: number;
-};
+export type { PairingOffer } from "./pairingOffer";
 
 export type RemoteState = {
   phase: RemotePhase;
@@ -255,6 +253,7 @@ function mockDevice(id: string, name: string, kind: ConnectDevice["kind"]): Conn
     created_at: new Date().toISOString(),
     last_seen: new Date().toISOString(),
     revoked_at: null,
+    scopes: kind === "mobile" ? ["view", "approve"] : [],
   };
 }
 
@@ -295,7 +294,7 @@ export function initializeRemote(): void {
     });
     // Mock mode mirrors a phone that just opened a pairing link, so the
     // confirmation screen (scopes, expiry, claim) is reachable in a browser.
-    pendingPairingRaw = `h4rn://pair?c=${MOCK_CONNECT_URL}&m=mock-machine-orion&k=bW9jay1ub2lzZQ&e=${Math.floor(
+    pendingPairingRaw = `h4rn://pair?c=${MOCK_CONNECT_URL}&m=mock-machine-orion&k=bW9jay1ub2lzZQ&p=view,approve&e=${Math.floor(
       (Date.now() + 10 * 60_000) / 1_000,
     )}`;
     return;
@@ -766,6 +765,8 @@ export type ConnectPairingPayload = {
   machineId: string;
   daemonNoiseKey: string;
   expiresAt: number;
+  /** What the host says it will grant. Display only; connect enforces. */
+  scopes: PairScope[];
   raw: string;
 };
 
@@ -797,6 +798,7 @@ export function parseConnectPairing(raw: string): ConnectPairingPayload | null {
     machineId,
     daemonNoiseKey: base64UrlToHex(key),
     expiresAt: expires * 1_000,
+    scopes: orderedScopes((url.searchParams.get("p") ?? "").split(",").filter(isPairScope)),
     raw,
   };
 }
@@ -873,34 +875,30 @@ export async function pairMachine(raw: string): Promise<boolean> {
   }
 }
 
-/** Creates a QR for pairing a new device with a machine. */
-export async function createPairing(machineId: string, ttlMs = 5 * 60_000): Promise<void> {
+/**
+ * Creates a QR and short code for pairing a new device with a machine.
+ *
+ * `scopes` is what the paired device will hold. Replacing a live pairing
+ * revokes the old one first, so changing a checkbox never leaves a second
+ * working code behind.
+ */
+export async function createPairing(
+  machineId: string,
+  scopes: readonly PairScope[] = DEFAULT_PAIR_SCOPES,
+  ttlMs = 5 * 60_000,
+): Promise<void> {
   if (mockFixtures) {
-    patch({
-      pairing: {
-        id: "mock-pairing",
-        qr: `h4rn://pair?c=${MOCK_CONNECT_URL}&m=${machineId}&k=mock&e=${Math.floor(
-          (Date.now() + ttlMs) / 1_000,
-        )}`,
-        expiresAt: Date.now() + ttlMs,
-      },
-    });
+    patch({ pairing: mockOffer(machineId, MOCK_CONNECT_URL, scopes, ttlMs) });
     return;
   }
   const client = await loadConnectClient();
   if (!client) return;
+  const previous = getRemoteState().pairing;
   patch({ busy: "Generating a code" });
   try {
-    const created = await client.createPairing(machineId);
-    const expires = Date.parse(created.pairing.expires_at);
-    patch({
-      pairing: {
-        id: created.pairing.id,
-        qr: created.qr,
-        expiresAt: Number.isFinite(expires) ? expires : Date.now() + ttlMs,
-      },
-      busy: null,
-    });
+    const created = await client.createPairing(machineId, orderedScopes(scopes));
+    patch({ pairing: offerFromCreate(created, ttlMs), busy: null });
+    if (previous) void client.revokePairing(previous.id).catch(() => undefined);
   } catch (error) {
     patch({ busy: null, error: describe(error) });
     pushToast({
@@ -908,6 +906,44 @@ export async function createPairing(machineId: string, ttlMs = 5 * 60_000): Prom
       title: "Could not create a pairing.",
       description: describe(error),
     });
+  }
+}
+
+/** Claims a pairing by the 8-character code typed from the host. */
+export async function pairByCode(code: string): Promise<boolean> {
+  if (mockFixtures) {
+    pushToast({ variant: "success", title: "Paired with atlas." });
+    return true;
+  }
+  const client = await loadConnectClient();
+  if (!client) {
+    patch({ error: "Sign in to h4rn-connect first, then enter the code again." });
+    return false;
+  }
+  patch({ busy: "Claiming pairing", error: null });
+  try {
+    const claimed = await client.claimPairingCode(code, defaultDeviceName());
+    const machine = claimed.machine;
+    // A typed code carries no key: the daemon's comes from connect. That is
+    // weaker than the QR, which pins the key out of band (ADR-029).
+    const active: ActiveRemote = {
+      connectUrl: client.connectUrl,
+      machineId: machine.id,
+      machineName: machine.name,
+      daemonNoiseKey: base64UrlToHex(claimed.daemon_noise_public_key),
+      addresses: machine.addresses,
+      online: machine.online,
+      relay: true,
+    };
+    writeActiveRemote(active);
+    patch({ active, activeMachineId: machine.id, busy: null });
+    await refresh();
+    restartConnection();
+    pushToast({ variant: "success", title: `Paired with ${machine.name}.` });
+    return true;
+  } catch (error) {
+    patch({ busy: null, error: describe(error) });
+    return false;
   }
 }
 

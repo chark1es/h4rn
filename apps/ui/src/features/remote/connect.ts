@@ -22,6 +22,7 @@ import type {
   PairingClaimResponse,
   PairingCreateResponse,
   PairingInfo,
+  PairScope,
   ProviderInfo,
 } from "@/gen";
 import { connect_proof, identity_public } from "@/gen/transport-wasm/h4rn_transport_wasm";
@@ -381,9 +382,10 @@ export class ConnectClient {
     return this.authorizedJson<PairingInfo[]>("GET", "/v1/pairings");
   }
 
-  async createPairing(machineId: string): Promise<PairingCreateResponse> {
+  async createPairing(machineId: string, scopes?: PairScope[]): Promise<PairingCreateResponse> {
     return this.authorizedJson<PairingCreateResponse>("POST", "/v1/pairings", {
       machine_id: machineId,
+      ...(scopes ? { scopes } : {}),
     });
   }
 
@@ -400,6 +402,22 @@ export class ConnectClient {
     };
     return this.authorizedJson<PairingClaimResponse>("POST", "/v1/pairings/claim", {
       payload,
+      device_public_key: publicIdentity.proofPublicKey,
+      noise_static_public_key: publicIdentity.noisePublic,
+      device_name: name,
+    });
+  }
+
+  /** Claims a pairing by the code typed from the daemon, instead of a scanned QR. */
+  async claimPairingCode(code: string, name: string): Promise<PairingClaimResponse> {
+    await loadTransportWasm();
+    const identity = await ensureDeviceIdentity();
+    const publicIdentity = JSON.parse(identity_public(identity)) as {
+      proofPublicKey: string;
+      noisePublic: string;
+    };
+    return this.authorizedJson<PairingClaimResponse>("POST", "/v1/pairings/claim-code", {
+      code,
       device_public_key: publicIdentity.proofPublicKey,
       noise_static_public_key: publicIdentity.noisePublic,
       device_name: name,

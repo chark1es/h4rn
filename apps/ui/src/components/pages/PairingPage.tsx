@@ -1,24 +1,13 @@
 import { useState } from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
-import { pairMachine, pendingPairing, useRemote } from "@/features/remote/remoteStore";
+import { isCompleteShortCode, maskShortCode, SCOPE_OPTIONS } from "@/features/remote/pairingScopes";
+import { pairByCode, pairMachine, pendingPairing, useRemote } from "@/features/remote/remoteStore";
 import { useNow } from "@/hooks/use-now";
 import { machineSeed } from "@/lib/entities";
 import { navigate } from "@/lib/store/appStore";
 
-function ScopeRow({
-  label,
-  sub,
-  on,
-  locked = false,
-  onToggle,
-}: {
-  label: string;
-  sub?: string;
-  on: boolean;
-  locked?: boolean;
-  onToggle?: () => void;
-}) {
+function ScopeRow({ label, sub, on }: { label: string; sub?: string; on: boolean }) {
   return (
     <div className="q-ph-li">
       <div className="grow">
@@ -31,9 +20,8 @@ function ScopeRow({
         role="switch"
         aria-checked={on}
         aria-label={label}
-        aria-disabled={locked || undefined}
-        disabled={locked}
-        onClick={onToggle}
+        aria-disabled
+        disabled
       />
     </div>
   );
@@ -48,17 +36,13 @@ function formatRemaining(ms: number): string {
  * Phone pairing confirmation.
  *
  * The QR or deep link already carries the connect URL, machine id and the
- * daemon's Noise key; this screen asks the person to claim it. Scopes are
- * shown as the fixed connect grant: every paired device sees threads and can
- * approve, and the additional scopes stay host-local.
+ * daemon's Noise key; this screen asks the person to claim it. The scopes are
+ * chosen on the host when it makes the code, so they are shown, not toggled:
+ * the link carries them as a hint and connect enforces the real set. Without a
+ * link, the 8-character code from the host does the same job.
  */
 export function PairingPage() {
-  const [scopes, setScopes] = useState({
-    reply: true,
-    terminal: false,
-    files: false,
-    manage: false,
-  });
+  const [code, setCode] = useState("");
   const [claiming, setClaiming] = useState(false);
   const user = useRemote((state) => state.user);
   const active = useRemote((state) => state.active);
@@ -67,8 +51,6 @@ export function PairingPage() {
   const machines = useRemote((state) => state.machines);
   const now = useNow(1_000);
   const pending = pendingPairing();
-  const toggle = (key: keyof typeof scopes) =>
-    setScopes((current) => ({ ...current, [key]: !current[key] }));
 
   const pendingMachine = pending
     ? machines.find((machine) => machine.id === pending.payload.machineId)
@@ -82,12 +64,8 @@ export function PairingPage() {
     pending !== null && pending.payload.expiresAt > 0 && pending.payload.expiresAt < now;
 
   const claim = async () => {
-    if (!pending) {
-      navigate({ kind: "placeholder", surface: "settings", path: "/settings/devices" });
-      return;
-    }
     setClaiming(true);
-    const ok = await pairMachine(pending.raw);
+    const ok = pending ? await pairMachine(pending.raw) : await pairByCode(code);
     setClaiming(false);
     if (ok) navigate({ kind: "inbox" });
   };
@@ -132,29 +110,16 @@ export function PairingPage() {
           <>
             <div className="q-ph-gh">This phone can</div>
             <div className="q-ph-group">
-              <ScopeRow label="View threads" sub="Always included" on locked />
-              <ScopeRow
-                label="Approve and reply"
-                on={scopes.reply}
-                onToggle={() => toggle("reply")}
-              />
-              <ScopeRow
-                label="Terminal"
-                sub={`Type into shells on ${machineName}`}
-                on={scopes.terminal}
-                onToggle={() => toggle("terminal")}
-              />
-              <ScopeRow
-                label="Files and edits"
-                on={scopes.files}
-                onToggle={() => toggle("files")}
-              />
-              <ScopeRow
-                label="Manage hosts and devices"
-                on={scopes.manage}
-                onToggle={() => toggle("manage")}
-              />
+              {SCOPE_OPTIONS.map((option) => (
+                <ScopeRow
+                  key={option.id}
+                  label={option.label}
+                  sub={option.id === "terminal" ? `Type into shells on ${machineName}` : option.sub}
+                  on={option.locked || pending.payload.scopes.includes(option.id)}
+                />
+              ))}
             </div>
+            <p className="q-pair-note">Chosen on {machineName} when it made this code.</p>
             <div className="q-ph-gh">Also included</div>
             <div className="q-ph-group">
               <div className="q-ph-li">
@@ -178,19 +143,26 @@ export function PairingPage() {
               Open the code on the host from Settings → Devices, then scan it with this device. The
               link brings you back here to confirm.
             </p>
-            <button
-              type="button"
-              className="q-btn secondary"
-              onClick={() =>
-                navigate({
-                  kind: "placeholder",
-                  surface: "settings",
-                  path: "/settings/devices",
-                })
-              }
-            >
-              Open Devices
-            </button>
+            <label className="q-pair-code">
+              <span className="q-muted">Or type the code under the QR</span>
+              <input
+                className="q-input"
+                inputMode="text"
+                autoCapitalize="characters"
+                autoComplete="off"
+                autoCorrect="off"
+                spellCheck={false}
+                placeholder="ABCD-EFGH"
+                aria-label="Pairing code"
+                value={code}
+                onChange={(event) => setCode(maskShortCode(event.target.value))}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && isCompleteShortCode(code) && !claiming) {
+                    void claim();
+                  }
+                }}
+              />
+            </label>
           </div>
         )}
 
@@ -209,15 +181,25 @@ export function PairingPage() {
             ? expired
               ? "Link expired"
               : `Link expires in ${formatRemaining(pending.payload.expiresAt - now)}`
-            : "Waiting for a code"}
+            : "Codes work once and expire in 5 minutes"}
         </div>
         <button
           type="button"
           className="q-btn primary"
-          disabled={claiming || busy !== null || (pending !== null && (expired || alreadyPaired))}
+          disabled={
+            claiming ||
+            busy !== null ||
+            (pending !== null ? expired || alreadyPaired : !isCompleteShortCode(code))
+          }
           onClick={() => (alreadyPaired ? navigate({ kind: "inbox" }) : void claim())}
         >
-          {alreadyPaired ? "Open threads" : claiming || busy ? "Pairing…" : "Pair this phone"}
+          {alreadyPaired
+            ? "Open threads"
+            : claiming || busy
+              ? "Pairing…"
+              : pending
+                ? "Pair this phone"
+                : "Pair with code"}
         </button>
       </div>
     </main>

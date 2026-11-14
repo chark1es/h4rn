@@ -15,7 +15,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ChipSelect } from "@/components/common/ChipSelect";
-import type { ConnectDevice, HostSummary, MachineSummary } from "@/gen";
+import type { ConnectDevice, HostSummary, MachineSummary, PairScope } from "@/gen";
 import { useNow } from "@/hooks/use-now";
 import { harnessLabel, machineSeed } from "@/lib/entities";
 import { relativeAge } from "@/lib/format";
@@ -23,6 +23,14 @@ import { navigate, pushToast, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 
 import { AccountBadge, ConnectSignIn, SignOutButton } from "./ConnectSignIn";
+import {
+  DEFAULT_PAIR_SCOPES,
+  formatShortCode,
+  orderedScopes,
+  SCOPE_OPTIONS,
+  scopesLabel,
+  toggleScope,
+} from "./pairingScopes";
 import { QrCode } from "./QrCode";
 import {
   activateMachine,
@@ -461,7 +469,7 @@ function DeviceRow({
         </span>
       </td>
       <td className="q-muted">{deviceKindLabel(device)}</td>
-      <td className="q-muted">All</td>
+      <td className="q-muted">{scopesLabel(device.scopes)}</td>
       <td>
         {device.last_seen ? (
           <Health tone="on">{relativeSeen(device.last_seen, now)}</Health>
@@ -524,26 +532,6 @@ function DeviceRow({
   );
 }
 
-const PAIR_SCOPES = [
-  { id: "view", label: "View threads", sub: "Always included", locked: true },
-  { id: "approve", label: "Approve and reply", sub: "", locked: false },
-  { id: "terminal", label: "Terminal", sub: "Type into shells", locked: false },
-  { id: "files", label: "Files and edits", sub: "", locked: false },
-  { id: "admin", label: "Manage hosts and devices", sub: "Admin", locked: false },
-] as const;
-
-/** A short code to read aloud, derived from the pairing id (the QR is the credential). */
-function displayCode(id: string): string {
-  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let hash = 2166136261;
-  let out = "";
-  for (let i = 0; out.length < 8; i += 1) {
-    hash = Math.imul(hash ^ (id.charCodeAt(i % id.length) + i), 16777619) >>> 0;
-    out += alphabet[hash % alphabet.length];
-  }
-  return `${out.slice(0, 4)}-${out.slice(4)}`;
-}
-
 export function LiveDevicesForm() {
   const user = useRemote((state) => state.user);
   const device = useRemote((state) => state.device);
@@ -557,13 +545,7 @@ export function LiveDevicesForm() {
   const available = machines;
   const [machineId, setMachineId] = useState(() => activeId ?? available[0]?.id ?? "");
   const [copied, setCopied] = useState(false);
-  const [scopes, setScopes] = useState<Set<string>>(() => new Set(["approve"]));
-  const toggleScope = (id: string) =>
-    setScopes((current) => {
-      const next = new Set(current);
-      if (!next.delete(id)) next.add(id);
-      return next;
-    });
+  const [scopes, setScopes] = useState<PairScope[]>(() => [...DEFAULT_PAIR_SCOPES]);
   const expiring = useRef(false);
 
   useEffect(() => {
@@ -572,8 +554,17 @@ export function LiveDevicesForm() {
 
   useEffect(() => {
     if (!isSignedIn || pairing || !machineId) return;
-    void createPairing(machineId);
-  }, [isSignedIn, pairing, machineId]);
+    void createPairing(machineId, scopes);
+  }, [isSignedIn, pairing, machineId, scopes]);
+
+  // The scopes are baked into the pairing when connect creates it, so changing
+  // a checkbox asks for a new code. The wait keeps a run of clicks to one call.
+  const offeredScopes = pairing?.scopes.join(",");
+  useEffect(() => {
+    if (!pairing || !machineId || offeredScopes === orderedScopes(scopes).join(",")) return;
+    const timer = window.setTimeout(() => void createPairing(machineId, scopes), 350);
+    return () => window.clearTimeout(timer);
+  }, [scopes, offeredScopes, pairing, machineId]);
 
   const pairingExpired = pairing !== null && pairing.expiresAt <= now;
 
@@ -584,8 +575,8 @@ export function LiveDevicesForm() {
     }
     if (!pairingExpired || expiring.current) return;
     expiring.current = true;
-    void createPairing(machineId);
-  }, [pairing, pairingExpired, machineId]);
+    void createPairing(machineId, scopes);
+  }, [pairing, pairingExpired, machineId, scopes]);
 
   const pairingMachine = available.find((machine) => machine.id === machineId);
   const remaining = pairing ? Math.max(0, pairing.expiresAt - now) : 0;
@@ -659,27 +650,27 @@ export function LiveDevicesForm() {
                       Scan with the h4rn app, or enter this code
                     </div>
                     <div className="q-code-big" style={{ margin: "4px 0 2px" }}>
-                      {displayCode(pairing.id)}
+                      {formatShortCode(pairing.shortCode)}
                     </div>
                     <div className="q-faint" style={{ fontSize: 12, marginBottom: 14 }}>
                       Works once, for one device. Pairs with{" "}
                       {pairingMachine?.name ?? "this machine"}.
                     </div>
                     <div className="q-pair-scopes">
-                      {PAIR_SCOPES.map((scope) => (
+                      {SCOPE_OPTIONS.map((scope) => (
                         <label key={scope.id} className="q-pair-scope">
                           <input
                             type="checkbox"
                             className="sr-only"
-                            checked={scope.locked || scopes.has(scope.id)}
+                            checked={scope.locked || scopes.includes(scope.id)}
                             disabled={scope.locked}
-                            onChange={() => toggleScope(scope.id)}
+                            onChange={() => setScopes((current) => toggleScope(current, scope.id))}
                           />
                           <span
-                            className={`q-check${scope.locked || scopes.has(scope.id) ? " on" : ""}`}
+                            className={`q-check${scope.locked || scopes.includes(scope.id) ? " on" : ""}`}
                             aria-hidden
                           >
-                            {scope.locked || scopes.has(scope.id) ? (
+                            {scope.locked || scopes.includes(scope.id) ? (
                               <CheckIcon className="q-icon s12" strokeWidth={2} />
                             ) : null}
                           </span>
@@ -711,7 +702,7 @@ export function LiveDevicesForm() {
                       <button
                         type="button"
                         className="q-btn ghost"
-                        onClick={() => void createPairing(machineId)}
+                        onClick={() => void createPairing(machineId, scopes)}
                       >
                         <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                         New code
@@ -731,7 +722,7 @@ export function LiveDevicesForm() {
                       type="button"
                       className="q-btn secondary"
                       disabled={!machineId}
-                      onClick={() => void createPairing(machineId)}
+                      onClick={() => void createPairing(machineId, scopes)}
                     >
                       Generate a pairing code
                     </button>
