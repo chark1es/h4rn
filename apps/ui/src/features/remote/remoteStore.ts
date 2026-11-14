@@ -9,7 +9,7 @@
 import { useSyncExternalStore } from "react";
 
 import type { ConnectDevice, ConnectUser, MachineSummary, PairingInfo, PairScope } from "@/gen";
-import { readBootConfig } from "@/lib/client/config";
+import { MOCK_ALLOWED, readBootConfig } from "@/lib/client/config";
 import { takeConnectPair, takeOidcCallback } from "@/lib/platform/pending";
 import {
   readSessionState,
@@ -272,7 +272,7 @@ export function initializeRemote(): void {
   booted = true;
 
   const config = readBootConfig();
-  if (config.mock) {
+  if (MOCK_ALLOWED && config.mock) {
     mockFixtures = true;
     const user: ConnectUser = {
       id: "mock-user",

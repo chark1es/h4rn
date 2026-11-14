@@ -28,9 +28,7 @@ export function UsageFooter({ threadId }: { threadId: string }) {
     <div className="q-usage-foot q-num">
       <span>{tokens(total)} tokens</span>
       <span>{cost(usage.cost_micros)} est.</span>
-      <span>
-        {tokensPerSecond(tps)} tok/s
-      </span>
+      <span>{tokensPerSecond(tps)} tok/s</span>
       {isPhone ? null : <span>TTFT {firstToken(ttft)}</span>}
       {isPhone ? null : <span>{duration(active)} active</span>}
       {isPhone ? null : <span className="grow" />}
