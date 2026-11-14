@@ -1273,7 +1273,7 @@ async fn schedules(client: &mut Client) -> Vec<h4rn_protocol::ResumeSchedule> {
 
 #[tokio::test]
 async fn a_limit_hit_stays_working_and_auto_resumes_at_the_provider_reset() {
-    let reset_at = chrono::Utc::now() + chrono::Duration::milliseconds(200);
+    let reset_at = chrono::Utc::now() + chrono::Duration::milliseconds(4_000);
     let daemon = boot_with(
         resume_options(),
         FakeHarness::with_session_scripts(vec![limit_script(Some(reset_at)), resume_script()]),
