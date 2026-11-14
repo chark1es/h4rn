@@ -664,6 +664,9 @@ function OpenPrButton({
   );
 }
 
+/** Stable ref callback: focuses the reply box the moment the user opens it. */
+const focusOnMount = (element: HTMLElement | null) => element?.focus();
+
 /** The diff lines a review thread is anchored to, quoted above its comments. */
 function ThreadQuote({ thread, files }: { thread: ForgeReviewThread; files: ForgeFileDiff[] }) {
   const file = files.find((candidate) => candidate.path === thread.path);
@@ -1171,7 +1174,7 @@ function PrDetail({
                         <textarea
                           className="q-input"
                           rows={2}
-                          autoFocus
+                          ref={focusOnMount}
                           placeholder={`Reply to ${thread.comments.at(-1)?.author ?? "review"}`}
                           value={replyDrafts[thread.thread_id] ?? ""}
                           onChange={(event) =>

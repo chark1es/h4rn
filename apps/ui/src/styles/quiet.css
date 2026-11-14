@@ -4333,8 +4333,18 @@
   font: inherit;
   cursor: pointer;
 }
+.q-node.q-sub-node:hover {
+  background: var(--hover);
+}
+.q-node.q-sub-node.sel {
+  background: var(--sel);
+}
+.q-node.q-sub-node {
+  min-width: 0;
+}
 .q-node.q-sub-node.kid2 {
-  margin-left: 22px;
+  margin-left: 14px;
+  width: calc(100% - 14px);
 }
 .q-spin {
   animation: q-spin 1s linear infinite;
