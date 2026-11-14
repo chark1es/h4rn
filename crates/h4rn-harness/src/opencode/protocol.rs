@@ -386,6 +386,7 @@ impl OpenCodeParser {
                 summary,
                 input,
                 None,
+                None,
                 started_at,
             ),
         }]
@@ -429,17 +430,23 @@ impl OpenCodeParser {
             state_for_tool(&meta.name)
         };
 
-        vec![HarnessEvent::ToolCall {
-            tool_call: complete_tool_call(
-                id.to_string(),
-                meta.name,
-                status,
-                meta.summary,
-                meta.input,
-                output.map(|output| truncate_chars(output.trim(), OUTPUT_PREVIEW_CHARS)),
-                meta.started_at,
-            ),
-        }]
+        // Count from the whole result, not the truncated preview; OpenCode's
+        // `metadata` carries `filediff` and `diff` for edits.
+        let metadata = data.get("metadata").filter(|metadata| !metadata.is_null());
+        let mut call = complete_tool_call(
+            id.to_string(),
+            meta.name,
+            status,
+            meta.summary,
+            meta.input,
+            output,
+            metadata,
+            meta.started_at,
+        );
+        call.output = call
+            .output
+            .map(|output| truncate_chars(output.trim(), OUTPUT_PREVIEW_CHARS));
+        vec![HarnessEvent::ToolCall { tool_call: call }]
     }
 
     fn on_permission_asked(&mut self, data: &Value) -> Vec<HarnessEvent> {
@@ -823,6 +830,7 @@ fn content_text(content: &[Value]) -> String {
         .join("\n")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn complete_tool_call(
     tool_call_id: String,
     name: String,
@@ -830,8 +838,12 @@ fn complete_tool_call(
     summary: String,
     input: Option<Value>,
     output: Option<String>,
+    structured: Option<&Value>,
     started_at: DateTime<Utc>,
 ) -> ToolCall {
+    let stats = (status == ToolCallStatus::Completed)
+        .then(|| crate::stats::derive(&name, input.as_ref(), output.as_deref(), structured))
+        .flatten();
     let completed_at = matches!(
         status,
         ToolCallStatus::Completed | ToolCallStatus::Failed | ToolCallStatus::Denied
@@ -846,6 +858,7 @@ fn complete_tool_call(
         output,
         started_at,
         completed_at,
+        stats,
     }
 }
 

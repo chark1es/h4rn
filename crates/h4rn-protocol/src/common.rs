@@ -430,6 +430,42 @@ pub struct ToolCall {
     pub started_at: DateTime<Utc>,
     /// When the call finished, if it did.
     pub completed_at: Option<DateTime<Utc>>,
+    /// What the call changed or found, derived in Rust from the tool's own
+    /// result: the diffstat of an edit, the match count of a search. `None`
+    /// for tools that report neither, or while the call is still running.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub stats: Option<ToolStats>,
+}
+
+/// What a search counted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchUnit {
+    /// Matching lines or occurrences.
+    Matches,
+    /// Matching files or paths (a glob, or a search that lists files).
+    Files,
+}
+
+/// The one-number summary a tool row shows next to its name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolStats {
+    /// An edit or write: lines added and removed.
+    Diff {
+        /// Lines added.
+        added: u32,
+        /// Lines removed.
+        removed: u32,
+    },
+    /// A search: how many results it returned.
+    Matches {
+        /// The count.
+        count: u32,
+        /// What was counted.
+        unit: MatchUnit,
+    },
 }
 
 /// Filter applied by [`crate::ClientRequest::ListThreads`].

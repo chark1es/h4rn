@@ -255,6 +255,7 @@ impl HarnessSession for FakeSession {
                         output: None,
                         started_at: now,
                         completed_at: None,
+                        stats: None,
                     },
                 },
             );
@@ -264,7 +265,7 @@ impl HarnessSession for FakeSession {
             let text = input.text;
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                if let Some(written) = apply_write_directive(&workspace, &text) {
+                if let Some((written, stats)) = apply_write_directive(&workspace, &text) {
                     send(
                         &sender,
                         HarnessEvent::ToolCall {
@@ -277,6 +278,7 @@ impl HarnessSession for FakeSession {
                                 output: Some(format!("wrote {written}")),
                                 started_at: now,
                                 completed_at: Some(chrono::Utc::now()),
+                                stats: Some(stats),
                             },
                         },
                     );
@@ -465,14 +467,24 @@ fn parse_write_directive(text: &str) -> Option<(&str, &str)> {
     Some((relative, content))
 }
 
-fn apply_write_directive(workspace: &Path, text: &str) -> Option<String> {
+/// Writes the directive's file and returns its relative path with the real
+/// diffstat against whatever was there before.
+fn apply_write_directive(
+    workspace: &Path,
+    text: &str,
+) -> Option<(String, h4rn_protocol::ToolStats)> {
     let (relative, content) = parse_write_directive(text)?;
     let path = workspace.join(relative);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok()?;
     }
+    let before = std::fs::read_to_string(&path).unwrap_or_default();
     std::fs::write(&path, content).ok()?;
-    Some(relative.to_owned())
+    let (added, removed) = crate::stats::line_diff(&before, content);
+    Some((
+        relative.to_owned(),
+        h4rn_protocol::ToolStats::Diff { added, removed },
+    ))
 }
 
 #[cfg(test)]

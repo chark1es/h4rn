@@ -444,6 +444,7 @@ impl ClaudeStreamParser {
                             output: None,
                             started_at,
                             completed_at: None,
+                            stats: None,
                         },
                     });
                 }
@@ -479,6 +480,7 @@ impl ClaudeStreamParser {
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
             let output = output_preview(block.get("content"));
+            let full_output = full_output_text(block.get("content"));
             let auto_denied = output
                 .as_deref()
                 .is_some_and(|text| text.to_ascii_lowercase().contains("requested permissions"));
@@ -499,6 +501,17 @@ impl ClaudeStreamParser {
             });
 
             self.state = AgentState::Thinking;
+            let structured = (!frame.tool_use_result.is_null()).then_some(&frame.tool_use_result);
+            let stats = (status == ToolCallStatus::Completed)
+                .then(|| {
+                    crate::stats::derive(
+                        &meta.name,
+                        meta.input.as_ref(),
+                        full_output.as_deref(),
+                        structured,
+                    )
+                })
+                .flatten();
             events.push(HarnessEvent::ToolCall {
                 tool_call: ToolCall {
                     tool_call_id: tool_use_id.to_string(),
@@ -509,6 +522,7 @@ impl ClaudeStreamParser {
                     output,
                     started_at: meta.started_at,
                     completed_at: Some(completed_at),
+                    stats,
                 },
             });
         }
@@ -630,6 +644,23 @@ fn block_text(block: &Value) -> Option<String> {
             .get("text")
             .and_then(Value::as_str)
             .map(str::to_string),
+    }
+}
+
+/// The whole result text, untruncated: counting matches from the 4 KB preview
+/// would undercount a long result list.
+fn full_output_text(content: Option<&Value>) -> Option<String> {
+    match content? {
+        Value::Null => None,
+        Value::String(text) => Some(text.clone()),
+        Value::Array(blocks) => Some(
+            blocks
+                .iter()
+                .filter_map(block_text)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
+        other => Some(other.to_string()),
     }
 }
 
@@ -785,6 +816,10 @@ struct AssistantMessage {
 #[derive(Debug, Deserialize)]
 struct UserFrame {
     message: UserMessage,
+    /// Claude Code's structured result for the tool call (`structuredPatch`
+    /// for edits, `mode`/`numFiles` for searches); absent on older versions.
+    #[serde(default)]
+    tool_use_result: Value,
     #[serde(default)]
     parent_tool_use_id: Option<String>,
 }

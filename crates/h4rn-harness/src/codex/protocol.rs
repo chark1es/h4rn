@@ -520,17 +520,23 @@ impl CodexParser {
             }
         };
         let completed_at = (status != ToolCallStatus::Running).then(Utc::now);
+        let input = input.or_else(|| self.tool_calls.get(id).and_then(|meta| meta.input.clone()));
+        // Codex reports file edits as `fileChange` unified diffs (kept in the
+        // input); it has no search tool, so only edits get stats.
+        let stats = (status == ToolCallStatus::Completed)
+            .then(|| crate::stats::derive(&name, input.as_ref(), output.as_deref(), None))
+            .flatten();
         vec![HarnessEvent::ToolCall {
             tool_call: ToolCall {
                 tool_call_id: id.to_string(),
                 name,
                 status,
                 summary,
-                input: input
-                    .or_else(|| self.tool_calls.get(id).and_then(|meta| meta.input.clone())),
+                input,
                 output,
                 started_at,
                 completed_at,
+                stats,
             },
         }]
     }

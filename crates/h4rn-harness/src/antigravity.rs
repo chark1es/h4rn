@@ -1124,6 +1124,7 @@ fn tool_event(call: &AcpToolCall, shared: &Arc<Mutex<AcpShared>>) -> HarnessEven
             output,
             started_at,
             completed_at,
+            stats: call.stats(),
         },
     }
 }

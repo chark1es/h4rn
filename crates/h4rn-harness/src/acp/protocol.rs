@@ -650,6 +650,45 @@ impl AcpToolCall {
         (!text.is_empty()).then(|| truncate(text, 2_000))
     }
 
+    /// The diffstat of the call's `diff` content, or the match count of a
+    /// finished search.
+    ///
+    /// ACP hands over old and new text for an edit, so the diffstat is exact;
+    /// a file that has no old text is a new file and counts as all added.
+    pub fn stats(&self) -> Option<h4rn_protocol::ToolStats> {
+        let (mut added, mut removed) = (0u32, 0u32);
+        let mut diffs = 0usize;
+        for item in &self.content {
+            if let ToolCallContent::Diff(diff) = item {
+                let (a, r) =
+                    crate::stats::line_diff(diff.old_text.as_deref().unwrap_or(""), &diff.new_text);
+                added = added.saturating_add(a);
+                removed = removed.saturating_add(r);
+                diffs += 1;
+            }
+        }
+        if diffs > 0 {
+            return Some(h4rn_protocol::ToolStats::Diff { added, removed });
+        }
+        if self.kind == AcpToolKind::Search && self.status == AcpToolStatus::Completed {
+            let mut text = self
+                .content
+                .iter()
+                .filter_map(|item| match item {
+                    ToolCallContent::Text(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Some(Value::String(raw)) = self.raw_output.as_ref() {
+                text.push('\n');
+                text.push_str(raw);
+            }
+            return crate::stats::derive("search", None, Some(&text), None);
+        }
+        None
+    }
+
     /// Paths the call touched, including diff targets.
     pub fn paths(&self) -> Vec<String> {
         let mut paths: Vec<String> = self

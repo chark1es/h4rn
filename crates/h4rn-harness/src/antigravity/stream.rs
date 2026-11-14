@@ -252,6 +252,7 @@ impl AgyStreamParser {
                     output: None,
                     started_at,
                     completed_at: None,
+                    stats: None,
                 },
             });
         }

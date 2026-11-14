@@ -33,6 +33,7 @@ mod codex;
 mod fake;
 mod opencode;
 pub mod registry;
+pub mod stats;
 
 pub use antigravity::{
     AgyStreamParser, AntigravityHarness, ENV_AGY_MODE, ENV_AGY_PATH, ENV_AGY_TRANSPORT,
