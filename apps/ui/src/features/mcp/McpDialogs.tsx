@@ -1,3 +1,4 @@
+import { ChipSelect } from "@/components/common/ChipSelect";
 import { PlusIcon, Trash2Icon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
@@ -59,9 +60,6 @@ function FieldLabel({
 }
 
 const NO_TOOLS: McpToolInfo[] = [];
-
-const selectClass =
-  "h-7 w-full rounded-[6px] border-0 bg-bg-raised px-2 text-[12.5px] text-fg shadow-[inset_0_0_0_1px_var(--line-2)] outline-none focus-visible:shadow-[inset_0_0_0_1px_var(--accent)]";
 
 type SecretRow = { id: string; name: string; value: string };
 
@@ -444,18 +442,14 @@ export function McpImportDialog({
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="flex flex-col gap-1">
             <FieldLabel htmlFor="mcp-import-harness">Harness</FieldLabel>
-            <select
+            <ChipSelect
               id="mcp-import-harness"
-              className={selectClass}
+              block
+              label="Harness"
               value={harness}
-              onChange={(event) => setHarness(event.target.value as HarnessKind)}
-            >
-              {HARNESSES.map((entry) => (
-                <option key={entry} value={entry}>
-                  {HARNESS_LABELS[entry]}
-                </option>
-              ))}
-            </select>
+              options={HARNESSES.map((entry) => ({ value: entry, label: HARNESS_LABELS[entry] }))}
+              onChange={setHarness}
+            />
           </div>
           <div className="flex flex-col gap-1">
             <FieldLabel htmlFor="mcp-import-workspace" hint="Optional">
@@ -535,22 +529,23 @@ export function McpImportDialog({
                         h4rn has a different configuration for this name. Pick which one to keep.
                       </div>
                       <div className="flex items-center gap-1.5" style={{ marginTop: 8 }}>
-                        <select
-                          className={selectClass}
-                          aria-label={`Resolution for ${conflict.name}`}
+                        <ChipSelect
+                          label={`Resolution for ${conflict.name}`}
+                          width={160}
                           value={resolutions[conflict.name] ?? "keep_mine"}
-                          onChange={(event) =>
+                          options={[
+                            { value: "keep_mine", label: "Keep mine" },
+                            { value: "use_theirs", label: "Use theirs" },
+                            { value: "rename", label: "Rename theirs" },
+                            { value: "skip", label: "Skip" },
+                          ]}
+                          onChange={(value) =>
                             setResolutions((current) => ({
                               ...current,
-                              [conflict.name]: event.target.value,
+                              [conflict.name]: value,
                             }))
                           }
-                        >
-                          <option value="keep_mine">Keep mine</option>
-                          <option value="use_theirs">Use theirs</option>
-                          <option value="rename">Rename theirs</option>
-                          <option value="skip">Skip</option>
-                        </select>
+                        />
                         {resolutions[conflict.name] === "rename" ? (
                           <Input
                             value={renames[conflict.name] ?? ""}
@@ -670,19 +665,15 @@ export function McpShareDialog({
         <div className="grid gap-3">
           <div className="flex flex-col gap-1">
             <FieldLabel htmlFor="mcp-share-machine">Machine</FieldLabel>
-            <select
+            <ChipSelect
               id="mcp-share-machine"
-              className={selectClass}
+              block
+              label="Machine"
+              placeholder="No other machine"
               value={machine}
-              onChange={(event) => setMachine(event.target.value as HostId)}
-            >
-              {choices.length === 0 ? <option value="">No other machine</option> : null}
-              {choices.map((host) => (
-                <option key={host.host_id} value={host.host_id}>
-                  {host.name}
-                </option>
-              ))}
-            </select>
+              options={choices.map((host) => ({ value: host.host_id, label: host.name }))}
+              onChange={setMachine}
+            />
           </div>
           <div className="flex flex-col gap-1">
             <FieldLabel htmlFor="mcp-share-allowed" hint="Blank allows every tool">

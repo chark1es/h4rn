@@ -1,3 +1,4 @@
+import { ChipSelect } from "@/components/common/ChipSelect";
 import { ArrowRightIcon, GitBranchIcon, PaperclipIcon, PlusIcon } from "lucide-react";
 import type * as React from "react";
 import { useEffect, useMemo, useState } from "react";
@@ -165,47 +166,44 @@ export function NewThreadDialog() {
         <div className="grid gap-3 sm:grid-cols-3">
           <div className="flex flex-col gap-1">
             <FieldLabel htmlFor="new-thread-host">Host</FieldLabel>
-            <select
+            <ChipSelect
               id="new-thread-host"
+              block
+              label="Host"
+              placeholder="No online hosts"
               value={host}
-              onChange={(event) => {
-                const nextHost = hosts[event.target.value];
-                setHost(event.target.value);
+              options={onlineHosts.map((option) => ({
+                value: option.host_id,
+                label: option.name,
+              }))}
+              onChange={(value) => {
+                const nextHost = hosts[value];
+                setHost(value);
                 const nextHarness = nextHost?.harnesses[0];
                 if (nextHarness) {
                   setHarness(nextHarness);
                   setModel(DEFAULT_MODELS[nextHarness]);
                 }
               }}
-              className="h-7 w-full rounded-[6px] border-0 bg-bg-raised px-2 text-[12.5px] text-fg shadow-[inset_0_0_0_1px_var(--line-2)] outline-none focus-visible:shadow-[inset_0_0_0_1px_var(--accent)]"
-            >
-              {onlineHosts.length === 0 ? <option value="">No online hosts</option> : null}
-              {onlineHosts.map((option) => (
-                <option key={option.host_id} value={option.host_id}>
-                  {option.name}
-                </option>
-              ))}
-            </select>
+            />
           </div>
 
           <div className="flex flex-col gap-1">
             <FieldLabel htmlFor="new-thread-harness">Harness</FieldLabel>
-            <select
+            <ChipSelect
               id="new-thread-harness"
+              block
+              label="Harness"
               value={harness}
-              onChange={(event) => {
-                const next = event.target.value as HarnessKind;
+              options={harnessChoices.map((option) => ({
+                value: option,
+                label: HARNESS_LABELS[option],
+              }))}
+              onChange={(next) => {
                 setHarness(next);
                 setModel(proxyDefaultModel(next) ?? DEFAULT_MODELS[next]);
               }}
-              className="h-7 w-full rounded-[6px] border-0 bg-bg-raised px-2 text-[12.5px] text-fg shadow-[inset_0_0_0_1px_var(--line-2)] outline-none focus-visible:shadow-[inset_0_0_0_1px_var(--accent)]"
-            >
-              {harnessChoices.map((option) => (
-                <option key={option} value={option}>
-                  {HARNESS_LABELS[option]}
-                </option>
-              ))}
-            </select>
+            />
           </div>
 
           <div className="flex flex-col gap-1">
@@ -234,16 +232,18 @@ export function NewThreadDialog() {
         <div className="grid gap-3 sm:grid-cols-[1fr_1.2fr]">
           <div className="flex flex-col gap-1">
             <FieldLabel htmlFor="new-thread-mode">Mode</FieldLabel>
-            <select
+            <ChipSelect
               id="new-thread-mode"
-              className="h-7 w-full rounded-[6px] border-0 bg-bg-raised px-2 text-[12.5px] text-fg shadow-[inset_0_0_0_1px_var(--line-2)] outline-none focus-visible:shadow-[inset_0_0_0_1px_var(--accent)]"
+              block
+              label="Mode"
               value={runtimeMode}
-              onChange={(event) => setRuntimeMode(event.target.value as RuntimeMode)}
-            >
-              <option value="approval_required">Approval required</option>
-              <option value="auto_accept_edits">Auto-accept edits</option>
-              <option value="full_access">Full access</option>
-            </select>
+              options={[
+                { value: "approval_required", label: "Approval required" },
+                { value: "auto_accept_edits", label: "Auto-accept edits" },
+                { value: "full_access", label: "Full access" },
+              ]}
+              onChange={setRuntimeMode}
+            />
             <span className="text-small text-fg-3">Fixed for the life of the thread.</span>
           </div>
 

@@ -2167,6 +2167,14 @@
   cursor: default;
   justify-content: space-between;
 }
+.q-chip-select.block {
+  width: 100%;
+  max-width: none;
+  height: 28px;
+  padding: 0 8px;
+  font-size: 12.5px;
+  font-weight: 400;
+}
 .q-chip-select:disabled {
   color: var(--fg-3);
 }
@@ -3078,6 +3086,65 @@
 }
 .q-probe .v {
   color: var(--fg);
+}
+.q-harness .ctl {
+  gap: 12px;
+}
+.q-cfgpath {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+}
+.q-envprev {
+  margin: 0 0 8px;
+  padding: 4px 0;
+  border-radius: 8px;
+  background: var(--bg-sunk);
+  box-shadow: inset 0 0 0 1px var(--line);
+  font-size: 12px;
+  line-height: 20px;
+}
+.q-envprev .ln {
+  display: flex;
+  gap: 10px;
+  padding: 0 10px;
+  min-width: 0;
+  background: color-mix(in oklch, var(--ok) 9%, transparent);
+}
+.q-envprev .ln .q-mono {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.q-envprev .sg {
+  color: var(--ok);
+  font-family: var(--mono);
+}
+.q-applybar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+}
+.q-applybar .note {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+}
+.q-applybar .note em {
+  font-style: normal;
+  color: var(--fg-2);
+}
+.q-details {
+  margin-top: 8px;
+  font-size: 12px;
+}
+.q-details summary {
+  cursor: pointer;
+  color: var(--fg-3);
+  width: fit-content;
 }
 .q-qr {
   width: 168px;

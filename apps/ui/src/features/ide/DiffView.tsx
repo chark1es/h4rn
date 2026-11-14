@@ -1,3 +1,4 @@
+import { ChipSelect } from "@/components/common/ChipSelect";
 import { FileDiffIcon, FileTextIcon, Loader2Icon, TriangleAlertIcon } from "lucide-react";
 import { type ReactNode, useMemo } from "react";
 
@@ -210,28 +211,18 @@ export function DiffView({
           }}
         >
           <FileDiffIcon className="q-icon s14 q-faint" aria-hidden />
-          <select
-            value={path ?? ""}
-            onChange={(event) => onSelectFile(event.target.value)}
+          <ChipSelect
+            label="File"
+            block
             className="q-mono"
-            style={{
-              flex: 1,
-              minWidth: 0,
-              height: 26,
-              border: "1px solid var(--control-line)",
-              borderRadius: 6,
-              background: "var(--bg-raised)",
-              color: "var(--fg)",
-              fontSize: 11,
-              padding: "0 6px",
-            }}
-          >
-            {files.map((file) => (
-              <option key={file.path} value={file.path}>
-                {file.path} (+{file.added} −{file.removed})
-              </option>
-            ))}
-          </select>
+            value={path ?? ""}
+            options={files.map((file) => ({
+              value: file.path,
+              label: file.path,
+              hint: `+${file.added} −${file.removed}`,
+            }))}
+            onChange={onSelectFile}
+          />
         </label>
       ) : null}
       {diff.note ? (

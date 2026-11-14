@@ -31,6 +31,7 @@ export function ChipSelect<T extends string>({
   disabled,
   className,
   width,
+  block,
 }: {
   value: T | "";
   options: ChipOption<T>[];
@@ -43,6 +44,8 @@ export function ChipSelect<T extends string>({
   className?: string;
   /** Fixed chip width in px; the chip otherwise hugs its label. */
   width?: number;
+  /** Fill the field like an input (28 px) instead of hugging the label. */
+  block?: boolean;
 }) {
   const current = options.find((option) => option.value === value);
   return (
@@ -51,7 +54,7 @@ export function ChipSelect<T extends string>({
         <button
           type="button"
           id={id}
-          className={`q-chip q-chip-select${className ? ` ${className}` : ""}`}
+          className={`q-chip q-chip-select${block ? " block" : ""}${className ? ` ${className}` : ""}`}
           style={width ? { width, maxWidth: "100%" } : undefined}
           aria-label={`${label}: ${current?.label ?? placeholder}`}
           aria-haspopup="menu"

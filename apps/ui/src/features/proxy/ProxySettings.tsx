@@ -1,6 +1,7 @@
 import {
   CheckIcon,
-  ChevronDownIcon,
+  CircleCheckIcon,
+  CircleDotIcon,
   KeyRoundIcon,
   PlusIcon,
   RefreshCwIcon,
@@ -8,12 +9,15 @@ import {
 } from "lucide-react";
 import { Fragment, useEffect, useMemo, useState } from "react";
 
+import { ChipSelect } from "@/components/common/ChipSelect";
 import type {
+  AgentState,
   HarnessKind,
   ProxyCapabilities,
   ProxyDiagnostic,
   ProxyModel,
   ProxyProfile,
+  ProxyProfileId,
 } from "@/gen";
 import { HARNESS_LABELS } from "@/lib/entities";
 import { relativeAge } from "@/lib/format";
@@ -22,6 +26,7 @@ import { cn } from "@/lib/utils";
 
 import {
   addProxyProfile,
+  applyProxyOverrides,
   loadProxyProfiles,
   proxyDefaultModel,
   selectProxyProfile,
@@ -46,94 +51,88 @@ function buildLabel(capabilities: ProxyCapabilities | null): string {
   return "Build not identified";
 }
 
-type ProbeRow = { label: string; value: string; ok: boolean; hint?: string };
+type ProbeRow = { label: string; value: string; ok: boolean | "neutral"; hint?: string };
 
-function probe(
-  label: string,
-  value: string | null | undefined,
-  ok: boolean,
-  hint?: string,
-): ProbeRow | null {
-  if (value === null || value === undefined) return null;
-  return { label, value, ok, ...(hint ? { hint } : {}) };
+function managementValue(capabilities: ProxyCapabilities): string {
+  const state =
+    capabilities.management === "available"
+      ? "Enabled"
+      : capabilities.management === "open"
+        ? "Open, no key required"
+        : capabilities.management === "needs_key"
+          ? "Key required"
+          : capabilities.management === "disabled"
+            ? "Disabled"
+            : "Unknown";
+  return capabilities.version ? `${state} · ${capabilities.version}` : state;
 }
 
-function capabilityRows(capabilities: ProxyCapabilities | null): ProbeRow[] {
+/** The four lines a person needs from a probe. */
+function summaryRows(capabilities: ProxyCapabilities | null): ProbeRow[] {
   if (!capabilities) return [];
+  const shapes = [
+    capabilities.claude_models ? "Claude" : null,
+    capabilities.openai_models ? "OpenAI" : null,
+    capabilities.gemini_models ? "Gemini" : null,
+  ].filter(Boolean);
+  const usageKnown = capabilities.usage_queue || capabilities.legacy_usage;
   return [
-    probe("Health", capabilities.reachable ? "OK" : "Unreachable", capabilities.reachable),
-    probe(
-      "Management",
-      capabilities.management === "available"
-        ? "Available"
-        : capabilities.management === "open"
-          ? "Open, no key required"
-          : capabilities.management === "needs_key"
-            ? "Key required"
-            : capabilities.management === "disabled"
-              ? "Disabled"
-              : "Unknown",
-      capabilities.management === "available" || capabilities.management === "open",
-      capabilities.management === "needs_key"
-        ? "Add the management key so h4rn can read models and credentials."
+    { label: "Health", value: capabilities.reachable ? "OK" : "Unreachable", ok: capabilities.reachable },
+    {
+      label: "Management",
+      value: managementValue(capabilities),
+      ok: capabilities.management === "available" || capabilities.management === "open",
+      ...(capabilities.management === "needs_key"
+        ? { hint: "Add the management key so h4rn can read models and credentials." }
         : capabilities.management === "disabled"
-          ? "Enable the management API in CLIProxyAPI's config to read models."
-          : undefined,
-    ),
-    probe("Version", capabilities.version, true),
-    probe("Commit", capabilities.commit, true),
-    probe(
-      "Usage queue",
-      capabilities.usage_queue ? "Supported" : "Not available",
-      capabilities.usage_queue,
-    ),
-    probe(
-      "Legacy usage",
-      capabilities.legacy_usage ? "Supported (≤ 6.9)" : "Not available",
-      capabilities.legacy_usage,
-    ),
-    probe(
-      "v8 config",
-      capabilities.v8_config ? "Supported" : "Not available",
-      capabilities.v8_config,
-    ),
-    probe(
-      "Performance",
-      capabilities.performance ? "Fork-only route present" : "Not available",
-      capabilities.performance,
-    ),
-    probe(
-      "Credentials verify",
-      capabilities.credentials_verify ? "Upstream route present" : "Not available",
-      capabilities.credentials_verify,
-    ),
-    probe(
-      "Cooldowns",
-      capabilities.cooldowns ? "Reported" : "Not reported",
-      capabilities.cooldowns,
-    ),
-    probe(
-      "Quota providers",
-      capabilities.quota_providers ? "Reported" : "Not reported",
-      capabilities.quota_providers,
-    ),
-    probe(
-      "Model shapes",
-      [
-        capabilities.openai_models ? "OpenAI" : null,
-        capabilities.claude_models ? "Claude" : null,
-        capabilities.gemini_models ? "Gemini" : null,
-      ]
-        .filter(Boolean)
-        .join(", ") || "None",
-      capabilities.openai_models || capabilities.claude_models || capabilities.gemini_models,
-    ),
-    probe(
-      "Fork enrichment",
-      capabilities.fork_model_enrichment ? "Present" : "Not present",
-      capabilities.fork_model_enrichment,
-    ),
-  ].filter((row): row is ProbeRow => row !== null);
+          ? { hint: "Enable the management API in CLIProxyAPI's config to read models." }
+          : {}),
+    },
+    {
+      label: "Model shape",
+      value: shapes.length > 0 ? shapes.join(", ") : "None detected",
+      ok: shapes.length > 0,
+    },
+    {
+      label: "Usage history",
+      value: usageKnown ? "Read from the proxy" : "Not available · h4rn counts usage itself",
+      ok: usageKnown ? true : "neutral",
+    },
+  ];
+}
+
+const yesNo = (value: boolean, yes: string, no: string): ProbeRow["value"] => (value ? yes : no);
+
+/** Everything else the probe learned, behind a disclosure. */
+function detailRows(capabilities: ProxyCapabilities | null): ProbeRow[] {
+  if (!capabilities) return [];
+  const row = (label: string, value: string, ok: boolean): ProbeRow => ({ label, value, ok });
+  return [
+    row("Build", buildLabel(capabilities), true),
+    ...(capabilities.commit ? [row("Commit", capabilities.commit, true)] : []),
+    row("Usage queue", yesNo(capabilities.usage_queue, "Supported", "Not available"), capabilities.usage_queue),
+    row("Legacy usage", yesNo(capabilities.legacy_usage, "Supported (≤ 6.9)", "Not available"), capabilities.legacy_usage),
+    row("Config v8", yesNo(capabilities.v8_config, "Supported", "Not available"), capabilities.v8_config),
+    row("Performance", yesNo(capabilities.performance, "Route present", "Not available"), capabilities.performance),
+    row("Credentials verify", yesNo(capabilities.credentials_verify, "Route present", "Not available"), capabilities.credentials_verify),
+    row("Cooldowns", yesNo(capabilities.cooldowns, "Reported", "Not reported"), capabilities.cooldowns),
+    row("Quota providers", yesNo(capabilities.quota_providers, "Reported", "Not reported"), capabilities.quota_providers),
+  ];
+}
+
+function useHostName(): string {
+  return useApp((state) =>
+    state.localHostId ? (state.hosts[state.localHostId]?.name ?? "this host") : "this host",
+  );
+}
+
+/** "480" → "8 min": a cooldown a person can plan around. */
+function cooldownText(seconds: bigint | number | null | undefined): string {
+  if (seconds == null) return "Cooling down";
+  const value = Number(seconds);
+  if (value < 60) return `Cooling down · ${Math.max(1, Math.round(value))} s`;
+  if (value < 3_600) return `Cooling down · ${Math.round(value / 60)} min`;
+  return `Cooling down · ${Math.round(value / 3_600)} h`;
 }
 
 function Diagnostics({ diagnostics }: { diagnostics: ProxyDiagnostic[] }) {
@@ -182,10 +181,8 @@ function ModelTable({ models }: { models: ProxyModel[] }) {
       <thead>
         <tr>
           <th>Model</th>
-          <th>Family</th>
-          <th>Provenance</th>
+          <th>Maps to</th>
           <th className="r">Context</th>
-          <th className="r">Max out</th>
         </tr>
       </thead>
       <tbody>
@@ -194,31 +191,22 @@ function ModelTable({ models }: { models: ProxyModel[] }) {
             <td>
               <span className="q-mono">{model.id}</span>
               {model.alias_of ? (
-                <span className="q-faint" style={{ marginLeft: 6, fontSize: 11.5 }}>
-                  → {model.alias_of}
+                <span className="q-badge" style={{ height: 18, marginLeft: 6 }}>
+                  Custom
                 </span>
               ) : null}
             </td>
-            <td className="q-faint">{model.shape.replace("_", " ")}</td>
-            <td>
-              <span className="q-badge" style={{ height: 18 }}>
-                {model.source.replace("_", " ")}
-              </span>
-              {model.fork_enriched ? (
-                <span className="q-faint" style={{ marginLeft: 6, fontSize: 11.5 }}>
-                  enriched
-                </span>
-              ) : null}
+            <td className="q-faint">
+              {model.alias_of ? (
+                <>
+                  <span className="q-mono">{model.alias_of}</span> · keeps original id
+                </>
+              ) : (
+                "—"
+              )}
             </td>
             <td className="r num">
-              {model.context_length != null
-                ? `${Number(model.context_length).toLocaleString()}`
-                : "—"}
-            </td>
-            <td className="r num">
-              {model.max_output_tokens != null
-                ? Number(model.max_output_tokens).toLocaleString()
-                : "—"}
+              {model.context_length != null ? formatContext(Number(model.context_length)) : "—"}
             </td>
           </tr>
         ))}
@@ -227,7 +215,16 @@ function ModelTable({ models }: { models: ProxyModel[] }) {
   );
 }
 
+function formatContext(tokens: number): string {
+  return tokens >= 1_000_000
+    ? `${+(tokens / 1_000_000).toFixed(1)}M`
+    : tokens >= 1_000
+      ? `${Math.round(tokens / 1_000)}k`
+      : String(tokens);
+}
+
 function AddProfile() {
+  const host = useHostName();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("CLIProxyAPI");
   const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:8317");
@@ -248,8 +245,7 @@ function AddProfile() {
     <div className="q-group">
       <h2>Add a profile</h2>
       <p className="desc">
-        Keys are written to the daemon's secret store on the host. This app only learns whether one
-        exists.
+        Keys are written to the secret store on {host}. This app only learns whether one exists.
       </p>
       <div className="q-field">
         <div className="lab">
@@ -290,7 +286,7 @@ function AddProfile() {
             type="password"
             value={managementKey}
             onChange={(event) => setManagementKey(event.target.value)}
-            placeholder="Stored on the daemon"
+            placeholder={`Stored on ${host}`}
             aria-label="Management key"
             style={{ maxWidth: 300, fontSize: 12 }}
           />
@@ -298,7 +294,7 @@ function AddProfile() {
       </div>
       <div className="q-field">
         <div className="lab">
-          <div className="t">Client API key</div>
+          <div className="t">Access key</div>
           <div className="s">What harnesses send</div>
         </div>
         <div className="ctl">
@@ -307,8 +303,8 @@ function AddProfile() {
             type="password"
             value={apiKey}
             onChange={(event) => setApiKey(event.target.value)}
-            placeholder="Stored on the daemon"
-            aria-label="Client API key"
+            placeholder={`Stored on ${host}`}
+            aria-label="Access key"
             style={{ maxWidth: 300, fontSize: 12 }}
           />
         </div>
@@ -398,22 +394,25 @@ function ProfileField({
 
 function SecretField({
   label,
+  sub,
   hasKey,
   onReplace,
   onClear,
 }: {
   label: string;
+  sub?: string;
   hasKey: boolean;
   onReplace: (value: string) => void;
   onClear: () => void;
 }) {
+  const host = useHostName();
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState("");
   return (
     <div className="q-field">
       <div className="lab">
         <div className="t">{label}</div>
-        <div className="s">{hasKey ? "Stored on the daemon" : "Not set"}</div>
+        {sub ? <div className="s">{sub}</div> : null}
       </div>
       <div className="ctl">
         {editing ? (
@@ -447,7 +446,7 @@ function SecretField({
           <>
             <span className="q-secret">
               <KeyRoundIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-              {hasKey ? "Stored on the daemon" : "No key stored"}
+              {hasKey ? `Stored on ${host}` : "No key stored"}
             </span>
             <span style={{ flex: 1 }} />
             <button type="button" className="q-btn ghost" onClick={() => setEditing(true)}>
@@ -466,58 +465,124 @@ function SecretField({
 }
 
 function HarnessRow({ profile, harness }: { profile: ProxyProfile; harness: HarnessKind }) {
+  const host = useHostName();
   const override = profile.harnesses.find((candidate) => candidate.harness === harness);
   const enabled = override?.enabled ?? false;
   const catalog = useProxy((state) => state.catalogs[profile.id])?.models ?? [];
   const saving = useProxy((state) => state.overridesSaving[`${profile.id}:${harness}`] ?? false);
   const defaultModel = override?.default_model ?? proxyDefaultModel(harness) ?? "";
   return (
-    <div className="q-field">
-      <div className="lab">
-        <div className="t">{HARNESS_LABELS[harness]}</div>
-        <div className="s">{override?.note ?? (enabled ? "Routed" : "Own credential")}</div>
-      </div>
-      <div className="ctl">
-        <button
-          type="button"
-          className="q-switch"
-          role="switch"
-          aria-checked={enabled}
-          aria-label={`Route ${HARNESS_LABELS[harness]} through CLIProxyAPI`}
-          disabled={saving}
-          onClick={() =>
-            void setHarnessOverride(
-              profile.id,
-              harness,
-              !enabled,
-              !enabled ? (override?.default_model ?? catalog[0]?.id ?? null) : null,
-            )
-          }
-        />
-        <select
-          className="q-input"
-          value={defaultModel}
-          disabled={!enabled}
-          aria-label={`Default model for ${HARNESS_LABELS[harness]}`}
-          onChange={(event) =>
-            void setHarnessOverride(profile.id, harness, true, event.target.value || null)
-          }
-          style={{ maxWidth: 220, fontSize: 12 }}
-        >
-          <option value="">Profile default</option>
-          {catalog.map((model) => (
-            <option key={model.id} value={model.id}>
-              {model.id}
-            </option>
-          ))}
-        </select>
-        {override?.verified ? (
-          <span className="q-faint" style={{ fontSize: 11.5 }}>
-            verified in this repo
+    <>
+      <div className="q-field q-harness">
+        <div className="lab">
+          <div className="t">{HARNESS_LABELS[harness]}</div>
+          <div className="s">{enabled ? "Routed" : "Own credential"}</div>
+        </div>
+        <div className="ctl">
+          <button
+            type="button"
+            className="q-switch"
+            role="switch"
+            aria-checked={enabled}
+            aria-label={`Route ${HARNESS_LABELS[harness]} through CLIProxyAPI`}
+            disabled={saving}
+            onClick={() =>
+              void setHarnessOverride(
+                profile.id,
+                harness,
+                !enabled,
+                !enabled ? (override?.default_model ?? catalog[0]?.id ?? null) : null,
+              )
+            }
+          />
+          <ChipSelect
+            label={`Default model for ${HARNESS_LABELS[harness]}`}
+            width={190}
+            disabled={!enabled}
+            value={defaultModel}
+            options={[
+              { value: "", label: "Profile default" },
+              ...catalog.map((model) => ({ value: model.id, label: model.id })),
+            ]}
+            onChange={(value) => void setHarnessOverride(profile.id, harness, true, value || null)}
+          />
+          <span className="q-mono q-faint q-cfgpath" title={override?.config_path}>
+            {override?.config_path}
           </span>
-        ) : null}
-        {saving ? <span className="q-faint">Saving…</span> : null}
+        </div>
       </div>
+      {enabled && override && override.preview.length > 0 ? (
+        <div className="q-envprev" aria-label={`${HARNESS_LABELS[harness]} settings preview`}>
+          {override.preview.map((line) => (
+            <div key={line.name} className="ln">
+              <span className="sg">+</span>
+              <span className="q-mono">
+                {line.name}:{" "}
+                {line.value === null ? (
+                  <span className="q-faint">stored on {host}</span>
+                ) : (
+                  line.value
+                )}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+const RUNNING_STATES: ReadonlySet<AgentState> = new Set([
+  "thinking",
+  "searching",
+  "reading",
+  "editing",
+  "running_tool",
+  "awaiting_approval",
+]);
+
+/** The footer of the override group: what applying will interrupt, and the button. */
+function ApplyBar({ profile }: { profile: ProxyProfile }) {
+  const host = useHostName();
+  const dirty = useProxy((state) => state.overridesDirty[profile.id] ?? false);
+  const applying = useProxy((state) => state.applying[profile.id] ?? false);
+  const applied = useProxy((state) => state.applied[profile.id]);
+  const threads = useApp((state) => state.threads);
+  const localHostId = useApp((state) => state.localHostId);
+  const routed = new Set(profile.harnesses.filter((row) => row.enabled).map((row) => row.harness));
+  const live = Object.values(threads).filter(
+    (thread) =>
+      thread.host === localHostId &&
+      routed.has(thread.harness) &&
+      RUNNING_STATES.has(thread.agent_state),
+  );
+  const note =
+    live.length === 1
+      ? (
+          <>
+            Interrupts <em>{live[0]?.title}</em> on {host}.
+          </>
+        )
+      : live.length > 1
+        ? `Interrupts ${live.length} running turns on ${host}.`
+        : applied && !dirty
+          ? applied.restarted > 0
+            ? `Restarted ${applied.restarted} ${applied.restarted === 1 ? "session" : "sessions"}.`
+            : "Applied. Sessions you start next use it."
+          : "Sessions already running keep their old routing until restarted.";
+  return (
+    <div className="q-applybar">
+      <span className="q-faint note" role="status">
+        {note}
+      </span>
+      <button
+        type="button"
+        className="q-btn primary"
+        disabled={!dirty || applying}
+        onClick={() => void applyProxyOverrides(profile.id)}
+      >
+        {applying ? "Restarting…" : "Apply and restart"}
+      </button>
     </div>
   );
 }
@@ -528,8 +593,10 @@ function ProfileDetail({ profile }: { profile: ProxyProfile }) {
   const catalog = useProxy((state) => state.catalogs[profile.id]);
   const limits = useProxy((state) => state.limits[profile.id]);
   const catalogLoading = useProxy((state) => state.catalogLoading);
+  const host = useHostName();
   const caps = report?.capabilities ?? profile.capabilities;
-  const rows = capabilityRows(caps);
+  const rows = summaryRows(caps);
+  const details = detailRows(caps);
   const models = catalog?.models ?? [];
 
   return (
@@ -584,7 +651,8 @@ function ProfileDetail({ profile }: { profile: ProxyProfile }) {
           }
         />
         <SecretField
-          label="Client API key"
+          label="Access key"
+          sub="What harnesses send"
           hasKey={profile.has_api_key}
           onReplace={(value) =>
             void updateProxyProfile(profile.id, {
@@ -611,9 +679,9 @@ function ProfileDetail({ profile }: { profile: ProxyProfile }) {
         />
         <div className="q-field" style={{ alignItems: "flex-start" }}>
           <div className="lab">
-            <div className="t">Test</div>
+            <div className="t">Probe</div>
             <div className="s">
-              {caps ? `probed ${relativeAge(caps.detected_at)}` : "not tested yet"}
+              {caps ? `${relativeAge(caps.detected_at)} from ${host}` : "not probed yet"}
             </div>
           </div>
           <div className="ctl" style={{ display: "block" }}>
@@ -625,11 +693,11 @@ function ProfileDetail({ profile }: { profile: ProxyProfile }) {
                 onClick={() => void testProxyProfile(profile.id)}
               >
                 <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                {testing ? "Testing…" : "Test profile"}
+                {testing ? "Probing…" : "Probe"}
               </button>
               {report ? (
                 <span className="q-faint num" style={{ alignSelf: "center", fontSize: 12 }}>
-                  {Number(report.latency_ms)} ms round trip · {buildLabel(report.capabilities)}
+                  {Number(report.latency_ms)} ms round trip
                 </span>
               ) : null}
             </div>
@@ -637,26 +705,50 @@ function ProfileDetail({ profile }: { profile: ProxyProfile }) {
               <div className="q-probe" style={{ paddingTop: 2 }}>
                 {rows.map((row) => (
                   <Fragment key={row.label}>
-                    <span className={row.ok ? "q-ok" : "q-warn"}>
-                      {row.ok ? (
-                        <CheckIcon className="q-icon s12" strokeWidth={2} aria-hidden />
+                    <span className={row.ok === true ? "q-ok" : row.ok === false ? "q-warn" : "q-faint"}>
+                      {row.ok === true ? (
+                        <CircleCheckIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                      ) : row.ok === false ? (
+                        <TriangleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                       ) : (
-                        <TriangleAlertIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                        <CircleDotIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                       )}
                     </span>
                     <div className="k">{row.label}</div>
-                    <div className={cn("v", !row.ok && "q-faint")} title={row.hint}>
+                    <div className={cn("v", row.ok === false && "q-faint")} title={row.hint}>
                       {row.value}
-                      {!row.ok && row.hint ? <span className="q-faint"> · {row.hint}</span> : null}
+                      {row.ok === false && row.hint ? (
+                        <span className="q-faint"> · {row.hint}</span>
+                      ) : null}
                     </div>
                   </Fragment>
                 ))}
               </div>
             ) : null}
-            {report ? (
-              <div style={{ marginTop: 12 }}>
-                <Diagnostics diagnostics={report.diagnostics} />
-              </div>
+            {details.length > 0 || report ? (
+              <details className="q-details">
+                <summary>Details</summary>
+                {details.length > 0 ? (
+                  <div className="q-probe">
+                    {details.map((row) => (
+                      <Fragment key={row.label}>
+                        <span className={row.ok ? "q-ok" : "q-faint"}>
+                          {row.ok ? (
+                            <CheckIcon className="q-icon s12" strokeWidth={2} aria-hidden />
+                          ) : null}
+                        </span>
+                        <div className="k">{row.label}</div>
+                        <div className={cn("v", !row.ok && "q-faint")}>{row.value}</div>
+                      </Fragment>
+                    ))}
+                  </div>
+                ) : null}
+                {report ? (
+                  <div style={{ marginTop: 12 }}>
+                    <Diagnostics diagnostics={report.diagnostics} />
+                  </div>
+                ) : null}
+              </details>
             ) : null}
           </div>
         </div>
@@ -684,6 +776,7 @@ function ProfileDetail({ profile }: { profile: ProxyProfile }) {
         {HARNESSES.map((harness) => (
           <HarnessRow key={harness} profile={profile} harness={harness} />
         ))}
+        <ApplyBar profile={profile} />
       </div>
 
       <div className="q-group">
@@ -732,9 +825,7 @@ function ProfileDetail({ profile }: { profile: ProxyProfile }) {
                       {credential.failed != null ? Number(credential.failed) : "—"}
                     </td>
                     <td className="q-faint">
-                      {cooldown
-                        ? `${cooldown.reason ?? "cooling down"}${cooldown.remaining_seconds != null ? ` · ${Number(cooldown.remaining_seconds)}s` : ""}`
-                        : "—"}
+                      {cooldown ? cooldownText(cooldown.remaining_seconds) : "—"}
                     </td>
                   </tr>
                 );
@@ -755,7 +846,7 @@ export function ProxySettings() {
   const error = useProxy((state) => state.error);
   const saveError = useProxy((state) => state.saveError);
   const connection = useApp((state) => state.connection.status);
-  const [pickerOpen, setPickerOpen] = useState(false);
+  const host = useHostName();
 
   useEffect(() => {
     if (connection === "online") void loadProxyProfiles();
@@ -801,50 +892,27 @@ export function ProxySettings() {
     <div className="q-form">
       <div className="q-form-head">
         <div style={{ flex: 1 }}>
-          <h1>{selected?.name ?? "CLIProxyAPI"}</h1>
+          <h1>
+            {selected?.name ?? "CLIProxyAPI"}
+            {selected && !selected.name.includes(host) ? ` on ${host}` : ""}
+          </h1>
           <p className="lead">
-            Routes harnesses through one endpoint with several credentials. Keys stay on the daemon;
-            this app only sees whether they exist.
+            Routes harnesses on {host} through one endpoint with several credentials. Keys stay on{" "}
+            {host}; this app only sees whether they exist.
           </p>
         </div>
-        {profiles.length > 0 ? (
-          <div style={{ position: "relative" }}>
-            <button
-              type="button"
-              className="q-btn secondary"
-              onClick={() => setPickerOpen((open) => !open)}
-            >
-              {selected?.name ?? "Profile"}{" "}
-              <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-            </button>
-            {pickerOpen ? (
-              <div
-                className="q-tip"
-                style={{ right: 0, top: 34, position: "absolute", minWidth: 220, zIndex: 10 }}
-                role="menu"
-              >
-                {profiles.map((profile) => (
-                  <button
-                    key={profile.id}
-                    type="button"
-                    role="menuitem"
-                    className="q-li"
-                    style={{ display: "block", width: "100%", textAlign: "left" }}
-                    onClick={() => {
-                      selectProxyProfile(profile.id);
-                      setPickerOpen(false);
-                    }}
-                  >
-                    <span className="t">{profile.name}</span>
-                    <span className="s q-faint q-mono">{profile.base_url}</span>
-                  </button>
-                ))}
-                <div style={{ padding: 8 }}>
-                  <AddProfile />
-                </div>
-              </div>
-            ) : null}
-          </div>
+        {profiles.length > 1 ? (
+          <ChipSelect
+            label="Profile"
+            width={160}
+            value={selected?.id ?? ""}
+            options={profiles.map((profile) => ({
+              value: profile.id,
+              label: profile.name,
+              hint: profile.base_url,
+            }))}
+            onChange={(id) => selectProxyProfile(id as ProxyProfileId)}
+          />
         ) : null}
       </div>
 

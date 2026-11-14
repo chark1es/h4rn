@@ -1,3 +1,4 @@
+import { ChipSelect } from "@/components/common/ChipSelect";
 import { FolderIcon, GitBranchIcon, Trash2Icon, TriangleAlertIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
@@ -30,9 +31,6 @@ const NO_AVAILABILITY: never[] = [];
 
 const SECRET_REFUSAL =
   "h4rn scans every file in a skill and refuses bundles that contain credentials. Remove the secret (or read it from an environment variable at run time) and add it again.";
-
-const selectClass =
-  "h-7 w-full rounded-[6px] border-0 bg-bg-raised px-2 text-[12.5px] text-fg shadow-[inset_0_0_0_1px_var(--line-2)] outline-none focus-visible:shadow-[inset_0_0_0_1px_var(--accent)]";
 
 function FieldLabel({
   children,
@@ -571,32 +569,24 @@ export function SkillDetailsDialog({
           <span className="aside">Path-by-path digest diff</span>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <select
-            className={cn(selectClass, "max-w-[220px]")}
-            aria-label="From version"
+          <ChipSelect
+            label="From version"
+            width={200}
             value={from}
-            onChange={(event) => setFrom(event.target.value)}
-          >
-            <option value="">New skill (no prior version)</option>
-            {versions.map((version) => (
-              <option key={version} value={version}>
-                {version.slice(0, 12)}
-              </option>
-            ))}
-          </select>
+            options={[
+              { value: "", label: "New skill (no prior version)" },
+              ...versions.map((version) => ({ value: version, label: version.slice(0, 12) })),
+            ]}
+            onChange={setFrom}
+          />
           <span className="q-faint">→</span>
-          <select
-            className={cn(selectClass, "max-w-[220px]")}
-            aria-label="To version"
+          <ChipSelect
+            label="To version"
+            width={200}
             value={to}
-            onChange={(event) => setTo(event.target.value)}
-          >
-            {versions.map((version) => (
-              <option key={version} value={version}>
-                {version.slice(0, 12)}
-              </option>
-            ))}
-          </select>
+            options={versions.map((version) => ({ value: version, label: version.slice(0, 12) }))}
+            onChange={setTo}
+          />
           <Button variant="secondary" onClick={() => void compare()} disabled={busy}>
             {busy ? "Comparing…" : "Compare"}
           </Button>

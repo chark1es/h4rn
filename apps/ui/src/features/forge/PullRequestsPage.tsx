@@ -61,6 +61,7 @@ import type {
 } from "@/gen";
 import { userSeed } from "@/lib/entities";
 import { relativeAge } from "@/lib/format";
+import { ChipSelect } from "@/components/common/ChipSelect";
 import { glyphForThread } from "@/lib/agent";
 import { getClient, navigate, openThread, pushToast, useApp } from "@/lib/store/appStore";
 
@@ -424,32 +425,26 @@ export function PullRequestsPage() {
           {repo.owner}/{repo.repo}
         </span>
         {repos.length > 1 ? (
-          <select
-            className="q-input"
-            style={{ width: "auto", height: 26 }}
-            aria-label="Repository"
+          <ChipSelect
+            label="Repository"
             value={`${repo.forge}:${repo.base_url}:${repo.owner}/${repo.repo}`}
-            onChange={(event) => {
+            options={repos.map((item) => ({
+              value: `${item.repo.forge}:${item.repo.base_url}:${item.repo.owner}/${item.repo.repo}`,
+              label: `${item.repo.owner}/${item.repo.repo}`,
+              hint: item.remote,
+            }))}
+            onChange={(value) => {
               const next = repos.find(
                 (item) =>
                   `${item.repo.forge}:${item.repo.base_url}:${item.repo.owner}/${item.repo.repo}` ===
-                  event.target.value,
+                  value,
               );
               if (next) {
                 setRepo(next.repo);
                 setPage(1);
               }
             }}
-          >
-            {repos.map((item) => (
-              <option
-                key={`${item.remote}:${item.repo.owner}/${item.repo.repo}`}
-                value={`${item.repo.forge}:${item.repo.base_url}:${item.repo.owner}/${item.repo.repo}`}
-              >
-                {item.repo.owner}/{item.repo.repo} ({item.remote})
-              </option>
-            ))}
-          </select>
+          />
         ) : null}
         <span className="grow" />
         <div className="q-seg" role="tablist" aria-label="Pull request filters">
