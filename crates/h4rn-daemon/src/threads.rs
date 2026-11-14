@@ -236,12 +236,19 @@ struct Inner {
 
 type ThreadHandle = Arc<Mutex<ThreadRecord>>;
 
+/// A harness session shared with the task that is writing to it.
+///
+/// `send` can take as long as the adapter likes; keeping it behind its own lock
+/// means the thread record stays available for snapshots, listings and settings
+/// requests while a harness accepts input.
+type SharedSession = Arc<Mutex<Box<dyn HarnessSession>>>;
+
 struct ThreadRecord {
     meta: ThreadMeta,
     state: ThreadState,
     active: Option<ActiveTurn>,
     last_turn_id: Option<TurnId>,
-    session: Option<Box<dyn HarnessSession>>,
+    session: Option<SharedSession>,
     pump: Option<JoinHandle<()>>,
     pending_approvals: BTreeMap<String, PendingApproval>,
     queued: VecDeque<UserInput>,
@@ -943,7 +950,13 @@ impl ThreadManager {
         };
         if record.session.is_some() {
             drop(record);
-            self.inner.deliver(handle, input).await;
+            // The message and its turn are already recorded; let the adapter
+            // accept the text in the background so the connection can answer
+            // other requests (snapshots, listings, settings) meanwhile.
+            let this = Arc::clone(&self.inner);
+            tokio::spawn(async move {
+                this.deliver(handle, input).await;
+            });
         } else {
             drop(record);
             self.inner.spawn_session(handle, Some(input));
@@ -958,18 +971,23 @@ impl ThreadManager {
     /// Interrupts the running turn.
     pub async fn interrupt(&self, thread_id: &ThreadId) -> Result<(), ManagerError> {
         let handle = self.inner.handle(thread_id).await?;
-        let mut record = handle.lock().await;
-        if record.active.is_none() {
-            return Err(ManagerError::Conflict(format!(
-                "thread {thread_id} has no running turn"
-            )));
-        }
-        let Some(session) = record.session.as_mut() else {
+        let session = {
+            let record = handle.lock().await;
+            if record.active.is_none() {
+                return Err(ManagerError::Conflict(format!(
+                    "thread {thread_id} has no running turn"
+                )));
+            }
+            record.session.clone()
+        };
+        let Some(session) = session else {
             return Err(ManagerError::Conflict(format!(
                 "thread {thread_id} has no live harness session"
             )));
         };
         session
+            .lock()
+            .await
             .interrupt()
             .await
             .map_err(|error| ManagerError::Internal(error.to_string()))
@@ -1021,19 +1039,25 @@ impl ThreadManager {
         };
 
         let target = self.inner.handle(&target_thread).await?;
-        let mut target_record = target.lock().await;
-        let response = match target_record.session.as_mut() {
-            Some(session) => Some(
-                session
-                    .respond_approval(&target_approval, decision, option_id.as_deref())
-                    .await,
-            ),
-            None => None,
+        let response = {
+            let target_session = {
+                let target_record = target.lock().await;
+                target_record.session.clone()
+            };
+            match target_session {
+                Some(session) => Some(
+                    session
+                        .lock()
+                        .await
+                        .respond_approval(&target_approval, decision, option_id.as_deref())
+                        .await,
+                ),
+                None => None,
+            }
         };
 
         match response {
             None => {
-                drop(target_record);
                 let mut record = handle.lock().await;
                 record
                     .pending_approvals
@@ -1043,7 +1067,6 @@ impl ThreadManager {
                 )))
             }
             Some(Err(error)) => {
-                drop(target_record);
                 let mut record = handle.lock().await;
                 record
                     .pending_approvals
@@ -1051,6 +1074,7 @@ impl ThreadManager {
                 Err(ManagerError::Internal(error.to_string()))
             }
             Some(Ok(())) => {
+                let mut target_record = target.lock().await;
                 target_record.pending_approvals.remove(&target_approval);
                 let kind = pending.kind;
                 let now = Utc::now();
@@ -1399,7 +1423,8 @@ impl ThreadManager {
                 }];
                 let _ = self.inner.emit(&mut record, domain, wire).await;
             }
-            if let Some(mut session) = record.session.take() {
+            if let Some(session) = record.session.take() {
+                let mut session = session.lock().await;
                 if let Err(error) = session.shutdown().await {
                     tracing::warn!(thread_id = %record.meta.thread_id, %error, "harness shutdown failed");
                 }
@@ -1670,12 +1695,14 @@ impl Inner {
         };
 
         let stream = session.events();
+        let session: SharedSession = Arc::new(Mutex::new(session));
         let mut record = handle.lock().await;
         if record.closed || self.closed.load(Ordering::Relaxed) {
-            let _ = session.shutdown().await;
+            drop(record);
+            let _ = session.lock().await.shutdown().await;
             return;
         }
-        record.session = Some(session);
+        record.session = Some(Arc::clone(&session));
         if context_window.is_some() {
             record.context_window = context_window;
         }
@@ -1684,32 +1711,36 @@ impl Inner {
         record.pump = Some(tokio::spawn(async move {
             inner.run_pump(pump_handle, stream).await;
         }));
+        drop(record);
 
-        if let Some(input) = first_input
-            && let Some(session) = record.session.as_mut()
-            && let Err(error) = session.send(input).await
-        {
-            let now = Utc::now();
-            record.active = None;
-            let wire = vec![Event::Error {
-                thread_id: Some(record.meta.thread_id.clone()),
-                message: format!("the harness rejected the message: {error}"),
-                hint: Some("Check the harness installation with `h4rnd doctor`".into()),
-                retryable: false,
-            }];
-            let _ = self
-                .emit(
-                    &mut record,
-                    vec![
-                        ThreadEvent::FailureRaised { at: now },
-                        ThreadEvent::TurnCompleted {
-                            status: TurnStatus::Failed,
-                            at: now,
-                        },
-                    ],
-                    wire,
-                )
-                .await;
+        if let Some(input) = first_input {
+            // The first prompt is written outside the record lock: a harness
+            // that takes a while to accept it must not stall the thread.
+            let sent = session.lock().await.send(input).await;
+            if let Err(error) = sent {
+                let mut record = handle.lock().await;
+                let now = Utc::now();
+                record.active = None;
+                let wire = vec![Event::Error {
+                    thread_id: Some(record.meta.thread_id.clone()),
+                    message: format!("the harness rejected the message: {error}"),
+                    hint: Some("Check the harness installation with `h4rnd doctor`".into()),
+                    retryable: false,
+                }];
+                let _ = self
+                    .emit(
+                        &mut record,
+                        vec![
+                            ThreadEvent::FailureRaised { at: now },
+                            ThreadEvent::TurnCompleted {
+                                status: TurnStatus::Failed,
+                                at: now,
+                            },
+                        ],
+                        wire,
+                    )
+                    .await;
+            }
         }
     }
 
@@ -1739,13 +1770,20 @@ impl Inner {
     }
 
     async fn deliver(self: &Arc<Self>, handle: ThreadHandle, input: UserInput) {
-        let mut record = handle.lock().await;
-        let Some(session) = record.session.as_mut() else {
-            drop(record);
+        let session = {
+            let record = handle.lock().await;
+            record.session.clone()
+        };
+        let Some(session) = session else {
             self.spawn_session(handle, Some(input));
             return;
         };
-        if let Err(error) = session.send(input).await {
+        // The record lock is released before the write: a harness that takes
+        // seconds to accept input must not stall snapshots or settings calls
+        // queued on the same connection.
+        let sent = session.lock().await.send(input).await;
+        if let Err(error) = sent {
+            let mut record = handle.lock().await;
             let now = Utc::now();
             record.active = None;
             let wire = vec![Event::Error {
@@ -1794,6 +1832,7 @@ impl Inner {
                 && let Some(session_id) = record
                     .session
                     .as_ref()
+                    .and_then(|session| session.try_lock().ok())
                     .and_then(|session| session.session_id())
             {
                 record.meta.resume_id = Some(session_id);
@@ -1856,7 +1895,11 @@ impl Inner {
                         && let Some(store) = self.snapshots.get()
                     {
                         let mut paths = tool_call_file_paths(tool_call.input.as_ref());
-                        if let Some(session) = record.session.as_ref() {
+                        if let Some(session) = record
+                            .session
+                            .as_ref()
+                            .and_then(|session| session.try_lock().ok())
+                        {
                             paths.extend(session.touched_paths());
                         }
                         paths.sort();
@@ -2062,6 +2105,7 @@ impl Inner {
                         record
                             .session
                             .as_ref()
+                            .and_then(|session| session.try_lock().ok())
                             .and_then(|session| session.last_turn())
                             .map(|report| Usage {
                                 cost_micros: report.cost_micros,
@@ -2192,6 +2236,7 @@ impl Inner {
         let stderr_tail = record
             .session
             .as_ref()
+            .and_then(|session| session.try_lock().ok())
             .map(|session| session.stderr_tail())
             .unwrap_or_default();
         record.session = None;
@@ -2272,7 +2317,12 @@ impl Inner {
         if needs_session {
             self.spawn_session(handle, Some(input));
         } else {
-            self.deliver(handle, input).await;
+            // Never block the pump on a slow adapter write; the turn is
+            // already recorded and its progress arrives as events.
+            let this = Arc::clone(self);
+            tokio::spawn(async move {
+                this.deliver(handle, input).await;
+            });
         }
     }
 
@@ -2459,7 +2509,14 @@ impl Inner {
         if needs_session {
             self.spawn_session(handle, Some(input));
         } else {
-            self.deliver(handle, input).await;
+            // Acknowledge the resume before the harness produces its first
+            // token. `finish_schedule` above already emitted `ScheduleChanged`
+            // and the thread events below report progress, so a slow first
+            // send must not hold the `ResumeNow` request open (ADR-003).
+            let this = Arc::clone(self);
+            tokio::spawn(async move {
+                this.deliver(handle, input).await;
+            });
         }
         Ok(Some(fired))
     }

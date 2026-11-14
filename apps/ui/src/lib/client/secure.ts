@@ -5,6 +5,7 @@ import {
   generate_identity,
   parse_pairing,
 } from "@/gen/transport-wasm/h4rn_transport_wasm";
+import { forgetSecret, getSecret, peekSecret, setSecret } from "@/lib/platform/secrets";
 
 import type { Transport, TransportContext, TransportFactory, TransportHandlers } from "./types";
 import { loadTransportWasm } from "./wasm";
@@ -15,8 +16,8 @@ import { loadTransportWasm } from "./wasm";
  * Every cryptographic operation, the Noise handshake, the session layer and
  * path selection live in `h4rn-transport-wasm`. This file only owns the two
  * things a browser must own: WebSockets and timers. No key material is ever
- * read or produced by TypeScript beyond moving opaque strings between
- * `localStorage` and wasm (ADR-001, ADR-009, ADR-010).
+ * read or produced by TypeScript beyond moving opaque strings between the
+ * platform secret store and wasm (ADR-001, ADR-009, ADR-010, ADR-038).
  *
  * The daemon issues a resume token once per logical session. `H4rnClient`
  * throws away and recreates a `Transport` on every reconnect, so the token and
@@ -27,6 +28,7 @@ const IDENTITY_KEY = "h4rn.secure.identity";
 const PIN_KEY = "h4rn.secure.pin";
 const PENDING_KEY = "h4rn.secure.pending";
 const SESSION_KEY = "h4rn.secure.session";
+const PAIRING_URI_KEY = "h4rn.secure.pairing-uri";
 
 /** How often the wasm core runs probes, retransmits and path selection. */
 const TICK_MS = 50;
@@ -92,8 +94,6 @@ export type SecureTransportOptions = {
    * so an expired access token never becomes a dead transport.
    */
   mintRelayUrl?: (() => Promise<string | null>) | null;
-  /** Injectable storage for tests. */
-  storage?: Pick<Storage, "getItem" | "setItem" | "removeItem"> | null;
 };
 
 /**
@@ -109,16 +109,13 @@ export function createSecureTransportFactory(
 }
 
 /** Whether this browser has ever pinned a daemon, so boot can choose Noise. */
-export function hasStoredSecurity(
-  storage: Pick<Storage, "getItem"> | null = defaultStorage(),
-): boolean {
-  return Boolean(storage?.getItem(PIN_KEY) ?? storage?.getItem(PENDING_KEY));
+export function hasStoredSecurity(): boolean {
+  return Boolean(peekSecret(PIN_KEY) ?? peekSecret(PENDING_KEY));
 }
 
 export class SecureTransport implements Transport {
   readonly kind = "websocket" as const;
 
-  private readonly storage: SecureTransportOptions["storage"];
   private handlers: TransportHandlers | null = null;
   private wasm: WasmSecureTransport | null = null;
   private sockets: Array<WebSocket | null> = [];
@@ -140,9 +137,7 @@ export class SecureTransport implements Transport {
   constructor(
     private readonly context: TransportContext,
     private readonly options: SecureTransportOptions = {},
-  ) {
-    this.storage = options.storage === undefined ? defaultStorage() : options.storage;
-  }
+  ) {}
 
   connect(handlers: TransportHandlers): void {
     this.handlers = handlers;
@@ -263,8 +258,8 @@ export class SecureTransport implements Transport {
       return this.resolveRemote(this.options.remote);
     }
 
-    const storedPin = readJson<PairingPin>(this.storage, PIN_KEY);
-    const pending = readJson<PendingPairing>(this.storage, PENDING_KEY);
+    const storedPin = await readJson<PairingPin>(PIN_KEY);
+    const pending = await readJson<PendingPairing>(PENDING_KEY);
     let pin = storedPin;
     let psk = pending?.psk;
 
@@ -283,7 +278,10 @@ export class SecureTransport implements Transport {
           label: parsed.label ?? null,
           relay: this.options.relay ?? pin?.relay ?? null,
         };
-        writeJson(this.storage, PENDING_KEY, fresh);
+        await writeJson(PENDING_KEY, fresh);
+        // The pairing URI carries the one-time PSK; consume it so a reload
+        // does not replay a secret that the daemon has already burned.
+        forgetSecret(PAIRING_URI_KEY);
         // The pin that survives pairing carries no one-time secret.
         pin = {
           endpoint: fresh.endpoint,
@@ -314,9 +312,9 @@ export class SecureTransport implements Transport {
       paths.push({ kind: "relay", endpoint: normalizeSecureUrl(relay) });
     }
 
-    const session = readJson<StoredSession>(this.storage, SESSION_KEY);
+    const session = await readJson<StoredSession>(SESSION_KEY);
     return {
-      identity: readIdentity(this.storage),
+      identity: await ensureDeviceIdentity(),
       daemonPublic: pin.daemonPublic,
       psk,
       sessionId: session?.sessionId ?? "00".repeat(16),
@@ -358,12 +356,12 @@ export class SecureTransport implements Transport {
     if (paths.length === 0) return null;
 
     this.sessionKey = remote.sessionKey ?? SESSION_KEY;
-    const session = readJson<StoredSession>(this.storage, this.sessionKey);
+    const session = await readJson<StoredSession>(this.sessionKey);
     if (paths.some((path) => path.kind === "relay")) {
       this.relayConnId = randomHex(16);
     }
     return {
-      identity: readIdentity(this.storage),
+      identity: await ensureDeviceIdentity(),
       daemonPublic: remote.daemonPublic,
       psk: undefined,
       sessionId: session?.sessionId ?? "00".repeat(16),
@@ -633,8 +631,8 @@ export class SecureTransport implements Transport {
     // The PSK is single-use. Once the handshake succeeded the daemon has
     // allowlisted this device, so drop the one-time secret and keep the pin.
     if (this.pinned) {
-      writeJson(this.storage, PIN_KEY, this.pinned);
-      remove(this.storage, PENDING_KEY);
+      void writeJson(PIN_KEY, this.pinned);
+      forgetSecret(PENDING_KEY);
     }
     if (!this.openedOnce) {
       this.openedOnce = true;
@@ -666,7 +664,7 @@ export class SecureTransport implements Transport {
     // the next transport starts a fresh logical session. A first handshake
     // that never authenticated keeps the pending PSK for a retry or re-pair.
     if (!this.established && this.resumeAttempted) {
-      remove(this.storage, this.sessionKey);
+      forgetSecret(this.sessionKey);
     }
 
     for (const socket of this.sockets) closeSocket(socket);
@@ -696,7 +694,7 @@ export class SecureTransport implements Transport {
   }
 
   private persistSession(session: StoredSession): void {
-    writeJson(this.storage, this.sessionKey, session);
+    void writeJson(this.sessionKey, session);
   }
 }
 
@@ -724,7 +722,13 @@ function closeCodeFor(
 }
 
 function hasPendingPairing(): boolean {
-  return Boolean(readJson<PendingPairing>(defaultStorage(), PENDING_KEY));
+  const raw = peekSecret(PENDING_KEY);
+  if (!raw) return false;
+  try {
+    return Boolean(JSON.parse(raw));
+  } catch {
+    return false;
+  }
 }
 
 function sendSocket(socket: WebSocket, bytes: Uint8Array): void {
@@ -747,31 +751,17 @@ function closeSocket(socket: WebSocket | null): void {
   }
 }
 
-function defaultStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> | null {
-  try {
-    return typeof window === "undefined" ? null : window.localStorage;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * The stable device identity used for Noise and DPoP.
  *
- * It is generated once and kept on this device. Only the wasm module ever
- * sees the secret halves.
+ * It is generated once and kept in the platform secret store. Only the wasm
+ * module ever sees the secret halves.
  */
-export function ensureDeviceIdentity(
-  storage: SecureTransportOptions["storage"] = defaultStorage(),
-): string {
-  return readIdentity(storage);
-}
-
-function readIdentity(storage: SecureTransportOptions["storage"]): string {
-  const existing = storage?.getItem(IDENTITY_KEY);
+export async function ensureDeviceIdentity(): Promise<string> {
+  const existing = await getSecret(IDENTITY_KEY);
   if (existing) return existing;
   const identity = generate_identity();
-  storage?.setItem(IDENTITY_KEY, identity);
+  await setSecret(IDENTITY_KEY, identity);
   return identity;
 }
 
@@ -809,8 +799,8 @@ function randomHex(bytes: number): string {
   return [...buffer].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function readJson<T>(storage: SecureTransportOptions["storage"], key: string): T | null {
-  const value = storage?.getItem(key);
+async function readJson<T>(key: string): Promise<T | null> {
+  const value = await getSecret(key);
   if (!value) return null;
   try {
     return JSON.parse(value) as T;
@@ -819,20 +809,11 @@ function readJson<T>(storage: SecureTransportOptions["storage"], key: string): T
   }
 }
 
-function writeJson(storage: SecureTransportOptions["storage"], key: string, value: unknown): void {
+async function writeJson(key: string, value: unknown): Promise<void> {
   try {
-    storage?.setItem(key, JSON.stringify(value));
+    await setSecret(key, JSON.stringify(value));
   } catch {
-    // Private-mode storage can reject writes; the transport still works for
-    // this page load.
-  }
-}
-
-function remove(storage: SecureTransportOptions["storage"], key: string): void {
-  try {
-    storage?.removeItem(key);
-  } catch {
-    // Ignore.
+    // A rejecting store leaves the in-memory cache serving this page load.
   }
 }
 

@@ -5,6 +5,27 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### Credentials and remote sign-in
+
+- **Browser storage never holds a credential.** The daemon token, pairing URI, Noise
+  identity/pin/session and h4rn-connect access/refresh tokens now go through one platform secret
+  store: Android Keystore / iOS Keychain behind `secret_*`, the OS keychain behind `keychain_*`
+  on desktop, and AES-GCM envelopes in IndexedDB under a non-extractable `CryptoKey` on the web
+  (ADR-041). Legacy `localStorage`/`sessionStorage` values are migrated on first boot and
+  deleted; `?token=` and `?pair=` bootstrap secrets are consumed and stripped from the address
+  bar, and `sessionStorage` keeps only short-lived, non-secret OIDC state.
+- **OIDC sign-in completes on every shell.** The web returns through `/auth/callback` and
+  reloads the route the person left, desktop waits on the loopback callback, and mobile opens the
+  provider in the system browser and returns through `h4rn://callback`. The device-code grant
+  remains as "Sign in on another device"; the remote e2e now drives both the browser redirect
+  and the device-code fallback (from a fresh profile, since the relay refuses a revoked device's key) against Docker OrbitID.
+- **Resume now acknowledges immediately.** `ResumeNow` finishes the schedule and returns before
+  the harness produces its first token, and the resumed turn reports progress through
+  `ScheduleChanged` and thread events, so a realistic slow harness no longer times out the
+  request. A normal `SendMessage` likewise returns once the turn is recorded, and the thread
+  record is no longer locked across the harness write, so a slow adapter cannot stall thread
+  listings, snapshots or settings requests with it.
+
 ### UI: layout v2
 
 - **One left sidebar, one right panel.** The nav rail and inbox column are merged into a single

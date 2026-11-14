@@ -114,10 +114,13 @@ h4rn://pair?daemon=...&token=...
 - Typed or scanned in the pairing screen.
 - Reused from the Android Keystore on later launches.
 
-The token is not kept in the URL: the adapter stores it in localStorage (which the UI already
-reads) and in the Keystore, then rewrites the URL with only `?daemon=`. OIDC callbacks are
-registered under the same scheme (`h4rn://oidc/callback`, `h4rn://callback`) and forwarded as a
-`h4rn-oidc-callback` event; the auth flow itself is a later phase.
+The token is not kept in the URL: the adapter writes it to the platform secret store (Android
+Keystore / iOS Keychain behind `secret_*`) and rewrites the URL with only the non-secret
+`?daemon=`. A `?token=` bootstrap value is consumed on boot and stripped from the address bar;
+legacy `localStorage` copies are migrated and deleted (ADR-041). OIDC callbacks are registered
+under the same scheme (`h4rn://oidc/callback`, `h4rn://callback`) and forwarded to the remote
+store. Sign-in opens the provider in the system browser through the opener plugin, so the
+webview keeps the app bundle and the deep link returns the authorization code.
 
 ### QR format
 

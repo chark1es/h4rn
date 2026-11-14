@@ -382,6 +382,9 @@ pub struct UpstreamStatus {
 }
 
 struct ManagedState {
+    /// Set once the entry is replaced or removed; a connect that finishes
+    /// afterwards discards its transport.
+    retired: bool,
     upstream: Option<Arc<dyn Upstream>>,
     status: McpServerStatusKind,
     last_error: Option<String>,
@@ -400,6 +403,9 @@ struct ManagedState {
 struct Managed {
     name: String,
     config: UpstreamConfig,
+    /// Serialises connects. `state` is never held across one, so status reads
+    /// (the server list) stay instant while a server is starting.
+    connect_gate: tokio::sync::Mutex<()>,
     state: tokio::sync::Mutex<ManagedState>,
 }
 
@@ -680,7 +686,9 @@ impl Managed {
         Self {
             name,
             config,
+            connect_gate: tokio::sync::Mutex::new(()),
             state: tokio::sync::Mutex::new(ManagedState {
+                retired: false,
                 upstream: None,
                 status: McpServerStatusKind::Stopped,
                 last_error: None,
@@ -715,31 +723,41 @@ impl Managed {
     }
 
     async fn ensure(&self, manager: &UpstreamManager) -> Result<Arc<dyn Upstream>, UpstreamError> {
-        let mut state = self.state.lock().await;
-        if let Some(upstream) = &state.upstream {
-            return Ok(Arc::clone(upstream));
-        }
-        if let Some(retry_at) = state.next_retry
-            && Instant::now() < retry_at
-        {
-            let wait = retry_at.saturating_duration_since(Instant::now());
-            return Err(UpstreamError::Unavailable(format!(
-                "\"{}\" is restarting in {}s",
-                self.name,
-                wait.as_secs().max(1)
-            )));
-        }
-        state.status = McpServerStatusKind::Starting;
-        let attempts = state.attempts;
-        self.emit(
-            manager,
-            McpServerStatusKind::Starting,
-            0,
-            state.last_error.clone(),
-        );
-        // The state lock is held across connect on purpose: concurrent callers
-        // wait and then observe the same ready-or-failed result instead of
-        // racing two child processes into existence.
+        // Concurrent callers queue here and then observe the same
+        // ready-or-failed result instead of racing two child processes into
+        // existence. Only this gate is held across `connect`; `state` is not,
+        // so `status()` never waits on a spawn.
+        let _gate = self.connect_gate.lock().await;
+        let attempts = {
+            let mut state = self.state.lock().await;
+            if let Some(upstream) = &state.upstream {
+                return Ok(Arc::clone(upstream));
+            }
+            if state.retired {
+                return Err(UpstreamError::Unavailable(format!(
+                    "\"{}\" was removed",
+                    self.name
+                )));
+            }
+            if let Some(retry_at) = state.next_retry
+                && Instant::now() < retry_at
+            {
+                let wait = retry_at.saturating_duration_since(Instant::now());
+                return Err(UpstreamError::Unavailable(format!(
+                    "\"{}\" is restarting in {}s",
+                    self.name,
+                    wait.as_secs().max(1)
+                )));
+            }
+            state.status = McpServerStatusKind::Starting;
+            self.emit(
+                manager,
+                McpServerStatusKind::Starting,
+                0,
+                state.last_error.clone(),
+            );
+            state.attempts
+        };
         let connected = manager
             .factory
             .connect(
@@ -749,6 +767,17 @@ impl Managed {
                 manager.events.clone(),
             )
             .await;
+        let mut state = self.state.lock().await;
+        if state.retired {
+            drop(state);
+            if let Ok(connected) = connected {
+                connected.upstream.shutdown().await;
+            }
+            return Err(UpstreamError::Unavailable(format!(
+                "\"{}\" was removed",
+                self.name
+            )));
+        }
         match connected {
             Ok(connected) => {
                 state.upstream = Some(Arc::clone(&connected.upstream));
@@ -821,6 +850,7 @@ impl Managed {
 
     async fn stop(&self) {
         let mut state = self.state.lock().await;
+        state.retired = true;
         if let Some(upstream) = state.upstream.take() {
             upstream.shutdown().await;
         }
@@ -1140,6 +1170,81 @@ mod tests {
             manager.status("nope").await.status,
             McpServerStatusKind::Stopped
         );
+    }
+
+    struct StallingFactory {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    #[async_trait]
+    impl UpstreamFactory for StallingFactory {
+        async fn connect(
+            &self,
+            _name: &str,
+            _config: &UpstreamConfig,
+            _limits: &UpstreamLimits,
+            _events: broadcast::Sender<UpstreamEvent>,
+        ) -> Result<ConnectedUpstream, UpstreamError> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            Err(UpstreamError::Unavailable("stalled start".into()))
+        }
+    }
+
+    /// Regression: listing servers waited on the per-server state lock, which
+    /// a starting server held across its whole connect, so a list issued while
+    /// a stdio server spawned hung until the start finished or timed out.
+    #[tokio::test]
+    async fn status_does_not_wait_for_a_server_that_is_starting() {
+        let factory = Arc::new(StallingFactory {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let manager = Arc::new(UpstreamManager::with_factory(
+            factory.clone(),
+            UpstreamLimits::default(),
+        ));
+        manager
+            .upsert(
+                "slow",
+                UpstreamConfig::Stdio {
+                    command: "x".into(),
+                    args: Vec::new(),
+                    cwd: None,
+                    env: BTreeMap::new(),
+                },
+            )
+            .await;
+        let starting = {
+            let manager = Arc::clone(&manager);
+            tokio::spawn(async move { manager.ensure("slow").await.err() })
+        };
+        factory.entered.notified().await;
+
+        let status = tokio::time::timeout(Duration::from_secs(2), manager.status("slow"))
+            .await
+            .expect("status must not block on the connect in flight");
+        assert_eq!(status.status, McpServerStatusKind::Starting);
+
+        // Replacing the entry mid-start must not block either.
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            manager.upsert(
+                "other",
+                UpstreamConfig::Stdio {
+                    command: "y".into(),
+                    args: Vec::new(),
+                    cwd: None,
+                    env: BTreeMap::new(),
+                },
+            ),
+        )
+        .await
+        .expect("upsert of another server must not block");
+
+        factory.release.notify_one();
+        assert!(starting.await.unwrap().is_some());
     }
 
     #[test]

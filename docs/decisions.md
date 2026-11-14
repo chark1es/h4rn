@@ -708,3 +708,44 @@ look's strongest brand signal (the stage silhouette) is gone, so identity must c
 restraint, the blobatar/orb system and typographic precision. Surfaces whose wire protocol
 has not landed yet (Pull requests, MCP & skills, Usage, Settings, pairing) ship as clearly
 marked mock-mode shells rather than as partial implementations.
+
+## ADR-041: One platform secret store; browser storage never holds a credential
+
+**Status:** Accepted
+
+Every credential the view touches goes through `apps/ui/src/lib/platform/secrets.ts`.
+On Tauri mobile it is the Android Keystore / iOS Keychain behind `secret_get`,
+`secret_set` and `secret_delete`; on Tauri desktop it is the OS keychain behind
+`keychain_get`, `keychain_set` and `keychain_delete` with service `h4rn` and the logical key as
+the account. The web has no OS keychain, so it stores AES-GCM envelopes in IndexedDB
+(`h4rn-secrets`) under a non-extractable `CryptoKey` kept in the same database. If IndexedDB or
+WebCrypto is unavailable the page falls back to an in-memory cache for that page load rather
+than writing plaintext anywhere.
+
+The values covered are the daemon token, the pairing URI (including its one-time PSK), the
+Noise identity, the pinned daemon key, the pending/session resume state, and h4rn-connect
+access and refresh tokens. `localStorage` and `sessionStorage` never see them. Reads are
+asynchronous but `prepareSecrets()` runs once before React mounts, so the few synchronous boot
+reads (`readBootConfig`, `hasStoredSecurity`) answer from an in-memory cache and the rest of the
+app uses `getSecret`/`setSecret`.
+
+Existing builds left some of these in `localStorage` (`h4rn.token`, `h4rn.pairing`, any
+`h4rn.secure.*`, `h4rn.remote.credentials`), in `sessionStorage`
+(`h4rn.remote.credentials`) and, on desktop, in the old `h4rn-connect` keychain service. Boot
+migrates each value into the new store, deletes the old copy, and only then continues. `?token=`
+and `?pair=` bootstrap values are ingested the same way and stripped from the address bar, so
+they cannot leak through history, screenshots or a copied link.
+
+`sessionStorage` is still used for two things that are deliberately not secrets: the OIDC
+`state`/redirect metadata for one tab, and nothing else. When the IDB record outlives a profile
+reset, its envelope simply fails to decrypt and is skipped; a re-pair is required.
+
+Why not memory-only on the web: the OIDC redirect leaves the page and returns through
+`/auth/callback`, which would drop the daemon token and pairing PSK held only in memory.
+The encrypted IndexedDB record survives that round trip; the cost is the same-origin caveat below.
+
+Consequences: the daemon token survives reloads and relaunches on every shell without plaintext
+storage; the web's at-rest protection is weaker than an OS keychain because same-origin script
+can ask the page to decrypt, which `docs/transport.md` records in the threat model. Desktop and
+mobile keep their native keychain implementations; the missing piece was a single interface and
+a web backend, not another platform backend.
