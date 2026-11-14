@@ -11,6 +11,7 @@ pub mod connect;
 pub mod credentials;
 pub mod network;
 pub mod pairing;
+pub mod peers;
 pub mod relay;
 pub mod tailscale;
 

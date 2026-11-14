@@ -44,6 +44,10 @@ type Connections = Arc<Mutex<HashMap<String, mpsc::Sender<Vec<u8>>>>>;
 #[derive(Debug, Default)]
 pub struct DeviceRegistry {
     devices: RwLock<HashMap<String, RegisteredDevice>>,
+    /// Fired when the relay reports that the account's machines or devices may
+    /// have changed (snapshot, presence, pairing, revocation), so the peer
+    /// directory refreshes on a push instead of polling connect.
+    topology: tokio::sync::Notify,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +58,11 @@ struct RegisteredDevice {
 }
 
 impl DeviceRegistry {
+    /// The topology-change signal; see the field docs.
+    pub fn topology(&self) -> &tokio::sync::Notify {
+        &self.topology
+    }
+
     /// Registers a device and its Noise key with no scope restriction.
     pub fn insert(&self, device_id: impl Into<String>, noise_key: [u8; KEY_LEN]) {
         self.insert_scoped(device_id, noise_key, Vec::new());
@@ -286,17 +295,21 @@ async fn handle_event(
             for device in devices {
                 register_device(service, registry, &device);
             }
+            registry.topology().notify_one();
         }
         RelayServerEvent::DevicePaired { device, .. } => {
             register_device(service, registry, &device);
+            registry.topology().notify_one();
         }
         RelayServerEvent::DeviceRevoked { device_id, .. } => {
             if let Some(key) = registry.remove(&device_id) {
                 service.revoke(key);
                 tracing::info!(device = %device_id, "revoked a paired device");
             }
+            registry.topology().notify_one();
         }
         RelayServerEvent::Presence { presence } => {
+            registry.topology().notify_one();
             tracing::debug!(
                 machine = %presence.machine_id,
                 online = presence.online,

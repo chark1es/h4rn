@@ -33,23 +33,21 @@ use h4rn_mcp::sharing::{
     ShareError, TunnelSession,
 };
 use h4rn_mcp::upstream::{
-    DEFAULT_REQUEST_TIMEOUT, DEFAULT_TOOL_TIMEOUT, UpstreamError, UpstreamLimits,
+    DEFAULT_TOOL_TIMEOUT, UpstreamError, UpstreamLimits,
 };
 use h4rn_protocol::{
     ClientRequest, HarnessKind, HostId, McpRequest, ProtoError, ResponseBody, ThreadId,
-    TransportPathKind,
 };
 use h4rn_transport::AppFrame;
-use h4rn_transport::client::{Client, ClientConfig, ClientEvent, ClientPath};
-use h4rn_transport::engine::EngineConfig;
+use h4rn_transport::client::{Client, ClientEvent};
 use h4rn_transport::keys::{DeviceIdentity, KEY_LEN};
 use h4rn_transport::server::{AcceptOutcome, Link, SecureService};
-use h4rn_transport::wire::SESSION_ID_LEN;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::config::Config;
+use crate::mcp_peers::{GRANTS_HANDSHAKE, PeerDirectory, PeerLinks, serve_grants};
 use crate::remote::{RemoteAudit, SessionOrigin};
 use crate::threads::{McpSession, McpSessionProvider};
 
@@ -67,6 +65,8 @@ pub struct McpService {
     audit: Arc<DaemonShareAudit>,
     endpoint: Arc<RwLock<Option<String>>>,
     background: std::sync::Mutex<Option<JoinHandle<()>>>,
+    peers: Arc<PeerDirectory>,
+    peering: std::sync::Mutex<Option<(tokio::sync::watch::Sender<bool>, JoinHandle<()>)>>,
 }
 
 impl McpService {
@@ -118,6 +118,8 @@ impl McpService {
             audit,
             endpoint: Arc::new(RwLock::new(None)),
             background: std::sync::Mutex::new(None),
+            peers: Arc::new(PeerDirectory::new()),
+            peering: std::sync::Mutex::new(None),
         };
         service.start_background();
         Ok(service)
@@ -131,6 +133,32 @@ impl McpService {
     /// The shared Streamable-HTTP route state.
     pub fn http_state(&self) -> McpServerState {
         self.state.clone()
+    }
+
+    /// The sibling daemons this machine may share MCP servers with.
+    pub fn peers(&self) -> Arc<PeerDirectory> {
+        Arc::clone(&self.peers)
+    }
+
+    /// Starts following peers' grants: for every online peer, mirror the
+    /// servers it shared with this machine into the hub, authenticating the
+    /// tunnels as this daemon's own `identity`. Idempotent.
+    pub fn start_peering(&self, identity: DeviceIdentity) {
+        let mut peering = self
+            .peering
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if peering.is_some() {
+            return;
+        }
+        let links = PeerLinks::new(
+            Arc::clone(&self.hub),
+            Arc::clone(&self.peers),
+            identity,
+            self.hub.local_host().clone(),
+        );
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        *peering = Some((stop, tokio::spawn(links.run(stopped))));
     }
 
     /// Sets the loopback URL injected into harness sessions.
@@ -162,6 +190,15 @@ impl McpService {
 
     /// Stops the background pass, every upstream and the hub event bridge.
     pub async fn shutdown(&self) {
+        let peering = self
+            .peering
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some((stop, handle)) = peering {
+            let _ = stop.send(true);
+            let _ = handle.await;
+        }
         if let Some(handle) = self
             .background
             .lock()
@@ -244,6 +281,17 @@ impl McpService {
         let Ok(value) = serde_json::from_str::<Value>(text) else {
             return;
         };
+        if value.get("h4rn_mcp_grants").and_then(Value::as_str) == Some(GRANTS_HANDSHAKE) {
+            serve_grants(
+                Arc::clone(&self.hub),
+                Arc::clone(&self.peers),
+                device,
+                sender,
+                frames,
+            )
+            .await;
+            return;
+        }
         if value.get("h4rn_mcp_tunnel").and_then(Value::as_str) != Some(TUNNEL_HANDSHAKE) {
             return;
         }
@@ -636,14 +684,14 @@ mod tunnel {
     /// Everything needed to dial another daemon's `/secure-mcp` route.
     #[derive(Clone)]
     pub struct TunnelConnection {
-        /// `ws://host:port/secure-mcp` on the owning daemon.
-        pub url: String,
-        /// This daemon's transport identity.
+        /// `ws://host:port/secure-mcp` candidates on the owning daemon (LAN,
+        /// tailnet), probed in parallel by the multipath engine.
+        pub urls: Vec<String>,
+        /// This daemon's transport identity. The owner authenticates the
+        /// tunnel by this key.
         pub identity: DeviceIdentity,
         /// The owning daemon's pinned X25519 key.
         pub daemon_public: [u8; 32],
-        /// Session id for the client engine (32 hex characters' worth of bytes).
-        pub session_id: [u8; SESSION_ID_LEN],
         /// This daemon's host id, used by the owner's share policy.
         pub machine: HostId,
         /// Connect device id, when known.
@@ -665,39 +713,13 @@ mod tunnel {
     #[async_trait::async_trait]
     impl McpTunnel for TransportMcpTunnel {
         async fn open(&self, server: &str) -> Result<Arc<dyn TunnelSession>, UpstreamError> {
-            let engine = EngineConfig::new(
-                self.connection.session_id,
-                self.connection.identity.clone(),
+            let client = crate::mcp_peers::establish(
+                &self.connection.urls,
+                &self.connection.identity,
                 self.connection.daemon_public,
-            );
-            let paths = vec![ClientPath::websocket(
-                TransportPathKind::Direct,
-                self.connection.url.clone(),
-            )];
-            let mut client = Client::connect(ClientConfig::new(engine, paths))
-                .map_err(|error| UpstreamError::Unavailable(error.to_string()))?;
-
-            loop {
-                match tokio::time::timeout(DEFAULT_REQUEST_TIMEOUT, client.recv()).await {
-                    Ok(Some(ClientEvent::Established(_))) => break,
-                    Ok(Some(ClientEvent::Closed { reason })) => {
-                        return Err(UpstreamError::Unavailable(format!(
-                            "the secure MCP tunnel closed: {reason}"
-                        )));
-                    }
-                    Ok(Some(_)) => {}
-                    Ok(None) => {
-                        return Err(UpstreamError::Unavailable(
-                            "the secure MCP client stopped during connect".into(),
-                        ));
-                    }
-                    Err(_) => {
-                        return Err(UpstreamError::Unavailable(
-                            "timed out opening the secure MCP tunnel".into(),
-                        ));
-                    }
-                }
-            }
+            )
+            .await
+            .map_err(UpstreamError::Unavailable)?;
 
             let handshake = json!({
                 "h4rn_mcp_tunnel": TUNNEL_HANDSHAKE,

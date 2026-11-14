@@ -40,6 +40,7 @@ pub struct DaemonBuilder {
     mcp: Option<Arc<McpService>>,
     mcp_gate: Option<Arc<dyn h4rn_mcp::sharing::ConfirmationGate>>,
     subagent_options: SubagentOptions,
+    local_host: Option<(h4rn_protocol::HostId, String)>,
 }
 
 impl DaemonBuilder {
@@ -56,7 +57,14 @@ impl DaemonBuilder {
             mcp: None,
             mcp_gate: None,
             subagent_options: SubagentOptions::default(),
+            local_host: None,
         }
+    }
+
+    /// Overrides the detected local host id and display name.
+    pub fn with_local_host(mut self, id: h4rn_protocol::HostId, name: impl Into<String>) -> Self {
+        self.local_host = Some((id, name.into()));
+        self
     }
 
     /// Replaces the MCP hub (tests and embedders that bring their own storage).
@@ -157,7 +165,11 @@ impl DaemonBuilder {
             ),
         };
 
-        let hosts = Arc::new(HostInventory::detect(Arc::clone(&catalog)));
+        let mut inventory = HostInventory::detect(Arc::clone(&catalog));
+        if let Some((id, name)) = self.local_host {
+            inventory = inventory.with_local(id, name);
+        }
+        let hosts = Arc::new(inventory);
         let terminals = Arc::new(TerminalManager::new(
             hosts.local_id(),
             Arc::new(FileAudit::new(&self.config.data_dir)),
@@ -293,6 +305,11 @@ impl DaemonBuilder {
                 .await?,
             ),
         };
+        // Peer daemons are admitted on, and revoked from, the same transport
+        // that serves `/secure-mcp`.
+        if let Some(service) = &secure {
+            mcp.peers().attach_secure(Arc::clone(service));
+        }
         // The endpoint is unknown until `bind`; until then `prepare` returns
         // `None` and a session starts without MCP rather than with a bogus URL.
         manager.set_mcp_provider(Arc::clone(&mcp) as Arc<dyn McpSessionProvider>);
@@ -451,6 +468,11 @@ impl Daemon {
             SocketAddr::from(([127, 0, 0, 1], addrs[0].port()))
         );
         self.mcp.set_endpoint(mcp_url).await;
+        // With a secure transport this daemon can reach its peers' shared MCP
+        // servers, authenticating as its own daemon key.
+        if let Some(service) = &self.secure {
+            self.mcp.start_peering(service.options().identity.clone());
+        }
 
         let hosts = Arc::clone(&self.hosts);
         let remote = self.remote;
@@ -490,6 +512,11 @@ impl Daemon {
         if let Some(remote) = &remote
             && let Some(service) = &secure
         {
+            remote_tasks.push(tokio::spawn(crate::remote::peers::run_peer_sync(
+                Arc::clone(&remote.client),
+                mcp.peers(),
+                Arc::clone(&remote.devices),
+            )));
             remote_tasks.push(tokio::spawn(crate::remote::run_relay(
                 state.clone(),
                 Arc::clone(service),
