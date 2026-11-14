@@ -9,6 +9,7 @@ import type { ForgeCapabilityEntry } from "./ForgeCapabilityEntry";
 import type { ForgeChecks } from "./ForgeChecks";
 import type { ForgeComment } from "./ForgeComment";
 import type { ForgeCommentPage } from "./ForgeCommentPage";
+import type { ForgeCommits } from "./ForgeCommits";
 import type { ForgeDeviceFlow } from "./ForgeDeviceFlow";
 import type { ForgeDeviceFlowStatus } from "./ForgeDeviceFlowStatus";
 import type { ForgeDiffPage } from "./ForgeDiffPage";
@@ -310,7 +311,11 @@ page: ForgeCommentPage, } | { "type": "forge_checks",
 /**
  * Checks snapshot.
  */
-checks: ForgeChecks, } | { "type": "forge_comment_posted", 
+checks: ForgeChecks, } | { "type": "forge_commits", 
+/**
+ * The commits, oldest first.
+ */
+commits: ForgeCommits, } | { "type": "forge_comment_posted", 
 /**
  * The new comment.
  */

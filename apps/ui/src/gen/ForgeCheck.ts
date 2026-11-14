@@ -32,4 +32,10 @@ completed_at: string | null,
 /**
  * Wall time in milliseconds, when both ends are known.
  */
-duration_ms: bigint | null, };
+duration_ms: bigint | null, 
+/**
+ * Whether the forge requires this check before merging. `None` when the
+ * forge or the token cannot say (GitHub without read access to the branch
+ * rules, a Gitea token that is not an admin).
+ */
+required: boolean | null, };

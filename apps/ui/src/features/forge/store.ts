@@ -7,6 +7,7 @@ import type {
   ForgeChecksState,
   ForgeComment,
   ForgeCommentPage,
+  ForgeCommits,
   ForgeDeviceFlow,
   ForgeDeviceFlowStatus,
   ForgeDiffPage,
@@ -114,6 +115,23 @@ export class ForgeApi {
   async checks(repo: ForgeRepoRef, number: number): Promise<ForgeChecks> {
     const response = await this.call(
       { type: "forge_list_checks", account_id: null, repo, number },
+      "forge_checks",
+    );
+    return response.checks;
+  }
+
+  async commits(repo: ForgeRepoRef, number: number): Promise<ForgeCommits> {
+    const response = await this.call(
+      { type: "forge_list_pr_commits", account_id: null, repo, number },
+      "forge_commits",
+    );
+    return response.commits;
+  }
+
+  /** Re-runs the failed checks; the answer is the refreshed checks snapshot. */
+  async rerunChecks(repo: ForgeRepoRef, number: number): Promise<ForgeChecks> {
+    const response = await this.call(
+      { type: "forge_rerun_checks", account_id: null, repo, number },
       "forge_checks",
     );
     return response.checks;
@@ -422,4 +440,41 @@ export function threadForLine(
   line: number | null,
 ): ForgeReviewThread | undefined {
   return threads.find((thread) => thread.path === path && (line === null || thread.line === line));
+}
+
+/** What the "Re-run failed" action should do for one checks snapshot. */
+export type RerunAction =
+  | { kind: "ready" }
+  | { kind: "nothing"; reason: string }
+  | { kind: "unsupported"; reason: string };
+
+/**
+ * The daemon says whether the forge can re-run checks and why not; this only
+ * adds "there is nothing failed to re-run".
+ */
+export function rerunAction(checks: ForgeChecks): RerunAction {
+  if (!checks.rerun.supported) {
+    return {
+      kind: "unsupported",
+      reason: checks.rerun.reason ?? "This forge cannot re-run checks",
+    };
+  }
+  if (checks.failed === 0) return { kind: "nothing", reason: "No checks failed" };
+  return { kind: "ready" };
+}
+
+/** The check "View log" opens: the first failing one with a link, else any link. */
+export function logCheck(checks: ForgeChecks): ForgeChecks["checks"][number] | null {
+  const linked = checks.checks.filter((check) => check.details_url);
+  return linked.find((check) => check.status === "failure") ?? linked[0] ?? null;
+}
+
+/** The faint "required" mark after a check name, or `null` when unknown or optional. */
+export function requiredMark(check: ForgeChecks["checks"][number]): string | null {
+  return check.required === true ? "required" : null;
+}
+
+/** First 7 characters of a commit id, the way forges abbreviate it. */
+export function shortSha(sha: string): string {
+  return sha.slice(0, 7);
 }

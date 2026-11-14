@@ -810,6 +810,30 @@ repo: ForgeRepoRef,
 /**
  * PR number.
  */
+number: number, } | { "type": "forge_list_pr_commits", 
+/**
+ * Account to use.
+ */
+account_id: string | null, 
+/**
+ * Repository.
+ */
+repo: ForgeRepoRef, 
+/**
+ * PR number.
+ */
+number: number, } | { "type": "forge_rerun_checks", 
+/**
+ * Account to use.
+ */
+account_id: string | null, 
+/**
+ * Repository.
+ */
+repo: ForgeRepoRef, 
+/**
+ * PR number.
+ */
 number: number, } | { "type": "forge_reply", 
 /**
  * Account to use.

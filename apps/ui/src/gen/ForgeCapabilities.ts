@@ -42,4 +42,9 @@ diff_pagination: boolean,
 /**
  * GraphQL is used for review threads.
  */
-graphql: boolean, };
+graphql: boolean, 
+/**
+ * Failed checks can be re-run through the API (GitHub check suites, GitLab
+ * pipelines). Gitea and Forgejo CI posts plain commit statuses.
+ */
+rerun_checks: boolean, };

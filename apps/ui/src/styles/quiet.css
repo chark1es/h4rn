@@ -2857,6 +2857,42 @@
 .q-chk .grow {
   flex: 1;
 }
+.q-commit {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.q-commit:last-of-type {
+  border-bottom: 0;
+}
+.q-commit .grow {
+  flex: 1;
+  min-width: 0;
+}
+.q-commit .t {
+  font-size: 14px;
+  line-height: 20px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.q-commit .s {
+  font-size: 12px;
+  color: var(--fg-3);
+}
+.q-commit-sha {
+  font-size: 12px;
+  color: var(--fg-2);
+  text-decoration: none;
+  flex: none;
+}
+.q-commit-sha:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}
 .q-side-sec {
   padding: 0 0 18px;
   margin-bottom: 18px;

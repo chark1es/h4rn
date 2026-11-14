@@ -30,12 +30,16 @@ import {
   checksLabel,
   ForgeApi,
   forgeLabel,
+  logCheck,
   mergeableLabel,
   mergeDiffPages,
   parsePatch,
   removeComment,
   replaceComment,
+  requiredMark,
+  rerunAction,
   reviewChip,
+  shortSha,
   stateLabel,
   summaryChecksLabel,
 } from "@/features/forge/store";
@@ -45,6 +49,7 @@ import type {
   ForgeChecks,
   ForgeComment,
   ForgeCommentPage,
+  ForgeCommits,
   ForgeDiffPage,
   ForgeFileDiff,
   ForgePrFilter,
@@ -109,6 +114,47 @@ function duration(ms: bigint | null): string {
   if (seconds < 60) return `${Math.round(seconds)}s`;
   const minutes = Math.floor(seconds / 60);
   return `${minutes}m ${String(Math.round(seconds % 60)).padStart(2, "0")}s`;
+}
+
+/**
+ * "View log" and "Re-run failed" under a checks list. View log is a link to
+ * the forge's own log page. Re-run is the forge's API where it has one; where
+ * it does not, the button stays but is disabled and its tooltip says why.
+ */
+function ChecksActions({
+  checks,
+  busy,
+  onRerun,
+  showLog = true,
+}: {
+  checks: ForgeChecks;
+  busy: boolean;
+  onRerun: () => void;
+  /** The Checks tab already has a View log on every row. */
+  showLog?: boolean;
+}) {
+  const log = showLog ? logCheck(checks) : null;
+  const rerun = rerunAction(checks);
+  const blocked = rerun.kind !== "ready";
+  return (
+    <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+      {log?.details_url ? (
+        <a
+          className="q-btn secondary"
+          href={log.details_url}
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          View log
+        </a>
+      ) : null}
+      <span title={blocked ? rerun.reason : undefined}>
+        <button type="button" className="q-btn ghost" disabled={blocked || busy} onClick={onRerun}>
+          {busy ? "Re-running…" : "Re-run failed"}
+        </button>
+      </span>
+    </div>
+  );
 }
 
 function CheckIcon({ status }: { status: string }) {
@@ -713,12 +759,14 @@ function PrDetail({
   const [pr, setPr] = useState<ForgePullRequest | null>(null);
   const [comments, setComments] = useState<ForgeCommentPage | null>(null);
   const [checks, setChecks] = useState<ForgeChecks | null>(null);
+  const [commits, setCommits] = useState<ForgeCommits | null>(null);
+  const [rerunBusy, setRerunBusy] = useState(false);
   const [diffFiles, setDiffFiles] = useState<ForgeFileDiff[]>([]);
   const [diffPage, setDiffPage] = useState<ForgeDiffPage | null>(null);
   const [diffLoading, setDiffLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<"conversation" | "checks" | "files">("conversation");
+  const [tab, setTab] = useState<"conversation" | "commits" | "checks" | "files">("conversation");
   const [reloadNonce, setReloadNonce] = useState(0);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [replyBusy, setReplyBusy] = useState<Record<string, boolean>>({});
@@ -750,12 +798,16 @@ function PrDetail({
         .checks(repo, number)
         .catch(() => null),
       api().getDiff(repo, number, 1),
+      api()
+        .commits(repo, number)
+        .catch(() => null),
     ])
-      .then(([detail, page, checksResult, diff]) => {
+      .then(([detail, page, checksResult, diff, commitList]) => {
         if (cancelled) return;
         setPr(detail);
         setComments(page);
         setChecks(checksResult);
+        setCommits(commitList);
         setDiffPage(diff);
         setDiffFiles(diff.files);
         setLoading(false);
@@ -784,6 +836,23 @@ function PrDetail({
       }
     });
   }, [repo, number]);
+
+  const rerunFailed = async () => {
+    if (rerunBusy) return;
+    setRerunBusy(true);
+    try {
+      setChecks(await api().rerunChecks(repo, number));
+      pushToast({ title: "Re-running the failed checks.", variant: "success" });
+    } catch (cause) {
+      pushToast({
+        title: "Could not re-run the checks.",
+        description: cause instanceof Error ? cause.message : String(cause),
+        variant: "error",
+      });
+    } finally {
+      setRerunBusy(false);
+    }
+  };
 
   const loadMoreDiff = async () => {
     if (!diffPage?.has_more || diffLoading) return;
@@ -1086,6 +1155,14 @@ function PrDetail({
               <button
                 type="button"
                 role="tab"
+                aria-selected={tab === "commits"}
+                onClick={() => setTab("commits")}
+              >
+                Commits <span className="c">{commits?.commits.length ?? pr.commits}</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
                 aria-selected={tab === "checks"}
                 onClick={() => setTab("checks")}
               >
@@ -1270,6 +1347,54 @@ function PrDetail({
               </>
             ) : null}
 
+            {tab === "commits" ? (
+              <div>
+                {commits && commits.commits.length > 0 ? (
+                  <>
+                    {commits.commits.map((commit) => (
+                      <div className="q-commit" key={commit.sha}>
+                        <div className="grow">
+                          <div className="t">{commit.title}</div>
+                          <div className="s">
+                            {commit.author_login ?? commit.author}
+                            {commit.authored_at ? ` · ${relativeAge(commit.authored_at)}` : ""}
+                          </div>
+                        </div>
+                        {commit.web_url ? (
+                          <a
+                            className="q-mono q-commit-sha"
+                            href={commit.web_url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            title="Open this commit"
+                          >
+                            {shortSha(commit.sha)}
+                          </a>
+                        ) : (
+                          <span className="q-mono q-faint">{shortSha(commit.sha)}</span>
+                        )}
+                      </div>
+                    ))}
+                    {commits.truncated ? (
+                      <p className="q-faint" style={{ fontSize: 12, marginTop: 10 }}>
+                        Showing the first {commits.commits.length} commits. Open the PR on{" "}
+                        {forgeLabel(repo.forge)} for the rest.
+                      </p>
+                    ) : null}
+                  </>
+                ) : (
+                  <div className="q-empty">
+                    <h3>{commits ? "No commits" : "Commits did not load"}</h3>
+                    <p>
+                      {commits
+                        ? "This pull request has no commits."
+                        : `${forgeLabel(repo.forge)} did not return the commit list.`}
+                    </p>
+                  </div>
+                )}
+              </div>
+            ) : null}
+
             {tab === "checks" ? (
               <div>
                 {checks ? (
@@ -1281,7 +1406,12 @@ function PrDetail({
                     {checks.checks.map((check) => (
                       <div className="q-chk" key={check.name}>
                         <CheckIcon status={check.status} />
-                        <span className="grow">{check.name}</span>
+                        <span className="grow">
+                          {check.name}
+                          {requiredMark(check) ? (
+                            <span className="q-faint"> · {requiredMark(check)}</span>
+                          ) : null}
+                        </span>
                         {check.description ? (
                           <span className="q-faint">{check.description}</span>
                         ) : null}
@@ -1299,6 +1429,12 @@ function PrDetail({
                         ) : null}
                       </div>
                     ))}
+                    <ChecksActions
+                      checks={checks}
+                      busy={rerunBusy}
+                      onRerun={rerunFailed}
+                      showLog={false}
+                    />
                   </>
                 ) : (
                   <div className="q-empty">
@@ -1418,7 +1554,12 @@ function PrDetail({
                 checks.checks.slice(0, 8).map((check) => (
                   <div className="q-chk" key={check.name}>
                     <CheckIcon status={check.status} />
-                    <span className="grow">{check.name}</span>
+                    <span className="grow">
+                      {check.name}
+                      {requiredMark(check) ? (
+                        <span className="q-faint"> · {requiredMark(check)}</span>
+                      ) : null}
+                    </span>
                     <span className="q-faint num">{duration(check.duration_ms)}</span>
                   </div>
                 ))
@@ -1427,6 +1568,9 @@ function PrDetail({
                   No checks reported.
                 </p>
               )}
+              {checks && checks.checks.length > 0 ? (
+                <ChecksActions checks={checks} busy={rerunBusy} onRerun={rerunFailed} />
+              ) : null}
             </div>
             <div className="q-side-sec">
               <h3>

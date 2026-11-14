@@ -2,6 +2,7 @@
 import type { ForgeCheck } from "./ForgeCheck";
 import type { ForgeChecksState } from "./ForgeChecksState";
 import type { ForgeRepoRef } from "./ForgeRepoRef";
+import type { ForgeRerunSupport } from "./ForgeRerunSupport";
 
 /**
  * The checks tab and the agent context summary.
@@ -43,6 +44,10 @@ pending: number,
  * The checks themselves.
  */
 checks: Array<ForgeCheck>, 
+/**
+ * Whether "Re-run failed" can work on this forge.
+ */
+rerun: ForgeRerunSupport, 
 /**
  * When the daemon fetched this snapshot.
  */

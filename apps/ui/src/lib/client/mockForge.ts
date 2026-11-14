@@ -50,6 +50,7 @@ const CAPABILITIES: ForgeCapabilityEntry[] = [
       pipelines: false,
       diff_pagination: true,
       graphql: true,
+      rerun_checks: true,
     },
   },
   {
@@ -64,6 +65,7 @@ const CAPABILITIES: ForgeCapabilityEntry[] = [
       pipelines: true,
       diff_pagination: true,
       graphql: false,
+      rerun_checks: true,
     },
   },
   {
@@ -78,6 +80,7 @@ const CAPABILITIES: ForgeCapabilityEntry[] = [
       pipelines: false,
       diff_pagination: false,
       graphql: false,
+      rerun_checks: false,
     },
   },
   {
@@ -92,6 +95,7 @@ const CAPABILITIES: ForgeCapabilityEntry[] = [
       pipelines: false,
       diff_pagination: false,
       graphql: false,
+      rerun_checks: false,
     },
   },
 ];
@@ -351,7 +355,16 @@ function checksFor(repo: ForgeRepoRef, summary: ForgePrSummary): ForgeChecks {
       // The wire is JSON, so a u64 arrives as a number even though the
       // generated type says bigint. Keep the mock serializable.
       duration_ms: check.duration === null ? null : (check.duration as unknown as bigint),
+      // e2e gates the merge in the mock repo; the others are advisory.
+      required: check.name === "e2e" || check.name === "build",
     })),
+    rerun:
+      repo.forge === "gitea" || repo.forge === "forgejo"
+        ? {
+            supported: false,
+            reason: `${repo.forge === "gitea" ? "Gitea" : "Forgejo"} posts CI results as commit statuses and has no re-run API; re-run it in ${repo.forge === "gitea" ? "Gitea" : "Forgejo"}'s Actions tab`,
+          }
+        : { supported: true, reason: null },
     updated_at: now(-60_000),
   };
 }
@@ -558,6 +571,72 @@ export class MockForge {
           SUMMARIES.find((item) => item.number === request.number) ??
           (SUMMARIES[0] as ForgePrSummary);
         hooks.ok({ type: "forge_checks", checks: checksFor(request.repo, summary) });
+        return true;
+      }
+      case "forge_list_pr_commits": {
+        const request = body as Extract<ClientRequest, { type: "forge_list_pr_commits" }>;
+        hooks.ok({
+          type: "forge_commits",
+          commits: {
+            repo: request.repo,
+            number: request.number,
+            truncated: false,
+            commits: [
+              {
+                sha: "5d1c0aa83e7f4b6c9d2a1e0f3b4c5d6e7f8a9b0c",
+                title: "Pin the clock in the test setup",
+                body: "createPool() no longer reads Date.now() at import time.",
+                author: "Dev",
+                author_login: "dev",
+                authored_at: now(-3 * 60 * 60_000),
+                web_url: `https://github.com/${request.repo.owner}/${request.repo.repo}/commit/5d1c0aa`,
+              },
+              {
+                sha: "a93be41c07d85f62e19b3c4d5a6f7e8091b2c3d4",
+                title: "Add a regression test at the 30 s session boundary",
+                body: null,
+                author: "Dev",
+                author_login: "dev",
+                authored_at: now(-2 * 60 * 60_000),
+                web_url: `https://github.com/${request.repo.owner}/${request.repo.repo}/commit/a93be41`,
+              },
+              {
+                sha: "f07e92d1a4b3c5d6e7f8091a2b3c4d5e6f708192",
+                title: "Close the pool in afterAll",
+                body: null,
+                author: "Claude Code",
+                author_login: null,
+                authored_at: now(-9 * 60_000),
+                web_url: `https://github.com/${request.repo.owner}/${request.repo.repo}/commit/f07e92d`,
+              },
+            ],
+          },
+        });
+        return true;
+      }
+      case "forge_rerun_checks": {
+        const request = body as Extract<ClientRequest, { type: "forge_rerun_checks" }>;
+        const summary =
+          SUMMARIES.find((item) => item.number === request.number) ??
+          (SUMMARIES[0] as ForgePrSummary);
+        const checks = checksFor(request.repo, summary);
+        if (!checks.rerun.supported) {
+          hooks.err("unsupported", checks.rerun.reason ?? "Not supported", null);
+          return true;
+        }
+        // The re-run flips the failing check back to running.
+        const rerun = {
+          ...checks,
+          state: "pending" as const,
+          failed: 0,
+          pending: checks.failed,
+          checks: checks.checks.map((check) =>
+            check.status === "failure"
+              ? { ...check, status: "in_progress" as const, description: null }
+              : check,
+          ),
+        };
+        hooks.ok({ type: "forge_checks", checks: rerun });
         return true;
       }
       case "forge_reply": {

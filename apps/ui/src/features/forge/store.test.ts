@@ -1,8 +1,10 @@
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import type {
   ForgeAccount,
+  ForgeChecks,
   ForgeComment,
+  ForgeCommits,
   ForgeDiffPage,
   ForgeFileDiff,
   ForgePrSummary,
@@ -15,13 +17,18 @@ import {
   accountForRepo,
   appendComment,
   checksLabel,
+  ForgeApi,
   forgeLabel,
+  logCheck,
   mergeableLabel,
   mergeDiffPages,
   parsePatch,
   removeComment,
   replaceComment,
+  requiredMark,
+  rerunAction,
   reviewChip,
+  shortSha,
   stateLabel,
   summaryChecksLabel,
   threadForLine,
@@ -224,5 +231,146 @@ describe("PR rows", () => {
       draft: true,
     };
     expect(stateLabel(row.state).label).toBe("Draft");
+  });
+});
+
+const gitHubChecks: ForgeChecks = {
+  repo,
+  number: 7,
+  head_sha: "9f2c1d0e8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d",
+  state: "failing",
+  total: 3,
+  passed: 1,
+  failed: 2,
+  pending: 0,
+  checks: [
+    {
+      name: "build",
+      status: "success",
+      details_url: "https://github.com/acme/widget/runs/1",
+      description: null,
+      started_at: null,
+      completed_at: null,
+      duration_ms: null,
+      required: true,
+    },
+    {
+      name: "test",
+      status: "failure",
+      details_url: "https://github.com/acme/widget/runs/2",
+      description: null,
+      started_at: null,
+      completed_at: null,
+      duration_ms: null,
+      required: true,
+    },
+    {
+      name: "lint",
+      status: "failure",
+      details_url: null,
+      description: null,
+      started_at: null,
+      completed_at: null,
+      duration_ms: null,
+      required: null,
+    },
+  ],
+  rerun: { supported: true, reason: null },
+  updated_at: "2026-11-13T00:00:00Z",
+};
+
+describe("check actions", () => {
+  test("marks only the checks the forge says are required", () => {
+    const [build, test_, lint] = gitHubChecks.checks as [
+      ForgeChecks["checks"][number],
+      ForgeChecks["checks"][number],
+      ForgeChecks["checks"][number],
+    ];
+    expect(requiredMark(build)).toBe("required");
+    expect(requiredMark(test_)).toBe("required");
+    // Unknown (`null`) is not shown as optional.
+    expect(requiredMark(lint)).toBeNull();
+    expect(requiredMark({ ...build, required: false })).toBeNull();
+  });
+
+  test("View log picks a failing check that has a link", () => {
+    expect(logCheck(gitHubChecks)?.name).toBe("test");
+    const passing: ForgeChecks = {
+      ...gitHubChecks,
+      checks: gitHubChecks.checks.map((check) => ({ ...check, status: "success" as const })),
+    };
+    expect(logCheck(passing)?.name).toBe("build");
+    expect(logCheck({ ...gitHubChecks, checks: [] })).toBeNull();
+  });
+
+  test("Re-run failed is ready, idle or unsupported with the daemon's reason", () => {
+    expect(rerunAction(gitHubChecks)).toEqual({ kind: "ready" });
+    expect(rerunAction({ ...gitHubChecks, failed: 0 })).toEqual({
+      kind: "nothing",
+      reason: "No checks failed",
+    });
+    expect(
+      rerunAction({
+        ...gitHubChecks,
+        rerun: { supported: false, reason: "Gitea posts CI results as commit statuses" },
+      }),
+    ).toEqual({ kind: "unsupported", reason: "Gitea posts CI results as commit statuses" });
+    // A missing reason still gives the tooltip something to say.
+    expect(
+      rerunAction({ ...gitHubChecks, rerun: { supported: false, reason: null } }),
+    ).toMatchObject({ kind: "unsupported" });
+  });
+
+  test("abbreviates a commit id to 7 characters", () => {
+    expect(shortSha("5d1c0aa83e7f4b6c9d2a1e0f3b4c5d6e7f8a9b0c")).toBe("5d1c0aa");
+  });
+});
+
+describe("ForgeApi commits and re-run", () => {
+  const commits: ForgeCommits = {
+    repo,
+    number: 7,
+    truncated: false,
+    commits: [
+      {
+        sha: "1111111111111111111111111111111111111111",
+        title: "Add a failing test",
+        body: null,
+        author: "Alice Example",
+        author_login: "alice",
+        authored_at: "2026-11-12T09:00:00Z",
+        web_url: null,
+      },
+    ],
+  };
+
+  test("lists commits through the typed request", async () => {
+    const request = vi.fn().mockResolvedValue({ type: "forge_commits", commits });
+    const result = await new ForgeApi(request).commits(repo, 7);
+    expect(request).toHaveBeenCalledWith({
+      type: "forge_list_pr_commits",
+      account_id: null,
+      repo,
+      number: 7,
+    });
+    expect(result.commits[0]?.title).toBe("Add a failing test");
+  });
+
+  test("re-runs failed checks and returns the refreshed snapshot", async () => {
+    const refreshed = { ...gitHubChecks, state: "pending" as const, failed: 0, pending: 2 };
+    const request = vi.fn().mockResolvedValue({ type: "forge_checks", checks: refreshed });
+    const result = await new ForgeApi(request).rerunChecks(repo, 7);
+    expect(request).toHaveBeenCalledWith({
+      type: "forge_rerun_checks",
+      account_id: null,
+      repo,
+      number: 7,
+    });
+    expect(result.state).toBe("pending");
+  });
+
+  test("rejects an unexpected response instead of guessing", async () => {
+    const request = vi.fn().mockResolvedValue({ type: "ack" });
+    await expect(new ForgeApi(request).commits(repo, 7)).rejects.toThrow("expected forge_commits");
   });
 });
