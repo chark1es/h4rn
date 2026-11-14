@@ -740,6 +740,10 @@ they cannot leak through history, screenshots or a copied link.
 `state`/redirect metadata for one tab, and nothing else. When the IDB record outlives a profile
 reset, its envelope simply fails to decrypt and is skipped; a re-pair is required.
 
+Why not memory-only on the web: the OIDC redirect leaves the page and returns through
+`/auth/callback`, which would drop the daemon token and pairing PSK held only in memory.
+The encrypted IndexedDB record survives that round trip; the cost is the same-origin caveat below.
+
 Consequences: the daemon token survives reloads and relaunches on every shell without plaintext
 storage; the web's at-rest protection is weaker than an OS keychain because same-origin script
 can ask the page to decrypt, which `docs/transport.md` records in the threat model. Desktop and

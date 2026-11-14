@@ -649,7 +649,21 @@ async function main() {
       .waitFor({ timeout: 30_000 });
 
     // The device-code grant stays available as a fallback for shells without a
-    // usable browser redirect; sign in once more with it.
+    // usable browser redirect. The relay refuses to re-register the key of a
+    // revoked device, so the fallback signs in from a fresh browser profile
+    // (a new device identity), exactly like a second device would.
+    const fallbackContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+    page = await fallbackContext.newPage();
+    page.setDefaultTimeout(20_000);
+    page.on("console", (message) => logs.push(`browser2: ${message.type()} ${message.text()}\n`));
+    await page.goto(
+      `${uiOrigin}/?token=${encodeURIComponent(token)}` +
+        `&daemon=${encodeURIComponent(`ws://127.0.0.1:${daemonPort}/ws`)}`,
+    );
+    await page.locator('[title="Hosts and connection"]').click();
+    await page.getByRole("menuitem", { name: /Sign in to h4rn-connect/ }).click();
+    await page.getByLabel("h4rn-connect URL").fill(relayUrl);
+    await page.getByRole("button", { name: "Use", exact: true }).click();
     await page.getByRole("button", { name: /Sign in on another device/ }).click();
     const code = (await page.locator(".q-code-big").textContent())?.trim();
     if (!code) throw new Error("the sign-in panel did not show a device code");

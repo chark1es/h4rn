@@ -18,7 +18,7 @@ All notable changes to h4rn are recorded here. The format follows
   reloads the route the person left, desktop waits on the loopback callback, and mobile opens the
   provider in the system browser and returns through `h4rn://callback`. The device-code grant
   remains as "Sign in on another device"; the remote e2e now drives both the browser redirect
-  and the device-code fallback against Docker OrbitID.
+  and the device-code fallback (from a fresh profile, since the relay refuses a revoked device's key) against Docker OrbitID.
 - **Resume now acknowledges immediately.** `ResumeNow` finishes the schedule and returns before
   the harness produces its first token, and the resumed turn reports progress through
   `ScheduleChanged` and thread events, so a realistic slow harness no longer times out the
