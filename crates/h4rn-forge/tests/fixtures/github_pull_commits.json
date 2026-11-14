@@ -1,0 +1,12 @@
+[
+  {"sha": "1111111111111111111111111111111111111111",
+   "html_url": "https://github.com/acme/widget/commit/1111111111111111111111111111111111111111",
+   "commit": {"message": "Add a failing test\n\nReproduces the panic on empty input.",
+              "author": {"name": "Alice Example", "email": "alice@example.test", "date": "2026-11-12T09:00:00Z"}},
+   "author": {"login": "alice"}},
+  {"sha": "2222222222222222222222222222222222222222",
+   "html_url": "https://github.com/acme/widget/commit/2222222222222222222222222222222222222222",
+   "commit": {"message": "Fix the panic",
+              "author": {"name": "Alice Example", "email": "alice@example.test", "date": "2026-11-12T09:30:00Z"}},
+   "author": {"login": "alice"}}
+]

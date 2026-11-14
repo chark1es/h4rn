@@ -31,6 +31,8 @@ pub(super) fn matches(request: &ClientRequest) -> bool {
             | ClientRequest::ForgeGetPrDiff { .. }
             | ClientRequest::ForgeListPrComments { .. }
             | ClientRequest::ForgeListChecks { .. }
+            | ClientRequest::ForgeListPrCommits { .. }
+            | ClientRequest::ForgeRerunChecks { .. }
             | ClientRequest::ForgeReply { .. }
             | ClientRequest::ForgeComment { .. }
             | ClientRequest::ForgeOpenPr { .. }
@@ -156,6 +158,28 @@ pub(super) async fn handle(
             .state
             .forge
             .list_checks(account_id.as_deref(), &repo, number)
+            .await
+            .map(|checks| ResponseBody::ForgeChecks { checks })
+            .map_err(ForgeServiceError::into_proto),
+        ClientRequest::ForgeListPrCommits {
+            account_id,
+            repo,
+            number,
+        } => conn
+            .state
+            .forge
+            .list_commits(account_id.as_deref(), &repo, number)
+            .await
+            .map(|commits| ResponseBody::ForgeCommits { commits })
+            .map_err(ForgeServiceError::into_proto),
+        ClientRequest::ForgeRerunChecks {
+            account_id,
+            repo,
+            number,
+        } => conn
+            .state
+            .forge
+            .rerun_checks(account_id.as_deref(), &repo, number)
             .await
             .map(|checks| ResponseBody::ForgeChecks { checks })
             .map_err(ForgeServiceError::into_proto),

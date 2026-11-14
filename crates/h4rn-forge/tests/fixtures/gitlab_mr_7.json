@@ -1,0 +1,6 @@
+{
+  "iid": 7, "state": "opened", "title": "Fix the widget",
+  "sha": "abc123",
+  "source_branch": "alice/fix", "target_branch": "main",
+  "head_pipeline": {"id": 77, "status": "failed", "web_url": "https://gitlab.example.test/acme/widget/-/pipelines/77", "ref": "alice/fix"}
+}

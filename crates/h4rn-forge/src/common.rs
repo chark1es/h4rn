@@ -141,7 +141,58 @@ pub fn finish_checks(
         failed,
         pending,
         checks,
+        rerun: crate::rerun_support(repo.forge),
         updated_at: Utc::now(),
+    }
+}
+
+/// Splits a commit message into its title and the rest.
+pub fn split_message(message: &str) -> (String, Option<String>) {
+    let message = message.trim_end();
+    match message.split_once('\n') {
+        Some((title, rest)) => {
+            let rest = rest.trim();
+            (
+                title.trim().to_owned(),
+                (!rest.is_empty()).then(|| rest.to_owned()),
+            )
+        }
+        None => (message.trim().to_owned(), None),
+    }
+}
+
+/// Maps a commit in the GitHub/Gitea/Forgejo shape
+/// (`{sha, html_url, commit: {message, author: {name, date}}, author: {login}}`).
+pub fn map_commit_gh_like(value: &Value) -> Option<h4rn_protocol::ForgeCommit> {
+    let sha = optional_text(value, "sha")?;
+    let (title, body) = split_message(&text(&value["commit"], "message"));
+    let author = optional_text(&value["commit"]["author"], "name")
+        .or_else(|| optional_text(&value["author"], "login"))
+        .unwrap_or_default();
+    Some(h4rn_protocol::ForgeCommit {
+        sha,
+        title,
+        body,
+        author,
+        author_login: optional_text(&value["author"], "login"),
+        authored_at: parse_optional_datetime(value["commit"]["author"].get("date"), "date")
+            .ok()
+            .flatten(),
+        web_url: optional_text(value, "html_url"),
+    })
+}
+
+/// Whether `name` matches a required-check pattern. Forges that let a rule use
+/// `*` wildcards (Gitea) match them; GitHub rules are exact names.
+pub fn context_matches(pattern: &str, name: &str) -> bool {
+    match pattern.split_once('*') {
+        None => pattern == name,
+        Some((prefix, rest)) => {
+            let rest_matches = |tail: &str| rest.is_empty() || tail.ends_with(rest);
+            name.starts_with(prefix)
+                && name.len() >= prefix.len()
+                && rest_matches(&name[prefix.len()..])
+        }
     }
 }
 
@@ -230,6 +281,24 @@ mod tests {
     }
 
     #[test]
+    fn commit_messages_split_into_title_and_body() {
+        assert_eq!(split_message("Fix it"), ("Fix it".into(), None));
+        assert_eq!(
+            split_message("Fix it\n\nBecause.\nReally.\n"),
+            ("Fix it".into(), Some("Because.\nReally.".into()))
+        );
+    }
+
+    #[test]
+    fn required_patterns_match_exactly_or_by_wildcard() {
+        assert!(context_matches("ci/test", "ci/test"));
+        assert!(!context_matches("ci/test", "ci/test-2"));
+        assert!(context_matches("ci/*", "ci/lint"));
+        assert!(context_matches("*-build", "linux-build"));
+        assert!(!context_matches("ci/*", "other/lint"));
+    }
+
+    #[test]
     fn aggregate_state_prefers_failures_then_pending() {
         let repo = ForgeRepoRef {
             forge: ForgeKind::GitHub,
@@ -248,6 +317,7 @@ mod tests {
             started_at: None,
             completed_at: None,
             duration_ms: None,
+            required: None,
         });
         checks.checks.push(h4rn_protocol::ForgeCheck {
             name: "b".into(),
@@ -257,6 +327,7 @@ mod tests {
             started_at: None,
             completed_at: None,
             duration_ms: None,
+            required: None,
         });
         let finished = finish_checks(&repo, 1, "abc".into(), checks.checks.clone());
         assert_eq!(finished.state, ForgeChecksState::Pending);

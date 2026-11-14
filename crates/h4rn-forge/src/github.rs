@@ -10,17 +10,18 @@ use async_trait::async_trait;
 use chrono::Utc;
 use h4rn_protocol::{
     ForgeCapabilities, ForgeCheck, ForgeChecks, ForgeChecksState, ForgeComment, ForgeCommentPage,
-    ForgeDiffPage, ForgeDiffSide, ForgeFileDiff, ForgeFileStatus, ForgeKind, ForgeLabel,
-    ForgeMergeable, ForgeNewPr, ForgePrFilter, ForgePrState, ForgePrSummary, ForgePullRequest,
-    ForgeRepoRef, ForgeReview, ForgeReviewComment, ForgeReviewState, ForgeReviewThread,
+    ForgeCommits, ForgeDiffPage, ForgeDiffSide, ForgeFileDiff, ForgeFileStatus, ForgeKind,
+    ForgeLabel, ForgeMergeable, ForgeNewPr, ForgePrFilter, ForgePrState, ForgePrSummary,
+    ForgePullRequest, ForgeRepoRef, ForgeReview, ForgeReviewComment, ForgeReviewState,
+    ForgeReviewThread,
 };
 use reqwest::Method;
 use serde_json::{Value, json};
 use url::form_urlencoded;
 
 use crate::common::{
-    duration_ms, finish_checks, github_check_status, optional_text, parse_datetime,
-    parse_optional_datetime, text, validate_repo,
+    duration_ms, finish_checks, github_check_status, map_commit_gh_like, optional_text,
+    parse_datetime, parse_optional_datetime, text, validate_repo,
 };
 use crate::error::{ForgeError, Result};
 use crate::http::{ForgeHttp, auth_header, next_link};
@@ -223,6 +224,49 @@ query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
         roots
     }
 
+    /// Check names the base branch requires, or `None` when the token cannot
+    /// read the rules (branch protection needs push access; rulesets are
+    /// readable with plain read access, so both are tried).
+    async fn required_contexts(&self, repo: &ForgeRepoRef, base_ref: &str) -> Option<Vec<String>> {
+        let base = self.repo_url(repo);
+        let branch = encode_segment(base_ref);
+        let mut known = false;
+        let mut names: Vec<String> = Vec::new();
+        if let Ok(value) = self
+            .get_json(&format!(
+                "{base}/branches/{branch}/protection/required_status_checks"
+            ))
+            .await
+        {
+            known = true;
+            if let Some(contexts) = value["contexts"].as_array() {
+                names.extend(
+                    contexts
+                        .iter()
+                        .filter_map(|c| c.as_str().map(str::to_owned)),
+                );
+            }
+            if let Some(checks) = value["checks"].as_array() {
+                names.extend(checks.iter().filter_map(|c| optional_text(c, "context")));
+            }
+        }
+        if let Ok(value) = self
+            .get_json(&format!("{base}/rules/branches/{branch}"))
+            .await
+            && let Some(rules) = value.as_array()
+        {
+            known = true;
+            for rule in rules {
+                if rule["type"] == "required_status_checks"
+                    && let Some(checks) = rule["parameters"]["required_status_checks"].as_array()
+                {
+                    names.extend(checks.iter().filter_map(|c| optional_text(c, "context")));
+                }
+            }
+        }
+        known.then_some(names)
+    }
+
     async fn head_sha(&self, repo: &ForgeRepoRef, number: u32) -> Result<String> {
         let pr = self.fetch_pr(repo, number).await?;
         pr["head"]["sha"]
@@ -416,7 +460,11 @@ impl Forge for GitHubClient {
 
     async fn list_checks(&self, repo: &ForgeRepoRef, number: u32) -> Result<ForgeChecks> {
         validate_repo(repo)?;
-        let sha = self.head_sha(repo, number).await?;
+        let pr = self.fetch_pr(repo, number).await?;
+        let sha = pr["head"]["sha"]
+            .as_str()
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| ForgeError::Parse("the PR has no head SHA".into()))?;
         let base = self.repo_url(repo);
         let mut checks = Vec::new();
 
@@ -441,7 +489,63 @@ impl Forge for GitHubClient {
                 }
             }
         }
+        if let Some(base_ref) = pr["base"]["ref"].as_str()
+            && let Some(required) = self.required_contexts(repo, base_ref).await
+        {
+            for check in &mut checks {
+                check.required = Some(required.iter().any(|name| name == &check.name));
+            }
+        }
         Ok(finish_checks(repo, number, sha, checks))
+    }
+
+    async fn list_commits(&self, repo: &ForgeRepoRef, number: u32) -> Result<ForgeCommits> {
+        validate_repo(repo)?;
+        let url = format!(
+            "{}/pulls/{number}/commits?per_page=100",
+            self.repo_url(repo)
+        );
+        let values = self.get_all(&url, 5).await?;
+        Ok(ForgeCommits {
+            repo: repo.clone(),
+            number,
+            truncated: values.len() >= 500,
+            commits: values.iter().filter_map(map_commit_gh_like).collect(),
+        })
+    }
+
+    async fn rerun_failed_checks(&self, repo: &ForgeRepoRef, number: u32) -> Result<u32> {
+        validate_repo(repo)?;
+        let sha = self.head_sha(repo, number).await?;
+        let base = self.repo_url(repo);
+        let value = self
+            .get_json(&format!("{base}/commits/{sha}/check-runs?per_page=100"))
+            .await?;
+        let mut suites: Vec<u64> = Vec::new();
+        for run in value["check_runs"].as_array().into_iter().flatten() {
+            let failed = github_check_status(
+                run["status"].as_str().unwrap_or_default(),
+                run["conclusion"].as_str(),
+            )
+            .is_failure();
+            if let Some(id) = run["check_suite"]["id"].as_u64()
+                && failed
+                && !suites.contains(&id)
+            {
+                suites.push(id);
+            }
+        }
+        if suites.is_empty() {
+            return Err(ForgeError::Conflict(
+                "there are no failed checks to re-run".into(),
+            ));
+        }
+        for id in &suites {
+            self.http
+                .post_json(&format!("{base}/check-suites/{id}/rerequest"), &json!({}))
+                .await?;
+        }
+        Ok(suites.len() as u32)
     }
 
     async fn reply(
@@ -812,7 +916,9 @@ fn map_check_run(value: &Value) -> ForgeCheck {
             value["status"].as_str().unwrap_or_default(),
             value["conclusion"].as_str(),
         ),
-        details_url: optional_text(value, "details_url"),
+        details_url: optional_text(value, "html_url")
+            .or_else(|| optional_text(value, "details_url")),
+        required: None,
         description: optional_text(&value["output"], "title")
             .or_else(|| optional_text(&value["output"], "summary")),
         duration_ms: duration_ms(started_at.as_ref(), completed_at.as_ref()),
@@ -832,6 +938,7 @@ fn map_status_context(value: &Value) -> ForgeCheck {
         name: text(value, "context"),
         status: github_check_status(value["state"].as_str().unwrap_or_default(), None),
         details_url: optional_text(value, "target_url"),
+        required: None,
         description: optional_text(value, "description"),
         duration_ms: duration_ms(created_at.as_ref(), updated_at.as_ref()),
         started_at: created_at,

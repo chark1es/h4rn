@@ -125,6 +125,9 @@ pub struct ForgeCapabilities {
     pub diff_pagination: bool,
     /// GraphQL is used for review threads.
     pub graphql: bool,
+    /// Failed checks can be re-run through the API (GitHub check suites, GitLab
+    /// pipelines). Gitea and Forgejo CI posts plain commit statuses.
+    pub rerun_checks: bool,
 }
 
 /// One configured forge account.
@@ -566,6 +569,20 @@ pub struct ForgeCheck {
     pub completed_at: Option<DateTime<Utc>>,
     /// Wall time in milliseconds, when both ends are known.
     pub duration_ms: Option<u64>,
+    /// Whether the forge requires this check before merging. `None` when the
+    /// forge or the token cannot say (GitHub without read access to the branch
+    /// rules, a Gitea token that is not an admin).
+    #[serde(default)]
+    pub required: Option<bool>,
+}
+
+/// Whether the forge can re-run a PR's failed checks, and why not if it can't.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ForgeRerunSupport {
+    /// The forge exposes a re-run API for this check source.
+    pub supported: bool,
+    /// Why it does not, worded for a tooltip. `None` when supported.
+    pub reason: Option<String>,
 }
 
 /// The checks tab and the agent context summary.
@@ -589,8 +606,42 @@ pub struct ForgeChecks {
     pub pending: u32,
     /// The checks themselves.
     pub checks: Vec<ForgeCheck>,
+    /// Whether "Re-run failed" can work on this forge.
+    pub rerun: ForgeRerunSupport,
     /// When the daemon fetched this snapshot.
     pub updated_at: DateTime<Utc>,
+}
+
+/// One commit of a pull request.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ForgeCommit {
+    /// Full commit id.
+    pub sha: String,
+    /// First line of the message.
+    pub title: String,
+    /// The rest of the message, when there is one.
+    pub body: Option<String>,
+    /// Author name as recorded in the commit.
+    pub author: String,
+    /// Forge login of the author, when the forge links one.
+    pub author_login: Option<String>,
+    /// When the commit was authored.
+    pub authored_at: Option<DateTime<Utc>>,
+    /// Web page of the commit.
+    pub web_url: Option<String>,
+}
+
+/// The Commits tab: a PR's commits, oldest first.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ForgeCommits {
+    /// Repository.
+    pub repo: ForgeRepoRef,
+    /// PR number.
+    pub number: u32,
+    /// The commits, oldest first, as far as the forge returned them.
+    pub commits: Vec<ForgeCommit>,
+    /// The PR has more commits than were fetched.
+    pub truncated: bool,
 }
 
 /// A title/body pair for a new pull request.

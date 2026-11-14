@@ -1,0 +1,6 @@
+{
+  "branch_name": "main", "rule_name": "main",
+  "enable_status_check": true,
+  "status_check_contexts": ["ci/test", "deploy/*"],
+  "required_approvals": 1
+}

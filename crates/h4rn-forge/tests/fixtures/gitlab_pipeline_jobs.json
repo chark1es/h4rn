@@ -1,0 +1,14 @@
+[
+  {"id": 901, "name": "build", "status": "success", "allow_failure": false,
+   "web_url": "https://gitlab.example.test/acme/widget/-/jobs/901",
+   "started_at": "2026-11-12T10:00:00.000Z", "finished_at": "2026-11-12T10:02:00.000Z",
+   "duration": 120.5, "failure_reason": null},
+  {"id": 902, "name": "test", "status": "failed", "allow_failure": false,
+   "web_url": "https://gitlab.example.test/acme/widget/-/jobs/902",
+   "started_at": "2026-11-12T10:02:00.000Z", "finished_at": "2026-11-12T10:04:00.000Z",
+   "duration": 120.0, "failure_reason": "script_failure"},
+  {"id": 903, "name": "lint", "status": "failed", "allow_failure": true,
+   "web_url": "https://gitlab.example.test/acme/widget/-/jobs/903",
+   "started_at": "2026-11-12T10:02:00.000Z", "finished_at": "2026-11-12T10:02:30.000Z",
+   "duration": 30.0, "failure_reason": "script_failure"}
+]

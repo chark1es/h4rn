@@ -11,9 +11,10 @@
 use async_trait::async_trait;
 use h4rn_protocol::{
     ForgeCapabilities, ForgeCheck, ForgeChecks, ForgeChecksState, ForgeComment, ForgeCommentPage,
-    ForgeDiffPage, ForgeDiffSide, ForgeFileDiff, ForgeFileStatus, ForgeKind, ForgeLabel,
-    ForgeMergeable, ForgeNewPr, ForgePrFilter, ForgePrState, ForgePrSummary, ForgePullRequest,
-    ForgeRepoRef, ForgeReview, ForgeReviewComment, ForgeReviewState, ForgeReviewThread,
+    ForgeCommit, ForgeCommits, ForgeDiffPage, ForgeDiffSide, ForgeFileDiff, ForgeFileStatus,
+    ForgeKind, ForgeLabel, ForgeMergeable, ForgeNewPr, ForgePrFilter, ForgePrState, ForgePrSummary,
+    ForgePullRequest, ForgeRepoRef, ForgeReview, ForgeReviewComment, ForgeReviewState,
+    ForgeReviewThread,
 };
 use reqwest::Method;
 use serde_json::{Value, json};
@@ -21,7 +22,7 @@ use url::form_urlencoded;
 
 use crate::common::{
     duration_ms, encode_project_path, finish_checks, gitlab_check_status, optional_text,
-    parse_datetime, parse_optional_datetime, text, validate_repo,
+    parse_datetime, parse_optional_datetime, split_message, text, validate_repo,
 };
 use crate::error::{ForgeError, Result};
 use crate::http::{ForgeHttp, next_link};
@@ -310,6 +311,64 @@ impl Forge for GitLabClient {
             checks.push(map_pipeline(&pipeline));
         }
         Ok(finish_checks(repo, number, sha, checks))
+    }
+
+    async fn list_commits(&self, repo: &ForgeRepoRef, number: u32) -> Result<ForgeCommits> {
+        validate_repo(repo)?;
+        let url = format!("{}/commits?per_page=100", self.mr_url(repo, number));
+        let values = self.get_all(&url, 5).await?;
+        // GitLab lists the newest commit first; the tab reads oldest first.
+        let commits = values
+            .iter()
+            .rev()
+            .filter_map(|value| {
+                let sha = optional_text(value, "id")?;
+                let (title, body) = split_message(&text(value, "message"));
+                Some(ForgeCommit {
+                    sha,
+                    title: optional_text(value, "title").unwrap_or(title),
+                    body,
+                    author: text(value, "author_name"),
+                    author_login: None,
+                    authored_at: parse_optional_datetime(
+                        value.get("authored_date"),
+                        "authored_date",
+                    )
+                    .ok()
+                    .flatten(),
+                    web_url: optional_text(value, "web_url"),
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(ForgeCommits {
+            repo: repo.clone(),
+            number,
+            truncated: values.len() >= 500,
+            commits,
+        })
+    }
+
+    async fn rerun_failed_checks(&self, repo: &ForgeRepoRef, number: u32) -> Result<u32> {
+        validate_repo(repo)?;
+        let checks = self.list_checks(repo, number).await?;
+        let failed = checks.failed;
+        if failed == 0 {
+            return Err(ForgeError::Conflict(
+                "there are no failed checks to re-run".into(),
+            ));
+        }
+        let mr = self.fetch_mr(repo, number).await?;
+        let pipeline_id = mr["head_pipeline"]["id"].as_u64().ok_or_else(|| {
+            ForgeError::Conflict("the merge request has no pipeline to retry".into())
+        })?;
+        // Retry re-queues only the pipeline's failed jobs.
+        self.http
+            .post_json(
+                &format!("{}/pipelines/{pipeline_id}/retry", self.project_url(repo)),
+                &json!({}),
+            )
+            .await?;
+        Ok(failed)
     }
 
     async fn reply(
@@ -697,6 +756,8 @@ fn map_job(value: &Value) -> ForgeCheck {
         name: text(value, "name"),
         status: gitlab_check_status(value["status"].as_str().unwrap_or_default()),
         details_url: optional_text(value, "web_url"),
+        // A job that may not fail is what GitLab gates the merge on.
+        required: value["allow_failure"].as_bool().map(|allowed| !allowed),
         description: optional_text(value, "failure_reason"),
         duration_ms: value["duration"]
             .as_f64()
@@ -712,6 +773,7 @@ fn map_pipeline(value: &Value) -> ForgeCheck {
         name: "pipeline".into(),
         status: gitlab_check_status(value["status"].as_str().unwrap_or_default()),
         details_url: optional_text(value, "web_url"),
+        required: None,
         description: optional_text(value, "ref"),
         started_at: None,
         completed_at: None,

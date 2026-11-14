@@ -1,0 +1,29 @@
+{
+  "total_count": 4,
+  "check_runs": [
+    {"id": 1001, "name": "build", "status": "completed", "conclusion": "success",
+     "html_url": "https://github.com/acme/widget/runs/1001",
+     "details_url": "https://github.com/acme/widget/actions/runs/500/job/1001",
+     "started_at": "2026-11-12T10:00:00Z", "completed_at": "2026-11-12T10:03:20Z",
+     "output": {"title": "Build passed", "summary": null},
+     "check_suite": {"id": 11}},
+    {"id": 1002, "name": "test", "status": "completed", "conclusion": "failure",
+     "html_url": "https://github.com/acme/widget/runs/1002",
+     "details_url": "https://github.com/acme/widget/actions/runs/501/job/1002",
+     "started_at": "2026-11-12T10:00:00Z", "completed_at": "2026-11-12T10:05:00Z",
+     "output": {"title": "2 tests failed", "summary": null},
+     "check_suite": {"id": 12}},
+    {"id": 1003, "name": "lint", "status": "completed", "conclusion": "failure",
+     "html_url": "https://github.com/acme/widget/runs/1003",
+     "details_url": "https://github.com/acme/widget/actions/runs/501/job/1003",
+     "started_at": "2026-11-12T10:00:00Z", "completed_at": "2026-11-12T10:01:00Z",
+     "output": {"title": "clippy found warnings", "summary": null},
+     "check_suite": {"id": 12}},
+    {"id": 1004, "name": "deploy-preview", "status": "completed", "conclusion": "skipped",
+     "html_url": "https://github.com/acme/widget/runs/1004",
+     "details_url": null,
+     "started_at": null, "completed_at": null,
+     "output": {"title": null, "summary": null},
+     "check_suite": {"id": 13}}
+  ]
+}

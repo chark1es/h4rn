@@ -16,16 +16,17 @@
 use async_trait::async_trait;
 use h4rn_protocol::{
     ForgeCapabilities, ForgeCheck, ForgeChecks, ForgeChecksState, ForgeComment, ForgeCommentPage,
-    ForgeDiffPage, ForgeDiffSide, ForgeFileDiff, ForgeFileStatus, ForgeKind, ForgeLabel,
-    ForgeMergeable, ForgeNewPr, ForgePrFilter, ForgePrState, ForgePrSummary, ForgePullRequest,
-    ForgeRepoRef, ForgeReview, ForgeReviewComment, ForgeReviewState, ForgeReviewThread,
+    ForgeCommit, ForgeCommits, ForgeDiffPage, ForgeDiffSide, ForgeFileDiff, ForgeFileStatus,
+    ForgeKind, ForgeLabel, ForgeMergeable, ForgeNewPr, ForgePrFilter, ForgePrState, ForgePrSummary,
+    ForgePullRequest, ForgeRepoRef, ForgeReview, ForgeReviewComment, ForgeReviewState,
+    ForgeReviewThread,
 };
 
 use serde_json::{Value, json};
 
 use crate::common::{
-    duration_ms, finish_checks, gitea_check_status, optional_text, parse_datetime,
-    parse_optional_datetime, text, validate_repo,
+    context_matches, duration_ms, finish_checks, gitea_check_status, map_commit_gh_like,
+    optional_text, parse_datetime, parse_optional_datetime, text, validate_repo,
 };
 use crate::error::{ForgeError, Result};
 use crate::http::ForgeHttp;
@@ -114,6 +115,28 @@ impl GiteaClient {
 
     async fn fetch_pr(&self, repo: &ForgeRepoRef, number: u32) -> Result<Value> {
         self.http.get_json(&self.pr_url(repo, number)).await
+    }
+
+    /// The status-check patterns the base branch requires, or `None` when the
+    /// protection rule cannot be read (it needs repository admin) or none is
+    /// enabled. Unknown is better than a guess in either direction.
+    async fn required_contexts(&self, repo: &ForgeRepoRef, base_ref: &str) -> Option<Vec<String>> {
+        let url = format!(
+            "{}/branch_protections/{}",
+            self.repo_url(repo),
+            urlencode(base_ref)
+        );
+        let value = self.http.get_json(&url).await.ok()?;
+        if value["enable_status_check"].as_bool() != Some(true) {
+            return None;
+        }
+        Some(
+            value["status_check_contexts"]
+                .as_array()?
+                .iter()
+                .filter_map(|context| context.as_str().map(str::to_owned))
+                .collect(),
+        )
     }
 }
 
@@ -350,7 +373,36 @@ impl Forge for GiteaClient {
         {
             checks = statuses.iter().map(map_status).collect();
         }
+        if let Some(base_ref) = pr["base"]["ref"].as_str()
+            && let Some(required) = self.required_contexts(repo, base_ref).await
+        {
+            for check in &mut checks {
+                check.required = Some(
+                    required
+                        .iter()
+                        .any(|pattern| context_matches(pattern, &check.name)),
+                );
+            }
+        }
         Ok(finish_checks(repo, number, sha, checks))
+    }
+
+    async fn list_commits(&self, repo: &ForgeRepoRef, number: u32) -> Result<ForgeCommits> {
+        validate_repo(repo)?;
+        let url = format!(
+            "{}/commits?limit=50&verification=false&files=false",
+            self.pr_url(repo, number)
+        );
+        let values = self.get_all(&url, 10).await?;
+        let mut commits: Vec<ForgeCommit> = values.iter().filter_map(map_commit_gh_like).collect();
+        // Gitea answers newest first; the tab reads oldest first.
+        commits.reverse();
+        Ok(ForgeCommits {
+            repo: repo.clone(),
+            number,
+            truncated: values.len() >= 500,
+            commits,
+        })
     }
 
     async fn reply(
@@ -671,6 +723,7 @@ fn map_status(value: &Value) -> ForgeCheck {
         name: text(value, "context"),
         status: gitea_check_status(value["status"].as_str().unwrap_or_default()),
         details_url: optional_text(value, "target_url"),
+        required: None,
         description: optional_text(value, "description"),
         duration_ms: duration_ms(created_at.as_ref(), updated_at.as_ref()),
         started_at: created_at,

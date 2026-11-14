@@ -27,9 +27,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use h4rn_protocol::{
-    ForgeAccount, ForgeCapabilities, ForgeChecks, ForgeComment, ForgeCommentPage, ForgeDiffPage,
-    ForgeKind, ForgeNewPr, ForgePrFilter, ForgePrSummary, ForgePullRequest, ForgeRepoRef,
-    ForgeReviewComment,
+    ForgeAccount, ForgeCapabilities, ForgeChecks, ForgeComment, ForgeCommentPage, ForgeCommits,
+    ForgeDiffPage, ForgeKind, ForgeNewPr, ForgePrFilter, ForgePrSummary, ForgePullRequest,
+    ForgeRepoRef, ForgeReviewComment,
 };
 
 pub use common::{finish_checks, validate_repo};
@@ -108,6 +108,23 @@ pub trait Forge: Send + Sync {
     /// Fetches the head commit's checks.
     async fn list_checks(&self, repo: &ForgeRepoRef, number: u32) -> Result<ForgeChecks>;
 
+    /// Lists the PR's commits, oldest first.
+    async fn list_commits(&self, repo: &ForgeRepoRef, number: u32) -> Result<ForgeCommits>;
+
+    /// Re-runs the PR's failed checks and returns how many runs, suites or
+    /// pipelines were re-requested.
+    ///
+    /// Forges whose CI is plain commit statuses answer
+    /// [`ForgeError::Unsupported`]; see [`rerun_support`].
+    async fn rerun_failed_checks(&self, repo: &ForgeRepoRef, number: u32) -> Result<u32> {
+        let _ = (repo, number);
+        Err(ForgeError::Unsupported(
+            rerun_support(self.kind())
+                .reason
+                .unwrap_or_else(|| "this forge cannot re-run checks".into()),
+        ))
+    }
+
     /// Replies to a comment or a review thread.
     async fn reply(
         &self,
@@ -184,6 +201,7 @@ pub fn capabilities(kind: ForgeKind) -> ForgeCapabilities {
             pipelines: false,
             diff_pagination: true,
             graphql: true,
+            rerun_checks: true,
         },
         ForgeKind::GitLab => ForgeCapabilities {
             device_flow: false,
@@ -195,6 +213,7 @@ pub fn capabilities(kind: ForgeKind) -> ForgeCapabilities {
             pipelines: true,
             diff_pagination: true,
             graphql: false,
+            rerun_checks: true,
         },
         ForgeKind::Gitea => ForgeCapabilities {
             device_flow: false,
@@ -206,6 +225,7 @@ pub fn capabilities(kind: ForgeKind) -> ForgeCapabilities {
             pipelines: false,
             diff_pagination: false,
             graphql: false,
+            rerun_checks: false,
         },
         ForgeKind::Forgejo => ForgeCapabilities {
             device_flow: false,
@@ -217,7 +237,24 @@ pub fn capabilities(kind: ForgeKind) -> ForgeCapabilities {
             pipelines: false,
             diff_pagination: false,
             graphql: false,
+            rerun_checks: false,
         },
+    }
+}
+
+/// Whether a forge can re-run failed checks, with the reason when it cannot.
+pub fn rerun_support(kind: ForgeKind) -> h4rn_protocol::ForgeRerunSupport {
+    let supported = capabilities(kind).rerun_checks;
+    h4rn_protocol::ForgeRerunSupport {
+        supported,
+        reason: (!supported).then(|| match kind {
+            ForgeKind::Gitea | ForgeKind::Forgejo => format!(
+                "{} posts CI results as commit statuses and has no re-run API; re-run it in {}'s Actions tab",
+                kind.display_name(),
+                kind.display_name()
+            ),
+            _ => format!("{} has no API to re-run checks", kind.display_name()),
+        }),
     }
 }
 
@@ -257,5 +294,22 @@ mod tests {
         assert!(!capabilities(ForgeKind::GitLab).device_flow);
         assert!(capabilities(ForgeKind::GitLab).pipelines);
         assert!(!capabilities(ForgeKind::Gitea).nested_replies);
+    }
+
+    #[test]
+    fn rerun_is_offered_only_where_the_forge_has_an_api() {
+        assert!(rerun_support(ForgeKind::GitHub).supported);
+        assert!(rerun_support(ForgeKind::GitLab).supported);
+        for kind in [ForgeKind::Gitea, ForgeKind::Forgejo] {
+            let support = rerun_support(kind);
+            assert!(!support.supported);
+            assert!(
+                support
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("commit statuses")),
+                "{support:?}"
+            );
+        }
     }
 }

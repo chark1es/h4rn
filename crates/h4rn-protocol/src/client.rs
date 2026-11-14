@@ -744,6 +744,27 @@ pub enum ClientRequest {
         /// PR number.
         number: u32,
     },
+    /// List a PR's commits, oldest first.
+    ForgeListPrCommits {
+        /// Account to use.
+        account_id: Option<String>,
+        /// Repository.
+        repo: crate::forge::ForgeRepoRef,
+        /// PR number.
+        number: u32,
+    },
+    /// Re-run a PR's failed checks, then return the refreshed checks.
+    ///
+    /// Only where `ForgeChecks.rerun.supported` says so; elsewhere the daemon
+    /// answers `unsupported` with the reason.
+    ForgeRerunChecks {
+        /// Account to use.
+        account_id: Option<String>,
+        /// Repository.
+        repo: crate::forge::ForgeRepoRef,
+        /// PR number.
+        number: u32,
+    },
     /// Reply in an existing review thread, or to a general comment.
     ///
     /// `thread_id` is the normalised thread/discussion id from
@@ -854,7 +875,8 @@ impl ClientRequest {
             | Self::ForgeGetPr { .. }
             | Self::ForgeGetPrDiff { .. }
             | Self::ForgeListPrComments { .. }
-            | Self::ForgeListChecks { .. } => View,
+            | Self::ForgeListChecks { .. }
+            | Self::ForgeListPrCommits { .. } => View,
             Self::CreateThread { .. }
             | Self::SendMessage { .. }
             | Self::Interrupt { .. }
@@ -866,6 +888,7 @@ impl ClientRequest {
             | Self::CancelResume { .. }
             | Self::ResumeNow { .. }
             | Self::FailOver { .. }
+            | Self::ForgeRerunChecks { .. }
             | Self::ForgeReply { .. }
             | Self::ForgeComment { .. }
             | Self::ForgeOpenPr { .. }

@@ -1,0 +1,10 @@
+[
+  {"id": "2222222222222222222222222222222222222222", "short_id": "22222222",
+   "title": "Fix the panic", "message": "Fix the panic\n",
+   "author_name": "Alice Example", "authored_date": "2026-11-12T09:30:00.000Z",
+   "web_url": "https://gitlab.example.test/acme/widget/-/commit/2222222222222222222222222222222222222222"},
+  {"id": "1111111111111111111111111111111111111111", "short_id": "11111111",
+   "title": "Add a failing test", "message": "Add a failing test\n\nReproduces the panic on empty input.\n",
+   "author_name": "Alice Example", "authored_date": "2026-11-12T09:00:00.000Z",
+   "web_url": "https://gitlab.example.test/acme/widget/-/commit/1111111111111111111111111111111111111111"}
+]

@@ -665,6 +665,44 @@ impl ForgeService {
         Ok(checks)
     }
 
+    /// Lists a PR's commits, oldest first.
+    pub async fn list_commits(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<h4rn_protocol::ForgeCommits, ForgeServiceError> {
+        let (_account, client) = self.resolve_client(account_id, repo)?;
+        Ok(client.list_commits(repo, number).await?)
+    }
+
+    /// Re-runs a PR's failed checks and returns the refreshed checks.
+    ///
+    /// Forges without a re-run API answer `unsupported` with the reason the
+    /// checks snapshot already carries.
+    pub async fn rerun_checks(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<ForgeChecks, ForgeServiceError> {
+        let (account, client) = self.resolve_client(account_id, repo)?;
+        let requested = client.rerun_failed_checks(repo, number).await?;
+        self.audit.record(
+            "checks.rerun",
+            &account,
+            repo,
+            number,
+            json!({"requested": requested}),
+        );
+        // The forge needs a moment to flip the runs back to queued; a fresh
+        // read right away usually still shows the old result, so the caller
+        // keeps polling through the normal checks watcher.
+        let checks = client.list_checks(repo, number).await?;
+        self.remember_checks(&account, repo, number, &checks);
+        Ok(checks)
+    }
+
     /// Replies in a thread or posts a general comment.
     pub async fn reply(
         &self,
@@ -1168,6 +1206,7 @@ mod tests {
             started_at: None,
             completed_at: None,
             duration_ms: None,
+            required: None,
         });
         let second = checks_signature(&changed);
         assert_ne!(first, second);

@@ -364,6 +364,7 @@ mod tests {
                     started_at: None,
                     completed_at: None,
                     duration_ms: None,
+                    required: None,
                 },
                 ForgeCheck {
                     name: "ci/lint".into(),
@@ -373,8 +374,10 @@ mod tests {
                     started_at: None,
                     completed_at: None,
                     duration_ms: None,
+                    required: None,
                 },
             ],
+            rerun: crate::rerun_support(ForgeKind::GitHub),
             updated_at: Utc::now(),
         }
     }

@@ -352,6 +352,11 @@ pub enum ResponseBody {
         /// Checks snapshot.
         checks: crate::forge::ForgeChecks,
     },
+    /// A PR's commits.
+    ForgeCommits {
+        /// The commits, oldest first.
+        commits: crate::forge::ForgeCommits,
+    },
     /// A general comment was posted.
     ForgeCommentPosted {
         /// The new comment.
