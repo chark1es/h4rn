@@ -92,55 +92,76 @@ export type ResponseOf<T extends ClientRequest["type"]> = T extends "hello"
                                                           : T extends "skills_import_commit"
                                                             ? Extract<ResponseBody, { type: "ack" }>
                                                             : T extends "get_usage"
-                                                  ? Extract<ResponseBody, { type: "usage_report" }>
-                                                  : T extends "get_limits"
-                                                    ? Extract<ResponseBody, { type: "limits" }>
-                                                    : T extends "list_resets"
-                                                      ? Extract<ResponseBody, { type: "resets" }>
-                                                      : T extends "cancel_resume" | "resume_now"
-                                                        ? Extract<
-                                                            ResponseBody,
-                                                            { type: "resume_changed" }
-                                                          >
-                                                        : T extends
-                                                              | "list_proxy_profiles"
-                                                              | "remove_proxy_profile"
-                                                          ? Extract<
-                                                              ResponseBody,
-                                                              { type: "proxy_profiles" }
-                                                            >
-                                                          : T extends
-                                                                | "add_proxy_profile"
-                                                                | "update_proxy_profile"
-                                                                | "set_proxy_harness_override"
-                                                            ? Extract<
-                                                                ResponseBody,
-                                                                { type: "proxy_profile" }
-                                                              >
-                                                            : T extends "test_proxy_profile"
                                                               ? Extract<
                                                                   ResponseBody,
-                                                                  { type: "proxy_tested" }
+                                                                  { type: "usage_report" }
                                                                 >
-                                                              : T extends "list_proxy_models"
+                                                              : T extends "get_limits"
                                                                 ? Extract<
                                                                     ResponseBody,
-                                                                    { type: "proxy_models" }
+                                                                    { type: "limits" }
                                                                   >
-                                                                : T extends "list_proxy_limits"
+                                                                : T extends "list_resets"
                                                                   ? Extract<
                                                                       ResponseBody,
-                                                                      { type: "proxy_limits" }
+                                                                      { type: "resets" }
                                                                     >
-                                                                  : T extends "pick_proxy_failover"
+                                                                  : T extends
+                                                                        | "cancel_resume"
+                                                                        | "resume_now"
                                                                     ? Extract<
                                                                         ResponseBody,
-                                                                        { type: "proxy_failover" }
+                                                                        { type: "resume_changed" }
                                                                       >
-                                                                  : Extract<
-                                                                      ResponseBody,
-                                                                      { type: "ack" }
-                                                                    >;
+                                                                    : T extends
+                                                                          | "list_proxy_profiles"
+                                                                          | "remove_proxy_profile"
+                                                                      ? Extract<
+                                                                          ResponseBody,
+                                                                          { type: "proxy_profiles" }
+                                                                        >
+                                                                      : T extends
+                                                                            | "add_proxy_profile"
+                                                                            | "update_proxy_profile"
+                                                                            | "set_proxy_harness_override"
+                                                                        ? Extract<
+                                                                            ResponseBody,
+                                                                            {
+                                                                              type: "proxy_profile";
+                                                                            }
+                                                                          >
+                                                                        : T extends "test_proxy_profile"
+                                                                          ? Extract<
+                                                                              ResponseBody,
+                                                                              {
+                                                                                type: "proxy_tested";
+                                                                              }
+                                                                            >
+                                                                          : T extends "list_proxy_models"
+                                                                            ? Extract<
+                                                                                ResponseBody,
+                                                                                {
+                                                                                  type: "proxy_models";
+                                                                                }
+                                                                              >
+                                                                            : T extends "list_proxy_limits"
+                                                                              ? Extract<
+                                                                                  ResponseBody,
+                                                                                  {
+                                                                                    type: "proxy_limits";
+                                                                                  }
+                                                                                >
+                                                                              : T extends "pick_proxy_failover"
+                                                                                ? Extract<
+                                                                                    ResponseBody,
+                                                                                    {
+                                                                                      type: "proxy_failover";
+                                                                                    }
+                                                                                  >
+                                                                                : Extract<
+                                                                                    ResponseBody,
+                                                                                    { type: "ack" }
+                                                                                  >;
 
 /**
  * Events that carry no durable position: `seq` is the daemon's current

@@ -304,7 +304,6 @@ async function main() {
     await usageResume.getByRole("button", { name: "Resume now" }).click();
     await page.locator(".q-resume").first().waitFor({ state: "detached", timeout: 15_000 });
 
-
     // Settings → Tools: add a real stdio server, turn it off for one harness,
     // then install a local skill from a folder. Both must survive a reload.
     await page.getByRole("button", { name: "MCP & skills" }).click();

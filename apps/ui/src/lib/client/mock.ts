@@ -2284,6 +2284,7 @@ class MockDaemon {
         this.mcpServers = this.mcpServers.filter((server) => server.name !== body.name);
         this.ok(frame.id, { type: "ack" });
         return;
+      }
       case "get_usage":
         this.ok(frame.id, { type: "usage_report", report: this.usageReport(body) });
         return;

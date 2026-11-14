@@ -822,7 +822,21 @@ async fn subscribe_without_threads_suppresses_thread_events() {
 
 #[tokio::test]
 async fn list_threads_filters_by_tab_and_search() {
-    let daemon = boot().await;
+    // Keep both turns running for the whole test. The default harness echoes
+    // and completes immediately, so a thread only stays in Working for the
+    // 80ms exit grace; under load the two creates could outlast it and the
+    // tab filter then legitimately saw Done rows. An empty script pins the
+    // phase at Running, making the tab assertion independent of wall time.
+    let daemon = boot_with(
+        ThreadManagerOptions {
+            settings: LifecycleSettings::default()
+                .with_working_exit_grace(chrono::TimeDelta::milliseconds(80))
+                .with_stale_bypass(chrono::TimeDelta::seconds(60)),
+            tick_interval: Duration::from_millis(20),
+        },
+        FakeHarness::with_events(Vec::new()),
+    )
+    .await;
     let host = host_id_for(&daemon).await;
 
     let mut client = Client::connect(&daemon).await;
