@@ -79,6 +79,9 @@
   background: transparent;
   box-shadow: inset 0 0 0 1.5px var(--fg-3);
 }
+.q-dot.off.bad {
+  box-shadow: inset 0 0 0 1.5px var(--danger);
+}
 .q-dot.warn {
   background: var(--warn-dot);
 }
@@ -917,7 +920,7 @@
   text-align: left;
   cursor: pointer;
 }
-.q-row-more {
+.q-row .q-row-more {
   position: absolute;
   top: 5px;
   right: 4px;
@@ -4271,16 +4274,6 @@
 }
 .q-host:disabled {
   opacity: 0.6;
-}
-.q-hp-account {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 6px 8px 8px;
-}
-.q-hp-account .q-btn {
-  align-self: flex-start;
-  margin-top: 4px;
 }
 .q-account-name {
   font-size: 12.5px;

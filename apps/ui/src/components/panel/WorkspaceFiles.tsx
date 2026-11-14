@@ -7,6 +7,7 @@ import {
   RefreshCwIcon,
   SearchIcon,
 } from "lucide-react";
+import { KeyCaps, MOD } from "@/components/common/Kbd";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { gitBadge } from "@/features/ide/useIdeSession";
@@ -145,7 +146,7 @@ export function WorkspaceFiles({
             aria-label="Filter files"
             spellCheck={false}
           />
-          <span className="q-kbd">⌘P</span>
+          <KeyCaps value={`${MOD} P`} />
         </label>
       </div>
       <div className="q-rp-body q-scroll" style={{ padding: "6px 0 8px" }}>

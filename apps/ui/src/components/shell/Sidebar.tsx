@@ -18,11 +18,10 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
-import { KeyGlyphs, MOD, SHIFT } from "@/components/common/Kbd";
+import { KeyCaps, MOD, SHIFT } from "@/components/common/Kbd";
 import { ThreadRow } from "@/components/inbox/ThreadRow";
 import { serverStatus } from "@/features/mcp/labels";
 import { loadMcpServers, useMcp } from "@/features/mcp/store";
-import { SignOutButton } from "@/features/remote/ConnectSignIn";
 import { activateMachine, forgetMachine, useRemote } from "@/features/remote/remoteStore";
 import { loadSkills, useSkills } from "@/features/skills/store";
 import type { ThreadSummary, ThreadTab } from "@/gen";
@@ -243,15 +242,21 @@ function HostsPopover({
   onClose: () => void;
 }) {
   const user = useRemote((state) => state.user);
-  const connectUrl = useRemote((state) => state.connectUrl);
   const busy = useRemote((state) => state.busy);
   const online = rows.filter((row) => row.online).length;
   const active = rows.find((row) => row.active) ?? rows.find((row) => row.online);
+  // The daemon answers but this host does not: that is an unreachable host,
+  // shown in `danger` with its last-seen time (DESIGN §States).
+  const reachableLink = connection.status === "online";
   const dots = (row: HostRow) =>
     row.online ? (
       <span className="q-dot on" role="img" aria-label="online" />
     ) : (
-      <span className="q-dot off" role="img" aria-label="offline" />
+      <span
+        className={cn("q-dot off", reachableLink && "bad")}
+        role="img"
+        aria-label={reachableLink ? "unreachable" : "offline"}
+      />
     );
   const connectionLine =
     connection.status === "online"
@@ -301,7 +306,12 @@ function HostsPopover({
               size={16}
               decorative={false}
             />
-            <span className="lbl" style={row.online ? undefined : { color: "var(--fg-3)" }}>
+            <span
+              className="lbl"
+              style={
+                row.online ? undefined : { color: reachableLink ? "var(--danger)" : "var(--fg-3)" }
+              }
+            >
               {row.name}
             </span>
             {row.online ? (
@@ -311,7 +321,12 @@ function HostsPopover({
             ) : (
               <span
                 className="meta"
-                style={{ display: "inline-flex", gap: 4, alignItems: "center" }}
+                style={{
+                  display: "inline-flex",
+                  gap: 4,
+                  alignItems: "center",
+                  color: reachableLink ? "var(--danger)" : undefined,
+                }}
               >
                 <WifiOffIcon className="q-icon s12" aria-hidden />
                 {row.lastSeen}
@@ -337,15 +352,7 @@ function HostsPopover({
         </button>
       ) : null}
       <div className="q-hp-sep" />
-      {user ? (
-        <div className="q-hp-account">
-          <span className="q-account-name">{user.display_name ?? user.email ?? user.id}</span>
-          <span className="q-faint" style={{ fontSize: 11 }}>
-            {connectUrl}
-          </span>
-          <SignOutButton onDone={onClose} />
-        </div>
-      ) : (
+      {user ? null : (
         <button
           type="button"
           className="q-nav"
@@ -597,9 +604,7 @@ function ThreadsSidebar() {
         >
           <SearchIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           <span>Search or run</span>
-          <span className="q-kbd">
-            <KeyGlyphs value={`${MOD}K`} />
-          </span>
+          <KeyCaps value={`${MOD} K`} />
         </button>
         {allEmpty ? null : (
           <div className="q-seg" role="tablist" aria-label="Thread state">
@@ -646,7 +651,7 @@ function ThreadsSidebar() {
             <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           </span>
           <span className="grow">
-            <b>Couldn’t reach {Object.values(hosts)[0]?.name ?? "the daemon"}.</b>{" "}
+            <b>Couldn’t reach {unreachableHostLabel(hosts)}.</b>{" "}
             {error.hint ?? "Showing cached threads."}
           </span>
           <button
@@ -1058,6 +1063,14 @@ function SettingsSidebar() {
       />
     </nav>
   );
+}
+
+/** Names the host that is actually down; several (or none known) read as "a host". */
+function unreachableHostLabel(hosts: Record<string, { name: string; online: boolean }>): string {
+  const down = Object.values(hosts).filter((host) => !host.online);
+  if (down.length === 1) return down[0]?.name ?? "a host";
+  if (down.length > 1) return `${down.length} hosts`;
+  return "the daemon";
 }
 
 export function Sidebar() {

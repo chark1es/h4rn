@@ -3,7 +3,7 @@ import { type ReactNode, useEffect, useState } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
-import { MOD } from "@/components/common/Kbd";
+import { KeyCaps, MOD } from "@/components/common/Kbd";
 import { DelegateDialog } from "@/features/subagents/DelegateDialog";
 import {
   loadSubagents,
@@ -388,7 +388,7 @@ export function PhonePanelSheet({
               a change back to the agent.
             </p>
             <p className="q-ph-desktop-only">
-              Files and the IDE open on desktop. Press <span className="q-kbd">{MOD}E</span> there
+              Files and the IDE open on desktop. Press <KeyCaps value={`${MOD} E`} /> there
               to switch views.
             </p>
           </div>
