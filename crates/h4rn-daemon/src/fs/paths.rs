@@ -122,6 +122,17 @@ pub fn resolve_inside(root: &Path, rel: &str, mode: ResolveMode) -> Result<PathB
     let mut ancestor = joined.clone();
     let mut missing = Vec::new();
     while !ancestor.exists() {
+        // `exists()` follows links, so a dangling symlink reads as "missing".
+        // Creating through it would write wherever it points, so refuse.
+        if ancestor
+            .symlink_metadata()
+            .map(|meta| meta.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return Err(FsError::Forbidden(
+                "path is a dangling symlink; refusing to create through it".into(),
+            ));
+        }
         let Some(name) = ancestor.file_name().map(|name| name.to_owned()) else {
             return Err(FsError::Forbidden(
                 "path has no existing ancestor inside the workspace".into(),
