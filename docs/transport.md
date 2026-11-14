@@ -308,6 +308,30 @@ The connect flow creates a pairing on the relay and renders the returned
 `h4rn://pair?...` URL as a terminal QR (Unicode half blocks, no external
 image). The claimed device is announced over the relay and allowlisted.
 
+A connect pairing grants **scopes** and has a **short code** (ADR-042):
+
+```sh
+h4rnd pair --scope approve --scope terminal   # view is always granted
+```
+
+The scopes are `view`, `approve` (start/reply/approve/control runs and the forge
+write actions), `terminal`, `files` (browse, read and edit) and `admin`
+(configuration: MCP, skills, proxy, forge accounts, policy). With no `--scope`
+the device gets everything but `admin`. The relay records them on the
+device-machine link, signs them into the device's access token (`scp`), and
+sends them to the daemon in the snapshot and `DevicePaired` event. The daemon
+checks every request with `ClientRequest::required_scope()` and answers
+`forbidden` ("this device was paired without the `approve` permission") when the
+device lacks it; re-pairing replaces the scopes. Direct pairings and local
+sessions are unrestricted.
+
+The short code is 8 Crockford base32 characters (40 bits), shown as `ABCD-EFGH`,
+single use, expiring with the QR. A phone without a camera claims it with
+`POST /v1/pairings/claim-code` (typed case, hyphens and `I/L/O` confusions are
+normalised). A typed code carries no daemon key, so the relay supplies it:
+that first handshake trusts the relay for the key, where the QR pins it out of
+band.
+
 `--direct` skips connect: the CLI writes `<data_dir>/direct-pairing.json`
 (mode `0600`) with a fresh PSK, expiry and address candidates. The running
 daemon watches that file, installs the PSK, and the payload carries the

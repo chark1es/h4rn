@@ -151,10 +151,35 @@ read the flags instead of assuming all forges behave alike.
 | Pipeline view | no | yes | no | no |
 | Server-side diff pagination | yes | yes | no | no |
 | GraphQL used | yes | no | no | no |
+| Re-run failed checks | yes (check suites) | yes (pipeline retry) | no | no |
 
 Diff pagination on Gitea/Forgejo is applied locally: the whole patch is parsed
 and sliced by `page`/`per_page`, and `has_more` reports whether more files
 exist.
+
+## Checks, logs, re-run and commits
+
+Each `ForgeCheck` carries `details_url` (the page that shows the log; the UI's
+"View log" is a link, never a fetch) and `required`:
+
+- **GitHub:** a check is `required` when branch protection
+  (`.../protection/required_status_checks`) or a ruleset
+  (`/rules/branches/{branch}`) names it. If neither can be read with the token
+  the field is `null`, not `false`.
+- **GitLab:** a job is required unless `allow_failure` is set.
+- **Gitea/Forgejo:** from the branch protection rule's status-check contexts
+  (wildcards allowed); reading it needs repository admin, otherwise `null`.
+
+`ForgeRerunChecks` re-runs the failed checks and returns the refreshed checks.
+GitHub re-requests each check suite that has a failed run
+(`POST /check-suites/{id}/rerequest`); GitLab retries the head pipeline
+(`POST /pipelines/{id}/retry`, which re-queues only failed jobs). Gitea and
+Forgejo (1.22 / 9) report CI as commit statuses and expose no re-run API, so
+`ForgeChecks.rerun` says `supported: false` with the reason, and the UI keeps
+the button disabled with that reason as its tooltip.
+
+`ForgeListPrCommits` lists a PR's commits oldest first (title, body, author,
+date, link) for the Commits tab; forges that answer newest first are reversed.
 
 ## Requests and events
 
@@ -212,6 +237,12 @@ Error messages redact `token`, `authorization`, `private-token` and common
 credential query parameters before they reach a log or a protocol error.
 
 ## Testing
+
+`crates/h4rn-forge/tests/checks_and_commits.rs` replays fixtures from
+`tests/fixtures/`. The Gitea commit list was recorded from Gitea 1.22
+(`H4RN_RECORD_FIXTURES=<dir> ./scripts/test-forges.sh` re-records); the GitHub and
+GitLab ones follow those providers' REST schemas. `./scripts/test-forges.sh --ui`
+also checks the Commits tab and the disabled re-run reason against Docker Gitea.
 
 The client tests are wiremock tests with realistic JSON for each API shape:
 GitHub REST + GraphQL, ETag/304, 429 `retry-after`; GitLab MR, changes, diffs,

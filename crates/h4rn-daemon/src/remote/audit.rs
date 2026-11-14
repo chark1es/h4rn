@@ -83,7 +83,6 @@ impl RemoteAudit {
     }
 
     /// The connect device id whose Noise key is `key`, when known.
-
     pub fn device_id_for_key(&self, key: &[u8; h4rn_transport::keys::KEY_LEN]) -> Option<String> {
         self.devices.device_for_key(key)
     }

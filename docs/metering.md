@@ -107,10 +107,27 @@ that choice on the schedule (and emits it in `ScheduleChanged`), and uses the
 model for the resumed session. A failed resume moves to `Waiting` with
 `last_error` instead of silently losing the thread.
 
+### Failing over now
+
+Instead of waiting for a reset, a limit-hit thread can resume immediately on
+another model or account. `ListFailoverOptions { thread_id }` returns the
+daemon's default plus every eligible alternative (`h4rn_proxy::eligible_failovers`,
+best first: the head is what `pick_failover` returns); `FailOver { thread_id,
+model, account }` fires the schedule now. With no `model` the default is used; a
+named model must be one of the options. The choice is recorded on the schedule
+and the session restarts on the new model. Without a proxy profile for the
+thread's harness there are no options and the reply carries `unavailable` with
+the reason; the card's "Fail over…" button is then disabled with it as a tooltip.
+
 ## Requests and events
 
 Client requests: `GetUsage`, `GetLimits`, `ListResets`, `CancelResume`,
-`ResumeNow`, `SetAutoResumePolicy`.
+`ResumeNow`, `ListFailoverOptions`, `FailOver`, `SetAutoResumePolicy`.
+
+Tool rows carry `ToolCall.stats`: `diff {added, removed}` for edits and
+`matches {count, unit}` for searches, derived in `h4rn_harness::stats` from each
+adapter's own result (Claude `structuredPatch`/`Grep` results, Codex `fileChange`
+diffs, OpenCode `metadata`, ACP diff content). Tools that report neither get none.
 
 Ephemeral server frames (`ServerFrame::UsageEvent`): `UsageTick`,
 `LimitStatus`, `ScheduleChanged`. Durable lifecycle changes

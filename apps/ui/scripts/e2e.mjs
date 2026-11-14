@@ -7,6 +7,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -95,6 +96,32 @@ function run(command, args, options) {
     );
   }
   return result.stdout ?? "";
+}
+
+/** A stand-in CLIProxyAPI: just the model catalogue and an empty credential list. */
+async function startFakeProxy() {
+  const server = createHttpServer((request, response) => {
+    const url = request.url ?? "";
+    response.setHeader("content-type", "application/json");
+    if (url.startsWith("/v1/models") && !request.headers["anthropic-version"]) {
+      response.end(
+        JSON.stringify({
+          data: [
+            { id: "claude-sonnet-5", owned_by: "anthropic" },
+            { id: "claude-opus-5", owned_by: "anthropic" },
+          ],
+        }),
+      );
+    } else if (url.startsWith("/v0/management/auth-files")) {
+      response.end(JSON.stringify({ files: [] }));
+    } else {
+      response.statusCode = 404;
+      response.end("{}");
+    }
+  });
+  const port = await freePort();
+  await new Promise((resolveListen) => server.listen(port, "127.0.0.1", resolveListen));
+  return { url: `http://127.0.0.1:${port}`, close: () => server.close() };
 }
 
 async function main() {
@@ -393,6 +420,54 @@ async function main() {
     await usageResume.waitFor({ timeout: 20_000 });
     await usageResume.getByText(/until auto-resume/).waitFor({ timeout: 10_000 });
     await usageResume.getByRole("button", { name: "Resume now" }).click();
+    await page.locator(".q-resume").first().waitFor({ state: "detached", timeout: 15_000 });
+
+    // Fail over: with a proxy provider serving Claude Code, a limit-hit
+    // thread can resume now on another model instead of waiting for the reset.
+    const proxy = await startFakeProxy();
+    children.push({ exitCode: null, kill: () => proxy.close() });
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page
+      .locator('nav[aria-label="Settings"]')
+      .getByRole("button", { name: "Providers", exact: true })
+      .click();
+    await page.getByRole("button", { name: "Add profile" }).first().click();
+    await page.getByLabel("Proxy base URL").fill(proxy.url);
+    await page.getByRole("button", { name: "Save profile" }).click();
+    const route = page.getByRole("switch", { name: /Route Claude Code through/ });
+    await route.waitFor({ timeout: 20_000 });
+    if ((await route.getAttribute("aria-checked")) !== "true") await route.click();
+    await page
+      .getByRole("switch", { name: /Route Claude Code through/, checked: true })
+      .waitFor({ timeout: 20_000 });
+
+    await page.getByRole("button", { name: "New thread" }).first().click();
+    await page.locator("#new-thread-workspace").fill(workspace);
+    await page.locator("#new-thread-harness").selectOption("claude_code");
+    await page.locator("#new-thread-task").fill("Fail me over [h4rn-limit]");
+    await page.waitForFunction(() => {
+      const button = [...document.querySelectorAll("button")].find(
+        (candidate) => candidate.textContent?.trim() === "Start",
+      );
+      return button !== undefined && !button.disabled;
+    });
+    await page.getByRole("button", { name: "Start", exact: true }).click();
+    const failCard = page.locator(".q-resume").first();
+    await failCard.waitFor({ timeout: 20_000 });
+    const failOver = failCard.getByRole("button", { name: /Fail over/ });
+    await page.waitForFunction(
+      () =>
+        [...document.querySelectorAll(".q-resume button")].some(
+          (button) => /Fail over/.test(button.textContent ?? "") && !button.disabled,
+        ),
+      null,
+      { timeout: 20_000 },
+    );
+    await failOver.click();
+    await page
+      .getByRole("menuitem", { name: /claude-(opus|sonnet)-5/ })
+      .first()
+      .click();
     await page.locator(".q-resume").first().waitFor({ state: "detached", timeout: 15_000 });
 
     // Settings → Tools: add a real stdio server, turn it off for one harness,

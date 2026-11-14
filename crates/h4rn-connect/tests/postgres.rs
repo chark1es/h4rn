@@ -662,11 +662,7 @@ async fn short_code_pairing_grants_exactly_the_chosen_scopes() {
     );
 
     // A typed code is forgiving about case and separators.
-    let typed = format!(
-        "{}-{}",
-        &code[..4].to_lowercase(),
-        &code[4..].to_lowercase()
-    );
+    let typed = format!("{}-{}", code[..4].to_lowercase(), code[4..].to_lowercase());
     let (status, claimed) = send(
         &state,
         request(

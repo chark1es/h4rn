@@ -749,3 +749,29 @@ storage; the web's at-rest protection is weaker than an OS keychain because same
 can ask the page to decrypt, which `docs/transport.md` records in the threat model. Desktop and
 mobile keep their native keychain implementations; the missing piece was a single interface and
 a web backend, not another platform backend.
+
+## ADR-042: Pairing scopes and a typed short code
+
+**Status:** Accepted
+
+A pairing used to make an all-powerful device and showed a fake code. Now it
+grants a set of scopes (`view`, `approve`, `terminal`, `files`, `admin`; `view`
+is implied) chosen when the pairing is created. `h4rn-connect` stores them on
+`pairings` and copies them to `machine_devices` on claim (migration 0005; old
+links keep all five), signs them into the device's access token as `scp`, and
+includes them in the daemon's relay snapshot and `DevicePaired` event. Two places
+enforce them. The relay API reads the live scopes from the database: creating or
+revoking pairings and revoking another device need `admin`, and an unpaired phone
+holds `view` alone. The daemon classifies every `ClientRequest`
+(`required_scope()`, an exhaustive match so new requests must be classified) and
+refuses with `forbidden` before dispatch. Direct (PSK) pairings and local sessions
+are unrestricted; a re-pairing replaces the scopes.
+
+The short code is 8 Crockford base32 characters (40 bits from the OS RNG), stored
+only as a domain-separated BLAKE3 hash under a unique index over pending rows,
+single use, expiring with the QR. At 40 bits the hash does not protect it; the
+five-minute life, single use and rate limits do (10 attempts per user and per IP
+per hour, charged hit or miss; another account's code is indistinguishable from
+an unknown one). Trade-off: a typed code has no QR to pin the daemon's Noise key,
+so the relay supplies it at claim and the first handshake trusts the relay for
+it. The QR path is unchanged and remains the stronger one.

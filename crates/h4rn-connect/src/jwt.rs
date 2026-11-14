@@ -53,7 +53,8 @@ struct JwtHeader<'a> {
     kid: &'a str,
 }
 
-/// Issues a signed access token.
+/// Issues a signed access token. The arguments are the token's claims, one each.
+#[allow(clippy::too_many_arguments)]
 pub fn issue_access_token(
     keystore: &Keystore,
     user_id: &str,

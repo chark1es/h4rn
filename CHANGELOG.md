@@ -5,6 +5,22 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### Gaps left by UI fidelity round 3
+
+- **Pairing scopes and a real short code (ADR-042).** The Devices checkboxes now choose what the
+  paired device may do (`view`, `approve`, `terminal`, `files`, `admin`); connect records and
+  signs them, and the daemon refuses anything outside them. The 8-character code is Crockford
+  base32, single use, expires with the QR and is rate limited; the phone pairing screen accepts
+  it (`POST /v1/pairings/claim-code`). `h4rnd pair --scope` sets scopes from the terminal.
+- **Fail over…** on a limit-hit thread resumes now on another model or account: the daemon names
+  its default and the eligible alternatives (`ListFailoverOptions`, `FailOver`).
+- **PR detail:** a Commits tab, `required` marks on checks, View log and Re-run failed (GitHub
+  check suites, GitLab pipelines; disabled with the reason on Gitea/Forgejo).
+- **MCP import conflicts** use one "Resolve…" popover (keep mine, use theirs, rename, skip).
+- **Tool rows** show `+N −M` on edits and match counts on searches, derived in Rust for all four
+  adapters (`ToolCall.stats`).
+- **Sidebar footer** names the host on a fresh install and counts real hosts otherwise.
+
 ### Credentials and remote sign-in
 
 - **Browser storage never holds a credential.** The daemon token, pairing URI, Noise
