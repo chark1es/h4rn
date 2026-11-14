@@ -364,6 +364,10 @@ impl Config {
             self.rate_limits.relay_connects_per_minute =
                 parse_u32("H4RN_CONNECT_RATE_RELAY_CONNECTS_PER_MINUTE", &value)?;
         }
+        if let Some(value) = env("H4RN_CONNECT_RATE_PAIRING_CODE_PER_HOUR") {
+            self.rate_limits.pairing_code_per_hour =
+                parse_u32("H4RN_CONNECT_RATE_PAIRING_CODE_PER_HOUR", &value)?;
+        }
         if let Some(value) = env("H4RN_CONNECT_PAIRING_ATTEMPTS") {
             self.rate_limits.pairing_attempts = parse_u32("H4RN_CONNECT_PAIRING_ATTEMPTS", &value)?;
         }

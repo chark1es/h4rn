@@ -91,6 +91,7 @@ both, using the snake_case names shown below.
 | `H4RN_CONNECT_RATE_AUTH_PER_MINUTE` | `30` | Login/device-grant requests per IP per minute. |
 | `H4RN_CONNECT_RATE_PAIRING_PER_HOUR` | `60` | Pairing creates and claims per IP per hour. |
 | `H4RN_CONNECT_RATE_RELAY_CONNECTS_PER_MINUTE` | `120` | Relay upgrades per IP per minute. |
+| `H4RN_CONNECT_RATE_PAIRING_CODE_PER_HOUR` | `10` | Short-code claim attempts per user and per IP per hour. |
 | `H4RN_CONNECT_PAIRING_ATTEMPTS` | `10` | Failed claims before a pairing is burned. |
 
 `RUST_LOG` controls tracing. The relay logs metadata (ids, status,

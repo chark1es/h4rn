@@ -440,6 +440,7 @@ async function main() {
     await page
       .getByRole("switch", { name: /Route Claude Code through/, checked: true })
       .waitFor({ timeout: 20_000 });
+    await page.getByRole("button", { name: "Back to threads" }).click();
 
     await page.getByRole("button", { name: "New thread" }).first().click();
     await page.locator("#new-thread-workspace").fill(workspace);
