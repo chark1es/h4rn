@@ -7,6 +7,10 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Hang guard for one websocket frame; slow-harness tests rely on it being
+/// longer than their configured delay.
+const FRAME_TIMEOUT: Duration = Duration::from_secs(30);
+
 use futures::{SinkExt, StreamExt};
 use h4rn_core::LifecycleSettings;
 use h4rn_daemon::auth::TokenStore;
@@ -158,7 +162,9 @@ impl Client {
 
     async fn read_frame(&mut self) -> ServerFrame {
         loop {
-            let message = tokio::time::timeout(Duration::from_secs(5), self.ws.next())
+            // A hang guard only: tests that configure a slow harness send need
+            // a single frame to arrive later than the usual event budget.
+            let message = tokio::time::timeout(FRAME_TIMEOUT, self.ws.next())
                 .await
                 .expect("timed out waiting for a frame")
                 .expect("socket closed")
@@ -207,7 +213,18 @@ impl Client {
     }
 
     async fn wait_event(&mut self, predicate: impl Fn(&Event) -> bool) -> (u64, Event) {
-        tokio::time::timeout(Duration::from_secs(5), async {
+        self.wait_event_within(Duration::from_secs(5), predicate)
+            .await
+    }
+
+    /// Like `wait_event` with an explicit budget. A budget must exceed any
+    /// harness delay the test configures, or the wait races the delay.
+    async fn wait_event_within(
+        &mut self,
+        budget: Duration,
+        predicate: impl Fn(&Event) -> bool,
+    ) -> (u64, Event) {
+        tokio::time::timeout(budget, async {
             loop {
                 let (seq, event) = self.next_event().await;
                 if predicate(&event) {
@@ -229,8 +246,13 @@ impl Client {
     }
 
     async fn wait_for_turn_completed(&mut self) -> (u64, TurnStatus) {
+        self.wait_for_turn_completed_within(Duration::from_secs(5))
+            .await
+    }
+
+    async fn wait_for_turn_completed_within(&mut self, budget: Duration) -> (u64, TurnStatus) {
         let (seq, event) = self
-            .wait_event(|event| matches!(event, Event::TurnCompleted { .. }))
+            .wait_event_within(budget, |event| matches!(event, Event::TurnCompleted { .. }))
             .await;
         match event {
             Event::TurnCompleted { status, .. } => (seq, status),
@@ -1488,6 +1510,9 @@ async fn resume_now_fires_a_scheduled_thread_without_waiting_for_the_reset() {
     daemon.stop().await;
 }
 
+/// Event budget for tests that configure a harness send delay of up to 5 s.
+const SLOW_SEND_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[tokio::test]
 async fn resume_now_acknowledges_before_a_slow_first_send() {
     let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
@@ -1538,10 +1563,15 @@ async fn resume_now_acknowledges_before_a_slow_first_send() {
     );
 
     // The resumed turn still runs and reports progress through events.
+    // Budgets exceed the 5 s harness delay so the wait cannot race it.
     client
-        .wait_event(|event| matches!(event, Event::TurnStarted { .. }))
+        .wait_event_within(SLOW_SEND_BUDGET, |event| {
+            matches!(event, Event::TurnStarted { .. })
+        })
         .await;
-    let (_, status) = client.wait_for_turn_completed().await;
+    let (_, status) = client
+        .wait_for_turn_completed_within(SLOW_SEND_BUDGET)
+        .await;
     assert_eq!(status, TurnStatus::Completed);
     assert_eq!(thread_usage(&mut client, &thread_id).await.totals.turns, 2);
 
@@ -1597,7 +1627,9 @@ async fn send_message_acknowledges_before_a_slow_harness_write() {
         "a snapshot waited for the slow harness write: {snapshot:?}"
     );
 
-    let (_, status) = client.wait_for_turn_completed().await;
+    let (_, status) = client
+        .wait_for_turn_completed_within(SLOW_SEND_BUDGET)
+        .await;
     assert_eq!(status, TurnStatus::Completed);
 
     daemon.stop().await;
