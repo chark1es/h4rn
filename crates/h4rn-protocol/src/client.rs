@@ -975,6 +975,74 @@ mod tests {
     }
 
     #[test]
+    fn required_scopes_follow_what_a_request_can_change() {
+        use crate::connect::PairScope::{Admin, Approve, Files, Terminal, View};
+        let repo = || crate::forge::ForgeRepoRef {
+            forge: crate::forge::ForgeKind::GitHub,
+            base_url: "https://github.com".into(),
+            owner: "o".into(),
+            repo: "r".into(),
+        };
+        let thread = || ThreadId::new("th_1");
+        let cases: Vec<(ClientRequest, crate::connect::PairScope)> = vec![
+            (ClientRequest::ListHosts, View),
+            (
+                ClientRequest::ListFailoverOptions {
+                    thread_id: thread(),
+                },
+                View,
+            ),
+            (
+                ClientRequest::FailOver {
+                    thread_id: thread(),
+                    model: None,
+                    account: None,
+                },
+                Approve,
+            ),
+            (
+                ClientRequest::ForgeListPrCommits {
+                    account_id: None,
+                    repo: repo(),
+                    number: 1,
+                },
+                View,
+            ),
+            (
+                ClientRequest::ForgeRerunChecks {
+                    account_id: None,
+                    repo: repo(),
+                    number: 1,
+                },
+                Approve,
+            ),
+            (
+                ClientRequest::RespondApproval {
+                    thread_id: thread(),
+                    approval_id: "a".into(),
+                    decision: ApprovalDecision::Approve,
+                    option_id: None,
+                },
+                Approve,
+            ),
+            (ClientRequest::TerminalList { thread_id: None }, Terminal),
+            (
+                ClientRequest::FsDelete {
+                    host: HostId::new("h"),
+                    workspace: "/w".into(),
+                    path: "a".into(),
+                },
+                Files,
+            ),
+            (ClientRequest::McpList, View),
+            (ClientRequest::McpRemove { name: "x".into() }, Admin),
+        ];
+        for (request, expected) in cases {
+            assert_eq!(request.required_scope(), expected, "{request:?}");
+        }
+    }
+
+    #[test]
     fn request_round_trips() {
         let frame = ClientFrame {
             id: 1,
