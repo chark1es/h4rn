@@ -1,6 +1,6 @@
 import { LoaderIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-
+import { ChipSelect } from "@/components/common/ChipSelect";
 import {
   Dialog,
   DialogContent,
@@ -108,7 +108,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
             value={task}
             autoFocus
             placeholder="Reproduce the failing auth test and report the race."
-            className="min-h-[84px]"
+            className="min-h-[84px] resize-none"
             onChange={(event) => setTask(event.target.value)}
           />
         </div>
@@ -118,42 +118,39 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
             <label htmlFor="delegate-host" className="text-[12px] text-[var(--fg-3)]">
               Host
             </label>
-            <select
+            <ChipSelect
               id="delegate-host"
+              label="Host"
               value={host}
-              onChange={(event) => {
-                setHost(event.target.value);
-                const next = event.target.value;
+              placeholder="No online hosts"
+              width={160}
+              options={onlineHosts.map((option) => ({
+                value: option.host_id,
+                label: option.name,
+              }))}
+              onChange={(next) => {
+                setHost(next);
                 const options = hosts[next]?.harnesses;
                 if (options?.length && !options.includes(harness))
                   setHarness(options[0] ?? harness);
               }}
-              className="h-7 w-full rounded-[6px] border-0 bg-bg-raised px-2 text-[12.5px] text-fg shadow-[inset_0_0_0_1px_var(--line-2)] outline-none focus-visible:shadow-[inset_0_0_0_1px_var(--accent)]"
-            >
-              {onlineHosts.length === 0 ? <option value="">No online hosts</option> : null}
-              {onlineHosts.map((option) => (
-                <option key={option.host_id} value={option.host_id}>
-                  {option.name}
-                </option>
-              ))}
-            </select>
+            />
           </div>
           <div className="flex flex-col gap-1">
             <label htmlFor="delegate-harness" className="text-[12px] text-[var(--fg-3)]">
               Harness
             </label>
-            <select
+            <ChipSelect
               id="delegate-harness"
+              label="Harness"
               value={harness}
-              onChange={(event) => setHarness(event.target.value as HarnessKind)}
-              className="h-7 w-full rounded-[6px] border-0 bg-bg-raised px-2 text-[12.5px] text-fg shadow-[inset_0_0_0_1px_var(--line-2)] outline-none focus-visible:shadow-[inset_0_0_0_1px_var(--accent)]"
-            >
-              {harnessChoices.map((option) => (
-                <option key={option} value={option}>
-                  {HARNESS_LABELS[option]}
-                </option>
-              ))}
-            </select>
+              width={160}
+              options={harnessChoices.map((option) => ({
+                value: option,
+                label: HARNESS_LABELS[option],
+              }))}
+              onChange={setHarness}
+            />
           </div>
           <div className="flex flex-col gap-1">
             <label htmlFor="delegate-model" className="text-[12px] text-[var(--fg-3)]">
@@ -173,15 +170,17 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
             <label htmlFor="delegate-isolation" className="text-[12px] text-[var(--fg-3)]">
               Workspace
             </label>
-            <select
+            <ChipSelect<SubagentIsolation>
               id="delegate-isolation"
+              label="Workspace"
               value={isolation}
-              onChange={(event) => setIsolation(event.target.value as SubagentIsolation)}
-              className="h-7 w-full rounded-[6px] border-0 bg-bg-raised px-2 text-[12.5px] text-fg shadow-[inset_0_0_0_1px_var(--line-2)] outline-none focus-visible:shadow-[inset_0_0_0_1px_var(--accent)]"
-            >
-              <option value="worktree">Isolated worktree</option>
-              <option value="shared">Shared workspace</option>
-            </select>
+              width={160}
+              options={[
+                { value: "worktree", label: "Isolated worktree" },
+                { value: "shared", label: "Shared workspace" },
+              ]}
+              onChange={setIsolation}
+            />
           </div>
           <div className="flex flex-col gap-1">
             <label htmlFor="delegate-turns" className="text-[12px] text-[var(--fg-3)]">

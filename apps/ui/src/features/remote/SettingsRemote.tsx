@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
+import { ChipSelect } from "@/components/common/ChipSelect";
 import type { ConnectDevice, HostSummary, MachineSummary } from "@/gen";
 import { useNow } from "@/hooks/use-now";
 import { harnessLabel, machineSeed } from "@/lib/entities";
@@ -523,6 +524,26 @@ function DeviceRow({
   );
 }
 
+const PAIR_SCOPES = [
+  { id: "view", label: "View threads", sub: "Always included", locked: true },
+  { id: "approve", label: "Approve and reply", sub: "", locked: false },
+  { id: "terminal", label: "Terminal", sub: "Type into shells", locked: false },
+  { id: "files", label: "Files and edits", sub: "", locked: false },
+  { id: "admin", label: "Manage hosts and devices", sub: "Admin", locked: false },
+] as const;
+
+/** A short code to read aloud, derived from the pairing id (the QR is the credential). */
+function displayCode(id: string): string {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let hash = 2166136261;
+  let out = "";
+  for (let i = 0; out.length < 8; i += 1) {
+    hash = Math.imul(hash ^ (id.charCodeAt(i % id.length) + i), 16777619) >>> 0;
+    out += alphabet[hash % alphabet.length];
+  }
+  return `${out.slice(0, 4)}-${out.slice(4)}`;
+}
+
 export function LiveDevicesForm() {
   const user = useRemote((state) => state.user);
   const device = useRemote((state) => state.device);
@@ -531,12 +552,18 @@ export function LiveDevicesForm() {
   const activeId = useRemote((state) => state.activeMachineId);
   const pairing = useRemote((state) => state.pairing);
   const phase = useRemote((state) => state.phase);
-  const connectUrl = useRemote((state) => state.connectUrl);
   const now = useNow(1_000);
   const isSignedIn = user !== null;
   const available = machines;
   const [machineId, setMachineId] = useState(() => activeId ?? available[0]?.id ?? "");
   const [copied, setCopied] = useState(false);
+  const [scopes, setScopes] = useState<Set<string>>(() => new Set(["approve"]));
+  const toggleScope = (id: string) =>
+    setScopes((current) => {
+      const next = new Set(current);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
   const expiring = useRef(false);
 
   useEffect(() => {
@@ -595,32 +622,20 @@ export function LiveDevicesForm() {
                   <div className="s">The paired device can reach this machine's hosts.</div>
                 </div>
                 <div className="ctl">
-                  <select
-                    className="q-input"
-                    aria-label="Machine to pair with"
+                  <ChipSelect
+                    label="Machine to pair with"
                     value={machineId}
-                    style={{ maxWidth: 240 }}
-                    onChange={(event) => {
-                      setMachineId(event.target.value);
+                    placeholder="No machines"
+                    width={200}
+                    options={available.map((machine) => ({
+                      value: machine.id,
+                      label: machine.name,
+                    }))}
+                    onChange={(next) => {
+                      setMachineId(next);
                       dismissPairing();
                     }}
-                  >
-                    {available.length === 0 ? <option value="">No machines</option> : null}
-                    {available.map((machine) => (
-                      <option key={machine.id} value={machine.id}>
-                        {machine.name}
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    type="button"
-                    className="q-btn ghost"
-                    disabled={!machineId}
-                    onClick={() => void createPairing(machineId)}
-                  >
-                    <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                    New code
-                  </button>
+                  />
                 </div>
               </div>
               {pairing ? (
@@ -636,20 +651,46 @@ export function LiveDevicesForm() {
                     <QrCode
                       value={pairing.qr}
                       label={`Pairing QR code for ${pairingMachine?.name ?? "this machine"}`}
+                      size={148}
                     />
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div className="q-muted" style={{ fontSize: 12 }}>
-                      Scan with the h4rn app, or copy the link to this device
+                      Scan with the h4rn app, or enter this code
                     </div>
-                    <div style={{ fontWeight: 500, margin: "8px 0 4px" }}>
-                      {pairingMachine?.name ?? "This machine"}
+                    <div className="q-code-big" style={{ margin: "4px 0 2px" }}>
+                      {displayCode(pairing.id)}
                     </div>
                     <div className="q-faint" style={{ fontSize: 12, marginBottom: 14 }}>
-                      Works once, for one device. Credentials stay on the host; revoke this device
-                      here at any time.
+                      Works once, for one device. Pairs with{" "}
+                      {pairingMachine?.name ?? "this machine"}.
                     </div>
-                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    <div className="q-pair-scopes">
+                      {PAIR_SCOPES.map((scope) => (
+                        <label key={scope.id} className="q-pair-scope">
+                          <input
+                            type="checkbox"
+                            className="sr-only"
+                            checked={scope.locked || scopes.has(scope.id)}
+                            disabled={scope.locked}
+                            onChange={() => toggleScope(scope.id)}
+                          />
+                          <span
+                            className={`q-check${scope.locked || scopes.has(scope.id) ? " on" : ""}`}
+                            aria-hidden
+                          >
+                            {scope.locked || scopes.has(scope.id) ? (
+                              <CheckIcon className="q-icon s12" strokeWidth={2} />
+                            ) : null}
+                          </span>
+                          <span>
+                            <span style={{ fontWeight: 500 }}>{scope.label}</span>
+                            {scope.sub ? <span className="q-faint sub">{scope.sub}</span> : null}
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                    <div style={{ display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap" }}>
                       <button
                         type="button"
                         className="q-btn secondary"
@@ -675,9 +716,6 @@ export function LiveDevicesForm() {
                         <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
                         New code
                       </button>
-                    </div>
-                    <div className="q-faint q-mono" style={{ fontSize: 11, marginTop: 12 }}>
-                      {connectUrl}
                     </div>
                   </div>
                 </div>

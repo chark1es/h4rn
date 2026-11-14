@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ChipSelect } from "@/components/common/ChipSelect";
 import type { AutoResumePolicy } from "@/gen";
 
 import { duration } from "@/lib/format";
@@ -101,19 +102,16 @@ export function AutoResumeSettings() {
             <div className="s">Unknown reset times are retried within this window</div>
           </div>
           <div className="ctl">
-            <select
-              className="q-input"
-              value={draft.max_wait_ms}
-              aria-label="Longest wait"
-              onChange={(event) => patch({ max_wait_ms: Number(event.target.value) })}
-              style={{ maxWidth: 220, fontSize: 12 }}
-            >
-              {WAIT_CHOICES.map((choice) => (
-                <option key={choice.ms} value={choice.ms}>
-                  {choice.label}
-                </option>
-              ))}
-            </select>
+            <ChipSelect<string>
+              label="Longest wait"
+              value={String(draft.max_wait_ms)}
+              width={180}
+              options={WAIT_CHOICES.map((choice) => ({
+                value: String(choice.ms),
+                label: choice.label,
+              }))}
+              onChange={(next) => patch({ max_wait_ms: Number(next) })}
+            />
             {!WAIT_CHOICES.some((choice) => choice.ms === draft.max_wait_ms) ? (
               <span className="q-faint" style={{ fontSize: 12 }}>
                 Current: {duration(draft.max_wait_ms)}
