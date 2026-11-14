@@ -61,6 +61,7 @@ import type {
 } from "@/gen";
 import { userSeed } from "@/lib/entities";
 import { relativeAge } from "@/lib/format";
+import { glyphForThread } from "@/lib/agent";
 import { getClient, navigate, openThread, pushToast, useApp } from "@/lib/store/appStore";
 
 const api = () => new ForgeApi((request) => getClient().request(request));
@@ -778,6 +779,7 @@ function PrDetail({
 
   const account = accountForRepo(accounts, repo);
   const caps = capabilities.find((entry) => entry.forge === repo.forge)?.capabilities ?? null;
+  const hosts = useApp((state) => state.hosts);
   const linkedThread = useMemo(
     () =>
       threads.find((thread) => thread.branch && thread.branch === pr?.summary.head_branch) ??
@@ -1617,10 +1619,18 @@ function PrDetail({
                   style={{ width: "100%", textAlign: "left" }}
                   onClick={() => openThread(linkedThread.thread_id)}
                 >
-                  <AgentGlyph glyph={{ kind: "check", label: linkedThread.title }} size={14} />
+                  <AgentGlyph
+                    glyph={glyphForThread(linkedThread, hosts[linkedThread.host]?.online ?? false)}
+                    size={14}
+                  />
                   <span className="grow">{linkedThread.title}</span>
                   <span className="q-faint" style={{ fontSize: 12 }}>
-                    {linkedThread.host}
+                    {[
+                      linkedThread.workspace_path.split("/").filter(Boolean).pop(),
+                      hosts[linkedThread.host]?.name,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
                   </span>
                 </button>
               ) : (

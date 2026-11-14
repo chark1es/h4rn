@@ -2049,6 +2049,28 @@
   white-space: normal;
   overflow: visible;
 }
+.q-signin-err {
+  margin: 12px 0;
+  align-items: flex-start;
+  font-size: 13px;
+  line-height: 18px;
+}
+.q-signin-err .ic {
+  margin-top: 2px;
+}
+.q-signin-details {
+  margin-top: 4px;
+  color: var(--fg-3);
+}
+.q-signin-details summary {
+  cursor: pointer;
+}
+.q-signin-details .q-mono {
+  display: block;
+  margin-top: 4px;
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
 .q-banner.err .ic {
   color: var(--danger);
 }
@@ -3823,15 +3845,31 @@
   color: var(--fg-3);
   margin-top: 6px;
 }
+.q-pair-empty {
+  padding: 8px 24px 0;
+  text-align: center;
+  font-size: 15px;
+  line-height: 22px;
+  color: var(--fg-2);
+}
+.q-pair-empty h3 {
+  margin: 0 0 6px;
+  font-size: 17px;
+  line-height: 24px;
+  font-weight: 600;
+  color: var(--fg);
+}
+.q-pair-empty p {
+  margin: 0;
+}
 .q-pair-code {
   display: flex;
   flex-direction: column;
   gap: 6px;
   width: 100%;
-  max-width: 260px;
-  margin-top: 16px;
-  font-size: 13px;
-  text-align: left;
+  margin: 20px auto 0;
+  font-size: 14px;
+  text-align: center;
 }
 .q-pair-code .q-input {
   height: 44px;
@@ -3845,7 +3883,24 @@
   line-height: 18px;
   color: var(--fg-3);
   padding: 0 32px;
-  margin: -8px 0 0;
+  margin: 12px 0 0;
+}
+.q-ph-group + .q-pair-note {
+  margin-top: -8px;
+}
+.q-pair-note + .q-pair-note {
+  margin-top: 6px;
+}
+.q-scope-mark {
+  width: 18px;
+  height: 18px;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  color: var(--fg-2);
+}
+.q-ph-li.off {
+  color: var(--fg-3);
 }
 .q-pair-foot {
   flex: none;

@@ -22,7 +22,7 @@ import { relativeAge } from "@/lib/format";
 import { navigate, pushToast, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 
-import { AccountBadge, ConnectSignIn, SignOutButton } from "./ConnectSignIn";
+import { ConnectSignIn, SignOutButton } from "./ConnectSignIn";
 import {
   DEFAULT_PAIR_SCOPES,
   formatShortCode,
@@ -785,7 +785,9 @@ export function LiveAccountForm() {
   const device = useRemote((state) => state.device);
   const connectUrl = useRemote((state) => state.connectUrl);
   const connection = useApp((state) => state.connection);
-  const activeName = useRemote((state) => state.active?.machineName ?? null);
+  const hostName = useApp((state) =>
+    state.localHostId ? (state.hosts[state.localHostId]?.name ?? null) : null,
+  );
   const machines = useRemote((state) => state.machines);
 
   return (
@@ -801,15 +803,13 @@ export function LiveAccountForm() {
             <h2>Relay</h2>
             <div className="q-field">
               <div className="lab">
-                <div className="t">Transport</div>
-                <div className="s">
-                  {activeName ? `Used for ${activeName}` : "No remote machine selected"}
-                </div>
+                <div className="t">Connection</div>
               </div>
               <div className="ctl">
                 {connection.status === "online" ? (
                   <Health tone="on">
-                    {pathLabel(connection.transport)} · {latencyText(connection.latencyMs)} ·
+                    {pathLabel(connection.transport)}
+                    {hostName ? ` to ${hostName}` : ""} · {latencyText(connection.latencyMs)} ·
                     encrypted
                   </Health>
                 ) : connection.status === "connecting" ? (
@@ -817,7 +817,13 @@ export function LiveAccountForm() {
                 ) : (
                   <Health tone="danger">Offline</Health>
                 )}
-                <span style={{ flex: 1 }} />
+              </div>
+            </div>
+            <div className="q-field">
+              <div className="lab">
+                <div className="t">Relay URL</div>
+              </div>
+              <div className="ctl">
                 <span className="q-faint q-mono" style={{ fontSize: 11.5 }}>
                   {connectUrl}
                 </span>
@@ -825,8 +831,8 @@ export function LiveAccountForm() {
             </div>
             <div className="q-field">
               <div className="lab">
-                <div className="t">Machines</div>
-                <div className="s">Signed in to h4rn-connect</div>
+                <div className="t">Paired machines</div>
+                <div className="s">Reached through h4rn-connect</div>
               </div>
               <div className="ctl">
                 <span className="q-muted q-num">
@@ -858,7 +864,6 @@ export function LiveAccountForm() {
                 <div className="s">{user.email ?? user.id}</div>
               </div>
               <div className="ctl">
-                <AccountBadge />
                 <span style={{ flex: 1 }} />
                 <SignOutButton
                   onDone={() =>

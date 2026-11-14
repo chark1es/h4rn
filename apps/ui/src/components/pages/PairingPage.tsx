@@ -1,3 +1,4 @@
+import { CheckIcon } from "lucide-react";
 import { useState } from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
@@ -6,23 +7,19 @@ import { pairByCode, pairMachine, pendingPairing, useRemote } from "@/features/r
 import { useNow } from "@/hooks/use-now";
 import { machineSeed } from "@/lib/entities";
 import { navigate } from "@/lib/store/appStore";
+import { cn } from "@/lib/utils";
 
 function ScopeRow({ label, sub, on }: { label: string; sub?: string; on: boolean }) {
   return (
-    <div className="q-ph-li">
+    <div className={cn("q-ph-li", !on && "off")}>
+      <span className="q-scope-mark" aria-hidden>
+        {on ? <CheckIcon className="q-icon s14" strokeWidth={2} /> : null}
+      </span>
       <div className="grow">
         {label}
         {sub ? <div className="s">{sub}</div> : null}
       </div>
-      <button
-        type="button"
-        className="q-switch"
-        role="switch"
-        aria-checked={on}
-        aria-label={label}
-        aria-disabled
-        disabled
-      />
+      <span className="sr-only">{on ? "Included" : "Not included"}</span>
     </div>
   );
 }
@@ -55,9 +52,9 @@ export function PairingPage() {
   const pendingMachine = pending
     ? machines.find((machine) => machine.id === pending.payload.machineId)
     : null;
-  const machineName =
-    pendingMachine?.name ??
-    (pending ? pending.payload.machineId : (active?.machineName ?? "atlas"));
+  // A typed code could be for any host, so no host is named until a link says which.
+  const machineName = pending ? (pendingMachine?.name ?? pending.payload.machineId) : null;
+  const hostLabel = machineName ?? "the host";
   const alreadyPaired =
     pending !== null && active !== null && active.machineId === pending.payload.machineId;
   const expired =
@@ -71,7 +68,7 @@ export function PairingPage() {
   };
 
   return (
-    <main className="q-main" aria-label={`Pair with ${machineName}`}>
+    <main className="q-main" aria-label={machineName ? `Pair with ${machineName}` : "Pair a host"}>
       <div className="q-ph-nav">
         <button
           type="button"
@@ -82,23 +79,25 @@ export function PairingPage() {
         >
           Cancel
         </button>
-        <span className="ttl">Pair with {machineName}</span>
+        <span className="ttl">{machineName ? `Pair with ${machineName}` : "Pair a host"}</span>
         <span style={{ width: 60 }} />
       </div>
       <div className="q-ph-body q-pair-body">
         <div className="q-pair-hero">
-          <EntityAvatar
-            seed={machineSeed(pending?.payload.machineId ?? machineName)}
-            kind="machine"
-            label={machineName}
-            size={48}
-          />
-          <div className="ttl">{machineName}</div>
-          <div className="sub">
-            {pending
-              ? `${pending.payload.connectUrl.replace(/^https?:\/\//, "")} · via relay`
-              : "No pairing link on this device"}
-          </div>
+          {pending && machineName ? (
+            <>
+              <EntityAvatar
+                seed={machineSeed(pending.payload.machineId)}
+                kind="machine"
+                label={machineName}
+                size={56}
+              />
+              <div className="ttl">{machineName}</div>
+              <div className="sub">
+                {`${pending.payload.connectUrl.replace(/^https?:\/\//, "")} · via relay`}
+              </div>
+            </>
+          ) : null}
           <div className="note">
             {user
               ? `Signed in to h4rn-connect as ${user.email ?? user.display_name ?? user.id}`
@@ -114,30 +113,30 @@ export function PairingPage() {
                 <ScopeRow
                   key={option.id}
                   label={option.label}
-                  sub={option.id === "terminal" ? `Type into shells on ${machineName}` : option.sub}
+                  sub={option.id === "terminal" ? `Type into shells on ${hostLabel}` : option.sub}
                   on={option.locked || pending.payload.scopes.includes(option.id)}
                 />
               ))}
             </div>
-            <p className="q-pair-note">Chosen on {machineName} when it made this code.</p>
+            <p className="q-pair-note">Set on {hostLabel}.</p>
             <div className="q-ph-gh">Also included</div>
             <div className="q-ph-group">
               <div className="q-ph-li">
                 <EntityAvatar
-                  seed={machineSeed(`${machineName}-hosts`)}
+                  seed={machineSeed(`${hostLabel}-hosts`)}
                   kind="machine"
                   label="Hosts"
                   size={22}
                 />
                 <div className="grow">
-                  Every host on {machineName}
+                  Every host on {hostLabel}
                   <div className="s">WSL distros included</div>
                 </div>
               </div>
             </div>
           </>
         ) : (
-          <div className="q-empty q-sub-empty">
+          <div className="q-pair-empty">
             <h3>Scan a pairing code</h3>
             <p>
               Open the code on the host from Settings → Devices, then scan it with this device. The
@@ -167,7 +166,7 @@ export function PairingPage() {
         )}
 
         <p className="q-pair-note">
-          Credentials stay on {machineName}. You can revoke this phone from any other device.
+          Credentials stay on {hostLabel}. You can revoke this phone from any other device.
         </p>
         {error || expired ? (
           <p className="q-pair-note q-danger">

@@ -582,7 +582,7 @@ async function main() {
     const relayInput = page.getByLabel("h4rn-connect URL");
     await relayInput.fill(relayUrl);
     await page.getByRole("button", { name: "Use", exact: true }).click();
-    await page.getByRole("button", { name: /Continue with OrbitID/ }).click();
+    await page.getByRole("button", { name: /Sign in with OrbitID/ }).click();
     // OrbitID authorizes the pre-seeded browser session, redirects to
     // /auth/callback, and the app reloads the route it left. Reaching the
     // signed-in Devices panel proves the full redirect round trip.
@@ -644,7 +644,7 @@ async function main() {
     // Revoking this device also drops its dead credentials, so the Devices
     // panel returns to the signed-out sign-in affordances.
     await page
-      .getByRole("button", { name: /Sign in on another device|Continue with OrbitID/ })
+      .getByRole("button", { name: /Sign in on another device|Sign in with OrbitID/ })
       .first()
       .waitFor({ timeout: 30_000 });
 

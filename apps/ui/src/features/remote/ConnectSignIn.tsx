@@ -1,4 +1,10 @@
-import { ArrowRightIcon, CopyIcon, KeyRoundIcon, LoaderIcon, LogOutIcon } from "lucide-react";
+import {
+  AlertCircleIcon,
+  ArrowRightIcon,
+  CopyIcon, KeyRoundIcon,
+  LoaderIcon,
+  LogOutIcon,
+} from "lucide-react";
 import { useEffect, useState } from "react";
 
 import type { ProviderInfo } from "@/gen";
@@ -11,6 +17,14 @@ import {
   signInWithDeviceCode,
   useRemote,
 } from "./remoteStore";
+
+function relayHost(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
 
 function providerLabel(provider: ProviderInfo): string {
   return provider.display_name || provider.id;
@@ -32,6 +46,7 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [providersError, setProvidersError] = useState<string | null>(null);
   const [probing, setProbing] = useState(false);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => setDraftUrl(connectUrl), [connectUrl]);
 
@@ -55,7 +70,9 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, [connectUrl]);
+    // `attempt` re-probes on Retry.
+    // biome-ignore lint/correctness/useExhaustiveDependencies: attempt only re-runs the probe
+  }, [connectUrl, attempt]);
 
   const primary = providers[0];
   const signingIn = phase === "signing_in" || busy !== null;
@@ -132,16 +149,23 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
       ) : (
         <>
           {providersError ? (
-            <div className="q-field" style={{ alignItems: "flex-start" }}>
-              <div className="lab">
-                <div className="t">Relay unreachable</div>
-                <div className="s">{providersError}</div>
+            <div className="q-banner err wrap q-signin-err" role="alert">
+              <AlertCircleIcon className="q-icon s14 ic" strokeWidth={1.5} aria-hidden />
+              <div className="grow">
+                <b>Can't reach h4rn-connect at {relayHost(connectUrl)}.</b> It may not be running.
+                <details className="q-signin-details">
+                  <summary>Details</summary>
+                  <span className="q-mono">{providersError}</span>
+                </details>
               </div>
-              <div className="ctl">
-                <span className="q-faint" style={{ fontSize: 12 }}>
-                  Start h4rn-connect at {connectUrl}, then reload this page.
-                </span>
-              </div>
+              <button
+                type="button"
+                className="q-btn secondary"
+                disabled={probing}
+                onClick={() => setAttempt((count) => count + 1)}
+              >
+                {probing ? "Retrying…" : "Retry"}
+              </button>
             </div>
           ) : null}
           <div className="q-field">
@@ -151,26 +175,26 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
                 {probing
                   ? "Checking providers…"
                   : primary
-                    ? `OrbitID at ${new URL(primary.issuer).host}`
-                    : "No provider advertised"}
+                    ? `${providerLabel(primary)} at ${new URL(primary.issuer).host}`
+                    : providersError
+                      ? "Available once the relay is reachable"
+                      : "The relay advertises no sign-in provider"}
               </div>
             </div>
             <div className="ctl" style={{ flexWrap: "wrap" }}>
-              {primary ? (
-                <button
-                  type="button"
-                  className="q-btn primary"
-                  disabled={signingIn}
-                  onClick={() => void signIn(primary.id)}
-                >
-                  {signingIn ? (
-                    <LoaderIcon className="q-icon s14 q-spin" strokeWidth={1.5} aria-hidden />
-                  ) : (
-                    <KeyRoundIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                  )}
-                  Continue with {providerLabel(primary)}
-                </button>
-              ) : null}
+              <button
+                type="button"
+                className="q-btn primary"
+                disabled={!primary || signingIn}
+                onClick={() => (primary ? void signIn(primary.id) : undefined)}
+              >
+                {signingIn ? (
+                  <LoaderIcon className="q-icon s14 q-spin" strokeWidth={1.5} aria-hidden />
+                ) : (
+                  <KeyRoundIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                )}
+                {primary ? `Sign in with ${providerLabel(primary)}` : "Sign in"}
+              </button>
               {primary?.device_grant ? (
                 <button
                   type="button"
@@ -180,15 +204,6 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
                 >
                   Sign in on another device
                   <ArrowRightIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                </button>
-              ) : null}
-              {!primary && !probing ? (
-                <button
-                  type="button"
-                  className="q-btn secondary"
-                  onClick={() => setConnectUrl(draftUrl.trim() || DEFAULT_CONNECT_URL)}
-                >
-                  Probe relay
                 </button>
               ) : null}
             </div>
@@ -208,20 +223,6 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
           </div>
         </div>
       ) : null}
-    </div>
-  );
-}
-
-export function AccountBadge() {
-  const user = useRemote((state) => state.user);
-  const device = useRemote((state) => state.device);
-  if (!user) return null;
-  return (
-    <div className="q-account-badge">
-      <span className="q-account-name">{user.display_name ?? user.email ?? user.id}</span>
-      <span className="q-faint" style={{ fontSize: 11 }}>
-        {device?.name ?? "This device"}
-      </span>
     </div>
   );
 }
