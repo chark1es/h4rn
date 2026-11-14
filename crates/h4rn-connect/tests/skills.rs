@@ -412,7 +412,10 @@ async fn the_pull_cursor_never_skips_a_push_that_lands_after_the_read() {
     let (rows, cursor) = state.store.skill_pull(user, None).await.unwrap();
     assert_eq!(rows.len(), 1);
     let newest = rows.iter().map(|row| row.server_updated_at).max();
-    assert_eq!(cursor, newest, "the cursor is derived from the returned rows");
+    assert_eq!(
+        cursor, newest,
+        "the cursor is derived from the returned rows"
+    );
 
     let two = make_skill(source.path(), "second", "two");
     registry_b

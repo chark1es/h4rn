@@ -980,7 +980,10 @@ mod tests {
                         ("200 OK", r#"{"keys":[]}"#.to_string())
                     } else {
                         seen.lock().unwrap().push(text[head_end..].to_string());
-                        ("400 Bad Request", r#"{"error":"invalid_grant"}"#.to_string())
+                        (
+                            "400 Bad Request",
+                            r#"{"error":"invalid_grant"}"#.to_string(),
+                        )
                     };
                     let response = format!(
                         "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",

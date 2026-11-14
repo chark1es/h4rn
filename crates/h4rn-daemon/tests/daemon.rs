@@ -2293,7 +2293,10 @@ async fn a_message_appended_to_an_active_turn_replaces_the_stale_schedule() {
     client
         .wait_event(|event| matches!(event, Event::UsageLimitHit { .. }))
         .await;
-    assert_eq!(schedules(&mut client).await[0].state, ResumeState::Scheduled);
+    assert_eq!(
+        schedules(&mut client).await[0].state,
+        ResumeState::Scheduled
+    );
 
     client
         .request(ClientRequest::SendMessage {

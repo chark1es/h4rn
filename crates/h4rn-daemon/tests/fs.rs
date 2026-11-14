@@ -399,7 +399,10 @@ fn create_refuses_a_dangling_symlink_leaf_that_points_outside() {
         )
         .expect_err("dangling symlink must not be followed");
     assert!(matches!(error, FsError::Forbidden(_)), "got {error:?}");
-    assert!(!outside.exists(), "nothing may be created outside the workspace");
+    assert!(
+        !outside.exists(),
+        "nothing may be created outside the workspace"
+    );
 
     let error = fixture
         .service

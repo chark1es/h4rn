@@ -5,6 +5,26 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### Council round 1: correctness and hygiene
+
+- **IDE filesystem.** Creating or writing through a dangling symlink is refused instead of
+  following it outside the workspace. Saving a file that was deleted mid-edit now returns a
+  conflict with `current_etag: null` (the IDE conflict dialog offers "Recreate with mine" or
+  "Leave deleted") instead of silently recreating it.
+- **Journal.** `Journal::append` writes the thread row, the domain log and the wire log in one
+  SQLite transaction.
+- **Auto-resume.** A due schedule on an active thread waits silently instead of emitting an
+  Error every second, and a message appended to an active turn cancels the stale schedule so it
+  cannot fire a duplicate prompt.
+- **h4rn-connect.** The skill-sync pull cursor is derived from the rows the pull returned, so a
+  concurrent push cannot be skipped. The OIDC token exchange repeats `redirect_uri`.
+- **Browser wasm freshness.** `scripts/wasm.sh check` rebuilds `h4rn-transport-wasm` with the
+  pinned `wasm-bindgen` CLI and a path-remapped build and fails on any difference from
+  `apps/ui/src/gen/transport-wasm`; CI runs it (a new `wasm` job). The committed wasm was
+  rebuilt so it no longer embeds machine paths.
+- **Lint.** `bun run lint` runs `biome check --error-on-warnings`, so any warning fails instead
+  of scrolling past; the stale registry comment in `h4rn-harness` is fixed.
+
 ### UI fidelity round 4
 
 - **Apply and restart (Providers).** `ApplyProxyOverrides` interrupts the live turn of every

@@ -661,7 +661,11 @@ mod tests {
         assert!(result.is_err(), "the wire insert must fail");
 
         assert!(
-            journal.read_domain(&one.thread_id).await.unwrap().is_empty(),
+            journal
+                .read_domain(&one.thread_id)
+                .await
+                .unwrap()
+                .is_empty(),
             "a failed append must not leave a domain event behind"
         );
         assert!(

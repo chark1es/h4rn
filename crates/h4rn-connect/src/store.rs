@@ -2366,11 +2366,7 @@ impl Store {
         since: Option<DateTime<Utc>>,
     ) -> Result<(Vec<SkillEntryRow>, Option<DateTime<Utc>>)> {
         let rows = self.skill_entries_since(user_id, since).await?;
-        let cursor = rows
-            .iter()
-            .map(|row| row.server_updated_at)
-            .max()
-            .or(since);
+        let cursor = rows.iter().map(|row| row.server_updated_at).max().or(since);
         Ok((rows, cursor))
     }
 
