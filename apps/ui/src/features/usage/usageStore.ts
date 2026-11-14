@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import type {
   AutoResumePolicy,
+  FailoverOptions,
   LimitStatus,
   LimitsReport,
   ProtoError,
@@ -57,7 +58,9 @@ export type UsageState = {
   resetsLoading: boolean;
   resetsError: ProtoError | null;
   live: Record<ThreadId, LiveUsage>;
-  pending: Record<ThreadId, "cancel" | "resume" | undefined>;
+  pending: Record<ThreadId, "cancel" | "resume" | "failover" | undefined>;
+  /** What each limit-hit thread could fail over to, as the daemon last said. */
+  failover: Record<ThreadId, FailoverOptions | undefined>;
   actionError: ProtoError | null;
   policySaving: boolean;
   policyError: ProtoError | null;
@@ -103,6 +106,7 @@ function initialState(): UsageState {
     resetsError: null,
     live: {},
     pending: {},
+    failover: {},
     actionError: null,
     policySaving: false,
     policyError: null,
@@ -278,6 +282,47 @@ export async function resumeNow(threadId: ThreadId): Promise<void> {
   try {
     const response = await getClient().request({ type: "resume_now", thread_id: threadId });
     if (response.type === "resume_changed") applyResumeSchedule(response.schedule);
+    await Promise.all([loadResets(), loadLimits()]);
+  } catch (error) {
+    patch({ actionError: toProtoError(error) });
+  } finally {
+    patch({ pending: { ...state.pending, [threadId]: undefined } });
+  }
+}
+
+/** Asks the daemon where a limit-hit thread could go, and keeps the answer. */
+export async function loadFailoverOptions(threadId: ThreadId): Promise<void> {
+  try {
+    const response = await getClient().request({
+      type: "list_failover_options",
+      thread_id: threadId,
+    });
+    if (response.type === "failover_options") {
+      patch({ failover: { ...state.failover, [threadId]: response.options } });
+    }
+  } catch (error) {
+    patch({ actionError: toProtoError(error) });
+  }
+}
+
+/**
+ * Resumes a limit-hit thread now on another model or account. `choice` is one
+ * of the daemon's options; `null` takes the daemon's default.
+ */
+export async function failOver(
+  threadId: ThreadId,
+  choice: { model: string; account: string | null } | null,
+): Promise<void> {
+  patch({ pending: { ...state.pending, [threadId]: "failover" }, actionError: null });
+  try {
+    const response = await getClient().request({
+      type: "fail_over",
+      thread_id: threadId,
+      model: choice?.model ?? null,
+      account: choice?.account ?? null,
+    });
+    if (response.type === "resume_changed") applyResumeSchedule(response.schedule);
+    patch({ failover: { ...state.failover, [threadId]: undefined } });
     await Promise.all([loadResets(), loadLimits()]);
   } catch (error) {
     patch({ actionError: toProtoError(error) });

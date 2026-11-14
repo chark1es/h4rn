@@ -30,6 +30,7 @@ export type * from "./DeviceRegistration";
 export type * from "./DeviceRenameRequest";
 export type * from "./DiffAgainst";
 export type * from "./Event";
+export type * from "./FailoverOptions";
 export type * from "./FileEntry";
 export type * from "./FileEntryKind";
 export type * from "./ForgeAccount";

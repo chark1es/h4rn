@@ -701,13 +701,19 @@ async function main() {
     await page.goto(`${uiOrigin}/pairing`);
     await page.getByRole("textbox", { name: "Pairing code" }).fill(restrictedCode);
     await page.getByRole("button", { name: "Pair with code" }).click();
-    await page.getByText(/invalid or expired/).first().waitFor({ timeout: 20_000 });
+    await page
+      .getByText(/invalid or expired/)
+      .first()
+      .waitFor({ timeout: 20_000 });
 
     // Over the relay this device can read threads but not approve or reply: the
     // daemon enforces the scope the pairing granted.
     await page.goto(`${uiOrigin}${threadPath}`);
     await page.getByText(/echo: Reply with exactly: remote pong/).waitFor({ timeout: 40_000 });
-    await page.getByText(/^Relay to /).waitFor({ timeout: 30_000 }).catch(() => {});
+    await page
+      .getByText(/^Relay to /)
+      .waitFor({ timeout: 30_000 })
+      .catch(() => {});
     const restrictedComposer = page.getByRole("textbox", { name: /Reply to/ });
     await restrictedComposer.fill("This should be refused");
     await restrictedComposer.press("Enter");

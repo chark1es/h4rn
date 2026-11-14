@@ -674,7 +674,23 @@ thread_id: ThreadId, } | { "type": "resume_now",
 /**
  * Thread to resume.
  */
-thread_id: ThreadId, } | { "type": "set_auto_resume_policy", 
+thread_id: ThreadId, } | { "type": "list_failover_options", 
+/**
+ * Thread to inspect.
+ */
+thread_id: ThreadId, } | { "type": "fail_over", 
+/**
+ * Thread to move.
+ */
+thread_id: ThreadId, 
+/**
+ * Model to resume on, or `None` for the daemon's default.
+ */
+model: string | null, 
+/**
+ * Account to prefer; only meaningful with `model`.
+ */
+account: string | null, } | { "type": "set_auto_resume_policy", 
 /**
  * New policy.
  */

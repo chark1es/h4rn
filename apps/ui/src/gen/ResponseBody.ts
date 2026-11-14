@@ -2,6 +2,7 @@
 import type { BlobDownload } from "./BlobDownload";
 import type { BlobInfo } from "./BlobInfo";
 import type { DeviceId } from "./DeviceId";
+import type { FailoverOptions } from "./FailoverOptions";
 import type { FileEntry } from "./FileEntry";
 import type { ForgeAccount } from "./ForgeAccount";
 import type { ForgeCapabilityEntry } from "./ForgeCapabilityEntry";
@@ -361,7 +362,11 @@ report: LimitsReport, } | { "type": "resets",
 /**
  * Schedules and history.
  */
-resets: Resets, } | { "type": "resume_changed", 
+resets: Resets, } | { "type": "failover_options", 
+/**
+ * The default and the alternatives.
+ */
+options: FailoverOptions, } | { "type": "resume_changed", 
 /**
  * The current schedule, or `None` when none remains.
  */

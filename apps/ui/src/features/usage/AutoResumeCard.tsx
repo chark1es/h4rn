@@ -1,6 +1,13 @@
-import { ClockIcon, TriangleAlertIcon } from "lucide-react";
+import { ChevronDownIcon, ClockIcon, TriangleAlertIcon } from "lucide-react";
 import { useEffect } from "react";
 
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import type { FailoverOptions } from "@/gen";
 import { useNow } from "@/hooks/use-now";
 import { harnessLabel } from "@/lib/entities";
 import { absoluteTime } from "@/lib/format";
@@ -8,7 +15,15 @@ import { useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 
 import { countdownPrecise } from "./presentation";
-import { cancelResume, getUsageState, loadResets, resumeNow, useUsage } from "./usageStore";
+import {
+  cancelResume,
+  failOver,
+  getUsageState,
+  loadFailoverOptions,
+  loadResets,
+  resumeNow,
+  useUsage,
+} from "./usageStore";
 
 /**
  * The auto-resume card. It renders a countdown and two typed actions; the
@@ -24,6 +39,7 @@ export function AutoResumeCards({
 }) {
   const resets = useUsage((state) => state.resets);
   const pending = useUsage((state) => state.pending);
+  const failover = useUsage((state) => state.failover);
   const actionError = useUsage((state) => state.actionError);
   const threads = useApp((state) => state.threads);
   const thread = threadId ? threads[threadId] : undefined;
@@ -42,6 +58,16 @@ export function AutoResumeCards({
       (schedule.state === "scheduled" || schedule.state === "waiting") &&
       (threadId === undefined || schedule.thread_id === threadId),
   );
+  // Ask the daemon where each paused thread could go as soon as its card
+  // shows, so the action can say up front when there is nowhere.
+  const pausedIds = schedules.map((schedule) => schedule.thread_id).join(",");
+  // biome-ignore lint/correctness/useExhaustiveDependencies: keyed by the joined ids
+  useEffect(() => {
+    for (const id of pausedIds.split(",").filter(Boolean)) {
+      if (!getUsageState().failover[id]) void loadFailoverOptions(id);
+    }
+  }, [pausedIds]);
+
   if (schedules.length === 0) return null;
 
   return (
@@ -95,6 +121,13 @@ export function AutoResumeCards({
               </div>
             </div>
             <div style={{ display: "flex", gap: compact ? 10 : 6, marginTop: compact ? 12 : 0 }}>
+              <FailOverMenu
+                compact={compact}
+                options={failover[schedule.thread_id]}
+                busy={state !== undefined}
+                label={state === "failover" ? "Failing over…" : "Fail over…"}
+                onChoose={(choice) => void failOver(schedule.thread_id, choice)}
+              />
               <button
                 type="button"
                 className="q-btn secondary"
@@ -124,5 +157,59 @@ export function AutoResumeCards({
         </p>
       ) : null}
     </>
+  );
+}
+
+/**
+ * "Fail over…": resume now on another model or account. The daemon picks the
+ * default and lists the rest; this only shows them and sends the choice back.
+ */
+function FailOverMenu({
+  options,
+  busy,
+  label,
+  compact,
+  onChoose,
+}: {
+  options: FailoverOptions | undefined;
+  busy: boolean;
+  label: string;
+  compact: boolean;
+  onChoose: (choice: { model: string; account: string | null }) => void;
+}) {
+  const none = options !== undefined && options.options.length === 0;
+  const reason = none ? (options.unavailable ?? "There is no model to fail over to") : undefined;
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          type="button"
+          className="q-btn ghost"
+          style={compact ? { flex: 1 } : undefined}
+          disabled={busy || options === undefined || none}
+          title={reason}
+        >
+          {label}
+          <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-[240px] max-w-[360px]">
+        {options?.options.map((choice, index) => (
+          <DropdownMenuItem
+            key={`${choice.model}:${choice.account ?? ""}`}
+            onSelect={() => onChoose({ model: choice.model, account: choice.account })}
+          >
+            <span className="min-w-0 flex-1">
+              <span className="block truncate">
+                {choice.model}
+                {choice.account ? ` on ${choice.account}` : ""}
+                {index === 0 ? <span className="text-fg-3"> · default</span> : null}
+              </span>
+              <span className="block text-[11.5px] text-fg-3">{choice.reason}</span>
+            </span>
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

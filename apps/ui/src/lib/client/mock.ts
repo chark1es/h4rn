@@ -2597,6 +2597,48 @@ class MockDaemon {
         this.ok(frame.id, { type: "resume_changed", schedule: null });
         return;
       }
+      case "list_failover_options": {
+        const thread = this.threads.get(body.thread_id);
+        const current = thread?.summary.model ?? "claude-sonnet-5-5";
+        const family = current.split("-")[0] ?? "";
+        const options = MOCK_PROXY_MODELS.filter((model) => model.id !== current)
+          .sort((a, b) => Number(!a.id.startsWith(family)) - Number(!b.id.startsWith(family)))
+          .map((model) => ({
+            model: model.id,
+            account: "anthropic-work.json" as string | null,
+            reason: model.id.startsWith(family)
+              ? `same family as \`${current}\` and not cooling down`
+              : `\`${current}\` was limited; this model has no active cooldown`,
+          }));
+        this.ok(frame.id, {
+          type: "failover_options",
+          options: {
+            thread_id: body.thread_id,
+            current_model: current,
+            default: options[0] ?? null,
+            options,
+            unavailable: options.length === 0 ? "Every other model is cooling down" : null,
+          },
+        });
+        return;
+      }
+      case "fail_over": {
+        const thread = this.threads.get(body.thread_id);
+        this.schedules = this.schedules.filter((schedule) => schedule.thread_id !== body.thread_id);
+        if (thread) {
+          thread.summary = {
+            ...thread.summary,
+            model: body.model ?? "claude-opus-5-5",
+            resume_at: null,
+            agent_state: "thinking",
+            tab: "working",
+          };
+          this.emit(body.thread_id, { type: "thread_upserted", ...thread.summary });
+        }
+        this.sendUsage({ type: "schedule_changed", schedule: null });
+        this.ok(frame.id, { type: "resume_changed", schedule: null });
+        return;
+      }
       case "set_auto_resume_policy":
         this.resumePolicy = body.policy;
         this.ok(frame.id, { type: "ack" });

@@ -29,6 +29,8 @@ vi.mock("@/lib/client/frames", () => ({
 
 const {
   cancelResume,
+  failOver,
+  loadFailoverOptions,
   getUsageState,
   loadLimits,
   loadUsage,
@@ -210,6 +212,54 @@ describe("auto-resume actions", () => {
     request.mockResolvedValue({ type: "resume_changed", schedule: null });
     await resumeNow("thr_a");
     expect(request).toHaveBeenCalledWith({ type: "resume_now", thread_id: "thr_a" });
+    expect(getUsageState().pending.thr_a).toBeUndefined();
+  });
+
+  it("keeps the daemon's failover options per thread", async () => {
+    const options = {
+      thread_id: "thr_a",
+      current_model: "claude-sonnet-5",
+      default: { model: "claude-opus-5", account: null, reason: "same family" },
+      options: [
+        { model: "claude-opus-5", account: null, reason: "same family" },
+        { model: "gpt-6.1-sol", account: "acct-b", reason: "other vendor" },
+      ],
+      unavailable: null,
+    };
+    request.mockResolvedValueOnce({ type: "failover_options", options });
+    await loadFailoverOptions("thr_a");
+    expect(request).toHaveBeenCalledWith({ type: "list_failover_options", thread_id: "thr_a" });
+    expect(getUsageState().failover.thr_a).toEqual(options);
+  });
+
+  it("fails over to a chosen option, then forgets the stale options", async () => {
+    request.mockResolvedValue({ type: "resume_changed", schedule: null });
+    await failOver("thr_a", { model: "gpt-6.1-sol", account: "acct-b" });
+    expect(request).toHaveBeenCalledWith({
+      type: "fail_over",
+      thread_id: "thr_a",
+      model: "gpt-6.1-sol",
+      account: "acct-b",
+    });
+    expect(getUsageState().pending.thr_a).toBeUndefined();
+    expect(getUsageState().failover.thr_a).toBeUndefined();
+  });
+
+  it("lets the daemon pick when no choice is named", async () => {
+    request.mockResolvedValue({ type: "resume_changed", schedule: null });
+    await failOver("thr_a", null);
+    expect(request).toHaveBeenCalledWith({
+      type: "fail_over",
+      thread_id: "thr_a",
+      model: null,
+      account: null,
+    });
+  });
+
+  it("shows the daemon's refusal instead of throwing", async () => {
+    request.mockRejectedValue(new Error("`gpt-x` is not an eligible failover"));
+    await failOver("thr_a", { model: "gpt-x", account: null });
+    expect(getUsageState().actionError?.message).toContain("not an eligible failover");
     expect(getUsageState().pending.thr_a).toBeUndefined();
   });
 
