@@ -37,11 +37,13 @@ import {
   setThreadTab,
   setView,
   snoozeThread,
+  panelFits,
   togglePanel,
   togglePin,
   toggleTheme,
   useApp,
 } from "@/lib/store/appStore";
+import { useViewportWidth } from "@/hooks/use-viewport-width";
 import { cn } from "@/lib/utils";
 
 export function ViewCluster({
@@ -52,7 +54,10 @@ export function ViewCluster({
   onToggleTerminal?: (() => void) | undefined;
 }) {
   const view = useApp((state) => state.ui.layout.view);
-  const panelOpen = useApp((state) => state.ui.layout.panelOpen);
+  const layout = useApp((state) => state.ui.layout);
+  const viewportWidth = useViewportWidth();
+  // Pressed means the panel is on screen, not that it was asked for.
+  const panelOpen = layout.panelOpen && panelFits(layout, viewportWidth);
   return (
     <>
       <div

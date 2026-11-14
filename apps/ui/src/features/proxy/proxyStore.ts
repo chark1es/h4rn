@@ -32,6 +32,11 @@ export type ProxyState = {
   limitsLoading: boolean;
   saveError: ProtoError | null;
   overridesSaving: Record<string, boolean>;
+  /** Overrides changed since the last "Apply and restart", per profile. */
+  overridesDirty: Record<string, boolean>;
+  applying: Record<string, boolean>;
+  /** What the last apply restarted, per profile. */
+  applied: Record<string, { restarted: number; interrupted: number }>;
 };
 
 const initialState: ProxyState = {
@@ -49,6 +54,9 @@ const initialState: ProxyState = {
   limitsLoading: false,
   saveError: null,
   overridesSaving: {},
+  overridesDirty: {},
+  applying: {},
+  applied: {},
 };
 
 type Listener = () => void;
@@ -248,6 +256,8 @@ export async function setHarnessOverride(
     default_model: defaultModel,
     verified: existing?.verified ?? false,
     note: existing?.note ?? null,
+    config_path: existing?.config_path ?? "",
+    preview: existing?.preview ?? [],
   };
   patch({
     profiles: state.profiles.map((candidate) =>
@@ -278,6 +288,7 @@ export async function setHarnessOverride(
         profiles: state.profiles.map((candidate) =>
           candidate.id === profileId ? response.profile : candidate,
         ),
+        overridesDirty: { ...state.overridesDirty, [profileId]: true },
       });
     }
   } catch (error) {
@@ -289,6 +300,36 @@ export async function setHarnessOverride(
     });
   } finally {
     patch({ overridesSaving: { ...state.overridesSaving, [key]: false } });
+  }
+}
+
+/**
+ * "Apply and restart": the daemon interrupts any live turn of a routed
+ * harness and drops its session, so the next message uses the new routing.
+ */
+export async function applyProxyOverrides(profileId: ProxyProfileId): Promise<void> {
+  patch({ applying: { ...state.applying, [profileId]: true }, saveError: null });
+  try {
+    const response = await getClient().request({
+      type: "apply_proxy_overrides",
+      profile_id: profileId,
+    });
+    if (response.type === "proxy_applied") {
+      patch({
+        applied: {
+          ...state.applied,
+          [profileId]: {
+            restarted: response.restarted.length,
+            interrupted: response.interrupted.length,
+          },
+        },
+        overridesDirty: { ...state.overridesDirty, [profileId]: false },
+      });
+    }
+  } catch (error) {
+    patch({ saveError: toProtoError(error) });
+  } finally {
+    patch({ applying: { ...state.applying, [profileId]: false } });
   }
 }
 

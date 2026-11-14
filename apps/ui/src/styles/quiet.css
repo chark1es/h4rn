@@ -3454,6 +3454,57 @@
   background: var(--fill);
   box-shadow: none;
 }
+.q-ph-resume {
+  margin: 0 16px 22px;
+  padding: 16px;
+  border-radius: 12px;
+  background: var(--bg-raised);
+  box-shadow: inset 0 0 0 1px var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.dark .q-ph-resume {
+  background: var(--fill);
+  box-shadow: none;
+}
+.q-ph-resume .head {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+.q-ph-resume .grow {
+  flex: 1;
+  min-width: 0;
+}
+.q-ph-resume .ttl {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 22px;
+}
+.q-ph-resume .sub {
+  font-size: 14px;
+  line-height: 20px;
+}
+.q-ph-resume .cd {
+  font-size: 30px;
+  line-height: 36px;
+  font-weight: 600;
+}
+.q-ph-resume .actions {
+  display: flex;
+  gap: 10px;
+}
+.q-ph-resume .actions .q-btn {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+}
+.q-ph-resume .more .q-btn {
+  width: 100%;
+  height: 44px;
+}
 .q-ph-gh {
   font-size: 13px;
   color: var(--fg-2);

@@ -32,6 +32,8 @@ import type {
   McpTransportView,
   ProtoError,
   ProxyModel,
+  ProxyEnvLine,
+  ProxyHarnessOverride,
   ProxyModelCatalog,
   ProxyProfile,
   ProxyProfilePatch,
@@ -1576,6 +1578,55 @@ function mockProxyCatalog(profileId: string): ProxyModelCatalog {
   };
 }
 
+const MOCK_HARNESS_PATHS: Record<HarnessKind, string> = {
+  claude_code: "~/.claude/settings.json",
+  codex: "~/.codex/config.toml",
+  opencode: "~/.config/opencode/opencode.jsonc",
+  antigravity: "~/.gemini/settings.json",
+};
+
+/** The redacted settings the daemon would report for one harness. */
+function mockHarnessRow(
+  harness: HarnessKind,
+  enabled: boolean,
+  defaultModel: string | null,
+  verified: boolean,
+  note: string | null,
+  baseUrl = "http://127.0.0.1:8317",
+): ProxyHarnessOverride {
+  const model = defaultModel ?? "claude-sonnet-5-5";
+  const preview: ProxyEnvLine[] =
+    harness === "claude_code"
+      ? [
+          { name: "ANTHROPIC_BASE_URL", value: baseUrl },
+          { name: "ANTHROPIC_AUTH_TOKEN", value: null },
+          { name: "ANTHROPIC_MODEL", value: model },
+        ]
+      : harness === "codex"
+        ? [
+            { name: "H4RN_CODEX_BASE_URL", value: `${baseUrl}/v1` },
+            { name: "CLIPROXY_API_KEY", value: null },
+          ]
+        : harness === "opencode"
+          ? [
+              { name: "H4RN_OPENCODE_BASE_URL", value: `${baseUrl}/v1` },
+              { name: "H4RN_OPENCODE_API_KEY", value: null },
+            ]
+          : [
+              { name: "GOOGLE_GEMINI_BASE_URL", value: baseUrl },
+              { name: "GEMINI_API_KEY", value: null },
+            ];
+  return {
+    harness,
+    enabled,
+    default_model: defaultModel,
+    verified,
+    note,
+    config_path: MOCK_HARNESS_PATHS[harness],
+    preview,
+  };
+}
+
 function mockProxyProfile(): ProxyProfile {
   return {
     id: "prx_mock",
@@ -1585,34 +1636,10 @@ function mockProxyProfile(): ProxyProfile {
     has_management_key: true,
     has_api_key: true,
     harnesses: [
-      {
-        harness: "claude_code",
-        enabled: true,
-        default_model: "claude-sonnet-5-5",
-        verified: true,
-        note: null,
-      },
-      {
-        harness: "codex",
-        enabled: false,
-        default_model: null,
-        verified: false,
-        note: null,
-      },
-      {
-        harness: "opencode",
-        enabled: false,
-        default_model: null,
-        verified: false,
-        note: "Unverified in this repository",
-      },
-      {
-        harness: "antigravity",
-        enabled: false,
-        default_model: null,
-        verified: false,
-        note: "Unverified in this repository",
-      },
+      mockHarnessRow("claude_code", true, "claude-sonnet-5-5", true, null),
+      mockHarnessRow("codex", false, null, true, null),
+      mockHarnessRow("opencode", false, null, true, null),
+      mockHarnessRow("antigravity", false, null, false, "Unverified in this repository"),
     ],
     capabilities: {
       reachable: true,
@@ -1896,7 +1923,8 @@ class MockDaemon {
             prompt: this.resumePolicy.prompt,
             failover: {
               model: "claude-sonnet-5-5",
-              account: "atlas",
+              account: "anthropic-work.json",
+              account_label: "anthropic-work",
               reason: "Same family, warmer credential",
             },
             last_error: null,
@@ -2617,9 +2645,10 @@ class MockDaemon {
           .map((model) => ({
             model: model.id,
             account: "anthropic-work.json" as string | null,
+            account_label: "anthropic-work" as string | null,
             reason: model.id.startsWith(family)
-              ? `same family as \`${current}\` and not cooling down`
-              : `\`${current}\` was limited; this model has no active cooldown`,
+              ? `same family as ${current} and not cooling down`
+              : `${current} was limited; this model has no active cooldown`,
           }));
         this.ok(frame.id, {
           type: "failover_options",
@@ -2732,13 +2761,14 @@ class MockDaemon {
           return;
         }
         const existing = current.harnesses.find((override) => override.harness === body.harness);
-        const override = {
-          harness: body.harness,
-          enabled: body.enabled,
-          default_model: body.default_model,
-          verified: existing?.verified ?? false,
-          note: existing?.note ?? null,
-        };
+        const override = mockHarnessRow(
+          body.harness,
+          body.enabled,
+          body.default_model,
+          existing?.verified ?? false,
+          existing?.note ?? null,
+          current.base_url,
+        );
         const next: ProxyProfile = {
           ...current,
           harnesses: existing
@@ -2751,6 +2781,21 @@ class MockDaemon {
           profile.id === current.id ? next : profile,
         );
         this.ok(frame.id, { type: "proxy_profile", profile: next });
+        return;
+      }
+      case "apply_proxy_overrides": {
+        const profile = this.proxyProfiles.find((candidate) => candidate.id === body.profile_id);
+        const routed = new Set(
+          (profile?.harnesses ?? []).filter((row) => row.enabled).map((row) => row.harness),
+        );
+        const live = [...this.threads.values()].filter(
+          (thread) => routed.has(thread.summary.harness) && thread.summary.tab === "working",
+        );
+        this.ok(frame.id, {
+          type: "proxy_applied",
+          restarted: live.map((thread) => thread.summary.thread_id),
+          interrupted: live.map((thread) => thread.summary.thread_id),
+        });
         return;
       }
       case "list_proxy_limits": {
@@ -2808,6 +2853,7 @@ class MockDaemon {
           choice: {
             model: body.current_model.includes("claude") ? "claude-sonnet-5-5" : "gpt-5.1-codex",
             account: "anthropic-work.json",
+            account_label: "anthropic-work",
             reason: "Same family, lowest cooldown backoff",
           },
         });
@@ -3353,7 +3399,8 @@ class MockDaemon {
       failover: this.resumePolicy.failover
         ? {
             model: "claude-sonnet-5-5",
-            account: "atlas",
+            account: "anthropic-work.json",
+            account_label: "anthropic-work",
             reason: "Same family, warmer credential",
           }
         : null,

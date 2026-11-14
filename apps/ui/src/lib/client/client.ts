@@ -165,6 +165,13 @@ export type ResponseOf<T extends ClientRequest["type"]> = T extends "hello"
                                                                                       type: "proxy_models";
                                                                                     }
                                                                                   >
+                                                                                : T extends "apply_proxy_overrides"
+                                                                                  ? Extract<
+                                                                                      ResponseBody,
+                                                                                      {
+                                                                                        type: "proxy_applied";
+                                                                                      }
+                                                                                    >
                                                                                 : T extends "list_proxy_limits"
                                                                                   ? Extract<
                                                                                       ResponseBody,

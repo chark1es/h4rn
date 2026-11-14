@@ -1,5 +1,5 @@
 import { ArrowUpIcon, AtSignIcon, ChevronDownIcon, PaperclipIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { CommandPalette } from "@/components/dialogs/CommandPalette";
@@ -36,8 +36,9 @@ import {
 import { UsagePage } from "@/features/usage/UsagePage";
 import type { HarnessKind } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
+import { useViewportWidth } from "@/hooks/use-viewport-width";
 import { HARNESS_LABELS, harnessLabel, harnessSeed, machineSeed } from "@/lib/entities";
-import { createThread, navigate, useApp } from "@/lib/store/appStore";
+import { createThread, navigate, panelFits, useApp } from "@/lib/store/appStore";
 import { activeThread } from "@/lib/thread-selection";
 
 const START_MODELS: Record<HarnessKind, string> = {
@@ -433,22 +434,6 @@ function PhoneIdeNotice() {
   );
 }
 
-/** DESIGN §Layout 6: main keeps at least this much room; the right panel yields first. */
-const MAIN_MIN_WIDTH = 560;
-
-function subscribeResize(callback: () => void): () => void {
-  window.addEventListener("resize", callback);
-  return () => window.removeEventListener("resize", callback);
-}
-
-function useViewportWidth(): number {
-  return useSyncExternalStore(
-    subscribeResize,
-    () => window.innerWidth,
-    () => 1440,
-  );
-}
-
 export function AppShell() {
   const route = useApp((state) => state.ui.route);
   const layout = useApp((state) => state.ui.layout);
@@ -466,14 +451,12 @@ export function AppShell() {
   const ide = layout.view === "ide" && !isPhone && (isThread || route.kind === "ide");
   const thread = activeThread(threads, selectedThreadId);
   const viewportWidth = useViewportWidth();
-  const mainRoom =
-    viewportWidth - (layout.sidebarOpen ? layout.sidebarWidth : 0) - layout.panelWidth;
   const showPanel =
     !isPhone &&
     layout.panelOpen &&
     Boolean(thread) &&
     (isThread || ide) &&
-    mainRoom >= MAIN_MIN_WIDTH;
+    panelFits(layout, viewportWidth);
 
   if (isPhone) {
     return (

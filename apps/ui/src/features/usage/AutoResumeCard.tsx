@@ -1,18 +1,18 @@
-import { ChevronDownIcon, ClockIcon, TriangleAlertIcon } from "lucide-react";
+import { ChevronDownIcon, ClockIcon } from "lucide-react";
 import { useEffect } from "react";
 
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import type { FailoverOptions } from "@/gen";
+import type { FailoverOptions, HarnessKind } from "@/gen";
 import { useNow } from "@/hooks/use-now";
 import { harnessLabel } from "@/lib/entities";
 import { absoluteTime } from "@/lib/format";
 import { useApp } from "@/lib/store/appStore";
-import { cn } from "@/lib/utils";
 
 import { countdownPrecise } from "./presentation";
 import {
@@ -76,31 +76,83 @@ export function AutoResumeCards({
         const thread = threads[schedule.thread_id];
         const state = pending[schedule.thread_id];
         const harness = thread?.harness;
-        return (
-          <div
-            key={schedule.schedule_id}
-            className={cn(compact ? "q-ph-group" : "q-resume")}
-            style={compact ? undefined : { marginBottom: 28 }}
+        const failoverMenu = (
+          <FailOverMenu
+            compact={compact}
+            options={failover[schedule.thread_id]}
+            harness={harness}
+            busy={state !== undefined}
+            label={state === "failover" ? "Failing over…" : "Fail over…"}
+            onChoose={(choice) => void failOver(schedule.thread_id, choice)}
+          />
+        );
+        const cancel = (
+          <button
+            type="button"
+            className="q-btn secondary"
+            disabled={state !== undefined}
+            onClick={() => void cancelResume(schedule.thread_id)}
           >
+            {state === "cancel" ? "Cancelling…" : compact ? "Cancel" : "Cancel auto-resume"}
+          </button>
+        );
+        const resume = (
+          <button
+            type="button"
+            className="q-btn primary"
+            disabled={state !== undefined}
+            onClick={() => void resumeNow(schedule.thread_id)}
+          >
+            {state === "resume" ? "Resuming…" : "Resume now"}
+          </button>
+        );
+        if (compact) {
+          return (
+            <div key={schedule.schedule_id} className="q-ph-resume">
+              <div className="head">
+                <span className="q-warn">
+                  <ClockIcon className="q-icon s20" strokeWidth={1.5} aria-hidden />
+                </span>
+                <div className="grow">
+                  <div className="ttl">{thread?.title ?? schedule.thread_id} is paused</div>
+                  <div className="q-muted sub">
+                    {harness ? harnessLabel(harness) : "The harness"} hit a limit.
+                  </div>
+                </div>
+              </div>
+              <div>
+                <div className="q-num cd">{countdownPrecise(schedule.resume_at, now)}</div>
+                <div className="q-muted sub">Auto-resumes at {absoluteTime(schedule.resume_at)}</div>
+              </div>
+              {schedule.last_error ? (
+                <div className="q-danger sub">Last attempt failed: {schedule.last_error}</div>
+              ) : null}
+              <div className="actions">
+                {cancel}
+                {resume}
+              </div>
+              <div className="more">{failoverMenu}</div>
+            </div>
+          );
+        }
+        return (
+          <div key={schedule.schedule_id} className="q-resume" style={{ marginBottom: 28 }}>
             <span className="q-warn">
               <ClockIcon className="q-icon s20" strokeWidth={1.5} aria-hidden />
             </span>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontWeight: 600 }}>{thread?.title ?? schedule.thread_id} is paused</div>
-              <div className="q-muted" style={{ marginTop: 2, fontSize: compact ? 14 : 13 }}>
+              <div className="q-muted" style={{ marginTop: 2, fontSize: 13 }}>
                 {harness ? harnessLabel(harness) : "The harness"} hit a limit at{" "}
                 {absoluteTime(schedule.scheduled_at)}. h4rn resumes the turn at{" "}
                 {absoluteTime(schedule.resume_at)} with its saved context.
               </div>
               {schedule.failover ? (
-                <div
-                  className="q-faint"
-                  style={{ marginTop: 6, fontSize: 12, display: "flex", gap: 6 }}
-                >
-                  <TriangleAlertIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-                  Failover ready: {schedule.failover.model}
-                  {schedule.failover.account ? ` on ${schedule.failover.account}` : ""} ·{" "}
-                  {schedule.failover.reason}
+                <div className="q-faint" style={{ marginTop: 6, fontSize: 12 }}>
+                  Will fail over to <span className="q-mono">{schedule.failover.model}</span>
+                  {schedule.failover.account_label
+                    ? ` on ${schedule.failover.account_label}`
+                    : ""}
                 </div>
               ) : null}
               {schedule.last_error ? (
@@ -109,43 +161,16 @@ export function AutoResumeCards({
                 </div>
               ) : null}
             </div>
-            <div className={compact ? undefined : "q-num"} style={{ textAlign: "right" }}>
-              <div
-                className={compact ? "q-num" : "cd num"}
-                style={compact ? { fontSize: 30, lineHeight: "36px", fontWeight: 600 } : undefined}
-              >
-                {countdownPrecise(schedule.resume_at, now)}
-              </div>
+            <div className="q-num" style={{ textAlign: "right" }}>
+              <div className="cd num">{countdownPrecise(schedule.resume_at, now)}</div>
               <div className="q-faint" style={{ fontSize: 12 }}>
                 until auto-resume
               </div>
             </div>
-            <div style={{ display: "flex", gap: compact ? 10 : 6, marginTop: compact ? 12 : 0 }}>
-              <FailOverMenu
-                compact={compact}
-                options={failover[schedule.thread_id]}
-                busy={state !== undefined}
-                label={state === "failover" ? "Failing over…" : "Fail over…"}
-                onChoose={(choice) => void failOver(schedule.thread_id, choice)}
-              />
-              <button
-                type="button"
-                className="q-btn secondary"
-                style={compact ? { flex: 1 } : undefined}
-                disabled={state !== undefined}
-                onClick={() => void cancelResume(schedule.thread_id)}
-              >
-                {state === "cancel" ? "Cancelling…" : compact ? "Cancel" : "Cancel auto-resume"}
-              </button>
-              <button
-                type="button"
-                className="q-btn primary"
-                style={compact ? { flex: 1 } : undefined}
-                disabled={state !== undefined}
-                onClick={() => void resumeNow(schedule.thread_id)}
-              >
-                {state === "resume" ? "Resuming…" : "Resume now"}
-              </button>
+            <div style={{ display: "flex", gap: 6 }}>
+              {failoverMenu}
+              {cancel}
+              {resume}
             </div>
           </div>
         );
@@ -166,12 +191,14 @@ export function AutoResumeCards({
  */
 function FailOverMenu({
   options,
+  harness,
   busy,
   label,
   compact,
   onChoose,
 }: {
   options: FailoverOptions | undefined;
+  harness: HarnessKind | undefined;
   busy: boolean;
   label: string;
   compact: boolean;
@@ -179,13 +206,15 @@ function FailOverMenu({
 }) {
   const none = options !== undefined && options.options.length === 0;
   const reason = none ? (options.unavailable ?? "There is no model to fail over to") : undefined;
+  // One reason shared by every row reads once, as the heading.
+  const reasons = new Set(options?.options.map((choice) => choice.reason));
+  const perRow = reasons.size > 1;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
           type="button"
           className="q-btn ghost"
-          style={compact ? { flex: 1 } : undefined}
           disabled={busy || options === undefined || none}
           title={reason}
         >
@@ -193,7 +222,10 @@ function FailOverMenu({
           <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-[240px] max-w-[360px]">
+      <DropdownMenuContent align={compact ? "center" : "end"} className="min-w-[260px] max-w-[360px]">
+        <DropdownMenuLabel className="font-normal text-fg-3">
+          {harness ? harnessLabel(harness) : "The harness"} hit its limit. Resume now on:
+        </DropdownMenuLabel>
         {options?.options.map((choice, index) => (
           <DropdownMenuItem
             key={`${choice.model}:${choice.account ?? ""}`}
@@ -201,11 +233,13 @@ function FailOverMenu({
           >
             <span className="min-w-0 flex-1">
               <span className="block truncate">
-                {choice.model}
-                {choice.account ? ` on ${choice.account}` : ""}
+                <span className="q-mono">{choice.model}</span>
+                {choice.account_label ? (
+                  <span className="text-fg-3"> · {choice.account_label}</span>
+                ) : null}
                 {index === 0 ? <span className="text-fg-3"> · default</span> : null}
               </span>
-              <span className="block text-[11.5px] text-fg-3">{choice.reason}</span>
+              {perRow ? <span className="block text-[11.5px] text-fg-3">{choice.reason}</span> : null}
             </span>
           </DropdownMenuItem>
         ))}

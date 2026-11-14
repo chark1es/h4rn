@@ -418,9 +418,30 @@ export function clearFilter(): void {
 // Layout: one sidebar, one right panel, and the Thread/IDE view
 // ---------------------------------------------------------------------------
 
+/** DESIGN §Layout 6: main keeps at least this much room; the right panel yields first. */
+export const MAIN_MIN_WIDTH = 560;
+
+/** Whether the right panel fits beside the sidebar and a 560 px main. */
+export function panelFits(layout: LayoutState, viewportWidth: number): boolean {
+  const sidebar = layout.sidebarOpen ? layout.sidebarWidth : 0;
+  return viewportWidth - sidebar - layout.panelWidth >= MAIN_MIN_WIDTH;
+}
+
+/**
+ * A person asked for the panel. When it would leave main under the floor,
+ * the sidebar closes to make room instead of the request doing nothing.
+ * Automatic resizes never come through here: they hide the panel first.
+ */
+function claimPanelRoom(layout: LayoutState): LayoutState {
+  if (!layout.panelOpen || !layout.sidebarOpen || typeof window === "undefined") return layout;
+  if (panelFits(layout, window.innerWidth)) return layout;
+  return { ...layout, sidebarOpen: false };
+}
+
 export function setLayout(patch: Partial<LayoutState>): void {
   const state = getState();
-  const layout = { ...state.ui.layout, ...patch };
+  const merged = { ...state.ui.layout, ...patch };
+  const layout = patch.panelOpen === true ? claimPanelRoom(merged) : merged;
   writeLayout(layout);
   setState({ ...state, ui: { ...state.ui, layout } });
 }
@@ -435,15 +456,15 @@ export function setView(view: UiView): void {
       ? { kind: "inbox" as const }
       : state.ui.route;
   if (route !== state.ui.route) pushRoute(route);
-  const layout: LayoutState = {
+  const revealed = view === "ide" && !state.ui.layout.panelOpen;
+  const base: LayoutState = {
     ...state.ui.layout,
     view,
     // Entering the IDE with the panel closed reveals the file tree; the panel
     // is part of the editor rather than an overlay.
-    ...(view === "ide" && !state.ui.layout.panelOpen
-      ? { panelOpen: true, panelTab: "files" as PanelTab }
-      : {}),
+    ...(revealed ? { panelOpen: true, panelTab: "files" as PanelTab } : {}),
   };
+  const layout = revealed ? claimPanelRoom(base) : base;
   writeLayout(layout);
   setState({ ...state, ui: { ...state.ui, route, layout } });
 }
@@ -493,7 +514,7 @@ export function requestFilesFocus(): void {
     ...state,
     ui: {
       ...state.ui,
-      layout: { ...state.ui.layout, panelOpen: true, panelTab: "files" },
+      layout: claimPanelRoom({ ...state.ui.layout, panelOpen: true, panelTab: "files" }),
       focusFilesNonce: state.ui.focusFilesNonce + 1,
     },
   });
@@ -502,11 +523,13 @@ export function requestFilesFocus(): void {
 
 export function openInIde(path: string): void {
   const state = getState();
-  const layout: LayoutState = {
+  const opening = !state.ui.layout.panelOpen;
+  const base: LayoutState = {
     ...state.ui.layout,
     view: "ide",
-    ...(state.ui.layout.panelOpen ? {} : { panelOpen: true, panelTab: "files" as PanelTab }),
+    ...(opening ? { panelOpen: true, panelTab: "files" as PanelTab } : {}),
   };
+  const layout = opening ? claimPanelRoom(base) : base;
   writeLayout(layout);
   setState({ ...state, ui: { ...state.ui, layout, pendingIdePath: path } });
 }

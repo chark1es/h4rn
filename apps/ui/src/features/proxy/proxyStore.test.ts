@@ -64,13 +64,13 @@ describe("proxy harness overrides", () => {
         profile({
           id: "proxy_a",
           harnesses: [
-            { harness: "codex", enabled: false, default_model: null, verified: false, note: null },
+            { harness: "codex", enabled: false, default_model: null, verified: false, note: null, config_path: "", preview: [] },
           ],
         }),
         profile({
           id: "proxy_b",
           harnesses: [
-            { harness: "codex", enabled: true, default_model: "gpt-5", verified: true, note: null },
+            { harness: "codex", enabled: true, default_model: "gpt-5", verified: true, note: null, config_path: "", preview: [] },
           ],
         }),
       ],
@@ -92,7 +92,7 @@ describe("proxy harness overrides", () => {
               enabled: true,
               default_model: null,
               verified: true,
-              note: null,
+              note: null, config_path: "", preview: [],
             },
           ],
         }),
@@ -119,14 +119,14 @@ describe("proxy harness overrides", () => {
               enabled: true,
               default_model: null,
               verified: true,
-              note: null,
+              note: null, config_path: "", preview: [],
             },
             {
               harness: "opencode",
               enabled: true,
               default_model: "chosen",
               verified: true,
-              note: null,
+              note: null, config_path: "", preview: [],
             },
           ],
         }),
@@ -144,7 +144,7 @@ describe("proxy harness overrides", () => {
         profile({
           id: "proxy_a",
           harnesses: [
-            { harness: "codex", enabled: true, default_model: "gpt-5", verified: true, note: null },
+            { harness: "codex", enabled: true, default_model: "gpt-5", verified: true, note: null, config_path: "", preview: [] },
           ],
         }),
       ],
@@ -167,7 +167,7 @@ describe("proxy harness override toggles", () => {
               enabled: false,
               default_model: null,
               verified: true,
-              note: null,
+              note: null, config_path: "", preview: [],
             },
           ],
         }),
@@ -185,6 +185,8 @@ describe("proxy harness override toggles", () => {
           default_model: "claude-sonnet-5-5",
           verified: true,
           note: "Routed",
+          config_path: "",
+          preview: [],
         },
       ],
     });
