@@ -1760,13 +1760,15 @@
 /* Terminal */
 .q-term {
   flex: none;
-  height: 340px;
+  height: 300px;
+  min-height: 0;
   border-top: 1px solid var(--line);
   display: flex;
   flex-direction: column;
   background: var(--bg-sunk);
 }
-.q-main.q-term-open > .q-dock {
+.q-term.hidden,
+.q-term[hidden] {
   display: none;
 }
 .q-term-head {

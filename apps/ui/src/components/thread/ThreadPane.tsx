@@ -347,17 +347,6 @@ export function ThreadPane({ threadId }: { threadId: string }) {
         />
       )}
 
-      {terminalMounted ? (
-        <TerminalPanel
-          key={threadId}
-          threadId={threadId}
-          host={summary.host}
-          cwd={summary.workspace_path}
-          hidden={!terminalOpen}
-          onClose={toggleTerminal}
-        />
-      ) : null}
-
       {!threadError || loaded ? (
         <div className="q-dock">
           <div className="q-col">
@@ -385,6 +374,17 @@ export function ThreadPane({ threadId }: { threadId: string }) {
             )}
           </div>
         </div>
+      ) : null}
+
+      {terminalMounted ? (
+        <TerminalPanel
+          key={threadId}
+          threadId={threadId}
+          host={summary.host}
+          cwd={summary.workspace_path}
+          hidden={!terminalOpen}
+          onClose={toggleTerminal}
+        />
       ) : null}
 
       {isPhone && approvalSheetOpen && firstApproval ? (
