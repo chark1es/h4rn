@@ -81,11 +81,28 @@ export function parsePairingUrl(raw: string): Pairing | null {
   if (target === "oidc" || target === "callback") {
     // The platform has no auth screen of its own; hand the callback to the UI
     // (or to a future auth flow) without touching the daemon connection.
-    window.dispatchEvent(
-      new CustomEvent("h4rn-oidc-callback", {
-        detail: Object.fromEntries(url.searchParams.entries()),
-      }),
-    );
+    const detail = Object.fromEntries(url.searchParams.entries());
+    try {
+      // A cold-start deep link is consumed before React mounts its listeners,
+      // so keep a copy the remote store can pick up during boot.
+      window.sessionStorage.setItem("h4rn.pending-oidc", JSON.stringify(detail));
+    } catch {
+      // The dispatch below still serves a warm link.
+    }
+    window.dispatchEvent(new CustomEvent("h4rn-oidc-callback", { detail }));
+    return null;
+  }
+
+  // A connect pairing QR names the relay, machine and daemon Noise key; the
+  // remote feature claims it. It carries no daemon token, so handle it before
+  // the local pairing shape below.
+  if (target === "pair" && url.searchParams.get("c") && url.searchParams.get("m")) {
+    try {
+      window.sessionStorage.setItem("h4rn.pending-connect-pair", raw);
+    } catch {
+      // The dispatch below still serves a warm link.
+    }
+    window.dispatchEvent(new CustomEvent("h4rn-connect-pair", { detail: raw }));
     return null;
   }
 

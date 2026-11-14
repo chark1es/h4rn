@@ -10,7 +10,7 @@
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "test": "vitest run",
-    "e2e": "bun run build && node scripts/e2e.mjs",
+    "e2e": "bun run build && node scripts/e2e.mjs && node scripts/e2e-remote.mjs",
     "e2e:forge": "../../scripts/test-forges.sh --ui",
     "screenshots": "node scripts/screenshots.mjs"
   },
@@ -46,6 +46,7 @@
     "cmdk": "1.1.1",
     "lucide-react": "1.72.0",
     "motion": "14.13.0",
+    "qrcode-generator": "1.4.4",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "react-markdown": "10.1.0",

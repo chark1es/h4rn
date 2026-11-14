@@ -23,6 +23,8 @@
 
 #![deny(missing_docs)]
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use h4rn_protocol::TransportPathKind;
 use h4rn_transport::PairingPayload;
 use h4rn_transport::engine::{Effect, EngineConfig, PathId, PathSpec, TransportEngine};
@@ -170,9 +172,12 @@ impl Core {
     fn closed(&mut self, index: usize, reason: &str, now: u64) -> Result<(), String> {
         let path = self.path(index)?;
         let effects = self.engine.on_path_closed(path, now);
-        if !reason.is_empty() {
-            self.events.push(CoreEvent::Closed(reason.to_owned()));
-        }
+        // A socket closing is path-local. The engine keeps the logical session
+        // alive while another path is ready or still handshaking, and only
+        // emits `Closed` itself when the whole session ends. Reporting the raw
+        // socket reason here would tear down every sibling path, including a
+        // relay path that is still completing its handshake.
+        let _ = reason;
         self.apply(effects);
         Ok(())
     }
@@ -280,6 +285,55 @@ pub fn transport_version() -> u32 {
 pub fn generate_identity() -> Result<String, JsError> {
     let identity = DeviceIdentity::generate().map_err(js_error)?;
     Ok(identity.encode())
+}
+
+/// Returns the public halves of an encoded identity as JSON.
+///
+/// h4rn-connect registers these keys at sign-in: `proofPublicKey` signs DPoP
+/// proofs and `noisePublic` is the key the daemon allowlists. The secret half
+/// never leaves wasm.
+#[wasm_bindgen]
+pub fn identity_public(identity: &str) -> Result<String, JsError> {
+    let identity = DeviceIdentity::decode(identity).map_err(js_error)?;
+    let public = identity.public();
+    serde_json::to_string(&serde_json::json!({
+        "proofPublicKey": URL_SAFE_NO_PAD.encode(public.signing_public),
+        "noisePublic": URL_SAFE_NO_PAD.encode(public.noise_public),
+        "fingerprint": public.fingerprint(),
+    }))
+    .map_err(|error| JsError::new(&error.to_string()))
+}
+
+/// Signs one h4rn-connect DPoP proof and returns the header triple as JSON.
+///
+/// The canonical string is defined by `h4rn-connect`'s `dpop` module. Keeping
+/// it here means TypeScript never constructs or signs the proof itself.
+#[wasm_bindgen]
+pub fn connect_proof(
+    identity: &str,
+    method: &str,
+    path: &str,
+    timestamp: i64,
+    nonce: &str,
+) -> Result<String, JsError> {
+    if nonce.is_empty() || nonce.len() > 128 {
+        return Err(JsError::new("proof nonce must be 1-128 characters"));
+    }
+    let identity = DeviceIdentity::decode(identity).map_err(js_error)?;
+    let canonical = format!(
+        "h4rn-dpop-v1\n{}\n{}\n{timestamp}\n{nonce}",
+        method.to_ascii_uppercase(),
+        path
+    );
+    let signature = identity.sign(canonical.as_bytes());
+    let public = identity.public();
+    serde_json::to_string(&serde_json::json!({
+        "proof": URL_SAFE_NO_PAD.encode(signature),
+        "publicKey": URL_SAFE_NO_PAD.encode(public.signing_public),
+        "timestamp": timestamp,
+        "nonce": nonce,
+    }))
+    .map_err(|error| JsError::new(&error.to_string()))
 }
 
 /// Parses a pairing URI into JSON (`endpoint`, `daemonPublic`, `psk`, `label`).

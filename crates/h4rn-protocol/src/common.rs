@@ -242,6 +242,16 @@ pub struct HostSummary {
     pub last_seen: DateTime<Utc>,
     /// Harnesses detected on this host.
     pub harnesses: Vec<HarnessKind>,
+    /// Round-trip time of the active transport path, when the client measured
+    /// one. The daemon does not know the client's path, so this is `None` on
+    /// the wire and the client overlays its own live value.
+    #[serde(default)]
+    #[ts(type = "number | null")]
+    pub latency_ms: Option<u32>,
+    /// Physical path carrying the session (`direct`, `tailscale`, `relay`).
+    /// Filled by the client from `TransportStatus`; the daemon reports `None`.
+    #[serde(default)]
+    pub path: Option<crate::transport::TransportPathKind>,
 }
 
 /// Token and cost accounting for a turn or a thread (ADR-024).

@@ -2,7 +2,8 @@ import { XIcon } from "lucide-react";
 
 import { MOD, SHIFT } from "@/components/common/Kbd";
 import { Resizer } from "@/components/shell/Resizer";
-import { SubagentsPanel, subagentCount } from "@/features/subagents/SubagentsPanel";
+import { SubagentsPanel } from "@/features/subagents/SubagentsPanel";
+import { useSubagentCount } from "@/features/subagents/subagentStore";
 import type { ThreadSummary } from "@/gen";
 import { harnessLabel } from "@/lib/entities";
 import { setPanelTab, setPanelWidth, togglePanel, useApp } from "@/lib/store/appStore";
@@ -21,7 +22,8 @@ export function RightPanel({ thread, ide = false }: { thread: ThreadSummary; ide
   const ideActivePath = useApp((state) => state.ui.ideActivePath);
   const changes = usePanelChanges(thread);
   const changeCount = changes.changes?.files.length ?? 0;
-  const subagents = subagentCount(thread.thread_id);
+  const subagents = useSubagentCount(thread.thread_id);
+  const subagentTotal = subagents.total;
 
   return (
     <aside
@@ -55,8 +57,8 @@ export function RightPanel({ thread, ide = false }: { thread: ThreadSummary; ide
           className="q-rp-tab"
           onClick={() => setPanelTab("subagents")}
         >
-          Subagents {subagents > 0 ? <span className="c q-num">{subagents}</span> : null}
-          {subagents > 0 && thread.needs_attention ? (
+          Subagents {subagentTotal > 0 ? <span className="c q-num">{subagentTotal}</span> : null}
+          {subagents.waiting > 0 ? (
             <span className="q-pip" role="img" aria-label="needs you" />
           ) : null}
         </button>
@@ -85,7 +87,7 @@ export function RightPanel({ thread, ide = false }: { thread: ThreadSummary; ide
           agentChangesLabel={ide ? `${thread.title} · ${harnessLabel(thread.harness)}` : null}
         />
       ) : (
-        <SubagentsPanel threadId={thread.thread_id} />
+        <SubagentsPanel thread={thread} />
       )}
 
       <Resizer

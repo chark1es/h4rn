@@ -76,9 +76,26 @@ export class SecureTransport {
 export function connect(config_json: string): SecureTransport;
 
 /**
+ * Signs one h4rn-connect DPoP proof and returns the header triple as JSON.
+ *
+ * The canonical string is defined by `h4rn-connect`'s `dpop` module. Keeping
+ * it here means TypeScript never constructs or signs the proof itself.
+ */
+export function connect_proof(identity: string, method: string, path: string, timestamp: bigint, nonce: string): string;
+
+/**
  * Generates a fresh device identity, encoded for persistence by JS.
  */
 export function generate_identity(): string;
+
+/**
+ * Returns the public halves of an encoded identity as JSON.
+ *
+ * h4rn-connect registers these keys at sign-in: `proofPublicKey` signs DPoP
+ * proofs and `noisePublic` is the key the daemon allowlists. The secret half
+ * never leaves wasm.
+ */
+export function identity_public(identity: string): string;
 
 /**
  * Parses a pairing URI into JSON (`endpoint`, `daemonPublic`, `psk`, `label`).
@@ -96,7 +113,9 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_securetransport_free: (a: number, b: number) => void;
     readonly connect: (a: number, b: number) => [number, number, number];
+    readonly connect_proof: (a: number, b: number, c: number, d: number, e: number, f: number, g: bigint, h: number, i: number) => [number, number, number, number];
     readonly generate_identity: () => [number, number, number, number];
+    readonly identity_public: (a: number, b: number) => [number, number, number, number];
     readonly parse_pairing: (a: number, b: number) => [number, number, number, number];
     readonly securetransport_close: (a: number, b: number) => void;
     readonly securetransport_on_closed: (a: number, b: any) => void;

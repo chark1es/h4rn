@@ -2,7 +2,8 @@
 //
 // Starts `h4rnd serve` with the fake harness on ephemeral ports, serves the
 // built UI with `vite preview`, then drives a real browser: create a thread,
-// watch streamed text, settle it, reload, and confirm the state comes back.
+// watch streamed text, settle it, reload, delegate and cancel a subagent, and
+// check usage, limits, MCP and skills wiring against a real daemon.
 
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
@@ -110,7 +111,9 @@ async function main() {
     run("git", ["init", "--quiet", "-b", "main", workspace]);
     run("git", ["-C", workspace, "config", "user.email", "e2e@h4rn.dev"]);
     run("git", ["-C", workspace, "config", "user.name", "E2E"]);
-    run("git", ["-C", workspace, "commit", "--quiet", "--allow-empty", "-m", "init"]);
+    writeFileSync(join(workspace, "README.md"), "# e2e workspace\n");
+    run("git", ["-C", workspace, "add", "README.md"]);
+    run("git", ["-C", workspace, "commit", "--quiet", "-m", "init"]);
     mkdirSync(join(homeDir, ".config"), { recursive: true });
     writeFileSync(
       join(skillDir, "SKILL.md"),
@@ -133,11 +136,15 @@ async function main() {
       ["--data-dir", dataDir, "--bind", `127.0.0.1:${daemonPort}`, "serve"],
       {
         // Keep a scripted limit pending long enough for the countdown card to
-        // be asserted and acted on before it fires.
+        // be asserted and acted on before it fires, and keep an echo turn in
+        // flight long enough to open and cancel a delegated child. The delay
+        // stays under the client's 10 s request timeout because Resume now
+        // waits for the resumed turn's first send.
         env: {
           ...process.env,
           H4RN_FAKE_HARNESS: "1",
           H4RN_FAKE_LIMIT_MS: "120000",
+          H4RN_FAKE_HARNESS_DELAY_MS: "8000",
           HOME: homeDir,
           XDG_CONFIG_HOME: join(homeDir, ".config"),
           XDG_DATA_HOME: join(homeDir, ".local", "share"),
@@ -266,6 +273,57 @@ async function main() {
       .waitFor({ timeout: 20_000 });
 
     // ------------------------------------------------------------------
+    // Delegation: spawn a real child turn, see it in the tree, open its
+    // transcript, then cancel it while the fake harness is still working.
+    // ------------------------------------------------------------------
+    if ((await panelToggle.getAttribute("aria-pressed")) !== "true") await panelToggle.click();
+    await panel.getByRole("tab", { name: /^Subagents/ }).click();
+    await panel.getByText("Nothing delegated").waitFor({ timeout: 10_000 });
+    await panel.getByRole("button", { name: "Delegate", exact: true }).first().click();
+
+    const delegate = page.getByRole("dialog");
+    await delegate.getByRole("heading", { name: "Delegate a subagent" }).waitFor();
+    const childTask = "Reproduce the relay fixture race";
+    await delegate.locator("#delegate-task").fill(childTask);
+    await delegate.getByRole("button", { name: "Delegate", exact: true }).click();
+
+    const childRow = panel.locator(".q-sub-node").filter({ hasText: childTask });
+    await childRow.waitFor({ timeout: 15_000 });
+    await childRow.click();
+    await panel.getByText(childTask, { exact: true }).first().waitFor();
+
+    await panel.getByRole("button", { name: "Open thread", exact: true }).click();
+    await page
+      .locator("header")
+      .filter({ has: page.getByRole("button", { name: "Thread actions" }) })
+      .getByText(childTask, { exact: true })
+      .waitFor({ timeout: 15_000 });
+
+    // Back to the parent through the sidebar, then cancel the live child. The
+    // parent is settled, so switch the sidebar back to that state first.
+    const states = page.getByRole("tablist", { name: "Thread state" });
+    await states.getByRole("tab", { name: /^Settled/ }).click();
+    await page
+      .getByRole("option")
+      .filter({ hasText: "hello from the fake harness" })
+      .first()
+      .click();
+    await panel.getByRole("tab", { name: /^Subagents/ }).click();
+    await childRow.waitFor({ timeout: 10_000 });
+    await childRow.click();
+    await panel.getByRole("button", { name: "Cancel subagent", exact: true }).click();
+    await panel.getByRole("button", { name: "Cancel subagent", exact: true }).click();
+    await childRow.getByText("Cancelled", { exact: false }).waitFor({ timeout: 15_000 });
+    await panel.getByRole("button", { name: "Cancel subagent", exact: true }).waitFor({
+      state: "detached",
+      timeout: 15_000,
+    });
+
+    // The delegation check left the sidebar on Settled; the limit flow below
+    // asserts the new thread's inbox row, which lives under Working.
+    await states.getByRole("tab", { name: /^Working/ }).click();
+
+    // ------------------------------------------------------------------
     // Usage wiring: the footer and the Usage screen read real ledger rows.
     // ------------------------------------------------------------------
     const footer = page.locator(".q-usage-foot");
@@ -391,7 +449,7 @@ async function main() {
       .waitFor({ timeout: 20_000 });
 
     console.log(
-      "UI e2e passed: thread streamed, settled, and restored; usage footer and Usage screen show metered tokens; a scripted limit armed, cancelled and resumed a schedule; MCP server and skill persisted.",
+      "UI e2e passed: thread streamed, settled, and restored; delegation spawned and cancelled; usage footer and Usage screen show metered tokens; a scripted limit armed, cancelled and resumed a schedule; MCP server and skill persisted.",
     );
   } catch (error) {
     if (page) {

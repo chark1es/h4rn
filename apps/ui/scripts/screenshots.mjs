@@ -128,7 +128,10 @@ const SHOTS = [
     wait: '[aria-label="Thread stream"]',
     action: async (page) => {
       const panel = await openPanelTab(page, "Subagents");
-      await panel.getByText("Reproduce CI failure").first().waitFor({ timeout: 10_000 });
+      await panel
+        .getByText("Bisect the auth fixture change on CI")
+        .first()
+        .waitFor({ timeout: 10_000 });
       await page.waitForTimeout(400);
     },
   },
@@ -271,6 +274,17 @@ const SHOTS = [
     settle: 1200,
   },
   {
+    name: "hosts-menu",
+    device: "desktop",
+    path: "/t/thr_a",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      await page.getByTitle("Hosts and connection").click();
+      await page.getByRole("menu", { name: "Hosts" }).waitFor();
+      await page.waitForTimeout(350);
+    },
+  },
+  {
     name: "set-devices",
     device: "desktop",
     path: "/settings/devices",
@@ -396,7 +410,10 @@ const SHOTS = [
       await page.getByRole("button", { name: "Changes and subagents" }).click();
       const sheet = page.getByRole("dialog", { name: "Changes and subagents" });
       await sheet.getByRole("tab", { name: /Subagents/ }).click();
-      await sheet.getByText("Reproduce CI failure").first().waitFor({ timeout: 10_000 });
+      await sheet
+        .getByText("Bisect the auth fixture change on CI")
+        .first()
+        .waitFor({ timeout: 10_000 });
       await page.waitForTimeout(400);
     },
   },
@@ -422,7 +439,7 @@ const SHOTS = [
     name: "p-pairing",
     device: "phone",
     path: "/pairing",
-    wait: "text=Pair with atlas",
+    wait: "text=Pair with orion",
     settle: 500,
   },
   {

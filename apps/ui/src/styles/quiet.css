@@ -4217,3 +4217,58 @@
     line-height: 28px;
   }
 }
+
+/* Remote account + live subagent additions */
+.q-host.on {
+  background: var(--sel);
+  color: var(--fg);
+}
+.q-host:disabled {
+  opacity: 0.6;
+}
+.q-hp-account {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px 8px;
+}
+.q-hp-account .q-btn {
+  align-self: flex-start;
+  margin-top: 4px;
+}
+.q-account-name {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.q-account-badge {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.3;
+}
+.q-node.q-sub-node {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.q-node.q-sub-node.kid2 {
+  margin-left: 22px;
+}
+.q-spin {
+  animation: q-spin 1s linear infinite;
+}
+@keyframes q-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .q-spin {
+    animation: none;
+  }
+}

@@ -49,10 +49,12 @@ import type {
   SkillSource,
   SkillSummary,
   SkillSyncStatus,
+  SubagentView,
   TerminalExit,
   TerminalInfo,
   ThreadSummary,
   ToolCall,
+  TransportStatus,
   TurnStatus,
   Usage,
   UsageGroup,
@@ -809,6 +811,8 @@ function buildHosts(scenario: string): HostSummary[] {
       online: true,
       last_seen: iso(-2_000),
       harnesses: ["claude_code", "codex", "opencode"],
+      latency_ms: 12,
+      path: "direct",
     },
     {
       host_id: "orion",
@@ -817,6 +821,8 @@ function buildHosts(scenario: string): HostSummary[] {
       online: true,
       last_seen: iso(-9_000),
       harnesses: ["codex", "claude_code"],
+      latency_ms: 42,
+      path: "relay",
     },
     {
       host_id: "atlas-wsl",
@@ -825,6 +831,8 @@ function buildHosts(scenario: string): HostSummary[] {
       online: true,
       last_seen: iso(-1_000),
       harnesses: ["codex", "opencode"],
+      latency_ms: 18,
+      path: "direct",
     },
     {
       host_id: "buildbox",
@@ -833,6 +841,8 @@ function buildHosts(scenario: string): HostSummary[] {
       online: false,
       last_seen: iso(-3 * HOUR - 60_000),
       harnesses: ["claude_code", "antigravity"],
+      latency_ms: null,
+      path: null,
     },
   ];
 }
@@ -1339,6 +1349,154 @@ function skillFromSource(
   };
 }
 
+function makeSubagent(
+  overrides: Partial<SubagentView> &
+    Pick<
+      SubagentView,
+      "subagent_id" | "parent_thread_id" | "task" | "harness" | "host" | "model" | "state"
+    >,
+): SubagentView {
+  const terminal =
+    overrides.state === "completed" ||
+    overrides.state === "cancelled" ||
+    overrides.state === "failed" ||
+    overrides.state === "budget_exceeded";
+  const agentState: AgentState =
+    overrides.state === "completed"
+      ? "done"
+      : overrides.state === "running"
+        ? "running_tool"
+        : overrides.state === "awaiting_approval"
+          ? "awaiting_approval"
+          : overrides.state === "failed" || overrides.state === "budget_exceeded"
+            ? "error"
+            : "queued";
+  return {
+    child_thread_id: null,
+    isolation: "shared",
+    workspace_path: "/home/you/code/h4rn",
+    branch: null,
+    depth: 1,
+    agent_state: agentState,
+    progress: { turns_started: 0, turns_completed: 0, tokens: 0, elapsed_ms: 0, current: null },
+    budget: { max_turns: 20, max_wall_time_secs: 900, max_tokens: 50_000 },
+    context: { kind: "none" },
+    credential: { label: "Claude subscription", shared_with_parent: true },
+    created_at: iso(-90_000),
+    started_at: null,
+    finished_at: terminal ? iso(-10_000) : null,
+    result: null,
+    ...overrides,
+  };
+}
+
+/** A realistic delegation tree for the mock inbox. */
+function buildSubagents(scenario: string): Map<string, SubagentView> {
+  const map = new Map<string, SubagentView>();
+  if (scenario === "empty" || scenario === "nohosts") return map;
+  const seeds: SubagentView[] = [
+    makeSubagent({
+      subagent_id: "sa_bisect",
+      parent_thread_id: "thr_a",
+      child_thread_id: "thr_sa_bisect",
+      task: "Bisect the auth fixture change on CI",
+      harness: "codex",
+      host: "atlas",
+      model: "gpt-5.1-codex",
+      isolation: "worktree",
+      branch: "h4rn/fix-flaky-auth-bisect",
+      state: "awaiting_approval",
+      depth: 1,
+      created_at: iso(-7 * 60_000),
+      started_at: iso(-7 * 60_000),
+      progress: {
+        turns_started: 5,
+        turns_completed: 4,
+        tokens: 12_800,
+        elapsed_ms: 96_000,
+        current: "Waiting to run `cargo test -p h4rn-daemon auth`",
+      },
+    }),
+    makeSubagent({
+      subagent_id: "sa_retry",
+      parent_thread_id: "thr_a",
+      child_thread_id: "thr_sa_retry",
+      task: "Trace the flaky retry timer in the web suite",
+      harness: "opencode",
+      host: "atlas-wsl",
+      model: "claude-sonnet-5-5",
+      state: "running",
+      depth: 1,
+      created_at: iso(-4 * 60_000),
+      started_at: iso(-4 * 60_000),
+      progress: {
+        turns_started: 3,
+        turns_completed: 2,
+        tokens: 6_100,
+        elapsed_ms: 41_000,
+        current: "Reading apps/web/src/retry.test.ts",
+      },
+    }),
+    makeSubagent({
+      subagent_id: "sa_retry_fixture",
+      parent_thread_id: "thr_a",
+      child_thread_id: "thr_sa_retry_fixture",
+      task: "Shrink the retry fixture so the timer cannot drift",
+      harness: "opencode",
+      host: "atlas-wsl",
+      model: "claude-sonnet-5-5",
+      state: "starting",
+      depth: 2,
+      created_at: iso(-40_000),
+      progress: {
+        turns_started: 0,
+        turns_completed: 0,
+        tokens: 0,
+        elapsed_ms: 8_000,
+        current: "Preparing workspace",
+      },
+    }),
+    makeSubagent({
+      subagent_id: "sa_audit",
+      parent_thread_id: "thr_a",
+      child_thread_id: "thr_sa_audit",
+      task: "Audit the session store for double writes",
+      harness: "claude_code",
+      host: "atlas",
+      model: "claude-sonnet-5-5",
+      state: "completed",
+      depth: 1,
+      created_at: iso(-19 * 60_000),
+      started_at: iso(-19 * 60_000),
+      finished_at: iso(-11 * 60_000),
+      progress: {
+        turns_started: 8,
+        turns_completed: 8,
+        tokens: 31_400,
+        elapsed_ms: 214_000,
+        current: null,
+      },
+      result: {
+        text: "The store writes the same session twice when a refresh lands mid-flight. One guarded write fixes it; tests added.",
+        usage: {
+          input_tokens: 22_400,
+          output_tokens: 9_000,
+          cached_input_tokens: 6_000,
+          cost_micros: 0,
+          duration_ms: 214_000,
+        },
+        files_changed: [
+          { path: "src/auth/session.ts", status: "M" },
+          { path: "src/auth/session.test.ts", status: "A" },
+        ],
+        error: null,
+      },
+    }),
+  ];
+  for (const view of seeds) map.set(view.subagent_id, view);
+  return map;
+}
+
 /** An in-browser daemon used by `?mock=1` for development and screenshots. */
 const MOCK_PROXY_MODELS: ProxyModel[] = [
   {
@@ -1608,6 +1766,7 @@ class MockDaemon {
   private nextStream = 7_000;
   private readonly startedStreams = new Set<string>();
   private readonly terminals = new Map<string, MockTerminal>();
+  private readonly subagents: Map<string, SubagentView>;
   private readonly fs = createMockFs();
   private mcpServers: McpServerView[];
   private skillInventory: SkillInventory;
@@ -1642,6 +1801,7 @@ class MockDaemon {
     this.mcpServers = buildMcpServers();
     this.skillInventory = buildSkillInventory();
     this.skillConflicts = buildSkillConflicts();
+    this.subagents = buildSubagents(scenario);
     // The error scenario renders the cached inbox, then fails the reload so
     // the partial-host banner and the thread error state are both visible.
     this.failLists = scenario === "error" && this.attempt > 0;
@@ -2178,6 +2338,87 @@ class MockDaemon {
           exit,
         };
         this.handlers.onMessage(wire({ kind: "terminal_event", event: notice }));
+        return;
+      }
+      case "subagent": {
+        const request = body.request;
+        if (request.type === "list_subagents") {
+          const views = [...this.subagents.values()]
+            .filter(
+              (view) =>
+                (request.parent_thread === null ||
+                  view.parent_thread_id === request.parent_thread) &&
+                (request.include_finished ||
+                  (view.state !== "completed" &&
+                    view.state !== "cancelled" &&
+                    view.state !== "failed" &&
+                    view.state !== "budget_exceeded")),
+            )
+            .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+          this.ok(frame.id, { type: "subagents", subagents: views });
+          return;
+        }
+        if (request.type === "get_subagent") {
+          const view = this.subagents.get(request.subagent_id);
+          if (!view) {
+            this.err(frame.id, "not_found", "That subagent is gone.", null);
+            return;
+          }
+          this.ok(frame.id, { type: "subagent", subagent: view });
+          return;
+        }
+        if (request.type === "cancel_subagent") {
+          const view = this.subagents.get(request.subagent_id);
+          if (!view) {
+            this.err(frame.id, "not_found", "That subagent is gone.", null);
+            return;
+          }
+          const terminal =
+            view.state === "completed" ||
+            view.state === "cancelled" ||
+            view.state === "failed" ||
+            view.state === "budget_exceeded";
+          if (!terminal) {
+            view.state = "cancelled";
+            view.agent_state = "idle";
+            view.finished_at = iso();
+            view.progress = { ...view.progress, current: null };
+            this.emitSubagent(view, "subagent_finished");
+          }
+          this.ok(frame.id, { type: "subagent", subagent: view });
+          return;
+        }
+        const parent = this.threads.get(request.request.parent_thread);
+        const task = request.request.task.trim() || "Untitled delegation";
+        const view = makeSubagent({
+          subagent_id: uid("sa"),
+          parent_thread_id: request.request.parent_thread,
+          task,
+          harness: request.request.harness ?? parent?.summary.harness ?? "claude_code",
+          host: request.request.host ?? parent?.summary.host ?? this.hosts[0]?.host_id ?? "atlas",
+          model: request.request.model ?? parent?.summary.model ?? "claude-sonnet-5-5",
+          isolation: request.request.isolation,
+          workspace_path: parent?.summary.workspace_path ?? "/home/you/code/h4rn",
+          context: request.request.context,
+          budget: {
+            max_turns: request.request.budget.max_turns ?? 20,
+            max_wall_time_secs: request.request.budget.max_wall_time_secs ?? 900,
+            max_tokens: request.request.budget.max_tokens ?? 50_000,
+          },
+          state: "starting",
+          created_at: iso(),
+          progress: {
+            turns_started: 0,
+            turns_completed: 0,
+            tokens: 0,
+            elapsed_ms: 0,
+            current: "Preparing workspace",
+          },
+        });
+        this.subagents.set(view.subagent_id, view);
+        this.emitSubagent(view, "subagent_spawned");
+        this.ok(frame.id, { type: "subagent", subagent: view });
+        this.advanceSubagent(view.subagent_id);
         return;
       }
       case "begin_upload": {
@@ -3582,6 +3823,84 @@ class MockDaemon {
     this.later(350, tick);
   }
 
+  private emitSubagent(
+    view: SubagentView,
+    type: "subagent_spawned" | "subagent_updated" | "subagent_finished",
+  ): void {
+    this.emit(view.parent_thread_id, {
+      type,
+      parent_thread_id: view.parent_thread_id,
+      subagent: view,
+    });
+  }
+
+  /** Walks a freshly spawned child through a short, plausible run. */
+  private advanceSubagent(id: string): void {
+    this.later(700, () => {
+      const view = this.subagents.get(id);
+      if (!view || view.state !== "starting") return;
+      view.state = "running";
+      view.agent_state = "thinking";
+      view.started_at = iso();
+      view.child_thread_id = uid("thr");
+      view.progress = {
+        turns_started: 1,
+        turns_completed: 0,
+        tokens: 900,
+        elapsed_ms: 700,
+        current: "Planning the change",
+      };
+      this.emitSubagent(view, "subagent_updated");
+      this.tickSubagent(id, 1);
+    });
+  }
+
+  private tickSubagent(id: string, turn: number): void {
+    this.later(1_400, () => {
+      const view = this.subagents.get(id);
+      if (!view || view.state !== "running") return;
+      const turns = turn + 1;
+      const tokens = view.progress.tokens + 1_800 + turn * 400;
+      const elapsed = view.progress.elapsed_ms + 1_400;
+      if (turns > 3) {
+        view.state = "completed";
+        view.agent_state = "done";
+        view.finished_at = iso();
+        view.progress = {
+          turns_started: turns,
+          turns_completed: turns,
+          tokens,
+          elapsed_ms: elapsed,
+          current: null,
+        };
+        view.result = {
+          text: `Finished: ${view.task}.`,
+          usage: {
+            input_tokens: Math.round(tokens * 0.7),
+            output_tokens: Math.round(tokens * 0.3),
+            cached_input_tokens: 0,
+            cost_micros: 0,
+            duration_ms: elapsed,
+          },
+          files_changed: [],
+          error: null,
+        };
+        this.emitSubagent(view, "subagent_finished");
+        return;
+      }
+      view.agent_state = turn % 2 === 0 ? "reading" : "editing";
+      view.progress = {
+        turns_started: turns,
+        turns_completed: turns - 1,
+        tokens,
+        elapsed_ms: elapsed,
+        current: turn % 2 === 0 ? "Reading the diff" : "Applying the change",
+      };
+      this.emitSubagent(view, "subagent_updated");
+      this.tickSubagent(id, turns);
+    });
+  }
+
   private emit(threadId: string, event: Event): void {
     if (this.disposed) return;
     const seq = this.seq + 1;
@@ -3658,6 +3977,33 @@ export function createMockTransport(scenario: string, attempt = 0): Transport {
         openTimer = null;
         if (closed) return;
         handlers.onOpen();
+        // A plausible multipath snapshot so the hosts menu and footer render
+        // a real path, RTT and encryption state instead of a placeholder.
+        const now = new Date().toISOString();
+        const status: TransportStatus = {
+          session_id: "mock-session",
+          state: "online",
+          active: {
+            kind: "direct",
+            endpoint: "192.168.1.24:47800",
+            state: "active",
+            rtt_ms: 12,
+            encrypted: true,
+          },
+          candidates: [
+            {
+              kind: "direct",
+              endpoint: "192.168.1.24:47800",
+              state: "active",
+              rtt_ms: 12,
+              encrypted: true,
+            },
+          ],
+          switched: false,
+          detail: null,
+          updated_at: now,
+        };
+        handlers.onTransportStatus?.(status);
         if (attempt === 0 && (scenario === "offline" || scenario === "error")) {
           closeTimer = setTimeout(
             () => {

@@ -22,6 +22,8 @@ import { KeyGlyphs, MOD, SHIFT } from "@/components/common/Kbd";
 import { ThreadRow } from "@/components/inbox/ThreadRow";
 import { serverStatus } from "@/features/mcp/labels";
 import { loadMcpServers, useMcp } from "@/features/mcp/store";
+import { SignOutButton } from "@/features/remote/ConnectSignIn";
+import { activateMachine, forgetMachine, useRemote } from "@/features/remote/remoteStore";
 import { loadSkills, useSkills } from "@/features/skills/store";
 import type { ThreadSummary, ThreadTab } from "@/gen";
 import { useNow } from "@/hooks/use-now";
@@ -124,12 +126,71 @@ type HostRow = {
   sub: boolean;
   harnesses: string;
   latency: string | null;
+  /** Path the session uses, when this row is the active machine. */
+  path: string | null;
+  /** Connect machine id, when this row can be switched to. */
+  machineId: string | null;
+  active: boolean;
 };
+
+function pathLabel(transport: string): string {
+  if (transport === "tailscale") return "Tailscale";
+  if (transport === "relay") return "Relay";
+  return "Direct";
+}
 
 function useHostRows(): HostRow[] {
   const hosts = useApp((state) => state.hosts);
+  const connection = useApp((state) => state.connection);
+  const machines = useRemote((state) => state.machines);
+  const activeMachineId = useRemote((state) => state.activeMachineId);
+  const signedIn = useRemote((state) => state.user !== null);
   const now = useNow();
   return useMemo(() => {
+    if (signedIn && machines.length > 0) {
+      // A connect machine is addressable per host: a Windows box and each of
+      // its WSL distros are separate rows. While a machine is active the live
+      // transport decides presence and RTT; otherwise connect's presence does.
+      const localByName = new Map(
+        Object.values(hosts).map((host) => [host.name.toLowerCase(), host]),
+      );
+      const rows: HostRow[] = [];
+      for (const machine of machines) {
+        const active = machine.id === activeMachineId;
+        const machineHosts =
+          machine.hosts.length > 0
+            ? machine.hosts
+            : [{ id: machine.id, name: machine.name, kind: "host" as const, distro: null }];
+        for (const host of machineHosts) {
+          const local = localByName.get(host.name.toLowerCase());
+          const online = active ? connection.status === "online" : machine.online;
+          const latency = active
+            ? (local?.latency_ms ?? connection.latencyMs)
+            : (local?.latency_ms ?? null);
+          const path = online ? (active ? connection.transport : (local?.path ?? null)) : null;
+          rows.push({
+            id: host.id,
+            name: host.name,
+            online,
+            lastSeen: online
+              ? null
+              : machine.last_seen
+                ? relativeAge(machine.last_seen, now)
+                : null,
+            sub: host.kind === "wsl",
+            harnesses: (local?.harnesses ?? []).map(harnessLabel).join(", "),
+            latency:
+              online && latency !== null && latency !== undefined
+                ? `${Math.round(latency)} ms`
+                : null,
+            path: path ? pathLabel(path) : null,
+            machineId: machine.id,
+            active,
+          });
+        }
+      }
+      return rows;
+    }
     const list = Object.values(hosts);
     const roots = list
       .filter((host) => !host.platform.startsWith("wsl:"))
@@ -144,7 +205,19 @@ function useHostRows(): HostRow[] {
         lastSeen: host.online ? null : relativeAge(host.last_seen ?? "", now),
         sub,
         harnesses: host.harnesses.map(harnessLabel).join(", "),
-        latency: null,
+        latency:
+          host.latency_ms !== null && host.latency_ms !== undefined
+            ? `${Math.round(host.latency_ms)} ms`
+            : connection.status === "online" && connection.latencyMs !== null && rows.length === 0
+              ? `${Math.round(connection.latencyMs)} ms`
+              : null,
+        path: host.online
+          ? host.path
+            ? pathLabel(host.path)
+            : pathLabel(connection.transport)
+          : null,
+        machineId: null,
+        active: rows.length === 0 && host.online && connection.status === "online",
       });
     };
     for (const host of roots) {
@@ -157,7 +230,7 @@ function useHostRows(): HostRow[] {
       if (!rows.some((row) => row.id === child.host_id)) push(child, true);
     }
     return rows;
-  }, [hosts, now]);
+  }, [hosts, machines, activeMachineId, signedIn, connection, now]);
 }
 
 function HostsPopover({
@@ -169,14 +242,25 @@ function HostsPopover({
   connection: { status: string; latencyMs: number | null; transport: string };
   onClose: () => void;
 }) {
+  const user = useRemote((state) => state.user);
+  const connectUrl = useRemote((state) => state.connectUrl);
+  const busy = useRemote((state) => state.busy);
   const online = rows.filter((row) => row.online).length;
-  const firstOnline = rows.find((row) => row.online);
+  const active = rows.find((row) => row.active) ?? rows.find((row) => row.online);
   const dots = (row: HostRow) =>
     row.online ? (
       <span className="q-dot on" role="img" aria-label="online" />
     ) : (
       <span className="q-dot off" role="img" aria-label="offline" />
     );
+  const connectionLine =
+    connection.status === "online"
+      ? `${pathLabel(connection.transport)} to ${active?.name ?? "local"}${
+          connection.latencyMs !== null ? ` · ${Math.round(connection.latencyMs)} ms` : ""
+        } · encrypted`
+      : connection.status === "connecting"
+        ? "Connecting…"
+        : "Offline";
   return (
     <div className="q-hostpop" role="menu" aria-label="Hosts">
       <div className="q-hp-h">
@@ -194,10 +278,18 @@ function HostsPopover({
           <button
             key={row.id}
             type="button"
-            className={cn("q-host", row.sub && "sub")}
+            className={cn("q-host", row.sub && "sub", row.active && "on")}
             role="menuitem"
             title={row.harnesses}
+            aria-current={row.active ? "true" : undefined}
+            disabled={row.machineId !== null && busy !== null}
             onClick={() => {
+              if (row.machineId) {
+                void activateMachine(row.machineId).then((ok) => {
+                  if (ok) onClose();
+                });
+                return;
+              }
               navigate({ kind: "placeholder", surface: "settings", path: settingsPath("hosts") });
               onClose();
             }}
@@ -214,9 +306,7 @@ function HostsPopover({
             </span>
             {row.online ? (
               <span className="meta q-num">
-                {row.id === firstOnline?.id && connection.latencyMs !== null
-                  ? `${Math.round(connection.latencyMs)} ms`
-                  : "Online"}
+                {row.path ? `${row.path}${row.latency ? ` · ${row.latency}` : ""}` : "Online"}
               </span>
             ) : (
               <span
@@ -231,14 +321,44 @@ function HostsPopover({
           </button>
         ))
       )}
-      <div className="q-hp-conn">
-        {connection.status === "online"
-          ? `${connection.transport === "mock" ? "Direct" : connection.transport} to ${firstOnline?.name ?? "local"}`
-          : connection.status === "connecting"
-            ? "Connecting…"
-            : "Offline"}
-      </div>
+      <div className="q-hp-conn">{connectionLine}</div>
+      {active?.active && active.machineId ? (
+        <button
+          type="button"
+          className="q-nav"
+          role="menuitem"
+          onClick={() => {
+            forgetMachine();
+            onClose();
+          }}
+        >
+          <WifiOffIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+          <span className="lbl">Disconnect from {active.name}</span>
+        </button>
+      ) : null}
       <div className="q-hp-sep" />
+      {user ? (
+        <div className="q-hp-account">
+          <span className="q-account-name">{user.display_name ?? user.email ?? user.id}</span>
+          <span className="q-faint" style={{ fontSize: 11 }}>
+            {connectUrl}
+          </span>
+          <SignOutButton onDone={onClose} />
+        </div>
+      ) : (
+        <button
+          type="button"
+          className="q-nav"
+          role="menuitem"
+          onClick={() => {
+            navigate({ kind: "placeholder", surface: "settings", path: settingsPath("devices") });
+            onClose();
+          }}
+        >
+          <ServerIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+          <span className="lbl">Sign in to h4rn-connect…</span>
+        </button>
+      )}
       <button
         type="button"
         className="q-nav"
@@ -329,13 +449,15 @@ function SidebarFooter({
 }) {
   const [popoverOpen, setPopoverOpen] = useState(false);
   const online = rows.filter((row) => row.online).length;
+  const machines = new Set(rows.map((row) => row.machineId).filter(Boolean)).size;
+  const noun = rows.some((row) => row.sub) || rows.length !== machines ? "hosts" : "machines";
   const status = loading
     ? "Connecting…"
     : offline
       ? "Offline"
       : empty
         ? (rows[0]?.name ?? "No hosts")
-        : `${online} of ${rows.length} hosts`;
+        : `${online} of ${rows.length} ${noun}`;
 
   return (
     <>
@@ -761,6 +883,7 @@ function SettingsSidebar() {
   const skillInventory = useSkills((state) => state.inventory);
   const skills = skillInventory?.skills ?? NO_SKILLS;
   const daemonHost = useApp((state) => state.localHostId);
+  const deviceCount = useRemote((state) => state.devices.length);
   // The Tools group shows counts for both halves, so read them once the daemon
   // has reported its host rather than leaving a misleading zero.
   useEffect(() => {
@@ -834,7 +957,9 @@ function SettingsSidebar() {
                 <item.icon className="q-icon" strokeWidth={1.5} aria-hidden />
                 <span className="lbl">{item.label}</span>
                 {item.key === "hosts" || item.key === "devices" ? (
-                  <span className="ct q-num">{item.key === "hosts" ? rows.length : 4}</span>
+                  <span className="ct q-num">
+                    {item.key === "hosts" ? rows.length : deviceCount}
+                  </span>
                 ) : null}
               </button>
               {item.key === "providers" ? (

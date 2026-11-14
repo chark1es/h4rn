@@ -193,6 +193,55 @@ export function connect(config_json) {
 }
 
 /**
+ * Signs one h4rn-connect DPoP proof and returns the header triple as JSON.
+ *
+ * The canonical string is defined by `h4rn-connect`'s `dpop` module. Keeping
+ * it here means TypeScript never constructs or signs the proof itself.
+ * @param {string} identity
+ * @param {string} method
+ * @param {string} path
+ * @param {bigint} timestamp
+ * @param {string} nonce
+ * @returns {string}
+ */
+export function connect_proof(identity, method, path, timestamp, nonce) {
+    let deferred7_0;
+    let deferred7_1;
+    try {
+        const val5 = BigInt.asIntN(64, timestamp);
+        let ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3;
+        try {
+            ptr0 = passStringToWasm0(identity, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            len0 = WASM_VECTOR_LEN;
+            ptr1 = passStringToWasm0(method, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            len1 = WASM_VECTOR_LEN;
+            ptr2 = passStringToWasm0(path, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            len2 = WASM_VECTOR_LEN;
+            ptr3 = passStringToWasm0(nonce, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            len3 = WASM_VECTOR_LEN;
+        } catch (e) {
+            if (ptr3) { wasm.__wbindgen_free(ptr3, len3 * 1, 1); }
+            if (ptr2) { wasm.__wbindgen_free(ptr2, len2 * 1, 1); }
+            if (ptr1) { wasm.__wbindgen_free(ptr1, len1 * 1, 1); }
+            if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 1, 1); }
+            throw e;
+        }
+        const ret = wasm.connect_proof(ptr0, len0, ptr1, len1, ptr2, len2, val5, ptr3, len3);
+        var ptr6 = ret[0];
+        var len6 = ret[1];
+        if (ret[3]) {
+            ptr6 = 0; len6 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred7_0 = ptr6;
+        deferred7_1 = len6;
+        return getStringFromWasm0(ptr6, len6);
+    } finally {
+        wasm.__wbindgen_free(deferred7_0, deferred7_1, 1);
+    }
+}
+
+/**
  * Generates a fresh device identity, encoded for persistence by JS.
  * @returns {string}
  */
@@ -212,6 +261,36 @@ export function generate_identity() {
         return getStringFromWasm0(ptr1, len1);
     } finally {
         wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * Returns the public halves of an encoded identity as JSON.
+ *
+ * h4rn-connect registers these keys at sign-in: `proofPublicKey` signs DPoP
+ * proofs and `noisePublic` is the key the daemon allowlists. The secret half
+ * never leaves wasm.
+ * @param {string} identity
+ * @returns {string}
+ */
+export function identity_public(identity) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(identity, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.identity_public(ptr0, len0);
+        var ptr2 = ret[0];
+        var len2 = ret[1];
+        if (ret[3]) {
+            ptr2 = 0; len2 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred3_0 = ptr2;
+        deferred3_1 = len2;
+        return getStringFromWasm0(ptr2, len2);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
     }
 }
 

@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
@@ -147,6 +148,14 @@ impl Harness for FakeHarness {
             }
         }
 
+        // A test can slow the echo turn down so a UI e2e has time to cancel a
+        // live child. Normal daemon builds never set this.
+        let delay = std::env::var("H4RN_FAKE_HARNESS_DELAY_MS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(Duration::from_millis)
+            .unwrap_or_default();
+
         Ok(Box::new(FakeSession {
             kind: self.kind,
             workspace: spec.workspace,
@@ -155,6 +164,7 @@ impl Harness for FakeHarness {
             script: self.script.clone(),
             session_scripts,
             primed,
+            delay,
             closed: false,
         }))
     }
@@ -170,6 +180,8 @@ pub struct FakeSession {
     session_scripts: Option<Arc<SessionScripts>>,
     /// The daemon's first `send` is the input that started the scripted turn.
     primed: bool,
+    /// Env-gated pause before an echo turn, for cancel-flow e2e tests.
+    delay: Duration,
     closed: bool,
 }
 
@@ -181,6 +193,10 @@ impl HarnessSession for FakeSession {
                 harness: self.kind,
                 message: "session is shut down".into(),
             });
+        }
+
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
         }
 
         if let Some(scripts) = &self.session_scripts {
