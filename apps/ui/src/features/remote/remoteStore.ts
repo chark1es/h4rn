@@ -10,6 +10,12 @@ import { useSyncExternalStore } from "react";
 
 import type { ConnectDevice, ConnectUser, MachineSummary, PairingInfo } from "@/gen";
 import { readBootConfig } from "@/lib/client/config";
+import { takeConnectPair, takeOidcCallback } from "@/lib/platform/pending";
+import {
+  readSessionState,
+  removeSessionState,
+  writeSessionState,
+} from "@/lib/platform/sessionState";
 import { pushToast, restartConnection } from "@/lib/store/appStore";
 import {
   type ActiveRemote,
@@ -339,8 +345,15 @@ async function finishRedirectCallback(): Promise<void> {
   if (typeof window === "undefined") return;
   if (window.location.pathname !== "/auth/callback") return;
   const params = new URLSearchParams(window.location.search);
-  await finishCallback(params);
+  const returnTo = await finishCallback(params);
   try {
+    if (returnTo && returnTo !== "/auth/callback") {
+      // Reloading is deliberate: the app booted on the callback route and its
+      // router already read that path. A fresh load returns to the route the
+      // person left, with the new credentials already in the secret store.
+      window.location.replace(returnTo);
+      return;
+    }
     window.history.replaceState({}, "", "/");
   } catch {
     // A webview that refuses history edits still has a working app.
@@ -352,63 +365,58 @@ type PendingLogin = {
   state: string;
   redirectUri: string;
   connectUrl: string;
+  /** Where to return after the provider redirects back (path plus query). */
+  returnTo: string;
 };
 
 function readPendingLogin(): PendingLogin | null {
+  const raw = readSessionState(PENDING_LOGIN_KEY);
+  if (!raw) return null;
   try {
-    const raw = window.sessionStorage.getItem(PENDING_LOGIN_KEY);
-    return raw ? (JSON.parse(raw) as PendingLogin) : null;
+    return JSON.parse(raw) as PendingLogin;
   } catch {
     return null;
   }
 }
 
 function writePendingLogin(pending: PendingLogin): void {
-  try {
-    window.sessionStorage.setItem(PENDING_LOGIN_KEY, JSON.stringify(pending));
-  } catch {
-    // The state check still works for this page load through the URL.
-  }
+  // OIDC state and the return path are short-lived and non-secret; the code
+  // itself never reaches storage, and tokens go to the platform secret store.
+  writeSessionState(PENDING_LOGIN_KEY, JSON.stringify(pending));
 }
 
 function clearPendingLogin(): void {
-  try {
-    window.sessionStorage.removeItem(PENDING_LOGIN_KEY);
-  } catch {
-    // Ignore.
-  }
+  removeSessionState(PENDING_LOGIN_KEY);
 }
 
 /** Replays a cold-start deep link that arrived before React mounted. */
 async function consumePendingDeepLinks(): Promise<void> {
-  let pair: string | null = null;
-  let oidc: Record<string, string> | null = null;
-  try {
-    pair = window.sessionStorage.getItem("h4rn.pending-connect-pair");
-    const rawOidc = window.sessionStorage.getItem("h4rn.pending-oidc");
-    window.sessionStorage.removeItem("h4rn.pending-connect-pair");
-    window.sessionStorage.removeItem("h4rn.pending-oidc");
-    if (rawOidc) oidc = JSON.parse(rawOidc) as Record<string, string>;
-  } catch {
-    // No session storage means no pending link.
-  }
+  const pair = takeConnectPair();
+  const oidc = takeOidcCallback();
   if (oidc) await finishCallback(new URLSearchParams(oidc));
   if (pair) await pairMachine(pair);
 }
 
-async function finishCallback(params: URLSearchParams): Promise<void> {
+/**
+ * Completes a sign-in callback.
+ *
+ * Returns the path to return to on success (used by the full-page redirect
+ * flow); deep-link and loopback callers ignore it because their view never
+ * navigated away.
+ */
+async function finishCallback(params: URLSearchParams): Promise<string | null> {
   const error = params.get("error");
   if (error) {
     patch({ phase: "error", error: params.get("error_description") ?? error });
     clearPendingLogin();
-    return;
+    return null;
   }
   const code = params.get("code");
   const state = params.get("state");
   const pending = readPendingLogin();
   if (!code || !state || !pending || pending.state !== state) {
     patch({ phase: "error", error: "The sign-in callback is missing its state." });
-    return;
+    return null;
   }
   patch({ phase: "signing_in", busy: "Completing sign-in" });
   try {
@@ -421,8 +429,10 @@ async function finishCallback(params: URLSearchParams): Promise<void> {
     );
     await establish(pending.connectUrl, result.tokens, result.user, result.device);
     clearPendingLogin();
+    return pending.returnTo;
   } catch (failure) {
     patch({ phase: "error", error: describe(failure) });
+    return null;
   } finally {
     patch({ busy: null });
   }
@@ -537,6 +547,10 @@ export async function signIn(provider: string): Promise<void> {
       state: start.state,
       redirectUri,
       connectUrl: state.connectUrl,
+      returnTo:
+        typeof window === "undefined"
+          ? "/"
+          : `${window.location.pathname}${window.location.search}`,
     });
 
     if (shell === "desktop") {
@@ -551,8 +565,19 @@ export async function signIn(provider: string): Promise<void> {
       return;
     }
 
-    // Browsers and the mobile webview both navigate; the mobile shell returns
-    // through `h4rn://callback`, which the deep-link adapter re-dispatches.
+    if (shell === "mobile") {
+      // Open the provider in the system browser so this webview keeps the app
+      // bundle. The provider redirects to `h4rn://callback`, which the OS
+      // hands back to the deep-link adapter.
+      try {
+        await tauriInvoke("plugin:opener|open_url", { url: start.authorize_url });
+        return;
+      } catch {
+        // Fall back to an in-webview navigation; the deep link still lands.
+      }
+    }
+
+    // Browsers navigate and come back through `/auth/callback`.
     window.location.assign(start.authorize_url);
   } catch (error) {
     patch({ phase: "error", busy: null, error: describe(error) });

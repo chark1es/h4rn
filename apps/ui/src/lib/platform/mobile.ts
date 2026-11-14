@@ -10,9 +10,10 @@
  *
  * - read a pairing from a cold-start deep link (`h4rn://connect?daemon=&token=`),
  *   a warm deep link, the Android Keystore, or the form below;
- * - persist the pairing through the shell's `secret_set` command;
- * - put `?daemon=` on the URL and the token in localStorage, which is exactly
- *   what `lib/client/config.ts` already reads;
+ * - persist it through the platform secret store (Android Keystore / iOS
+ *   Keychain behind `secret_*`), never `localStorage` (ADR-016, ADR-038);
+ * - put only the non-secret `?daemon=` on the URL; the token stays in the
+ *   secret store and an in-memory cache that `lib/client/config.ts` reads;
  * - scan a pairing QR with the barcode-scanner plugin;
  * - make `env(safe-area-inset-*)` available by forcing `viewport-fit=cover`.
  *
@@ -20,9 +21,11 @@
  * shell, build pipeline and native integrations. A later UI pass replaces it.
  */
 
+import { rememberConnectPair, rememberOidcCallback } from "./pending";
+import { getSecret, peekSecret, prepareSecrets, setSecret } from "./secrets";
+
 const PAIRING_KEY = "h4rn.pairing";
 const TOKEN_KEY = "h4rn.token";
-const DAEMON_KEY = "h4rn.daemon";
 
 type TauriInternals = {
   invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
@@ -31,8 +34,6 @@ type TauriInternals = {
 type Pairing = { daemon: string; token: string };
 
 type ScanResult = { content: string };
-
-type SecretResponse = { value: string | null } | null;
 
 /** Tauri mobile plugins reject with `{ message }` objects, not `Error`s. */
 function describeError(error: unknown): string {
@@ -80,15 +81,11 @@ export function parsePairingUrl(raw: string): Pairing | null {
 
   if (target === "oidc" || target === "callback") {
     // The platform has no auth screen of its own; hand the callback to the UI
-    // (or to a future auth flow) without touching the daemon connection.
+    // (or to a future auth flow) without touching the daemon connection. A
+    // cold-start link arrives before React mounts, so keep it in memory for
+    // the remote store; an authorization code is never written to storage.
     const detail = Object.fromEntries(url.searchParams.entries());
-    try {
-      // A cold-start deep link is consumed before React mounts its listeners,
-      // so keep a copy the remote store can pick up during boot.
-      window.sessionStorage.setItem("h4rn.pending-oidc", JSON.stringify(detail));
-    } catch {
-      // The dispatch below still serves a warm link.
-    }
+    rememberOidcCallback(detail);
     window.dispatchEvent(new CustomEvent("h4rn-oidc-callback", { detail }));
     return null;
   }
@@ -97,11 +94,7 @@ export function parsePairingUrl(raw: string): Pairing | null {
   // remote feature claims it. It carries no daemon token, so handle it before
   // the local pairing shape below.
   if (target === "pair" && url.searchParams.get("c") && url.searchParams.get("m")) {
-    try {
-      window.sessionStorage.setItem("h4rn.pending-connect-pair", raw);
-    } catch {
-      // The dispatch below still serves a warm link.
-    }
+    rememberConnectPair(raw);
     window.dispatchEvent(new CustomEvent("h4rn-connect-pair", { detail: raw }));
     return null;
   }
@@ -123,11 +116,15 @@ function currentQueryPairing(): Pairing | null {
 }
 
 async function readStoredPairing(): Promise<Pairing | null> {
-  if (!internals) return null;
   try {
-    const response = await internals.invoke<SecretResponse>("secret_get", { key: PAIRING_KEY });
-    const raw = response?.value;
+    const raw = (await getSecret(PAIRING_KEY)) ?? (await getSecret(TOKEN_KEY)) ?? null;
     if (!raw) return null;
+    // Older builds stored only the token in `h4rn.token`; the pairing record
+    // is JSON. Accept either so an upgrade keeps the device connected.
+    if (!raw.trimStart().startsWith("{")) {
+      const daemon = new URLSearchParams(window.location.search).get("daemon");
+      return daemon ? { daemon: normaliseDaemon(daemon), token: raw } : null;
+    }
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== "object" || parsed === null) return null;
     const record = parsed as Record<string, unknown>;
@@ -138,30 +135,34 @@ async function readStoredPairing(): Promise<Pairing | null> {
   }
 }
 
-/** Persists a pairing everywhere the app needs it, reloading only if necessary. */
-async function commitPairing(pairing: Pairing): Promise<void> {
-  if (!internals) return;
-
-  const tokenChanged = window.localStorage.getItem(TOKEN_KEY) !== pairing.token;
-  window.localStorage.setItem(TOKEN_KEY, pairing.token);
-  window.localStorage.setItem(DAEMON_KEY, pairing.daemon);
-  try {
-    await internals.invoke("secret_set", {
-      key: PAIRING_KEY,
-      value: JSON.stringify(pairing),
-    });
-  } catch {
-    // A keystore failure must not prevent the session; the next cold start asks
-    // again, while this launch still works from localStorage.
-  }
-
+/**
+ * Persists a pairing everywhere the app needs it, reloading only when the URL
+ * or the token actually changed.
+ *
+ * The daemon URL is a non-secret address and stays in the query string so a
+ * reload boots against the right host. The token is written to the platform
+ * secret store and never to `localStorage` or the URL.
+ */
+export async function commitPairing(pairing: Pairing): Promise<void> {
+  const tokenChanged = peekSecret(TOKEN_KEY) !== pairing.token;
   const url = new URL(window.location.href);
   const daemonChanged = url.searchParams.get("daemon") !== pairing.daemon;
+
+  await setSecret(TOKEN_KEY, pairing.token);
+  await setSecret(PAIRING_KEY, JSON.stringify(pairing));
+  // Clean up anything a pre-ADR-038 build left behind, including the token
+  // from a dev deep link that put it in the address bar.
+  try {
+    window.localStorage.removeItem(TOKEN_KEY);
+    window.localStorage.removeItem("h4rn.daemon");
+    window.localStorage.removeItem(PAIRING_KEY);
+  } catch {
+    // A locked-down webview has nothing to clean.
+  }
+
   if (!tokenChanged && !daemonChanged) return;
 
   url.searchParams.set("daemon", pairing.daemon);
-  // The token stays out of the URL; it is already in localStorage and the
-  // keystore. A dev link that supplies it is consumed and then dropped.
   url.searchParams.delete("token");
   window.location.replace(url.toString());
 }
@@ -440,6 +441,20 @@ async function boot(): Promise<void> {
   renderConnect();
 }
 
+/**
+ * Boots the platform layer before React mounts.
+ *
+ * Every shell loads its secret store first: `readBootConfig()` is synchronous
+ * and needs the daemon token from the cache. On a mobile shell this also
+ * consumes a cold-start pairing/deep link and repaints the safe-area CSS.
+ */
+export async function preparePlatform(): Promise<void> {
+  await prepareSecrets();
+  if (!isMobileShell) return;
+  watchDeepLinks();
+  await boot();
+}
+
 function watchDeepLinks(): void {
   window.addEventListener("h4rn-deep-link", (event) => {
     const detail = (event as CustomEvent<unknown>).detail;
@@ -460,9 +475,4 @@ function watchDeepLinks(): void {
       }
     }
   });
-}
-
-if (isMobileShell) {
-  watchDeepLinks();
-  void boot();
 }

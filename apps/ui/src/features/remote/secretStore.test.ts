@@ -1,4 +1,6 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { resetSecretStoreForTests } from "@/lib/platform/secrets";
 
 import { deleteSecret, getSecret, setSecret } from "./secretStore";
 
@@ -20,94 +22,105 @@ function memoryStorage(): Storage {
   };
 }
 
+function stubWindow(extra: Record<string, unknown> = {}): {
+  local: Storage;
+  session: Storage;
+} {
+  const local = memoryStorage();
+  const session = memoryStorage();
+  vi.stubGlobal("window", { localStorage: local, sessionStorage: session, ...extra });
+  return { local, session };
+}
+
+beforeEach(() => {
+  resetSecretStoreForTests();
+});
+
 afterEach(() => {
   vi.unstubAllGlobals();
 });
 
 describe("web secret store", () => {
-  it("uses sessionStorage, never localStorage", async () => {
-    const session = memoryStorage();
-    const local = memoryStorage();
-    vi.stubGlobal("window", { sessionStorage: session, localStorage: local });
+  it("never writes a connect secret to localStorage or sessionStorage", async () => {
+    const { local, session } = stubWindow();
 
-    await setSecret("token", "abc");
-    expect(session.getItem("h4rn.remote.token")).toBe("abc");
-    expect(local.getItem("h4rn.remote.token")).toBeNull();
-    await expect(getSecret("token")).resolves.toBe("abc");
+    await setSecret("credentials", "refresh-token");
+    await expect(getSecret("credentials")).resolves.toBe("refresh-token");
 
-    await deleteSecret("token");
-    await expect(getSecret("token")).resolves.toBeNull();
-  });
+    expect(local.length).toBe(0);
+    expect(session.length).toBe(0);
+    expect(local.getItem("h4rn.remote.credentials")).toBeNull();
+    expect(local.getItem("refresh-token")).toBeNull();
 
-  it("falls back to memory when the webview rejects storage", async () => {
-    vi.stubGlobal("window", {
-      get sessionStorage(): Storage {
-        throw new Error("private mode");
-      },
-    });
-    await setSecret("locked", "value");
-    await expect(getSecret("locked")).resolves.toBe("value");
-    await deleteSecret("locked");
-    await expect(getSecret("locked")).resolves.toBeNull();
+    await deleteSecret("credentials");
+    await expect(getSecret("credentials")).resolves.toBeNull();
   });
 });
 
 describe("desktop secret store", () => {
-  it("routes to the OS keychain through Tauri", async () => {
-    const invoke = vi.fn(async (command: string) => {
-      if (command === "keychain_get") return "from-keychain";
+  it("routes connect secrets through the OS keychain", async () => {
+    const store = new Map<string, string>();
+    const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "keychain_get") {
+        if (args?.service === "h4rn-connect") return null;
+        return store.get(String(args?.account)) ?? null;
+      }
+      if (command === "keychain_set") {
+        store.set(String(args?.account), String(args?.secret));
+        return null;
+      }
+      if (command === "keychain_delete") {
+        store.delete(String(args?.account));
+        return null;
+      }
       return null;
     });
-    vi.stubGlobal("window", {
+    const { local, session } = stubWindow({
       __TAURI_INTERNALS__: { invoke },
       navigator: { userAgent: "Mozilla/5.0 (X11; Linux x86_64)" },
     });
 
-    await expect(getSecret("token")).resolves.toBe("from-keychain");
-    expect(invoke).toHaveBeenCalledWith("keychain_get", {
-      service: "h4rn-connect",
-      account: "token",
-    });
-
-    await setSecret("token", "value");
+    await setSecret("credentials", "refresh-token");
+    expect(store.get("h4rn.remote.credentials")).toBe("refresh-token");
     expect(invoke).toHaveBeenCalledWith("keychain_set", {
-      service: "h4rn-connect",
-      account: "token",
-      secret: "value",
+      service: "h4rn",
+      account: "h4rn.remote.credentials",
+      secret: "refresh-token",
     });
 
-    await deleteSecret("token");
-    expect(invoke).toHaveBeenCalledWith("keychain_delete", {
-      service: "h4rn-connect",
-      account: "token",
-    });
+    await expect(getSecret("credentials")).resolves.toBe("refresh-token");
+
+    await deleteSecret("credentials");
+    expect(store.has("h4rn.remote.credentials")).toBe(false);
+    expect(local.length).toBe(0);
+    expect(session.length).toBe(0);
   });
+});
 
-  it("reports a rejected keychain write instead of pretending it saved", async () => {
-    vi.stubGlobal("window", {
-      __TAURI_INTERNALS__: {
-        invoke: vi.fn(async () => {
-          throw new Error("keychain locked");
-        }),
-      },
-      navigator: { userAgent: "Mozilla/5.0 (X11; Linux x86_64)" },
+describe("mobile secret store", () => {
+  it("uses the Keystore/Keychain commands on Android", async () => {
+    const invoke = vi.fn(async (command: string) => {
+      if (command === "secret_get") return { value: null };
+      return null;
     });
-    await expect(setSecret("token", "value")).rejects.toThrow("keychain locked");
-    await expect(getSecret("token")).resolves.toBeNull();
-  });
-
-  it("uses the mobile secret commands on Android", async () => {
-    const invoke = vi.fn(async () => ({ value: null }));
-    vi.stubGlobal("window", {
+    const { local, session } = stubWindow({
       __TAURI_INTERNALS__: { invoke },
       navigator: { userAgent: "Mozilla/5.0 (Linux; Android 15)" },
     });
-    await getSecret("token");
-    expect(invoke).toHaveBeenCalledWith("secret_get", { key: "h4rn.remote.token" });
-    await setSecret("token", "value");
+
+    await expect(getSecret("credentials")).resolves.toBeNull();
+    expect(invoke).toHaveBeenCalledWith("secret_get", { key: "h4rn.remote.credentials" });
+
+    await setSecret("credentials", "refresh-token");
     expect(invoke).toHaveBeenCalledWith("secret_set", {
-      key: "h4rn.remote.token",
-      value: "value",
+      key: "h4rn.remote.credentials",
+      value: "refresh-token",
     });
+
+    await deleteSecret("credentials");
+    expect(invoke).toHaveBeenCalledWith("secret_delete", { key: "h4rn.remote.credentials" });
+
+    expect(local.length).toBe(0);
+    expect(session.length).toBe(0);
   });
 });

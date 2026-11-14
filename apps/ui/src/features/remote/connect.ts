@@ -103,7 +103,7 @@ export async function deviceRegistration(
   name: string,
 ): Promise<DeviceRegistration> {
   await loadTransportWasm();
-  const identity = ensureDeviceIdentity();
+  const identity = await ensureDeviceIdentity();
   const publicIdentity = JSON.parse(identity_public(identity)) as {
     proofPublicKey: string;
     noisePublic: string;
@@ -279,7 +279,7 @@ export class ConnectClient {
     nonce: string;
   }> {
     await loadTransportWasm();
-    const identity = ensureDeviceIdentity();
+    const identity = await ensureDeviceIdentity();
     const timestamp = Math.floor(Date.now() / 1_000);
     const nonce = await randomNonce();
     const result = JSON.parse(connect_proof(identity, method, path, BigInt(timestamp), nonce)) as {
@@ -393,7 +393,7 @@ export class ConnectClient {
 
   async claimPairing(payload: string, name: string): Promise<PairingClaimResponse> {
     await loadTransportWasm();
-    const identity = ensureDeviceIdentity();
+    const identity = await ensureDeviceIdentity();
     const publicIdentity = JSON.parse(identity_public(identity)) as {
       proofPublicKey: string;
       noisePublic: string;

@@ -1,5 +1,6 @@
 import { readActiveRemote } from "@/features/remote/active";
 import { createRemoteTransportFactory } from "@/features/remote/remoteTransport";
+import { peekSecret } from "@/lib/platform/secrets";
 
 import { H4rnClient } from "./client";
 import { createMockTransport } from "./mock";
@@ -8,6 +9,7 @@ import type { ClientOptions, TransportFactory } from "./types";
 
 export const DEFAULT_WS_URL = "ws://127.0.0.1:47800/ws";
 const TOKEN_KEY = "h4rn.token";
+const PAIRING_URI_KEY = "h4rn.secure.pairing-uri";
 
 export type BootConfig = {
   mock: boolean;
@@ -45,12 +47,15 @@ export function readBootConfig(): BootConfig {
 
   const params = new URLSearchParams(window.location.search);
   const queryTheme = params.get("theme");
-  const pairing = params.get("pair");
+  const pairing = params.get("pair") ?? peekSecret(PAIRING_URI_KEY);
   const active = readActiveRemote();
   return {
     mock: params.get("mock") === "1",
     scenario: params.get("scenario") ?? "default",
-    token: params.get("token") ?? readStoredToken(),
+    // `preparePlatform()` moves a `?token=` bootstrap value into the platform
+    // secret store and strips it from the address bar before this runs. The
+    // query fallback keeps non-browser callers and tests working.
+    token: peekSecret(TOKEN_KEY) ?? params.get("token"),
     daemonUrl: readDaemonUrl(params.get("daemon")),
     theme:
       queryTheme === "light" || queryTheme === "dark" || queryTheme === "system"
@@ -82,14 +87,6 @@ function readDaemonUrl(value: string | null): string | null {
     // Fall through to the default daemon URL.
   }
   return null;
-}
-
-function readStoredToken(): string | null {
-  try {
-    return window.localStorage.getItem(TOKEN_KEY);
-  } catch {
-    return null;
-  }
 }
 
 export function createClientFromEnv(): H4rnClient {
