@@ -309,7 +309,7 @@ impl DeviceRegistry {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         list.retain(|entry| entry.paired_at > cutoff && live.contains(&entry.device_id));
         let mut out = list.clone();
-        out.sort_by(|a, b| b.paired_at.cmp(&a.paired_at));
+        out.sort_by_key(|entry| std::cmp::Reverse(entry.paired_at));
         out
     }
 
