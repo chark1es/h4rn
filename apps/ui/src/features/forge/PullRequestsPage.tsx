@@ -664,6 +664,32 @@ function OpenPrButton({
   );
 }
 
+/** The diff lines a review thread is anchored to, quoted above its comments. */
+function ThreadQuote({ thread, files }: { thread: ForgeReviewThread; files: ForgeFileDiff[] }) {
+  const file = files.find((candidate) => candidate.path === thread.path);
+  if (!file || thread.line === null) return null;
+  const rows = parsePatch(file.patch).filter((row) => row.kind !== "hunk");
+  const at = rows.findIndex((row) => (row.newLine ?? row.oldLine) === thread.line);
+  if (at < 0) return null;
+  const quoted = rows.slice(Math.max(0, at - 1), at + 1);
+  return (
+    <div className="q-hunk q-quote" role="presentation">
+      {quoted.map((row) => (
+        <div
+          key={`${row.newLine ?? row.oldLine}:${row.kind}`}
+          className={row.kind === "add" ? "q-ln a" : row.kind === "del" ? "q-ln d" : "q-ln"}
+        >
+          <span className="n">{row.newLine ?? row.oldLine ?? ""}</span>
+          <span className="sg" aria-hidden>
+            {row.kind === "add" ? "+" : row.kind === "del" ? "−" : " "}
+          </span>
+          <span className="q-cx">{row.text || " "}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function PrDetail({
   repo,
   number,
@@ -693,6 +719,7 @@ function PrDetail({
   const [reloadNonce, setReloadNonce] = useState(0);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
   const [replyBusy, setReplyBusy] = useState<Record<string, boolean>>({});
+  const [replyOpen, setReplyOpen] = useState<Record<string, boolean>>({});
   const [commentDraft, setCommentDraft] = useState("");
   const [commentBusy, setCommentBusy] = useState(false);
   const [handoff, setHandoff] = useState<string | null>(null);
@@ -995,14 +1022,21 @@ function PrDetail({
     <main className="q-main" aria-label="Pull request">
       <header className="q-page-head q-pr-head">
         <div style={{ flex: 1, minWidth: 0 }}>
-          <button
-            type="button"
-            className="q-link"
-            style={{ fontSize: 12, marginBottom: 4 }}
-            onClick={onBack}
-          >
-            Pull requests / {repo.owner}/{repo.repo} / #{number}
-          </button>
+          <nav className="q-crumb" aria-label="Breadcrumb">
+            <button type="button" className="q-crumb-link" onClick={onBack}>
+              Pull requests
+            </button>
+            <span className="q-sep" aria-hidden>
+              /
+            </span>
+            <span>
+              {repo.owner}/{repo.repo}
+            </span>
+            <span className="q-sep" aria-hidden>
+              /
+            </span>
+            <span aria-current="page">#{number}</span>
+          </nav>
           <h1 style={{ fontSize: 17, lineHeight: "22px" }}>
             {pr.summary.title}{" "}
             <span className="q-faint" style={{ fontWeight: 400 }}>
@@ -1013,11 +1047,6 @@ function PrDetail({
             <span className={`q-badge ${state.tone}`} style={{ height: 18 }}>
               {state.label}
             </span>
-            {mergeable ? (
-              <span className={`q-badge ${mergeable.tone}`} style={{ height: 18 }}>
-                {mergeable.label}
-              </span>
-            ) : null}
             <span className="mono" style={{ fontSize: 11.5 }}>
               {pr.summary.head_branch}
             </span>{" "}
@@ -1028,15 +1057,6 @@ function PrDetail({
             · {pr.commits} commits · opened by {pr.summary.author} {relativeAge(pr.created_at)} ·{" "}
             {repo.owner}/{repo.repo} on {forgeLabel(repo.forge)}
           </div>
-          {pr.labels.length > 0 ? (
-            <div className="q-pr-labels">
-              {pr.labels.map((label) => (
-                <span key={label.name} className="q-badge" style={{ height: 18 }}>
-                  {label.name}
-                </span>
-              ))}
-            </div>
-          ) : null}
         </div>
         <button
           type="button"
@@ -1134,6 +1154,7 @@ function PrDetail({
                       )}
                       {thread.outdated ? <span className="q-faint">· outdated</span> : null}
                     </div>
+                    <ThreadQuote thread={thread} files={diffFiles} />
                     {thread.comments.map((comment) => (
                       <div key={comment.comment_id} style={{ marginBottom: 10 }}>
                         <div className="q-cmt-h" style={{ marginBottom: 2 }}>
@@ -1145,32 +1166,60 @@ function PrDetail({
                         <Markdown text={comment.body} />
                       </div>
                     ))}
+                    {replyOpen[thread.thread_id] || (replyDrafts[thread.thread_id] ?? "") !== "" ? (
+                      <div className="q-cmt-reply">
+                        <textarea
+                          className="q-input"
+                          rows={2}
+                          autoFocus
+                          placeholder={`Reply to ${thread.comments.at(-1)?.author ?? "review"}`}
+                          value={replyDrafts[thread.thread_id] ?? ""}
+                          onChange={(event) =>
+                            setReplyDrafts((current) => ({
+                              ...current,
+                              [thread.thread_id]: event.target.value,
+                            }))
+                          }
+                          aria-label={`Reply to ${thread.path}`}
+                        />
+                        <div className="q-cmt-a">
+                          <button
+                            type="button"
+                            className="q-btn primary"
+                            disabled={
+                              (replyDrafts[thread.thread_id] ?? "").trim() === "" ||
+                              replyBusy[thread.thread_id]
+                            }
+                            onClick={() => void submitReply(thread)}
+                          >
+                            {replyBusy[thread.thread_id] ? "Sending…" : "Send reply"}
+                          </button>
+                          <button
+                            type="button"
+                            className="q-btn ghost"
+                            onClick={() => {
+                              setReplyOpen((current) => ({
+                                ...current,
+                                [thread.thread_id]: false,
+                              }));
+                              setReplyDrafts((current) => ({ ...current, [thread.thread_id]: "" }));
+                            }}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
                     <div className="q-cmt-a">
-                      <textarea
-                        className="q-input"
-                        rows={2}
-                        placeholder={`Reply to ${thread.comments.at(-1)?.author ?? "review"}`}
-                        value={replyDrafts[thread.thread_id] ?? ""}
-                        onChange={(event) =>
-                          setReplyDrafts((current) => ({
-                            ...current,
-                            [thread.thread_id]: event.target.value,
-                          }))
-                        }
-                        aria-label={`Reply to ${thread.path}`}
-                        style={{ flex: 1 }}
-                      />
                       <button
                         type="button"
                         className="q-btn secondary"
-                        disabled={
-                          (replyDrafts[thread.thread_id] ?? "").trim() === "" ||
-                          replyBusy[thread.thread_id]
+                        onClick={() =>
+                          setReplyOpen((current) => ({ ...current, [thread.thread_id]: true }))
                         }
-                        onClick={() => void submitReply(thread)}
                       >
                         <MessageSquareIcon className="q-icon s14" aria-hidden />
-                        {replyBusy[thread.thread_id] ? "Sending…" : "Reply"}
+                        Reply
                       </button>
                       <button
                         type="button"
@@ -1336,6 +1385,27 @@ function PrDetail({
           </div>
 
           <aside className="q-pr-side">
+            {mergeable || pr.labels.length > 0 ? (
+              <div className="q-side-sec">
+                {mergeable ? (
+                  <h3>
+                    <span>Merge</span>
+                    <span className={mergeable.tone === "ok" ? "q-ok" : "q-warn"}>
+                      {mergeable.label}
+                    </span>
+                  </h3>
+                ) : null}
+                {pr.labels.length > 0 ? (
+                  <div className="q-pr-labels">
+                    {pr.labels.map((label) => (
+                      <span key={label.name} className="q-badge" style={{ height: 18 }}>
+                        {label.name}
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             <div className="q-side-sec">
               <h3>
                 <span>Checks</span>

@@ -4,8 +4,12 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   CircleAlertIcon,
+  CircleCheckIcon,
+  CircleIcon,
+  CircleXIcon,
   ClockIcon,
   GitPullRequestIcon,
+  KeyRoundIcon,
   PanelLeftIcon,
   PlugIcon,
   QrCodeIcon,
@@ -1012,14 +1016,7 @@ function SettingsSidebar() {
                             onClick={() => openMcp(server.name)}
                           >
                             <span>{server.name}</span>
-                            <span
-                              className={cn(
-                                "q-dot",
-                                status.tone === "ok" && "on",
-                                status.tone === "warn" && "warn",
-                                status.tone === "danger" && "danger",
-                              )}
-                            />
+                            <McpHealthGlyph status={status} />
                           </button>
                         );
                       })}
@@ -1063,6 +1060,23 @@ function SettingsSidebar() {
       />
     </nav>
   );
+}
+
+/** Health as a glyph plus an accessible word, never colour alone (DESIGN rule 3). */
+function McpHealthGlyph({ status }: { status: ReturnType<typeof serverStatus> }) {
+  const common = { className: "q-icon s14", strokeWidth: 1.5, role: "img" } as const;
+  const label = status.label;
+  if (status.tone === "ok")
+    return <CircleCheckIcon {...common} aria-label={label} style={{ color: "var(--fg-3)" }} />;
+  if (status.tone === "danger")
+    return <CircleXIcon {...common} aria-label={label} style={{ color: "var(--danger)" }} />;
+  if (status.tone === "warn")
+    return label === "Needs credential" ? (
+      <KeyRoundIcon {...common} aria-label={label} style={{ color: "var(--warn)" }} />
+    ) : (
+      <CircleAlertIcon {...common} aria-label={label} style={{ color: "var(--warn)" }} />
+    );
+  return <CircleIcon {...common} aria-label={label} style={{ color: "var(--fg-3)" }} />;
 }
 
 /** Names the host that is actually down; several (or none known) read as "a host". */

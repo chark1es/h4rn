@@ -388,8 +388,8 @@ export function PhonePanelSheet({
               a change back to the agent.
             </p>
             <p className="q-ph-desktop-only">
-              Files and the IDE open on desktop. Press <KeyCaps value={`${MOD} E`} /> there
-              to switch views.
+              Files and the IDE open on desktop. Press <KeyCaps value={`${MOD} E`} /> there to
+              switch views.
             </p>
           </div>
         )}

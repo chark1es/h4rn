@@ -863,7 +863,7 @@ export function gitBadge(status: GitFileStatus | null): { letter: string; tone: 
   if (!status) return null;
   switch (status) {
     case "modified":
-      return { letter: "M", tone: "text-accent-tx" };
+      return { letter: "M", tone: "text-warn" };
     case "added":
       return { letter: "A", tone: "text-ok" };
     case "untracked":
@@ -871,11 +871,11 @@ export function gitBadge(status: GitFileStatus | null): { letter: string; tone: 
     case "deleted":
       return { letter: "D", tone: "text-danger" };
     case "renamed":
-      return { letter: "R", tone: "text-accent-tx" };
+      return { letter: "R", tone: "text-warn" };
     case "conflicted":
       return { letter: "!", tone: "text-danger" };
     case "type_changed":
-      return { letter: "T", tone: "text-accent-tx" };
+      return { letter: "T", tone: "text-warn" };
   }
 }
 

@@ -7,8 +7,8 @@ import {
   RefreshCwIcon,
   SearchIcon,
 } from "lucide-react";
-import { KeyCaps, MOD } from "@/components/common/Kbd";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { KeyCaps, MOD } from "@/components/common/Kbd";
 
 import { gitBadge } from "@/features/ide/useIdeSession";
 import type { FileEntry, FsListing, FsTurnChanges, HostId, ProtoError } from "@/gen";
