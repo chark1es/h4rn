@@ -92,7 +92,9 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 wait_for_url() {
-  local url=$1 tries=${2:-120}
+  # Docker Desktop on WSL can take two minutes to finish a first-run install
+  # and open the web listener, so wait longer than a warm container needs.
+  local url=$1 tries=${2:-${H4RN_FORGE_WAIT_TRIES:-240}}
   for ((i = 1; i <= tries; i++)); do
     if curl -fsS "$url" >/dev/null 2>&1; then
       return 0

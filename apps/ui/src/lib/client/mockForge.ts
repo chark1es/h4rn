@@ -348,7 +348,9 @@ function checksFor(repo: ForgeRepoRef, summary: ForgePrSummary): ForgeChecks {
       description: check.status === "failure" ? "Connection leaked in afterAll" : null,
       started_at: now(-10 * 60_000),
       completed_at: check.duration === null ? null : now(-8 * 60_000),
-      duration_ms: check.duration === null ? null : BigInt(check.duration),
+      // The wire is JSON, so a u64 arrives as a number even though the
+      // generated type says bigint. Keep the mock serializable.
+      duration_ms: check.duration === null ? null : (check.duration as unknown as bigint),
     })),
     updated_at: now(-60_000),
   };

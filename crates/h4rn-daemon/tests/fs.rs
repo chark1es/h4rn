@@ -297,12 +297,7 @@ fn a_file_the_turn_created_diffs_from_nothing() {
     let turn = TurnId::new("turn_new");
     let snapshots = fixture.service.snapshots();
     snapshots
-        .capture(
-            &fixture.workspace,
-            &thread,
-            &turn,
-            &["new.txt".to_owned()],
-        )
+        .capture(&fixture.workspace, &thread, &turn, &["new.txt".to_owned()])
         .expect("capture");
     fixture.write("new.txt", "written by the turn\n");
 

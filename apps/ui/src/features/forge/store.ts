@@ -16,11 +16,11 @@ import type {
   ForgeMergeable,
   ForgePrFilter,
   ForgePrState,
-  ForgeReviewState,
   ForgePullRequest,
   ForgeRemote,
   ForgeRepoRef,
   ForgeReviewComment,
+  ForgeReviewState,
   ForgeReviewThread,
   ResponseBody,
 } from "@/gen";

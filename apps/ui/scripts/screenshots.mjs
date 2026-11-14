@@ -6,9 +6,11 @@
  * Requires `bun run dev` and a Playwright Chromium in ~/.cache/ms-playwright.
  * Override the binary with H4RN_CHROMIUM.
  *
- * The shot list mirrors design/a-quiet-native/shots one for one. Desktop
- * screenshots are 1440×900, phone screenshots are 390×844 (plus the 360×780
- * floor), and every screen is captured in light and dark.
+ * The shot list mirrors design/a-quiet-native/shots one for one, plus the
+ * surfaces the design shots do not cover (PR list, the change-set card, and
+ * the phone PR screens). Desktop screenshots are 1440×900, phone screenshots
+ * are 390×844 (plus the 360×780 floor), and every screen is captured in light
+ * and dark.
  */
 import { mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -229,6 +231,30 @@ const SHOTS = [
     path: "/pulls",
     wait: "text=Fix flaky auth test",
     settle: 1200,
+    action: async (page) => {
+      await page.locator(".q-row").filter({ hasText: "#482" }).first().click();
+      await page.getByRole("heading", { name: /Fix flaky auth test/ }).waitFor({ timeout: 10_000 });
+      await page.waitForTimeout(700);
+    },
+  },
+  {
+    name: "pr-list",
+    device: "desktop",
+    path: "/pulls",
+    wait: "text=Fix flaky auth test",
+    settle: 1200,
+  },
+  {
+    name: "change-set",
+    device: "desktop",
+    path: "/t/thr_h",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      const card = page.locator(".q-changes").first();
+      await card.waitFor({ timeout: 10_000 });
+      await card.scrollIntoViewIfNeeded();
+      await page.waitForTimeout(600);
+    },
   },
   {
     name: "set-hosts",
@@ -321,6 +347,37 @@ const SHOTS = [
       const sheet = page.getByRole("dialog", { name: "Changes and subagents" });
       await sheet.getByText("tests/setup.ts").first().waitFor({ timeout: 10_000 });
       await page.waitForTimeout(500);
+    },
+  },
+  {
+    name: "p-pr-list",
+    device: "phone",
+    path: "/pulls",
+    wait: "text=Fix flaky auth test",
+    settle: 1000,
+  },
+  {
+    name: "p-pr",
+    device: "phone",
+    path: "/pulls",
+    wait: "text=Fix flaky auth test",
+    settle: 1000,
+    action: async (page) => {
+      await page.locator(".q-row").filter({ hasText: "#482" }).first().click();
+      await page.getByRole("heading", { name: /Fix flaky auth test/ }).waitFor({ timeout: 10_000 });
+      await page.waitForTimeout(700);
+    },
+  },
+  {
+    name: "p-change-set",
+    device: "phone",
+    path: "/t/thr_h",
+    wait: '[aria-label="Thread stream"]',
+    action: async (page) => {
+      const card = page.locator(".q-changes").first();
+      await card.waitFor({ timeout: 10_000 });
+      await card.scrollIntoViewIfNeeded();
+      await page.waitForTimeout(600);
     },
   },
   {

@@ -182,6 +182,8 @@ function NoRepo({ onSettings }: { onSettings: () => void }) {
 
 export function PullRequestsPage() {
   const threads = useApp((state) => state.threads);
+  // A cold deep link mounts this page before the socket handshake finishes.
+  const connection = useApp((state) => state.connection.status);
   const [accounts, setAccounts] = useState<ForgeAccount[]>([]);
   const [capabilities, setCapabilities] = useState<ForgeCapabilityEntry[]>([]);
   const [loadingAccounts, setLoadingAccounts] = useState(true);
@@ -205,10 +207,7 @@ export function PullRequestsPage() {
   );
   const threadBranch = activeThread?.branch ?? null;
   const filters = useMemo(
-    () =>
-      threadBranch
-        ? [...FILTERS, { key: "branch" as const, label: "This branch" }]
-        : FILTERS,
+    () => (threadBranch ? [...FILTERS, { key: "branch" as const, label: "This branch" }] : FILTERS),
     [threadBranch],
   );
 
@@ -217,8 +216,12 @@ export function PullRequestsPage() {
 
   useEffect(() => {
     void reloadNonce;
+    // The first paint can beat the handshake; wait for it instead of showing
+    // "daemon is not connected" as a forge failure.
+    if (connection === "connecting") return;
     let cancelled = false;
     setLoadingAccounts(true);
+    setAccountsError(null);
     api()
       .accounts()
       .then((result) => {
@@ -235,7 +238,7 @@ export function PullRequestsPage() {
     return () => {
       cancelled = true;
     };
-  }, [reloadNonce]);
+  }, [reloadNonce, connection]);
 
   // Detect a repository from the thread workspaces unless the URL names one.
   useEffect(() => {
@@ -262,8 +265,18 @@ export function PullRequestsPage() {
         }
       }
       if (cancelled) return;
-      setRepos(found);
-      setRepo((current) => current ?? found[0]?.repo ?? null);
+      // Two workspaces in the same checkout report the same remote; React and
+      // the repository picker want one entry per remote and repository.
+      const unique = [
+        ...new Map(
+          found.map((item) => [
+            `${item.remote}:${item.repo.forge}:${item.repo.base_url}:${item.repo.owner}/${item.repo.repo}`,
+            item,
+          ]),
+        ).values(),
+      ];
+      setRepos(unique);
+      setRepo((current) => current ?? unique[0]?.repo ?? null);
       setDetecting(false);
     })();
     return () => {
@@ -358,7 +371,7 @@ export function PullRequestsPage() {
 
   return (
     <main className="q-main" aria-label="Pull requests">
-      <header className="q-page-head">
+      <header className="q-page-head q-pr-list-head">
         <h1>Pull requests</h1>
         <span className="q-faint" style={{ fontSize: 12 }}>
           {repo.owner}/{repo.repo}
@@ -498,9 +511,7 @@ export function PullRequestsPage() {
                       </span>
                       <span className={`q-row-status ${state.tone}`}>{state.label}</span>
                       {checks ? (
-                        <span
-                          className={`q-row-status ${pr.checks === "failing" ? "danger" : ""}`}
-                        >
+                        <span className={`q-row-status ${pr.checks === "failing" ? "danger" : ""}`}>
                           {checks}
                         </span>
                       ) : null}
@@ -982,10 +993,7 @@ function PrDetail({
 
   return (
     <main className="q-main" aria-label="Pull request">
-      <header
-        className="q-page-head"
-        style={{ height: "auto", padding: "14px 16px 14px 32px", alignItems: "flex-start" }}
-      >
+      <header className="q-page-head q-pr-head">
         <div style={{ flex: 1, minWidth: 0 }}>
           <button
             type="button"
@@ -1001,10 +1009,7 @@ function PrDetail({
               #{number}
             </span>
           </h1>
-          <div
-            className="q-muted"
-            style={{ fontSize: 12, marginTop: 4, display: "flex", gap: 6, alignItems: "center" }}
-          >
+          <div className="q-muted q-pr-meta">
             <span className={`q-badge ${state.tone}`} style={{ height: 18 }}>
               {state.label}
             </span>
@@ -1024,7 +1029,7 @@ function PrDetail({
             {repo.owner}/{repo.repo} on {forgeLabel(repo.forge)}
           </div>
           {pr.labels.length > 0 ? (
-            <div style={{ display: "flex", gap: 4, marginTop: 6 }}>
+            <div className="q-pr-labels">
               {pr.labels.map((label) => (
                 <span key={label.name} className="q-badge" style={{ height: 18 }}>
                   {label.name}
