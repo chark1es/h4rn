@@ -299,6 +299,9 @@ pub struct ResumeFailover {
     pub model: String,
     /// Credential/account to prefer, when the proxy picked one.
     pub account: Option<String>,
+    /// [`Self::account`] as a person would read it.
+    #[serde(default)]
+    pub account_label: Option<String>,
     /// Why it was chosen.
     pub reason: String,
 }

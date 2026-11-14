@@ -134,6 +134,7 @@ export type * from "./ProxyCooldown";
 export type * from "./ProxyCredential";
 export type * from "./ProxyDiagnostic";
 export type * from "./ProxyDiagnosticLevel";
+export type * from "./ProxyEnvLine";
 export type * from "./ProxyEvent";
 export type * from "./ProxyFailoverChoice";
 export type * from "./ProxyFailoverPolicy";

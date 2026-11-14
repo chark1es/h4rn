@@ -303,6 +303,23 @@ pub struct ProxyHarnessOverride {
     pub verified: bool,
     /// A short note, for example that Antigravity is unverified.
     pub note: Option<String>,
+    /// The file the harness keeps its own credential in, shown with `~`.
+    /// Turning the override off leaves it alone.
+    #[serde(default)]
+    pub config_path: String,
+    /// What h4rn sets for a session of this harness when the override is on.
+    /// Secrets are redacted.
+    #[serde(default)]
+    pub preview: Vec<ProxyEnvLine>,
+}
+
+/// One setting of a harness override, with secrets redacted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct ProxyEnvLine {
+    /// Variable name.
+    pub name: String,
+    /// Value, or `None` when it is a secret kept on the host.
+    pub value: Option<String>,
 }
 
 /// A profile as exposed to clients. Never contains a secret.
@@ -437,8 +454,27 @@ pub struct ProxyFailoverChoice {
     pub model: String,
     /// Credential name to prefer, when the choice is account-specific.
     pub account: Option<String>,
-    /// Why this candidate won.
+    /// [`Self::account`] as a person would read it: no file extension or
+    /// directory.
+    #[serde(default)]
+    pub account_label: Option<String>,
+    /// Why this candidate won, as plain text.
     pub reason: String,
+}
+
+/// A credential's display name: the stored name without its directory or
+/// `.json`/`.yaml` extension ("anthropic-work.json" → "anthropic-work").
+#[must_use]
+pub fn credential_label(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    for ext in [".json", ".yaml", ".yml", ".toml"] {
+        if let Some(stem) = base.strip_suffix(ext)
+            && !stem.is_empty()
+        {
+            return stem.to_owned();
+        }
+    }
+    base.to_owned()
 }
 
 /// One proxy change broadcast to subscribed clients.

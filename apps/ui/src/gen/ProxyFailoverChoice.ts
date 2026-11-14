@@ -13,6 +13,11 @@ model: string,
  */
 account: string | null, 
 /**
- * Why this candidate won.
+ * [`Self::account`] as a person would read it: no file extension or
+ * directory.
+ */
+account_label: string | null, 
+/**
+ * Why this candidate won, as plain text.
  */
 reason: string, };

@@ -2117,3 +2117,89 @@ async fn thread_summary_names_the_workspace_branch() {
 
     daemon.stop().await;
 }
+
+#[tokio::test]
+async fn applying_proxy_overrides_drops_the_sessions_of_routed_harnesses() {
+    let server = wiremock::MockServer::start().await;
+    mock_proxy_catalog(&server).await;
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+
+    let profile = match client
+        .request(ClientRequest::AddProxyProfile {
+            profile: ProxyProfileDraft {
+                name: "mock-apply".into(),
+                base_url: server.uri(),
+                management_key: Some("mgmt-secret".into()),
+                api_key: Some("sk-client".into()),
+                default: true,
+            },
+        })
+        .await
+        .expect("add proxy profile")
+    {
+        ResponseBody::ProxyProfile { profile } => profile,
+        other => panic!("unexpected AddProxyProfile response: {other:?}"),
+    };
+    // The client sees where the override lands, and never the key.
+    let claude = profile
+        .harnesses
+        .iter()
+        .find(|routed| routed.harness == HarnessKind::ClaudeCode)
+        .expect("claude row");
+    assert_eq!(claude.config_path, "~/.claude/settings.json");
+    assert!(claude.preview.iter().any(|line| line.value.is_none()));
+    assert!(!format!("{:?}", claude.preview).contains("sk-client"));
+
+    let summary = create_with_model(
+        &mut client,
+        host,
+        "hello",
+        HarnessKind::ClaudeCode,
+        "claude-sonnet-5",
+    )
+    .await;
+    client.wait_for_turn_completed().await;
+
+    // Nothing is routed yet, so nothing restarts.
+    let applied = |response| match response {
+        ResponseBody::ProxyApplied {
+            restarted,
+            interrupted,
+        } => (restarted, interrupted),
+        other => panic!("unexpected ApplyProxyOverrides response: {other:?}"),
+    };
+    let (restarted, _) = applied(
+        client
+            .request(ClientRequest::ApplyProxyOverrides {
+                profile_id: profile.id.clone(),
+            })
+            .await
+            .expect("apply with no routed harness"),
+    );
+    assert!(restarted.is_empty());
+
+    client
+        .request(ClientRequest::SetProxyHarnessOverride {
+            profile_id: profile.id.clone(),
+            harness: HarnessKind::ClaudeCode,
+            enabled: true,
+            default_model: None,
+        })
+        .await
+        .expect("enable proxy for Claude Code");
+    let (restarted, interrupted) = applied(
+        client
+            .request(ClientRequest::ApplyProxyOverrides {
+                profile_id: profile.id.clone(),
+            })
+            .await
+            .expect("apply"),
+    );
+    assert_eq!(restarted, vec![summary.thread_id]);
+    assert!(interrupted.is_empty());
+
+    daemon.stop().await;
+}

@@ -189,6 +189,52 @@ fn antigravity_recipe(target: &ProxyTarget<'_>, model: String) -> HarnessOverrid
     }
 }
 
+/// Where the harness keeps its own credential, which an override leaves alone.
+#[must_use]
+pub fn config_path(kind: HarnessKind) -> &'static str {
+    match kind {
+        HarnessKind::ClaudeCode => "~/.claude/settings.json",
+        HarnessKind::Codex => "~/.codex/config.toml",
+        HarnessKind::Opencode => "~/.config/opencode/opencode.jsonc",
+        HarnessKind::Antigravity => "~/.gemini/settings.json",
+    }
+}
+
+/// What the recipe sets for `kind`, with every secret redacted.
+///
+/// The recipe runs with a marker in place of the key, so a value that carries
+/// the key (or one built from it) can never leak into what a client sees.
+#[must_use]
+pub fn preview(
+    kind: HarnessKind,
+    profile_id: &str,
+    base_url: &str,
+    default_model: Option<&str>,
+) -> Vec<h4rn_protocol::ProxyEnvLine> {
+    const MARKER: &str = "\u{1}secret\u{1}";
+    let models: Vec<String> = default_model.map(str::to_owned).into_iter().collect();
+    let recipe = for_harness(
+        kind,
+        &ProxyTarget {
+            profile_id,
+            base_url,
+            api_key: Some(MARKER),
+            model: "",
+            default_model,
+            models: &models,
+        },
+    );
+    recipe
+        .env
+        .into_iter()
+        .filter(|(_, value)| !value.is_empty())
+        .map(|(name, value)| h4rn_protocol::ProxyEnvLine {
+            value: (!value.contains(MARKER)).then_some(value),
+            name,
+        })
+        .collect()
+}
+
 /// Resolves the model id a harness should request.
 pub fn resolve_model(kind: HarnessKind, target: &ProxyTarget<'_>, provider: &str) -> String {
     let requested = target.model.trim();
@@ -271,6 +317,30 @@ mod tests {
             default_model: None,
             models,
         }
+    }
+
+    #[test]
+    fn the_preview_never_carries_the_key() {
+        for kind in [
+            HarnessKind::ClaudeCode,
+            HarnessKind::Codex,
+            HarnessKind::Opencode,
+            HarnessKind::Antigravity,
+        ] {
+            let lines = preview(kind, "proxy_0", "http://127.0.0.1:8317", Some("sonnet"));
+            assert!(!lines.is_empty());
+            assert!(lines.iter().all(|line| {
+                line.value
+                    .as_deref()
+                    .is_none_or(|value| !value.contains('\u{1}'))
+            }));
+        }
+        let claude = preview(HarnessKind::ClaudeCode, "p", "http://h:1", Some("sonnet"));
+        let token = claude
+            .iter()
+            .find(|line| line.name == "ANTHROPIC_AUTH_TOKEN")
+            .expect("token line");
+        assert_eq!(token.value, None);
     }
 
     #[test]

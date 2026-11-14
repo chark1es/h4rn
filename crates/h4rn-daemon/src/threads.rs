@@ -111,6 +111,15 @@ pub struct NewThread {
     pub worktree: Option<WorktreeRequest>,
 }
 
+/// What [`ThreadManager::restart_sessions`] did.
+#[derive(Clone, Debug, Default)]
+pub struct RestartedSessions {
+    /// Threads whose live session was dropped.
+    pub restarted: Vec<ThreadId>,
+    /// The subset that had a running turn, which was interrupted.
+    pub interrupted: Vec<ThreadId>,
+}
+
 /// Result of creating a thread: the row, its first turn and the last sequence.
 #[derive(Clone, Debug)]
 pub struct CreatedThread {
@@ -968,6 +977,62 @@ impl ThreadManager {
         })
     }
 
+    /// Drops the live harness session of every thread on one of `harnesses`,
+    /// so its next message starts a session with the current proxy routing.
+    ///
+    /// A running turn is interrupted first, as if the person had pressed stop.
+    /// A thread whose turn does not end within a few seconds keeps its session
+    /// and is left out of the result.
+    pub async fn restart_sessions(&self, harnesses: &[HarnessKind]) -> RestartedSessions {
+        let handles: Vec<ThreadHandle> = {
+            let threads = self.inner.threads.lock().await;
+            threads.values().cloned().collect()
+        };
+        let mut result = RestartedSessions::default();
+        for handle in handles {
+            let (thread_id, was_running) = {
+                let record = handle.lock().await;
+                if !harnesses.contains(&record.meta.harness) || record.session.is_none() {
+                    continue;
+                }
+                (record.meta.thread_id.clone(), record.active.is_some())
+            };
+            if was_running {
+                if self.interrupt(&thread_id).await.is_err() {
+                    continue;
+                }
+                let mut ended = false;
+                for _ in 0..30 {
+                    if handle.lock().await.active.is_none() {
+                        ended = true;
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                if !ended {
+                    continue;
+                }
+            }
+            let (session, pump) = {
+                let mut record = handle.lock().await;
+                (record.session.take(), record.pump.take())
+            };
+            if let Some(session) = session
+                && let Err(error) = session.lock().await.shutdown().await
+            {
+                tracing::warn!(%thread_id, %error, "harness shutdown before a proxy restart failed");
+            }
+            if let Some(pump) = pump {
+                pump.abort();
+            }
+            if was_running {
+                result.interrupted.push(thread_id.clone());
+            }
+            result.restarted.push(thread_id);
+        }
+        result
+    }
+
     /// Interrupts the running turn.
     pub async fn interrupt(&self, thread_id: &ThreadId) -> Result<(), ManagerError> {
         let handle = self.inner.handle(thread_id).await?;
@@ -1501,6 +1566,7 @@ impl ThreadManager {
         schedule.failover = Some(ResumeFailover {
             model: choice.model,
             account: choice.account,
+            account_label: choice.account_label,
             reason: format!("chosen now: {}", choice.reason),
         });
         schedule.resume_at = Utc::now();
@@ -2578,6 +2644,7 @@ impl Inner {
             schedule.failover = Some(ResumeFailover {
                 model: choice.model,
                 account: choice.account,
+                account_label: choice.account_label,
                 reason: choice.reason,
             });
         }

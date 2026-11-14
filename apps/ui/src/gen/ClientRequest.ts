@@ -611,7 +611,11 @@ enabled: boolean,
 /**
  * Model used when a thread did not pick a proxy model.
  */
-default_model: string | null, } | { "type": "list_proxy_limits", 
+default_model: string | null, } | { "type": "apply_proxy_overrides", 
+/**
+ * Profile whose overrides were changed.
+ */
+profile_id: ProxyProfileId, } | { "type": "list_proxy_limits", 
 /**
  * Profile to read.
  */

@@ -547,6 +547,15 @@ pub enum ClientRequest {
         /// Model used when a thread did not pick a proxy model.
         default_model: Option<String>,
     },
+    /// Make the saved harness overrides take effect now.
+    ///
+    /// Sessions already running keep the routing they started with, so the
+    /// daemon interrupts any live turn of a routed harness and drops its
+    /// session. The next message starts a fresh one with the new routing.
+    ApplyProxyOverrides {
+        /// Profile whose overrides were changed.
+        profile_id: crate::proxy::ProxyProfileId,
+    },
     /// Read credential health and cooldowns for one profile.
     ListProxyLimits {
         /// Profile to read.
@@ -926,6 +935,7 @@ impl ClientRequest {
             | Self::RemoveProxyProfile { .. }
             | Self::TestProxyProfile { .. }
             | Self::SetProxyHarnessOverride { .. }
+            | Self::ApplyProxyOverrides { .. }
             | Self::PickProxyFailover { .. }
             | Self::SetAutoResumePolicy { .. }
             | Self::ForgeAddAccount { .. }

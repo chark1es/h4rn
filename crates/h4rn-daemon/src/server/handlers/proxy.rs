@@ -20,6 +20,7 @@ pub(super) fn matches(request: &ClientRequest) -> bool {
             | ClientRequest::TestProxyProfile { .. }
             | ClientRequest::ListProxyModels { .. }
             | ClientRequest::SetProxyHarnessOverride { .. }
+            | ClientRequest::ApplyProxyOverrides { .. }
             | ClientRequest::ListProxyLimits { .. }
             | ClientRequest::PickProxyFailover { .. }
     )
@@ -77,6 +78,32 @@ pub(super) async fn handle(
             .set_harness_override(&profile_id, harness, enabled, default_model)
             .map(|profile| ResponseBody::ProxyProfile { profile })
             .map_err(h4rn_proxy::ProxyError::into_proto),
+        ClientRequest::ApplyProxyOverrides { profile_id } => {
+            let profile = conn
+                .state
+                .proxy
+                .profiles()
+                .into_iter()
+                .find(|profile| profile.id == profile_id)
+                .ok_or_else(|| {
+                    ProtoError::new(
+                        h4rn_protocol::ProtoErrorCode::NotFound,
+                        "no such proxy profile",
+                        "Reload the profile list.",
+                    )
+                })?;
+            let harnesses: Vec<_> = profile
+                .harnesses
+                .iter()
+                .filter(|routed| routed.enabled)
+                .map(|routed| routed.harness)
+                .collect();
+            let applied = conn.state.manager.restart_sessions(&harnesses).await;
+            Ok(ResponseBody::ProxyApplied {
+                restarted: applied.restarted,
+                interrupted: applied.interrupted,
+            })
+        }
         ClientRequest::ListProxyLimits { profile_id } => conn
             .state
             .proxy

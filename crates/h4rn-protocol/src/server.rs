@@ -291,6 +291,14 @@ pub enum ResponseBody {
         /// The health snapshot.
         limits: crate::proxy::ProxyLimits,
     },
+    /// Which sessions an override change restarted.
+    ProxyApplied {
+        /// Threads whose live harness session was dropped. Each starts a new
+        /// one on its next message.
+        restarted: Vec<crate::ThreadId>,
+        /// The subset that had a running turn, which was interrupted.
+        interrupted: Vec<crate::ThreadId>,
+    },
     /// A failover candidate, or `None` when the proxy has no other model.
     ProxyFailover {
         /// The chosen candidate.

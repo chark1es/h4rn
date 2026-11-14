@@ -449,6 +449,7 @@ mod tests {
         let failover = ResumeFailover {
             model: "claude-opus-5".into(),
             account: Some("acct-a".into()),
+            account_label: Some("acct-a".into()),
             reason: "same family".into(),
         };
         hub.arm_schedule(

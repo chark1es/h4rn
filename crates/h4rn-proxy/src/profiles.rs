@@ -420,12 +420,20 @@ impl ProfileStore {
                     .get(kind.slug())
                     .cloned()
                     .unwrap_or_default();
+                let preview = crate::overrides::preview(
+                    kind,
+                    id.as_str(),
+                    &profile.base_url,
+                    stored.default_model.as_deref(),
+                );
                 ProxyHarnessOverride {
                     harness: kind,
                     enabled: stored.enabled,
                     default_model: stored.default_model,
                     verified: recipe_verified(kind),
                     note: recipe_note(kind),
+                    config_path: crate::overrides::config_path(kind).to_owned(),
+                    preview,
                 }
             })
             .collect();

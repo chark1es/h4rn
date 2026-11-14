@@ -255,7 +255,16 @@ catalog: ProxyModelCatalog, } | { "type": "proxy_limits",
 /**
  * The health snapshot.
  */
-limits: ProxyLimits, } | { "type": "proxy_failover", 
+limits: ProxyLimits, } | { "type": "proxy_applied", 
+/**
+ * Threads whose live harness session was dropped. Each starts a new
+ * one on its next message.
+ */
+restarted: Array<ThreadId>, 
+/**
+ * The subset that had a running turn, which was interrupted.
+ */
+interrupted: Array<ThreadId>, } | { "type": "proxy_failover", 
 /**
  * The chosen candidate.
  */

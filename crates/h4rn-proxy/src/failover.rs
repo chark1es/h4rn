@@ -86,18 +86,19 @@ pub fn eligible_failovers(
             let account = healthy_account(&pick.id);
             let mut reason = match policy.strategy {
                 ProxyFailoverStrategy::SameFamilyFirst if family_of(&pick.id) == family => {
-                    format!("same family as `{current}` and not cooling down")
+                    format!("same family as {current} and not cooling down")
                 }
                 ProxyFailoverStrategy::AccountFirst if account.is_some() => {
                     "a credential can serve this model without a cooldown".to_owned()
                 }
-                _ => format!("`{current}` was limited; this model has no active cooldown"),
+                _ => format!("{current} was limited; this model has no active cooldown"),
             };
             if !limits.available {
                 reason.push_str(" (credential cooldowns were unavailable)");
             }
             ProxyFailoverChoice {
                 model: pick.id.clone(),
+                account_label: account.as_deref().map(h4rn_protocol::credential_label),
                 account,
                 reason,
             }
@@ -117,7 +118,8 @@ pub fn eligible_failovers(
         })
         .map(|account| ProxyFailoverChoice {
             model: current.to_owned(),
-            reason: format!("`{current}` on another account that has no cooldown for it"),
+            account_label: Some(h4rn_protocol::credential_label(&account)),
+            reason: format!("{current} on another account that has no cooldown for it"),
             account: Some(account),
         });
     if let Some(choice) = same_model_elsewhere {

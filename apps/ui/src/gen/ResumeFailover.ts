@@ -13,6 +13,10 @@ model: string,
  */
 account: string | null, 
 /**
+ * [`Self::account`] as a person would read it.
+ */
+account_label: string | null, 
+/**
  * Why it was chosen.
  */
 reason: string, };
