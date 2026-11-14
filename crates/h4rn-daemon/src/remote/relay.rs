@@ -186,20 +186,7 @@ async fn handle_event(
             RelayFrameKind::Ping => {}
         },
         RelayServerEvent::Snapshot { devices, .. } => {
-            // A snapshot is the authoritative list of connect-paired devices:
-            // anything missing was revoked while this daemon was offline.
-            let entries: Vec<ConnectEntry> = devices
-                .iter()
-                .filter_map(|device| connect_entry(device))
-                .collect();
-            let removed = registry.reconcile_connect(&entries);
-            for entry in &entries {
-                service.allow(entry.key);
-            }
-            for key in removed {
-                service.revoke(key);
-                tracing::info!(key = %hex::encode(key), "revoked a device missing from the connect snapshot");
-            }
+            apply_snapshot(service, registry, &devices);
         }
         RelayServerEvent::DevicePaired { device, .. } => {
             register_device(service, registry, &device);
@@ -227,6 +214,24 @@ async fn handle_event(
         }
     }
     Ok(())
+}
+
+/// Makes a connect snapshot authoritative for connect-managed devices.
+///
+/// A snapshot is the full list of devices paired with this machine, so any
+/// connect-managed key missing from it was revoked while the daemon was
+/// offline: it leaves the registry, the transport allowlist and every live
+/// session. Direct pairings and peer daemons are not connect's to revoke.
+fn apply_snapshot(service: &SecureService, registry: &DeviceRegistry, devices: &[ConnectDevice]) {
+    let entries: Vec<ConnectEntry> = devices.iter().filter_map(connect_entry).collect();
+    let removed = registry.reconcile_connect(&entries);
+    for entry in &entries {
+        service.allow(entry.key);
+    }
+    for key in removed {
+        service.revoke(key);
+        tracing::info!(key = %hex::encode(key), "revoked a device missing from the connect snapshot");
+    }
 }
 
 /// Parses a connect device into a registry entry, skipping malformed keys.
@@ -313,6 +318,47 @@ mod tests {
             revoked_at: None,
             scopes,
         }
+    }
+
+    #[test]
+    fn a_reconnect_snapshot_revokes_devices_missing_from_it() {
+        let service = SecureService::new(h4rn_transport::server::SecureOptions::new(
+            h4rn_transport::keys::DeviceIdentity::generate().unwrap(),
+        ));
+        let registry = DeviceRegistry::in_memory();
+        // Both were paired before the daemon went offline; `gone` was then
+        // revoked, and a direct pairing exists alongside.
+        apply_snapshot(
+            &service,
+            &registry,
+            &[
+                device("kept", 1, vec![PairScope::View]),
+                device("gone", 2, vec![PairScope::View]),
+            ],
+        );
+        registry.insert_direct([3u8; KEY_LEN], PairScope::ALL.to_vec());
+        service.allow([3u8; KEY_LEN]);
+        apply_snapshot(
+            &service,
+            &registry,
+            &[device("kept", 1, vec![PairScope::View, PairScope::Approve])],
+        );
+        assert!(
+            !service.is_allowed(&[2u8; KEY_LEN]),
+            "revoked key still allowed"
+        );
+        assert!(registry.authorization(&[2u8; KEY_LEN]).is_none());
+        assert!(service.is_allowed(&[1u8; KEY_LEN]));
+        assert_eq!(
+            registry.scopes_for_key(&[1u8; KEY_LEN]),
+            Some(vec![PairScope::View, PairScope::Approve]),
+            "scopes follow the latest snapshot"
+        );
+        assert!(
+            service.is_allowed(&[3u8; KEY_LEN]),
+            "direct pairing was dropped"
+        );
+        assert!(registry.authorization(&[3u8; KEY_LEN]).is_some());
     }
 
     #[test]
