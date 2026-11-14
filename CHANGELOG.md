@@ -5,6 +5,20 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### Council round 1 (part D)
+
+- **Usage numbers come from Rust.** `Usage` gains `generation_ms` and `tps` (tokens per second of
+  generation, tool time excluded), computed by the meter; `ThreadSummary` gains
+  `context_fill_percent`. The UI formats them and no longer divides output by wall time. Threads
+  recorded before this change show `—` until their next turn.
+- **Removed** the never-implemented `ProxyProbe` and `ProxyConfigure` requests.
+- **Mock daemon is dev-only.** `?mock=1` works under `bun run dev` and in tests; a production
+  build excludes the ~5.6k lines of mock code unless built with `VITE_H4RN_MOCK=1`.
+- **CI** runs the Postgres-only `h4rn-connect` suites (`postgres`, `skills`) against a
+  `postgres:16` service; `docs/release.md` lists the suites that still need OrbitID.
+- **Tests.** `resume_now_acknowledges_before_a_slow_first_send` and its sibling no longer race a
+  5 s event budget against a 5 s harness delay.
+
 ### UI fidelity round 4
 
 - **Apply and restart (Providers).** `ApplyProxyOverrides` interrupts the live turn of every
