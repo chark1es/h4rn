@@ -49,7 +49,11 @@ export function ToolCard({ toolCall }: { toolCall: ToolCall }) {
         <span className="verb">{verbOf(toolCall.name)}</span>
         <span className="tgt">{toolCall.summary}</span>
         <span className={cn("m q-num", failed && "q-danger")}>
-          {elapsed !== null && elapsed >= 0 ? duration(elapsed) : toolCall.status}
+          {elapsed !== null && elapsed >= 1000
+            ? duration(elapsed)
+            : elapsed !== null && !failed
+              ? ""
+              : toolCall.status}
         </span>
         <ChevronRightIcon className="q-icon s14 chev" strokeWidth={1.5} aria-hidden />
       </button>

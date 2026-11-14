@@ -2,6 +2,7 @@ import { ChevronDownIcon, ShieldCheckIcon } from "lucide-react";
 
 import { BACKSPACE, ENTER, KeyCaps, MOD } from "@/components/common/Kbd";
 import type { ApprovalKind } from "@/gen";
+import { tildePath } from "@/lib/format";
 import { harnessLabel } from "@/lib/entities";
 import { respondApproval, useApp } from "@/lib/store/appStore";
 
@@ -54,18 +55,13 @@ export function ApprovalCard({ threadId }: { threadId: string }) {
           {more > 0 ? `+${more} more` : "now"}
         </span>
       </div>
-      <div className="q-ask-sub">
-        {first.approvalKind === "command" ? "Command" : "Request"}
-        {summary?.workspace_path ? (
-          <>
-            {" "}
-            · in{" "}
-            <span className="q-mono" style={{ fontSize: 11.5 }}>
-              {summary.workspace_path}
-            </span>
-          </>
-        ) : null}
-      </div>
+      {summary?.workspace_path ? (
+        <div className="q-ask-sub">
+          <span className="q-mono" style={{ fontSize: 11.5 }}>
+            {tildePath(summary.workspace_path)}
+          </span>
+        </div>
+      ) : null}
       <div className="q-cmd">{first.prompt}</div>
       {first.options.length > 0 ? (
         <div className="q-ask-f" style={{ marginTop: 8 }}>

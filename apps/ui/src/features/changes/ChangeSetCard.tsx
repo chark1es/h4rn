@@ -1,4 +1,3 @@
-import { FileIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { FileDiff } from "@/components/panel/FileDiff";
@@ -74,7 +73,6 @@ export function ChangeSetCard({ turn, summary }: { turn: StreamTurn; summary: Th
         const { directory, name } = splitPath(file.path);
         return (
           <div className="q-ch-file" key={file.path}>
-            <FileIcon className="q-icon s14 q-faint" strokeWidth={1.5} aria-hidden />
             <span className="p q-mono">
               <span>{directory}</span>
               {name}
