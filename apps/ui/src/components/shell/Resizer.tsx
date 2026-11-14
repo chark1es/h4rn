@@ -30,6 +30,7 @@ export function Resizer({
   return (
     <hr
       className={cn("q-resizer", side, drag && "drag")}
+      role="separator"
       aria-orientation="vertical"
       aria-label={label}
       aria-valuenow={width}

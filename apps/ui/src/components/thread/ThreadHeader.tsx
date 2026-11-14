@@ -129,7 +129,7 @@ export function ThreadHeader({
   // A dropped connection outranks the last agent state: do not animate work
   // the daemon can no longer confirm.
   const glyph =
-    stale && working
+    stale && working && !unreachable
       ? { kind: "offline" as const, label: "Last seen running" }
       : glyphForThread(summary, hostOnline);
   const isPhone = useIsPhone();

@@ -2074,7 +2074,10 @@
 .q-center-empty {
   flex: 1;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   place-items: center;
+  padding: 0 16px;
+  min-width: 0;
 }
 .q-center-empty .q-box {
   width: 420px;
