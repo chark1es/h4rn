@@ -241,6 +241,48 @@ impl Authed {
     }
 }
 
+impl Authed {
+    /// Fails with `scope_required` unless the device holds `scope` *on this
+    /// machine*. Machine-scoped actions use this instead of [`Self::require`],
+    /// which checks the union across every machine.
+    pub async fn require_on(
+        &self,
+        state: &AppState,
+        machine_id: Uuid,
+        scope: PairScope,
+    ) -> Result<()> {
+        let scopes = state
+            .store
+            .machine_scopes(machine_id, self.device.id)
+            .await?;
+        if scopes.contains(&scope) {
+            Ok(())
+        } else {
+            Err(AppError::forbidden_hint(
+                "scope_required",
+                format!(
+                    "this device was not paired with the `{}` scope on this machine",
+                    scope.as_str()
+                ),
+                "Pair the device again and enable that permission for this machine.",
+            ))
+        }
+    }
+
+    /// Authorises an action on another device: admin on every machine that
+    /// device belongs to, or the account-wide default when it belongs to none.
+    pub async fn require_admin_over_device(&self, state: &AppState, target: Uuid) -> Result<()> {
+        let machines = state.store.device_machines(target).await?;
+        if machines.is_empty() {
+            return self.require(PairScope::Admin);
+        }
+        for machine_id in machines {
+            self.require_on(state, machine_id, PairScope::Admin).await?;
+        }
+        Ok(())
+    }
+}
+
 impl FromRequestParts<AppState> for Authed {
     type Rejection = AppError;
 
@@ -1066,7 +1108,7 @@ async fn rename_device(
     let device_id = Uuid::parse_str(&id)
         .map_err(|_| AppError::bad_request("device_invalid", "device id is not a UUID"))?;
     if device_id != authed.device.id {
-        authed.require(PairScope::Admin)?;
+        authed.require_admin_over_device(&state, device_id).await?;
     }
     let device = state
         .store
@@ -1095,7 +1137,7 @@ async fn revoke_device(
     let device_id = Uuid::parse_str(&id)
         .map_err(|_| AppError::bad_request("device_invalid", "device id is not a UUID"))?;
     if device_id != authed.device.id {
-        authed.require(PairScope::Admin)?;
+        authed.require_admin_over_device(&state, device_id).await?;
     }
     let machines = state.store.revoke_device(authed.user.id, device_id).await?;
     for machine_id in machines {
@@ -1283,9 +1325,15 @@ async fn revoke_pairing(
     authed: Authed,
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
-    authed.require(PairScope::Admin)?;
     let pairing_id = Uuid::parse_str(&id)
         .map_err(|_| AppError::bad_request("pairing_invalid", "pairing id is not a UUID"))?;
+    let machine_id = state
+        .store
+        .pairing_machine(authed.user.id, pairing_id)
+        .await?;
+    authed
+        .require_on(&state, machine_id, PairScope::Admin)
+        .await?;
     state
         .store
         .revoke_pairing(authed.user.id, pairing_id)

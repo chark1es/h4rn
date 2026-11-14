@@ -2630,6 +2630,9 @@ class MockDaemon {
       case "get_limits":
         this.ok(frame.id, { type: "limits", report: this.limitsReport() });
         return;
+      case "pairing_confirmations":
+        this.ok(frame.id, { type: "pairing_confirmations", confirmations: [] });
+        return;
       case "list_resets":
         this.ok(frame.id, {
           type: "resets",

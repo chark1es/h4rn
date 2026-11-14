@@ -432,6 +432,11 @@ pub enum ResponseBody {
         /// The default and the alternatives.
         options: crate::usage::FailoverOptions,
     },
+    /// Devices awaiting short-authentication-string confirmation.
+    PairingConfirmations {
+        /// Newest first; entries expire after a few minutes.
+        confirmations: Vec<crate::connect::PairingConfirmation>,
+    },
     /// A schedule was armed, moved or cleared.
     ResumeChanged {
         /// The current schedule, or `None` when none remains.

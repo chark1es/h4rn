@@ -210,6 +210,8 @@ struct SessionEndpoint {
     notify: Arc<tokio::sync::Notify>,
 }
 
+type PairingHook = Arc<dyn Fn([u8; KEY_LEN]) + Send + Sync>;
+
 /// The daemon's secure transport service.
 pub struct SecureService {
     options: SecureOptions,
@@ -218,6 +220,7 @@ pub struct SecureService {
     psk: RwLock<Option<[u8; TOKEN_LEN]>>,
     /// Optional file the allowlist is mirrored to, so pairings survive restart.
     allowlist_path: RwLock<Option<std::path::PathBuf>>,
+    pairing_hook: RwLock<Option<PairingHook>>,
     sessions: Mutex<HashMap<SessionId, Arc<SessionEndpoint>>>,
     next_path: AtomicU32,
     started: Instant,
@@ -233,6 +236,7 @@ impl SecureService {
             policy,
             psk,
             allowlist_path: RwLock::new(None),
+            pairing_hook: RwLock::new(None),
             sessions: Mutex::new(HashMap::new()),
             next_path: AtomicU32::new(1),
             started: Instant::now(),
@@ -316,6 +320,54 @@ impl SecureService {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 
+    /// Atomically consumes the pairing secret if it is still `used`.
+    ///
+    /// Returns `true` for exactly one caller: the first to present the live
+    /// secret. A second handshake that started with the same secret (it took a
+    /// snapshot before the first finished) gets `false` and must be rejected.
+    pub fn consume_psk(&self, used: &[u8; TOKEN_LEN]) -> bool {
+        use subtle::ConstantTimeEq as _;
+        let mut guard = self
+            .psk
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match guard.as_ref() {
+            Some(current) if bool::from(current.ct_eq(used)) => {
+                *guard = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Registers a hook run when a device pairs through the one-time secret,
+    /// after the secret is consumed and before the device is allowed.
+    ///
+    /// The daemon uses it to record the new device's scopes and provenance.
+    pub fn set_pairing_hook(&self, hook: Arc<dyn Fn([u8; KEY_LEN]) + Send + Sync>) {
+        *self
+            .pairing_hook
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
+    }
+
+    fn paired_through_psk(&self, used: Option<[u8; TOKEN_LEN]>, device: [u8; KEY_LEN]) -> bool {
+        let Some(used) = used else { return false };
+        if !self.consume_psk(&used) {
+            return false;
+        }
+        let hook = self
+            .pairing_hook
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook(device);
+        }
+        self.allow(device);
+        true
+    }
+
     /// The current pairing secret, when pairing is open.
     pub fn psk(&self) -> Option<[u8; TOKEN_LEN]> {
         *self
@@ -383,12 +435,11 @@ impl SecureService {
             return Err(SecureError::Protocol("first packet was not a handshake"));
         }
         let session_id = packet.session_id;
-        let (mut path, device, newly_paired) =
+        // The single-use pairing secret is consumed inside `handshake`, at the
+        // moment the device is authorised, so two racing handshakes cannot
+        // both pair with the same QR.
+        let (mut path, device, _newly_paired) =
             self.handshake(&mut *link, session_id, packet.body).await?;
-        if newly_paired {
-            // The QR is single-use: rotate the secret as soon as a device pairs.
-            self.clear_psk();
-        }
 
         // The first encrypted record must be `Open`: it binds this fresh Noise
         // channel to the logical session and carries the resume token.
@@ -570,13 +621,14 @@ impl SecureService {
         session_id: SessionId,
         mut message: Vec<u8>,
     ) -> Result<(ServerPath, [u8; KEY_LEN], bool), SecureError> {
+        // Read the live secret: a pairing payload installed after the daemon
+        // started must be usable on the next handshake. The snapshot is only
+        // a candidate; `consume_psk` decides who actually owns it.
+        let psk_snapshot = self.psk();
         let mut path = ServerPath::new(
             session_id,
             self.options.identity.clone(),
-            // Read the live secret: a pairing payload installed after the
-            // daemon started must be usable on the next handshake, and a
-            // consumed secret must never be reused.
-            self.psk(),
+            psk_snapshot,
             self.options.rekey,
         );
         let mut paired_through_psk = false;
@@ -597,8 +649,11 @@ impl SecureService {
                     send_handshake(link, session_id, reply).await?;
                 }
                 ServerHandshakeStep::PairedThroughPsk { device, reply } => {
+                    if !self.paired_through_psk(psk_snapshot, device) {
+                        let _ = reject(link, session_id, RejectReason::NotPaired).await;
+                        return Err(SecureError::Rejected(RejectReason::NotPaired));
+                    }
                     paired_through_psk = true;
-                    self.allow(device);
                     if let Some(reply) = reply {
                         send_handshake(link, session_id, reply).await?;
                     }
@@ -608,9 +663,16 @@ impl SecureService {
                     newly_paired,
                     reply,
                 } => {
-                    paired_through_psk |= newly_paired;
                     if newly_paired {
-                        self.allow(device);
+                        // A path that authorised in an earlier step already
+                        // consumed the secret and allowed the device.
+                        if !self.is_allowed(&device)
+                            && !self.paired_through_psk(psk_snapshot, device)
+                        {
+                            let _ = reject(link, session_id, RejectReason::NotPaired).await;
+                            return Err(SecureError::Rejected(RejectReason::NotPaired));
+                        }
+                        paired_through_psk = true;
                     }
                     if let Some(reply) = reply {
                         send_handshake(link, session_id, reply).await?;
@@ -974,6 +1036,26 @@ mod tests {
         assert!(service.is_allowed(&[1u8; KEY_LEN]));
         service.revoke([1u8; KEY_LEN]);
         assert!(!service.is_allowed(&[1u8; KEY_LEN]));
+    }
+
+    #[test]
+    fn the_pairing_secret_is_consumed_exactly_once() {
+        let service = SecureService::new(
+            SecureOptions::new(DeviceIdentity::generate().unwrap()).with_psk([9u8; TOKEN_LEN]),
+        );
+        // Two handshakes both took a snapshot of the live secret.
+        assert!(service.consume_psk(&[9u8; TOKEN_LEN]));
+        assert!(!service.consume_psk(&[9u8; TOKEN_LEN]));
+        assert_eq!(service.psk(), None);
+    }
+
+    #[test]
+    fn a_wrong_secret_does_not_consume_the_live_one() {
+        let service = SecureService::new(
+            SecureOptions::new(DeviceIdentity::generate().unwrap()).with_psk([9u8; TOKEN_LEN]),
+        );
+        assert!(!service.consume_psk(&[1u8; TOKEN_LEN]));
+        assert_eq!(service.psk(), Some([9u8; TOKEN_LEN]));
     }
 
     #[test]

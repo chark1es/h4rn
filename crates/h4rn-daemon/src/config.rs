@@ -93,6 +93,11 @@ impl Config {
         self.data_dir.join("transport-allowlist")
     }
 
+    /// Path of the persisted device registry (keys, scopes, provenance).
+    pub fn devices_path(&self) -> PathBuf {
+        self.data_dir.join("devices.json")
+    }
+
     /// Path of the persisted h4rn-connect session.
     pub fn connect_credentials_path(&self) -> PathBuf {
         self.data_dir

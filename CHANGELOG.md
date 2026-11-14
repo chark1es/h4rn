@@ -5,6 +5,28 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### Council round 1: authorization, transport and pairing
+
+- **Binary PTY input is authorised (A1).** It needs `Hello`, the `terminal` scope and a viewer
+  this connection attached; blob chunks need `Hello` and `approve`.
+- **`/secure-mcp` authenticates the peer (A2).** The caller must be a registered peer daemon key;
+  `machine` and device id come from the registry, not the frame; `allowed_devices: None` means the
+  target machine's daemon only.
+- **Authorization fails closed (A3).** A persisted device registry (`devices.json`) records scopes
+  and pairing provenance per key. No entry means denied; the identity is the handshake key, never
+  the relay's device id. Pairings made before scopes were recorded must be paired again.
+- **Reconnect reconciles revocations (A4).** A relay snapshot removes connect-paired devices it no
+  longer lists and ends their sessions; direct pairings are kept.
+- **`h4rnd pair --direct --scope` is honoured (A5).** Without `--scope` a direct pairing grants every
+  scope, now stated in the help. The pairing watcher also runs for daemons not signed in to connect.
+- **Short authentication string for typed codes (A6).** The phone shows a 12-digit code derived in
+  Rust and confirms it against the host's before pinning the daemon key. New request
+  `PairingConfirmations`; wasm export `pairing_sas` (committed wasm rebuilt).
+- **One QR pairs one device (A7).** The one-time PSK is consumed atomically at authorisation.
+- **`SetThreadTab` and `Snooze` need `approve` (A8).**
+- **Scopes are per machine in h4rn-connect (A9).** Admin on one machine no longer mints or revokes
+  pairings for another.
+
 ### UI fidelity round 4
 
 - **Apply and restart (Providers).** `ApplyProxyOverrides` interrupts the live turn of every

@@ -526,3 +526,67 @@ async fn slow_viewer_resyncs_from_a_snapshot() {
         "a viewer that falls outside the ring must be resynced from a snapshot"
     );
 }
+
+/// Binary PTY input is authorised like a request: it needs `Hello` and a
+/// viewer this connection attached. A stream id alone (ids are sequential)
+/// must not let another connection type into somebody else's shell.
+#[tokio::test]
+async fn pty_input_needs_hello_and_an_attached_viewer() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().to_string_lossy().to_string();
+
+    let mut owner = Client::connect(&daemon).await;
+    owner.hello().await;
+    let terminal = owner
+        .open(host, &cwd, Some("/bin/sh"), Vec::new(), 80, 24)
+        .await;
+    owner.attach(&terminal.terminal_id, 80, 24).await;
+
+    // A connection that never said Hello guesses the stream id.
+    let mut stranger = {
+        let url = format!("ws://{}/ws?token={}", daemon.addr, daemon.token);
+        let (ws, _) = connect_async(url).await.expect("connect");
+        Client {
+            ws,
+            next_id: 1,
+            texts: VecDeque::new(),
+            binaries: VecDeque::new(),
+        }
+    };
+    stranger
+        .send_input(terminal.stream_id, b"touch no-hello\n")
+        .await;
+    stranger.pump().await;
+    assert!(
+        !stranger.texts.is_empty(),
+        "a refused frame must be reported, not silently dropped"
+    );
+
+    // A connection that said Hello but never attached this terminal.
+    let mut other = Client::connect(&daemon).await;
+    other.hello().await;
+    other
+        .send_input(terminal.stream_id, b"touch not-attached\n")
+        .await;
+    other.pump().await;
+
+    // The owner still works, and proves the shell processed input in order.
+    owner
+        .send_input(terminal.stream_id, b"echo done-$((40+2))\n")
+        .await;
+    owner.output_until("done-42").await;
+    assert!(!work.path().join("no-hello").exists(), "no-Hello input ran");
+    assert!(
+        !work.path().join("not-attached").exists(),
+        "unattached input ran"
+    );
+    owner
+        .request(ClientRequest::TerminalClose {
+            terminal_id: terminal.terminal_id,
+        })
+        .await
+        .expect("close terminal");
+    daemon.stop().await;
+}

@@ -295,6 +295,47 @@ export function identity_public(identity) {
 }
 
 /**
+ * The short authentication string for a typed-code pairing.
+ *
+ * Both arguments are 32-byte X25519 keys as hex: `client_public` is this
+ * device's own key, `daemon_public` the daemon key connect handed over. The
+ * daemon derives the same string natively from the keys it holds; the person
+ * compares the two. Computed here so the UI only renders it.
+ * @param {string} client_public
+ * @param {string} daemon_public
+ * @returns {string}
+ */
+export function pairing_sas(client_public, daemon_public) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        let ptr0, len0, ptr1, len1;
+        try {
+            ptr0 = passStringToWasm0(client_public, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            len0 = WASM_VECTOR_LEN;
+            ptr1 = passStringToWasm0(daemon_public, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            len1 = WASM_VECTOR_LEN;
+        } catch (e) {
+            if (ptr1) { wasm.__wbindgen_free(ptr1, len1 * 1, 1); }
+            if (ptr0) { wasm.__wbindgen_free(ptr0, len0 * 1, 1); }
+            throw e;
+        }
+        const ret = wasm.pairing_sas(ptr0, len0, ptr1, len1);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
  * Parses a pairing URI into JSON (`endpoint`, `daemonPublic`, `psk`, `label`).
  * @param {string} uri
  * @returns {string}

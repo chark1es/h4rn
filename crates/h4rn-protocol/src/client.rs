@@ -605,6 +605,9 @@ pub enum ClientRequest {
         #[serde(default)]
         include_children: bool,
     },
+    /// Devices that paired through a typed code and still await a human
+    /// comparing the short authentication string with the new device's screen.
+    PairingConfirmations,
     /// Read known usage limits and the auto-resume policy.
     GetLimits,
     /// List persisted auto-resume schedules and limit history.
@@ -860,8 +863,6 @@ impl ClientRequest {
             | Self::ListHosts
             | Self::ListThreads { .. }
             | Self::GetThread { .. }
-            | Self::SetThreadTab { .. }
-            | Self::Snooze { .. }
             | Self::Subscribe { .. }
             | Self::GetBlob { .. }
             | Self::FsDiff { .. }
@@ -894,6 +895,8 @@ impl ClientRequest {
             | Self::CommitUpload { .. }
             | Self::AbortUpload { .. }
             | Self::QueryUpload { .. }
+            | Self::SetThreadTab { .. }
+            | Self::Snooze { .. }
             | Self::CancelResume { .. }
             | Self::ResumeNow { .. }
             | Self::FailOver { .. }
@@ -942,6 +945,7 @@ impl ClientRequest {
             | Self::ForgeRemoveAccount { .. }
             | Self::ForgeDeviceFlowStart { .. }
             | Self::ForgeDeviceFlowPoll { .. }
+            | Self::PairingConfirmations
             | Self::ForgeImportCli { .. } => Admin,
             Self::Mcp { request } => match request {
                 crate::mcp::McpRequest::ListServers | crate::mcp::McpRequest::ListTools { .. } => {
@@ -1045,7 +1049,25 @@ mod tests {
                 Files,
             ),
             (ClientRequest::McpList, View),
+            // Both persist per-thread state, so a view-only device must not
+            // be able to send them.
+            (
+                ClientRequest::SetThreadTab {
+                    thread_id: thread(),
+                    tab: ThreadTab::Working,
+                    pinned: true,
+                },
+                Approve,
+            ),
+            (
+                ClientRequest::Snooze {
+                    thread_id: thread(),
+                    until: None,
+                },
+                Approve,
+            ),
             (ClientRequest::McpRemove { name: "x".into() }, Admin),
+            (ClientRequest::PairingConfirmations, Admin),
         ];
         for (request, expected) in cases {
             assert_eq!(request.required_scope(), expected, "{request:?}");

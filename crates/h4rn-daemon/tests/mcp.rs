@@ -19,9 +19,12 @@ use h4rn_daemon::auth::TokenStore;
 use h4rn_daemon::config::Config;
 use h4rn_daemon::daemon::DaemonBuilder;
 use h4rn_daemon::mcp::{TransportMcpTunnel, TunnelConnection};
+use h4rn_daemon::remote::DeviceRegistry;
 use h4rn_daemon::threads::ThreadManagerOptions;
 use h4rn_harness::FakeHarness;
 use h4rn_mcp::session::McpScope;
+use h4rn_mcp::sharing::McpTunnel as _;
+use h4rn_protocol::HostId;
 use h4rn_protocol::{
     ClientFrame, ClientRequest, DeviceId, DeviceInfo, Event, HarnessKind, McpConflictResolution,
     McpEnabledMatrix, McpRequest, McpSecretInput, McpServerInput, McpSharePolicy,
@@ -60,6 +63,13 @@ impl TestDaemon {
 }
 
 async fn boot_with_secure(secure: Option<Arc<SecureService>>) -> TestDaemon {
+    boot_with_devices(secure, None).await
+}
+
+async fn boot_with_devices(
+    secure: Option<Arc<SecureService>>,
+    devices: Option<Arc<DeviceRegistry>>,
+) -> TestDaemon {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = Config {
         data_dir: dir.path().to_path_buf(),
@@ -79,6 +89,9 @@ async fn boot_with_secure(secure: Option<Arc<SecureService>>) -> TestDaemon {
         .with_lifecycle(options);
     if let Some(secure) = secure {
         builder = builder.with_secure(secure);
+    }
+    if let Some(devices) = devices {
+        builder = builder.with_devices(devices);
     }
     let daemon = builder.build().await.expect("build daemon");
     let token = TokenStore::new(dir.path())
@@ -515,12 +528,19 @@ async fn a_remote_hub_proxies_a_shared_server_over_the_secure_tunnel() {
         SecureOptions::new(a_identity.clone())
             .with_policy(PairingPolicy::new([b_identity.public().noise_public])),
     ));
-    let a = boot_with_secure(Some(Arc::clone(&a_secure))).await;
     let b_secure = Arc::new(SecureService::new(SecureOptions::new(b_identity.clone())));
     let b = boot_with_secure(Some(b_secure)).await;
+    let b_host = b.mcp.hub().local_host().clone();
+    // ... and registers that key as the daemon of machine B.
+    let a_devices = Arc::new(DeviceRegistry::in_memory());
+    a_devices.register_host(
+        b_host.clone(),
+        b_identity.public().noise_public,
+        Some("dev_b".into()),
+    );
+    let a = boot_with_devices(Some(Arc::clone(&a_secure)), Some(a_devices)).await;
 
     let a_host = a.mcp.hub().local_host().clone();
-    let b_host = b.mcp.hub().local_host().clone();
 
     // A owns a server and shares it with B's machine id.
     let upstream = start_http_upstream("owner").await;
@@ -611,4 +631,158 @@ async fn a_remote_hub_proxies_a_shared_server_over_the_secure_tunnel() {
 
     b.stop().await;
     a.stop().await;
+}
+
+/// Owner A with one shared server and a hand-built tunnel from key `b`.
+struct TunnelRig {
+    a: TestDaemon,
+    tunnel: TransportMcpTunnel,
+}
+
+async fn tunnel_rig(
+    registry: impl FnOnce(&DeviceRegistry, &HostId, [u8; 32]),
+    policy: McpSharePolicy,
+    claimed_machine: Option<&str>,
+    claimed_device: Option<&str>,
+) -> TunnelRig {
+    let a_identity = DeviceIdentity::generate().expect("A identity");
+    let b_identity = DeviceIdentity::generate().expect("B identity");
+    let b_key = b_identity.public().noise_public;
+    let a_secure = Arc::new(SecureService::new(
+        SecureOptions::new(a_identity).with_policy(PairingPolicy::new([b_key])),
+    ));
+    let b_host = HostId::new("host_b");
+    let devices = Arc::new(DeviceRegistry::in_memory());
+    registry(&devices, &b_host, b_key);
+    let a = boot_with_devices(Some(Arc::clone(&a_secure)), Some(devices)).await;
+    let upstream = start_http_upstream("owner").await;
+    let mut client = Client::connect(&a).await;
+    client.hello().await;
+    client
+        .mcp(McpRequest::Upsert {
+            input: http_server(upstream),
+        })
+        .await
+        .expect("upsert");
+    client
+        .mcp(McpRequest::Share {
+            name: "local".into(),
+            to_machine: b_host.clone(),
+            policy,
+        })
+        .await
+        .expect("share");
+    let tunnel = TransportMcpTunnel::new(TunnelConnection {
+        url: format!("ws://{}/secure-mcp", a.addr),
+        identity: b_identity,
+        daemon_public: a_secure.public_identity().noise_public,
+        session_id: [9u8; SESSION_ID_LEN],
+        machine: HostId::new(claimed_machine.unwrap_or("host_b")),
+        device_id: claimed_device.map(str::to_owned),
+    });
+    TunnelRig { a, tunnel }
+}
+
+async fn list_tools_over(rig: &TunnelRig) -> Result<Value, String> {
+    let session = rig.tunnel.open("local").await.map_err(|e| e.to_string())?;
+    session
+        .request("tools/list", json!({}), Duration::from_secs(5))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tokio::test]
+async fn a_registered_peer_daemon_can_use_its_grant() {
+    let rig = tunnel_rig(
+        |devices, host, key| devices.register_host(host.clone(), key, Some("dev_b".into())),
+        McpSharePolicy::default(),
+        None,
+        None,
+    )
+    .await;
+    let tools = list_tools_over(&rig)
+        .await
+        .expect("peer daemon is admitted");
+    assert!(tools["tools"].as_array().is_some_and(|t| !t.is_empty()));
+    rig.a.stop().await;
+}
+
+#[tokio::test]
+async fn a_view_only_client_key_cannot_use_the_tunnel() {
+    // The key completes the Noise handshake (it is on the allowlist) but it is
+    // a user device with `view`, not a peer daemon.
+    let rig = tunnel_rig(
+        |devices, _host, key| {
+            devices.insert_scoped("phone", key, vec![h4rn_protocol::PairScope::View])
+        },
+        McpSharePolicy::default(),
+        None,
+        None,
+    )
+    .await;
+    assert!(list_tools_over(&rig).await.is_err());
+    rig.a.stop().await;
+}
+
+#[tokio::test]
+async fn a_key_with_no_registry_entry_cannot_use_the_tunnel() {
+    let rig = tunnel_rig(|_, _, _| {}, McpSharePolicy::default(), None, None).await;
+    assert!(list_tools_over(&rig).await.is_err());
+    rig.a.stop().await;
+}
+
+#[tokio::test]
+async fn a_spoofed_machine_or_device_claim_is_refused() {
+    let register = |devices: &DeviceRegistry, host: &HostId, key: [u8; 32]| {
+        devices.register_host(host.clone(), key, Some("dev_b".into()))
+    };
+    // Claims to be another machine that holds a grant.
+    let rig = tunnel_rig(register, McpSharePolicy::default(), Some("host_c"), None).await;
+    assert!(list_tools_over(&rig).await.is_err());
+    rig.a.stop().await;
+    // Claims another device id than the one the key is registered under.
+    let rig = tunnel_rig(register, McpSharePolicy::default(), None, Some("dev_admin")).await;
+    assert!(list_tools_over(&rig).await.is_err());
+    rig.a.stop().await;
+}
+
+#[tokio::test]
+async fn an_explicit_device_list_compares_the_verified_device_only() {
+    let register = |devices: &DeviceRegistry, host: &HostId, key: [u8; 32]| {
+        devices.register_host(host.clone(), key, Some("dev_b".into()))
+    };
+    let allowed = McpSharePolicy {
+        allowed_devices: Some(vec!["dev_b".into()]),
+        ..McpSharePolicy::default()
+    };
+    let rig = tunnel_rig(register, allowed, None, None).await;
+    let session = rig.tunnel.open("local").await.expect("open");
+    let called = session
+        .request(
+            "tools/call",
+            json!({"name": "echo", "arguments": {"message": "hi"}}),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("verified device in the list");
+    assert_eq!(called["isError"], false);
+    rig.a.stop().await;
+
+    let other = McpSharePolicy {
+        allowed_devices: Some(vec!["dev_other".into()]),
+        ..McpSharePolicy::default()
+    };
+    let rig = tunnel_rig(register, other, None, None).await;
+    let session = rig.tunnel.open("local").await.expect("open");
+    assert!(
+        session
+            .request(
+                "tools/call",
+                json!({"name": "echo", "arguments": {"message": "hi"}}),
+                Duration::from_secs(5),
+            )
+            .await
+            .is_err()
+    );
+    rig.a.stop().await;
 }

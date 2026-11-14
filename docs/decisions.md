@@ -764,8 +764,8 @@ enforce them. The relay API reads the live scopes from the database: creating or
 revoking pairings and revoking another device need `admin`, and an unpaired phone
 holds `view` alone. The daemon classifies every `ClientRequest`
 (`required_scope()`, an exhaustive match so new requests must be classified) and
-refuses with `forbidden` before dispatch. Direct (PSK) pairings and local sessions
-are unrestricted; a re-pairing replaces the scopes.
+refuses with `forbidden` before dispatch. A re-pairing replaces the scopes. Local
+(loopback) sessions are unrestricted; nothing else is.
 
 The short code is 8 Crockford base32 characters (40 bits from the OS RNG), stored
 only as a domain-separated BLAKE3 hash under a unique index over pending rows,
@@ -775,3 +775,50 @@ per hour, charged hit or miss; another account's code is indistinguishable from
 an unknown one). Trade-off: a typed code has no QR to pin the daemon's Noise key,
 so the relay supplies it at claim and the first handshake trusts the relay for
 it. The QR path is unchanged and remains the stronger one.
+
+### Round-1 council amendments
+
+**The daemon's device registry is the only authority.** `<data_dir>/devices.json`
+(encrypted at rest) records, per Noise key, a role (`client` with scopes, or `host`
+for a peer daemon), a provenance (`connect` or `direct`) and the connect device id.
+Missing authorisation is denial: a key that completes the handshake but has no
+entry gets `forbidden` on its first request, and a corrupt file means everyone
+pairs again, never an open daemon. The session's identity is always the key the
+handshake authenticated; a device id the relay puts in its `open` frame is a claim
+and is replaced by the registry's answer. The registry is rebuilt into the
+transport allowlist at start; keys in the old allowlist file but not in the
+registry are not admitted. A relay snapshot is authoritative for `connect`
+entries: absent ones are removed, their sessions terminated and the registry
+persisted. Direct pairings are recorded with the scopes armed in
+`direct-pairing.json` (`h4rnd pair --direct --scope …`; no `--scope` grants every
+scope) and survive snapshots. Binary frames are authorised like requests: PTY
+input needs `Hello`, the `terminal` scope and a viewer this connection attached.
+`SetThreadTab` and `Snooze` mutate state and need `approve`. The one-time PSK is
+consumed atomically when the device is authorised, so racing handshakes pair one
+device per QR.
+
+**Typed-code pairing is confirmed by a short authentication string.** The relay
+supplies the daemon's key for a typed code, so a malicious relay could sit in the
+middle of the first session. The phone therefore stops after the claim: it derives
+`short_auth_string(own key, daemon key as received)` in Rust (wasm export
+`pairing_sas`) and shows it; the daemon derives the same function from the device
+key connect gave it and its own key, and lists it under Settings → Devices
+(`PairingConfirmations`, `admin`). Nothing is pinned until the person taps "They
+match"; "They differ" revokes the device and signs it out. A swapped key on either
+side makes the two strings differ. It is 12 digits (about 40 bits), not 6: a short
+string can be ground in real time by generating key pairs until two strings
+collide. The QR path pins the key out of band and needs no confirmation. Limits: a
+pairing claimed while the daemon is offline queues no confirmation; the entry
+lasts ten minutes.
+
+**Scopes are per machine.** `h4rn-connect` authorises machine-scoped actions
+(creating or revoking a pairing, revoking another device) against the link's
+scopes for that machine (`machine_scopes`), never the union across machines. A
+machine's own daemon holds every scope on its machine. A device linked only to
+other machines holds nothing here. A device linked to no machine keeps the
+unpaired default (the owner's desktop and browser everything, a phone `view`).
+
+**`/secure-mcp` authenticates peer daemons.** The peer must be a registered `host`
+key; `machine` and device id are derived from the registry, and a handshake frame
+that claims otherwise is refused. `allowed_devices: None` admits the target
+machine's daemon only; a list compares the verified id alone.

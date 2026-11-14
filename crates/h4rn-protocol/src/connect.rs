@@ -253,9 +253,9 @@ pub struct ConnectDevice {
     pub last_seen: Option<DateTime<Utc>>,
     /// Revocation time, if revoked.
     pub revoked_at: Option<DateTime<Utc>>,
-    /// Scopes the device was paired with on this machine. Empty means no
-    /// restriction was recorded (a direct pairing or a pre-scope record), which
-    /// the daemon treats as unrestricted.
+    /// Scopes the device was paired with on this machine. An empty list is a
+    /// record without recorded authority, which the daemon reads as `view`
+    /// only: missing authorisation is never widened.
     #[serde(default)]
     pub scopes: Vec<PairScope>,
 }
@@ -460,6 +460,23 @@ impl PairScope {
         set.insert(Self::View);
         set.into_iter().collect()
     }
+}
+
+/// A device that paired through a typed code, waiting to be confirmed.
+///
+/// The daemon computes `sas` from the daemon key it holds and the device key
+/// connect gave it. The person compares it with the string the new device
+/// shows after claiming; a mismatch means the relay substituted a key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PairingConfirmation {
+    /// Connect device id of the new device.
+    pub device_id: String,
+    /// Its display name.
+    pub device_name: String,
+    /// Twelve digits in groups of four, derived in Rust.
+    pub sas: String,
+    /// When the daemon first saw the device.
+    pub paired_at: DateTime<Utc>,
 }
 
 /// Alphabet of the pairing short code: Crockford base32 (no I, L, O, U).

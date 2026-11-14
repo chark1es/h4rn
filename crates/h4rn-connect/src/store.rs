@@ -773,6 +773,95 @@ impl Store {
         Ok(scope_strings(&self.device_scopes(device_id).await?))
     }
 
+    /// What a device may do on one machine.
+    ///
+    /// Machine-scoped actions are authorised against this, never against the
+    /// union [`Self::device_scopes`] returns: admin on machine A must not let a
+    /// device mint an admin pairing for machine B.
+    ///
+    /// - A linked device holds exactly its link's scopes.
+    /// - A machine's own daemon holds every scope on its machine.
+    /// - A device linked only to *other* machines holds nothing here.
+    /// - A device linked to no machine at all keeps the unpaired default: the
+    ///   account owner's desktop, browser and daemon are not scope-limited until
+    ///   they are paired like a remote, and an unpaired phone holds `view`.
+    pub async fn machine_scopes(
+        &self,
+        machine_id: Uuid,
+        device_id: Uuid,
+    ) -> Result<Vec<PairScope>> {
+        let link: Option<Vec<String>> = sqlx::query_scalar(
+            "SELECT scopes FROM machine_devices WHERE machine_id = $1 AND device_id = $2",
+        )
+        .bind(machine_id)
+        .bind(device_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(link) = link {
+            return Ok(PairScope::normalize(parse_scopes(&link)));
+        }
+        let own: Option<Option<Uuid>> =
+            sqlx::query_scalar("SELECT machine_id FROM devices WHERE id = $1")
+                .bind(device_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        if own.flatten() == Some(machine_id) {
+            return Ok(PairScope::ALL.to_vec());
+        }
+        let linked_elsewhere: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM machine_devices WHERE device_id = $1")
+                .bind(device_id)
+                .fetch_one(&self.pool)
+                .await?;
+        if linked_elsewhere > 0 {
+            return Ok(Vec::new());
+        }
+        let kind: Option<String> = sqlx::query_scalar("SELECT kind FROM devices WHERE id = $1")
+            .bind(device_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(match kind.as_deref() {
+            Some("mobile") => vec![PairScope::View],
+            _ => PairScope::ALL.to_vec(),
+        })
+    }
+
+    /// Every machine a device is linked to, or runs.
+    pub async fn device_machines(&self, device_id: Uuid) -> Result<Vec<Uuid>> {
+        let mut machines: Vec<Uuid> =
+            sqlx::query_scalar("SELECT machine_id FROM machine_devices WHERE device_id = $1")
+                .bind(device_id)
+                .fetch_all(&self.pool)
+                .await?;
+        let own: Option<Option<Uuid>> =
+            sqlx::query_scalar("SELECT machine_id FROM devices WHERE id = $1")
+                .bind(device_id)
+                .fetch_optional(&self.pool)
+                .await?;
+        machines.extend(own.flatten());
+        machines.sort_unstable();
+        machines.dedup();
+        Ok(machines)
+    }
+
+    /// The machine a pairing belongs to, for authorising its revocation.
+    pub async fn pairing_machine(&self, user_id: Uuid, pairing_id: Uuid) -> Result<Uuid> {
+        sqlx::query_scalar(
+            "SELECT machine_id FROM pairings
+             WHERE id = $1 AND machine_id IN (SELECT id FROM machines WHERE user_id = $2)",
+        )
+        .bind(pairing_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| {
+            AppError::not_found(
+                "pairing_not_found",
+                "pairing does not exist or is not pending",
+            )
+        })
+    }
+
     /// The scopes one machine link carries.
     pub async fn link_scopes(&self, machine_id: Uuid, device_id: Uuid) -> Result<Vec<PairScope>> {
         let row: Option<Vec<String>> = sqlx::query_scalar(

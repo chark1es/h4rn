@@ -31,6 +31,7 @@ import type { McpImportPreview } from "./McpImportPreview";
 import type { McpServerView } from "./McpServerView";
 import type { McpTestCallResult } from "./McpTestCallResult";
 import type { McpToolInfo } from "./McpToolInfo";
+import type { PairingConfirmation } from "./PairingConfirmation";
 import type { ProxyFailoverChoice } from "./ProxyFailoverChoice";
 import type { ProxyLimits } from "./ProxyLimits";
 import type { ProxyModelCatalog } from "./ProxyModelCatalog";
@@ -380,7 +381,11 @@ resets: Resets, } | { "type": "failover_options",
 /**
  * The default and the alternatives.
  */
-options: FailoverOptions, } | { "type": "resume_changed", 
+options: FailoverOptions, } | { "type": "pairing_confirmations", 
+/**
+ * Newest first; entries expire after a few minutes.
+ */
+confirmations: Array<PairingConfirmation>, } | { "type": "resume_changed", 
 /**
  * The current schedule, or `None` when none remains.
  */

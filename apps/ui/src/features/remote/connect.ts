@@ -25,7 +25,11 @@ import type {
   PairScope,
   ProviderInfo,
 } from "@/gen";
-import { connect_proof, identity_public } from "@/gen/transport-wasm/h4rn_transport_wasm";
+import {
+  connect_proof,
+  identity_public,
+  pairing_sas,
+} from "@/gen/transport-wasm/h4rn_transport_wasm";
 import { ensureDeviceIdentity } from "@/lib/client/secure";
 import { loadTransportWasm } from "@/lib/client/wasm";
 
@@ -422,6 +426,17 @@ export class ConnectClient {
       noise_static_public_key: publicIdentity.noisePublic,
       device_name: name,
     });
+  }
+
+  /**
+   * The short authentication string for a daemon key connect handed over.
+   * Derived in Rust from this device's key and `daemonNoiseKeyHex`.
+   */
+  async pairingSas(daemonNoiseKeyHex: string): Promise<string> {
+    await loadTransportWasm();
+    const identity = await ensureDeviceIdentity();
+    const own = JSON.parse(identity_public(identity)) as { noisePublic: string };
+    return pairing_sas(base64UrlToHex(own.noisePublic), daemonNoiseKeyHex);
   }
 
   /** Builds an authenticated relay WebSocket URL for one attempt. */

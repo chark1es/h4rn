@@ -697,6 +697,45 @@ async function main() {
     const codeInput = page.getByRole("textbox", { name: "Pairing code" });
     await codeInput.fill(restrictedCode.toLowerCase());
     await page.getByRole("button", { name: "Pair with code" }).click();
+
+    // A typed code carries no daemon key, so the phone stops at a short
+    // authentication string. The host derives its own from the keys it holds;
+    // both are computed in Rust and must agree before anything is pinned.
+    const phoneSas = (await page.getByTestId("pair-sas").textContent({ timeout: 30_000 }))?.trim();
+    if (!phoneSas || !/^\d{4} \d{4} \d{4}$/.test(phoneSas)) {
+      throw new Error(`the phone did not show a 12-digit code: ${phoneSas}`);
+    }
+    const hostPage = await fallbackContext.newPage();
+    hostPage.setDefaultTimeout(20_000);
+    await hostPage.goto(
+      `${uiOrigin}/?token=${encodeURIComponent(token)}` +
+        `&daemon=${encodeURIComponent(`ws://127.0.0.1:${daemonPort}/ws`)}`,
+    );
+    await hostPage.locator('[title="Hosts and connection"]').click();
+    await hostPage
+      .getByRole("menu", { name: "Hosts" })
+      .getByRole("menuitem", { name: /Pair a device/ })
+      .click();
+    const hostSas = (
+      await hostPage
+        .getByTestId("host-sas")
+        .first()
+        .textContent({ timeout: 30_000 })
+        .catch(async (error) => {
+          const seen = await hostPage
+            .locator("body")
+            .innerText()
+            .catch(() => "");
+          throw new Error(
+            `the host never showed a code: ${error.message}\n${seen.slice(seen.indexOf("Pair a device"), seen.indexOf("Pair a device") + 1500)}`,
+          );
+        })
+    )?.trim();
+    await hostPage.close();
+    if (hostSas !== phoneSas) {
+      throw new Error(`the host and phone codes differ: host ${hostSas}, phone ${phoneSas}`);
+    }
+    await page.getByRole("button", { name: "They match" }).click();
     await page.getByText(/Paired with atlas/).waitFor({ timeout: 30_000 });
 
     // The code is single-use.
@@ -731,7 +770,7 @@ async function main() {
     }
     if (!refused) throw new Error("the daemon never refused the reply of a view-only device");
     console.log(
-      "Remote UI e2e passed: browser redirect signed in, paired, relayed a thread, revoked the device, the device-code fallback signed in again, and a view-only code pairing was refused approval by the daemon.",
+      "Remote UI e2e passed: browser redirect signed in, paired, relayed a thread, revoked the device, the device-code fallback signed in again, and a view-only code pairing confirmed its short authentication string, then was refused approval by the daemon.",
     );
   } catch (error) {
     if (page) {

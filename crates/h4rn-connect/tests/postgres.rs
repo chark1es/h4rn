@@ -879,3 +879,134 @@ async fn short_codes_expire_hide_across_users_and_are_rate_limited() {
     .await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
 }
+
+/// Admin on one machine must not be admin on another: scopes are per link, not
+/// the union across the account.
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn admin_on_one_machine_does_not_mint_pairings_for_another() {
+    let state = test_state().await;
+    let subject = Uuid::now_v7().to_string();
+    let alpha =
+        actor_with_subject(&state, ConnectDeviceKind::Daemon, Some("alpha"), &subject).await;
+    let beta = actor_with_subject(&state, ConnectDeviceKind::Daemon, Some("beta"), &subject).await;
+    let phone = actor_with_subject(&state, ConnectDeviceKind::Mobile, None, &subject).await;
+    let alpha_id = alpha.device.machine_id.expect("alpha machine");
+    let beta_id = beta.device.machine_id.expect("beta machine");
+    assert_ne!(alpha_id, beta_id);
+
+    let pair = |daemon: &Actor, machine: Uuid, scopes: serde_json::Value| {
+        request(
+            Method::POST,
+            "/v1/pairings",
+            Some(daemon),
+            Some(serde_json::json!({"machine_id": machine.to_string(), "scopes": scopes})),
+        )
+    };
+    // The phone is admin on alpha and view-only on beta.
+    for (daemon, machine, scopes) in [
+        (&alpha, alpha_id, serde_json::json!(["admin"])),
+        (&beta, beta_id, serde_json::json!(["view"])),
+    ] {
+        let (status, created) = send(&state, pair(daemon, machine, scopes)).await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let code = created["short_code"].as_str().unwrap().to_string();
+        let (status, claimed) = send(
+            &state,
+            request(
+                Method::POST,
+                "/v1/pairings/claim-code",
+                Some(&phone),
+                Some(claim_code_body(&code, &phone)),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{claimed}");
+    }
+    use h4rn_protocol::PairScope::{Admin, View};
+    assert!(
+        state
+            .store
+            .link_scopes(alpha_id, phone.device.id)
+            .await
+            .unwrap()
+            .contains(&Admin)
+    );
+    assert_eq!(
+        state
+            .store
+            .link_scopes(beta_id, phone.device.id)
+            .await
+            .unwrap(),
+        vec![View]
+    );
+
+    // Admin on alpha still mints pairings for alpha...
+    let (status, body) = send(
+        &state,
+        request(
+            Method::POST,
+            "/v1/pairings",
+            Some(&phone),
+            Some(serde_json::json!({"machine_id": alpha_id.to_string(), "scopes": ["admin"]})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let alpha_pairing = body["pairing"]["id"].as_str().unwrap().to_string();
+
+    // ...but not for beta, where it holds `view` only.
+    let (status, body) = send(
+        &state,
+        request(
+            Method::POST,
+            "/v1/pairings",
+            Some(&phone),
+            Some(serde_json::json!({"machine_id": beta_id.to_string(), "scopes": ["admin"]})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], "scope_required");
+
+    // Nor may it revoke beta's pending pairing, or beta's daemon.
+    let (status, created) = send(&state, pair(&beta, beta_id, serde_json::json!(["view"]))).await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    let beta_pairing = created["pairing"]["id"].as_str().unwrap().to_string();
+    let (status, body) = send(
+        &state,
+        request(
+            Method::DELETE,
+            &format!("/v1/pairings/{beta_pairing}"),
+            Some(&phone),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    let (status, body) = send(
+        &state,
+        request(
+            Method::DELETE,
+            &format!("/v1/devices/{}", beta.device.id),
+            Some(&phone),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], "scope_required");
+
+    // Its admin on alpha does cover alpha's pairing.
+    let (status, body) = send(
+        &state,
+        request(
+            Method::DELETE,
+            &format!("/v1/pairings/{alpha_pairing}"),
+            Some(&phone),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+}

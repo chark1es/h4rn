@@ -76,8 +76,9 @@ pub enum Command {
         #[arg(long, value_name = "NAME")]
         label: Option<String>,
         /// Scope to grant the new device (repeatable): view, approve, terminal,
-        /// files, admin. `view` is always granted; default is everything but
-        /// admin.
+        /// files, admin. `view` is always granted. Over connect the default is
+        /// everything but admin; with `--direct` and no `--scope` the device
+        /// is granted every scope, including admin.
         #[arg(long = "scope", value_name = "SCOPE", value_parser = parse_scope)]
         scopes: Vec<h4rn_protocol::PairScope>,
     },

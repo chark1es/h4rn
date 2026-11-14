@@ -67,9 +67,20 @@ pub struct McpService {
     audit: Arc<DaemonShareAudit>,
     endpoint: Arc<RwLock<Option<String>>>,
     background: std::sync::Mutex<Option<JoinHandle<()>>>,
+    /// Registry that decides which Noise keys are peer daemons. Without one,
+    /// `/secure-mcp` admits nobody.
+    devices: std::sync::RwLock<Option<Arc<crate::remote::DeviceRegistry>>>,
 }
 
 impl McpService {
+    /// Points `/secure-mcp` at the registry that authenticates peer daemons.
+    pub fn set_devices(&self, devices: Arc<crate::remote::DeviceRegistry>) {
+        *self
+            .devices
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(devices);
+    }
+
     /// Opens the registry, secret store and hub for a daemon.
     pub async fn open(
         config: &Config,
@@ -118,6 +129,7 @@ impl McpService {
             audit,
             endpoint: Arc::new(RwLock::new(None)),
             background: std::sync::Mutex::new(None),
+            devices: std::sync::RwLock::new(None),
         };
         service.start_background();
         Ok(service)
@@ -251,17 +263,51 @@ impl McpService {
             return;
         };
         let server = names::normalise_server_name(server);
-        let Some(machine) = value
-            .get("machine")
-            .and_then(Value::as_str)
-            .map(HostId::new)
-        else {
+        // Identity comes from the authenticated Noise key alone. The handshake
+        // frame's `machine` and `device_id` are claims: they may repeat what
+        // the registry says but never override it.
+        let registry = self
+            .devices
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let peer = registry
+            .as_ref()
+            .and_then(|registry| registry.authorization(&device))
+            .filter(|auth| auth.role == crate::remote::Role::Host);
+        let Some((machine, device_id)) = peer.and_then(|auth| {
+            let machine = auth.machine?;
+            let verified = auth.device_id.unwrap_or_else(|| hex::encode(device));
+            Some((machine, verified))
+        }) else {
+            tracing::warn!(
+                key = %hex::encode(device),
+                "refused a secure MCP peer that is not a registered daemon"
+            );
+            let error = jsonrpc::RpcErrorObject::new(
+                jsonrpc::INVALID_REQUEST,
+                "this key is not a registered peer daemon",
+            );
+            let _ = sender.send(AppFrame::text(error.response(Value::Null).to_string()));
             return;
         };
-        let device_id = value
-            .get("device_id")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned);
+        let claimed_machine = value.get("machine").and_then(Value::as_str);
+        let claimed_device = value.get("device_id").and_then(Value::as_str);
+        if claimed_machine.is_some_and(|claimed| claimed != machine.as_str())
+            || claimed_device.is_some_and(|claimed| claimed != device_id)
+        {
+            tracing::warn!(
+                %machine,
+                "refused a secure MCP peer whose claimed identity disagrees with its key"
+            );
+            let error = jsonrpc::RpcErrorObject::new(
+                jsonrpc::INVALID_REQUEST,
+                "the claimed machine or device does not match the authenticated key",
+            );
+            let _ = sender.send(AppFrame::text(error.response(Value::Null).to_string()));
+            return;
+        }
+        let device_id = Some(device_id);
 
         if self
             .hub
@@ -460,6 +506,9 @@ impl McpService {
         };
         let call = ShareCall {
             device_id: device_id.clone(),
+            // Reaching this point means the caller's key is the registered
+            // daemon key of `machine` (see `serve_secure_mcp`).
+            peer_verified: true,
             machine: machine.clone(),
             server: server.to_owned(),
             tool: tool.to_owned(),

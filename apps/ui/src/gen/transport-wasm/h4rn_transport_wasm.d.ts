@@ -98,6 +98,16 @@ export function generate_identity(): string;
 export function identity_public(identity: string): string;
 
 /**
+ * The short authentication string for a typed-code pairing.
+ *
+ * Both arguments are 32-byte X25519 keys as hex: `client_public` is this
+ * device's own key, `daemon_public` the daemon key connect handed over. The
+ * daemon derives the same string natively from the keys it holds; the person
+ * compares the two. Computed here so the UI only renders it.
+ */
+export function pairing_sas(client_public: string, daemon_public: string): string;
+
+/**
  * Parses a pairing URI into JSON (`endpoint`, `daemonPublic`, `psk`, `label`).
  */
 export function parse_pairing(uri: string): string;
@@ -116,6 +126,7 @@ export interface InitOutput {
     readonly connect_proof: (a: number, b: number, c: number, d: number, e: number, f: number, g: bigint, h: number, i: number) => [number, number, number, number];
     readonly generate_identity: () => [number, number, number, number];
     readonly identity_public: (a: number, b: number) => [number, number, number, number];
+    readonly pairing_sas: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly parse_pairing: (a: number, b: number) => [number, number, number, number];
     readonly securetransport_close: (a: number, b: number) => void;
     readonly securetransport_on_closed: (a: number, b: any) => void;

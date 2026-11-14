@@ -12,11 +12,12 @@ use std::time::Duration;
 use h4rn_core::LifecycleSettings;
 use h4rn_daemon::config::Config;
 use h4rn_daemon::daemon::DaemonBuilder;
+use h4rn_daemon::remote::DeviceRegistry;
 use h4rn_daemon::threads::ThreadManagerOptions;
 use h4rn_harness::FakeHarness;
 use h4rn_protocol::{
-    ClientFrame, ClientRequest, DeviceId, DeviceInfo, Event, HarnessKind, ProtoError, ResponseBody,
-    RuntimeMode, ServerFrame, ThreadSummary, TransportPathKind,
+    ClientFrame, ClientRequest, DeviceId, DeviceInfo, Event, HarnessKind, PairScope, ProtoError,
+    ResponseBody, RuntimeMode, ServerFrame, ThreadSummary, TransportPathKind,
 };
 use h4rn_transport::client::{Client, ClientConfig, ClientEvent, ClientPath};
 use h4rn_transport::engine::EngineConfig;
@@ -30,7 +31,8 @@ use tokio::task::JoinHandle;
 struct TestDaemon {
     addr: std::net::SocketAddr,
     service: Arc<SecureService>,
-    _dir: Option<tempfile::TempDir>,
+    devices: Arc<DeviceRegistry>,
+    dir: Option<tempfile::TempDir>,
     shutdown: Option<oneshot::Sender<()>>,
     task: JoinHandle<anyhow::Result<()>>,
 }
@@ -44,7 +46,17 @@ impl TestDaemon {
     }
 }
 
+/// Boots with every key already on the transport allowlist registered as a
+/// full-access direct device, the way a finished pairing would leave it.
 async fn boot(service: Arc<SecureService>) -> TestDaemon {
+    let devices = Arc::new(DeviceRegistry::in_memory());
+    for key in service.allowed_devices() {
+        devices.insert_direct(key, PairScope::ALL.to_vec());
+    }
+    boot_with(service, devices).await
+}
+
+async fn boot_with(service: Arc<SecureService>, devices: Arc<DeviceRegistry>) -> TestDaemon {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = Config {
         data_dir: dir.path().to_path_buf(),
@@ -63,6 +75,7 @@ async fn boot(service: Arc<SecureService>) -> TestDaemon {
         .with_harness(Arc::new(FakeHarness::new()))
         .with_lifecycle(options)
         .with_secure(Arc::clone(&service))
+        .with_devices(Arc::clone(&devices))
         .build()
         .await
         .expect("build daemon");
@@ -79,7 +92,8 @@ async fn boot(service: Arc<SecureService>) -> TestDaemon {
     TestDaemon {
         addr,
         service,
-        _dir: Some(dir),
+        devices,
+        dir: Some(dir),
         shutdown: Some(shutdown),
         task,
     }
@@ -401,5 +415,234 @@ async fn secure_transport_psk_pairs_a_new_device() {
         "PSK pairing must add the device to the allowlist"
     );
     client.close().await;
+    daemon.stop().await;
+}
+
+fn create_thread_request(host: h4rn_protocol::HostId) -> ClientRequest {
+    ClientRequest::CreateThread {
+        host,
+        harness: HarnessKind::ClaudeCode,
+        workspace_path: "/tmp/h4rn-secure-workspace".into(),
+        model: "fake-model".into(),
+        prompt: "scope test".into(),
+        attachments: Vec::new(),
+        runtime_mode: RuntimeMode::ApprovalRequired,
+        worktree: None,
+    }
+}
+
+async fn host_of(client: &mut SecureClient) -> h4rn_protocol::HostId {
+    match client
+        .request(ClientRequest::ListHosts)
+        .await
+        .expect("hosts")
+    {
+        ResponseBody::Hosts { hosts } => hosts[0].host_id.clone(),
+        other => panic!("unexpected host response: {other:?}"),
+    }
+}
+
+impl SecureClient {
+    async fn hello_result(&mut self) -> Result<ResponseBody, ProtoError> {
+        self.request(ClientRequest::Hello {
+            protocol_version: h4rn_protocol::PROTOCOL_VERSION,
+            device: DeviceInfo {
+                device_id: DeviceId::new("dev_secure"),
+                name: "secure integration test".into(),
+                platform: "linux".into(),
+                app_version: "0.1.0".into(),
+            },
+        })
+        .await
+    }
+
+    async fn send_pty_input(&mut self, stream_id: u32, data: &[u8]) {
+        let frame = h4rn_protocol::BinaryFrame {
+            kind: h4rn_protocol::BinaryKind::PtyInput,
+            stream_id,
+            seq: 0,
+            payload: data.to_vec(),
+        };
+        self.client
+            .send(h4rn_transport::AppFrame::binary(frame.encode()))
+            .await
+            .expect("send binary frame");
+    }
+
+    /// The next error event the daemon pushes (it answers refused binary frames
+    /// with one, because they carry no request id).
+    async fn next_error_event(&mut self) -> String {
+        loop {
+            if let Some(index) = self
+                .pending
+                .iter()
+                .position(|(_, event)| matches!(event, Event::Error { .. }))
+            {
+                if let Some((_, Event::Error { message, .. })) = self.pending.remove(index) {
+                    return message;
+                }
+            }
+            if let ServerFrame::Event { seq, event } = self.read_frame().await {
+                self.pending.push_back((seq, event));
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_transport_key_without_a_registry_entry_is_refused() {
+    // A key can complete the Noise handshake (it is on the transport
+    // allowlist) and still have no recorded authorisation. That used to grant
+    // unrestricted access; it must be denied.
+    let client_identity = device_identity();
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity())
+            .with_policy(PairingPolicy::new([client_identity.public().noise_public])),
+    ));
+    let daemon = boot_with(Arc::clone(&service), Arc::new(DeviceRegistry::in_memory())).await;
+    let mut client = SecureClient::connect(&daemon, client_identity, None).await;
+    let denied = client.hello_result().await.expect_err("must be denied");
+    assert_eq!(denied.code, h4rn_protocol::ProtoErrorCode::Forbidden);
+    client.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_relay_claim_cannot_replace_the_authenticated_key() {
+    // The viewer's key is registered view-only; whatever device id a relay
+    // might attach, the daemon resolves the identity from the key.
+    let client_identity = device_identity();
+    let key = client_identity.public().noise_public;
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([key])),
+    ));
+    let devices = Arc::new(DeviceRegistry::in_memory());
+    devices.insert_scoped("viewer", key, vec![PairScope::View]);
+    devices.insert_scoped("admin", [0x77u8; 32], PairScope::ALL.to_vec());
+    let daemon = boot_with(Arc::clone(&service), devices).await;
+    let mut client = SecureClient::connect(&daemon, client_identity, None).await;
+    client.hello().await;
+    let host = host_of(&mut client).await;
+    let denied = client
+        .request(create_thread_request(host))
+        .await
+        .expect_err("view-only may not create threads");
+    assert_eq!(denied.code, h4rn_protocol::ProtoErrorCode::Forbidden);
+    client.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_view_only_device_cannot_type_into_a_terminal() {
+    let client_identity = device_identity();
+    let key = client_identity.public().noise_public;
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([key])),
+    ));
+    let devices = Arc::new(DeviceRegistry::in_memory());
+    devices.insert_scoped("viewer", key, vec![PairScope::View]);
+    let daemon = boot_with(Arc::clone(&service), devices).await;
+    let mut client = SecureClient::connect(&daemon, client_identity, None).await;
+    client.hello().await;
+    // Stream ids are sequential; this device did not open or attach anything.
+    client.send_pty_input(1, b"touch pwned\n").await;
+    let message = client.next_error_event().await;
+    assert!(message.contains("terminal"), "{message}");
+    client.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_direct_pairing_grants_exactly_the_requested_scopes() {
+    // `h4rnd pair --direct --scope files` writes the scopes into the pairing
+    // file; the daemon arms them, and the device that pairs holds only those.
+    let client_identity = device_identity();
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_psk([1u8; TOKEN_LEN]),
+    ));
+    let daemon = boot_with(Arc::clone(&service), Arc::new(DeviceRegistry::in_memory())).await;
+    let psk = [0x42u8; TOKEN_LEN];
+    h4rn_daemon::remote::pairing::write_direct_pairing(
+        daemon.dir.as_ref().unwrap().path(),
+        &h4rn_daemon::remote::DirectPairingFile {
+            psk: hex::encode(psk),
+            expires_at: chrono::Utc::now().timestamp() + 120,
+            endpoints: vec!["127.0.0.1:1".into()],
+            label: None,
+            scopes: vec![PairScope::View, PairScope::Files],
+        },
+    )
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while service.psk() != Some(psk) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the daemon never armed the direct pairing");
+
+    let mut client = SecureClient::connect(&daemon, client_identity.clone(), Some(psk)).await;
+    client.hello().await;
+    let host = host_of(&mut client).await;
+    let denied = client
+        .request(create_thread_request(host))
+        .await
+        .expect_err("approve was not granted");
+    assert_eq!(denied.code, h4rn_protocol::ProtoErrorCode::Forbidden);
+    let auth = daemon
+        .devices
+        .authorization(&client_identity.public().noise_public)
+        .expect("recorded");
+    assert_eq!(auth.provenance, h4rn_daemon::remote::Provenance::Direct);
+    assert_eq!(auth.scopes, vec![PairScope::View, PairScope::Files]);
+    client.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn the_pairing_secret_pairs_one_device_even_when_handshakes_race() {
+    let psk = [0x33u8; TOKEN_LEN];
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_psk(psk),
+    ));
+    let daemon = boot(Arc::clone(&service)).await;
+    let mut attempts = Vec::new();
+    for index in 0..6u8 {
+        let identity = device_identity();
+        let addr = daemon.addr;
+        let daemon_key = service.public_identity().noise_public;
+        attempts.push(tokio::spawn(async move {
+            let mut engine = EngineConfig::new([20 + index; SESSION_ID_LEN], identity, daemon_key);
+            engine.psk = Some(psk);
+            let paths = vec![ClientPath::websocket(
+                TransportPathKind::Direct,
+                format!("ws://{addr}/secure"),
+            )];
+            let mut client =
+                Client::connect(ClientConfig::new(engine, paths)).expect("start client");
+            let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    match client.recv().await {
+                        Some(ClientEvent::Established(_)) => return true,
+                        Some(ClientEvent::Closed { .. }) | None => return false,
+                        Some(_) => {}
+                    }
+                }
+            })
+            .await
+            .unwrap_or(false);
+            client.close().await;
+            outcome
+        }));
+    }
+    let mut established = 0;
+    for attempt in attempts {
+        if attempt.await.unwrap() {
+            established += 1;
+        }
+    }
+    assert_eq!(established, 1, "one QR must pair exactly one device");
+    assert_eq!(service.allowed_devices().len(), 1);
+    assert_eq!(service.psk(), None);
     daemon.stop().await;
 }

@@ -36,6 +36,15 @@ pub struct DirectPairingFile {
     pub endpoints: Vec<String>,
     /// Human label, normally the host name.
     pub label: Option<String>,
+    /// Scopes the paired device is granted. `h4rnd pair --direct` without
+    /// `--scope` writes every scope; a file from before scopes existed reads
+    /// the same way.
+    #[serde(default = "all_scopes")]
+    pub scopes: Vec<h4rn_protocol::PairScope>,
+}
+
+fn all_scopes() -> Vec<h4rn_protocol::PairScope> {
+    h4rn_protocol::PairScope::ALL.to_vec()
 }
 
 impl DirectPairingFile {
@@ -166,6 +175,7 @@ mod tests {
             expires_at: Utc::now().timestamp() + 60,
             endpoints: vec!["192.168.1.20:47800".into()],
             label: Some("studio".into()),
+            scopes: vec![h4rn_protocol::PairScope::View],
         };
         write_direct_pairing(dir.path(), &pairing).unwrap();
         assert_eq!(

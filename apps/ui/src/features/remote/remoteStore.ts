@@ -66,9 +66,22 @@ export type RemoteState = {
   active: ActiveRemote | null;
   login: DeviceCodeLogin | null;
   pairing: PairingOffer | null;
+  /** A typed-code pairing awaiting the person's check of the code on the host. */
+  sasConfirm: SasConfirm | null;
   busy: string | null;
   error: string | null;
   lastSyncAt: number | null;
+};
+
+/**
+ * What the phone shows after claiming a typed code and before it trusts the
+ * daemon key connect handed over. The string is derived in Rust (wasm) from
+ * this device's key and that daemon key; the host shows its own derivation.
+ */
+export type SasConfirm = {
+  sas: string;
+  machineName: string;
+  active: ActiveRemote;
 };
 
 const PENDING_LOGIN_KEY = "h4rn.remote.pending-login";
@@ -116,6 +129,7 @@ function createInitialState(): RemoteState {
     active,
     login: null,
     pairing: null,
+    sasConfirm: null,
     busy: null,
     error: null,
     lastSyncAt: null,
@@ -913,7 +927,16 @@ export async function createPairing(
   }
 }
 
-/** Claims a pairing by the 8-character code typed from the host. */
+/**
+ * Claims a pairing by the 8-character code typed from the host.
+ *
+ * A typed code carries no daemon key, so connect supplies it and a malicious
+ * relay could substitute its own. The claim therefore stops at a short
+ * authentication string: nothing is pinned or connected until the person
+ * confirms it matches the host's screen (`confirmPairingSas`). Resolves true
+ * only when the pairing is complete, which for a typed code is never the case
+ * here; the page watches `sasConfirm`.
+ */
 export async function pairByCode(code: string): Promise<boolean> {
   if (mockFixtures) {
     pushToast({ variant: "success", title: "Paired with atlas." });
@@ -928,27 +951,55 @@ export async function pairByCode(code: string): Promise<boolean> {
   try {
     const claimed = await client.claimPairingCode(code, defaultDeviceName());
     const machine = claimed.machine;
-    // A typed code carries no key: the daemon's comes from connect. That is
-    // weaker than the QR, which pins the key out of band (ADR-029).
+    const daemonNoiseKey = base64UrlToHex(claimed.daemon_noise_public_key);
     const active: ActiveRemote = {
       connectUrl: client.connectUrl,
       machineId: machine.id,
       machineName: machine.name,
-      daemonNoiseKey: base64UrlToHex(claimed.daemon_noise_public_key),
+      daemonNoiseKey,
       addresses: machine.addresses,
       online: machine.online,
       relay: true,
     };
-    writeActiveRemote(active);
-    patch({ active, activeMachineId: machine.id, busy: null });
-    await refresh();
-    restartConnection();
-    pushToast({ variant: "success", title: `Paired with ${machine.name}.` });
-    return true;
+    const sas = await client.pairingSas(daemonNoiseKey);
+    patch({ sasConfirm: { sas, machineName: machine.name, active }, busy: null });
+    return false;
   } catch (error) {
     patch({ busy: null, error: describe(error) });
     return false;
   }
+}
+
+/** The person confirmed the code matches: pin the daemon key and connect. */
+export async function confirmPairingSas(): Promise<boolean> {
+  const pending = remoteStore.getState().sasConfirm;
+  if (!pending) return false;
+  writeActiveRemote(pending.active);
+  patch({ active: pending.active, activeMachineId: pending.active.machineId, sasConfirm: null });
+  await refresh();
+  restartConnection();
+  pushToast({ variant: "success", title: `Paired with ${pending.machineName}.` });
+  return true;
+}
+
+/**
+ * The codes differ, so something between this device and the host changed a
+ * key. Nothing was pinned. Revoke this device's registration so the pairing
+ * cannot be used, and sign out.
+ */
+export async function rejectPairingSas(): Promise<void> {
+  const client = await loadConnectClient();
+  patch({ sasConfirm: null });
+  try {
+    if (client) await client.revokeDevice(client.device.id);
+  } catch {
+    // Signing out below still removes the local credentials.
+  }
+  await signOut();
+  patch({
+    error:
+      "The codes did not match, so this device was revoked. Pair again from a network you trust.",
+  });
 }
 
 export function dismissPairing(): void {
