@@ -118,9 +118,11 @@ A pairing payload is a URI:
 h4rn://pair?e=<host:port>&d=<daemon x25519 public, hex>&p=<one-time psk, hex>&l=<label>
 ```
 
-The PSK is single-use. After the first successful handshake the device keeps
-the pinned daemon key and drops the PSK; the daemon allowlists the device key
-and rotates the payload. A stale or photographed payload fails the handshake
+The PSK is single-use and is consumed atomically at the moment the daemon
+authorises the device (`SecureService::consume_psk`), so two handshakes racing on
+one QR pair one device and the loser is rejected. After the first successful
+handshake the device keeps the pinned daemon key and drops the PSK; the daemon
+allowlists the device key and rotates the payload. A stale or photographed payload fails the handshake
 instead of granting access.
 
 ### Allowlist and revocation
@@ -322,15 +324,28 @@ device-machine link, signs them into the device's access token (`scp`), and
 sends them to the daemon in the snapshot and `DevicePaired` event. The daemon
 checks every request with `ClientRequest::required_scope()` and answers
 `forbidden` ("this device was paired without the `approve` permission") when the
-device lacks it; re-pairing replaces the scopes. Direct pairings and local
-sessions are unrestricted.
+device lacks it; re-pairing replaces the scopes. Local sessions are unrestricted.
+
+The daemon enforces scopes from a persisted **device registry**
+(`<data_dir>/devices.json`): key, role, scopes and provenance. A key with no
+entry is denied, identity is always the handshake's key (a relay-claimed device id
+is ignored), and a relay snapshot on reconnect removes connect-paired devices it
+no longer lists and ends their sessions. `h4rnd pair --direct --scope …` writes
+the scopes into `direct-pairing.json`; the device that pairs holds exactly those
+(no `--scope`: every scope). Binary PTY input needs `Hello`, `terminal`, and a
+viewer this connection attached.
 
 The short code is 8 Crockford base32 characters (40 bits), shown as `ABCD-EFGH`,
 single use, expiring with the QR. A phone without a camera claims it with
 `POST /v1/pairings/claim-code` (typed case, hyphens and `I/L/O` confusions are
-normalised). A typed code carries no daemon key, so the relay supplies it:
-that first handshake trusts the relay for the key, where the QR pins it out of
-band.
+normalised). A typed code carries no daemon key, so the relay supplies it, and
+a malicious relay could substitute its own. The phone therefore shows a **short
+authentication string** (12 digits, computed in Rust by `short_auth_string` over
+both static keys and exported to the UI as `pairing_sas`) and pins nothing until
+the person confirms it equals the one the host shows in Settings → Devices (the
+daemon computes it from the key connect gave it and its own, and serves it via
+`PairingConfirmations`). A mismatch revokes the device. The QR path pins the key
+out of band and needs no confirmation.
 
 `--direct` skips connect: the CLI writes `<data_dir>/direct-pairing.json`
 (mode `0600`) with a fresh PSK, expiry and address candidates. The running

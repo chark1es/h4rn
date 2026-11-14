@@ -113,11 +113,15 @@ is enforced by the **owner**:
 
 - `allowed_tools: None` allows every tool; `Some(list)` is authoritative;
 - `confirm_tools` (and `confirm_all`) require an approval on the owning machine before each call;
-- `allowed_devices: None` admits the target machine's paired device only;
+- `allowed_devices: None` admits the target machine's own daemon only; `Some(list)` compares the
+  verified device id of the calling daemon (never a caller-supplied claim);
 - every remote call is audit-logged locally with the authenticated device key, the machine, the
   server, the tool and the outcome.
 
-The unknown machine dials the owner's `/secure-mcp` route over the same Noise transport as
+The caller is authenticated by its Noise key alone. The owner's device registry must list that key
+as a peer daemon (`host` role) for the target machine; a user device key (even one with every
+scope) is refused, and the `machine` / `device_id` in the handshake frame are checked against the
+registry and refused on any disagreement. The unknown machine dials the owner's `/secure-mcp` route over the same Noise transport as
 `/secure` (a second secure session; multiplexing is not required). After the internal handshake
 the tunnel carries JSON-RPC frames. The owner re-authorizes every call, strips namespaces on
 `tools/list` and re-adds them on `tools/call`, and never forwards credentials: the upstream server
