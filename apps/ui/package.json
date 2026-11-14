@@ -10,7 +10,7 @@
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "test": "vitest run",
-    "e2e": "bun run build && node scripts/e2e.mjs",
+    "e2e": "bun run build && node scripts/e2e.mjs && node scripts/e2e-remote.mjs",
     "screenshots": "node scripts/screenshots.mjs"
   },
   "dependencies": {

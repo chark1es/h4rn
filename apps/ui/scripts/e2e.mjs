@@ -5,7 +5,7 @@
 // watch streamed text, settle it, reload, and confirm the state comes back.
 
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -106,6 +106,20 @@ async function main() {
 
   try {
     run("git", ["init", "--quiet", workspace]);
+    writeFileSync(join(workspace, "README.md"), "# e2e workspace\n");
+    run("git", ["-C", workspace, "add", "README.md"]);
+    run("git", [
+      "-C",
+      workspace,
+      "-c",
+      "user.name=e2e",
+      "-c",
+      "user.email=e2e@example.test",
+      "commit",
+      "--quiet",
+      "-m",
+      "init",
+    ]);
 
     run(cargoBin, ["build", "--quiet", "-p", "h4rn-daemon", "--bin", "h4rnd"], {
       cwd: repoRoot,
@@ -118,7 +132,13 @@ async function main() {
       daemonBin,
       ["--data-dir", dataDir, "--bind", `127.0.0.1:${daemonPort}`, "serve"],
       {
-        env: { ...process.env, H4RN_FAKE_HARNESS: "1" },
+        env: {
+          ...process.env,
+          H4RN_FAKE_HARNESS: "1",
+          // Keep an echo turn in flight long enough for the delegation flow to
+          // open the child transcript and cancel it.
+          H4RN_FAKE_HARNESS_DELAY_MS: "12000",
+        },
         stdio: ["ignore", "pipe", "pipe"],
       },
     );
@@ -207,7 +227,50 @@ async function main() {
       .getByText("Settled", { exact: true })
       .waitFor({ timeout: 20_000 });
 
-    console.log("UI e2e passed: thread streamed, settled, and restored after reload.");
+    // Delegation: spawn a real child turn, see it in the tree, open its
+    // transcript, then cancel it while the fake harness is still working.
+    if ((await panelToggle.getAttribute("aria-pressed")) !== "true") await panelToggle.click();
+    await panel.getByRole("tab", { name: /^Subagents/ }).click();
+    await panel.getByText("Nothing delegated").waitFor({ timeout: 10_000 });
+    await panel.getByRole("button", { name: "Delegate", exact: true }).first().click();
+
+    const delegate = page.getByRole("dialog");
+    await delegate.getByRole("heading", { name: "Delegate a subagent" }).waitFor();
+    const childTask = "Reproduce the relay fixture race";
+    await delegate.locator("#delegate-task").fill(childTask);
+    await delegate.getByRole("button", { name: "Delegate", exact: true }).click();
+
+    const childRow = panel.locator(".q-sub-node").filter({ hasText: childTask });
+    await childRow.waitFor({ timeout: 15_000 });
+    await childRow.click();
+    await panel.getByText(childTask, { exact: true }).first().waitFor();
+
+    await panel.getByRole("button", { name: "Open thread", exact: true }).click();
+    await page
+      .locator("header")
+      .filter({ has: page.getByRole("button", { name: "Thread actions" }) })
+      .getByText(childTask, { exact: true })
+      .waitFor({ timeout: 15_000 });
+
+    // Back to the parent through the sidebar, then cancel the live child. The
+    // parent is settled, so switch the sidebar back to that state first.
+    const states = page.getByRole("tablist", { name: "Thread state" });
+    await states.getByRole("tab", { name: /^Settled/ }).click();
+    await page.getByRole("option").filter({ hasText: "Reply with exactly: pong" }).first().click();
+    await panel.getByRole("tab", { name: /^Subagents/ }).click();
+    await childRow.waitFor({ timeout: 10_000 });
+    await childRow.click();
+    await panel.getByRole("button", { name: "Cancel subagent", exact: true }).click();
+    await panel.getByRole("button", { name: "Cancel subagent", exact: true }).click();
+    await childRow.getByText("Cancelled", { exact: false }).waitFor({ timeout: 15_000 });
+    await panel.getByRole("button", { name: "Cancel subagent", exact: true }).waitFor({
+      state: "detached",
+      timeout: 15_000,
+    });
+
+    console.log(
+      "UI e2e passed: thread streamed, settled, restored after reload, and delegation spawned and cancelled.",
+    );
   } catch (error) {
     if (page) {
       console.error(`--- page url ---\n${page.url()}`);

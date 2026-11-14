@@ -190,19 +190,51 @@ let mockFixtures = false;
 const MOCK_MACHINE_ID = "mock-machine-atlas";
 const MOCK_CONNECT_URL = DEFAULT_CONNECT_URL;
 
-function mockMachine(): MachineSummary {
+function mockMachine(
+  id: string,
+  name: string,
+  online: boolean,
+  hosts: MachineSummary["hosts"],
+  addresses: string[],
+): MachineSummary {
   return {
-    id: MOCK_MACHINE_ID,
-    name: "atlas",
-    online: true,
-    last_seen: new Date().toISOString(),
-    daemon_device_id: "mock-daemon",
-    hosts: [
-      { id: "mock-host-atlas", name: "atlas", kind: "host", distro: null },
-      { id: "mock-host-wsl", name: "Ubuntu-24.04", kind: "wsl", distro: "Ubuntu-24.04" },
-    ],
-    addresses: ["192.168.1.24:47800", `relay:${MOCK_CONNECT_URL}`],
+    id,
+    name,
+    online,
+    last_seen: new Date(Date.now() - (online ? 1_000 : 3 * 60 * 60_000)).toISOString(),
+    daemon_device_id: `mock-daemon-${id}`,
+    hosts,
+    addresses,
   };
+}
+
+function mockMachines(): MachineSummary[] {
+  return [
+    mockMachine(
+      MOCK_MACHINE_ID,
+      "atlas",
+      true,
+      [
+        { id: "mock-host-atlas", name: "atlas", kind: "host", distro: null },
+        { id: "mock-host-wsl", name: "Ubuntu-24.04", kind: "wsl", distro: "Ubuntu-24.04" },
+      ],
+      ["192.168.1.24:47800", `relay:${MOCK_CONNECT_URL}`],
+    ),
+    mockMachine(
+      "mock-machine-orion",
+      "orion",
+      true,
+      [{ id: "mock-host-orion", name: "orion", kind: "host", distro: null }],
+      [`relay:${MOCK_CONNECT_URL}`],
+    ),
+    mockMachine(
+      "mock-machine-buildbox",
+      "buildbox",
+      false,
+      [{ id: "mock-host-buildbox", name: "buildbox", kind: "host", distro: null }],
+      [],
+    ),
+  ];
 }
 
 function mockDevice(id: string, name: string, kind: ConnectDevice["kind"]): ConnectDevice {
@@ -250,11 +282,16 @@ export function initializeRemote(): void {
         mockDevice("mock-web", "h4rn web", "web"),
         mockDevice("mock-phone", "iPhone 16 Pro", "mobile"),
       ],
-      machines: [mockMachine()],
+      machines: mockMachines(),
       pairings: [],
       activeMachineId: readActiveRemote()?.machineId ?? MOCK_MACHINE_ID,
       lastSyncAt: Date.now(),
     });
+    // Mock mode mirrors a phone that just opened a pairing link, so the
+    // confirmation screen (scopes, expiry, claim) is reachable in a browser.
+    pendingPairingRaw = `h4rn://pair?c=${MOCK_CONNECT_URL}&m=mock-machine-orion&k=bW9jay1ub2lzZQ&e=${Math.floor(
+      (Date.now() + 10 * 60_000) / 1_000,
+    )}`;
     return;
   }
 
@@ -914,7 +951,14 @@ export async function revokeDevice(id: string): Promise<boolean> {
   if (!client) return false;
   try {
     await client.revokeDevice(id);
+    const revokedSelf = getRemoteState().device?.id === id;
     pushToast({ variant: "success", title: "Device revoked. Its next request fails." });
+    if (revokedSelf) {
+      // These credentials are the device that was just revoked. Keeping them
+      // would only produce endless 401s, so drop them and return to a local
+      // session; the relay already ended the live session.
+      await signOut();
+    }
     return true;
   } catch (error) {
     patch({ devices: before, error: describe(error) });

@@ -172,9 +172,12 @@ impl Core {
     fn closed(&mut self, index: usize, reason: &str, now: u64) -> Result<(), String> {
         let path = self.path(index)?;
         let effects = self.engine.on_path_closed(path, now);
-        if !reason.is_empty() {
-            self.events.push(CoreEvent::Closed(reason.to_owned()));
-        }
+        // A socket closing is path-local. The engine keeps the logical session
+        // alive while another path is ready or still handshaking, and only
+        // emits `Closed` itself when the whole session ends. Reporting the raw
+        // socket reason here would tear down every sibling path, including a
+        // relay path that is still completing its handshake.
+        let _ = reason;
         self.apply(effects);
         Ok(())
     }

@@ -27,6 +27,7 @@ import type {
   TerminalInfo,
   ThreadSummary,
   ToolCall,
+  TransportStatus,
   TurnStatus,
   Usage,
 } from "@/gen";
@@ -732,8 +733,8 @@ function buildHosts(scenario: string): HostSummary[] {
       online: true,
       last_seen: iso(-2_000),
       harnesses: ["claude_code", "codex", "opencode"],
-      latency_ms: 18,
-      path: "tailscale",
+      latency_ms: 12,
+      path: "direct",
     },
     {
       host_id: "orion",
@@ -752,7 +753,7 @@ function buildHosts(scenario: string): HostSummary[] {
       online: true,
       last_seen: iso(-1_000),
       harnesses: ["codex", "opencode"],
-      latency_ms: 4,
+      latency_ms: 18,
       path: "direct",
     },
     {
@@ -2127,6 +2128,33 @@ export function createMockTransport(scenario: string, attempt = 0): Transport {
         openTimer = null;
         if (closed) return;
         handlers.onOpen();
+        // A plausible multipath snapshot so the hosts menu and footer render
+        // a real path, RTT and encryption state instead of a placeholder.
+        const now = new Date().toISOString();
+        const status: TransportStatus = {
+          session_id: "mock-session",
+          state: "online",
+          active: {
+            kind: "direct",
+            endpoint: "192.168.1.24:47800",
+            state: "active",
+            rtt_ms: 12,
+            encrypted: true,
+          },
+          candidates: [
+            {
+              kind: "direct",
+              endpoint: "192.168.1.24:47800",
+              state: "active",
+              rtt_ms: 12,
+              encrypted: true,
+            },
+          ],
+          switched: false,
+          detail: null,
+          updated_at: now,
+        };
+        handlers.onTransportStatus?.(status);
         if (attempt === 0 && (scenario === "offline" || scenario === "error")) {
           closeTimer = setTimeout(
             () => {

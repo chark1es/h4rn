@@ -64,14 +64,18 @@ export function PairingPage() {
   const active = useRemote((state) => state.active);
   const busy = useRemote((state) => state.busy);
   const error = useRemote((state) => state.error);
+  const machines = useRemote((state) => state.machines);
   const now = useNow(1_000);
   const pending = pendingPairing();
   const toggle = (key: keyof typeof scopes) =>
     setScopes((current) => ({ ...current, [key]: !current[key] }));
 
-  const machineName = pending?.payload.machineId
-    ? (active?.machineName ?? pending.payload.machineId)
-    : (active?.machineName ?? "atlas");
+  const pendingMachine = pending
+    ? machines.find((machine) => machine.id === pending.payload.machineId)
+    : null;
+  const machineName =
+    pendingMachine?.name ??
+    (pending ? pending.payload.machineId : (active?.machineName ?? "atlas"));
   const alreadyPaired =
     pending !== null && active !== null && active.machineId === pending.payload.machineId;
   const expired =

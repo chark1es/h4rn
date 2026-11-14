@@ -146,24 +146,48 @@ function useHostRows(): HostRow[] {
   const now = useNow();
   return useMemo(() => {
     if (signedIn && machines.length > 0) {
-      return machines.map((machine) => {
+      // A connect machine is addressable per host: a Windows box and each of
+      // its WSL distros are separate rows. While a machine is active the live
+      // transport decides presence and RTT; otherwise connect's presence does.
+      const localByName = new Map(
+        Object.values(hosts).map((host) => [host.name.toLowerCase(), host]),
+      );
+      const rows: HostRow[] = [];
+      for (const machine of machines) {
         const active = machine.id === activeMachineId;
-        return {
-          id: machine.id,
-          name: machine.name,
-          online: active ? connection.status === "online" : machine.online,
-          lastSeen: machine.last_seen ? relativeAge(machine.last_seen, now) : null,
-          sub: false,
-          harnesses: machine.hosts.map((host) => host.name).join(", "),
-          latency:
-            active && connection.latencyMs !== null
-              ? `${Math.round(connection.latencyMs)} ms`
-              : null,
-          path: active ? pathLabel(connection.transport) : machine.online ? "Reachable" : null,
-          machineId: machine.id,
-          active,
-        };
-      });
+        const machineHosts =
+          machine.hosts.length > 0
+            ? machine.hosts
+            : [{ id: machine.id, name: machine.name, kind: "host" as const, distro: null }];
+        for (const host of machineHosts) {
+          const local = localByName.get(host.name.toLowerCase());
+          const online = active ? connection.status === "online" : machine.online;
+          const latency = active
+            ? (local?.latency_ms ?? connection.latencyMs)
+            : (local?.latency_ms ?? null);
+          const path = online ? (active ? connection.transport : (local?.path ?? null)) : null;
+          rows.push({
+            id: host.id,
+            name: host.name,
+            online,
+            lastSeen: online
+              ? null
+              : machine.last_seen
+                ? relativeAge(machine.last_seen, now)
+                : null,
+            sub: host.kind === "wsl",
+            harnesses: (local?.harnesses ?? []).map(harnessLabel).join(", "),
+            latency:
+              online && latency !== null && latency !== undefined
+                ? `${Math.round(latency)} ms`
+                : null,
+            path: path ? pathLabel(path) : null,
+            machineId: machine.id,
+            active,
+          });
+        }
+      }
+      return rows;
     }
     const list = Object.values(hosts);
     const roots = list
@@ -421,7 +445,8 @@ function SidebarFooter({
 }) {
   const [popoverOpen, setPopoverOpen] = useState(false);
   const online = rows.filter((row) => row.online).length;
-  const noun = rows[0]?.machineId ? "machines" : "hosts";
+  const machines = new Set(rows.map((row) => row.machineId).filter(Boolean)).size;
+  const noun = rows.some((row) => row.sub) || rows.length !== machines ? "hosts" : "machines";
   const status = loading
     ? "Connecting…"
     : offline

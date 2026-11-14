@@ -551,35 +551,6 @@ export function restartConnection(): void {
   startConnection();
 }
 
-const PATH_KINDS = new Set(["direct", "tailscale", "relay"]);
-
-/** Overlays the live transport path and RTT onto the online host rows. */
-function overlayTransport(
-  hosts: Record<HostId, HostSummary>,
-  connection: ConnectionSnapshot,
-): Record<HostId, HostSummary> {
-  if (connection.status !== "online") return hosts;
-  const path = PATH_KINDS.has(connection.transport)
-    ? (connection.transport as HostSummary["path"])
-    : null;
-  let changed = false;
-  const next: Record<HostId, HostSummary> = {};
-  for (const [id, host] of Object.entries(hosts)) {
-    if (!host.online) {
-      next[id] = host;
-      continue;
-    }
-    const merged: HostSummary = {
-      ...host,
-      latency_ms: connection.latencyMs ?? host.latency_ms ?? null,
-      path: path ?? host.path ?? null,
-    };
-    if (merged.latency_ms !== host.latency_ms || merged.path !== host.path) changed = true;
-    next[id] = merged;
-  }
-  return changed ? next : hosts;
-}
-
 const eventQueue: EventEnvelope[] = [];
 const appEventListeners = new Set<(event: EventEnvelope) => void>();
 let flushScheduled = false;
@@ -634,12 +605,7 @@ export function startConnection(): void {
   const app = getClient();
 
   app.onStatus((connection) => {
-    const state = getState();
-    setState({
-      ...state,
-      connection,
-      hosts: overlayTransport(state.hosts, connection),
-    });
+    setState({ ...getState(), connection });
   });
 
   app.onEvent((envelope) => {

@@ -120,24 +120,24 @@ function PhoneSubagent({
       status={phoneState(view)}
       tone={waiting ? "accent" : failed ? "danger" : undefined}
     >
-      <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
-        <button
-          type="button"
-          className="q-btn secondary sm"
-          style={{ flex: 1 }}
-          disabled={!view.child_thread_id}
-          onClick={() => {
-            if (view.child_thread_id) openThread(view.child_thread_id);
-          }}
-        >
-          Open thread
-        </button>
-        {waiting ? (
+      {waiting ? (
+        <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
+          <button
+            type="button"
+            className="q-btn secondary sm"
+            style={{ flex: 1 }}
+            disabled={!view.child_thread_id}
+            onClick={() => {
+              if (view.child_thread_id) openThread(view.child_thread_id);
+            }}
+          >
+            Details
+          </button>
           <button type="button" className="q-btn primary sm" style={{ flex: 1 }} onClick={onReview}>
             Review
           </button>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
     </SubagentRow>
   );
 }

@@ -31,6 +31,15 @@ const SESSION_KEY = "h4rn.secure.session";
 /** How often the wasm core runs probes, retransmits and path selection. */
 const TICK_MS = 50;
 
+/**
+ * How long a socket may stay `CONNECTING` before its path is failed.
+ *
+ * Chromium can leave a WebSocket to an unroutable address connecting for
+ * minutes. Without this bound the engine keeps a path in `Probing` and the
+ * session never reports offline, so `H4rnClient` never reconnects.
+ */
+const OPEN_TIMEOUT_MS = 8_000;
+
 type PairingPin = {
   endpoint: string;
   daemonPublic: string;
@@ -388,8 +397,15 @@ export class SecureTransport implements Transport {
       }
       socket.binaryType = "arraybuffer";
       this.sockets[index] = socket;
+      const openTimer = setTimeout(() => {
+        if (this.closedByUs) return;
+        // Failing the path wakes the engine, which either selects another path
+        // or reports the session offline so the client can reconnect.
+        closeSocket(socket);
+      }, OPEN_TIMEOUT_MS);
 
       socket.onopen = () => {
+        clearTimeout(openTimer);
         if (this.closedByUs) return;
         // The relay routes by conn_id, so the open frame must precede the
         // first Noise packet on the same socket.
@@ -433,6 +449,7 @@ export class SecureTransport implements Transport {
         // `onclose` follows and carries the useful frame.
       };
       socket.onclose = (event) => {
+        clearTimeout(openTimer);
         if (this.closedByUs) return;
         this.socketClosed();
         try {
@@ -593,11 +610,14 @@ export class SecureTransport implements Transport {
       return;
     }
     const handlers = this.handlers;
-    const offline = status.state === "offline";
+    // `degraded` means the session was established but no path is usable any
+    // more. Nothing in this adapter reopens a socket, so hand the session back
+    // to `H4rnClient` to reconnect with fresh paths instead of hanging.
+    const lost = status.state === "offline" || status.state === "degraded";
     queueMicrotask(() => {
       if (!this.notifiedClose) handlers?.onTransportStatus?.(status);
     });
-    if (offline && !this.notifiedClose) {
+    if (lost && !this.notifiedClose) {
       queueMicrotask(() => {
         this.finishClose(1011, status.detail ?? "No secure path is available.", false);
       });
@@ -646,7 +666,7 @@ export class SecureTransport implements Transport {
     // the next transport starts a fresh logical session. A first handshake
     // that never authenticated keeps the pending PSK for a retry or re-pair.
     if (!this.established && this.resumeAttempted) {
-      remove(this.storage, SESSION_KEY);
+      remove(this.storage, this.sessionKey);
     }
 
     for (const socket of this.sockets) closeSocket(socket);
