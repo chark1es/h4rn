@@ -30,8 +30,7 @@ pub async fn create(
     scopes: Option<Vec<PairScope>>,
 ) -> Result<PairingCreateResponse> {
     // Handing out scopes is itself an admin act: a device cannot mint a
-    // pairing more powerful than the one it holds.
-    authed.require(PairScope::Admin)?;
+    // pairing more powerful than the one it holds *on this machine*.
     let scopes = PairScope::normalize(scopes.unwrap_or_else(|| PairScope::DEFAULT.to_vec()));
     let machine = state.store.machine(machine_id).await?;
     if machine.user_id != authed.user.id {
@@ -40,6 +39,9 @@ pub async fn create(
             "machine belongs to another user",
         ));
     }
+    authed
+        .require_on(state, machine_id, PairScope::Admin)
+        .await?;
     let daemon_device_id = machine.daemon_device_id.ok_or_else(|| {
         AppError::conflict(
             "machine_has_no_daemon",
