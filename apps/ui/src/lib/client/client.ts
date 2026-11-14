@@ -195,6 +195,21 @@ type Pending = {
   timer: ReturnType<typeof setTimeout>;
 };
 
+/** Errors produced by a dropped connection, as opposed to a daemon answer. */
+const DISCONNECTED = new WeakSet<H4rnRequestError>();
+
+const READ_PREFIXES = ["list_", "get_", "read_", "search_"];
+
+/** Read-only requests that are safe to send a second time. */
+function isIdempotent(body: ClientRequest): boolean {
+  if (body.type === "mcp_list") return true;
+  if (body.type === "mcp") {
+    const inner = (body as { request?: { type?: string } }).request?.type ?? "";
+    return READ_PREFIXES.some((prefix) => inner.startsWith(prefix));
+  }
+  return READ_PREFIXES.some((prefix) => body.type.startsWith(prefix));
+}
+
 const DEFAULT_DEVICE: DeviceInfo = {
   device_id: "web",
   name: "h4rn web",
@@ -242,6 +257,13 @@ export class H4rnClient {
   private stopped = false;
   private fatal = false;
   private socketOpen = false;
+  /** True once hello and the subscribe replay finished on this socket. */
+  private handshaken = false;
+  private readonly handshakeWaiters = new Set<{
+    resolve: () => void;
+    reject: (error: H4rnRequestError) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
   private everReady = false;
   private snapshot: ConnectionSnapshot;
   private readonly transportFactory: (context: {
@@ -280,13 +302,14 @@ export class H4rnClient {
 
   stop(): void {
     this.stopped = true;
+    this.handshaken = false;
     this.clearReconnect();
     this.stopPing();
-    this.rejectPending(
-      new H4rnRequestError(
-        protoError("internal", "The client stopped.", "Start it again to reconnect."),
-      ),
+    const stoppedError = new H4rnRequestError(
+      protoError("internal", "The client stopped.", "Start it again to reconnect."),
     );
+    this.settleHandshakeWaiters(stoppedError);
+    this.rejectPending(stoppedError);
     this.transport?.close();
     this.transport = null;
     this.socketOpen = false;
@@ -357,7 +380,90 @@ export class H4rnClient {
     return () => this.readyListeners.delete(listener);
   }
 
+  /**
+   * Sends one request. Requests wait for the hello handshake (and its
+   * subscribe replay) to finish instead of racing it, and an idempotent read
+   * that is cut off by a dropped connection is sent once more after the
+   * reconnect. Writes are never replayed: they may already have been applied.
+   */
   async request<T extends ClientRequest["type"]>(
+    body: Extract<ClientRequest, { type: T }>,
+    options: { timeoutMs?: number } = {},
+  ): Promise<ResponseOf<T>> {
+    if (body.type === "hello" || body.type === "subscribe") {
+      return this.dispatch(body, options);
+    }
+    const timeoutMs = options.timeoutMs ?? this.options.requestTimeoutMs;
+    const deadline = Date.now() + timeoutMs;
+    await this.untilHandshaken(timeoutMs);
+    try {
+      return await this.dispatch(body, { timeoutMs: Math.max(1, deadline - Date.now()) });
+    } catch (error) {
+      if (
+        error instanceof H4rnRequestError &&
+        DISCONNECTED.has(error) &&
+        isIdempotent(body) &&
+        deadline - Date.now() > 0
+      ) {
+        await this.untilHandshaken(Math.max(1, deadline - Date.now()));
+        return this.dispatch(body, { timeoutMs: Math.max(1, deadline - Date.now()) });
+      }
+      throw error;
+    }
+  }
+
+  private notConnected(): H4rnRequestError {
+    return new H4rnRequestError(
+      protoError(
+        "internal",
+        "The daemon is not connected.",
+        "Wait until the status bar says online, then try again.",
+      ),
+    );
+  }
+
+  /** Resolves once the handshake is done; waits through connect and reconnect. */
+  private untilHandshaken(timeoutMs: number): Promise<void> {
+    if (this.handshaken && this.socketOpen && this.transport) return Promise.resolve();
+    const status = this.snapshot.status;
+    const recovering = this.socketOpen || status === "connecting" || status === "degraded";
+    if (this.stopped || this.fatal || !recovering) return Promise.reject(this.notConnected());
+    return new Promise<void>((resolve, reject) => {
+      const waiter = {
+        resolve: () => {
+          clearTimeout(waiter.timer);
+          this.handshakeWaiters.delete(waiter);
+          resolve();
+        },
+        reject: (error: H4rnRequestError) => {
+          clearTimeout(waiter.timer);
+          this.handshakeWaiters.delete(waiter);
+          reject(error);
+        },
+        timer: setTimeout(() => {
+          waiter.reject(
+            new H4rnRequestError(
+              protoError(
+                "internal",
+                "The daemon connection did not finish its handshake in time.",
+                "The daemon may be busy. Try again, or check the connection in the status bar.",
+              ),
+            ),
+          );
+        }, timeoutMs),
+      };
+      this.handshakeWaiters.add(waiter);
+    });
+  }
+
+  private settleHandshakeWaiters(error: H4rnRequestError | null): void {
+    for (const waiter of [...this.handshakeWaiters]) {
+      if (error) waiter.reject(error);
+      else waiter.resolve();
+    }
+  }
+
+  private async dispatch<T extends ClientRequest["type"]>(
     body: Extract<ClientRequest, { type: T }>,
     options: { timeoutMs?: number } = {},
   ): Promise<ResponseOf<T>> {
@@ -522,6 +628,8 @@ export class H4rnClient {
       } finally {
         this.flushReplay();
       }
+      this.handshaken = true;
+      this.settleHandshakeWaiters(null);
 
       const ready: ReadyInfo = {
         reconnected,
@@ -535,6 +643,7 @@ export class H4rnClient {
       const proto = error instanceof H4rnRequestError ? error.proto : null;
       if (proto?.code === "unauthorized" || proto?.code === "forbidden") {
         this.fatal = true;
+        this.settleHandshakeWaiters(new H4rnRequestError(proto));
         this.setSnapshot({ status: "offline", error: proto });
         this.transport?.close();
         return;
@@ -655,19 +764,25 @@ export class H4rnClient {
     this.socketOpen = false;
     this.transport = null;
     this.stopPing();
-    this.rejectPending(
-      new H4rnRequestError(
-        protoError(
-          "internal",
-          reason || "The daemon closed the connection.",
-          "The client reconnects automatically. Requests sent during the gap are not retried.",
-        ),
+    this.handshaken = false;
+    const dropped = new H4rnRequestError(
+      protoError(
+        "internal",
+        reason || "The daemon closed the connection.",
+        "The client reconnects automatically. Reads are retried; writes are not.",
       ),
     );
+    DISCONNECTED.add(dropped);
+    this.rejectPending(dropped);
 
     const fatal = FATAL_CLOSE_CODES.get(code);
     if (fatal) {
       this.fatal = true;
+      this.settleHandshakeWaiters(
+        new H4rnRequestError(
+          protoError(code === 4401 ? "unauthorized" : "forbidden", fatal.message, fatal.hint),
+        ),
+      );
       this.setSnapshot({
         status: "offline",
         error: protoError(code === 4401 ? "unauthorized" : "forbidden", fatal.message, fatal.hint),

@@ -259,6 +259,81 @@ describe("H4rnClient", () => {
     }
   });
 
+  it("holds requests until the hello handshake completes", async () => {
+    let answerHello: Reply | null = null;
+    const { client, transports } = harness(
+      () =>
+        new FakeTransport((frame, reply) => {
+          if (frame.body.type !== "hello") return false;
+          answerHello = reply;
+          return true;
+        }),
+    );
+
+    client.start();
+    await settle();
+    const listing = client.request({ type: "list_threads", filter: EMPTY_FILTER });
+    await settle();
+    expect(transports[0]?.sent.map((frame) => frame.body.type)).toEqual(["hello"]);
+
+    (answerHello as Reply | null)?.({
+      type: "hello",
+      protocol_version: 1,
+      server_version: "test",
+      device_id: "dev_test",
+      local_host: "host_test",
+      hosts: [],
+    });
+    await settle();
+    const sent = transports[0]?.sent ?? [];
+    expect(sent.map((frame) => frame.body.type)).toEqual(["hello", "subscribe", "list_threads"]);
+    const frame = sent[2];
+    if (!frame) throw new Error("list was not sent");
+    transports[0]?.reply(frame.id, { type: "threads", threads: [] });
+    await expect(listing).resolves.toMatchObject({ type: "threads" });
+  });
+
+  it("resends an idempotent read after a reconnect but never a write", async () => {
+    vi.useFakeTimers();
+    try {
+      const { client, transports } = harness((context) =>
+        context.attempt === 0
+          ? new FakeTransport(
+              (frame) => frame.body.type === "list_threads" || frame.body.type === "send_message",
+            )
+          : new FakeTransport((frame, reply) => {
+              if (frame.body.type !== "list_threads") return false;
+              reply({ type: "threads", threads: [] });
+              return true;
+            }),
+      );
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      const read = client.request({ type: "list_threads", filter: EMPTY_FILTER });
+      const write = client.request({
+        type: "send_message",
+        thread_id: "t1",
+        text: "hi",
+        attachments: [],
+      });
+      const writeOutcome = write.then(
+        () => "resolved",
+        () => "rejected",
+      );
+      await vi.advanceTimersByTimeAsync(1);
+
+      transports[0]?.drop();
+      await vi.advanceTimersByTimeAsync(20);
+
+      await expect(read).resolves.toMatchObject({ type: "threads" });
+      await expect(writeOutcome).resolves.toBe("rejected");
+      expect(transports[1]?.sent.map((frame) => frame.body.type)).not.toContain("send_message");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("resumes the subscription from the last applied sequence", async () => {
     const { client, transports } = harness();
 
