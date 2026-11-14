@@ -7,6 +7,10 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Default event budget. Generous because CI and shared dev machines are
+/// slow; the tests assert on events, never on this timeout elapsing.
+const EVENT_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Hang guard for one websocket frame; slow-harness tests rely on it being
 /// longer than their configured delay.
 const FRAME_TIMEOUT: Duration = Duration::from_secs(30);
@@ -213,8 +217,7 @@ impl Client {
     }
 
     async fn wait_event(&mut self, predicate: impl Fn(&Event) -> bool) -> (u64, Event) {
-        self.wait_event_within(Duration::from_secs(5), predicate)
-            .await
+        self.wait_event_within(EVENT_TIMEOUT, predicate).await
     }
 
     /// Like `wait_event` with an explicit budget. A budget must exceed any
@@ -246,8 +249,7 @@ impl Client {
     }
 
     async fn wait_for_turn_completed(&mut self) -> (u64, TurnStatus) {
-        self.wait_for_turn_completed_within(Duration::from_secs(5))
-            .await
+        self.wait_for_turn_completed_within(EVENT_TIMEOUT).await
     }
 
     async fn wait_for_turn_completed_within(&mut self, budget: Duration) -> (u64, TurnStatus) {
