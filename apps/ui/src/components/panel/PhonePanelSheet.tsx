@@ -3,7 +3,6 @@ import { type ReactNode, useEffect, useState } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
-import { KeyCaps, MOD } from "@/components/common/Kbd";
 import { DelegateDialog } from "@/features/subagents/DelegateDialog";
 import {
   loadSubagents,
@@ -296,7 +295,7 @@ export function PhonePanelSheet({
           <div className="q-ph-body">
             <div className="q-ph-sum">
               <span className="q-btn secondary sm">
-                All {Math.max(changes.turns.length, 1)} turns{" "}
+                {changes.turns.length > 1 ? `All ${changes.turns.length} turns` : "1 turn"}{" "}
                 <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
               </span>
               <span className="grow" />
@@ -383,14 +382,7 @@ export function PhonePanelSheet({
                 ) : null}
               </>
             )}
-            <p className="q-ph-note">
-              Tap a file for its full diff. Editing files is a desktop task; from here you can hand
-              a change back to the agent.
-            </p>
-            <p className="q-ph-desktop-only">
-              Files and the IDE open on desktop. Press <KeyCaps value={`${MOD} E`} /> there to
-              switch views.
-            </p>
+            <p className="q-ph-desktop-only">Files and the IDE are on desktop.</p>
           </div>
         )}
       </div>

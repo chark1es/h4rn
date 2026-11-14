@@ -66,11 +66,6 @@ export function AutoResumeCards({
                 {absoluteTime(schedule.scheduled_at)}. h4rn resumes the turn at{" "}
                 {absoluteTime(schedule.resume_at)} with its saved context.
               </div>
-              {schedule.reason && !compact ? (
-                <div className="q-faint" style={{ marginTop: 4, fontSize: 12 }}>
-                  {schedule.reason}
-                </div>
-              ) : null}
               {schedule.failover ? (
                 <div
                   className="q-faint"
@@ -107,7 +102,7 @@ export function AutoResumeCards({
                 disabled={state !== undefined}
                 onClick={() => void cancelResume(schedule.thread_id)}
               >
-                {state === "cancel" ? "Cancelling…" : "Cancel"}
+                {state === "cancel" ? "Cancelling…" : compact ? "Cancel" : "Cancel auto-resume"}
               </button>
               <button
                 type="button"

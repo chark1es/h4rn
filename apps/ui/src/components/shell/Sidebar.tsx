@@ -8,6 +8,7 @@ import {
   CircleIcon,
   CircleXIcon,
   ClockIcon,
+  FolderPlusIcon,
   GitPullRequestIcon,
   KeyRoundIcon,
   PanelLeftIcon,
@@ -21,6 +22,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
+import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { KeyCaps, MOD, SHIFT } from "@/components/common/Kbd";
 import { ThreadRow } from "@/components/inbox/ThreadRow";
@@ -448,6 +450,7 @@ function SidebarFooter({
   loading,
   offline,
   empty,
+  noThreads,
   rows,
   connection,
 }: {
@@ -455,6 +458,8 @@ function SidebarFooter({
   loading: boolean;
   offline: boolean;
   empty: boolean;
+  /** No projects yet: nothing for the pull-request badge to count. */
+  noThreads: boolean;
   rows: HostRow[];
   connection: { status: string; latencyMs: number | null; transport: string };
 }) {
@@ -482,7 +487,10 @@ function SidebarFooter({
           onClick={() => setPopoverOpen((value) => !value)}
         >
           {loading ? (
-            <span className="q-dot" />
+            <AgentGlyph
+              glyph={{ kind: "orb", state: "breathing", speed: 0.35, label: "Connecting" }}
+              size={14}
+            />
           ) : offline || empty ? (
             <span className="q-faint" style={{ display: "inline-flex" }}>
               <WifiOffIcon className="q-icon s14" aria-hidden />
@@ -517,7 +525,7 @@ function SidebarFooter({
             }
           >
             <item.icon className="q-icon" strokeWidth={1.5} aria-hidden />
-            {item.key === "pr" ? <span className="q-side-dest-n">3</span> : null}
+            {item.key === "pr" && !noThreads ? <span className="q-side-dest-n">3</span> : null}
           </button>
         ))}
       </div>
@@ -680,7 +688,7 @@ function ThreadsSidebar() {
               under it.
             </p>
             <button type="button" className="q-btn secondary" onClick={openNewThread}>
-              <SquarePenIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+              <FolderPlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               Add a project…
             </button>
           </div>
@@ -796,6 +804,7 @@ function ThreadsSidebar() {
         loading={loading}
         offline={connection.status === "offline"}
         empty={rows.length === 0}
+        noThreads={allEmpty}
         rows={rows}
         connection={connection}
       />
@@ -1047,6 +1056,7 @@ function SettingsSidebar() {
         loading={loading}
         offline={connection.status === "offline"}
         empty={rows.length === 0}
+        noThreads={false}
         rows={rows}
         connection={connection}
       />

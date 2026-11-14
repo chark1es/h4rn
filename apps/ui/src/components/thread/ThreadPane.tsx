@@ -284,7 +284,10 @@ export function ThreadPane({ threadId }: { threadId: string }) {
                 Open host
               </button>
             </div>
-            <details style={{ fontSize: 12, color: "var(--fg-2)", alignSelf: "stretch" }}>
+            <details
+              className="q-disclosure"
+              style={{ fontSize: 12, color: "var(--fg-2)", alignSelf: "stretch" }}
+            >
               <summary style={{ cursor: "pointer" }}>Details</summary>
               <dl className="q-kv" style={{ marginTop: 10, textAlign: "left" }}>
                 <dt>Host</dt>

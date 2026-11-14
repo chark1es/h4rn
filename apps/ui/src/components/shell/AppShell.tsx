@@ -144,7 +144,15 @@ function InboxDetailEmpty() {
     <main className="q-main">
       <div className="q-center-empty">
         <div className="q-empty q-box" style={{ alignItems: "flex-start", padding: 0, gap: 0 }}>
-          <h2 style={{ margin: "0 0 6px", fontSize: 17, lineHeight: "24px", fontWeight: 600 }}>
+          <h2
+            style={{
+              margin: "0 0 6px",
+              fontSize: 17,
+              lineHeight: "24px",
+              fontWeight: 600,
+              color: "var(--fg)",
+            }}
+          >
             Start a thread
           </h2>
           <p className="q-muted" style={{ margin: "0 0 18px", lineHeight: "19px" }}>

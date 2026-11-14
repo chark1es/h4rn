@@ -2,8 +2,8 @@ import { ChevronDownIcon, ShieldCheckIcon } from "lucide-react";
 
 import { BACKSPACE, ENTER, KeyCaps, MOD } from "@/components/common/Kbd";
 import type { ApprovalKind } from "@/gen";
-import { tildePath } from "@/lib/format";
 import { harnessLabel } from "@/lib/entities";
+import { tildePath } from "@/lib/format";
 import { respondApproval, useApp } from "@/lib/store/appStore";
 
 const KIND_LABEL: Record<ApprovalKind, string> = {

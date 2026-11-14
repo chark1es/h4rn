@@ -609,7 +609,7 @@ function ProfileDetail({ profile }: { profile: ProxyProfile }) {
             })
           }
         />
-        <div className="q-field">
+        <div className="q-field" style={{ alignItems: "flex-start" }}>
           <div className="lab">
             <div className="t">Test</div>
             <div className="s">
