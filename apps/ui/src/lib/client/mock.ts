@@ -1966,7 +1966,7 @@ class MockDaemon {
   private prompt(terminal: MockTerminal): string {
     const cwd = terminal.info.cwd.replace(/^\/home\/[^/]+/, "~");
     return (
-      `\u001b[38;5;110m${cwd}\u001b[0m \u001b[38;5;180mh4rn/fix-flaky-auth\u001b[0m\r\n` +
+      `\u001b[38;5;110m${cwd}\u001b[0m \u001b[38;5;75mh4rn/fix-flaky-auth\u001b[0m\r\n` +
       `\u001b[38;5;114m$\u001b[0m `
     );
   }

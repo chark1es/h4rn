@@ -190,7 +190,8 @@ async function main() {
       .getByRole("button", { name: "Forges", exact: true })
       .click();
     await page.getByRole("heading", { name: "Forges" }).waitFor({ timeout: 10_000 });
-    await page.getByLabel("Forge", { exact: true }).selectOption("gitea");
+    await page.getByRole("button", { name: /^Forge:/ }).click();
+    await page.getByRole("menuitem", { name: "Gitea" }).click();
     await page.getByLabel("Forge base URL").fill(forgeUrl.replace(/\/$/, ""));
     await page.getByLabel("Forge token").fill(token);
     await page.getByRole("button", { name: "Add account" }).click();

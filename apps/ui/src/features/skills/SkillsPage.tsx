@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { useEffect, useState } from "react";
 
+import { ChipSelect } from "@/components/common/ChipSelect";
 import { Button } from "@/components/ui/button";
 import type { HarnessKind, SkillConflict, SkillInstallState, SkillSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
@@ -138,18 +139,16 @@ function Conflicts({ conflicts }: { conflicts: SkillConflict[] }) {
                   → remote <span className="q-mono">{shortVersion(conflict.remote_version)}</span>
                 </div>
               </div>
-              <select
-                className="h-7 rounded-[6px] border-0 bg-bg-raised px-2 text-[12.5px] text-fg shadow-[inset_0_0_0_1px_var(--line-2)] outline-none focus-visible:shadow-[inset_0_0_0_1px_var(--accent)]"
-                aria-label={`Resolution for ${conflict.name}`}
+              <ChipSelect
+                label={`Resolution for ${conflict.name}`}
                 value={choice}
-                onChange={(event) =>
-                  setChoices((current) => ({ ...current, [conflict.id]: event.target.value }))
-                }
-              >
-                <option value="keep_local">Keep local</option>
-                <option value="keep_remote">Keep remote</option>
-                <option value="keep_both">Keep both</option>
-              </select>
+                options={[
+                  { value: "keep_local", label: "Keep local" },
+                  { value: "keep_remote", label: "Keep remote" },
+                  { value: "keep_both", label: "Keep both" },
+                ]}
+                onChange={(next) => setChoices((current) => ({ ...current, [conflict.id]: next }))}
+              />
               <Button
                 variant="secondary"
                 size="sm"

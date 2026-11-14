@@ -1,5 +1,5 @@
 import { ArrowUpIcon, AtSignIcon, ChevronDownIcon, PaperclipIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { CommandPalette } from "@/components/dialogs/CommandPalette";
@@ -144,7 +144,15 @@ function InboxDetailEmpty() {
     <main className="q-main">
       <div className="q-center-empty">
         <div className="q-empty q-box" style={{ alignItems: "flex-start", padding: 0, gap: 0 }}>
-          <h2 style={{ margin: "0 0 6px", fontSize: 17, lineHeight: "24px", fontWeight: 600 }}>
+          <h2
+            style={{
+              margin: "0 0 6px",
+              fontSize: 17,
+              lineHeight: "24px",
+              fontWeight: 600,
+              color: "var(--fg)",
+            }}
+          >
             Start a thread
           </h2>
           <p className="q-muted" style={{ margin: "0 0 18px", lineHeight: "19px" }}>
@@ -425,6 +433,22 @@ function PhoneIdeNotice() {
   );
 }
 
+/** DESIGN §Layout 6: main keeps at least this much room; the right panel yields first. */
+const MAIN_MIN_WIDTH = 560;
+
+function subscribeResize(callback: () => void): () => void {
+  window.addEventListener("resize", callback);
+  return () => window.removeEventListener("resize", callback);
+}
+
+function useViewportWidth(): number {
+  return useSyncExternalStore(
+    subscribeResize,
+    () => window.innerWidth,
+    () => 1440,
+  );
+}
+
 export function AppShell() {
   const route = useApp((state) => state.ui.route);
   const layout = useApp((state) => state.ui.layout);
@@ -441,7 +465,15 @@ export function AppShell() {
     ) : null;
   const ide = layout.view === "ide" && !isPhone && (isThread || route.kind === "ide");
   const thread = activeThread(threads, selectedThreadId);
-  const showPanel = !isPhone && layout.panelOpen && Boolean(thread) && (isThread || ide);
+  const viewportWidth = useViewportWidth();
+  const mainRoom =
+    viewportWidth - (layout.sidebarOpen ? layout.sidebarWidth : 0) - layout.panelWidth;
+  const showPanel =
+    !isPhone &&
+    layout.panelOpen &&
+    Boolean(thread) &&
+    (isThread || ide) &&
+    mainRoom >= MAIN_MIN_WIDTH;
 
   if (isPhone) {
     return (

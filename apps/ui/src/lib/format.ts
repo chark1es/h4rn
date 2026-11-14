@@ -91,3 +91,8 @@ export function elapsedSince(iso: string, now = Date.now()): string {
 export function titleFromPrompt(prompt: string): string {
   return prompt.trim().split("\n")[0]?.slice(0, 72) || "New thread";
 }
+
+/** `/home/you/code/api` → `~/code/api`, the form the prototype prints folders in. */
+export function tildePath(path: string): string {
+  return path.replace(/^\/(?:home|Users)\/[^/]+(?=\/|$)/, "~");
+}

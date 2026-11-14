@@ -1,4 +1,4 @@
-import { ClockIcon, SquarePenIcon } from "lucide-react";
+import { ChevronDownIcon, ClockIcon, FolderPlusIcon, SquarePenIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { ThreadRow } from "@/components/inbox/ThreadRow";
@@ -90,7 +90,7 @@ export function PhoneInbox() {
             <h3>No projects yet</h3>
             <p>A project is a folder on one of your hosts. Start a thread to add one.</p>
             <button type="button" className="q-btn secondary" onClick={openNewThread}>
-              <SquarePenIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+              <FolderPlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               Add a project…
             </button>
           </div>
@@ -129,9 +129,11 @@ export function PhoneInbox() {
                       <span className="ct q-num">{group.threads.length}</span>
                     </>
                   ) : null}
-                  <span className={cn("chev", closed && "closed")} aria-hidden>
-                    ▾
-                  </span>
+                  <ChevronDownIcon
+                    className={cn("chev q-icon s16", closed && "closed")}
+                    strokeWidth={1.5}
+                    aria-hidden
+                  />
                 </button>
                 {closed ? null : (
                   <div className="q-rows">
@@ -141,6 +143,7 @@ export function PhoneInbox() {
                         thread={thread}
                         host={state.hosts[thread.host]}
                         index={0}
+                        compact
                         selected={state.ui.selectedThreadId === thread.thread_id}
                         tabStop={state.ui.selectedThreadId === thread.thread_id}
                         resumeAt={thread.resume_at ?? thread.limit?.reset_at ?? null}

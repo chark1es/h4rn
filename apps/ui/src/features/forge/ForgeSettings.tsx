@@ -1,6 +1,7 @@
 import { KeyRoundIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { ChipSelect } from "@/components/common/ChipSelect";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { type ForgeAccounts, ForgeApi, forgeLabel } from "@/features/forge/store";
 import type { ForgeAccount, ForgeCredentialSource, ForgeDeviceFlow, ForgeKind } from "@/gen";
@@ -184,19 +185,13 @@ function AddAccountForm({ onAdded }: { onAdded: () => void }) {
           <div className="t">Forge</div>
         </div>
         <div className="ctl">
-          <select
-            className="q-input"
-            style={{ width: 160 }}
-            aria-label="Forge"
+          <ChipSelect
+            label="Forge"
             value={forge}
-            onChange={(event) => changeForge(event.target.value as ForgeKind)}
-          >
-            {FORGES.map((kind) => (
-              <option key={kind} value={kind}>
-                {forgeLabel(kind)}
-              </option>
-            ))}
-          </select>
+            width={160}
+            options={FORGES.map((kind) => ({ value: kind, label: forgeLabel(kind) }))}
+            onChange={changeForge}
+          />
           <span className="q-faint" style={{ fontSize: 12 }}>
             Use {SCOPES[forge]}.
           </span>
@@ -467,7 +462,7 @@ export function ForgeSettings() {
 
   return (
     <div className="q-form" style={{ maxWidth: 940 }}>
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+      <div className="q-form-head">
         <div style={{ flex: 1 }}>
           <h1>Forges</h1>
           <p className="lead">

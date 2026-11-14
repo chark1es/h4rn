@@ -79,6 +79,9 @@
   background: transparent;
   box-shadow: inset 0 0 0 1.5px var(--fg-3);
 }
+.q-dot.off.bad {
+  box-shadow: inset 0 0 0 1.5px var(--danger);
+}
 .q-dot.warn {
   background: var(--warn-dot);
 }
@@ -917,7 +920,7 @@
   text-align: left;
   cursor: pointer;
 }
-.q-row-more {
+.q-row .q-row-more {
   position: absolute;
   top: 5px;
   right: 4px;
@@ -1314,6 +1317,7 @@
   box-shadow: inset 0 0 0 1px var(--line);
   margin: 4px 0 16px;
   overflow: hidden;
+  padding-bottom: 4px;
   background: var(--bg);
 }
 .q-ch-head {
@@ -1760,13 +1764,15 @@
 /* Terminal */
 .q-term {
   flex: none;
-  height: 340px;
+  height: 300px;
+  min-height: 0;
   border-top: 1px solid var(--line);
   display: flex;
   flex-direction: column;
   background: var(--bg-sunk);
 }
-.q-main.q-term-open > .q-dock {
+.q-term.hidden,
+.q-term[hidden] {
   display: none;
 }
 .q-term-head {
@@ -1858,6 +1864,15 @@
 .terminal-surface .xterm-viewport::-webkit-scrollbar-thumb {
   background: var(--fill);
   border-radius: 3px;
+}
+.terminal-surface .xterm .scrollbar.vertical {
+  width: 6px !important;
+}
+.terminal-surface .xterm .scrollbar.vertical .slider {
+  width: 6px !important;
+  left: 0 !important;
+  border-radius: 3px;
+  background: var(--fill) !important;
 }
 .terminal-surface .xterm-viewport::-webkit-scrollbar-thumb:hover {
   background: var(--fill-2);
@@ -2069,7 +2084,10 @@
 .q-center-empty {
   flex: 1;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   place-items: center;
+  padding: 0 16px;
+  min-width: 0;
 }
 .q-center-empty .q-box {
   width: 420px;
@@ -2114,6 +2132,18 @@
 }
 .q-chip .q-icon.s12 {
   color: var(--fg-3);
+  flex: none;
+}
+.q-chip-select {
+  cursor: default;
+  justify-content: space-between;
+}
+.q-chip-select:disabled {
+  color: var(--fg-3);
+}
+.q-chip-select:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
 }
 .q-chip.q-chip-field {
   padding: 0 6px 0 7px;
@@ -2503,8 +2533,18 @@
   justify-content: space-between;
   gap: 8px;
 }
+.q-stat .d .cap {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.q-stat {
+  min-width: 0;
+}
 .q-spark {
-  width: 56px;
+  flex: none;
+  width: 44px;
   height: 18px;
   color: var(--fg-3);
 }
@@ -2690,6 +2730,44 @@
 .q-pr-meta > * {
   white-space: nowrap;
 }
+.q-crumb {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  margin-bottom: 4px;
+  font-size: 12px;
+  color: var(--fg-3);
+}
+.q-crumb-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.q-crumb-link:hover {
+  color: var(--fg);
+  text-decoration: underline;
+}
+.q-quote {
+  margin: 4px 0 10px;
+  border-radius: 6px;
+  overflow: hidden;
+  font: 12px / 18px var(--mono);
+  background: var(--bg-sunk);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.q-cmt-reply {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.q-cmt-reply textarea {
+  resize: none;
+  width: 100%;
+}
 .q-pr-labels {
   display: flex;
   flex-wrap: wrap;
@@ -2812,6 +2890,15 @@
   font-size: 13px;
   max-width: 62ch;
 }
+.q-form-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.q-form-head > :first-child {
+  flex: 1;
+  min-width: 0;
+}
 .q-group {
   margin-bottom: 32px;
 }
@@ -2895,6 +2982,29 @@
   background: #fff;
   box-shadow: inset 0 0 0 1px var(--line);
   flex: none;
+}
+.q-pair-scopes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 24px;
+}
+.q-pair-scope {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 6px 0;
+  cursor: default;
+}
+.q-pair-scope .q-check {
+  margin-top: 2px;
+}
+.q-pair-scope .sub {
+  display: block;
+  font-size: 12px;
+}
+.q-pair-scope:has(input:focus-visible) .q-check {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
 }
 .q-code-big {
   font: 500 22px / 28px var(--mono);
@@ -3268,6 +3378,8 @@
 }
 .q-ph-li {
   display: flex;
+  width: 100%;
+  text-align: left;
   align-items: center;
   gap: 12px;
   min-height: 48px;
@@ -4069,8 +4181,10 @@
   width: 100%;
   text-align: left;
 }
+.q-ph-li .grow,
 .q-ph-chg .grow {
   flex: 1;
+  min-width: 0;
 }
 .q-ph-diff {
   margin: 0 16px 22px;
@@ -4226,16 +4340,6 @@
 .q-host:disabled {
   opacity: 0.6;
 }
-.q-hp-account {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 6px 8px 8px;
-}
-.q-hp-account .q-btn {
-  align-self: flex-start;
-  margin-top: 4px;
-}
 .q-account-name {
   font-size: 12.5px;
   font-weight: 500;
@@ -4256,8 +4360,18 @@
   font: inherit;
   cursor: pointer;
 }
+.q-node.q-sub-node:hover {
+  background: var(--hover);
+}
+.q-node.q-sub-node.sel {
+  background: var(--sel);
+}
+.q-node.q-sub-node {
+  min-width: 0;
+}
 .q-node.q-sub-node.kid2 {
-  margin-left: 22px;
+  margin-left: 14px;
+  width: calc(100% - 14px);
 }
 .q-spin {
   animation: q-spin 1s linear infinite;
@@ -4271,4 +4385,167 @@
   .q-spin {
     animation: none;
   }
+}
+
+/* Phone Settings: one column, grouped rows, one 2-line row per table item. */
+@media (max-width: 639px) {
+  .q-form {
+    max-width: 100% !important;
+    padding: 16px 16px 32px;
+  }
+  .q-form-head {
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-bottom: 20px;
+  }
+  .q-form-head > :first-child .lead {
+    margin-bottom: 4px;
+  }
+  .q-form-head > :first-child {
+    flex: 1 1 100% !important;
+  }
+  .q-form-head > .q-btn,
+  .q-form-head > div:not(:first-child) {
+    flex: 1 1 auto;
+  }
+  .q-form-head > div:not(:first-child) > .q-btn {
+    width: 100%;
+    justify-content: center;
+  }
+  .q-form .lead {
+    max-width: none;
+    margin-bottom: 20px;
+  }
+  .q-group > h2 {
+    flex-wrap: wrap;
+  }
+  .q-field {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .q-field .lab {
+    width: auto;
+  }
+  .q-field .ctl {
+    flex-wrap: wrap;
+  }
+  .q-field .ctl > .q-input,
+  .q-field .ctl > input {
+    min-width: 0;
+    width: 100%;
+    max-width: none !important;
+    flex: 1 1 100%;
+  }
+  .q-field .ctl > span[style*="flex: 1"],
+  .q-field .ctl > span[style*="flex:1"] {
+    display: none;
+  }
+  .q-secret {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .q-form .q-seg.inline {
+    display: flex;
+    width: 100%;
+  }
+  .q-form .q-seg.inline > button {
+    flex: 1 1 0;
+    min-width: 0;
+    padding: 0 6px;
+  }
+  .q-pair-scopes {
+    grid-template-columns: 1fr;
+  }
+  .q-faint.q-mono,
+  .q-form .q-mono {
+    overflow-wrap: anywhere;
+  }
+  .q-tbl,
+  .q-tbl tbody {
+    display: block;
+    width: 100%;
+  }
+  .q-tbl thead {
+    display: none;
+  }
+  .q-tbl tr {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 2px 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .q-tbl td {
+    display: block;
+    height: auto;
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    white-space: normal;
+    min-width: 0;
+    font-size: 12.5px;
+    color: var(--fg-2);
+  }
+  .q-tbl td:first-child {
+    flex: 1 1 100%;
+    font-size: 14px;
+    color: var(--fg);
+  }
+  .q-tbl td:last-child:not(:first-child) {
+    margin-left: auto;
+  }
+  .q-tbl td[colspan] {
+    flex: 1 1 100%;
+  }
+  .q-tbl tr.hov:hover td {
+    background: transparent;
+  }
+}
+
+/* Disclosure: a 12 px chevron instead of the native triangle. */
+.q-disclosure > summary {
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.q-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+.q-disclosure > summary::before {
+  content: "";
+  width: 12px;
+  height: 12px;
+  flex: none;
+  background: var(--fg-3);
+  -webkit-mask:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 18 6-6-6-6'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+  mask:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 18 6-6-6-6'/%3E%3C/svg%3E")
+    center / contain no-repeat;
+  transition: transform var(--dur-1) var(--ease-out);
+}
+.q-disclosure[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+/* Footer pull-request badge sits inline after its icon. */
+.q-side-dest:has(.q-side-dest-n) {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  padding: 0 6px;
+  gap: 3px;
+}
+.q-side-dest .q-side-dest-n {
+  position: static;
+  font-size: 11px;
+  line-height: 14px;
+  color: var(--fg-2);
 }

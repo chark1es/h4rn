@@ -2,6 +2,7 @@ import {
   CircleSlash2Icon,
   ExternalLinkIcon,
   FileDiffIcon,
+  GitBranchIcon,
   MoreHorizontalIcon,
   PanelRightIcon,
   PinIcon,
@@ -129,7 +130,7 @@ export function ThreadHeader({
   // A dropped connection outranks the last agent state: do not animate work
   // the daemon can no longer confirm.
   const glyph =
-    stale && working
+    stale && working && !unreachable
       ? { kind: "offline" as const, label: "Last seen running" }
       : glyphForThread(summary, hostOnline);
   const isPhone = useIsPhone();
@@ -278,7 +279,7 @@ export function ThreadHeader({
             size={14}
           />
           <span>{hostName}</span>
-          <span className="q-sep">·</span>
+          <span className="q-sep">/</span>
           <EntityAvatar
             seed={harnessSeed(summary.host, summary.harness)}
             kind="harness"
@@ -287,22 +288,17 @@ export function ThreadHeader({
           />
           <span>{harnessLabel(summary.harness)}</span>
           <span className="opt">
-            <span className="q-sep">·</span> {summary.model}
+            <span className="q-sep">/</span> {summary.model}
           </span>
           {summary.branch ? (
             <span className="br">
-              <span className="q-sep">·</span>
+              <span className="q-sep">/</span>
+              <GitBranchIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
               <span className="q-mono" style={{ fontSize: 11.5 }}>
                 {summary.branch}
               </span>
             </span>
           ) : null}
-          <span className="br">
-            <span className="q-sep">·</span>
-            <span className="q-mono" style={{ fontSize: 11.5 }}>
-              {summary.workspace_path}
-            </span>
-          </span>
         </div>
       </div>
 

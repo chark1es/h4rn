@@ -4,8 +4,13 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   CircleAlertIcon,
+  CircleCheckIcon,
+  CircleIcon,
+  CircleXIcon,
   ClockIcon,
+  FolderPlusIcon,
   GitPullRequestIcon,
+  KeyRoundIcon,
   PanelLeftIcon,
   PlugIcon,
   QrCodeIcon,
@@ -17,12 +22,12 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
+import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
-import { KeyGlyphs, MOD, SHIFT } from "@/components/common/Kbd";
+import { KeyCaps, MOD, SHIFT } from "@/components/common/Kbd";
 import { ThreadRow } from "@/components/inbox/ThreadRow";
 import { serverStatus } from "@/features/mcp/labels";
 import { loadMcpServers, useMcp } from "@/features/mcp/store";
-import { SignOutButton } from "@/features/remote/ConnectSignIn";
 import { activateMachine, forgetMachine, useRemote } from "@/features/remote/remoteStore";
 import { loadSkills, useSkills } from "@/features/skills/store";
 import type { ThreadSummary, ThreadTab } from "@/gen";
@@ -243,15 +248,21 @@ function HostsPopover({
   onClose: () => void;
 }) {
   const user = useRemote((state) => state.user);
-  const connectUrl = useRemote((state) => state.connectUrl);
   const busy = useRemote((state) => state.busy);
   const online = rows.filter((row) => row.online).length;
   const active = rows.find((row) => row.active) ?? rows.find((row) => row.online);
+  // The daemon answers but this host does not: that is an unreachable host,
+  // shown in `danger` with its last-seen time (DESIGN §States).
+  const reachableLink = connection.status === "online";
   const dots = (row: HostRow) =>
     row.online ? (
       <span className="q-dot on" role="img" aria-label="online" />
     ) : (
-      <span className="q-dot off" role="img" aria-label="offline" />
+      <span
+        className={cn("q-dot off", reachableLink && "bad")}
+        role="img"
+        aria-label={reachableLink ? "unreachable" : "offline"}
+      />
     );
   const connectionLine =
     connection.status === "online"
@@ -301,7 +312,12 @@ function HostsPopover({
               size={16}
               decorative={false}
             />
-            <span className="lbl" style={row.online ? undefined : { color: "var(--fg-3)" }}>
+            <span
+              className="lbl"
+              style={
+                row.online ? undefined : { color: reachableLink ? "var(--danger)" : "var(--fg-3)" }
+              }
+            >
               {row.name}
             </span>
             {row.online ? (
@@ -311,7 +327,12 @@ function HostsPopover({
             ) : (
               <span
                 className="meta"
-                style={{ display: "inline-flex", gap: 4, alignItems: "center" }}
+                style={{
+                  display: "inline-flex",
+                  gap: 4,
+                  alignItems: "center",
+                  color: reachableLink ? "var(--danger)" : undefined,
+                }}
               >
                 <WifiOffIcon className="q-icon s12" aria-hidden />
                 {row.lastSeen}
@@ -337,15 +358,7 @@ function HostsPopover({
         </button>
       ) : null}
       <div className="q-hp-sep" />
-      {user ? (
-        <div className="q-hp-account">
-          <span className="q-account-name">{user.display_name ?? user.email ?? user.id}</span>
-          <span className="q-faint" style={{ fontSize: 11 }}>
-            {connectUrl}
-          </span>
-          <SignOutButton onDone={onClose} />
-        </div>
-      ) : (
+      {user ? null : (
         <button
           type="button"
           className="q-nav"
@@ -437,6 +450,7 @@ function SidebarFooter({
   loading,
   offline,
   empty,
+  noThreads,
   rows,
   connection,
 }: {
@@ -444,6 +458,8 @@ function SidebarFooter({
   loading: boolean;
   offline: boolean;
   empty: boolean;
+  /** No projects yet: nothing for the pull-request badge to count. */
+  noThreads: boolean;
   rows: HostRow[];
   connection: { status: string; latencyMs: number | null; transport: string };
 }) {
@@ -471,7 +487,10 @@ function SidebarFooter({
           onClick={() => setPopoverOpen((value) => !value)}
         >
           {loading ? (
-            <span className="q-dot" />
+            <AgentGlyph
+              glyph={{ kind: "orb", state: "breathing", speed: 0.35, label: "Connecting" }}
+              size={14}
+            />
           ) : offline || empty ? (
             <span className="q-faint" style={{ display: "inline-flex" }}>
               <WifiOffIcon className="q-icon s14" aria-hidden />
@@ -506,7 +525,7 @@ function SidebarFooter({
             }
           >
             <item.icon className="q-icon" strokeWidth={1.5} aria-hidden />
-            {item.key === "pr" ? <span className="q-side-dest-n">3</span> : null}
+            {item.key === "pr" && !noThreads ? <span className="q-side-dest-n">3</span> : null}
           </button>
         ))}
       </div>
@@ -597,9 +616,7 @@ function ThreadsSidebar() {
         >
           <SearchIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           <span>Search or run</span>
-          <span className="q-kbd">
-            <KeyGlyphs value={`${MOD}K`} />
-          </span>
+          <KeyCaps value={`${MOD} K`} />
         </button>
         {allEmpty ? null : (
           <div className="q-seg" role="tablist" aria-label="Thread state">
@@ -646,7 +663,7 @@ function ThreadsSidebar() {
             <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           </span>
           <span className="grow">
-            <b>Couldn’t reach {Object.values(hosts)[0]?.name ?? "the daemon"}.</b>{" "}
+            <b>Couldn’t reach {unreachableHostLabel(hosts)}.</b>{" "}
             {error.hint ?? "Showing cached threads."}
           </span>
           <button
@@ -671,7 +688,7 @@ function ThreadsSidebar() {
               under it.
             </p>
             <button type="button" className="q-btn secondary" onClick={openNewThread}>
-              <SquarePenIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+              <FolderPlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               Add a project…
             </button>
           </div>
@@ -787,6 +804,7 @@ function ThreadsSidebar() {
         loading={loading}
         offline={connection.status === "offline"}
         empty={rows.length === 0}
+        noThreads={allEmpty}
         rows={rows}
         connection={connection}
       />
@@ -1007,14 +1025,7 @@ function SettingsSidebar() {
                             onClick={() => openMcp(server.name)}
                           >
                             <span>{server.name}</span>
-                            <span
-                              className={cn(
-                                "q-dot",
-                                status.tone === "ok" && "on",
-                                status.tone === "warn" && "warn",
-                                status.tone === "danger" && "danger",
-                              )}
-                            />
+                            <McpHealthGlyph status={status} />
                           </button>
                         );
                       })}
@@ -1045,6 +1056,7 @@ function SettingsSidebar() {
         loading={loading}
         offline={connection.status === "offline"}
         empty={rows.length === 0}
+        noThreads={false}
         rows={rows}
         connection={connection}
       />
@@ -1058,6 +1070,31 @@ function SettingsSidebar() {
       />
     </nav>
   );
+}
+
+/** Health as a glyph plus an accessible word, never colour alone (DESIGN rule 3). */
+function McpHealthGlyph({ status }: { status: ReturnType<typeof serverStatus> }) {
+  const common = { className: "q-icon s14", strokeWidth: 1.5, role: "img" } as const;
+  const label = status.label;
+  if (status.tone === "ok")
+    return <CircleCheckIcon {...common} aria-label={label} style={{ color: "var(--fg-3)" }} />;
+  if (status.tone === "danger")
+    return <CircleXIcon {...common} aria-label={label} style={{ color: "var(--danger)" }} />;
+  if (status.tone === "warn")
+    return label === "Needs credential" ? (
+      <KeyRoundIcon {...common} aria-label={label} style={{ color: "var(--warn)" }} />
+    ) : (
+      <CircleAlertIcon {...common} aria-label={label} style={{ color: "var(--warn)" }} />
+    );
+  return <CircleIcon {...common} aria-label={label} style={{ color: "var(--fg-3)" }} />;
+}
+
+/** Names the host that is actually down; several (or none known) read as "a host". */
+function unreachableHostLabel(hosts: Record<string, { name: string; online: boolean }>): string {
+  const down = Object.values(hosts).filter((host) => !host.online);
+  if (down.length === 1) return down[0]?.name ?? "a host";
+  if (down.length > 1) return `${down.length} hosts`;
+  return "the daemon";
 }
 
 export function Sidebar() {

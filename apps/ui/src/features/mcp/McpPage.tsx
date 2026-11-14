@@ -15,6 +15,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
+import { ChipSelect } from "@/components/common/ChipSelect";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -222,29 +223,23 @@ function ConflictCard({ server }: { server: McpServerView }) {
           this.
         </div>
         <div className="mt-2 flex flex-wrap items-center gap-1.5">
-          <select
-            className="h-7 rounded-[6px] border-0 bg-bg-raised px-2 text-[12.5px] text-fg shadow-[inset_0_0_0_1px_var(--line-2)] outline-none focus-visible:shadow-[inset_0_0_0_1px_var(--accent)]"
-            aria-label={`Conflict harness for ${server.name}`}
+          <ChipSelect
+            label={`Conflict harness for ${server.name}`}
             value={harness}
-            onChange={(event) => setHarness(event.target.value as HarnessKind)}
-          >
-            {MCP_HARNESSES.map((entry) => (
-              <option key={entry} value={entry}>
-                {HARNESS_LABELS[entry]}
-              </option>
-            ))}
-          </select>
-          <select
-            className="h-7 rounded-[6px] border-0 bg-bg-raised px-2 text-[12.5px] text-fg shadow-[inset_0_0_0_1px_var(--line-2)] outline-none focus-visible:shadow-[inset_0_0_0_1px_var(--accent)]"
-            aria-label={`Resolution for ${server.name}`}
+            options={MCP_HARNESSES.map((entry) => ({ value: entry, label: HARNESS_LABELS[entry] }))}
+            onChange={setHarness}
+          />
+          <ChipSelect
+            label={`Resolution for ${server.name}`}
             value={resolution}
-            onChange={(event) => setResolution(event.target.value)}
-          >
-            <option value="keep_mine">Keep mine</option>
-            <option value="use_theirs">Use theirs</option>
-            <option value="rename">Rename theirs</option>
-            <option value="skip">Leave unresolved</option>
-          </select>
+            options={[
+              { value: "keep_mine", label: "Keep mine" },
+              { value: "use_theirs", label: "Use theirs" },
+              { value: "rename", label: "Rename theirs" },
+              { value: "skip", label: "Leave unresolved" },
+            ]}
+            onChange={setResolution}
+          />
           {resolution === "rename" ? (
             <input
               className="q-input h-7 max-w-[160px]"

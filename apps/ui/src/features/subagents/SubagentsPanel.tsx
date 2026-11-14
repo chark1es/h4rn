@@ -165,7 +165,7 @@ function SubagentNode({
           )}
           {` · ${progressLine(view)}`}
         </div>
-        {percent > 0 ? (
+        {percent > 0 && view.state === "running" ? (
           <div
             className="prog"
             role="progressbar"

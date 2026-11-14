@@ -143,7 +143,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
     return (
       <main className="q-main" aria-label="Thread">
         <div className="q-center-empty">
-          <div className="q-empty" style={{ width: 460, padding: 0 }}>
+          <div className="q-empty" style={{ width: 460, maxWidth: "100%", padding: 0 }}>
             <span className="q-danger">
               <CircleAlertIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
             </span>
@@ -258,7 +258,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
 
       {!loaded && threadError && !log?.loading ? (
         <div className="q-center-empty">
-          <div className="q-empty" style={{ width: 460, padding: 0 }}>
+          <div className="q-empty" style={{ width: 460, maxWidth: "100%", padding: 0 }}>
             <span className="q-danger">
               <CircleAlertIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
             </span>
@@ -284,7 +284,10 @@ export function ThreadPane({ threadId }: { threadId: string }) {
                 Open host
               </button>
             </div>
-            <details style={{ fontSize: 12, color: "var(--fg-2)", alignSelf: "stretch" }}>
+            <details
+              className="q-disclosure"
+              style={{ fontSize: 12, color: "var(--fg-2)", alignSelf: "stretch" }}
+            >
               <summary style={{ cursor: "pointer" }}>Details</summary>
               <dl className="q-kv" style={{ marginTop: 10, textAlign: "left" }}>
                 <dt>Host</dt>
@@ -327,7 +330,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
         />
       ) : turns.length === 0 ? (
         <div className="q-center-empty">
-          <div className="q-empty" style={{ width: 460, padding: 0 }}>
+          <div className="q-empty" style={{ width: 460, maxWidth: "100%", padding: 0 }}>
             <InboxIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
             <h3 style={{ fontSize: 17, lineHeight: "24px" }}>Nothing has streamed yet</h3>
             <p style={{ margin: 0 }}>
@@ -346,17 +349,6 @@ export function ThreadPane({ threadId }: { threadId: string }) {
           staleAt={offline ? lastSyncAt : null}
         />
       )}
-
-      {terminalMounted ? (
-        <TerminalPanel
-          key={threadId}
-          threadId={threadId}
-          host={summary.host}
-          cwd={summary.workspace_path}
-          hidden={!terminalOpen}
-          onClose={toggleTerminal}
-        />
-      ) : null}
 
       {!threadError || loaded ? (
         <div className="q-dock">
@@ -385,6 +377,17 @@ export function ThreadPane({ threadId }: { threadId: string }) {
             )}
           </div>
         </div>
+      ) : null}
+
+      {terminalMounted ? (
+        <TerminalPanel
+          key={threadId}
+          threadId={threadId}
+          host={summary.host}
+          cwd={summary.workspace_path}
+          hidden={!terminalOpen}
+          onClose={toggleTerminal}
+        />
       ) : null}
 
       {isPhone && approvalSheetOpen && firstApproval ? (

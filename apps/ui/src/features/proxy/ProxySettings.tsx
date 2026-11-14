@@ -609,7 +609,7 @@ function ProfileDetail({ profile }: { profile: ProxyProfile }) {
             })
           }
         />
-        <div className="q-field">
+        <div className="q-field" style={{ alignItems: "flex-start" }}>
           <div className="lab">
             <div className="t">Test</div>
             <div className="s">
@@ -799,7 +799,7 @@ export function ProxySettings() {
 
   return (
     <div className="q-form">
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+      <div className="q-form-head">
         <div style={{ flex: 1 }}>
           <h1>{selected?.name ?? "CLIProxyAPI"}</h1>
           <p className="lead">

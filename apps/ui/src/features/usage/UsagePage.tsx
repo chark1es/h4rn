@@ -107,7 +107,9 @@ function Stat({
         {unit ? <small>{unit}</small> : null}
       </div>
       <div className="d num">
-        <span>{detail}</span>
+        <span className="cap" title={detail}>
+          {detail}
+        </span>
         {spark ? <Spark values={spark} /> : null}
       </div>
     </div>
@@ -456,7 +458,8 @@ function LimitRow({ limit }: { limit: import("@/gen").LimitStatus }) {
   const now = useNow(1_000);
   const thread = useApp((state) => (limit.thread_id ? state.threads[limit.thread_id] : undefined));
   const consumed = limit.limit > 0 ? percent(limit.consumed, limit.limit) : 0;
-  const label = limit.limit > 0 ? `${consumed}%` : "Limited";
+  const label =
+    limit.limit > 0 ? (consumed >= 100 ? `Limited · ${consumed}%` : `${consumed}%`) : "Limited";
   const tone = consumed >= 100 ? "danger" : consumed >= 75 ? "warn" : "";
   const harness = limit.harness ?? thread?.harness ?? "claude_code";
   const host = thread?.host ?? limit.account ?? "h4rn";
@@ -596,40 +599,36 @@ function Stats({ report, phone = false }: { report: UsageReport | null; phone?: 
         label="Tokens"
         value={tokens(totals.input_tokens + totals.output_tokens).replace(/[a-zA-Z]+$/, "")}
         unit={tokens(totals.input_tokens + totals.output_tokens).match(/[a-zA-Z]+$/)?.[0]}
-        detail={`${tokens(totals.input_tokens)} in · ${tokens(totals.output_tokens)} out`}
+        detail={`${tokens(totals.input_tokens)} in`}
         spark={spark((point) => point.input_tokens + point.output_tokens)}
       />
       <Stat
         label="Cost"
         value={cost(totals.cost_micros)}
-        detail="estimate, not billing"
+        detail="estimate"
         spark={spark((point) => point.cost_micros / 1_000_000)}
       />
       <Stat
         label="Throughput"
         value={totals.tps > 0 ? `${Math.round(totals.tps)}` : "—"}
         unit={totals.tps > 0 ? "tok/s" : undefined}
-        detail={`${totals.turns} metered turns`}
+        detail={`${totals.turns} turns`}
         spark={spark((point) => point.tps)}
       />
       <Stat
         label="First token"
         value={firstToken(totals.ttft_ms)}
-        detail="mean across turns"
+        detail="mean"
         spark={spark((point) => point.ttft_ms)}
       />
       {phone ? null : (
-        <Stat
-          label="Active"
-          value={duration(totals.active_ms)}
-          detail={`${activeRatio}% active · idle ${duration(totals.idle_ms)}`}
-        />
+        <Stat label="Active" value={duration(totals.active_ms)} detail={`${activeRatio}% active`} />
       )}
       {phone ? null : (
         <Stat
           label="Runtime"
           value={duration(totals.runtime_ms)}
-          detail="first start to last completion"
+          detail="wall time"
           spark={spark((point) => point.wall_ms)}
         />
       )}
