@@ -205,7 +205,7 @@ export function LiveHostsForm() {
 
   return (
     <div className="q-form" style={{ maxWidth: 880 }}>
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+      <div className="q-form-head">
         <div style={{ flex: 1 }}>
           <h1>Hosts</h1>
           <p className="lead">

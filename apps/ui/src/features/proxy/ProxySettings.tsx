@@ -799,7 +799,7 @@ export function ProxySettings() {
 
   return (
     <div className="q-form">
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+      <div className="q-form-head">
         <div style={{ flex: 1 }}>
           <h1>{selected?.name ?? "CLIProxyAPI"}</h1>
           <p className="lead">

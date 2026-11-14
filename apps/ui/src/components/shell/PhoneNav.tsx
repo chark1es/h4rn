@@ -42,8 +42,15 @@ const TABS = [
 
 function active(route: Route, key: string): boolean {
   if (key === "inbox") return route.kind === "inbox" || route.kind === "thread";
-  if (key === "settings" || key === "pairing") {
-    return route.kind === "placeholder" && route.surface === "settings";
+  if (key === "pairing") {
+    return route.kind === "placeholder" && route.path === "/settings/hosts";
+  }
+  if (key === "settings") {
+    return (
+      route.kind === "placeholder" &&
+      route.surface === "settings" &&
+      route.path !== "/settings/hosts"
+    );
   }
   return route.kind === "placeholder" && route.surface === key;
 }

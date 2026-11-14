@@ -462,7 +462,7 @@ export function ForgeSettings() {
 
   return (
     <div className="q-form" style={{ maxWidth: 940 }}>
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+      <div className="q-form-head">
         <div style={{ flex: 1 }}>
           <h1>Forges</h1>
           <p className="lead">
