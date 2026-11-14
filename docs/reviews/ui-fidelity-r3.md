@@ -218,3 +218,78 @@ There are no gradients, no emoji and no decorative colour. Type is consistent: h
    - `.q-row-time` right edge ≈ 269.
    - Sidebar search shows 2 chips.
    - `.q-rp-body` `scrollWidth == clientWidth` on Subagents.
+
+## Round 3 fixes
+
+Measured against `bun run dev -- --port 1543 --strictPort`, `?mock=1`, headless Chromium at 1440×900, 1100×800, 390×844 and 360×780, in light and dark. Every number below read identically in both themes unless the theme is named. The probe is a Playwright script reading computed styles and bounding boxes, not a note.
+
+### P0
+
+1. **Terminal drawer.** The terminal sits after `.q-dock` (stream → approval → composer → drawer), `.q-main.q-term-open > .q-dock { display:none }` is gone, `.q-term.hidden` really hides, and the height is 300 px.
+   - Closed: the drawer is absent. After opening and closing it again it has `display:none` at 0×0. Approval and composer: `626+150` and `786+72` (y + height) at 900 px, with no change between before and after.
+   - Open: the drawer is `600+300`, the approval `326+150` and the composer `486+72`. Both are fully inside the viewport.
+   - The xterm overlay scrollbar (`.scrollbar.vertical`) is now **6 px**, not 14 px.
+2. **Pairing QR.** `QrCode size={148}` now fits the 168 px tile (10 px padding).
+   - Tile `476,253,168,168`; svg `486,263,148,148`; inside = true. Before, the svg was 188 px and spilled 30 px.
+   - The Devices page now has the machine chip picker, the mono code (`22HM-QBUG`, `XXXX-XXXX` from the pairing id), "Works once, for one device. Pairs with atlas.", five scope checkboxes in 2 columns (view threads locked on), and one Copy link / New code row. There are 0 `<select>`s, and `New code` appears once.
+   - The raw URL line is removed.
+   - The code and the scope boxes are display-only today: the backend's `createPairing(machineId)` takes neither. The QR stays the credential.
+3. **Phone Settings.** Below 640 px:
+   - `.q-form` has 16 px gutters.
+   - `.q-form-head` stacks title → description → full-width actions.
+   - Fields stack label over control, inputs are `width:100%`, and tables become one 2-line row per item (name, then detail).
+   - The scope grid is one column and the segmented control is full width.
+   - Result: on all ten settings routes (hosts, general, appearance, notifications, shortcuts, devices, providers, resume, forges, account) at 390 and 360, `scrollWidth == viewport` and **0 elements** have `right > innerWidth`.
+   - The tab bar has exactly one `aria-current`: `Hosts` on `/settings/hosts`, `Settings` on every other settings route.
+
+### P1
+
+1. **560 px main floor.** `AppShell` hides the right panel when `viewport − sidebar − panel < 560` (the layout state is unchanged). At 1100 with the sidebar open and the panel requested, main is **812 px** and the panel is hidden. With the sidebar closed (Ctrl B), main is 700 px and the panel is shown.
+2. **Key chips.** The sidebar search shows `["Ctrl","K"]`, two chips. "Open in IDE", "Back to thread" and the Files filter (`Ctrl P`) use `KeyCaps` with `MOD`, and so does the phone sheet's note.
+3. **Row gutter.** `.q-row .q-row-more` is `position:absolute` again. `.q-row-time` right is **269**, the row's content edge (before: 237). The phone inbox status right edge is 370/390 and 340/360 (before: 336/306).
+4. **Phone project chevron.** The header is an SVG `ChevronDownIcon` 16×16 in `fg-3`, with no text glyph.
+5. **Error banner and hosts menu.**
+   - The banner reads "Couldn't reach **buildbox**. Showing 3 of 4 hosts." It names the host that is down; with several down it reads "N hosts".
+   - The unreachable row is `var(--danger)` with a danger hollow dot and its last-seen "2h".
+   - The account and Sign out block is gone from the menu; it is in Settings → Account.
+6. **Subagents overflow.** `.q-rp-body` scrollWidth **399 = clientWidth 399**. Nested nodes use a 14 px indent and `width:calc(100% - 14px)`, and all four nodes end at x=1428 inside the 1440 panel.
+7. **Subagents selection.** `.q-sub-node.sel` is `var(--sel)` (light `oklch(0.94 0.004 260)`, dark `oklch(0.252 0.006 260)`); it was transparent. The 3 px budget bar shows only while `running`: 1 bar, not 4.
+8. **Native selects.** `ChipSelect` (24 px chip, radius 6, 12 px chevron, Radix menu) replaces the selects on the Delegate dialog (3), Devices (1), the MCP conflict card (2), Forges (1), Auto-resume (1) and the Skills conflict row (1). 0 `<select>`s remain on those surfaces. The Delegate task textarea has `resize:none`. `forge-e2e.mjs` selects Gitea through the new menu. The "Resolve…" popover redesign for the MCP conflict is not done: it keeps the two chips and the button.
+9. **MCP health.** The settings nav shows `CircleCheck` (`fg-3`), `CircleX` (`danger`), `KeyRound` (`warn`), and a plain circle for off, each with an `aria-label` of the status word (github=Needs credential, linear=Healthy, sentry=Error).
+10. **Git `M`.** `M` computes to `--warn` (light `oklch(0.5 0.11 62)`, dark `oklch(0.83 0.12 80)`). `A` stays `ok`; R and T follow `warn`.
+11. **PR detail.**
+    - The breadcrumb is `fg-3` (`oklch(0.51 …)`), neutral, with `/` separators; only "Pull requests" is a button.
+    - The header has 1 badge (Open); "No conflicts" is now a "Merge" row and the labels are in the right column.
+    - 0 textareas are visible until Reply is clicked (then Send reply / Cancel).
+    - 2 review threads quote their diff lines.
+    - Not done: Commits tab, View log / Re-run failed buttons and the `required` mark on checks. The data is not in the wired API.
+12. **Phone error state.** At 390/360 the document is 390/360 wide (it was 461). The error block runs 16 → 374 and 16 → 344. The header reads "Host unreachable" on phone too; "Last seen running" no longer outranks it.
+13. **Resizer focus.** Tab to "Resize sidebar" gives a 2 px `--focus` line (light `oklch(0.6 0.17 258)`, dark `oklch(0.7 0.14 258)`). The CSS existed; the 0.15 s transition had hidden it in r3's probe. The `<hr>` already carries the separator role (adding `role` is a lint error).
+
+### P2
+
+- Tool rows hide durations under 1 s. Diffstat and match-count results are not shown, because the tool output isn't structured.
+- The change-set card drops its file icons and has 4 px bottom padding.
+- The approval subtitle is the `~/code/api` form alone.
+- Header provenance uses `/` separators with a branch icon and no path.
+- Usage:
+  - Stat captions are one line with ellipsis (Cost "estimate", Runtime "wall time", Tokens "721.8k in").
+  - The over-limit row reads "Limited · 100%".
+  - The auto-resume card shows "Cancel auto-resume" and no filler reason.
+  - `.q-stat` has `min-width:0`.
+  - Not done: the Fail over… action.
+- Phone Changes sheet:
+  - "1 turn".
+  - One sentence, "Files and the IDE are on desktop."
+  - File rows are full width, so the +/− stats and chevron are right-aligned.
+- Phone inbox rows are `compact` (host dropped from line 2).
+- Terminal: the scrollbar is 6 px, and the mock prompt branch is ANSI 75 (accent).
+- Empty state: `FolderPlus` on "Add a project…", the "Start a thread" title is `fg`, and the PR count badge is not shown without threads. Not done: the footer still reads "3 of 4 hosts" in the mock empty scenario.
+- Loading: the footer shows the breathing queued orb.
+- Error: the Details disclosure uses a 12 px chevron.
+- Providers: the Test field is top-aligned.
+- The PR footer badge is inline ("⑂ 3").
+
+### Verification
+
+See the commit message of the final commit for the exact results of `cargo fmt/clippy/test`, `check-bindings.sh`, and `bun run typecheck / lint / test / build / e2e`.
