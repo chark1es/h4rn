@@ -63,6 +63,7 @@ import {
   useApp,
 } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
+import { hostStatus } from "./hostStatus";
 import { Resizer } from "./Resizer";
 
 const SKELETON_WIDTHS: Array<[string, string]> = [
@@ -449,7 +450,6 @@ function SidebarFooter({
   destination,
   loading,
   offline,
-  empty,
   noThreads,
   rows,
   connection,
@@ -457,23 +457,13 @@ function SidebarFooter({
   destination: Destination | null;
   loading: boolean;
   offline: boolean;
-  empty: boolean;
   /** No projects yet: nothing for the pull-request badge to count. */
   noThreads: boolean;
   rows: HostRow[];
   connection: { status: string; latencyMs: number | null; transport: string };
 }) {
   const [popoverOpen, setPopoverOpen] = useState(false);
-  const online = rows.filter((row) => row.online).length;
-  const machines = new Set(rows.map((row) => row.machineId).filter(Boolean)).size;
-  const noun = rows.some((row) => row.sub) || rows.length !== machines ? "hosts" : "machines";
-  const status = loading
-    ? "Connecting…"
-    : offline
-      ? "Offline"
-      : empty
-        ? (rows[0]?.name ?? "No hosts")
-        : `${online} of ${rows.length} ${noun}`;
+  const hostLine = hostStatus({ loading, offline, rows });
 
   return (
     <>
@@ -486,19 +476,19 @@ function SidebarFooter({
           title="Hosts and connection"
           onClick={() => setPopoverOpen((value) => !value)}
         >
-          {loading ? (
+          {hostLine.icon === "orb" ? (
             <AgentGlyph
               glyph={{ kind: "orb", state: "breathing", speed: 0.35, label: "Connecting" }}
               size={14}
             />
-          ) : offline || empty ? (
+          ) : hostLine.icon === "off" ? (
             <span className="q-faint" style={{ display: "inline-flex" }}>
               <WifiOffIcon className="q-icon s14" aria-hidden />
             </span>
           ) : (
             <span className="q-dot on" />
           )}
-          <span>{status}</span>
+          <span>{hostLine.text}</span>
           <ChevronDownIcon className="q-icon s12 q-faint" strokeWidth={1.5} aria-hidden />
         </button>
         {DESTINATIONS.map((item) => (
@@ -803,7 +793,6 @@ function ThreadsSidebar() {
         destination={destination}
         loading={loading}
         offline={connection.status === "offline"}
-        empty={rows.length === 0}
         noThreads={allEmpty}
         rows={rows}
         connection={connection}
@@ -1055,7 +1044,6 @@ function SettingsSidebar() {
         destination={destination}
         loading={loading}
         offline={connection.status === "offline"}
-        empty={rows.length === 0}
         noThreads={false}
         rows={rows}
         connection={connection}

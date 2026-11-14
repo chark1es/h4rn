@@ -807,6 +807,13 @@ function buildThreads(scenario: string): Map<string, MockThread> {
 
 function buildHosts(scenario: string): HostSummary[] {
   if (scenario === "nohosts") return [];
+  // A fresh install: this machine and nothing else, so the sidebar footer
+  // reads "atlas" the way the empty-state design does.
+  const only = scenario === "empty" ? ["atlas"] : null;
+  return allMockHosts().filter((host) => only === null || only.includes(host.host_id));
+}
+
+function allMockHosts(): HostSummary[] {
   return [
     {
       host_id: "atlas",

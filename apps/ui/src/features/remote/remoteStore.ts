@@ -212,8 +212,8 @@ function mockMachine(
   };
 }
 
-function mockMachines(): MachineSummary[] {
-  return [
+function mockMachines(scenario = "default"): MachineSummary[] {
+  const all = [
     mockMachine(
       MOCK_MACHINE_ID,
       "atlas",
@@ -239,6 +239,10 @@ function mockMachines(): MachineSummary[] {
       [],
     ),
   ];
+  // A fresh install knows one machine; the others come with use.
+  return scenario === "empty"
+    ? all.slice(0, 1).map((machine) => ({ ...machine, hosts: machine.hosts.slice(0, 1) }))
+    : all;
 }
 
 function mockDevice(id: string, name: string, kind: ConnectDevice["kind"]): ConnectDevice {
@@ -287,7 +291,7 @@ export function initializeRemote(): void {
         mockDevice("mock-web", "h4rn web", "web"),
         mockDevice("mock-phone", "iPhone 16 Pro", "mobile"),
       ],
-      machines: mockMachines(),
+      machines: mockMachines(config.scenario),
       pairings: [],
       activeMachineId: readActiveRemote()?.machineId ?? MOCK_MACHINE_ID,
       lastSyncAt: Date.now(),
