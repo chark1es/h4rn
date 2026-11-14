@@ -30,7 +30,6 @@ use h4rn_protocol::{
 use h4rn_transport::keys::DeviceIdentity;
 use h4rn_transport::server::{SecureOptions, SecureService};
 use h4rn_transport::server_session::PairingPolicy;
-use h4rn_transport::wire::SESSION_ID_LEN;
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
@@ -543,10 +542,9 @@ async fn a_remote_hub_proxies_a_shared_server_over_the_secure_tunnel() {
 
     // B proxies it through the encrypted tunnel.
     let tunnel = TransportMcpTunnel::new(TunnelConnection {
-        url: format!("ws://{}/secure-mcp", a.addr),
+        urls: vec![format!("ws://{}/secure-mcp", a.addr)],
         identity: b_identity,
         daemon_public: a_secure.public_identity().noise_public,
-        session_id: [7u8; SESSION_ID_LEN],
         machine: b_host.clone(),
         device_id: Some("dev_b".into()),
     });

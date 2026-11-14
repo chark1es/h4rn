@@ -5,6 +5,15 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### Cross-machine MCP sharing, target side
+
+- **Shares now reach the target machine.** Each daemon keeps a peer directory (from connect, or
+  added directly), dials a peer's `/secure-mcp` with its own daemon key, receives that peer's
+  grants as pushed snapshots (share, unshare, policy change, server removal, peer revoked), builds
+  the tunnel itself and registers the server with its hub. Unshare, revocation and a dropped
+  session unregister it. B's MCP list shows the server as running on the owner.
+- Limits: LAN/tailnet endpoints only (no relay path for MCP tunnels yet).
+
 ### UI fidelity round 4
 
 - **Apply and restart (Providers).** `ApplyProxyOverrides` interrupts the live turn of every
