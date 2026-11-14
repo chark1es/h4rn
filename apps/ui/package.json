@@ -11,6 +11,7 @@
     "lint:fix": "biome check --write .",
     "test": "vitest run",
     "e2e": "bun run build && node scripts/e2e.mjs",
+    "e2e:forge": "../../scripts/test-forges.sh --ui",
     "screenshots": "node scripts/screenshots.mjs"
   },
   "dependencies": {

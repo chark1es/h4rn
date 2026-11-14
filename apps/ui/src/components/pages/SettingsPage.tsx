@@ -15,6 +15,7 @@ import type * as React from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ENTER, KeyGlyphs, MOD, SHIFT } from "@/components/common/Kbd";
+import { ForgeSettings } from "@/features/forge/ForgeSettings";
 import { ProxySettings } from "@/features/proxy/ProxySettings";
 import { AutoResumeSettings } from "@/features/usage/AutoResumeSettings";
 import { harnessSeed, machineSeed } from "@/lib/entities";
@@ -684,6 +685,7 @@ const FORMS: Record<string, () => React.ReactNode> = {
   devices: DevicesForm,
   providers: ProvidersForm,
   resume: AutoResumeSettings,
+  forges: ForgeSettings,
   general: GeneralForm,
   appearance: AppearanceForm,
   notifications: NotificationsForm,

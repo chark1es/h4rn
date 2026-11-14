@@ -5,6 +5,7 @@ import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ALT, KeyCaps, SHIFT } from "@/components/common/Kbd";
 import { MessageAttachments } from "@/features/attachments/MessageAttachments";
+import { ChangeSetCard } from "@/features/changes/ChangeSetCard";
 import type { ThreadSummary } from "@/gen";
 import { useSmoothText } from "@/hooks/use-smooth-text";
 import { glyphForAgentState } from "@/lib/agent";
@@ -193,6 +194,10 @@ export function TurnBlock({
       </div>
 
       {content}
+
+      {turn.changes && turn.changes.files.length > 0 ? (
+        <ChangeSetCard turn={turn} summary={summary} />
+      ) : null}
 
       {staleAt !== null && turn.status === "running" ? (
         <div className="q-live-line">

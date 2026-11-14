@@ -107,7 +107,10 @@ async function main() {
   let daemonLog = "";
 
   try {
-    run("git", ["init", "--quiet", workspace]);
+    run("git", ["init", "--quiet", "-b", "main", workspace]);
+    run("git", ["-C", workspace, "config", "user.email", "e2e@h4rn.dev"]);
+    run("git", ["-C", workspace, "config", "user.name", "E2E"]);
+    run("git", ["-C", workspace, "commit", "--quiet", "--allow-empty", "-m", "init"]);
     mkdirSync(join(homeDir, ".config"), { recursive: true });
     writeFileSync(
       join(skillDir, "SKILL.md"),
@@ -182,7 +185,7 @@ async function main() {
     // The fake adapter registers as Claude Code; pick it explicitly so a real
     // Codex/OpenCode install on the test machine cannot take the turn.
     await page.locator("#new-thread-harness").selectOption("claude_code");
-    await page.locator("#new-thread-task").fill("Reply with exactly: pong");
+    await page.locator("#new-thread-task").fill("[[write:notes.txt]]hello from the fake harness");
     await page.waitForFunction(() => {
       const button = [...document.querySelectorAll("button")].find(
         (candidate) => candidate.textContent?.trim() === "Start",
@@ -191,13 +194,25 @@ async function main() {
     });
     await page.getByRole("button", { name: "Start", exact: true }).click();
 
-    // The fake harness streams `echo: <prompt>` through the daemon.
-    await page.getByText(/echo: Reply with exactly: pong/).waitFor({ timeout: 20_000 });
+    // The fake harness streams `echo: <prompt>` through the daemon and writes
+    // the file named by the write directive.
+    await page.getByText(/wrote notes\.txt/).waitFor({ timeout: 20_000 });
 
     const header = page
       .locator("header")
       .filter({ has: page.getByRole("button", { name: "Thread actions" }) });
     await header.getByText(/^Done/).waitFor({ timeout: 20_000 });
+
+    // The thread header names the checkout's branch.
+    await header.getByText("main", { exact: true }).waitFor({ timeout: 10_000 });
+
+    // The completed turn carries its change set, and the stream shows a card
+    // before the panel is opened.
+    const card = page.locator(".q-changes");
+    await card.waitFor({ timeout: 10_000 });
+    await card.getByText("1 file changed").waitFor({ timeout: 10_000 });
+    await card.getByText("notes.txt").waitFor({ timeout: 10_000 });
+    await card.getByRole("button", { name: "Review" }).click();
 
     // Layout v2: the view cluster switches the main area to the IDE for this
     // thread's project, and the right panel follows the selected thread.
@@ -221,12 +236,29 @@ async function main() {
       throw new Error("Changes tab did not open in the right panel");
     }
 
+    // The panel lists the turn's file and renders the diff against the agent's
+    // starting point.
+    await panel.getByText("notes.txt").first().waitFor({ timeout: 10_000 });
+    await panel.getByText("hello from the fake harness").first().waitFor({ timeout: 10_000 });
+
+    // Per-file revert goes back to the pre-turn state, which for a new file
+    // means deleting it.
+    await panel.getByRole("button", { name: "Revert notes.txt" }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "Revert", exact: true }).click();
+    await page.getByText("Reverted 1 file.").waitFor({ timeout: 20_000 });
+    for (let attempt = 0; attempt < 50 && existsSync(join(workspace, "notes.txt")); attempt += 1) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+    }
+    if (existsSync(join(workspace, "notes.txt"))) {
+      throw new Error("Revert did not remove notes.txt from the workspace");
+    }
+
     await page.getByRole("button", { name: "Thread actions" }).click();
     await page.getByRole("menuitem", { name: "Settle now" }).click();
     await header.getByText("Settled", { exact: true }).waitFor({ timeout: 20_000 });
 
     await page.reload();
-    await page.getByText(/echo: Reply with exactly: pong/).waitFor({ timeout: 20_000 });
+    await page.getByText(/wrote notes\.txt/).waitFor({ timeout: 20_000 });
     await page
       .locator("header")
       .filter({ has: page.getByRole("button", { name: "Thread actions" }) })

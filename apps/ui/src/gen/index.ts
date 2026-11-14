@@ -43,6 +43,8 @@ export type * from "./ForgeChecksState";
 export type * from "./ForgeComment";
 export type * from "./ForgeCommentPage";
 export type * from "./ForgeCredentialSource";
+export type * from "./ForgeDeviceFlow";
+export type * from "./ForgeDeviceFlowStatus";
 export type * from "./ForgeDiffPage";
 export type * from "./ForgeDiffSide";
 export type * from "./ForgeFileDiff";

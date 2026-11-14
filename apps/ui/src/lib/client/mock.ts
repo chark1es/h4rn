@@ -17,6 +17,7 @@ import type {
   ClientFrame,
   ClientRequest,
   Event,
+  FsTurnChanges,
   HarnessKind,
   HostSummary,
   Item,
@@ -60,8 +61,8 @@ import type {
   UsageSeries,
   UsageTotals,
 } from "@/gen";
-
 import { decodeBinaryFrame, encodeBinaryFrame, BinaryKind as TerminalBinaryKind } from "./binary";
+import { MockForge } from "./mockForge";
 import type { Transport, TransportHandlers } from "./types";
 
 type MockThread = {
@@ -181,6 +182,31 @@ function usage(input: number, output: number, durationMs: number, costMicros: nu
 }
 
 const TOTAL_USAGE: Usage = usage(3_000, 15_400, 252_000, 420_000);
+
+/** The files the mock turn touched, matching the mock workspace snapshots. */
+function turnChanges(threadId: string, turnId: string): FsTurnChanges {
+  return {
+    thread_id: threadId,
+    turn_id: turnId,
+    note: null,
+    files: [
+      {
+        path: "tests/setup.ts",
+        added: 4,
+        removed: 1,
+        before_etag: "mock-before-setup",
+        after_etag: "mock-after-setup",
+      },
+      {
+        path: "src/auth/session.test.ts",
+        added: 12,
+        removed: 2,
+        before_etag: "mock-before-test",
+        after_etag: "mock-after-test",
+      },
+    ],
+  };
+}
 
 const continuedText = [
   "The failure only reproduces under the CI runner because the fake clock is installed after the database pool opens, so the first `find` races the timer advance.",
@@ -384,6 +410,7 @@ function historyFor(thread: ThreadSummary): Event[] {
       turn_id: turnId,
       usage: thread.usage,
       status: "completed",
+      changes: turnChanges(thread.thread_id, turnId),
     });
     events.push({
       type: "agent_state_changed",
@@ -404,6 +431,7 @@ function summary(input: {
   tab: ThreadSummary["tab"];
   state: AgentState;
   workspace?: string;
+  branch?: string;
   pinned?: boolean;
   snoozedMs?: number;
   lastActivityMs: number;
@@ -423,6 +451,7 @@ function summary(input: {
     harness: input.harness,
     title: input.title,
     workspace_path: input.workspace ?? "/home/you/code/api",
+    ...(input.branch ? { branch: input.branch } : {}),
     model: input.model,
     tab: input.tab,
     pinned: input.pinned ?? false,
@@ -461,6 +490,7 @@ function buildThreads(scenario: string): Map<string, MockThread> {
       model: "claude-sonnet-5-5",
       tab: "working",
       state: "awaiting_approval",
+      branch: "h4rn/fix-flaky-auth",
       lastActivityMs: 2 * 60_000,
       needsAttention: true,
       usage: TOTAL_USAGE,
@@ -473,6 +503,7 @@ function buildThreads(scenario: string): Map<string, MockThread> {
       model: "gpt-5.1-codex",
       tab: "working",
       state: "running_tool",
+      branch: "h4rn/relay-backoff",
       workspace: "/home/you/code/h4rn-connect",
       lastActivityMs: 18 * 60_000,
       usage: usage(98_000, 11_200, 184_000, 214_000),
@@ -1583,6 +1614,7 @@ class MockDaemon {
   private skillConflicts: SkillConflict[];
   private skillPreview: SkillImportPreview | null = null;
   private syncEmitted = false;
+  private readonly forge = new MockForge();
   private created = 0;
   private nextTerminal = 0;
   private readonly failLists: boolean;
@@ -2488,6 +2520,13 @@ class MockDaemon {
         return;
       }
       default: {
+        const forgeHandled = this.forge.handle(body, {
+          ok: (response) => this.ok(frame.id, response),
+          err: (code, message, hint) => this.err(frame.id, code, message, hint),
+          later: (ms, fn) => this.later(ms, fn),
+          transient: (event) => this.sendTransient(event),
+        });
+        if (forgeHandled) return;
         const handled = this.fs.handle(body, {
           ok: (response) => this.ok(frame.id, response),
           err: (code, message, hint) => this.err(frame.id, code, message, hint),
@@ -3302,6 +3341,7 @@ class MockDaemon {
             turn_id: turnId,
             usage: usage(8_400, 1_900, 24_000, 14_000),
             status: "completed",
+            changes: turnChanges(threadId, turnId),
           });
           this.sendUsage({
             type: "usage_tick",
@@ -3511,6 +3551,7 @@ class MockDaemon {
           turn_id: approval.turnId,
           usage: usage(24_600, 6_100, 68_000, 58_000),
           status: "completed",
+          changes: turnChanges(approval.threadId, approval.turnId),
         });
         const thread = this.threads.get(approval.threadId);
         if (thread) {

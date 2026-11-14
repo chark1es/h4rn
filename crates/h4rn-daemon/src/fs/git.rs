@@ -157,9 +157,14 @@ pub fn repository_root(workspace: &Path) -> Option<PathBuf> {
 }
 
 /// The current branch, or `None` for a detached `HEAD`.
+///
+/// `symbolic-ref` is asked first so an unborn branch (a fresh `git init` with
+/// no commits yet, which is what a new worktree looks like) still reports its
+/// name; `rev-parse` covers older Git layouts where `symbolic-ref` is absent.
 pub fn branch(workspace: &Path) -> Option<String> {
-    let stdout = run_git(workspace, &["rev-parse", "--abbrev-ref", "HEAD"])?;
-    let branch = String::from_utf8_lossy(&stdout).trim().to_owned();
+    let named = run_git(workspace, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .or_else(|| run_git(workspace, &["rev-parse", "--abbrev-ref", "HEAD"]))?;
+    let branch = String::from_utf8_lossy(&named).trim().to_owned();
     if branch.is_empty() || branch == "HEAD" {
         None
     } else {

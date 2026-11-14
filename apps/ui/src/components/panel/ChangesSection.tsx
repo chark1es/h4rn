@@ -1,6 +1,8 @@
-import { ChevronDownIcon, Code2Icon, FileIcon } from "lucide-react";
+import { ChevronDownIcon, Code2Icon, FileIcon, RotateCcwIcon } from "lucide-react";
+import { useState } from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
+import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { MOD } from "@/components/common/Kbd";
 import {
   DropdownMenu,
@@ -37,7 +39,10 @@ export function ChangesSection({
 }) {
   const { mode, setMode, turns, turnId, changes: turnChanges, diffs, loading, error } = changes;
   const files = turnChanges?.files ?? [];
-  const turnLabel = turns.length > 0 ? pickedLabel(turns, turnId) : "All turns";
+  const turnLabel = pickedLabel(turns, turnId);
+  const [confirm, setConfirm] = useState<
+    { kind: "all" } | { kind: "file"; path: string; name: string } | null
+  >(null);
 
   return (
     <>
@@ -67,10 +72,7 @@ export function ChangesSection({
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" className="w-44">
-            <DropdownMenuLabel>Compare</DropdownMenuLabel>
-            <DropdownMenuItem onSelect={() => changes.selectTurn(null)}>
-              All {turns.length || 1} turns
-            </DropdownMenuItem>
+            <DropdownMenuLabel>Turn</DropdownMenuLabel>
             {turns.map((turn) => (
               <DropdownMenuItem key={turn.id} onSelect={() => changes.selectTurn(turn.id)}>
                 {turn.label}
@@ -102,8 +104,16 @@ export function ChangesSection({
             </button>
           </div>
         ) : loading && !turnChanges ? (
-          <div className="q-sub-empty" role="status">
-            Loading changes…
+          <div
+            role="status"
+            aria-busy="true"
+            aria-label="Loading changes"
+            style={{ padding: "10px 12px" }}
+          >
+            <div className="q-skel" style={{ height: 14, width: "52%", marginBottom: 12 }} />
+            {[0, 1, 2, 3].map((row) => (
+              <div key={row} className="q-skel" style={{ height: 28, marginBottom: 6 }} />
+            ))}
           </div>
         ) : files.length === 0 ? (
           <div className="q-empty q-rp-empty">
@@ -131,27 +141,33 @@ export function ChangesSection({
               {files.map((file) => {
                 const { directory, name } = splitPath(file.path);
                 return (
-                  <button
-                    key={file.path}
-                    type="button"
-                    className="q-fr"
-                    onClick={() => openInIde(file.path)}
-                  >
-                    <FileIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                    <span className="p q-mono">
-                      <span>{directory}</span>
-                      {name}
-                    </span>
-                    {file.before_etag === null ? (
-                      <span className="q-badge ok" style={{ height: 18 }}>
-                        New
+                  <div key={file.path} style={{ display: "flex", alignItems: "center", gap: 2 }}>
+                    <button type="button" className="q-fr" onClick={() => openInIde(file.path)}>
+                      <FileIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                      <span className="p q-mono">
+                        <span>{directory}</span>
+                        {name}
                       </span>
-                    ) : null}
-                    <span className="q-num q-pm">
-                      <span className="q-add">+{file.added}</span>
-                      {file.removed > 0 ? <span className="q-del"> −{file.removed}</span> : null}
-                    </span>
-                  </button>
+                      {file.before_etag === null ? (
+                        <span className="q-badge ok" style={{ height: 18 }}>
+                          New
+                        </span>
+                      ) : null}
+                      <span className="q-num q-pm">
+                        <span className="q-add">+{file.added}</span>
+                        {file.removed > 0 ? <span className="q-del"> −{file.removed}</span> : null}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="q-ibtn"
+                      aria-label={`Revert ${name}`}
+                      title={`Revert ${file.path}`}
+                      onClick={() => setConfirm({ kind: "file", path: file.path, name })}
+                    >
+                      <RotateCcwIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                    </button>
+                  </div>
                 );
               })}
             </div>
@@ -182,7 +198,7 @@ export function ChangesSection({
           type="button"
           className="q-btn ghost"
           disabled={files.length === 0}
-          onClick={() => void changes.revertAll()}
+          onClick={() => setConfirm({ kind: "all" })}
         >
           Revert all…
         </button>
@@ -202,13 +218,31 @@ export function ChangesSection({
           </button>
         )}
       </div>
+      <ConfirmDialog
+        open={confirm !== null}
+        title={
+          confirm?.kind === "file" ? `Revert ${confirm.name}?` : `Revert ${files.length} files?`
+        }
+        description={
+          confirm?.kind === "file"
+            ? "The file goes back to the state it had before this turn. This cannot be undone from here."
+            : `All ${files.length} files in this scope go back to their pre-turn state. This cannot be undone from here.`
+        }
+        confirmLabel="Revert"
+        onOpenChange={(open) => {
+          if (!open) setConfirm(null);
+        }}
+        onConfirm={() => {
+          if (confirm?.kind === "file") void changes.revertFile(confirm.path);
+          else if (confirm?.kind === "all") void changes.revertAll();
+        }}
+      />
     </>
   );
 }
 
 function pickedLabel(turns: Array<{ id: string; label: string }>, turnId: string | null): string {
-  if (turns.length <= 1) return "All turns";
+  if (turns.length === 0) return "No turns";
   const picked = turns.find((turn) => turn.id === turnId);
-  if (!picked || picked.id === turns.at(-1)?.id) return `All ${turns.length} turns`;
-  return picked.label;
+  return picked?.label ?? turns.at(-1)?.label ?? "No turns";
 }

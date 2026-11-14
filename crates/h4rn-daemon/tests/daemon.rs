@@ -1689,3 +1689,80 @@ async fn a_scheduled_resume_records_the_proxy_failover_choice() {
 
     daemon.stop().await;
 }
+
+#[tokio::test]
+async fn turn_completed_carries_the_turns_change_set() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let workspace = tempfile::tempdir().expect("temp workspace");
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+
+    let result = client
+        .request(ClientRequest::CreateThread {
+            host,
+            harness: HarnessKind::ClaudeCode,
+            workspace_path: workspace.path().display().to_string(),
+            model: "fake-model".into(),
+            prompt: "make a note [[write:notes.txt]]hello from the fake harness".into(),
+            attachments: Vec::new(),
+            runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
+            worktree: None,
+        })
+        .await
+        .expect("create thread");
+    assert!(matches!(result, ResponseBody::ThreadCreated { .. }));
+
+    let (_, event) = client
+        .wait_event(|event| matches!(event, Event::TurnCompleted { .. }))
+        .await;
+    let Event::TurnCompleted { changes, .. } = event else {
+        unreachable!();
+    };
+    let changes = changes.expect("the daemon computed a change set");
+    assert_eq!(changes.files.len(), 1, "one file changed: {changes:?}");
+    assert_eq!(changes.files[0].path, "notes.txt");
+    assert_eq!(changes.files[0].added, 1);
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("notes.txt")).expect("written"),
+        "hello from the fake harness"
+    );
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn thread_summary_names_the_workspace_branch() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    let status = std::process::Command::new("git")
+        .args(["init", "-q", "-b", "main"])
+        .arg(workspace.path())
+        .status()
+        .expect("run git init");
+    assert!(status.success(), "git init failed");
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    let result = client
+        .request(ClientRequest::CreateThread {
+            host,
+            harness: HarnessKind::ClaudeCode,
+            workspace_path: workspace.path().display().to_string(),
+            model: "fake-model".into(),
+            prompt: "name the branch".into(),
+            attachments: Vec::new(),
+            runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
+            worktree: None,
+        })
+        .await
+        .expect("create thread");
+    let ResponseBody::ThreadCreated { summary, .. } = result else {
+        panic!("expected ThreadCreated");
+    };
+    assert_eq!(summary.branch.as_deref(), Some("main"));
+
+    daemon.stop().await;
+}

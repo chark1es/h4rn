@@ -8,6 +8,8 @@ import type { ForgeCapabilityEntry } from "./ForgeCapabilityEntry";
 import type { ForgeChecks } from "./ForgeChecks";
 import type { ForgeComment } from "./ForgeComment";
 import type { ForgeCommentPage } from "./ForgeCommentPage";
+import type { ForgeDeviceFlow } from "./ForgeDeviceFlow";
+import type { ForgeDeviceFlowStatus } from "./ForgeDeviceFlowStatus";
 import type { ForgeDiffPage } from "./ForgeDiffPage";
 import type { ForgeHandoff } from "./ForgeHandoff";
 import type { ForgePrSummary } from "./ForgePrSummary";
@@ -267,7 +269,15 @@ capabilities: Array<ForgeCapabilityEntry>, } | { "type": "forge_account",
 /**
  * Public account metadata (never the token).
  */
-account: ForgeAccount, } | { "type": "forge_repos", 
+account: ForgeAccount, } | { "type": "forge_device_flow", 
+/**
+ * Short code, verification URL and poll id.
+ */
+flow: ForgeDeviceFlow, } | { "type": "forge_device_flow_status", 
+/**
+ * Pending, slow down, complete or terminal.
+ */
+status: ForgeDeviceFlowStatus, } | { "type": "forge_repos", 
 /**
  * Detected remotes, preferred remote first.
  */

@@ -19,6 +19,7 @@ import {
   addSkill,
   commitSkillImport,
   diffSkill,
+  getSkillsState,
   previewSkillImport,
   removeSkill,
   useSkills,
@@ -93,11 +94,16 @@ export function SkillAddDialog({ open, onClose }: { open: boolean; onClose: () =
     setCommit("");
     setSubdir("");
     setName("");
-    const detected = availability.filter((entry) => entry.detected).map((entry) => entry.harness);
+    // Snapshot the detected harnesses once, when the dialog opens. Reading the
+    // store lazily keeps a late inventory load from wiping what the user has
+    // already typed into the form.
+    const detected = (getSkillsState().inventory?.harnesses ?? NO_AVAILABILITY)
+      .filter((entry) => entry.detected)
+      .map((entry) => entry.harness);
     setHarnesses(detected.length > 0 ? detected : ALL_HARNESSES);
     setBusy(false);
     setProblem(null);
-  }, [open, availability]);
+  }, [open]);
 
   const toggle = (harness: HarnessKind) => {
     setHarnesses((current) =>

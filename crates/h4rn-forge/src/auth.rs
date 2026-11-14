@@ -130,6 +130,108 @@ pub async fn start_github_device_flow(client_id: &str, scopes: &str) -> Result<D
     })
 }
 
+/// The result of one device authorization poll.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DevicePoll {
+    /// The user has not approved yet.
+    Pending {
+        /// Seconds the client should wait before polling again.
+        interval: u64,
+    },
+    /// The forge asked the client to slow down.
+    SlowDown {
+        /// Seconds the client should wait before polling again.
+        interval: u64,
+    },
+    /// The user approved; the account can be stored.
+    Authorized(DeviceToken),
+    /// The code expired; start a new flow.
+    Expired,
+    /// The user denied the authorization.
+    Denied {
+        /// Provider explanation.
+        message: String,
+    },
+}
+
+/// Polls a device authorization exactly once.
+///
+/// The daemon drives this from the client's poll requests, so it must not
+/// sleep. [`poll_github_device_flow`] keeps the blocking convenience for
+/// callers without a UI.
+pub async fn poll_github_device_once(client_id: &str, device_code: &str) -> Result<DevicePoll> {
+    let client_id = client_id.trim();
+    if client_id.is_empty() {
+        return Err(ForgeError::NotConfigured(format!(
+            "no GitHub OAuth client id; set {GITHUB_CLIENT_ID_ENV}"
+        )));
+    }
+    let response = oauth_client()?
+        .post(GITHUB_TOKEN_URL)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        )
+        .body(form_body(&[
+            ("client_id", client_id),
+            ("device_code", device_code),
+            ("grant_type", DEVICE_GRANT_TYPE),
+        ]))
+        .send()
+        .await
+        .map_err(|error| ForgeError::Network(error.to_string()))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| ForgeError::Network(error.to_string()))?;
+    if !status.is_success() {
+        return Err(ForgeError::Http {
+            status: status.as_u16(),
+            message: oauth_message(&body),
+        });
+    }
+    let value: Value = serde_json::from_str(&body)
+        .map_err(|error| ForgeError::Parse(format!("device token response: {error}")))?;
+
+    if let Some(token) = value.get("access_token").and_then(Value::as_str) {
+        if token.trim().is_empty() {
+            return Err(ForgeError::Parse(
+                "device flow returned an empty token".into(),
+            ));
+        }
+        return Ok(DevicePoll::Authorized(DeviceToken {
+            access_token: token.to_owned(),
+            scopes: parse_scopes(value.get("scope").and_then(Value::as_str).unwrap_or("")),
+            token_type: value
+                .get("token_type")
+                .and_then(Value::as_str)
+                .unwrap_or("bearer")
+                .to_owned(),
+        }));
+    }
+
+    Ok(
+        match value.get("error").and_then(Value::as_str).unwrap_or("") {
+            "authorization_pending" => DevicePoll::Pending { interval: 5 },
+            "slow_down" => DevicePoll::SlowDown { interval: 10 },
+            "expired_token" => DevicePoll::Expired,
+            "access_denied" => DevicePoll::Denied {
+                message: "the device authorization was denied".into(),
+            },
+            other if !other.is_empty() => DevicePoll::Denied {
+                message: oauth_message(&body),
+            },
+            _ => {
+                return Err(ForgeError::Parse(
+                    "device token response had no token and no error".into(),
+                ));
+            }
+        },
+    )
+}
+
 /// Polls until the user approves, denies, or the code expires.
 ///
 /// RFC 8628 error handling is honoured: `authorization_pending` keeps polling,
@@ -139,13 +241,6 @@ pub async fn poll_github_device_flow(
     client_id: &str,
     start: &DeviceFlowStart,
 ) -> Result<DeviceToken> {
-    let client_id = client_id.trim();
-    if client_id.is_empty() {
-        return Err(ForgeError::NotConfigured(format!(
-            "no GitHub OAuth client id; set {GITHUB_CLIENT_ID_ENV}"
-        )));
-    }
-    let client = oauth_client()?;
     let deadline = start.expires_in;
     let mut waited = 0u64;
     let mut interval = start.interval;
@@ -160,80 +255,21 @@ pub async fn poll_github_device_flow(
         sleep(std::time::Duration::from_secs(interval)).await;
         waited = waited.saturating_add(interval);
 
-        let response = client
-            .post(GITHUB_TOKEN_URL)
-            .header(reqwest::header::ACCEPT, "application/json")
-            .header(
-                reqwest::header::CONTENT_TYPE,
-                "application/x-www-form-urlencoded",
-            )
-            .body(form_body(&[
-                ("client_id", client_id),
-                ("device_code", start.device_code.as_str()),
-                ("grant_type", DEVICE_GRANT_TYPE),
-            ]))
-            .send()
-            .await
-            .map_err(|error| ForgeError::Network(error.to_string()))?;
-        let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|error| ForgeError::Network(error.to_string()))?;
-        if !status.is_success() {
-            return Err(ForgeError::Http {
-                status: status.as_u16(),
-                message: oauth_message(&body),
-            });
-        }
-        let value: Value = serde_json::from_str(&body)
-            .map_err(|error| ForgeError::Parse(format!("device token response: {error}")))?;
-
-        if let Some(token) = value.get("access_token").and_then(Value::as_str) {
-            if token.trim().is_empty() {
-                return Err(ForgeError::Parse(
-                    "device flow returned an empty token".into(),
-                ));
-            }
-            return Ok(DeviceToken {
-                access_token: token.to_owned(),
-                scopes: parse_scopes(value.get("scope").and_then(Value::as_str).unwrap_or("")),
-                token_type: value
-                    .get("token_type")
-                    .and_then(Value::as_str)
-                    .unwrap_or("bearer")
-                    .to_owned(),
-            });
-        }
-
-        match value.get("error").and_then(Value::as_str).unwrap_or("") {
-            "authorization_pending" => continue,
-            "slow_down" => {
-                interval = interval.saturating_add(5);
-                continue;
-            }
-            "expired_token" => {
+        match poll_github_device_once(client_id, &start.device_code).await? {
+            DevicePoll::Pending { .. } => {}
+            DevicePoll::SlowDown { interval: next } => interval = next,
+            DevicePoll::Authorized(token) => return Ok(token),
+            DevicePoll::Expired => {
                 return Err(ForgeError::Unauthorized {
                     forge: h4rn_protocol::ForgeKind::GitHub,
                     message: "the device code expired; start again".into(),
                 });
             }
-            "access_denied" => {
+            DevicePoll::Denied { message } => {
                 return Err(ForgeError::Unauthorized {
                     forge: h4rn_protocol::ForgeKind::GitHub,
-                    message: "the device authorization was denied".into(),
+                    message,
                 });
-            }
-            other if !other.is_empty() => {
-                return Err(ForgeError::Unauthorized {
-                    forge: h4rn_protocol::ForgeKind::GitHub,
-                    message: oauth_message(&body),
-                });
-            }
-            _ => {
-                return Err(ForgeError::Parse(
-                    "device token response had no token and no error".into(),
-                ));
             }
         }
     }

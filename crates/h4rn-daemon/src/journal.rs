@@ -477,6 +477,7 @@ mod tests {
             harness: HarnessKind::ClaudeCode,
             title: "first prompt".into(),
             workspace_path: "/tmp/work".into(),
+            branch: Some("h4rn/first-prompt".into()),
             model: "test-model".into(),
             tab: h4rn_protocol::ThreadTab::Working,
             pinned: false,

@@ -702,7 +702,23 @@ source: ForgeCredentialSource, } | { "type": "forge_remove_account",
 /**
  * Account to remove.
  */
-account_id: string, } | { "type": "forge_detect_repo", 
+account_id: string, } | { "type": "forge_device_flow_start", 
+/**
+ * Public base URL; only `https://github.com` supports the grant.
+ */
+base_url: string | null, } | { "type": "forge_device_flow_poll", 
+/**
+ * Opaque flow id returned by the start request.
+ */
+flow_id: string, } | { "type": "forge_import_cli", 
+/**
+ * Which CLI to read: GitHub (`gh`) or GitLab (`glab`).
+ */
+forge: ForgeKind, 
+/**
+ * Self-hosted hostname the CLI knows about, when not the public one.
+ */
+base_url: string | null, } | { "type": "forge_detect_repo", 
 /**
  * Absolute workspace path on this host.
  */

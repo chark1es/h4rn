@@ -39,6 +39,10 @@ title: string,
  */
 workspace_path: string, 
 /**
+ * Current git branch of the workspace, when it has one.
+ */
+branch?: string, 
+/**
  * Model slug reported by the harness.
  */
 model: string, 
