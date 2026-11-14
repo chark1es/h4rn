@@ -560,6 +560,11 @@ impl Connection {
         if let Some(remote) = &self.state.remote
             && let Err(error) = remote.authorize(&self.origin, &body)
         {
+            tracing::warn!(
+                origin = %self.origin.label(),
+                needs = body.required_scope().as_str(),
+                "refused a request outside the device's scopes"
+            );
             self.audit(
                 "scope.denied",
                 None,

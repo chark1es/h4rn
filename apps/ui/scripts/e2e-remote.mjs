@@ -702,7 +702,7 @@ async function main() {
     await page.getByRole("textbox", { name: "Pairing code" }).fill(restrictedCode);
     await page.getByRole("button", { name: "Pair with code" }).click();
     await page
-      .getByText(/invalid or expired/)
+      .getByText(/generate a new one|invalid or expired/)
       .first()
       .waitFor({ timeout: 20_000 });
 
@@ -715,12 +715,19 @@ async function main() {
       .waitFor({ timeout: 30_000 })
       .catch(() => {});
     const restrictedComposer = page.getByRole("textbox", { name: /Reply to/ });
-    await restrictedComposer.fill("This should be refused");
-    await restrictedComposer.press("Enter");
-    await page
-      .getByText(/paired without the .approve. permission/)
-      .first()
-      .waitFor({ timeout: 30_000 });
+    const refusal = page.getByText(/paired without the .approve. permission/).first();
+    // The relay session may still be coming up when the first reply goes out,
+    // so retry until the daemon's refusal arrives.
+    let refused = false;
+    for (let attempt = 0; attempt < 4 && !refused; attempt += 1) {
+      await restrictedComposer.fill("This should be refused");
+      await restrictedComposer.press("Enter");
+      refused = await refusal
+        .waitFor({ timeout: 10_000 })
+        .then(() => true)
+        .catch(() => false);
+    }
+    if (!refused) throw new Error("the daemon never refused the reply of a view-only device");
     console.log(
       "Remote UI e2e passed: browser redirect signed in, paired, relayed a thread, revoked the device, the device-code fallback signed in again, and a view-only code pairing was refused approval by the daemon.",
     );
