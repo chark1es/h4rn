@@ -669,8 +669,54 @@ async function main() {
     if (!code) throw new Error("the sign-in panel did not show a device code");
     await approveDeviceCode(orbitBase, orbit.sessionJwt, code);
     await page.getByRole("heading", { name: /^Pair a device/ }).waitFor({ timeout: 30_000 });
+
+    // Pair by the typed short code with a restricted scope. This second
+    // browser makes the pairing, drops "Approve and reply" (connect recreates
+    // the code with the new scopes), then claims the code on the phone
+    // pairing screen, so it ends up holding `view` alone.
+    const codeLabel = page.locator(".q-code-big");
+    await codeLabel.waitFor({ timeout: 30_000 });
+    const offeredCode = (await codeLabel.textContent())?.trim() ?? "";
+    await page.getByText("Approve and reply", { exact: true }).click();
+    await page.waitForFunction(
+      (previous) => {
+        const text = document.querySelector(".q-code-big")?.textContent?.trim();
+        return Boolean(text) && text !== previous;
+      },
+      offeredCode,
+      { timeout: 30_000 },
+    );
+    const restrictedCode = (await codeLabel.textContent())?.trim() ?? "";
+    if (!/^[0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}$/.test(restrictedCode)) {
+      throw new Error(`the short code is not 8 Crockford characters: ${restrictedCode}`);
+    }
+
+    await page.goto(`${uiOrigin}/pairing`);
+    const codeInput = page.getByRole("textbox", { name: "Pairing code" });
+    await codeInput.fill(restrictedCode.toLowerCase());
+    await page.getByRole("button", { name: "Pair with code" }).click();
+    await page.getByText(/Paired with atlas/).waitFor({ timeout: 30_000 });
+
+    // The code is single-use.
+    await page.goto(`${uiOrigin}/pairing`);
+    await page.getByRole("textbox", { name: "Pairing code" }).fill(restrictedCode);
+    await page.getByRole("button", { name: "Pair with code" }).click();
+    await page.getByText(/invalid or expired/).first().waitFor({ timeout: 20_000 });
+
+    // Over the relay this device can read threads but not approve or reply: the
+    // daemon enforces the scope the pairing granted.
+    await page.goto(`${uiOrigin}${threadPath}`);
+    await page.getByText(/echo: Reply with exactly: remote pong/).waitFor({ timeout: 40_000 });
+    await page.getByText(/^Relay to /).waitFor({ timeout: 30_000 }).catch(() => {});
+    const restrictedComposer = page.getByRole("textbox", { name: /Reply to/ });
+    await restrictedComposer.fill("This should be refused");
+    await restrictedComposer.press("Enter");
+    await page
+      .getByText(/paired without the .approve. permission/)
+      .first()
+      .waitFor({ timeout: 30_000 });
     console.log(
-      "Remote UI e2e passed: browser redirect signed in, paired, relayed a thread, revoked the device, and the device-code fallback signed in again.",
+      "Remote UI e2e passed: browser redirect signed in, paired, relayed a thread, revoked the device, the device-code fallback signed in again, and a view-only code pairing was refused approval by the daemon.",
     );
   } catch (error) {
     if (page) {
