@@ -22,7 +22,9 @@ All notable changes to h4rn are recorded here. The format follows
 - **Resume now acknowledges immediately.** `ResumeNow` finishes the schedule and returns before
   the harness produces its first token, and the resumed turn reports progress through
   `ScheduleChanged` and thread events, so a realistic slow harness no longer times out the
-  request.
+  request. A normal `SendMessage` likewise returns once the turn is recorded, and the thread
+  record is no longer locked across the harness write, so a slow adapter cannot stall thread
+  listings, snapshots or settings requests with it.
 
 ### UI: layout v2
 

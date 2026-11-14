@@ -1549,6 +1549,61 @@ async fn resume_now_acknowledges_before_a_slow_first_send() {
 }
 
 #[tokio::test]
+async fn send_message_acknowledges_before_a_slow_harness_write() {
+    let daemon = boot_with(
+        resume_options(),
+        FakeHarness::new().with_send_delay(std::time::Duration::from_secs(3)),
+    )
+    .await;
+    let host = host_id_for(&daemon).await;
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    let summary = create_with_host(&mut client, host, "first", HarnessKind::ClaudeCode).await;
+    let thread_id = summary.thread_id;
+    client.wait_for_turn_completed().await;
+
+    // The adapter now takes seconds to accept the text. The request must be
+    // acknowledged as soon as the turn is recorded, not when the write lands.
+    let started = std::time::Instant::now();
+    let accepted = client
+        .request(ClientRequest::SendMessage {
+            thread_id: thread_id.clone(),
+            text: "second".into(),
+            attachments: Vec::new(),
+        })
+        .await
+        .expect("send");
+    assert!(matches!(accepted, ResponseBody::MessageAccepted { .. }));
+    let acknowledged = started.elapsed();
+    assert!(
+        acknowledged < std::time::Duration::from_secs(2),
+        "SendMessage waited for the slow harness write: {acknowledged:?}"
+    );
+
+    // The thread record stays available while that write is in flight, so a
+    // snapshot or settings request queued behind it still answers promptly.
+    let started = std::time::Instant::now();
+    client
+        .request(ClientRequest::GetThread {
+            thread_id: thread_id.clone(),
+            since_seq: 0,
+        })
+        .await
+        .expect("get thread");
+    let snapshot = started.elapsed();
+    assert!(
+        snapshot < std::time::Duration::from_secs(2),
+        "a snapshot waited for the slow harness write: {snapshot:?}"
+    );
+
+    let (_, status) = client.wait_for_turn_completed().await;
+    assert_eq!(status, TurnStatus::Completed);
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn a_restart_rehydrates_the_summary_resume_target() {
     let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
     let mut daemon = boot_with(
