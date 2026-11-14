@@ -3331,6 +3331,26 @@
   outline: 2px solid var(--focus);
   outline-offset: 1px;
 }
+.q-sas {
+  padding: 8px 0 0;
+  text-align: center;
+}
+.q-sas-code {
+  font: 500 28px / 36px var(--mono);
+  letter-spacing: 0.08em;
+  padding: 16px 0 8px;
+  font-variant-numeric: tabular-nums;
+}
+.q-sas-host {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.q-sas-host .q-sas-code {
+  font-size: 22px;
+  line-height: 28px;
+  padding: 2px 0 2px;
+}
 .q-code-big {
   font: 500 22px / 28px var(--mono);
   letter-spacing: 0.06em;

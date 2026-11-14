@@ -15,11 +15,17 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ChipSelect } from "@/components/common/ChipSelect";
-import type { ConnectDevice, HostSummary, MachineSummary, PairScope } from "@/gen";
+import type {
+  ConnectDevice,
+  HostSummary,
+  MachineSummary,
+  PairingConfirmation,
+  PairScope,
+} from "@/gen";
 import { useNow } from "@/hooks/use-now";
 import { harnessLabel, machineSeed } from "@/lib/entities";
 import { relativeAge } from "@/lib/format";
-import { navigate, pushToast, useApp } from "@/lib/store/appStore";
+import { getClient, navigate, pushToast, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 
 import { ConnectSignIn, SignOutButton } from "./ConnectSignIn";
@@ -536,6 +542,35 @@ function DeviceRow({
   );
 }
 
+/**
+ * Typed-code pairings the daemon is waiting on a person to check. The code is
+ * derived by the daemon in Rust from the keys it holds; this only displays it.
+ */
+function usePairingConfirmations(enabled: boolean): PairingConfirmation[] {
+  const [entries, setEntries] = useState<PairingConfirmation[]>([]);
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const response = await getClient().request({ type: "pairing_confirmations" });
+        if (!cancelled && response.type === "pairing_confirmations") {
+          setEntries(response.confirmations);
+        }
+      } catch {
+        // A daemon without the request (or a revoked session) just shows none.
+      }
+    };
+    void load();
+    const timer = window.setInterval(() => void load(), 2_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [enabled]);
+  return entries;
+}
+
 export function LiveDevicesForm() {
   const user = useRemote((state) => state.user);
   const device = useRemote((state) => state.device);
@@ -551,6 +586,7 @@ export function LiveDevicesForm() {
   const [copied, setCopied] = useState(false);
   const [scopes, setScopes] = useState<PairScope[]>(() => [...DEFAULT_PAIR_SCOPES]);
   const expiring = useRef(false);
+  const confirmations = usePairingConfirmations(isSignedIn);
 
   useEffect(() => {
     if (!machineId && available[0]) setMachineId(available[0].id);
@@ -685,6 +721,19 @@ export function LiveDevicesForm() {
                         </label>
                       ))}
                     </div>
+                    {confirmations.map((entry) => (
+                      <div key={entry.device_id} className="q-sas-host" role="status">
+                        <div className="q-muted" style={{ fontSize: 12 }}>
+                          {entry.device_name} paired. Its screen should show
+                        </div>
+                        <div className="q-sas-code num" data-testid="host-sas">
+                          {entry.sas}
+                        </div>
+                        <div className="q-faint" style={{ fontSize: 12 }}>
+                          If the codes differ, revoke the device below.
+                        </div>
+                      </div>
+                    ))}
                     <div style={{ display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap" }}>
                       <button
                         type="button"

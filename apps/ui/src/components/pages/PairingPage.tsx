@@ -3,7 +3,14 @@ import { useState } from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { isCompleteShortCode, maskShortCode, SCOPE_OPTIONS } from "@/features/remote/pairingScopes";
-import { pairByCode, pairMachine, pendingPairing, useRemote } from "@/features/remote/remoteStore";
+import {
+  confirmPairingSas,
+  pairByCode,
+  pairMachine,
+  pendingPairing,
+  rejectPairingSas,
+  useRemote,
+} from "@/features/remote/remoteStore";
 import { useNow } from "@/hooks/use-now";
 import { machineSeed } from "@/lib/entities";
 import { navigate } from "@/lib/store/appStore";
@@ -44,6 +51,7 @@ export function PairingPage() {
   const user = useRemote((state) => state.user);
   const active = useRemote((state) => state.active);
   const busy = useRemote((state) => state.busy);
+  const sasConfirm = useRemote((state) => state.sasConfirm);
   const error = useRemote((state) => state.error);
   const machines = useRemote((state) => state.machines);
   const now = useNow(1_000);
@@ -66,6 +74,50 @@ export function PairingPage() {
     setClaiming(false);
     if (ok) navigate({ kind: "inbox" });
   };
+
+  if (sasConfirm) {
+    return (
+      <main className="q-main" aria-label={`Check the code for ${sasConfirm.machineName}`}>
+        <div className="q-ph-nav">
+          <span style={{ width: 60 }} />
+          <span className="ttl">Check the code</span>
+          <span style={{ width: 60 }} />
+        </div>
+        <div className="q-ph-body q-pair-body">
+          <div className="q-pair-hero">
+            <div className="ttl">{sasConfirm.machineName}</div>
+            <div className="note">Paired through a typed code. Compare before you trust it.</div>
+          </div>
+          <div className="q-sas">
+            <div className="q-sas-code num" data-testid="pair-sas">
+              {sasConfirm.sas}
+            </div>
+            <p className="q-pair-note">
+              {sasConfirm.machineName} shows a code under Settings → Devices. If it reads the same,
+              the connection is private. If it does not, something between you and the host changed
+              the key.
+            </p>
+          </div>
+        </div>
+        <div className="q-pair-foot">
+          <button type="button" className="q-btn secondary" onClick={() => void rejectPairingSas()}>
+            They differ
+          </button>
+          <button
+            type="button"
+            className="q-btn primary"
+            onClick={() => {
+              void confirmPairingSas().then((ok) => {
+                if (ok) navigate({ kind: "inbox" });
+              });
+            }}
+          >
+            They match
+          </button>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="q-main" aria-label={machineName ? `Pair with ${machineName}` : "Pair a host"}>

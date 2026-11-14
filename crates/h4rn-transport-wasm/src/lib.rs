@@ -541,6 +541,19 @@ mod tests {
     };
     use h4rn_transport::wire::{Control, Packet, PacketKind, Record, RecordKind};
 
+    #[test]
+    fn the_wasm_sas_matches_the_native_derivation() {
+        // The phone (this wasm export) and the daemon (native) must print the
+        // same string for the same pair of keys.
+        let client = [5u8; KEY_LEN];
+        let daemon = [6u8; KEY_LEN];
+        let from_wasm = pairing_sas(&hex::encode(client), &hex::encode(daemon)).unwrap();
+        assert_eq!(
+            from_wasm,
+            h4rn_transport::pairing::short_auth_string(&client, &daemon)
+        );
+    }
+
     struct Peer {
         policy: PairingPolicy,
         session: ServerSession,
