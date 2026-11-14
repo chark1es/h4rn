@@ -669,6 +669,19 @@ export function LiveDevicesForm() {
                   />
                 </div>
               </div>
+              {confirmations.map((entry) => (
+                <div key={entry.device_id} className="q-sas-host" role="status">
+                  <div className="q-muted" style={{ fontSize: 12 }}>
+                    {entry.device_name} paired. Its screen should show
+                  </div>
+                  <div className="q-sas-code num" data-testid="host-sas">
+                    {entry.sas}
+                  </div>
+                  <div className="q-faint" style={{ fontSize: 12 }}>
+                    If the codes differ, revoke the device below.
+                  </div>
+                </div>
+              ))}
               {pairing ? (
                 <div
                   style={{
@@ -721,19 +734,6 @@ export function LiveDevicesForm() {
                         </label>
                       ))}
                     </div>
-                    {confirmations.map((entry) => (
-                      <div key={entry.device_id} className="q-sas-host" role="status">
-                        <div className="q-muted" style={{ fontSize: 12 }}>
-                          {entry.device_name} paired. Its screen should show
-                        </div>
-                        <div className="q-sas-code num" data-testid="host-sas">
-                          {entry.sas}
-                        </div>
-                        <div className="q-faint" style={{ fontSize: 12 }}>
-                          If the codes differ, revoke the device below.
-                        </div>
-                      </div>
-                    ))}
                     <div style={{ display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap" }}>
                       <button
                         type="button"

@@ -717,7 +717,19 @@ async function main() {
       .getByRole("menuitem", { name: /Pair a device/ })
       .click();
     const hostSas = (
-      await hostPage.getByTestId("host-sas").first().textContent({ timeout: 30_000 })
+      await hostPage
+        .getByTestId("host-sas")
+        .first()
+        .textContent({ timeout: 30_000 })
+        .catch(async (error) => {
+          const seen = await hostPage
+            .locator("body")
+            .innerText()
+            .catch(() => "");
+          throw new Error(
+            `the host never showed a code: ${error.message}\n${seen.slice(seen.indexOf("Pair a device"), seen.indexOf("Pair a device") + 1500)}`,
+          );
+        })
     )?.trim();
     await hostPage.close();
     if (hostSas !== phoneSas) {
