@@ -449,11 +449,16 @@ impl ConnectClient {
     }
 
     /// Creates a pairing for this daemon's machine.
-    pub async fn create_pairing(&self) -> Result<PairingCreateResponse> {
+    ///
+    /// `scopes` of `None` takes connect's default (everything but `admin`).
+    pub async fn create_pairing(
+        &self,
+        scopes: Option<Vec<h4rn_protocol::PairScope>>,
+    ) -> Result<PairingCreateResponse> {
         let machine_id = self
             .machine_id()
             .ok_or_else(|| anyhow::anyhow!("not signed in"))?;
-        let request = PairingCreateRequest { machine_id };
+        let request = PairingCreateRequest { machine_id, scopes };
         self.authorized_json(Method::POST, "/v1/pairings", Some(&request))
             .await
     }

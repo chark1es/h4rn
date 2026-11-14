@@ -75,7 +75,18 @@ pub enum Command {
         /// Label printed on the QR (defaults to the host name).
         #[arg(long, value_name = "NAME")]
         label: Option<String>,
+        /// Scope to grant the new device (repeatable): view, approve, terminal,
+        /// files, admin. `view` is always granted; default is everything but
+        /// admin.
+        #[arg(long = "scope", value_name = "SCOPE", value_parser = parse_scope)]
+        scopes: Vec<h4rn_protocol::PairScope>,
     },
+}
+
+fn parse_scope(value: &str) -> Result<h4rn_protocol::PairScope, String> {
+    h4rn_protocol::PairScope::parse(&value.to_ascii_lowercase()).ok_or_else(|| {
+        format!("unknown scope `{value}`; expected view, approve, terminal, files or admin")
+    })
 }
 
 impl Cli {

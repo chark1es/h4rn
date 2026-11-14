@@ -17,7 +17,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{SinkExt as _, StreamExt as _};
-use h4rn_protocol::{ConnectDevice, RelayFrame, RelayFrameKind, RelayOpen, RelayServerEvent};
+use h4rn_protocol::{
+    ConnectDevice, PairScope, RelayFrame, RelayFrameKind, RelayOpen, RelayServerEvent,
+};
 use h4rn_transport::keys::KEY_LEN;
 use h4rn_transport::server::{Link, LinkError, SecureService};
 use tokio::sync::mpsc;
@@ -41,16 +43,51 @@ type Connections = Arc<Mutex<HashMap<String, mpsc::Sender<Vec<u8>>>>>;
 /// the device id is the human-facing connect id.
 #[derive(Debug, Default)]
 pub struct DeviceRegistry {
-    devices: RwLock<HashMap<String, [u8; KEY_LEN]>>,
+    devices: RwLock<HashMap<String, RegisteredDevice>>,
+}
+
+#[derive(Debug, Clone)]
+struct RegisteredDevice {
+    key: [u8; KEY_LEN],
+    /// Empty means unrestricted (see `ConnectDevice::scopes`).
+    scopes: Vec<PairScope>,
 }
 
 impl DeviceRegistry {
-    /// Registers a device and its Noise key.
+    /// Registers a device and its Noise key with no scope restriction.
     pub fn insert(&self, device_id: impl Into<String>, noise_key: [u8; KEY_LEN]) {
+        self.insert_scoped(device_id, noise_key, Vec::new());
+    }
+
+    /// Registers a device with the scopes its pairing granted. Pairing again
+    /// replaces the previous scopes.
+    pub fn insert_scoped(
+        &self,
+        device_id: impl Into<String>,
+        noise_key: [u8; KEY_LEN],
+        scopes: Vec<PairScope>,
+    ) {
         self.devices
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(device_id.into(), noise_key);
+            .insert(
+                device_id.into(),
+                RegisteredDevice {
+                    key: noise_key,
+                    scopes,
+                },
+            );
+    }
+
+    /// The scopes restricting a device, or `None` when it is unrestricted or
+    /// unknown (a direct pairing never passes through connect).
+    pub fn scopes_for(&self, device_id: &str) -> Option<Vec<PairScope>> {
+        self.devices
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(device_id)
+            .filter(|device| !device.scopes.is_empty())
+            .map(|device| device.scopes.clone())
     }
 
     /// Removes a device, returning the Noise key that can be revoked.
@@ -59,6 +96,7 @@ impl DeviceRegistry {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(device_id)
+            .map(|device| device.key)
     }
 
     /// The device id owning `key`, for audit attribution.
@@ -67,7 +105,7 @@ impl DeviceRegistry {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .iter()
-            .find(|(_, candidate)| *candidate == key)
+            .find(|(_, candidate)| candidate.key == *key)
             .map(|(device_id, _)| device_id.clone())
     }
 
@@ -77,7 +115,7 @@ impl DeviceRegistry {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(device_id)
-            .copied()
+            .map(|device| device.key)
     }
 
     /// Number of known devices.
@@ -286,7 +324,7 @@ fn register_device(service: &SecureService, registry: &DeviceRegistry, device: &
         tracing::warn!(device = %device.id, "paired device has a malformed Noise key");
         return;
     };
-    registry.insert(device.id.clone(), key);
+    registry.insert_scoped(device.id.clone(), key, device.scopes.clone());
     service.allow(key);
 }
 

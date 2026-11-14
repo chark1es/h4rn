@@ -139,9 +139,123 @@ impl RemoteState {
     }
 }
 
+impl audit::RemoteAudit {
+    /// Checks that the device behind `origin` may send `request`.
+    ///
+    /// Local sessions and devices without a recorded restriction (direct
+    /// pairings, links made before scopes existed) pass. A device paired
+    /// through connect holds exactly the scopes its pairing granted, read live
+    /// so a re-pairing takes effect on the next request.
+    pub fn authorize(
+        &self,
+        origin: &SessionOrigin,
+        request: &h4rn_protocol::ClientRequest,
+    ) -> Result<(), h4rn_protocol::ProtoError> {
+        authorize_scopes(self.devices(), origin, request)
+    }
+}
+
+/// Scope gate shared by [`RemoteState::authorize`] and its tests.
+pub fn authorize_scopes(
+    devices: &DeviceRegistry,
+    origin: &SessionOrigin,
+    request: &h4rn_protocol::ClientRequest,
+) -> Result<(), h4rn_protocol::ProtoError> {
+    if !origin.is_remote() {
+        return Ok(());
+    }
+    let device_id = origin.device_id.clone().or_else(|| {
+        origin
+            .device_key
+            .as_ref()
+            .and_then(|key| devices.device_for_key(key))
+    });
+    let Some(scopes) = device_id.and_then(|id| devices.scopes_for(&id)) else {
+        return Ok(());
+    };
+    let needed = request.required_scope();
+    if scopes.contains(&needed) {
+        return Ok(());
+    }
+    Err(h4rn_protocol::ProtoError::new(
+        h4rn_protocol::ProtoErrorCode::Forbidden,
+        format!(
+            "this device was paired without the `{}` permission",
+            needed.as_str()
+        ),
+        "Pair the device again and enable that permission in Settings → Devices",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use h4rn_protocol::{ApprovalDecision, ClientRequest, PairScope, ProtoErrorCode, ThreadId};
+
+    fn approve() -> ClientRequest {
+        ClientRequest::RespondApproval {
+            thread_id: ThreadId::new("t1"),
+            approval_id: "a1".into(),
+            decision: ApprovalDecision::Approve,
+            option_id: None,
+        }
+    }
+
+    #[test]
+    fn a_view_only_device_cannot_approve_but_can_read() {
+        let devices = DeviceRegistry::default();
+        devices.insert_scoped("phone", [1u8; KEY_LEN], vec![PairScope::View]);
+        let origin = SessionOrigin::relay(Some("phone".into()), Some([1u8; KEY_LEN]));
+        let denied = authorize_scopes(&devices, &origin, &approve()).unwrap_err();
+        assert_eq!(denied.code, ProtoErrorCode::Forbidden);
+        assert!(denied.message.contains("approve"), "{}", denied.message);
+        assert!(authorize_scopes(&devices, &origin, &ClientRequest::ListHosts).is_ok());
+    }
+
+    #[test]
+    fn granted_scopes_pass_and_others_stay_blocked() {
+        let devices = DeviceRegistry::default();
+        devices.insert_scoped(
+            "phone",
+            [1u8; KEY_LEN],
+            vec![PairScope::View, PairScope::Approve],
+        );
+        // Resolved by key when the relay did not name the device.
+        let origin = SessionOrigin::secure([1u8; KEY_LEN]);
+        assert!(authorize_scopes(&devices, &origin, &approve()).is_ok());
+        let terminal = ClientRequest::TerminalList { thread_id: None };
+        assert_eq!(
+            authorize_scopes(&devices, &origin, &terminal)
+                .unwrap_err()
+                .code,
+            ProtoErrorCode::Forbidden
+        );
+    }
+
+    #[test]
+    fn local_and_unrestricted_origins_are_not_gated() {
+        let devices = DeviceRegistry::default();
+        assert!(authorize_scopes(&devices, &SessionOrigin::local(), &approve()).is_ok());
+        devices.insert("legacy", [2u8; KEY_LEN]);
+        let legacy = SessionOrigin::relay(Some("legacy".into()), None);
+        assert!(authorize_scopes(&devices, &legacy, &approve()).is_ok());
+        let unknown = SessionOrigin::secure([9u8; KEY_LEN]);
+        assert!(authorize_scopes(&devices, &unknown, &approve()).is_ok());
+    }
+
+    #[test]
+    fn re_pairing_replaces_scopes() {
+        let devices = DeviceRegistry::default();
+        devices.insert_scoped("d", [3u8; KEY_LEN], vec![PairScope::View]);
+        let origin = SessionOrigin::relay(Some("d".into()), None);
+        assert!(authorize_scopes(&devices, &origin, &approve()).is_err());
+        devices.insert_scoped(
+            "d",
+            [3u8; KEY_LEN],
+            vec![PairScope::View, PairScope::Approve],
+        );
+        assert!(authorize_scopes(&devices, &origin, &approve()).is_ok());
+    }
 
     #[test]
     fn origins_are_labelled_unambiguously() {

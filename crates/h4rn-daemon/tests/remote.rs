@@ -754,7 +754,7 @@ async fn relay_pairing_failover_and_revocation() {
         .await,
     );
     let pairing = daemon_connect
-        .create_pairing()
+        .create_pairing(None)
         .await
         .expect("create pairing");
     let claim = client

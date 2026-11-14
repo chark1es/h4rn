@@ -80,7 +80,11 @@ pub async fn run(config: Config, command: Command) -> anyhow::Result<()> {
             name,
         } => login(&config, &connect, &provider, name.as_deref()).await,
         Command::Logout => logout(&config).await,
-        Command::Pair { direct, label } => pair(&config, direct, label).await,
+        Command::Pair {
+            direct,
+            label,
+            scopes,
+        } => pair(&config, direct, label, scopes).await,
     }
 }
 
@@ -162,7 +166,12 @@ async fn logout(config: &Config) -> anyhow::Result<()> {
 }
 
 /// Prints a pairing QR for a new device.
-async fn pair(config: &Config, direct: bool, label: Option<String>) -> anyhow::Result<()> {
+async fn pair(
+    config: &Config,
+    direct: bool,
+    label: Option<String>,
+    scopes: Vec<h4rn_protocol::PairScope>,
+) -> anyhow::Result<()> {
     if direct {
         return direct_pair(config, label);
     }
@@ -173,12 +182,28 @@ async fn pair(config: &Config, direct: bool, label: Option<String>) -> anyhow::R
             "not signed in to h4rn-connect; run `h4rnd login --connect <url>` or use `--direct`"
         );
     }
-    let response = client.create_pairing().await?;
+    let response = client
+        .create_pairing((!scopes.is_empty()).then_some(scopes))
+        .await?;
     println!("Scan this code with the h4rn app to pair a device:");
     println!();
     println!("{}", remote::render_qr(&response.qr)?);
     println!();
     println!("  {}", response.qr);
+    println!();
+    let code = &response.short_code;
+    println!(
+        "Or type this code in the app: {}-{}",
+        &code[..4],
+        &code[4..]
+    );
+    let granted: Vec<&str> = response
+        .pairing
+        .scopes
+        .iter()
+        .map(|scope| scope.as_str())
+        .collect();
+    println!("  Grants: {}", granted.join(", "));
     println!(
         "  Expires {}",
         response.pairing.expires_at.format("%Y-%m-%d %H:%M:%S UTC")

@@ -557,6 +557,18 @@ impl Connection {
             ));
         }
 
+        if let Some(remote) = &self.state.remote
+            && let Err(error) = remote.authorize(&self.origin, &body)
+        {
+            self.audit(
+                "scope.denied",
+                None,
+                None,
+                serde_json::json!({"needs": body.required_scope().as_str()}),
+            );
+            return Some(error_frame(id, error));
+        }
+
         let result: Result<ResponseBody, ProtoError> = match handlers::Service::of(&body) {
             Some(service) => service.handle(self, body).await,
             None => match body {
