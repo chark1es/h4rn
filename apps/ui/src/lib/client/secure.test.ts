@@ -54,12 +54,7 @@ describe("mobile cleartext policy", () => {
     }
     // ATS matches DNS names, not address ranges, so a CIDR key is inert and
     // must not creep back in as if it excepted private/CGNAT IP literals.
-    for (const cidr of [
-      "10.0.0.0/8",
-      "172.16.0.0/12",
-      "192.168.0.0/16",
-      "100.64.0.0/10",
-    ]) {
+    for (const cidr of ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"]) {
       expect(plist).not.toContain(`<key>${cidr}</key>`);
     }
 

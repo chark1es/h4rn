@@ -41,9 +41,8 @@ use h4rn_harness::FakeHarness;
 use h4rn_mcp::session::McpScope;
 use h4rn_protocol::{
     ClientFrame, ClientRequest, ConnectDeviceKind, DeviceId, DeviceInfo, HostId, McpEnabledMatrix,
-    McpRequest, McpServerInput, McpSharePolicy, McpTransportInput,
-    PROTOCOL_VERSION, PairingClaimRequest, ProtoError, RelayOpen, RelayService, ResponseBody,
-    ServerFrame,
+    McpRequest, McpServerInput, McpSharePolicy, McpTransportInput, PROTOCOL_VERSION,
+    PairingClaimRequest, ProtoError, RelayOpen, RelayService, ResponseBody, ServerFrame,
 };
 use h4rn_transport::client::{Client, ClientConfig, ClientEvent, ClientPath};
 use h4rn_transport::engine::EngineConfig;
@@ -169,7 +168,10 @@ async fn mint_login(
         connect_url: relay.base_url.clone(),
         user_id: user.id.to_string(),
         device_id: device.id.to_string(),
-        machine_id: device.machine_id.map(|id| id.to_string()).unwrap_or_default(),
+        machine_id: device
+            .machine_id
+            .map(|id| id.to_string())
+            .unwrap_or_default(),
         access_token: issued.tokens.access_token,
         refresh_token: issued.tokens.refresh_token,
         expires_at: Utc::now().timestamp() + issued.tokens.expires_in,
