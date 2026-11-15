@@ -124,7 +124,7 @@ struct SecureClient {
 /// One frame the daemon sent over the secure session.
 #[derive(Debug)]
 enum SecureFrame {
-    Text(ServerFrame),
+    Text(Box<ServerFrame>),
     Binary(Vec<u8>),
 }
 
@@ -276,11 +276,13 @@ impl SecureClient {
                 assert_eq!(ack.seq, seq);
                 Ok(())
             }
-            SecureFrame::Text(ServerFrame::Event {
-                event: Event::Error { message, .. },
-                ..
-            }) => Err(message),
-            SecureFrame::Text(other) => panic!("unexpected reply to a chunk: {other:?}"),
+            SecureFrame::Text(frame) => match *frame {
+                ServerFrame::Event {
+                    event: Event::Error { message, .. },
+                    ..
+                } => Err(message),
+                other => panic!("unexpected reply to a chunk: {other:?}"),
+            },
         }
     }
 
