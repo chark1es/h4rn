@@ -294,7 +294,7 @@ impl DaemonBuilder {
             // transport allowlist is rebuilt from it. A key the old allowlist
             // file holds but the registry does not (a pairing from before
             // scopes were recorded) is not admitted: it must pair again.
-            let known: std::collections::HashSet<_> = devices.keys().into_iter().collect();
+            let known: std::collections::HashSet<_> = devices.admitted_keys().into_iter().collect();
             for key in &known {
                 service.allow(*key);
             }

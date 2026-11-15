@@ -28,8 +28,8 @@ use h4rn_daemon::threads::ThreadManagerOptions;
 use h4rn_harness::FakeHarness;
 use h4rn_protocol::{
     ClientFrame, ClientRequest, ConnectDeviceKind, DeviceId, DeviceInfo, HarnessKind,
-    PairingClaimRequest, ProtoError, RelayOpen, ResponseBody, RuntimeMode, ServerFrame,
-    TransportPathKind,
+    PROTOCOL_VERSION, PairingClaimRequest, ProtoError, RelayOpen, ResponseBody, RuntimeMode,
+    ServerFrame, TransportPathKind,
 };
 use h4rn_transport::client::{Client, ClientConfig, ClientEvent, ClientPath};
 use h4rn_transport::engine::EngineConfig;
@@ -644,6 +644,109 @@ async fn wait_for<T>(what: &str, mut check: impl FnMut() -> Option<T>) -> T {
     panic!("timed out waiting for {what}");
 }
 
+/// A loopback UI session (`/ws`) standing in for the host's Settings page.
+///
+/// A relay-provisioned device is only admitted after the host confirms the
+/// short authentication string. The test drives that decision through the same
+/// authenticated request the UI sends, never by calling the registry directly.
+struct HostClient {
+    ws: tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    next_id: u64,
+}
+
+impl HostClient {
+    async fn connect(addr: SocketAddr, data_dir: &Path) -> Self {
+        let token = h4rn_daemon::auth::TokenStore::new(data_dir)
+            .load_or_create()
+            .expect("provision the local access token");
+        let url = format!("ws://{addr}/ws?token={token}");
+        let (ws, _) = tokio_tungstenite::connect_async(url)
+            .await
+            .expect("connect the host UI");
+        let mut client = Self { ws, next_id: 1 };
+        let hello = ClientRequest::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            device: DeviceInfo {
+                device_id: DeviceId::new("host-ui"),
+                name: "host ui".into(),
+                platform: "linux".into(),
+                app_version: "0.1.0".into(),
+            },
+        };
+        match client.request(hello).await {
+            Ok(ResponseBody::Hello { .. }) => {}
+            other => panic!("the host UI could not say hello: {other:?}"),
+        }
+        client
+    }
+
+    async fn request(&mut self, body: ClientRequest) -> Result<ResponseBody, ProtoError> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let frame = ClientFrame { id, body };
+        self.ws
+            .send(Message::Text(
+                serde_json::to_string(&frame)
+                    .expect("serialise frame")
+                    .into(),
+            ))
+            .await
+            .expect("send host frame");
+        loop {
+            let message = tokio::time::timeout(Duration::from_secs(10), self.ws.next())
+                .await
+                .expect("timed out waiting for the host UI")
+                .expect("host socket closed")
+                .expect("host websocket error");
+            let Message::Text(text) = message else {
+                continue;
+            };
+            match serde_json::from_str::<ServerFrame>(&text).expect("parse ServerFrame") {
+                ServerFrame::Response {
+                    id: response,
+                    result,
+                } if response == id => return result,
+                _ => {}
+            }
+        }
+    }
+
+    /// Waits for the daemon to list the pairing and returns its SAS.
+    async fn pending_sas(&mut self, device_id: &str) -> String {
+        for _ in 0..300 {
+            match self.request(ClientRequest::PairingConfirmations).await {
+                Ok(ResponseBody::PairingConfirmations { confirmations }) => {
+                    if let Some(entry) = confirmations
+                        .iter()
+                        .find(|entry| entry.device_id.as_str() == device_id)
+                    {
+                        return entry.sas.clone();
+                    }
+                }
+                Ok(other) => panic!("unexpected confirmation response: {other:?}"),
+                Err(error) => panic!("could not list pairing confirmations: {error:?}"),
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        panic!("the daemon never listed the pending pairing for {device_id}");
+    }
+
+    async fn confirm(&mut self, device_id: &str, confirm: bool) {
+        match self
+            .request(ClientRequest::ConfirmPairing {
+                device_id: DeviceId::new(device_id),
+                confirm,
+            })
+            .await
+        {
+            Ok(ResponseBody::Ack) => {}
+            other => panic!("unexpected confirmation decision: {other:?}"),
+        }
+    }
+}
+
 /// Runs the wasm client (Node-owned relay socket, wasm-owned Noise) once.
 ///
 /// `scripts/test-remote.sh` builds the wasm glue and sets `H4RN_TEST_WASM_DIR`;
@@ -782,6 +885,24 @@ async fn relay_pairing_failover_and_revocation() {
         .expect("the claiming device is listed");
 
     let client_noise = client_identity.public().noise_public;
+    // E4: the relay's `DevicePaired` is a claim, not admission. The device is
+    // registered as pending and stays off the allowlist until the host sees the
+    // same SAS on both screens and confirms it.
+    let mut host = HostClient::connect(daemon.addr, daemon_dir.path()).await;
+    let host_sas = host.pending_sas(&client_device_id).await;
+    let expected = h4rn_transport::pairing::short_auth_string(
+        &client_noise,
+        &daemon_identity.public().noise_public,
+    );
+    assert_eq!(
+        host_sas, expected,
+        "the host must derive the SAS from the announced device key"
+    );
+    assert!(
+        !service.is_allowed(&client_noise),
+        "a pending relay device reached the allowlist before the host confirmed it"
+    );
+    host.confirm(&client_device_id, true).await;
     wait_for("the daemon allowlist", || {
         service.is_allowed(&client_noise).then_some(())
     })

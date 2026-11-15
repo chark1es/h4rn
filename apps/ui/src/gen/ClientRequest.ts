@@ -3,6 +3,7 @@ import type { ApprovalDecision } from "./ApprovalDecision";
 import type { AttachmentId } from "./AttachmentId";
 import type { AutoResumePolicy } from "./AutoResumePolicy";
 import type { BlobRange } from "./BlobRange";
+import type { DeviceId } from "./DeviceId";
 import type { DeviceInfo } from "./DeviceInfo";
 import type { DiffAgainst } from "./DiffAgainst";
 import type { ForgeAgentTarget } from "./ForgeAgentTarget";
@@ -654,7 +655,15 @@ series_group_by: UsageGroupBy | null,
  * With this set, `scope_id` names a parent thread and the report adds
  * every child's turns; without it only the thread's own rows count.
  */
-include_children: boolean, } | { "type": "pairing_confirmations" } | { "type": "get_limits" } | { "type": "list_resets" } | { "type": "cancel_resume", 
+include_children: boolean, } | { "type": "pairing_confirmations" } | { "type": "confirm_pairing", 
+/**
+ * Connect device id from [`Self::PairingConfirmations`].
+ */
+device_id: DeviceId, 
+/**
+ * `true` admits the device, `false` revokes it.
+ */
+confirm: boolean, } | { "type": "get_limits" } | { "type": "list_resets" } | { "type": "cancel_resume", 
 /**
  * Thread whose schedule is cleared.
  */

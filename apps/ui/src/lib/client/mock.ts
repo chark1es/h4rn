@@ -2640,6 +2640,9 @@ class MockDaemon {
       case "pairing_confirmations":
         this.ok(frame.id, { type: "pairing_confirmations", confirmations: [] });
         return;
+      case "confirm_pairing":
+        this.ok(frame.id, { type: "ack" });
+        return;
       case "list_resets":
         this.ok(frame.id, {
           type: "resets",

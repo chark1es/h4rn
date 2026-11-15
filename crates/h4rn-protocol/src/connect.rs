@@ -466,11 +466,13 @@ impl PairScope {
     }
 }
 
-/// A device that paired through a typed code, waiting to be confirmed.
+/// A relay-provisioned device the host has not admitted yet.
 ///
-/// The daemon computes `sas` from the daemon key it holds and the device key
-/// connect gave it. The person compares it with the string the new device
-/// shows after claiming; a mismatch means the relay substituted a key.
+/// This covers typed codes and QR pairings: in both the host learns the device
+/// key from the relay, so it must confirm before the key is allowlisted. The
+/// daemon computes `sas` from its own key and the device key connect gave it.
+/// The person compares it with the string the new device shows after claiming;
+/// a mismatch means the relay substituted a key.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct PairingConfirmation {
     /// Connect device id of the new device.

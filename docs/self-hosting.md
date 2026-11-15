@@ -213,7 +213,7 @@ Point a daemon at this deployment and complete the OIDC device grant:
 h4rnd login --connect https://connect.example.com --provider orbitid --name workstation
 h4rnd serve
 h4rnd pair              # QR for a device, via connect
-h4rnd pair --direct     # QR with a LAN/tailnet endpoint and one-time PSK (all scopes unless --scope is given)
+h4rnd pair --direct     # QR with a LAN/tailnet endpoint and one-time PSK (view and approve unless --scope is given)
 h4rnd pair --scope approve --scope files   # restrict what the new device may do
 ```
 
@@ -223,9 +223,13 @@ rate limited per user and per IP (`H4RN_CONNECT_RATE_PAIRING_CODE_PER_HOUR`,
 default `10`). Pairings carry scopes (`view`, `approve`, `terminal`, `files`,
 `admin`); only a device holding `admin` *on that machine* can create or revoke its pairings
 or revoke a device linked to it (admin on one machine does not carry to another).
-A code claimed on the phone must be confirmed against the code Settings → Devices
-shows on the host before the phone trusts the connection. Apply migration `0005_pairing_scopes.sql` by upgrading the
-relay: existing device links keep every scope.
+Every relay-provisioned device is pending until it is confirmed in
+Settings → Devices on the host. A code claimed on the phone must match the
+short code the host shows; the host then confirms the device before it can
+reach any host, and rejecting it revokes the key. A QR pairing still needs the
+host confirmation: the QR pins the daemon key for the phone, while the host
+learns the device key from the relay. Apply migration `0005_pairing_scopes.sql`
+by upgrading the relay: existing device links keep every scope.
 
 `login` stores connect credentials in the OS keychain, or in an
 encrypted `connect-credentials.json` on headless hosts, and registers the

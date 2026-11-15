@@ -308,7 +308,9 @@ h4rnd pair --direct     # LAN/tailnet-only pairing
 
 The connect flow creates a pairing on the relay and renders the returned
 `h4rn://pair?...` URL as a terminal QR (Unicode half blocks, no external
-image). The claimed device is announced over the relay and allowlisted.
+image). The claimed device is announced over the relay as **pending**: its key
+is recorded, but it holds no scopes and is not on the transport allowlist until
+the host confirms it in Settings → Devices (see below).
 
 A connect pairing grants **scopes** and has a **short code** (ADR-042):
 
@@ -330,10 +332,11 @@ The daemon enforces scopes from a persisted **device registry**
 (`<data_dir>/devices.json`): key, role, scopes and provenance. A key with no
 entry is denied, identity is always the handshake's key (a relay-claimed device id
 is ignored), and a relay snapshot on reconnect removes connect-paired devices it
-no longer lists and ends their sessions. `h4rnd pair --direct --scope …` writes
-the scopes into `direct-pairing.json`; the device that pairs holds exactly those
-(no `--scope`: every scope). Binary PTY input needs `Hello`, `terminal`, and a
-viewer this connection attached.
+no longer lists and ends their sessions, and a pending device stays pending
+through every snapshot until the host decides. `h4rnd pair --direct --scope …`
+writes the scopes into `direct-pairing.json`; the device that pairs holds
+exactly those (no `--scope`: `view` and `approve`). Binary PTY input needs
+`Hello`, `terminal`, and a viewer this connection attached.
 
 The short code is 8 Crockford base32 characters (40 bits), shown as `ABCD-EFGH`,
 single use, expiring with the QR. A phone without a camera claims it with
@@ -344,15 +347,26 @@ authentication string** (12 digits, computed in Rust by `short_auth_string` over
 both static keys and exported to the UI as `pairing_sas`) and pins nothing until
 the person confirms it equals the one the host shows in Settings → Devices (the
 daemon computes it from the key connect gave it and its own, and serves it via
-`PairingConfirmations`). A mismatch revokes the device. The QR path pins the key
-out of band and needs no confirmation.
+`PairingConfirmations`). A mismatch revokes the device.
+
+The host-side confirmation is an admission gate, not just advice: a relay-
+provisioned key is pending until the host sends `ConfirmPairing { device_id,
+confirm }` (`admin`). Confirming adds the key to the allowlist; rejecting removes
+and revokes it. The relay therefore cannot swap in a device key and use the
+granted scopes before a person compares the codes. This applies to QR pairings
+too: the QR pins the daemon key for the phone, but the host still learns the
+device key from the relay. Pending entries do not expire while undecided.
 
 `--direct` skips connect: the CLI writes `<data_dir>/direct-pairing.json`
 (mode `0600`) with a fresh PSK, expiry and address candidates. The running
-daemon watches that file, installs the PSK, and the payload carries the
-endpoint plus the daemon's X25519 key; the first successful `IKpsk2` handshake
-consumes the PSK and allowlists the device. An expired file is ignored and
-removed.
+daemon watches that file, installs the PSK (which also opens PSK pairing on the
+transport), and the payload carries the endpoint plus the daemon's X25519 key;
+the first successful `IKpsk2` handshake consumes the PSK and allowlists the
+device. The consumed hook deletes the matching file before the device is
+authorised, so a restart cannot re-arm it; an expired file is deleted too. The
+watcher clears only the secret it installed: an operator's `H4RN_PAIRING_PSK`
+is never replaced or cleared by a direct file, and a direct file that would
+replace another live secret is logged and left for the operator.
 
 ### Address advertisement
 

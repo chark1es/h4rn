@@ -434,7 +434,7 @@ pub enum ResponseBody {
     },
     /// Devices awaiting short-authentication-string confirmation.
     PairingConfirmations {
-        /// Newest first; entries expire after a few minutes.
+        /// Newest first. An entry stays until the host confirms or rejects it.
         confirmations: Vec<crate::connect::PairingConfirmation>,
     },
     /// A schedule was armed, moved or cleared.

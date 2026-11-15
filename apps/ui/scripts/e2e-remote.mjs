@@ -606,6 +606,13 @@ async function main() {
     );
     await page.getByText(/Paired with atlas/).waitFor({ timeout: 30_000 });
 
+    // The relay only announced this device's key. The host must compare the
+    // code and confirm before the relay can use it; the browser is also the
+    // host here, so the same page shows its own confirmation card.
+    await page.getByTestId("host-sas").first().waitFor({ timeout: 30_000 });
+    await page.getByTestId("confirm-pairing").first().click();
+    await page.getByTestId("host-sas").first().waitFor({ state: "detached", timeout: 20_000 });
+
     // Signing in and pairing happen on the Settings route. Booting the app
     // again at the thread route with no query string is a full reload, so the
     // thread log and the footer path must come from persisted relay state.
@@ -731,10 +738,14 @@ async function main() {
           );
         })
     )?.trim();
-    await hostPage.close();
     if (hostSas !== phoneSas) {
       throw new Error(`the host and phone codes differ: host ${hostSas}, phone ${phoneSas}`);
     }
+    // The host's confirmation is the admission gate: a malicious relay that
+    // swapped the key cannot pass this step.
+    await hostPage.getByTestId("confirm-pairing").first().click();
+    await hostPage.getByTestId("host-sas").first().waitFor({ state: "detached", timeout: 20_000 });
+    await hostPage.close();
     await page.getByRole("button", { name: "They match" }).click();
     await page.getByText(/Paired with atlas/).waitFor({ timeout: 30_000 });
 

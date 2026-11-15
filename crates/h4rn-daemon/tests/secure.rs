@@ -124,8 +124,17 @@ impl SecureClient {
         identity: DeviceIdentity,
         psk: Option<[u8; TOKEN_LEN]>,
     ) -> Self {
+        Self::connect_with_session(daemon, identity, psk, [11u8; SESSION_ID_LEN]).await
+    }
+
+    async fn connect_with_session(
+        daemon: &TestDaemon,
+        identity: DeviceIdentity,
+        psk: Option<[u8; TOKEN_LEN]>,
+        session_id: [u8; SESSION_ID_LEN],
+    ) -> Self {
         let mut engine = EngineConfig::new(
-            [11u8; SESSION_ID_LEN],
+            session_id,
             identity,
             daemon.service.public_identity().noise_public,
         );
@@ -217,10 +226,14 @@ impl SecureClient {
     }
 
     async fn hello(&mut self) -> ResponseBody {
+        self.hello_as("dev_secure").await
+    }
+
+    async fn hello_as(&mut self, device_id: &str) -> ResponseBody {
         self.request(ClientRequest::Hello {
             protocol_version: h4rn_protocol::PROTOCOL_VERSION,
             device: DeviceInfo {
-                device_id: DeviceId::new("dev_secure"),
+                device_id: DeviceId::new(device_id),
                 name: "secure integration test".into(),
                 platform: "linux".into(),
                 app_version: "0.1.0".into(),
@@ -624,6 +637,148 @@ async fn a_view_only_device_cannot_type_into_a_terminal() {
     client.send_pty_input(1, b"touch pwned\n").await;
     let message = client.next_error_event().await;
     assert!(message.contains("terminal"), "{message}");
+    client.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_pending_device_is_admitted_only_after_the_host_confirms() {
+    // Regression for E4: the relay announces the key, the host compares the
+    // SAS, and only an admin-scoped ConfirmPairing admits it.
+    let phone_identity = device_identity();
+    let phone_key = phone_identity.public().noise_public;
+    let admin_identity = device_identity();
+    let admin_key = admin_identity.public().noise_public;
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([admin_key])),
+    ));
+    let devices = Arc::new(DeviceRegistry::in_memory());
+    devices.insert_scoped("dev_admin", admin_key, PairScope::ALL.to_vec());
+    devices.provision_scoped("dev_phone", phone_key, vec![PairScope::View]);
+    let daemon = boot_with(Arc::clone(&service), Arc::clone(&devices)).await;
+
+    expect_rejected(&daemon, phone_identity.clone(), [0u8; TOKEN_LEN]).await;
+    assert!(
+        !service.is_allowed(&phone_key),
+        "a pending key was admitted"
+    );
+
+    let mut admin = SecureClient::connect(&daemon, admin_identity, None).await;
+    admin.hello().await;
+    match admin
+        .request(ClientRequest::ConfirmPairing {
+            device_id: DeviceId::new("dev_phone"),
+            confirm: true,
+        })
+        .await
+        .expect("confirm the pairing")
+    {
+        ResponseBody::Ack => {}
+        other => panic!("unexpected confirm response: {other:?}"),
+    }
+    assert!(service.is_allowed(&phone_key));
+    assert_eq!(
+        devices.scopes_for_key(&phone_key),
+        Some(vec![PairScope::View])
+    );
+    admin.close().await;
+
+    // A fresh logical session: the admin's session id must not be reused while
+    // its close is still settling.
+    let mut phone =
+        SecureClient::connect_with_session(&daemon, phone_identity, None, [0x31u8; SESSION_ID_LEN])
+            .await;
+    phone.hello().await;
+    phone.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_view_only_device_cannot_confirm_a_pending_pairing() {
+    // E4: confirming is an admin decision. A view-only device must not be able
+    // to admit a key the host has not compared, and the entry stays pending.
+    let phone_key = device_identity().public().noise_public;
+    let viewer_identity = device_identity();
+    let viewer_key = viewer_identity.public().noise_public;
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([viewer_key])),
+    ));
+    let devices = Arc::new(DeviceRegistry::in_memory());
+    devices.insert_scoped("dev_viewer", viewer_key, vec![PairScope::View]);
+    devices.provision_scoped("dev_phone", phone_key, vec![PairScope::View]);
+    let daemon = boot_with(Arc::clone(&service), Arc::clone(&devices)).await;
+
+    let mut viewer = SecureClient::connect(&daemon, viewer_identity, None).await;
+    viewer.hello().await;
+    let refused = viewer
+        .request(ClientRequest::ConfirmPairing {
+            device_id: DeviceId::new("dev_phone"),
+            confirm: true,
+        })
+        .await
+        .expect_err("a view-only device must not confirm a pairing");
+    assert_eq!(refused.code, h4rn_protocol::ProtoErrorCode::Forbidden);
+    assert!(
+        devices.is_pending(&phone_key),
+        "a refused decision must not change the pending entry"
+    );
+    assert!(!service.is_allowed(&phone_key));
+    viewer.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn terminal_ownership_uses_the_verified_device_not_the_hello_claim() {
+    // Regression for E8: a remote client may claim any device id in Hello.
+    // Ownership and the terminal audit must name the key's registry entry.
+    let client_identity = device_identity();
+    let key = client_identity.public().noise_public;
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([key])),
+    ));
+    let devices = Arc::new(DeviceRegistry::in_memory());
+    devices.insert_scoped("dev_real", key, PairScope::ALL.to_vec());
+    let daemon = boot_with(Arc::clone(&service), devices).await;
+    let mut client = SecureClient::connect(&daemon, client_identity, None).await;
+    client.hello_as("dev_attacker").await;
+    let host = host_of(&mut client).await;
+    let cwd = tempfile::tempdir().expect("cwd");
+    let cwd_string = cwd.path().to_string_lossy().to_string();
+    let opened = client
+        .request(ClientRequest::TerminalOpen {
+            thread_id: None,
+            host,
+            cwd: cwd_string,
+            shell: Some("/bin/sh".into()),
+            args: Vec::new(),
+            cols: 80,
+            rows: 24,
+        })
+        .await
+        .expect("open terminal");
+    match opened {
+        ResponseBody::TerminalOpened { terminal } => {
+            assert!(terminal.terminal_id.as_str().starts_with("term_"));
+        }
+        other => panic!("unexpected terminal response: {other:?}"),
+    }
+    let audit = std::fs::read_to_string(
+        daemon
+            .dir
+            .as_ref()
+            .expect("tempdir")
+            .path()
+            .join("terminal-audit.log"),
+    )
+    .expect("terminal audit");
+    assert!(
+        audit.contains("dev_real"),
+        "audit must name the verified device: {audit}"
+    );
+    assert!(
+        !audit.contains("dev_attacker"),
+        "audit trusted the Hello claim: {audit}"
+    );
     client.close().await;
     daemon.stop().await;
 }
