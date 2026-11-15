@@ -36,8 +36,7 @@ use h4rn_protocol::{
     ClientFrame, ClientRequest, ConnectDeviceKind, DeviceId, DeviceInfo, HarnessKind, HostId,
     McpEnabledMatrix, McpRequest, McpServerInput, McpSharePolicy, McpTransportInput,
     PROTOCOL_VERSION, PairingClaimRequest, ProtoError, RelayOpen, RelayService, ResponseBody,
-    RuntimeMode,
-    ServerFrame, TransportPathKind,
+    RuntimeMode, ServerFrame, TransportPathKind,
 };
 use h4rn_transport::client::{Client, ClientConfig, ClientEvent, ClientPath};
 use h4rn_transport::engine::EngineConfig;
