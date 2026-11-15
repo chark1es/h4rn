@@ -1001,6 +1001,13 @@ device leaves the secret armed, matching the round-5 rule that paired devices do
 `SecureService::accept` is bounded by `handshake_timeout` (10 s) and the post-reject restart wait by
 `restart_timeout` (5 s), enforced inside the transport so no caller can forget the deadline.
 
+**The client waits longer for the first reply than for a probe.** Between the handshake and
+`Welcome` the daemon records a new pairing durably (registry write, pairing-file delete). The
+client's 1 s `path_timeout_ms` applied as soon as the channel existed, so on a slow or loaded disk
+it declared the path dead, dropped the late `Welcome` and ended with "transport client stopped"
+once the daemon closed the idle socket. A path now uses `establish_timeout_ms` (10 s) until its
+first authenticated record arrives, and `path_timeout_ms` after that.
+
 ## ADR-043: App updates live in the shell; harness updates live in the daemon
 
 **Status:** Accepted

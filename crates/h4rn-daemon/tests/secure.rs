@@ -166,7 +166,7 @@ impl SecureClient {
         )];
         let mut client = Client::connect(ClientConfig::new(engine, paths)).expect("start client");
         let mut ticket = None;
-        let established = tokio::time::timeout(Duration::from_secs(10), async {
+        let established = tokio::time::timeout(Duration::from_secs(60), async {
             loop {
                 match client.recv().await {
                     Some(ClientEvent::Established(value)) => {
@@ -523,6 +523,30 @@ async fn secure_transport_psk_pairs_a_new_device() {
         None,
         "a completed pairing must consume the one-time secret"
     );
+    client.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slow_durable_pairing_write_does_not_fail_the_pairing() {
+    // The daemon records a pairing durably (registry write, pairing-file
+    // delete) between the handshake and `Welcome`. On a slow or loaded disk
+    // that can take longer than the client's 1 s established-path liveness
+    // limit; a legitimate pairing must still complete.
+    let psk = [0x5cu8; TOKEN_LEN];
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_psk(psk),
+    ));
+    let daemon = boot(Arc::clone(&service)).await;
+    let registry = Arc::clone(&daemon.devices);
+    service.set_pairing_hook(Arc::new(move |key| {
+        std::thread::sleep(Duration::from_millis(1_300));
+        registry.complete_direct(key).map_err(|error| error.to_string())
+    }));
+    let phone = device_identity();
+    let mut client = SecureClient::connect(&daemon, phone.clone(), Some(psk)).await;
+    client.hello().await;
+    assert!(service.is_allowed(&phone.public().noise_public));
     client.close().await;
     daemon.stop().await;
 }

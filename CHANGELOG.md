@@ -17,6 +17,9 @@ protocol, with the desktop, mobile and browser clients as pure views over it. v1
   (`handshake_timeout` 10 s, `restart_timeout` 5 s, enforced inside `SecureService::accept`), the
   `Open` record is validated before authorisation, and every failed `Open` gets the same
   `NotPaired` reject.
+  A legitimate pairing no longer fails when the daemon's durable pairing write is slow: the
+  client waits up to `establish_timeout_ms` (10 s, the daemon's own handshake deadline) for the
+  first reply on a fresh channel, and only an established path uses the 1 s liveness limit.
 - **Connect and sharing:** the OrbitID-backed relay and registry, MCP sharing and the tunnel,
   content-addressed skills, subagents as child threads with daemon-enforced delegation policy, and
   forge integrations.

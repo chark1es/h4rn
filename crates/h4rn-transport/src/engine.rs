@@ -69,6 +69,13 @@ pub struct EngineConfig {
     /// How long a path may go without any authenticated packet before it is
     /// declared dead.
     pub path_timeout_ms: u64,
+    /// How long a path whose handshake finished may wait for the daemon's first
+    /// reply (`Welcome`) before it is declared dead. The daemon records a new
+    /// pairing durably between the handshake and `Welcome`, which on a slow or
+    /// loaded disk takes far longer than a probe round trip, so this is a
+    /// separate, longer limit than `path_timeout_ms`. It matches the daemon's
+    /// own pre-attach handshake deadline.
+    pub establish_timeout_ms: u64,
     /// How long to coalesce acknowledgements.
     pub ack_delay_ms: u64,
     /// RTT margin a same-class path must beat by to trigger a switch back.
@@ -91,6 +98,7 @@ impl EngineConfig {
             rto_ms: 250,
             probe_interval_ms: 250,
             path_timeout_ms: 1_000,
+            establish_timeout_ms: 10_000,
             ack_delay_ms: 40,
             switch_margin_ms: 40,
             switch_confirmations: 2,
@@ -133,6 +141,9 @@ struct PathRuntime {
     failure: Option<String>,
     /// Whether the handshake in flight mixed the one-time PSK in.
     used_psk: bool,
+    /// Whether an authenticated record has arrived on the current channel.
+    /// Until then the longer `establish_timeout_ms` applies.
+    confirmed: bool,
 }
 
 /// One client transport session across several paths.
@@ -226,6 +237,7 @@ impl TransportEngine {
                 pending_ping: None,
                 failure: None,
                 used_psk: false,
+                confirmed: false,
             },
         );
         id
@@ -289,6 +301,7 @@ impl TransportEngine {
             None
         };
         runtime.used_psk = psk.is_some();
+        runtime.confirmed = false;
         let handshake_config = HandshakeConfig {
             session_id: &self.config.session_id,
             local_static: self.config.identity.noise_secret(),
@@ -509,6 +522,7 @@ impl TransportEngine {
         let handshake = runtime.handshake.take().expect("handshake exists");
         let channel = handshake.into_channel(self.config.rekey)?;
         runtime.channel = Some(channel);
+        runtime.confirmed = false;
         runtime.state = TransportPathState::Ready;
         let token = self.ticket.map(|ticket| ticket.token);
         let (recv_next, send_next) = self.session.resume_state();
@@ -543,7 +557,10 @@ impl TransportEngine {
                 return Err(EngineError::Protocol("record before handshake"));
             };
             match channel.open(ciphertext) {
-                Ok(plaintext) => plaintext,
+                Ok(plaintext) => {
+                    runtime.confirmed = true;
+                    plaintext
+                }
                 Err(error) => {
                     self.fail_path(path, format!("record did not authenticate: {error}"));
                     return Err(EngineError::Noise(error));
@@ -828,7 +845,12 @@ impl TransportEngine {
                 {
                     return None;
                 }
-                if runtime.channel.is_some() && silent > self.config.path_timeout_ms {
+                let limit = if runtime.confirmed {
+                    self.config.path_timeout_ms
+                } else {
+                    self.config.establish_timeout_ms.max(self.config.path_timeout_ms)
+                };
+                if runtime.channel.is_some() && silent > limit {
                     Some(*id)
                 } else {
                     None
