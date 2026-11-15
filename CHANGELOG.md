@@ -48,8 +48,8 @@ All notable changes to h4rn are recorded here. The format follows
   also resolve through `resolve_inside(…, Existing)`, so a symlink pointing outside the workspace
   is refused instead of followed.
 - **Release mobile builds reach the LAN and a tailnet again (G2).** Android's release network
-  security config `base-config` and iOS ATS (`NSAllowsLocalNetworking`, `.local`, `ts.net`, RFC
-  1918 and CGNAT CIDRs) now permit the cleartext candidates the daemon actually serves. Noise
+  security config `base-config` and iOS ATS (`NSAllowsLocalNetworking`, `.local`, `ts.net`
+  exception domains) now permit the cleartext candidates the daemon actually serves. Noise
   end-to-end encryption with the pinned daemon key is the security boundary, so ws:// adds no
   exposure; the rationale is in `docs/mobile.md` and `docs/transport.md`, and a unit test checks
   both native configs and the candidate-URL builder.

@@ -6,13 +6,15 @@
   The socket is not the security boundary: device-to-daemon traffic runs inside
   a Noise session whose daemon static key is pinned from the pairing payload
   (ADR-010, ADR-031), so a ws:// candidate adds no confidentiality or integrity
-  loss. Apple's App Transport Security would otherwise veto the LAN, .local,
-  MagicDNS and CGNAT/Tailscale candidates a phone needs, leaving only the relay.
+  loss. NSAllowsLocalNetworking lets the app reach unqualified names and .local,
+  and the exception domains cover .local and ts.net (MagicDNS).
 
-  NSAllowsLocalNetworking covers unqualified names, .local and IP addresses on
-  iOS 10-16. From iOS 17, ATS no longer permits IP connections by default, so
-  the private and CGNAT ranges are listed explicitly as CIDR exceptions. See
-  docs/mobile.md and docs/transport.md.
+  ATS matches DNS names, not address ranges, so private and CGNAT IP literals
+  cannot be listed here. Whether iOS 17 admits a raw ws:// connection to such
+  an address without an ATS exception is unverified on this host: iOS apps are
+  built only by the macOS CI job, which does not run them. This is an accepted
+  limitation; a phone that cannot use a direct IP path falls back to the relay.
+  See docs/mobile.md and docs/transport.md.
 -->
 <plist version="1.0">
 <dict>
@@ -34,26 +36,6 @@
                 <key>NSExceptionAllowsInsecureHTTPLoads</key>
                 <true/>
                 <key>NSIncludesSubdomains</key>
-                <true/>
-            </dict>
-            <key>10.0.0.0/8</key>
-            <dict>
-                <key>NSExceptionAllowsInsecureHTTPLoads</key>
-                <true/>
-            </dict>
-            <key>172.16.0.0/12</key>
-            <dict>
-                <key>NSExceptionAllowsInsecureHTTPLoads</key>
-                <true/>
-            </dict>
-            <key>192.168.0.0/16</key>
-            <dict>
-                <key>NSExceptionAllowsInsecureHTTPLoads</key>
-                <true/>
-            </dict>
-            <key>100.64.0.0/10</key>
-            <dict>
-                <key>NSExceptionAllowsInsecureHTTPLoads</key>
                 <true/>
             </dict>
         </dict>

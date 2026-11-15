@@ -118,10 +118,13 @@ name or a Tailscale/CGNAT address — and silently leave only the relay:
   `.local`/MagicDNS cannot all be expressed there. The debug source set keeps
   its own permissive config.
 - **iOS** (`apps/mobile/src-tauri/Info.plist`, merged by Tauri) sets
-  `NSAllowsLocalNetworking` for unqualified names, `.local` and IP addresses,
-  and lists `ts.net` plus the private and CGNAT ranges as exception domains.
-  iOS 17 stopped allowing IP connections by default, so the CIDR entries are
-  required there; iOS 16 allows them without an exception.
+  `NSAllowsLocalNetworking` for unqualified names and `.local`, and lists
+  `.local` and `ts.net` as `NSExceptionDomains` so MagicDNS works. ATS matches
+  DNS names, not address ranges, so private and CGNAT IP literals cannot be
+  excepted with CIDR keys. Whether iOS 17 admits a raw `ws://` connection to
+  such an address is unverified: iOS apps are built only by the macOS CI job,
+  which does not run them. This is an accepted limitation; a phone that cannot
+  reach an IP candidate uses the relay.
 
 `apps/ui/src/lib/client/secure.test.ts` checks both checked-in configs and the
 candidate-URL builder, so a future "tighten the release policy" change fails a
