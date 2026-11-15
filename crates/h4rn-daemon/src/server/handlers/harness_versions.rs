@@ -1,4 +1,4 @@
-//! Harness CLI version listing and update requests (ADR-039).
+//! Harness CLI version listing and update requests (ADR-040).
 
 use h4rn_protocol::{ClientRequest, ProtoError, ResponseBody, ServerFrame, Topic};
 use tokio::task::JoinHandle;

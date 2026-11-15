@@ -1,4 +1,4 @@
-//! Harness CLI version reporting and updates (ADR-039).
+//! Harness CLI version reporting and updates (ADR-040).
 //!
 //! The daemon owns every fact the Settings → Harnesses screen shows: which
 //! harness CLIs are installed here, what version they run, what the npm registry

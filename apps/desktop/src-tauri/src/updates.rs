@@ -1,4 +1,4 @@
-//! Desktop app updates (ADR-039).
+//! Desktop app updates (ADR-040).
 //!
 //! The shell checks the configured updater endpoint shortly after launch and
 //! then every six hours. A check that cannot run — no endpoint, the development

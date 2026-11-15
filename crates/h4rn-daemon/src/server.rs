@@ -92,7 +92,7 @@ pub struct AppState {
     pub mcp: Arc<McpService>,
     /// Durable metering, limits and auto-resume (ADR-024).
     pub meter: Arc<h4rn_meter::MeterHub>,
-    /// Harness CLI versions and updates (ADR-039).
+    /// Harness CLI versions and updates (ADR-040).
     pub harness_versions: Arc<crate::harness_versions::HarnessVersionService>,
     /// Server boot time, for `/healthz`.
     pub started: Instant,

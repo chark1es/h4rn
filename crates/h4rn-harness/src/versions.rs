@@ -5,7 +5,7 @@
 //! reports, the version the registry publishes, and *how* the copy on this host
 //! was installed. Detection is deliberately conservative — anything that looks
 //! like Homebrew or a system package is reported as a command to run by hand
-//! rather than updated behind the user's back (ADR-039).
+//! rather than updated behind the user's back (ADR-040).
 //!
 //! Everything here is pure or injectable: [`RegistryClient`] and
 //! [`UpdateRunner`] are seams so tests never touch the network or a real global
