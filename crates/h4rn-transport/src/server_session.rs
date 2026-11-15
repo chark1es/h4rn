@@ -45,6 +45,15 @@ impl PairingPolicy {
         self
     }
 
+    /// Opens or closes PSK pairing in place.
+    ///
+    /// A live one-time secret must open the window, and losing that secret
+    /// (consumed, rotated or expired) must close it again. Callers that mutate
+    /// a policy at runtime use this rather than rebuilding it.
+    pub fn set_psk_pairing(&mut self, allow: bool) {
+        self.allow_psk_pairing = allow;
+    }
+
     /// Permanently rejects a device key.
     pub fn revoke(&mut self, key: [u8; KEY_LEN]) {
         self.revoked.insert(key);

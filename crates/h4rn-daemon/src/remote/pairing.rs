@@ -37,14 +37,14 @@ pub struct DirectPairingFile {
     /// Human label, normally the host name.
     pub label: Option<String>,
     /// Scopes the paired device is granted. `h4rnd pair --direct` without
-    /// `--scope` writes every scope; a file from before scopes existed reads
-    /// the same way.
-    #[serde(default = "all_scopes")]
+    /// `--scope` writes `view` and `approve`; a file from before scopes existed
+    /// reads the same safe default rather than every scope.
+    #[serde(default = "minimal_scopes")]
     pub scopes: Vec<h4rn_protocol::PairScope>,
 }
 
-fn all_scopes() -> Vec<h4rn_protocol::PairScope> {
-    h4rn_protocol::PairScope::ALL.to_vec()
+fn minimal_scopes() -> Vec<h4rn_protocol::PairScope> {
+    h4rn_protocol::PairScope::MINIMAL.to_vec()
 }
 
 impl DirectPairingFile {
@@ -88,6 +88,36 @@ pub fn read_direct_pairing(data_dir: &Path) -> Result<Option<DirectPairingFile>>
     let pairing: DirectPairingFile =
         serde_json::from_slice(&bytes).context("parse direct pairing file")?;
     Ok(Some(pairing))
+}
+
+/// Deletes the direct pairing file, tolerating an already absent one.
+///
+/// A consumed or expired secret must not survive to be re-armed on the next
+/// start, so the daemon deletes the file rather than only forgetting it.
+pub fn remove_direct_pairing(data_dir: &Path) -> Result<()> {
+    let path = direct_pairing_path(data_dir);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => {
+            Err(error).with_context(|| format!("delete direct pairing {}", path.display()))
+        }
+    }
+}
+
+/// Deletes the file when it carries `psk`, returning whether it did.
+///
+/// The one-time secret is consumed in the transport; this runs from the
+/// consumed hook so the durable copy is gone before the device is authorised.
+pub fn invalidate_direct_pairing(data_dir: &Path, psk: &[u8; KEY_LEN]) -> Result<bool> {
+    let Some(pairing) = read_direct_pairing(data_dir)? else {
+        return Ok(false);
+    };
+    if pairing.psk().ok().as_ref() != Some(psk) {
+        return Ok(false);
+    }
+    remove_direct_pairing(data_dir)?;
+    Ok(true)
 }
 
 /// Builds the QR payload for a direct pairing.
@@ -184,6 +214,47 @@ mod tests {
         );
         assert!(!pairing.expired());
         assert_eq!(pairing.psk().unwrap(), [0x11u8; KEY_LEN]);
+    }
+
+    #[test]
+    fn a_file_without_scopes_reads_the_safe_default() {
+        // Regression for E7: a file from before scopes existed (or one written
+        // by a caller that omits the field) must not grant every scope.
+        let dir = tempfile::tempdir().unwrap();
+        let body = format!(
+            r#"{{"psk":"{}","expires_at":{},"endpoints":["192.168.1.20:47800"]}}"#,
+            "11".repeat(KEY_LEN),
+            Utc::now().timestamp() + 60
+        );
+        write_secret_file(&direct_pairing_path(dir.path()), body.as_bytes()).unwrap();
+        let pairing = read_direct_pairing(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            pairing.scopes,
+            vec![
+                h4rn_protocol::PairScope::View,
+                h4rn_protocol::PairScope::Approve
+            ]
+        );
+    }
+
+    #[test]
+    fn the_consumed_secret_deletes_only_its_own_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let pairing = DirectPairingFile {
+            psk: "11".repeat(KEY_LEN),
+            expires_at: Utc::now().timestamp() + 60,
+            endpoints: vec!["192.168.1.20:47800".into()],
+            label: None,
+            scopes: h4rn_protocol::PairScope::MINIMAL.to_vec(),
+        };
+        write_direct_pairing(dir.path(), &pairing).unwrap();
+        assert!(
+            !invalidate_direct_pairing(dir.path(), &[0x22u8; KEY_LEN]).unwrap(),
+            "a different secret must not delete the file"
+        );
+        assert!(direct_pairing_path(dir.path()).exists());
+        assert!(invalidate_direct_pairing(dir.path(), &[0x11u8; KEY_LEN]).unwrap());
+        assert!(!direct_pairing_path(dir.path()).exists());
     }
 
     #[test]

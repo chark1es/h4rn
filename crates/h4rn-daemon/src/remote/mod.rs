@@ -288,11 +288,41 @@ mod tests {
     }
 
     #[test]
-    fn an_unarmed_direct_pairing_gets_every_scope() {
+    fn an_unarmed_direct_pairing_gets_the_safe_default() {
+        // An operator PSK with nothing armed grants read and reply, never the
+        // full set: widening needs an explicit arm.
         let devices = DeviceRegistry::in_memory();
         devices.complete_direct([5u8; KEY_LEN]);
         let origin = SessionOrigin::secure([5u8; KEY_LEN]);
+        let devices_scopes = devices.scopes_for_key(&[5u8; KEY_LEN]).unwrap();
+        assert_eq!(
+            devices_scopes,
+            vec![PairScope::View, PairScope::Approve],
+            "an unarmed direct pairing must not grant terminal, files or admin"
+        );
         assert!(authorize_scopes(&devices, &origin, &approve()).is_ok());
+        assert!(
+            authorize_scopes(
+                &devices,
+                &origin,
+                &ClientRequest::TerminalList { thread_id: None }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn cleared_direct_scopes_do_not_leak_into_the_next_pairing() {
+        // `pending_direct` must not outlive its secret: if the window closes,
+        // the next arm-less pairing gets the safe default, not the stale set.
+        let devices = DeviceRegistry::in_memory();
+        devices.arm_direct(PairScope::ALL.to_vec());
+        devices.clear_direct();
+        devices.complete_direct([6u8; KEY_LEN]);
+        assert_eq!(
+            devices.scopes_for_key(&[6u8; KEY_LEN]),
+            Some(vec![PairScope::View, PairScope::Approve])
+        );
     }
 
     #[test]

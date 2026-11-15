@@ -438,6 +438,10 @@ impl PairScope {
     /// `admin`.
     pub const DEFAULT: [Self; 4] = [Self::View, Self::Approve, Self::Terminal, Self::Files];
 
+    /// The least authority a pairing gets when it names no scopes: read and
+    /// reply. Terminal, files and admin need an explicit request.
+    pub const MINIMAL: [Self; 2] = [Self::View, Self::Approve];
+
     /// The database/wire spelling.
     pub fn as_str(self) -> &'static str {
         match self {

@@ -263,17 +263,30 @@ impl DeviceRegistry {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(PairScope::normalize(scopes));
     }
 
+    /// Drops the armed scopes without recording a device.
+    ///
+    /// Called with the secret: an armed window must not outlive the
+    /// `direct-pairing.json` that opened it, or a later arm-less pairing would
+    /// inherit the wrong authority.
+    pub fn clear_direct(&self) {
+        *self
+            .pending_direct
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
     /// Records the device that just paired directly with the armed scopes.
     ///
     /// With nothing armed (an operator-provisioned `H4RN_PAIRING_PSK`) the
-    /// device gets every scope: the operator chose to hand out that secret.
+    /// device gets `view` and `approve`: the same safe default as a CLI direct
+    /// pairing without `--scope`. Wider authority needs an explicit arm.
     pub fn complete_direct(&self, key: [u8; KEY_LEN]) {
         let scopes = self
             .pending_direct
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
-            .unwrap_or_else(|| PairScope::ALL.to_vec());
+            .unwrap_or_else(|| PairScope::MINIMAL.to_vec());
         self.insert_direct(key, scopes);
     }
 
