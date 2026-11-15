@@ -932,9 +932,12 @@ impl ClientRequest {
             | Self::PairingConfirmations
             | Self::ForgeImportCli { .. } => Admin,
             Self::Mcp { request } => match request {
-                crate::mcp::McpRequest::ListServers | crate::mcp::McpRequest::ListTools { .. } => {
-                    View
-                }
+                crate::mcp::McpRequest::ListServers
+                | crate::mcp::McpRequest::ListTools { .. }
+                | crate::mcp::McpRequest::PendingApprovals => View,
+                // Answering a remote call is the owner's approval, not an
+                // administrative reconfiguration.
+                crate::mcp::McpRequest::RespondApproval { .. } => Approve,
                 _ => Admin,
             },
             Self::Subagent { request } => match request {

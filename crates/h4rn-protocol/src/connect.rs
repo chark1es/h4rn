@@ -94,11 +94,25 @@ impl RelayFrame {
         }
     }
 
-    /// Builds an open frame for `machine_id`.
+    /// Builds an open frame for `machine_id` on the default client route.
     pub fn open(conn_id: impl Into<String>, machine_id: impl Into<String>) -> Self {
+        Self::open_service(conn_id, machine_id, RelayService::Secure)
+    }
+
+    /// Builds an open frame for `machine_id` on `service`.
+    ///
+    /// A daemon-to-daemon MCP session must use [`RelayService::SecureMcp`] so
+    /// the target daemon routes it to `/secure-mcp` and never to the client
+    /// `/secure` route.
+    pub fn open_service(
+        conn_id: impl Into<String>,
+        machine_id: impl Into<String>,
+        service: RelayService,
+    ) -> Self {
         let payload = serde_json::to_vec(&RelayOpen {
             machine_id: machine_id.into(),
             device_id: None,
+            service,
         })
         .expect("RelayOpen is always serialisable");
         Self {
@@ -109,11 +123,36 @@ impl RelayFrame {
     }
 }
 
+/// Which route an opened relay session is for.
+///
+/// The relay forwards the value unchanged; the target daemon chooses the
+/// listener. `Secure` is the original client protocol route. `SecureMcp` is
+/// the peer-only MCP tunnel route, which refuses user device keys.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayService {
+    /// The client `/secure` route.
+    #[default]
+    Secure,
+    /// The peer-only `/secure-mcp` route.
+    SecureMcp,
+}
+
+impl RelayService {
+    /// Stable spelling used in audits and logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Secure => "secure",
+            Self::SecureMcp => "secure_mcp",
+        }
+    }
+}
+
 /// The payload of a [`RelayFrameKind::Open`] frame.
 ///
-/// A client sends only `machine_id`; the relay fills `device_id` from the
-/// authenticated socket before forwarding the open to the daemon, so a client
-/// can never impersonate another device.
+/// A client sends `machine_id` and the service route; the relay fills
+/// `device_id` from the authenticated socket before forwarding the open to the
+/// daemon, so a client can never impersonate another device.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct RelayOpen {
     /// Machine the session targets.
@@ -121,6 +160,9 @@ pub struct RelayOpen {
     /// Device opening the session. Set by the relay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
+    /// Route the session must reach. Defaults to `secure` for older clients.
+    #[serde(default)]
+    pub service: RelayService,
 }
 
 /// Events the relay sends to a connected device.

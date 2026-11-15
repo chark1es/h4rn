@@ -44,7 +44,7 @@ use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
 
 use crate::mcp::{TransportMcpTunnel, TunnelConnection};
-use crate::remote::{DeviceRegistry, Role};
+use crate::remote::{DeviceRegistry, PeerRelayConnector, RelayDialer, Role};
 
 /// Marker for the grant-discovery handshake on `/secure-mcp`.
 pub(crate) const GRANTS_HANDSHAKE: &str = "h4rn-mcp-grants-1";
@@ -66,8 +66,18 @@ pub struct Peer {
     /// The peer daemon's pinned X25519 static key.
     pub noise_public: [u8; KEY_LEN],
     /// `ip:port` candidates for the peer's listener, preferred first. LAN and
-    /// tailnet addresses; `relay:` candidates are not usable for MCP tunnels.
+    /// tailnet addresses; the relay is carried separately because it is opened
+    /// as an authenticated session on this daemon's existing relay socket.
     pub endpoints: Vec<String>,
+    /// The peer's h4rn-connect machine id, needed to open a relay session.
+    pub machine_id: Option<String>,
+    /// Advertised relay base URL (`relay:<url>` without the prefix), when the
+    /// peer published one.
+    pub relay: Option<String>,
+    /// The peer daemon's connect device id. This is the value
+    /// `McpSharePolicy::allowed_devices` compares; it is registered as the
+    /// `Host` entry's device id.
+    pub device_id: Option<String>,
     /// Whether the peer is believed reachable. An offline peer is not dialled.
     pub online: bool,
 }
@@ -176,7 +186,11 @@ impl PeerDirectory {
                     );
                     continue;
                 }
-                devices.register_host(peer.host.clone(), peer.noise_public, None);
+                devices.register_host(
+                    peer.host.clone(),
+                    peer.noise_public,
+                    peer.device_id.clone(),
+                );
             }
             if let Some(service) = &service {
                 service.allow(peer.noise_public);
@@ -299,20 +313,17 @@ pub(crate) fn endpoint_urls(peer: &Peer) -> Vec<String> {
         .collect()
 }
 
-/// Opens an authenticated secure session to a peer's `/secure-mcp`, probing
-/// every candidate endpoint through the multipath engine.
-pub(crate) async fn establish(
-    urls: &[String],
-    identity: &DeviceIdentity,
-    daemon_public: [u8; KEY_LEN],
-) -> Result<Client, String> {
-    if urls.is_empty() {
-        return Err("the peer has no reachable endpoint".into());
-    }
-    let session_id: [u8; SESSION_ID_LEN] = rand::random();
-    let engine = EngineConfig::new(session_id, identity.clone(), daemon_public);
-    let paths = urls
-        .iter()
+/// Every candidate path to a peer, most preferred first.
+///
+/// Direct and tailnet sockets are probed in parallel by the engine, which
+/// ranks the relay last. The relay path is only built when both the peer's
+/// connect machine id and this daemon's shared relay socket are known.
+pub(crate) fn peer_paths(
+    peer: &Peer,
+    relay: Option<&Arc<RelayDialer>>,
+) -> Vec<ClientPath> {
+    let mut paths: Vec<ClientPath> = endpoint_urls(peer)
+        .into_iter()
         .map(|url| {
             let host = url
                 .trim_start_matches("ws://")
@@ -324,9 +335,32 @@ pub(crate) async fn establish(
             } else {
                 TransportPathKind::Direct
             };
-            ClientPath::websocket(kind, url.clone())
+            ClientPath::websocket(kind, url)
         })
         .collect();
+    if let (Some(dialer), Some(machine)) = (relay, peer.machine_id.as_deref()) {
+        let connector = Arc::new(PeerRelayConnector::new(Arc::clone(dialer), machine));
+        paths.push(ClientPath::relay(
+            connector,
+            peer.relay.clone().unwrap_or_else(|| "relay".into()),
+            None,
+        ));
+    }
+    paths
+}
+
+/// Opens an authenticated secure session to a peer's `/secure-mcp`, probing
+/// every candidate endpoint through the multipath engine.
+pub(crate) async fn establish(
+    paths: Vec<ClientPath>,
+    identity: &DeviceIdentity,
+    daemon_public: [u8; KEY_LEN],
+) -> Result<Client, String> {
+    if paths.is_empty() {
+        return Err("the peer has no reachable endpoint".into());
+    }
+    let session_id: [u8; SESSION_ID_LEN] = rand::random();
+    let engine = EngineConfig::new(session_id, identity.clone(), daemon_public);
     let mut client =
         Client::connect(ClientConfig::new(engine, paths)).map_err(|error| error.to_string())?;
     loop {
@@ -365,6 +399,9 @@ pub(crate) struct PeerLinks {
     peers: Arc<PeerDirectory>,
     identity: DeviceIdentity,
     local_host: HostId,
+    /// The daemon's shared relay socket, when h4rn-connect is configured.
+    /// Peer sessions are multiplexed over it as a fallback path.
+    relay: Option<Arc<RelayDialer>>,
 }
 
 /// A running per-peer task.
@@ -380,12 +417,14 @@ impl PeerLinks {
         peers: Arc<PeerDirectory>,
         identity: DeviceIdentity,
         local_host: HostId,
+        relay: Option<Arc<RelayDialer>>,
     ) -> Self {
         Self {
             hub,
             peers,
             identity,
             local_host,
+            relay,
         }
     }
 
@@ -429,6 +468,7 @@ impl PeerLinks {
                     Arc::clone(&self.hub),
                     self.identity.clone(),
                     self.local_host.clone(),
+                    self.relay.clone(),
                     stop_rx,
                 ));
                 tasks.insert(
@@ -458,13 +498,14 @@ async fn run_peer(
     hub: Arc<McpHub>,
     identity: DeviceIdentity,
     local_host: HostId,
+    relay: Option<Arc<RelayDialer>>,
     mut stop: watch::Receiver<bool>,
 ) {
     let registered: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
     let mut backoff = MIN_BACKOFF;
     loop {
         let outcome = tokio::select! {
-            outcome = follow(&peer, &hub, &identity, &local_host, &registered) => outcome,
+            outcome = follow(&peer, &hub, &identity, &local_host, &registered, relay.as_ref()) => outcome,
             _ = stop.changed() => Err(String::new()),
         };
         // A closed session or a stop both drop everything the peer granted;
@@ -493,9 +534,10 @@ async fn follow(
     identity: &DeviceIdentity,
     local_host: &HostId,
     registered: &Arc<Mutex<HashMap<String, String>>>,
+    relay: Option<&Arc<RelayDialer>>,
 ) -> Result<(), String> {
-    let urls = endpoint_urls(peer);
-    let mut client = establish(&urls, identity, peer.noise_public).await?;
+    let paths = peer_paths(peer, relay);
+    let mut client = establish(paths.clone(), identity, peer.noise_public).await?;
     client
         .send(AppFrame::text(
             json!({ "h4rn_mcp_grants": GRANTS_HANDSHAKE }).to_string(),
@@ -517,7 +559,7 @@ async fn follow(
                 let Ok(grants) = serde_json::from_value::<Vec<WireGrant>>(grants) else {
                     continue;
                 };
-                reconcile(peer, hub, identity, local_host, registered, &urls, &grants).await;
+                reconcile(peer, hub, identity, local_host, registered, &paths, &grants).await;
             }
             Some(ClientEvent::Closed { reason }) => return Err(reason.to_string()),
             Some(_) => {}
@@ -533,7 +575,7 @@ async fn reconcile(
     identity: &DeviceIdentity,
     local_host: &HostId,
     registered: &Arc<Mutex<HashMap<String, String>>>,
-    urls: &[String],
+    paths: &[ClientPath],
     grants: &[WireGrant],
 ) {
     let mut registered = registered.lock().await;
@@ -568,7 +610,7 @@ async fn reconcile(
         };
         let tunnel = AliasTunnel {
             inner: TransportMcpTunnel::new(TunnelConnection {
-                urls: urls.to_vec(),
+                paths: paths.to_vec(),
                 identity: identity.clone(),
                 daemon_public: peer.noise_public,
                 machine: local_host.clone(),
@@ -593,6 +635,9 @@ mod tests {
             name: host.into(),
             noise_public: [key; KEY_LEN],
             endpoints: vec!["10.0.0.2:7000".into(), "relay:https://c.example".into()],
+            machine_id: Some("machine_a".into()),
+            relay: Some("https://c.example".into()),
+            device_id: None,
             online: true,
         }
     }

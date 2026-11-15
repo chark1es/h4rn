@@ -28,8 +28,8 @@ use h4rn_daemon::threads::ThreadManagerOptions;
 use h4rn_harness::FakeHarness;
 use h4rn_protocol::{
     ClientFrame, ClientRequest, ConnectDeviceKind, DeviceId, DeviceInfo, HarnessKind,
-    PairingClaimRequest, ProtoError, RelayOpen, ResponseBody, RuntimeMode, ServerFrame,
-    TransportPathKind,
+    PairingClaimRequest, ProtoError, RelayOpen, RelayService, ResponseBody, RuntimeMode,
+    ServerFrame, TransportPathKind,
 };
 use h4rn_transport::client::{Client, ClientConfig, ClientEvent, ClientPath};
 use h4rn_transport::engine::EngineConfig;
@@ -198,6 +198,7 @@ struct ConnectRelayConnector {
     client: Arc<ConnectClient>,
     machine_id: String,
     device_id: String,
+    service: RelayService,
 }
 
 #[async_trait::async_trait]
@@ -219,6 +220,7 @@ impl RelayConnector for ConnectRelayConnector {
         let open = RelayOpen {
             machine_id: self.machine_id.clone(),
             device_id: Some(self.device_id.clone()),
+            service: self.service,
         };
         let payload = serde_json::to_vec(&open).map_err(|error| {
             RelayError::Malformed(Box::leak(error.to_string().into_boxed_str()))
@@ -802,6 +804,7 @@ async fn relay_pairing_failover_and_revocation() {
         client: Arc::clone(&client),
         machine_id: machine_id.clone(),
         device_id: client_device_id.clone(),
+        service: RelayService::Secure,
     });
 
     // Relay-only first: the relay is the only path the client knows about.

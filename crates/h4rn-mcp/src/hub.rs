@@ -159,6 +159,18 @@ pub enum HubEvent {
         /// Server name.
         server: String,
     },
+    /// A shared tool call is waiting for the owner's decision (ADR-037).
+    ShareApprovalRequested {
+        /// What the owner is asked to approve.
+        approval: h4rn_protocol::McpShareApproval,
+    },
+    /// A pending shared tool call was answered, expired or cancelled.
+    ShareApprovalResolved {
+        /// Approval that is no longer pending.
+        approval_id: String,
+        /// What happened to it.
+        decision: h4rn_protocol::ApprovalDecision,
+    },
 }
 
 /// Where a qualified tool lives.
@@ -342,6 +354,12 @@ impl McpHub {
     /// The upstream manager (diagnostics and sharing).
     pub fn upstreams(&self) -> Arc<UpstreamManager> {
         Arc::clone(&self.upstreams)
+    }
+
+    /// A sender for the hub's transient event stream. The daemon's approval
+    /// gate publishes through it so approval cards share the MCP forwarder.
+    pub fn event_sender(&self) -> broadcast::Sender<HubEvent> {
+        self.events.clone()
     }
 
     /// Subscribes to status and audit events.
@@ -1303,6 +1321,13 @@ impl McpHub {
                         .filter(|tool| tool.server == name)
                         .collect(),
                 })
+            }
+            // Share approvals live on the daemon's confirmation gate, not in
+            // the hub; `McpService::handle` answers these before dispatch.
+            McpRequest::PendingApprovals | McpRequest::RespondApproval { .. } => {
+                Err(HubError::Invalid(
+                    "share approvals are handled by the daemon".into(),
+                ))
             }
             McpRequest::TestCall {
                 name,

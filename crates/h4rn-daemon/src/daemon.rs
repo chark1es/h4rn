@@ -18,7 +18,7 @@ use crate::fs::FsService;
 use crate::harnesses::{HarnessCatalog, StaticHarnessCatalog};
 use crate::hosts::HostInventory;
 use crate::journal::{Journal, SqliteJournal};
-use crate::mcp::{McpService, default_confirmation_gate};
+use crate::mcp::McpService;
 use crate::remote::{
     ConnectClient, DeviceRegistry, RemoteState, TailscaleMode, advertised_addresses,
     pairing::read_direct_pairing,
@@ -320,10 +320,9 @@ impl DaemonBuilder {
             );
         }
 
-        let gate = self
-            .mcp_gate
-            .clone()
-            .unwrap_or_else(default_confirmation_gate);
+        // Without an injected gate the service installs its own approval gate,
+        // which raises a card and waits for the owner.
+        let gate = self.mcp_gate.clone();
         let mcp = match self.mcp {
             Some(mcp) => mcp,
             None => Arc::new(
@@ -378,6 +377,7 @@ impl DaemonBuilder {
             remote,
             devices,
             mcp,
+            relay_dialer: Arc::new(crate::remote::RelayDialer::new()),
             supervisor: self.supervisor,
             proxy,
             meter,
@@ -401,6 +401,8 @@ pub struct Daemon {
     remote: Option<Arc<RemoteState>>,
     devices: Arc<DeviceRegistry>,
     mcp: Arc<McpService>,
+    /// Multiplexes peer MCP sessions over the daemon's one relay socket.
+    relay_dialer: Arc<crate::remote::RelayDialer>,
     supervisor: Arc<ProcessSupervisor>,
     proxy: Arc<h4rn_proxy::ProxyService>,
     meter: Arc<h4rn_meter::MeterHub>,
@@ -506,7 +508,10 @@ impl Daemon {
         // With a secure transport this daemon can reach its peers' shared MCP
         // servers, authenticating as its own daemon key.
         if let Some(service) = &self.secure {
-            self.mcp.start_peering(service.options().identity.clone());
+            self.mcp.start_peering(
+                service.options().identity.clone(),
+                Some(Arc::clone(&self.relay_dialer)),
+            );
         }
 
         let hosts = Arc::clone(&self.hosts);
@@ -559,6 +564,7 @@ impl Daemon {
                 Arc::clone(service),
                 Arc::clone(&remote.client),
                 Arc::clone(&remote.devices),
+                Arc::clone(&self.relay_dialer),
             )));
             remote_tasks.push(tokio::spawn(publish_presence(
                 state.clone(),

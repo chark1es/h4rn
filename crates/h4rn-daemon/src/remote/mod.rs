@@ -11,6 +11,7 @@ pub mod connect;
 pub mod credentials;
 pub mod network;
 pub mod pairing;
+pub mod peer_relay;
 pub mod peers;
 pub mod registry;
 pub mod relay;
@@ -23,8 +24,9 @@ pub use connect::{ConnectClient, DeviceGrantSummary, LoginOutcome};
 pub use credentials::Credentials;
 pub use network::{advertised_addresses, local_ipv4};
 pub use pairing::{DirectPairingFile, render_qr};
+pub use peer_relay::PeerRelayConnector;
 pub use registry::{Authorization, ConnectEntry, DeviceRegistry, Provenance, Role};
-pub use relay::run_relay;
+pub use relay::{RelayDialer, run_relay};
 pub use tailscale::TailscaleMode;
 
 /// Which physical path a daemon session arrived on.

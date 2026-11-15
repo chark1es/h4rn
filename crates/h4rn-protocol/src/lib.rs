@@ -68,8 +68,8 @@ pub use ids::{
 pub use mcp::{
     McpCaller, McpConflictResolution, McpEnabledMatrix, McpHarnessToggle, McpImportCandidate,
     McpImportConflict, McpImportPreview, McpMachineToggle, McpRequest, McpSecretInput,
-    McpServerInput, McpServerStatusKind, McpServerView, McpSharePolicy, McpShareView,
-    McpTestCallResult, McpToolInfo, McpTransportInput, McpTransportView,
+    McpServerInput, McpServerStatusKind, McpServerView, McpShareApproval, McpSharePolicy,
+    McpShareView, McpTestCallResult, McpToolInfo, McpTransportInput, McpTransportView,
 };
 pub use proxy::*;
 pub use server::{Event, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame};

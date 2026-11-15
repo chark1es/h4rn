@@ -29,15 +29,15 @@ use h4rn_mcp::secrets::OpenSecretStore;
 use h4rn_mcp::server::McpServerState;
 use h4rn_mcp::session::McpScope;
 use h4rn_mcp::sharing::{
-    ConfirmationGate, DenyConfirmation, McpTunnel, ShareAudit, ShareAuthorizer, ShareCall,
-    ShareError, TunnelSession,
+    ApprovalGate, ConfirmationGate, McpTunnel, ShareAudit, ShareAuthorizer, ShareCall, ShareError,
+    TunnelSession,
 };
 use h4rn_mcp::upstream::{DEFAULT_TOOL_TIMEOUT, UpstreamError, UpstreamLimits};
 use h4rn_protocol::{
     ClientRequest, HarnessKind, HostId, McpRequest, ProtoError, ResponseBody, ThreadId,
 };
 use h4rn_transport::AppFrame;
-use h4rn_transport::client::{Client, ClientEvent};
+use h4rn_transport::client::{Client, ClientEvent, ClientPath};
 use h4rn_transport::keys::{DeviceIdentity, KEY_LEN};
 use h4rn_transport::server::{AcceptOutcome, Link, SecureService};
 use serde_json::{Value, json};
@@ -60,6 +60,9 @@ pub struct McpService {
     hub: Arc<McpHub>,
     state: McpServerState,
     authorizer: Arc<ShareAuthorizer>,
+    /// The gate that answers `PendingApprovals` / `RespondApproval`. It is the
+    /// same object the authorizer consults before running a confirmable tool.
+    gate: Arc<dyn ConfirmationGate>,
     audit: Arc<DaemonShareAudit>,
     endpoint: Arc<RwLock<Option<String>>>,
     background: std::sync::Mutex<Option<JoinHandle<()>>>,
@@ -84,7 +87,7 @@ impl McpService {
         config: &Config,
         local_host: HostId,
         remote_audit: Option<Arc<RemoteAudit>>,
-        gate: Arc<dyn ConfirmationGate>,
+        gate: Option<Arc<dyn ConfirmationGate>>,
     ) -> anyhow::Result<Self> {
         let registry: Arc<dyn RegistryStore> = Arc::new(
             SqliteRegistry::open(config.mcp_db_path())
@@ -114,9 +117,12 @@ impl McpService {
         let audit = Arc::new(DaemonShareAudit {
             remote: remote_audit,
         });
+        // The production gate raises real approval cards on this daemon. Tests
+        // and embedders may inject a fixed gate instead.
+        let gate = gate.unwrap_or_else(|| Arc::new(ApprovalGate::new(hub.event_sender())));
         let authorizer = Arc::new(ShareAuthorizer::new(
             registry,
-            gate,
+            Arc::clone(&gate),
             Arc::clone(&audit) as Arc<dyn ShareAudit>,
         ));
         let state = McpServerState::new(Arc::clone(&hub));
@@ -124,6 +130,7 @@ impl McpService {
             hub,
             state,
             authorizer,
+            gate,
             audit,
             endpoint: Arc::new(RwLock::new(None)),
             background: std::sync::Mutex::new(None),
@@ -153,7 +160,11 @@ impl McpService {
     /// Starts following peers' grants: for every online peer, mirror the
     /// servers it shared with this machine into the hub, authenticating the
     /// tunnels as this daemon's own `identity`. Idempotent.
-    pub fn start_peering(&self, identity: DeviceIdentity) {
+    pub fn start_peering(
+        &self,
+        identity: DeviceIdentity,
+        relay: Option<Arc<crate::remote::RelayDialer>>,
+    ) {
         let mut peering = self
             .peering
             .lock()
@@ -166,6 +177,7 @@ impl McpService {
             Arc::clone(&self.peers),
             identity,
             self.hub.local_host().clone(),
+            relay,
         );
         let (stop, stopped) = tokio::sync::watch::channel(false);
         *peering = Some((stop, tokio::spawn(links.run(stopped))));
@@ -217,12 +229,30 @@ impl McpService {
         {
             handle.abort();
         }
+        // A waiting remote call must not outlive the daemon: deny everything
+        // still pending before the hub goes away.
+        self.gate.cancel_all();
         self.hub.shutdown().await;
     }
 
     /// Maps one UI MCP request onto the hub and the protocol response shape.
     pub async fn handle(&self, request: McpRequest) -> Result<ResponseBody, ProtoError> {
         match request {
+            McpRequest::PendingApprovals => Ok(ResponseBody::McpApprovals {
+                approvals: self.gate.pending(),
+            }),
+            McpRequest::RespondApproval {
+                approval_id,
+                decision,
+            } => {
+                if !self.gate.respond(&approval_id, decision) {
+                    return Err(ProtoError::plain(
+                        h4rn_protocol::ProtoErrorCode::NotFound,
+                        format!("approval {approval_id} is no longer pending"),
+                    ));
+                }
+                Ok(ResponseBody::Ack)
+            }
             McpRequest::Upsert { input } => self
                 .hub
                 .upsert(input)
@@ -734,15 +764,6 @@ pub async fn http_delete(state: McpServerState, headers: HeaderMap) -> Response 
     state.handle_delete(headers).await
 }
 
-/// Confirmation policy for shared tool calls.
-///
-/// The daemon defaults to denying every confirmation: a remote call that the
-/// policy marks as needing approval fails until the user has given one. Tests
-/// and explicit "always allow" grants inject an allowing gate.
-pub fn default_confirmation_gate() -> Arc<dyn ConfirmationGate> {
-    Arc::new(DenyConfirmation)
-}
-
 /// Re-exported for callers that build a tunnel to another daemon.
 pub use tunnel::{TransportMcpTunnel, TunnelConnection};
 
@@ -753,9 +774,9 @@ mod tunnel {
     /// Everything needed to dial another daemon's `/secure-mcp` route.
     #[derive(Clone)]
     pub struct TunnelConnection {
-        /// `ws://host:port/secure-mcp` candidates on the owning daemon (LAN,
-        /// tailnet), probed in parallel by the multipath engine.
-        pub urls: Vec<String>,
+        /// Candidate paths to the owning daemon (LAN, tailnet, relay), probed
+        /// by the multipath engine with the relay ranked last.
+        pub paths: Vec<ClientPath>,
         /// This daemon's transport identity. The owner authenticates the
         /// tunnel by this key.
         pub identity: DeviceIdentity,
@@ -783,7 +804,7 @@ mod tunnel {
     impl McpTunnel for TransportMcpTunnel {
         async fn open(&self, server: &str) -> Result<Arc<dyn TunnelSession>, UpstreamError> {
             let client = crate::mcp_peers::establish(
-                &self.connection.urls,
+                self.connection.paths.clone(),
                 &self.connection.identity,
                 self.connection.daemon_public,
             )

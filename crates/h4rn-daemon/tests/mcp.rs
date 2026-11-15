@@ -25,6 +25,7 @@ use h4rn_harness::FakeHarness;
 use h4rn_mcp::session::McpScope;
 use h4rn_mcp::sharing::McpTunnel as _;
 use h4rn_protocol::HostId;
+use h4rn_protocol::TransportPathKind;
 use h4rn_protocol::{
     ClientFrame, ClientRequest, DeviceId, DeviceInfo, Event, HarnessKind, McpConflictResolution,
     McpEnabledMatrix, McpRequest, McpSecretInput, McpServerInput, McpSharePolicy,
@@ -563,7 +564,10 @@ async fn a_remote_hub_proxies_a_shared_server_over_the_secure_tunnel() {
 
     // B proxies it through the encrypted tunnel.
     let tunnel = TransportMcpTunnel::new(TunnelConnection {
-        urls: vec![format!("ws://{}/secure-mcp", a.addr)],
+        paths: vec![h4rn_transport::client::ClientPath::websocket(
+            TransportPathKind::Direct,
+            format!("ws://{}/secure-mcp", a.addr),
+        )],
         identity: b_identity,
         daemon_public: a_secure.public_identity().noise_public,
         machine: b_host.clone(),
@@ -674,7 +678,10 @@ async fn tunnel_rig(
         .await
         .expect("share");
     let tunnel = TransportMcpTunnel::new(TunnelConnection {
-        urls: vec![format!("ws://{}/secure-mcp", a.addr)],
+        paths: vec![h4rn_transport::client::ClientPath::websocket(
+            TransportPathKind::Direct,
+            format!("ws://{}/secure-mcp", a.addr),
+        )],
         identity: b_identity.clone(),
         daemon_public: a_secure.public_identity().noise_public,
         machine: HostId::new(claimed_machine.unwrap_or("host_b")),

@@ -21,7 +21,7 @@ use chrono::Utc;
 use futures::{SinkExt as _, StreamExt as _};
 use h4rn_protocol::{
     ConnectDevice, ConnectErrorBody, PresenceUpdate, RelayFrame, RelayFrameKind, RelayOpen,
-    RelayServerEvent,
+    RelayServerEvent, RelayService,
 };
 use serde::Deserialize;
 use tokio::sync::{RwLock, mpsc};
@@ -561,29 +561,62 @@ async fn dispatch(state: &AppState, authed: &Authed, mut frame: RelayFrame) -> R
                 .await
         }
         RelayFrameKind::Open => {
-            if authed.device.kind == "daemon" {
-                return Err(AppError::forbidden(
-                    "open_forbidden",
-                    "only a client device may open a relay session",
-                ));
-            }
             let open: RelayOpen = serde_json::from_slice(&frame.payload).map_err(|_| {
                 AppError::bad_request("open_invalid", "the open payload must be RelayOpen JSON")
             })?;
             let machine_id = Uuid::parse_str(&open.machine_id).map_err(|_| {
                 AppError::bad_request("machine_invalid", "machine_id is not a UUID")
             })?;
-            let allowed = state
-                .store
-                .device_may_reach(authed.user.id, authed.device.id, machine_id)
-                .await?;
-            if !allowed {
-                return Err(AppError::forbidden(
-                    "machine_forbidden",
-                    "this device is not paired with the machine",
-                ));
+            let is_daemon = authed.device.kind == "daemon";
+            match (is_daemon, open.service) {
+                (true, RelayService::Secure) => {
+                    return Err(AppError::forbidden(
+                        "open_forbidden",
+                        "a daemon may only open a peer MCP relay session",
+                    ));
+                }
+                (false, RelayService::SecureMcp) => {
+                    // `/secure-mcp` admits peer daemon keys only. Letting a
+                    // user device open it would still fail its handshake, but
+                    // rejecting the route here keeps the relay's guarantees
+                    // explicit.
+                    return Err(AppError::forbidden(
+                        "open_forbidden",
+                        "only a daemon may open the peer MCP relay service",
+                    ));
+                }
+                _ => {}
             }
             let machine = state.store.machine(machine_id).await?;
+            if is_daemon {
+                // Cross-machine sharing is between two machines of the same
+                // account. The owner's `/secure-mcp` still authorises the
+                // caller by its registered peer key, so this relay check only
+                // narrows who may ask.
+                if machine.user_id != authed.user.id {
+                    return Err(AppError::forbidden(
+                        "machine_forbidden",
+                        "the machine belongs to another account",
+                    ));
+                }
+                if authed.device.machine_id == Some(machine_id) {
+                    return Err(AppError::forbidden(
+                        "machine_forbidden",
+                        "a daemon may not open a peer session to its own machine",
+                    ));
+                }
+            } else {
+                let allowed = state
+                    .store
+                    .device_may_reach(authed.user.id, authed.device.id, machine_id)
+                    .await?;
+                if !allowed {
+                    return Err(AppError::forbidden(
+                        "machine_forbidden",
+                        "this device is not paired with the machine",
+                    ));
+                }
+            }
             let daemon_device_id = machine.daemon_device_id.ok_or_else(|| {
                 AppError::unavailable("daemon_missing", "the machine has no daemon")
             })?;
@@ -597,6 +630,7 @@ async fn dispatch(state: &AppState, authed: &Authed, mut frame: RelayFrame) -> R
             let forwarded = RelayOpen {
                 machine_id: machine_id.to_string(),
                 device_id: Some(authed.device.id.to_string()),
+                service: open.service,
             };
             frame.payload = serde_json::to_vec(&forwarded)
                 .map_err(|_| AppError::internal("serialise RelayOpen"))?;
@@ -622,7 +656,10 @@ async fn dispatch(state: &AppState, authed: &Authed, mut frame: RelayFrame) -> R
                     "relay.opened",
                     Some("machine"),
                     Some(&machine_id.to_string()),
-                    serde_json::json!({"conn_id": conn_id}),
+                    serde_json::json!({
+                        "conn_id": conn_id,
+                        "service": open.service.as_str(),
+                    }),
                 )
                 .await
                 .ok();

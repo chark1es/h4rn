@@ -412,6 +412,11 @@ pub enum ResponseBody {
         /// Flattened result.
         result: crate::mcp::McpTestCallResult,
     },
+    /// Remote tool calls waiting for the owner's decision (ADR-037).
+    McpApprovals {
+        /// Pending requests, oldest first.
+        approvals: Vec<crate::mcp::McpShareApproval>,
+    },
     /// Aggregated usage from the durable ledger.
     UsageReport {
         /// The report.
@@ -767,6 +772,25 @@ pub enum Event {
         error: Option<String>,
         /// When the call returned.
         at: DateTime<Utc>,
+    },
+    /// A shared MCP tool call is waiting for the owner's decision (ADR-037).
+    ///
+    /// Transient: the pending set is re-read with
+    /// [`crate::mcp::McpRequest::PendingApprovals`] after a reconnect. The call
+    /// fails closed when the approval expires or is cancelled.
+    McpShareApprovalRequested {
+        /// What the owner is asked to approve.
+        approval: crate::mcp::McpShareApproval,
+    },
+    /// A pending shared MCP tool call was answered or expired.
+    ///
+    /// Transient for the same reason as
+    /// [`Event::McpShareApprovalRequested`].
+    McpShareApprovalResolved {
+        /// Approval that is no longer pending.
+        approval_id: String,
+        /// What happened to it.
+        decision: crate::ApprovalDecision,
     },
     /// A parent thread spawned a subagent (ADR-039).
     ///

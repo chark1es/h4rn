@@ -60,6 +60,13 @@ async fn refresh(client: &ConnectClient) -> anyhow::Result<Vec<Peer>> {
         let Some(machine) = machines.iter().find(|machine| machine.id == machine_id) else {
             continue;
         };
+        // The relay base URL is advertised as `relay:<url>`; the daemon's own
+        // authenticated socket is the transport, so keep only the marker's
+        // value. Direct and tailnet endpoints stay separate candidates.
+        let relay = machine
+            .addresses
+            .iter()
+            .find_map(|address| address.strip_prefix("relay:").map(str::to_owned));
         peers.push(Peer {
             host: primary_host(machine),
             name: machine.name.clone(),
@@ -70,6 +77,9 @@ async fn refresh(client: &ConnectClient) -> anyhow::Result<Vec<Peer>> {
                 .filter(|address| !address.starts_with("relay:"))
                 .cloned()
                 .collect(),
+            machine_id: Some(machine_id),
+            relay,
+            device_id: Some(device.id.clone()),
             online: machine.online,
         });
     }
