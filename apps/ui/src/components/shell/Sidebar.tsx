@@ -28,6 +28,11 @@ import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { KeyCaps, MOD, SHIFT } from "@/components/common/Kbd";
 import { ThreadRow } from "@/components/inbox/ThreadRow";
+import {
+  harnessUpdateCount,
+  useHarnesses,
+  useHarnessVersions,
+} from "@/features/harnesses/harnessStore";
 import { serverStatus } from "@/features/mcp/labels";
 import { loadMcpServers, pendingMcpApprovals, useMcp } from "@/features/mcp/store";
 import { activateMachine, forgetMachine, useRemote } from "@/features/remote/remoteStore";
@@ -897,6 +902,8 @@ function SettingsSidebar() {
   const skills = skillInventory?.skills ?? NO_SKILLS;
   const daemonHost = useApp((state) => state.localHostId);
   const deviceCount = useRemote((state) => state.devices.length);
+  useHarnessVersions();
+  const harnessUpdates = useHarnesses(harnessUpdateCount);
   // The Tools group shows counts for both halves, so read them once the daemon
   // has reported its host rather than leaving a misleading zero.
   useEffect(() => {
@@ -969,6 +976,11 @@ function SettingsSidebar() {
               >
                 <item.icon className="q-icon" strokeWidth={1.5} aria-hidden />
                 <span className="lbl">{item.label}</span>
+                {item.key === "harnesses" && harnessUpdates > 0 ? (
+                  <span className="ct q-num" title="Harness updates available">
+                    {harnessUpdates}
+                  </span>
+                ) : null}
                 {item.key === "hosts" || item.key === "devices" ? (
                   <span className="ct q-num">
                     {item.key === "hosts" ? rows.length : deviceCount}

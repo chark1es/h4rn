@@ -2,8 +2,10 @@ import type * as React from "react";
 
 import { ENTER, KeyGlyphs, MOD, SHIFT } from "@/components/common/Kbd";
 import { ForgeSettings } from "@/features/forge/ForgeSettings";
+import { HarnessSettings } from "@/features/harnesses/HarnessSettings";
 import { ProxySettings } from "@/features/proxy/ProxySettings";
 import { LiveAccountForm, LiveDevicesForm, LiveHostsForm } from "@/features/remote/SettingsRemote";
+import { AboutSettings } from "@/features/updates/AboutSettings";
 import { AutoResumeSettings } from "@/features/usage/AutoResumeSettings";
 
 function Toggle({ checked, label }: { checked: boolean; label: string }) {
@@ -44,20 +46,9 @@ function GeneralForm() {
           </div>
         </div>
       </div>
+      <AboutSettings />
       <div className="q-group">
         <h2>Daemon</h2>
-        <div className="q-field">
-          <div className="lab">
-            <div className="t">Version</div>
-          </div>
-          <div className="ctl">
-            <span className="q-mono q-muted">0.10.2</span>
-            <span style={{ flex: 1 }} />
-            <button type="button" className="q-btn secondary">
-              Check for updates
-            </button>
-          </div>
-        </div>
         <div className="q-field">
           <div className="lab">
             <div className="t">Data directory</div>
@@ -192,6 +183,7 @@ const FORMS: Record<string, () => React.ReactNode> = {
   hosts: LiveHostsForm,
   devices: LiveDevicesForm,
   providers: ProxySettings,
+  harnesses: HarnessSettings,
   resume: AutoResumeSettings,
   forges: ForgeSettings,
   general: GeneralForm,

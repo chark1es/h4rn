@@ -8,6 +8,7 @@ import {
   SettingsIcon,
   SmartphoneIcon,
   SunIcon,
+  TerminalIcon,
   TimerIcon,
   UserIcon,
 } from "lucide-react";
@@ -27,6 +28,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
   { key: "hosts", label: "Hosts", icon: ServerIcon, group: "Machines" },
   { key: "devices", label: "Devices", icon: SmartphoneIcon, group: "Machines" },
   { key: "providers", label: "Providers", icon: LayersIcon, group: "Machines" },
+  { key: "harnesses", label: "Harnesses", icon: TerminalIcon, group: "Machines" },
   { key: "resume", label: "Auto-resume", icon: TimerIcon, group: "Machines" },
   { key: "forges", label: "Forges", icon: GitPullRequestIcon, group: "Machines" },
   { key: "account", label: "Account & relay", icon: UserIcon, group: "Account" },

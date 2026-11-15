@@ -35,6 +35,7 @@ import {
   useProxy,
   useProxyCatalog,
 } from "@/features/proxy/proxyStore";
+import { AppUpdateNotice } from "@/features/updates/AppUpdateNotice";
 import { UsagePage } from "@/features/usage/UsagePage";
 import type { HarnessKind } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
@@ -482,6 +483,7 @@ export function AppShell() {
     return (
       <div className="q-app q-ph" style={{ flexDirection: "column", height: "100%", minHeight: 0 }}>
         {surface ? <OfflineBanner /> : null}
+        <AppUpdateNotice inline />
         <McpApprovalCard />
         <div
           className="q-ph-content"
@@ -520,6 +522,7 @@ export function AppShell() {
       {layout.sidebarOpen ? <Sidebar /> : null}
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
         {surface ? <OfflineBanner /> : null}
+        <AppUpdateNotice />
         <McpApprovalCard />
         <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
           {main}
