@@ -47,6 +47,8 @@ pub struct DaemonBuilder {
     subagent_options: SubagentOptions,
     devices: Option<Arc<DeviceRegistry>>,
     local_host: Option<(h4rn_protocol::HostId, String)>,
+    harness_registry: Option<Arc<dyn h4rn_harness::RegistryClient>>,
+    update_runner: Option<Arc<dyn h4rn_harness::UpdateRunner>>,
 }
 
 impl DaemonBuilder {
@@ -65,6 +67,8 @@ impl DaemonBuilder {
             subagent_options: SubagentOptions::default(),
             devices: None,
             local_host: None,
+            harness_registry: None,
+            update_runner: None,
         }
     }
 
@@ -103,6 +107,21 @@ impl DaemonBuilder {
     /// this registry alone.
     pub fn with_devices(mut self, devices: Arc<DeviceRegistry>) -> Self {
         self.devices = Some(devices);
+        self
+    }
+
+    /// Replaces the npm registry client behind harness version checks.
+    pub fn with_harness_registry(
+        mut self,
+        registry: Arc<dyn h4rn_harness::RegistryClient>,
+    ) -> Self {
+        self.harness_registry = Some(registry);
+        self
+    }
+
+    /// Replaces the process runner behind harness updates.
+    pub fn with_update_runner(mut self, runner: Arc<dyn h4rn_harness::UpdateRunner>) -> Self {
+        self.update_runner = Some(runner);
         self
     }
 
@@ -395,8 +414,10 @@ impl DaemonBuilder {
 
         let harness_versions = Arc::new(crate::harness_versions::HarnessVersionService::new(
             Arc::clone(&catalog),
-            Arc::new(h4rn_harness::NpmRegistry::new()),
-            Arc::new(h4rn_harness::ProcessUpdateRunner),
+            self.harness_registry
+                .unwrap_or_else(|| Arc::new(h4rn_harness::NpmRegistry::new())),
+            self.update_runner
+                .unwrap_or_else(|| Arc::new(h4rn_harness::ProcessUpdateRunner)),
             Arc::clone(&manager) as Arc<dyn crate::harness_versions::TurnBusy>,
         ));
 
