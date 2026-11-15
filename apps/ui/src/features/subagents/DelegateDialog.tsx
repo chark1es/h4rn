@@ -14,6 +14,7 @@ import { Textarea } from "@/components/ui/textarea";
 import type { HarnessKind, HostId, SubagentIsolation, ThreadSummary } from "@/gen";
 import { HARNESS_LABELS, HARNESS_SLUGS } from "@/lib/entities";
 import { useApp } from "@/lib/store/appStore";
+import { localOnlyHostOptions } from "@/lib/thread-hosts";
 
 import { closeDelegate, spawnSubagent, useSubagentStore } from "./subagentStore";
 
@@ -126,15 +127,10 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
               value={host}
               placeholder="No online hosts"
               width={160}
-              options={onlineHosts.map((option) =>
-                option.host_id === thread.host
-                  ? { value: option.host_id, label: option.name }
-                  : {
-                      value: option.host_id,
-                      label: option.name,
-                      disabled: true,
-                      hint: "Not yet: delegation runs on this thread's host",
-                    },
+              options={localOnlyHostOptions(
+                onlineHosts,
+                thread.host,
+                "Not yet: delegation runs on this thread's host",
               )}
               onChange={(next) => {
                 setHost(next);

@@ -29,6 +29,7 @@ import type { HarnessKind, HostId, RuntimeMode } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { HARNESS_LABELS, HARNESS_SLUGS } from "@/lib/entities";
 import { closeNewThread, createThread, useApp } from "@/lib/store/appStore";
+import { defaultThreadHostId, localOnlyHostOptions } from "@/lib/thread-hosts";
 import { cn } from "@/lib/utils";
 
 const DEFAULT_MODELS: Record<HarnessKind, string> = {
@@ -87,8 +88,10 @@ export function NewThreadDialog() {
     if (!open) return;
     // A new thread can only run on this daemon's host for now; prefer it even
     // when another online host sorts first.
-    const first =
-      onlineHosts.find((candidate) => candidate.host_id === localHostId) ?? onlineHosts[0];
+    const firstId = defaultThreadHostId(onlineHosts, localHostId);
+    const first = firstId
+      ? onlineHosts.find((candidate) => candidate.host_id === firstId)
+      : undefined;
     if (first) {
       setHost(first.host_id);
       const nextHarness = first.harnesses[0] ?? "claude_code";
@@ -176,15 +179,10 @@ export function NewThreadDialog() {
               label="Host"
               placeholder="No online hosts"
               value={host}
-              options={onlineHosts.map((option) =>
-                localHostId === null || option.host_id === localHostId
-                  ? { value: option.host_id, label: option.name }
-                  : {
-                      value: option.host_id,
-                      label: option.name,
-                      disabled: true,
-                      hint: "Not yet: new threads run on this host",
-                    },
+              options={localOnlyHostOptions(
+                onlineHosts,
+                localHostId,
+                "Not yet: new threads run on this host",
               )}
               onChange={(value) => {
                 const nextHost = hosts[value];

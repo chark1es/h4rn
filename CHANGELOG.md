@@ -28,8 +28,8 @@ All notable changes to h4rn are recorded here. The format follows
   lock for the I/O, and re-checks `closed`/`active` before mutating.
 - **Docs and UI stop implying two unimplemented paths (G5).** README no longer claims a Phase 1a
   scaffold, the stale protocol comments are corrected, ADR-022 records that only subagent
-  worktrees ship, and the New-thread/Delegate dialogs disable other hosts with the reason that a
-  new thread and a subagent both run on the daemon's host.
+  worktrees ship, and the New-thread dialog, the inbox composer and the Delegate dialog disable
+  other hosts with the reason that a new thread and a subagent both run on the daemon's host.
 
 ### Council round 1: authorization, transport and pairing
 

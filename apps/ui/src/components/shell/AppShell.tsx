@@ -39,6 +39,7 @@ import { useIsPhone } from "@/hooks/use-media-query";
 import { useViewportWidth } from "@/hooks/use-viewport-width";
 import { HARNESS_LABELS, harnessLabel, harnessSeed, machineSeed } from "@/lib/entities";
 import { createThread, navigate, panelFits, useApp } from "@/lib/store/appStore";
+import { defaultThreadHostId, localOnlyHostOptions } from "@/lib/thread-hosts";
 import { activeThread } from "@/lib/thread-selection";
 
 const START_MODELS: Record<HarnessKind, string> = {
@@ -52,6 +53,7 @@ const HARNESSES: HarnessKind[] = ["claude_code", "codex", "opencode", "antigravi
 
 function InboxDetailEmpty() {
   const hosts = useApp((state) => state.hosts);
+  const localHostId = useApp((state) => state.localHostId);
   const connection = useApp((state) => state.connection.status);
   const onlineHosts = useMemo(
     () =>
@@ -59,6 +61,10 @@ function InboxDetailEmpty() {
         .filter((host) => host.online)
         .sort((a, b) => a.name.localeCompare(b.name)),
     [hosts],
+  );
+  const hostOptions = useMemo(
+    () => localOnlyHostOptions(onlineHosts, localHostId, "Not yet: new threads run on this host"),
+    [onlineHosts, localHostId],
   );
   const [host, setHost] = useState("");
   const [harness, setHarness] = useState<HarnessKind>("claude_code");
@@ -72,8 +78,8 @@ function InboxDetailEmpty() {
 
   useEffect(() => {
     if (host || onlineHosts.length === 0) return;
-    setHost(onlineHosts[0]?.host_id ?? "");
-  }, [host, onlineHosts]);
+    setHost(defaultThreadHostId(onlineHosts, localHostId) ?? "");
+  }, [host, onlineHosts, localHostId]);
 
   const selectedHost = hosts[host];
   const harnessChoices = selectedHost?.harnesses.length ? selectedHost.harnesses : HARNESSES;
@@ -181,21 +187,28 @@ function InboxDetailEmpty() {
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" className="w-52">
                 <DropdownMenuLabel>Host</DropdownMenuLabel>
-                {onlineHosts.length === 0 ? (
+                {hostOptions.length === 0 ? (
                   <DropdownMenuItem disabled>No online hosts</DropdownMenuItem>
                 ) : (
-                  onlineHosts.map((option) => (
+                  hostOptions.map((option) => (
                     <DropdownMenuItem
-                      key={option.host_id}
-                      onSelect={() => pickHost(option.host_id)}
+                      key={option.value}
+                      disabled={option.disabled}
+                      title={option.hint}
+                      onSelect={() => pickHost(option.value)}
                     >
                       <EntityAvatar
-                        seed={machineSeed(option.host_id)}
+                        seed={machineSeed(option.value)}
                         kind="machine"
-                        label={option.name}
+                        label={option.label}
                         size={16}
                       />
-                      {option.name}
+                      <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                      {option.hint ? (
+                        <span className="ml-2 shrink-0 text-[11px] text-[var(--fg-3)]">
+                          Not yet
+                        </span>
+                      ) : null}
                     </DropdownMenuItem>
                   ))
                 )}
