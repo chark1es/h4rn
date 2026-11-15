@@ -34,6 +34,7 @@ mod fake;
 mod opencode;
 pub mod registry;
 pub mod stats;
+pub mod versions;
 
 pub use antigravity::{
     AgyStreamParser, AntigravityHarness, ENV_AGY_MODE, ENV_AGY_PATH, ENV_AGY_TRANSPORT,
@@ -61,6 +62,11 @@ pub use opencode::{
     provider_config,
 };
 pub use registry::{HarnessRegistry, builtin_adapters};
+pub use versions::{
+    NpmRegistry, ProcessUpdateRunner, RegistryClient, UpdateLine, UpdateRunner,
+    detect_update_method, is_newer, npm_package, parse_registry_latest, parse_version,
+    self_update_args, update_command,
+};
 
 /// A detected harness installation on this host.
 #[derive(Clone, Debug, PartialEq, Eq)]

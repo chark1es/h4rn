@@ -261,7 +261,8 @@ impl Client {
                 ServerFrame::Response { .. }
                 | ServerFrame::TerminalEvent { .. }
                 | ServerFrame::ProxyEvent { .. }
-                | ServerFrame::UsageEvent { .. } => {}
+                | ServerFrame::UsageEvent { .. }
+                | ServerFrame::HarnessEvent { .. } => {}
             }
         }
     }

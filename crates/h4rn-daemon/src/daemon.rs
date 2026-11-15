@@ -393,8 +393,16 @@ impl DaemonBuilder {
             .register_provider(Arc::new(SubagentProvider::new(Arc::clone(&subagents))));
         subagents.start();
 
+        let harness_versions = Arc::new(crate::harness_versions::HarnessVersionService::new(
+            Arc::clone(&catalog),
+            Arc::new(h4rn_harness::NpmRegistry::new()),
+            Arc::new(h4rn_harness::ProcessUpdateRunner),
+            Arc::clone(&manager) as Arc<dyn crate::harness_versions::TurnBusy>,
+        ));
+
         Ok(Daemon {
             config: self.config,
+            harness_versions,
             manager,
             subagents,
             hosts,
@@ -437,6 +445,7 @@ pub struct Daemon {
     supervisor: Arc<ProcessSupervisor>,
     proxy: Arc<h4rn_proxy::ProxyService>,
     meter: Arc<h4rn_meter::MeterHub>,
+    harness_versions: Arc<crate::harness_versions::HarnessVersionService>,
 }
 
 impl Daemon {
@@ -568,6 +577,7 @@ impl Daemon {
             started: std::time::Instant::now(),
             proxy: Arc::clone(&self.proxy),
             meter: Arc::clone(&self.meter),
+            harness_versions: Arc::clone(&self.harness_versions),
         };
 
         let mut remote_tasks = Vec::new();
