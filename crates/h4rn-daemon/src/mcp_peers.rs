@@ -26,6 +26,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -85,6 +86,9 @@ pub struct PeerDirectory {
     secure: RwLock<Option<Arc<SecureService>>>,
     devices: RwLock<Option<Arc<DeviceRegistry>>>,
     version: watch::Sender<u64>,
+    /// Whether a source has reported the authoritative peer set at least once.
+    /// Until then an empty directory is "not loaded yet", not "no peers".
+    reconciled: AtomicBool,
 }
 
 impl Default for PeerDirectory {
@@ -101,6 +105,7 @@ impl PeerDirectory {
             secure: RwLock::new(None),
             devices: RwLock::new(None),
             version: watch::channel(0).0,
+            reconciled: AtomicBool::new(false),
         }
     }
 
@@ -138,7 +143,10 @@ impl PeerDirectory {
             }
         }
         let after = self.peers();
-        if before == after {
+        // A source has now reported: its union is authoritative even when
+        // empty, so persisted hosts absent from it are revoked on this pass.
+        let first = !self.reconciled.swap(true, Ordering::SeqCst);
+        if before == after && !first {
             return;
         }
         self.apply(&before, &after);
@@ -158,6 +166,29 @@ impl PeerDirectory {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
+        // Reconcile the *persisted* peer entries too, not just the previous
+        // in-memory set. After a restart the directory starts empty, so the
+        // before/after diff would otherwise keep a revoked peer's key allowed
+        // forever. Only a source report makes this authoritative: until then
+        // the directory is still loading.
+        if self.reconciled.load(Ordering::SeqCst)
+            && let Some(devices) = &devices
+        {
+            for key in devices.connect_host_keys() {
+                if after.iter().any(|peer| peer.noise_public == key) {
+                    continue;
+                }
+                if devices.remove_key(&key) {
+                    if let Some(service) = &service {
+                        service.revoke(key);
+                    }
+                    tracing::info!(
+                        key = %hex::encode(key),
+                        "revoked a peer daemon missing from the connect peer set"
+                    );
+                }
+            }
+        }
         for peer in after {
             let known = before.iter().any(|old| old == peer);
             if known {
@@ -638,6 +669,58 @@ mod tests {
             devices.authorization(&[1; KEY_LEN]).is_some(),
             "removing a peer must not delete a client entry"
         );
+    }
+
+    #[test]
+    fn a_client_insert_never_overwrites_a_peer_daemon_entry() {
+        // Regression for E6: a key that is a peer daemon must stay a host.
+        // Re-roling it into a client breaks the MCP tunnel authorisation.
+        let devices = DeviceRegistry::in_memory();
+        devices.register_host(HostId::new("host_a"), [1; KEY_LEN], None);
+        devices.insert_scoped("phone", [1; KEY_LEN], vec![h4rn_protocol::PairScope::View]);
+        let auth = devices
+            .authorization(&[1; KEY_LEN])
+            .expect("still registered");
+        assert_eq!(auth.role, Role::Host);
+        assert!(auth.scopes.is_empty(), "a host holds no client scopes");
+    }
+
+    #[test]
+    fn a_revoked_peer_does_not_survive_a_restart() {
+        // Regression for E5: the previous directory is in memory, so after a
+        // restart the before/after diff keeps the persisted host entry. The
+        // first authoritative peer report must remove and revoke it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("devices.json");
+        {
+            let devices = DeviceRegistry::open(&path);
+            devices.register_host(HostId::new("host_a"), [1; KEY_LEN], None);
+            devices.register_host(HostId::new("host_gone"), [2; KEY_LEN], None);
+        }
+        let devices = Arc::new(DeviceRegistry::open(&path));
+        assert!(devices.authorization(&[2; KEY_LEN]).is_some());
+        let service = Arc::new(SecureService::new(
+            h4rn_transport::server::SecureOptions::new(
+                DeviceIdentity::generate().expect("identity"),
+            )
+            .with_policy(h4rn_transport::server_session::PairingPolicy::new([
+                [1; KEY_LEN],
+                [2; KEY_LEN],
+            ])),
+        ));
+        let directory = PeerDirectory::new();
+        directory.attach_devices(Arc::clone(&devices));
+        directory.attach_secure(Arc::clone(&service));
+        // Nothing has reported yet: startup must not wipe the persisted hosts
+        // before connect has had a chance to answer.
+        assert!(devices.authorization(&[2; KEY_LEN]).is_some());
+        directory.replace_source("connect", vec![peer("host_a", 1)]);
+        assert!(devices.authorization(&[1; KEY_LEN]).is_some());
+        assert!(
+            devices.authorization(&[2; KEY_LEN]).is_none(),
+            "a revoked peer daemon survived the restart"
+        );
+        assert!(!service.is_allowed(&[2; KEY_LEN]));
     }
 
     #[test]

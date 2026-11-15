@@ -419,8 +419,22 @@ struct Connection {
 }
 
 impl Connection {
+    /// The device id used for ownership and audit.
+    ///
+    /// A remote session's `Hello` is a claim. The identity comes from the key
+    /// the Noise handshake authenticated: the registry's connect id for that
+    /// key, or the key itself when the pairing has no connect id (a direct
+    /// LAN/tailnet pairing). A loopback session keeps its `Hello` identity.
     fn device_id(&self) -> Option<DeviceId> {
-        self.device.as_ref().map(|device| device.device_id.clone())
+        if self.origin.is_remote() {
+            self.origin
+                .device_id
+                .clone()
+                .or_else(|| self.origin.device_key.map(hex::encode))
+                .map(DeviceId::new)
+        } else {
+            self.device.as_ref().map(|device| device.device_id.clone())
+        }
     }
 
     /// Records one remote action, if this session came from another device.
@@ -634,6 +648,43 @@ impl Connection {
                 ClientRequest::PairingConfirmations => Ok(ResponseBody::PairingConfirmations {
                     confirmations: self.state.devices.pending_confirmations(),
                 }),
+                ClientRequest::ConfirmPairing { device_id, confirm } => {
+                    let decided = self
+                        .state
+                        .devices
+                        .decide_pending(device_id.as_str(), confirm);
+                    match decided {
+                        Some((key, true)) => {
+                            if let Some(service) = &self.state.secure {
+                                service.allow(key);
+                            }
+                            self.audit(
+                                "pairing.confirmed",
+                                Some("device"),
+                                Some(device_id.as_str()),
+                                json!({"key": hex::encode(key)}),
+                            );
+                            Ok(ResponseBody::Ack)
+                        }
+                        Some((key, false)) => {
+                            if let Some(service) = &self.state.secure {
+                                service.revoke(key);
+                            }
+                            self.audit(
+                                "pairing.rejected",
+                                Some("device"),
+                                Some(device_id.as_str()),
+                                json!({"key": hex::encode(key)}),
+                            );
+                            Ok(ResponseBody::Ack)
+                        }
+                        None => Err(ProtoError::new(
+                            ProtoErrorCode::NotFound,
+                            format!("no pending pairing for {device_id}"),
+                            "Refresh Settings → Devices; the pairing may already be decided",
+                        )),
+                    }
+                }
                 ClientRequest::ListHosts => Ok(ResponseBody::Hosts {
                     hosts: self.state.hosts.summaries(),
                 }),
@@ -1280,13 +1331,25 @@ impl Connection {
     }
 
     fn require_device(&self) -> Result<DeviceInfo, ProtoError> {
-        self.device.clone().ok_or_else(|| {
+        let mut device = self.device.clone().ok_or_else(|| {
             ProtoError::new(
                 ProtoErrorCode::Unauthorized,
                 "the connection has not completed the Hello handshake",
                 "Send Hello with the device identity before opening a terminal",
             )
-        })
+        })?;
+        if self.origin.is_remote() {
+            // Never let a remote client name the device that owns its
+            // terminals or writes: use the registry/verified key instead.
+            device.device_id = self.device_id().ok_or_else(|| {
+                ProtoError::new(
+                    ProtoErrorCode::Unauthorized,
+                    "this session has no verified device identity",
+                    "Pair the device again so the daemon can record its key",
+                )
+            })?;
+        }
+        Ok(device)
     }
 
     /// Handles one client-to-daemon binary frame.

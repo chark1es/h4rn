@@ -212,12 +212,14 @@ async fn pair(
     Ok(())
 }
 
-/// The scopes a direct pairing grants: every scope when none were requested
-/// (the owner is at the machine and chose a direct pairing), otherwise exactly
-/// the requested ones plus the always-held `view`.
+/// The scopes a direct pairing grants: `view` and `approve` when none were
+/// requested, otherwise exactly the requested ones plus the always-held `view`.
+///
+/// A LAN/tailnet window is short but a QR can be photographed, so terminal,
+/// files and admin authority must be asked for explicitly.
 pub fn direct_scopes(requested: &[h4rn_protocol::PairScope]) -> Vec<h4rn_protocol::PairScope> {
     if requested.is_empty() {
-        h4rn_protocol::PairScope::ALL.to_vec()
+        h4rn_protocol::PairScope::MINIMAL.to_vec()
     } else {
         h4rn_protocol::PairScope::normalize(requested.iter().copied())
     }
@@ -286,6 +288,11 @@ mod tests {
             super::direct_scopes(&[PairScope::Files]),
             vec![PairScope::View, PairScope::Files]
         );
-        assert_eq!(super::direct_scopes(&[]), PairScope::ALL.to_vec());
+        // Without `--scope` the QR grants read and reply only; widening it
+        // needs an explicit `--scope`.
+        assert_eq!(
+            super::direct_scopes(&[]),
+            vec![PairScope::View, PairScope::Approve]
+        );
     }
 }

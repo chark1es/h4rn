@@ -8,6 +8,7 @@ use h4rn_harness::Harness;
 use h4rn_protocol::{MachineHostInput, MachineHostKind};
 use h4rn_transport::keys::{DeviceIdentity, FileKeyStore, KEY_LEN, load_or_create};
 use h4rn_transport::server::{SecureOptions, SecureService};
+use h4rn_transport::wire::TOKEN_LEN;
 use tokio::net::TcpListener;
 
 use crate::auth::TokenStore;
@@ -21,7 +22,7 @@ use crate::journal::{Journal, SqliteJournal};
 use crate::mcp::{McpService, default_confirmation_gate};
 use crate::remote::{
     ConnectClient, DeviceRegistry, RemoteState, TailscaleMode, advertised_addresses,
-    pairing::read_direct_pairing,
+    pairing::{invalidate_direct_pairing, read_direct_pairing, remove_direct_pairing},
 };
 use crate::server::{self, AppState};
 use crate::subagents::{SubagentManager, SubagentOptions, SubagentProvider};
@@ -293,7 +294,7 @@ impl DaemonBuilder {
             // transport allowlist is rebuilt from it. A key the old allowlist
             // file holds but the registry does not (a pairing from before
             // scopes were recorded) is not admitted: it must pair again.
-            let known: std::collections::HashSet<_> = devices.keys().into_iter().collect();
+            let known: std::collections::HashSet<_> = devices.admitted_keys().into_iter().collect();
             for key in &known {
                 service.allow(*key);
             }
@@ -314,6 +315,19 @@ impl DaemonBuilder {
             // the pairing was armed with, recorded before it is allowed.
             let registry = Arc::clone(&devices);
             service.set_pairing_hook(Arc::new(move |key| registry.complete_direct(key)));
+            // Invalidate the durable pairing file the moment its secret is
+            // consumed, before the device is authorised: a restart must never
+            // re-arm a used QR.
+            let pairing_dir = self.config.data_dir.clone();
+            service.set_psk_consumed_hook(Arc::new(move |psk| {
+                match invalidate_direct_pairing(&pairing_dir, &psk) {
+                    Ok(true) => tracing::info!("deleted the consumed direct pairing file"),
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, "could not delete the consumed direct pairing file")
+                    }
+                }
+            }));
             tracing::info!(
                 devices = service.allowed_devices().len(),
                 "secure transport enabled"
@@ -891,23 +905,46 @@ pub(crate) fn machine_hosts(hosts: &HostInventory) -> Vec<MachineHostInput> {
 /// Watches `<data_dir>/direct-pairing.json` and arms the one-time PSK.
 ///
 /// The CLI writes the file; the daemon applies it within a couple of seconds.
-/// The transport clears the PSK after the first successful pairing, so a
-/// second device needs a fresh file. An expired or removed file also clears it.
+/// The transport consumes the secret on the first successful pairing and calls
+/// the consumed hook, which deletes the file, so restart can never re-arm a
+/// used QR. An expired file is deleted too. The watcher only ever clears a
+/// secret it installed itself: an operator's `H4RN_PAIRING_PSK` stays armed,
+/// and a direct file that would replace it is ignored with a warning.
 async fn watch_direct_pairing(
     service: Arc<SecureService>,
     devices: Arc<DeviceRegistry>,
     data_dir: PathBuf,
 ) {
+    // The secret this watcher installed, hex, and the file it came from.
     let mut applied: Option<String> = None;
+    // A live file that was not armed because another secret already was.
+    let mut blocked: Option<String> = None;
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(2));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         ticker.tick().await;
         match read_direct_pairing(&data_dir) {
             Ok(Some(pairing)) if !pairing.expired() => {
-                if applied.as_deref() != Some(pairing.psk.as_str()) {
-                    match pairing.psk() {
-                        Ok(psk) => {
+                if applied.as_deref() == Some(pairing.psk.as_str())
+                    || blocked.as_deref() == Some(pairing.psk.as_str())
+                {
+                    continue;
+                }
+                blocked = None;
+                match pairing.psk() {
+                    Ok(psk) => match service.psk() {
+                        Some(current) if current != psk => {
+                            // Never replace a secret someone else armed. An
+                            // operator PSK or a concurrent pairing keeps
+                            // precedence; the file stays for operator review
+                            // until it expires.
+                            tracing::warn!(
+                                label = ?pairing.label,
+                                "a direct pairing is waiting but another pairing secret is already armed; leaving it untouched"
+                            );
+                            blocked = Some(pairing.psk.clone());
+                        }
+                        _ => {
                             // Arm the scopes first: the device that pairs with
                             // this secret is recorded with exactly these.
                             devices.arm_direct(pairing.scopes.clone());
@@ -919,16 +956,32 @@ async fn watch_direct_pairing(
                                 "armed a direct pairing; scan the QR now"
                             );
                         }
-                        Err(error) => {
-                            tracing::warn!(%error, "ignoring a malformed direct pairing file")
-                        }
+                    },
+                    Err(error) => {
+                        tracing::warn!(%error, "ignoring a malformed direct pairing file")
                     }
                 }
             }
             Ok(_) => {
-                if applied.take().is_some() {
-                    service.clear_psk();
-                    tracing::info!("direct pairing expired or was closed");
+                if let Some(hex) = applied.take() {
+                    // Clear only the secret this watcher installed. Comparing
+                    // by value keeps an operator rotation intact.
+                    let ours = hex::decode(&hex)
+                        .ok()
+                        .and_then(|bytes| <[u8; TOKEN_LEN]>::try_from(bytes.as_slice()).ok());
+                    if ours.is_some() && service.psk() == ours {
+                        service.clear_psk();
+                    }
+                    devices.clear_direct();
+                    tracing::info!("direct pairing expired, was used or was closed");
+                }
+                blocked = None;
+                // A consumed or expired secret must not survive a restart.
+                if let Ok(Some(pairing)) = read_direct_pairing(&data_dir)
+                    && pairing.expired()
+                    && let Err(error) = remove_direct_pairing(&data_dir)
+                {
+                    tracing::debug!(%error, "could not delete the expired direct pairing");
                 }
             }
             Err(error) => tracing::debug!(%error, "could not read the direct pairing file"),

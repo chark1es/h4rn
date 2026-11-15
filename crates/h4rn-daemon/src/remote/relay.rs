@@ -230,7 +230,22 @@ fn apply_snapshot(service: &SecureService, registry: &DeviceRegistry, devices: &
     let entries: Vec<ConnectEntry> = devices.iter().filter_map(connect_entry).collect();
     let removed = registry.reconcile_connect(&entries);
     for entry in &entries {
-        service.allow(entry.key);
+        // A snapshot is authoritative for scopes, never for admission: a
+        // pending device stays off the allowlist until the host confirms it.
+        if registry.is_admitted(&entry.key) {
+            service.allow(entry.key);
+        }
+    }
+    let daemon_key = service.public_identity().noise_public;
+    for device in devices {
+        let Some(entry) = connect_entry(device) else {
+            continue;
+        };
+        if registry.is_pending(&entry.key) {
+            // Rebuild the host's confirmation card after a restart: the key is
+            // persisted but the in-memory SAS list is not.
+            registry.note_confirmation(&entry.device_id, &device.name, &entry.key, &daemon_key);
+        }
     }
     for key in removed {
         service.revoke(key);
@@ -252,27 +267,30 @@ fn connect_entry(device: &ConnectDevice) -> Option<ConnectEntry> {
     })
 }
 
-/// Adds a paired device's Noise key to the allowlist and the registry.
+/// Records a newly paired device from the relay.
 ///
-/// A device the registry has not seen before is also queued for short
-/// authentication string confirmation: a typed-code pairing hands the phone its
-/// daemon key through the relay, and this is how the person detects a swap.
+/// The key is stored but *not* admitted: a relay that substituted a device key
+/// must not receive the scopes before a person compares the short
+/// authentication string and confirms the pairing on the host. Only
+/// [`DeviceRegistry::decide_pending`] may promote it.
 fn register_device(service: &SecureService, registry: &DeviceRegistry, device: &ConnectDevice) {
     let Some(entry) = connect_entry(device) else {
         return;
     };
-    let is_new = registry.authorization(&entry.key).is_none();
-    registry.insert_scoped(entry.device_id.clone(), entry.key, entry.scopes);
-    service.allow(entry.key);
-    if is_new {
-        let daemon_key = service.public_identity().noise_public;
-        registry.note_confirmation(&entry.device_id, &device.name, &entry.key, &daemon_key);
-        tracing::info!(
-            device = %device.name,
-            sas = %h4rn_transport::pairing::short_auth_string(&entry.key, &daemon_key),
-            "new device paired: confirm this code matches the one on its screen"
-        );
+    registry.provision_scoped(entry.device_id.clone(), entry.key, entry.scopes);
+    if registry.is_admitted(&entry.key) {
+        // An already-confirmed device reappearing (a re-pair event) is admitted
+        // as before; only a pending one waits.
+        service.allow(entry.key);
+        return;
     }
+    let daemon_key = service.public_identity().noise_public;
+    registry.note_confirmation(&entry.device_id, &device.name, &entry.key, &daemon_key);
+    tracing::info!(
+        device = %device.name,
+        sas = %h4rn_transport::pairing::short_auth_string(&entry.key, &daemon_key),
+        "new device paired: waiting for the host to confirm the code"
+    );
 }
 
 fn decode_key(value: &str) -> Option<[u8; KEY_LEN]> {
@@ -354,6 +372,10 @@ mod tests {
                 device("gone", 2, vec![PairScope::View]),
             ],
         );
+        // The host confirmed `kept` while both were present.
+        let kept = registry.key_for_device("kept").expect("kept key");
+        registry.decide_pending("kept", true);
+        service.allow(kept);
         registry.insert_direct([3u8; KEY_LEN], PairScope::ALL.to_vec());
         service.allow([3u8; KEY_LEN]);
         apply_snapshot(
@@ -380,37 +402,71 @@ mod tests {
     }
 
     #[test]
-    fn a_new_device_is_queued_for_sas_confirmation_with_the_daemons_own_key() {
+    fn a_new_device_stays_pending_until_the_host_confirms() {
+        // Regression for E4: registering a relay key must not grant scopes or
+        // admit it on the transport before a person compares the SAS.
         let identity = h4rn_transport::keys::DeviceIdentity::generate().unwrap();
         let daemon_key = identity.public().noise_public;
         let service = SecureService::new(h4rn_transport::server::SecureOptions::new(identity));
         let registry = DeviceRegistry::in_memory();
         register_device(&service, &registry, &device("d1", 7, vec![PairScope::View]));
+        assert!(!service.is_allowed(&[7u8; KEY_LEN]));
+        assert!(registry.is_pending(&[7u8; KEY_LEN]));
+        assert!(registry.authorization(&[7u8; KEY_LEN]).is_none());
+        assert!(registry.scopes_for_key(&[7u8; KEY_LEN]).is_none());
         let pending = registry.pending_confirmations();
         assert_eq!(pending.len(), 1);
         assert_eq!(
             pending[0].sas,
             h4rn_transport::pairing::short_auth_string(&[7u8; KEY_LEN], &daemon_key)
         );
-        // Seeing the same device again (a snapshot) does not re-queue it.
-        register_device(&service, &registry, &device("d1", 7, vec![PairScope::View]));
-        assert_eq!(registry.pending_confirmations().len(), 1);
+
+        // A snapshot that keeps listing it must never promote it.
+        apply_snapshot(
+            &service,
+            &registry,
+            &[device("d1", 7, vec![PairScope::View])],
+        );
+        assert!(registry.is_pending(&[7u8; KEY_LEN]));
+        assert!(!service.is_allowed(&[7u8; KEY_LEN]));
+
+        // Only the host's decision admits it.
+        let (key, confirm) = registry
+            .decide_pending("d1", true)
+            .expect("the pending pairing");
+        assert_eq!(key, [7u8; KEY_LEN]);
+        assert!(confirm);
+        service.allow(key);
+        assert!(service.is_allowed(&[7u8; KEY_LEN]));
+        assert_eq!(
+            registry.scopes_for_key(&[7u8; KEY_LEN]),
+            Some(vec![PairScope::View])
+        );
+        assert!(registry.pending_confirmations().is_empty());
+
         // A revoked device is no longer listed.
         registry.remove("d1");
         assert!(registry.pending_confirmations().is_empty());
     }
 
     #[test]
-    fn register_device_records_scopes_and_allows_the_key() {
+    fn rejecting_a_pending_device_removes_and_revokes_it() {
         let service = SecureService::new(h4rn_transport::server::SecureOptions::new(
             h4rn_transport::keys::DeviceIdentity::generate().unwrap(),
         ));
         let registry = DeviceRegistry::in_memory();
         register_device(&service, &registry, &device("d1", 3, vec![PairScope::View]));
-        assert!(service.is_allowed(&[3u8; KEY_LEN]));
-        assert_eq!(
-            registry.scopes_for_key(&[3u8; KEY_LEN]),
-            Some(vec![PairScope::View])
+        let (key, confirm) = registry
+            .decide_pending("d1", false)
+            .expect("the pending pairing");
+        assert!(!confirm);
+        service.revoke(key);
+        assert!(registry.authorization(&[3u8; KEY_LEN]).is_none());
+        assert!(!service.is_allowed(&[3u8; KEY_LEN]));
+        assert!(registry.pending_confirmations().is_empty());
+        assert!(
+            registry.decide_pending("d1", true).is_none(),
+            "already decided"
         );
     }
 }

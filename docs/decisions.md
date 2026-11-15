@@ -790,8 +790,8 @@ transport allowlist at start; keys in the old allowlist file but not in the
 registry are not admitted. A relay snapshot is authoritative for `connect`
 entries: absent ones are removed, their sessions terminated and the registry
 persisted. Direct pairings are recorded with the scopes armed in
-`direct-pairing.json` (`h4rnd pair --direct --scope …`; no `--scope` grants every
-scope) and survive snapshots. Binary frames are authorised like requests: PTY
+`direct-pairing.json` (`h4rnd pair --direct --scope …`; no `--scope` grants
+`view` and `approve`) and survive snapshots. Binary frames are authorised like requests: PTY
 input needs `Hello`, the `terminal` scope and a viewer this connection attached.
 `SetThreadTab` and `Snooze` mutate state and need `approve`. The one-time PSK is
 consumed atomically when the device is authorised, so racing handshakes pair one
@@ -807,9 +807,10 @@ key connect gave it and its own key, and lists it under Settings → Devices
 match"; "They differ" revokes the device and signs it out. A swapped key on either
 side makes the two strings differ. It is 12 digits (about 40 bits), not 6: a short
 string can be ground in real time by generating key pairs until two strings
-collide. The QR path pins the key out of band and needs no confirmation. Limits: a
-pairing claimed while the daemon is offline queues no confirmation; the entry
-lasts ten minutes.
+collide. The QR path pins the daemon key out of band, so the phone side needs no
+confirmation; see the round-2 amendment for the host-side gate. Limits: a
+pairing claimed while the daemon is offline queues no confirmation until the
+relay snapshot arrives.
 
 **Scopes are per machine.** `h4rn-connect` authorises machine-scoped actions
 (creating or revoking a pairing, revoking another device) against the link's
@@ -822,3 +823,51 @@ unpaired default (the owner's desktop and browser everything, a phone `view`).
 key; `machine` and device id are derived from the registry, and a handshake frame
 that claims otherwise is refused. `allowed_devices: None` admits the target
 machine's daemon only; a list compares the verified id alone.
+
+### Round-2 council amendments
+
+**A live secret opens PSK pairing, and only its owner closes it.** Storing a
+one-time secret in `SecureService` now also flips `PairingPolicy::allow_psk_pairing`;
+consuming or clearing the secret flips it back. The direct-pairing watcher therefore
+works from `SecureOptions::new` with no `with_psk`, and a watcher-armed secret can
+pair a device. The watcher remembers the secret it installed and clears only that
+value: an operator's `H4RN_PAIRING_PSK` is never replaced, and its expiry never
+clears the operator's secret. A live file that would replace another secret is
+logged and left alone.
+
+**A consumed or expired direct pairing is deleted from disk.** The transport's
+consumed hook runs before the device is authorised and removes the matching
+`direct-pairing.json`; the watcher deletes expired files and drops the armed scopes
+with the secret. A restart before the old expiry can no longer re-arm a QR that
+already paired one device.
+
+**A direct pairing without `--scope` grants `view` and `approve`.** A QR can be
+photographed and the LAN/tailnet window is short, so `terminal`, `files` and
+`admin` need an explicit `--scope`. The same safe default applies to a file with
+no `scopes` field and to an operator PSK with nothing armed.
+
+**Every relay-provisioned device waits for the host.** `DevicePaired` and snapshots
+now insert the key as *pending*: registered, with its requested scopes stored but
+not effective, and deliberately absent from the transport allowlist. A snapshot
+refreshes the requested scopes but never promotes a pending entry. Settings →
+Devices shows the SAS and a Confirm/Reject action, served by the
+`ConfirmPairing { device_id, confirm }` request (`admin`). Confirming admits the
+key on the transport; rejecting removes and revokes it. This closes the window in
+which a malicious relay could substitute a key and use the granted scopes before
+anyone compared the codes.
+
+The gate applies to QR pairings too. A QR pins the daemon key for the phone, but
+the host still learns the *device* key from the relay, so the host must confirm it
+just like a typed code. Pending entries do not expire: an undecided device stays
+blocked and listed until the host confirms or rejects it, including across a
+restart (the relay snapshot rebuilds the confirmation card).
+
+**Registry and peer lifecycle are reconciled, not overwritten.** A client insert
+never replaces a `host` entry: the peer daemon's MCP authorisation survives a
+device re-pair. After a restart the in-memory peer directory is empty, so the first
+authoritative peer report now reconciles the *persisted* connect-provenance host
+entries too: a host key absent from the peer set is removed from the registry,
+revoked from the transport and its sessions closed. Terminal ownership and the
+remote audit trail use the registry id (or the verified key when a direct
+pairing has no connect id), never the device id a remote client claimed in
+`Hello`.

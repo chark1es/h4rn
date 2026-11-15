@@ -9,7 +9,7 @@ use crate::common::{
     ApprovalDecision, DeviceInfo, HarnessKind, RuntimeMode, ThreadFilter, ThreadTab, Topic,
     WorktreeRequest,
 };
-use crate::ids::{AttachmentId, HostId, TerminalId, ThreadId};
+use crate::ids::{AttachmentId, DeviceId, HostId, TerminalId, ThreadId};
 
 /// One request sent by a client.
 ///
@@ -594,6 +594,16 @@ pub enum ClientRequest {
     /// Devices that paired through a typed code and still await a human
     /// comparing the short authentication string with the new device's screen.
     PairingConfirmations,
+    /// Record the host's decision on a pending pairing.
+    ///
+    /// Confirming admits the device key on the transport; rejecting removes and
+    /// revokes it. Only a device holding `admin` may decide.
+    ConfirmPairing {
+        /// Connect device id from [`Self::PairingConfirmations`].
+        device_id: DeviceId,
+        /// `true` admits the device, `false` revokes it.
+        confirm: bool,
+    },
     /// Read known usage limits and the auto-resume policy.
     GetLimits,
     /// List persisted auto-resume schedules and limit history.
@@ -930,6 +940,7 @@ impl ClientRequest {
             | Self::ForgeDeviceFlowStart { .. }
             | Self::ForgeDeviceFlowPoll { .. }
             | Self::PairingConfirmations
+            | Self::ConfirmPairing { .. }
             | Self::ForgeImportCli { .. } => Admin,
             Self::Mcp { request } => match request {
                 crate::mcp::McpRequest::ListServers | crate::mcp::McpRequest::ListTools { .. } => {
@@ -1052,6 +1063,13 @@ mod tests {
             ),
             (ClientRequest::McpRemove { name: "x".into() }, Admin),
             (ClientRequest::PairingConfirmations, Admin),
+            (
+                ClientRequest::ConfirmPairing {
+                    device_id: DeviceId::new("dev_1"),
+                    confirm: true,
+                },
+                Admin,
+            ),
         ];
         for (request, expected) in cases {
             assert_eq!(request.required_scope(), expected, "{request:?}");

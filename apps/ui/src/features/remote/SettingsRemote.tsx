@@ -546,7 +546,10 @@ function DeviceRow({
  * Typed-code pairings the daemon is waiting on a person to check. The code is
  * derived by the daemon in Rust from the keys it holds; this only displays it.
  */
-function usePairingConfirmations(enabled: boolean): PairingConfirmation[] {
+function usePairingConfirmations(enabled: boolean): {
+  entries: PairingConfirmation[];
+  decide: (deviceId: string, confirm: boolean) => Promise<void>;
+} {
   const [entries, setEntries] = useState<PairingConfirmation[]>([]);
   useEffect(() => {
     if (!enabled) return;
@@ -568,7 +571,33 @@ function usePairingConfirmations(enabled: boolean): PairingConfirmation[] {
       window.clearInterval(timer);
     };
   }, [enabled]);
-  return entries;
+
+  const decide = async (deviceId: string, confirm: boolean) => {
+    // Hide the card immediately; the next poll confirms the daemon's answer.
+    setEntries((current) => current.filter((entry) => entry.device_id !== deviceId));
+    try {
+      await getClient().request({ type: "confirm_pairing", device_id: deviceId, confirm });
+      pushToast({
+        variant: "success",
+        title: confirm ? "Device approved." : "Device rejected.",
+        description: confirm
+          ? "It can now reach this host with the scopes it was granted."
+          : "Its key was revoked and never reached this host.",
+      });
+    } catch (error) {
+      pushToast({
+        variant: "error",
+        title: "Could not record the pairing decision.",
+        description: error instanceof Error ? error.message : String(error),
+      });
+      const response = await getClient()
+        .request({ type: "pairing_confirmations" })
+        .catch(() => null);
+      if (response?.type === "pairing_confirmations") setEntries(response.confirmations);
+    }
+  };
+
+  return { entries, decide };
 }
 
 export function LiveDevicesForm() {
@@ -586,7 +615,7 @@ export function LiveDevicesForm() {
   const [copied, setCopied] = useState(false);
   const [scopes, setScopes] = useState<PairScope[]>(() => [...DEFAULT_PAIR_SCOPES]);
   const expiring = useRef(false);
-  const confirmations = usePairingConfirmations(isSignedIn);
+  const { entries: confirmations, decide: decidePairing } = usePairingConfirmations(isSignedIn);
 
   useEffect(() => {
     if (!machineId && available[0]) setMachineId(available[0].id);
@@ -670,17 +699,35 @@ export function LiveDevicesForm() {
                 </div>
               </div>
               {confirmations.map((entry) => (
-                <div key={entry.device_id} className="q-sas-host" role="status">
-                  <div className="q-muted" style={{ fontSize: 12 }}>
-                    {entry.device_name} paired. Its screen should show
-                  </div>
+                <fieldset key={entry.device_id} className="q-sas-host">
+                  <legend className="q-muted" style={{ fontSize: 12 }}>
+                    {entry.device_name} wants to connect. Its screen shows
+                  </legend>
                   <div className="q-sas-code num" data-testid="host-sas">
                     {entry.sas}
                   </div>
                   <div className="q-faint" style={{ fontSize: 12 }}>
-                    If the codes differ, revoke the device below.
+                    Approve only if both codes match. Until then the device cannot reach this host.
                   </div>
-                </div>
+                  <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+                    <button
+                      type="button"
+                      className="q-btn primary"
+                      data-testid="confirm-pairing"
+                      onClick={() => void decidePairing(entry.device_id, true)}
+                    >
+                      Confirm device
+                    </button>
+                    <button
+                      type="button"
+                      className="q-btn danger"
+                      data-testid="reject-pairing"
+                      onClick={() => void decidePairing(entry.device_id, false)}
+                    >
+                      Reject
+                    </button>
+                  </div>
+                </fieldset>
               ))}
               {pairing ? (
                 <div

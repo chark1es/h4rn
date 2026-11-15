@@ -61,6 +61,11 @@ pub struct Entry {
     pub provenance: Provenance,
     /// The machine a `Host` entry stands for.
     pub machine: Option<String>,
+    /// A relay-provisioned device whose key was announced but not admitted
+    /// until the host confirms the pairing. Pending entries have no effective
+    /// scopes and are kept off the transport allowlist.
+    #[serde(default)]
+    pub pending: bool,
 }
 
 impl Entry {
@@ -109,9 +114,6 @@ pub struct DeviceRegistry {
     /// directory refreshes on a push instead of polling connect.
     topology: tokio::sync::Notify,
 }
-
-/// How long a pairing confirmation stays listed.
-pub const CONFIRMATION_TTL: chrono::TimeDelta = chrono::TimeDelta::minutes(10);
 
 impl DeviceRegistry {
     /// An in-memory registry (tests, signed-out tools).
@@ -197,30 +199,84 @@ impl DeviceRegistry {
         key: [u8; KEY_LEN],
         scopes: Vec<PairScope>,
     ) {
-        let device_id = device_id.into();
-        let entry = Entry {
-            key: hex::encode(key),
-            device_id: Some(device_id.clone()),
-            role: Role::Client,
-            scopes: PairScope::normalize(scopes),
-            provenance: Provenance::Connect,
-            machine: None,
-        };
-        self.mutate(|entries| {
-            // One connect device id maps to one key: a re-paired device with a
-            // fresh key replaces its old entry.
-            entries.retain(|_, existing| {
-                !(existing.provenance == Provenance::Connect
-                    && existing.role == Role::Client
-                    && existing.device_id.as_deref() == Some(device_id.as_str()))
-            });
-            entries.insert(key, entry);
-        });
+        self.upsert_connect(device_id.into(), key, scopes, Some(false));
+    }
+
+    /// Registers a relay-announced device that is not admitted yet.
+    ///
+    /// A key connect announced but nobody compared a code for has no scopes
+    /// and stays off the transport allowlist. A snapshot that still lists it
+    /// must never promote it: only [`Self::decide_pending`] may.
+    pub fn provision_scoped(
+        &self,
+        device_id: impl Into<String>,
+        key: [u8; KEY_LEN],
+        scopes: Vec<PairScope>,
+    ) {
+        self.upsert_connect(device_id.into(), key, scopes, None);
     }
 
     /// Registers a connect-paired client with `view` only.
     pub fn insert(&self, device_id: impl Into<String>, key: [u8; KEY_LEN]) {
         self.insert_scoped(device_id, key, Vec::new());
+    }
+
+    /// Inserts or updates a connect-managed client without ever re-rolling a
+    /// peer daemon key. `pending` is `Some` for an explicit decision and
+    /// `None` to keep an existing decision (new entries stay pending).
+    fn upsert_connect(
+        &self,
+        device_id: String,
+        key: [u8; KEY_LEN],
+        scopes: Vec<PairScope>,
+        pending: Option<bool>,
+    ) {
+        let scopes = PairScope::normalize(scopes);
+        let entry = Entry {
+            key: hex::encode(key),
+            device_id: Some(device_id.clone()),
+            role: Role::Client,
+            scopes: scopes.clone(),
+            provenance: Provenance::Connect,
+            machine: None,
+            pending: pending.unwrap_or(true),
+        };
+        self.mutate(|entries| {
+            // A peer daemon key is never silently re-roled into a client: MCP
+            // peering depends on the host entry staying a host.
+            if entries
+                .get(&key)
+                .is_some_and(|existing| existing.role == Role::Host)
+            {
+                tracing::warn!(
+                    device = %device_id,
+                    "refusing to replace a peer daemon entry with a client"
+                );
+                return;
+            }
+            // One connect device id maps to one key: a re-paired device with a
+            // fresh key replaces its old entry.
+            entries.retain(|existing_key, existing| {
+                *existing_key == key
+                    || !(existing.provenance == Provenance::Connect
+                        && existing.role == Role::Client
+                        && existing.device_id.as_deref() == Some(device_id.as_str()))
+            });
+            match entries.get_mut(&key) {
+                Some(existing) => {
+                    // A snapshot refreshes the requested scopes but keeps a
+                    // pending device pending and a confirmed one confirmed.
+                    existing.device_id = Some(device_id);
+                    existing.scopes = scopes;
+                    existing.provenance = Provenance::Connect;
+                    existing.machine = None;
+                    existing.pending = pending.unwrap_or(existing.pending);
+                }
+                None => {
+                    entries.insert(key, entry);
+                }
+            }
+        });
     }
 
     /// Registers a direct (LAN/tailnet) pairing with explicit scopes.
@@ -232,6 +288,7 @@ impl DeviceRegistry {
             scopes: PairScope::normalize(scopes),
             provenance: Provenance::Direct,
             machine: None,
+            pending: false,
         };
         self.mutate(|entries| {
             entries.insert(key, entry);
@@ -248,6 +305,7 @@ impl DeviceRegistry {
             scopes: Vec::new(),
             provenance: Provenance::Connect,
             machine: Some(machine.to_string()),
+            pending: false,
         };
         self.mutate(|entries| {
             entries.insert(key, entry);
@@ -263,17 +321,30 @@ impl DeviceRegistry {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(PairScope::normalize(scopes));
     }
 
+    /// Drops the armed scopes without recording a device.
+    ///
+    /// Called with the secret: an armed window must not outlive the
+    /// `direct-pairing.json` that opened it, or a later arm-less pairing would
+    /// inherit the wrong authority.
+    pub fn clear_direct(&self) {
+        *self
+            .pending_direct
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
     /// Records the device that just paired directly with the armed scopes.
     ///
     /// With nothing armed (an operator-provisioned `H4RN_PAIRING_PSK`) the
-    /// device gets every scope: the operator chose to hand out that secret.
+    /// device gets `view` and `approve`: the same safe default as a CLI direct
+    /// pairing without `--scope`. Wider authority needs an explicit arm.
     pub fn complete_direct(&self, key: [u8; KEY_LEN]) {
         let scopes = self
             .pending_direct
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
-            .unwrap_or_else(|| PairScope::ALL.to_vec());
+            .unwrap_or_else(|| PairScope::MINIMAL.to_vec());
         self.insert_direct(key, scopes);
     }
 
@@ -304,40 +375,77 @@ impl DeviceRegistry {
         });
     }
 
-    /// Confirmations still worth showing, newest first. Expired ones and those
-    /// of devices that were since revoked are dropped.
+    /// Confirmations still worth showing, newest first. Entries that were
+    /// confirmed, rejected or removed since are dropped.
+    ///
+    /// A pending device does not expire: until the host decides, it stays
+    /// blocked and listed rather than silently becoming an orphan.
     pub fn pending_confirmations(&self) -> Vec<PairingConfirmation> {
-        let cutoff = chrono::Utc::now() - CONFIRMATION_TTL;
         let live: std::collections::HashSet<String> = self
             .read()
             .values()
+            .filter(|entry| entry.pending)
             .filter_map(|entry| entry.device_id.clone())
             .collect();
         let mut list = self
             .confirmations
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        list.retain(|entry| entry.paired_at > cutoff && live.contains(&entry.device_id));
+        list.retain(|entry| live.contains(&entry.device_id));
         let mut out = list.clone();
         out.sort_by_key(|entry| std::cmp::Reverse(entry.paired_at));
         out
     }
 
-    /// What `key` is authorised as, or `None` when it has no entry.
+    /// Records the host's decision on a pending relay pairing.
+    ///
+    /// Returns the key and the decision so the caller can admit or revoke it
+    /// on the transport. `None` means the device is no longer pending, which
+    /// makes the request safe to retry.
+    pub fn decide_pending(&self, device_id: &str, confirm: bool) -> Option<([u8; KEY_LEN], bool)> {
+        let decided = self.mutate(|entries| {
+            let key = entries
+                .iter()
+                .find(|(_, entry)| {
+                    entry.pending
+                        && entry.role == Role::Client
+                        && entry.device_id.as_deref() == Some(device_id)
+                })
+                .map(|(key, _)| *key)?;
+            if confirm {
+                entries.get_mut(&key)?.pending = false;
+            } else {
+                entries.remove(&key);
+            }
+            Some(key)
+        });
+        self.confirmations
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .retain(|entry| entry.device_id != device_id);
+        decided.map(|key| (key, confirm))
+    }
+
+    /// What `key` is authorised as, or `None` when it has no entry or is still
+    /// waiting for the host to confirm its pairing.
     pub fn authorization(&self, key: &[u8; KEY_LEN]) -> Option<Authorization> {
-        self.read().get(key).map(|entry| Authorization {
-            role: entry.role,
-            scopes: entry.scopes.clone(),
-            device_id: entry.device_id.clone(),
-            provenance: entry.provenance,
-            machine: entry.machine.clone().map(HostId::new),
-        })
+        self.read()
+            .get(key)
+            .filter(|entry| !entry.pending)
+            .map(|entry| Authorization {
+                role: entry.role,
+                scopes: entry.scopes.clone(),
+                device_id: entry.device_id.clone(),
+                provenance: entry.provenance,
+                machine: entry.machine.clone().map(HostId::new),
+            })
     }
 
     /// The connect device id owning `key`, for audit attribution.
     pub fn device_for_key(&self, key: &[u8; KEY_LEN]) -> Option<String> {
         self.read()
             .get(key)
+            .filter(|entry| !entry.pending)
             .and_then(|entry| entry.device_id.clone())
     }
 
@@ -397,14 +505,49 @@ impl DeviceRegistry {
             stale
         });
         for device in devices {
-            self.insert_scoped(device.device_id.clone(), device.key, device.scopes.clone());
+            // A snapshot may refresh scopes, but it must never promote a
+            // device the host has not confirmed.
+            self.provision_scoped(device.device_id.clone(), device.key, device.scopes.clone());
         }
         removed
     }
 
-    /// Every registered key, for rebuilding the transport allowlist.
+    /// Every registered key, pending ones included.
     pub fn keys(&self) -> Vec<[u8; KEY_LEN]> {
         self.read().keys().copied().collect()
+    }
+
+    /// Keys the transport may admit: every registered entry whose pairing the
+    /// host has confirmed. A pending relay device is deliberately absent.
+    pub fn admitted_keys(&self) -> Vec<[u8; KEY_LEN]> {
+        self.read()
+            .iter()
+            .filter(|(_, entry)| !entry.pending)
+            .map(|(key, _)| *key)
+            .collect()
+    }
+
+    /// Whether `key` may be admitted to the transport right now.
+    pub fn is_admitted(&self, key: &[u8; KEY_LEN]) -> bool {
+        self.read().get(key).is_some_and(|entry| !entry.pending)
+    }
+
+    /// Whether `key` is registered but still waiting for the host to confirm
+    /// the pairing.
+    pub fn is_pending(&self, key: &[u8; KEY_LEN]) -> bool {
+        self.read().get(key).is_some_and(|entry| entry.pending)
+    }
+
+    /// Every connect-managed peer-daemon key, for reconciliation after a
+    /// restart when the in-memory peer directory is empty.
+    pub fn connect_host_keys(&self) -> Vec<[u8; KEY_LEN]> {
+        self.read()
+            .iter()
+            .filter(|(_, entry)| {
+                entry.role == Role::Host && entry.provenance == Provenance::Connect
+            })
+            .map(|(key, _)| *key)
+            .collect()
     }
 
     /// Number of registered keys.
@@ -415,5 +558,34 @@ impl DeviceRegistry {
     /// Whether nothing is registered.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pending_pairing_survives_a_restart_without_admitting_the_key() {
+        // A relay-announced key must stay blocked across restarts until the
+        // host decides; neither reloading nor an old registry defaults it open.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("devices.json");
+        {
+            let devices = DeviceRegistry::open(&path);
+            devices.provision_scoped("d1", [7u8; KEY_LEN], vec![PairScope::View]);
+        }
+        let devices = DeviceRegistry::open(&path);
+        assert!(devices.is_pending(&[7u8; KEY_LEN]));
+        assert!(devices.authorization(&[7u8; KEY_LEN]).is_none());
+        assert!(!devices.admitted_keys().contains(&[7u8; KEY_LEN]));
+        let (key, confirm) = devices.decide_pending("d1", true).expect("pending");
+        assert_eq!(key, [7u8; KEY_LEN]);
+        assert!(confirm);
+        assert!(devices.is_admitted(&[7u8; KEY_LEN]));
+        assert_eq!(
+            devices.scopes_for_key(&[7u8; KEY_LEN]),
+            Some(vec![PairScope::View])
+        );
     }
 }

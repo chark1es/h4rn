@@ -383,7 +383,7 @@ resets: Resets, } | { "type": "failover_options",
  */
 options: FailoverOptions, } | { "type": "pairing_confirmations", 
 /**
- * Newest first; entries expire after a few minutes.
+ * Newest first. An entry stays until the host confirms or rejects it.
  */
 confirmations: Array<PairingConfirmation>, } | { "type": "resume_changed", 
 /**

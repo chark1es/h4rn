@@ -5,6 +5,28 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### Council round 2: pairing, direct pairing and registry lifecycle
+
+- **`h4rnd pair --direct` can pair again (E1).** A live one-time secret now opens PSK pairing;
+  clearing or consuming it closes the window. The watcher no longer needs a test-only `with_psk`.
+- **A used direct QR cannot be replayed after a restart (E2).** The consumed hook deletes the
+  matching `direct-pairing.json` before the device is authorised.
+- **Direct-pairing files have one owner (E3).** Expired files are deleted, the watcher clears only
+  the secret it installed, an operator `H4RN_PAIRING_PSK` is never replaced or cleared, and the
+  armed scopes are dropped with the secret.
+- **Relay-provisioned devices are pending until the host confirms (E4).** `DevicePaired` and
+  snapshots register the key with no effective scopes and off the transport allowlist; Settings →
+  Devices shows the SAS with Confirm/Reject, backed by `ConfirmPairing` (`admin`). Snapshots never
+  promote a pending key. QR pairings follow the same rule.
+- **Revoked peer daemons do not survive a restart (E5).** The first authoritative peer report
+  reconciles persisted connect-provenance host entries, removing and revoking keys that are gone.
+- **A client pairing never overwrites a peer daemon (E6).** `insert_scoped` keeps the existing
+  `host` entry and logs a warning instead of re-roling it.
+- **A direct pairing without `--scope` grants `view` and `approve` (E7).** Terminal, files and admin
+  need an explicit `--scope`; the same default applies to old files and an unarmed operator PSK.
+- **Terminal ownership uses the verified device (E8).** A remote client's `Hello` device id is a
+  claim; terminal ownership and the remote audit trail use the registry id or the handshake key.
+
 ### Council round 1: authorization, transport and pairing
 
 - **Binary PTY input is authorised (A1).** It needs `Hello`, the `terminal` scope and a viewer

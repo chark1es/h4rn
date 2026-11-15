@@ -3344,8 +3344,15 @@
 }
 .q-sas-host {
   margin-top: 14px;
-  padding-top: 12px;
+  margin-inline: 0;
+  padding: 12px 0 0;
   border-top: 1px solid var(--line);
+  border-inline: 0;
+  border-bottom: 0;
+  min-inline-size: 0;
+}
+.q-sas-host > legend {
+  padding: 0;
 }
 .q-sas-host .q-sas-code {
   font-size: 22px;

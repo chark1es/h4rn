@@ -211,6 +211,7 @@ struct SessionEndpoint {
 }
 
 type PairingHook = Arc<dyn Fn([u8; KEY_LEN]) + Send + Sync>;
+type PskConsumedHook = Arc<dyn Fn([u8; TOKEN_LEN]) + Send + Sync>;
 
 /// The daemon's secure transport service.
 pub struct SecureService {
@@ -221,6 +222,7 @@ pub struct SecureService {
     /// Optional file the allowlist is mirrored to, so pairings survive restart.
     allowlist_path: RwLock<Option<std::path::PathBuf>>,
     pairing_hook: RwLock<Option<PairingHook>>,
+    psk_consumed_hook: RwLock<Option<PskConsumedHook>>,
     sessions: Mutex<HashMap<SessionId, Arc<SessionEndpoint>>>,
     next_path: AtomicU32,
     started: Instant,
@@ -237,6 +239,7 @@ impl SecureService {
             psk,
             allowlist_path: RwLock::new(None),
             pairing_hook: RwLock::new(None),
+            psk_consumed_hook: RwLock::new(None),
             sessions: Mutex::new(HashMap::new()),
             next_path: AtomicU32::new(1),
             started: Instant::now(),
@@ -305,19 +308,33 @@ impl SecureService {
     }
 
     /// Installs a one-time pairing secret.
+    ///
+    /// A live secret opens PSK pairing: an unknown device that proves
+    /// possession of it may pair. [`Self::clear_psk`] and a successful
+    /// [`Self::consume_psk`] close the window again, so a stale secret cannot
+    /// keep admitting devices after it is gone.
     pub fn set_psk(&self, psk: [u8; TOKEN_LEN]) {
         *self
             .psk
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(psk);
+        self.policy
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .set_psk_pairing(true);
     }
 
-    /// Removes the current pairing secret (rotation or expiry).
+    /// Removes the current pairing secret (rotation or expiry) and closes PSK
+    /// pairing.
     pub fn clear_psk(&self) {
         *self
             .psk
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        self.policy
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .set_psk_pairing(false);
     }
 
     /// Atomically consumes the pairing secret if it is still `used`.
@@ -325,19 +342,53 @@ impl SecureService {
     /// Returns `true` for exactly one caller: the first to present the live
     /// secret. A second handshake that started with the same secret (it took a
     /// snapshot before the first finished) gets `false` and must be rejected.
+    /// The consumed hook runs before `true` is returned, so a durable record of
+    /// the secret can be invalidated before the device is authorised.
     pub fn consume_psk(&self, used: &[u8; TOKEN_LEN]) -> bool {
         use subtle::ConstantTimeEq as _;
-        let mut guard = self
-            .psk
-            .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match guard.as_ref() {
-            Some(current) if bool::from(current.ct_eq(used)) => {
-                *guard = None;
-                true
+        let consumed = {
+            let mut guard = self
+                .psk
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match guard.as_ref() {
+                Some(current) if bool::from(current.ct_eq(used)) => {
+                    *guard = None;
+                    true
+                }
+                _ => false,
             }
-            _ => false,
+        };
+        if !consumed {
+            return false;
         }
+        // The window closes with the secret, even while a durable invalidation
+        // is in flight.
+        self.policy
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .set_psk_pairing(false);
+        let hook = self
+            .psk_consumed_hook
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(hook) = hook {
+            hook(*used);
+        }
+        true
+    }
+
+    /// Registers a hook run with the used secret when the one-time secret is
+    /// consumed, before the device is allowed.
+    ///
+    /// The daemon uses it to delete the `direct-pairing.json` that carried the
+    /// secret, so a restart cannot re-arm a used QR.
+    pub fn set_psk_consumed_hook(&self, hook: Arc<dyn Fn([u8; TOKEN_LEN]) + Send + Sync>) {
+        *self
+            .psk_consumed_hook
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hook);
     }
 
     /// Registers a hook run when a device pairs through the one-time secret,

@@ -58,8 +58,19 @@ async fn boot(service: Arc<SecureService>) -> TestDaemon {
 
 async fn boot_with(service: Arc<SecureService>, devices: Arc<DeviceRegistry>) -> TestDaemon {
     let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().to_path_buf();
+    boot_at(path, service, devices, Some(dir)).await
+}
+
+/// Boots against an existing data directory, optionally owning its tempdir.
+async fn boot_at(
+    data_dir: std::path::PathBuf,
+    service: Arc<SecureService>,
+    devices: Arc<DeviceRegistry>,
+    owned: Option<tempfile::TempDir>,
+) -> TestDaemon {
     let config = Config {
-        data_dir: dir.path().to_path_buf(),
+        data_dir,
         bind: "127.0.0.1:0".parse().expect("bind"),
         extra_bind: None,
         log_level: "off".to_owned(),
@@ -94,7 +105,7 @@ async fn boot_with(service: Arc<SecureService>, devices: Arc<DeviceRegistry>) ->
         addr,
         service,
         devices,
-        dir: Some(dir),
+        dir: owned,
         shutdown: Some(shutdown),
         task,
     }
@@ -113,8 +124,17 @@ impl SecureClient {
         identity: DeviceIdentity,
         psk: Option<[u8; TOKEN_LEN]>,
     ) -> Self {
+        Self::connect_with_session(daemon, identity, psk, [11u8; SESSION_ID_LEN]).await
+    }
+
+    async fn connect_with_session(
+        daemon: &TestDaemon,
+        identity: DeviceIdentity,
+        psk: Option<[u8; TOKEN_LEN]>,
+        session_id: [u8; SESSION_ID_LEN],
+    ) -> Self {
         let mut engine = EngineConfig::new(
-            [11u8; SESSION_ID_LEN],
+            session_id,
             identity,
             daemon.service.public_identity().noise_public,
         );
@@ -206,10 +226,14 @@ impl SecureClient {
     }
 
     async fn hello(&mut self) -> ResponseBody {
+        self.hello_as("dev_secure").await
+    }
+
+    async fn hello_as(&mut self, device_id: &str) -> ResponseBody {
         self.request(ClientRequest::Hello {
             protocol_version: h4rn_protocol::PROTOCOL_VERSION,
             device: DeviceInfo {
-                device_id: DeviceId::new("dev_secure"),
+                device_id: DeviceId::new(device_id),
                 name: "secure integration test".into(),
                 platform: "linux".into(),
                 app_version: "0.1.0".into(),
@@ -618,13 +642,154 @@ async fn a_view_only_device_cannot_type_into_a_terminal() {
 }
 
 #[tokio::test]
+async fn a_pending_device_is_admitted_only_after_the_host_confirms() {
+    // Regression for E4: the relay announces the key, the host compares the
+    // SAS, and only an admin-scoped ConfirmPairing admits it.
+    let phone_identity = device_identity();
+    let phone_key = phone_identity.public().noise_public;
+    let admin_identity = device_identity();
+    let admin_key = admin_identity.public().noise_public;
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([admin_key])),
+    ));
+    let devices = Arc::new(DeviceRegistry::in_memory());
+    devices.insert_scoped("dev_admin", admin_key, PairScope::ALL.to_vec());
+    devices.provision_scoped("dev_phone", phone_key, vec![PairScope::View]);
+    let daemon = boot_with(Arc::clone(&service), Arc::clone(&devices)).await;
+
+    expect_rejected(&daemon, phone_identity.clone(), [0u8; TOKEN_LEN]).await;
+    assert!(
+        !service.is_allowed(&phone_key),
+        "a pending key was admitted"
+    );
+
+    let mut admin = SecureClient::connect(&daemon, admin_identity, None).await;
+    admin.hello().await;
+    match admin
+        .request(ClientRequest::ConfirmPairing {
+            device_id: DeviceId::new("dev_phone"),
+            confirm: true,
+        })
+        .await
+        .expect("confirm the pairing")
+    {
+        ResponseBody::Ack => {}
+        other => panic!("unexpected confirm response: {other:?}"),
+    }
+    assert!(service.is_allowed(&phone_key));
+    assert_eq!(
+        devices.scopes_for_key(&phone_key),
+        Some(vec![PairScope::View])
+    );
+    admin.close().await;
+
+    // A fresh logical session: the admin's session id must not be reused while
+    // its close is still settling.
+    let mut phone =
+        SecureClient::connect_with_session(&daemon, phone_identity, None, [0x31u8; SESSION_ID_LEN])
+            .await;
+    phone.hello().await;
+    phone.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_view_only_device_cannot_confirm_a_pending_pairing() {
+    // E4: confirming is an admin decision. A view-only device must not be able
+    // to admit a key the host has not compared, and the entry stays pending.
+    let phone_key = device_identity().public().noise_public;
+    let viewer_identity = device_identity();
+    let viewer_key = viewer_identity.public().noise_public;
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([viewer_key])),
+    ));
+    let devices = Arc::new(DeviceRegistry::in_memory());
+    devices.insert_scoped("dev_viewer", viewer_key, vec![PairScope::View]);
+    devices.provision_scoped("dev_phone", phone_key, vec![PairScope::View]);
+    let daemon = boot_with(Arc::clone(&service), Arc::clone(&devices)).await;
+
+    let mut viewer = SecureClient::connect(&daemon, viewer_identity, None).await;
+    viewer.hello().await;
+    let refused = viewer
+        .request(ClientRequest::ConfirmPairing {
+            device_id: DeviceId::new("dev_phone"),
+            confirm: true,
+        })
+        .await
+        .expect_err("a view-only device must not confirm a pairing");
+    assert_eq!(refused.code, h4rn_protocol::ProtoErrorCode::Forbidden);
+    assert!(
+        devices.is_pending(&phone_key),
+        "a refused decision must not change the pending entry"
+    );
+    assert!(!service.is_allowed(&phone_key));
+    viewer.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn terminal_ownership_uses_the_verified_device_not_the_hello_claim() {
+    // Regression for E8: a remote client may claim any device id in Hello.
+    // Ownership and the terminal audit must name the key's registry entry.
+    let client_identity = device_identity();
+    let key = client_identity.public().noise_public;
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([key])),
+    ));
+    let devices = Arc::new(DeviceRegistry::in_memory());
+    devices.insert_scoped("dev_real", key, PairScope::ALL.to_vec());
+    let daemon = boot_with(Arc::clone(&service), devices).await;
+    let mut client = SecureClient::connect(&daemon, client_identity, None).await;
+    client.hello_as("dev_attacker").await;
+    let host = host_of(&mut client).await;
+    let cwd = tempfile::tempdir().expect("cwd");
+    let cwd_string = cwd.path().to_string_lossy().to_string();
+    let opened = client
+        .request(ClientRequest::TerminalOpen {
+            thread_id: None,
+            host,
+            cwd: cwd_string,
+            shell: Some("/bin/sh".into()),
+            args: Vec::new(),
+            cols: 80,
+            rows: 24,
+        })
+        .await
+        .expect("open terminal");
+    match opened {
+        ResponseBody::TerminalOpened { terminal } => {
+            assert!(terminal.terminal_id.as_str().starts_with("term_"));
+        }
+        other => panic!("unexpected terminal response: {other:?}"),
+    }
+    let audit = std::fs::read_to_string(
+        daemon
+            .dir
+            .as_ref()
+            .expect("tempdir")
+            .path()
+            .join("terminal-audit.log"),
+    )
+    .expect("terminal audit");
+    assert!(
+        audit.contains("dev_real"),
+        "audit must name the verified device: {audit}"
+    );
+    assert!(
+        !audit.contains("dev_attacker"),
+        "audit trusted the Hello claim: {audit}"
+    );
+    client.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn a_direct_pairing_grants_exactly_the_requested_scopes() {
     // `h4rnd pair --direct --scope files` writes the scopes into the pairing
     // file; the daemon arms them, and the device that pairs holds only those.
+    // Nothing pre-enables PSK pairing: the watcher's live secret must.
     let client_identity = device_identity();
-    let service = Arc::new(SecureService::new(
-        SecureOptions::new(device_identity()).with_psk([1u8; TOKEN_LEN]),
-    ));
+    let service = Arc::new(SecureService::new(SecureOptions::new(device_identity())));
     let daemon = boot_with(Arc::clone(&service), Arc::new(DeviceRegistry::in_memory())).await;
     let psk = [0x42u8; TOKEN_LEN];
     h4rn_daemon::remote::pairing::write_direct_pairing(
@@ -661,6 +826,228 @@ async fn a_direct_pairing_grants_exactly_the_requested_scopes() {
     assert_eq!(auth.provenance, h4rn_daemon::remote::Provenance::Direct);
     assert_eq!(auth.scopes, vec![PairScope::View, PairScope::Files]);
     client.close().await;
+    daemon.stop().await;
+}
+
+/// Writes a direct pairing file into `dir`, as `h4rnd pair --direct` does.
+fn write_pairing(
+    dir: &std::path::Path,
+    psk: [u8; TOKEN_LEN],
+    expires_in: i64,
+    scopes: Vec<PairScope>,
+) {
+    h4rn_daemon::remote::pairing::write_direct_pairing(
+        dir,
+        &h4rn_daemon::remote::DirectPairingFile {
+            psk: hex::encode(psk),
+            expires_at: chrono::Utc::now().timestamp() + expires_in,
+            endpoints: vec!["127.0.0.1:1".into()],
+            label: Some("direct pairing test".into()),
+            scopes,
+        },
+    )
+    .unwrap();
+}
+
+/// Waits until the running watcher armed `psk`.
+async fn wait_for_secret(service: &SecureService, psk: [u8; TOKEN_LEN]) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while service.psk() != Some(psk) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the daemon never armed the direct pairing");
+}
+
+/// Dials `/secure` with `psk` and expects the daemon to reject it.
+async fn expect_rejected(daemon: &TestDaemon, identity: DeviceIdentity, psk: [u8; TOKEN_LEN]) {
+    let public = identity.public().noise_public;
+    let mut engine = EngineConfig::new(
+        [21u8; SESSION_ID_LEN],
+        identity,
+        daemon.service.public_identity().noise_public,
+    );
+    engine.psk = Some(psk);
+    let paths = vec![ClientPath::websocket(
+        TransportPathKind::Direct,
+        format!("ws://{}/secure", daemon.addr),
+    )];
+    let mut client = Client::connect(ClientConfig::new(engine, paths)).expect("start client");
+    let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match client.recv().await {
+                Some(ClientEvent::Closed { reason }) => return reason,
+                Some(ClientEvent::Established(_)) => panic!("a consumed secret paired a device"),
+                Some(_) => {}
+                None => panic!("the client stopped without a reason"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for the rejection");
+    // A refused handshake closes the socket right after the `Reject` packet;
+    // depending on flush timing the client reports either the daemon's reason
+    // or that the path stopped. Either way it must never have been established.
+    assert!(
+        outcome.contains("not paired")
+            || outcome.contains("revoked")
+            || outcome.contains("transport client stopped"),
+        "unexpected rejection reason: {outcome}"
+    );
+    assert!(
+        !daemon.service.is_allowed(&public),
+        "a rejected device ended up on the allowlist"
+    );
+    client.close().await;
+}
+
+#[tokio::test]
+async fn a_secret_armed_by_the_watcher_enables_psk_pairing() {
+    // Regression for E1: `SecureOptions::new` with no `with_psk`, then arm
+    // through the real file watcher. `set_psk` must open the pairing window.
+    let client_identity = device_identity();
+    let service = Arc::new(SecureService::new(SecureOptions::new(device_identity())));
+    let devices = Arc::new(DeviceRegistry::in_memory());
+    let daemon = boot_with(Arc::clone(&service), Arc::clone(&devices)).await;
+    let psk = [0x5bu8; TOKEN_LEN];
+    write_pairing(
+        daemon.dir.as_ref().unwrap().path(),
+        psk,
+        120,
+        vec![PairScope::View],
+    );
+    wait_for_secret(&service, psk).await;
+    assert!(
+        !service.is_allowed(&client_identity.public().noise_public),
+        "the device must not be allowed before it pairs"
+    );
+
+    let mut client = SecureClient::connect(&daemon, client_identity.clone(), Some(psk)).await;
+    client.hello().await;
+    assert!(
+        service.is_allowed(&client_identity.public().noise_public),
+        "a watcher-armed secret must pair the device"
+    );
+    assert_eq!(
+        devices.scopes_for_key(&client_identity.public().noise_public),
+        Some(vec![PairScope::View])
+    );
+    client.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_consumed_direct_pairing_cannot_be_reused_after_a_restart() {
+    // Regression for E2: consuming the secret must delete the file durably, so
+    // a restart before expiry never re-arms the same QR for a second device.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let identity = device_identity();
+    let psk = [0x6cu8; TOKEN_LEN];
+    write_pairing(
+        dir.path(),
+        psk,
+        300,
+        vec![PairScope::View, PairScope::Approve],
+    );
+
+    let service = Arc::new(SecureService::new(SecureOptions::new(identity.clone())));
+    let devices = Arc::new(DeviceRegistry::in_memory());
+    let daemon = boot_at(
+        dir.path().to_path_buf(),
+        Arc::clone(&service),
+        Arc::clone(&devices),
+        None,
+    )
+    .await;
+    wait_for_secret(&service, psk).await;
+    let first_identity = device_identity();
+    let mut first = SecureClient::connect(&daemon, first_identity.clone(), Some(psk)).await;
+    first.hello().await;
+    assert!(service.is_allowed(&first_identity.public().noise_public));
+    assert_eq!(service.psk(), None, "the secret is single use");
+    assert!(
+        h4rn_daemon::remote::pairing::read_direct_pairing(dir.path())
+            .unwrap()
+            .is_none(),
+        "consuming the secret must delete direct-pairing.json before granting access"
+    );
+    first.close().await;
+    daemon.stop().await;
+
+    // Restart before the original expiry with the same data directory.
+    let service = Arc::new(SecureService::new(SecureOptions::new(identity)));
+    let devices = Arc::new(DeviceRegistry::in_memory());
+    let daemon = boot_at(
+        dir.path().to_path_buf(),
+        Arc::clone(&service),
+        Arc::clone(&devices),
+        None,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(service.psk(), None, "a restart re-armed a consumed secret");
+    expect_rejected(&daemon, device_identity(), psk).await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn an_expired_direct_pairing_file_is_deleted() {
+    // Regression for E3: docs promised removal; the watcher must delete it.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let service = Arc::new(SecureService::new(SecureOptions::new(device_identity())));
+    let daemon = boot_at(
+        dir.path().to_path_buf(),
+        Arc::clone(&service),
+        Arc::new(DeviceRegistry::in_memory()),
+        None,
+    )
+    .await;
+    write_pairing(dir.path(), [0x7du8; TOKEN_LEN], -1, vec![PairScope::View]);
+    let path = h4rn_daemon::remote::pairing::direct_pairing_path(dir.path());
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while path.exists() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("an expired direct pairing file was left on disk");
+    assert_eq!(service.psk(), None);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn the_watcher_never_replaces_or_clears_an_operator_secret() {
+    // Regression for E3: an operator's H4RN_PAIRING_PSK is not the watcher's
+    // to replace, and expiry must not clear it.
+    let operator = [0x11u8; TOKEN_LEN];
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_psk(operator),
+    ));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let daemon = boot_at(
+        dir.path().to_path_buf(),
+        Arc::clone(&service),
+        Arc::new(DeviceRegistry::in_memory()),
+        None,
+    )
+    .await;
+
+    write_pairing(dir.path(), [0x22u8; TOKEN_LEN], 120, vec![PairScope::View]);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        service.psk(),
+        Some(operator),
+        "a direct pairing file replaced the operator secret"
+    );
+
+    write_pairing(dir.path(), [0x22u8; TOKEN_LEN], -1, vec![PairScope::View]);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        service.psk(),
+        Some(operator),
+        "direct pairing expiry cleared the operator secret"
+    );
     daemon.stop().await;
 }
 
