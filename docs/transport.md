@@ -117,6 +117,23 @@ key nor burns the real one. The policy is re-read after the handshake, so a
 revoke that lands mid-handshake is honoured. A client that holds a resume
 ticket is already paired and never sends a PSK.
 
+Follow-up rules for the first record:
+
+- A PSK-authorised device that sends a resume token in its `Open` is refused
+  with `NotPaired` before pairing, because a legitimate client never combines
+  the two. The key is not allowlisted and the secret stays armed.
+- Any failure to decrypt the first record is answered with the same
+  `NotPaired` reject, whether the key is allowed or not, so a failed `Open`
+  does not reveal which keys are on the allowlist.
+- A device that is already allowlisted and presents the correct secret is
+  admitted as usual but does **not** consume it: only a new device pairs
+  through the secret, and paired devices leave it armed (the round-5 rule).
+- The whole pre-attach phase of `SecureService::accept` (handshake, first
+  record, `Welcome`) is bounded by `SecureOptions::handshake_timeout`
+  (default 10 s), and the wait for the `IKpsk2` restart after a `NotPaired`
+  reject by `restart_timeout` (default 5 s). An unauthenticated peer cannot
+  hold a daemon task open by going silent.
+
 The device has two static keys:
 
 - **X25519**, used as the Noise static key and as its identity in the

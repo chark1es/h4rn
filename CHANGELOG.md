@@ -27,6 +27,19 @@ All notable changes to h4rn are recorded here. The format follows
 - **Docs (N4).** `docs/transport.md`, ADR-042 and the round-5 entry describe possession being
   proven by the first transport record and the plain-first fallback; the round-4 K2 backoff
   wording is corrected.
+- **An unknown key can no longer hold a daemon task open (Q1).** After a `NotPaired` reject the
+  server waited for the restart with no deadline, and `/secure` needs no credentials. `accept` now
+  bounds the whole pre-attach phase (`handshake_timeout`, 10 s) and the restart wait
+  (`restart_timeout`, 5 s), so every caller (`/secure`, the relay connector, `/secure-mcp`) is
+  covered.
+- **A PSK with a bogus resume token no longer pairs (Q2).** The `Open` record is decoded before
+  authorisation, and a PSK-authorised device that also sends a token is refused with `NotPaired`
+  before it is allowlisted or the secret is consumed.
+- **A failed `Open` rejects alike for every key (Q3).** The `NotPaired` reject no longer depends
+  on whether a secret is armed, so it cannot tell an allowed key from an unknown one.
+- **Paired devices leave the secret armed, now pinned (Q4).** Documented and tested.
+- **Test gaps closed (Q5).** The native `retry_with_psk` path and the daemon's forged-first-record
+  branch over a real WebSocket are covered.
 
 ### Council round 5: per-device handshake patterns, self-driving peer retries and honest tunnel capabilities (M1–M3)
 
