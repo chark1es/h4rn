@@ -51,7 +51,9 @@ impl TestDaemon {
 async fn boot(service: Arc<SecureService>) -> TestDaemon {
     let devices = Arc::new(DeviceRegistry::in_memory());
     for key in service.allowed_devices() {
-        devices.insert_direct(key, PairScope::ALL.to_vec());
+        devices
+            .insert_direct(key, PairScope::ALL.to_vec())
+            .expect("persist");
     }
     boot_with(service, devices).await
 }
@@ -558,11 +560,13 @@ async fn a_peer_daemon_key_cannot_issue_client_requests_on_secure() {
         SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([key])),
     ));
     let devices = Arc::new(DeviceRegistry::in_memory());
-    devices.register_host(
-        h4rn_protocol::HostId::new("host_peer"),
-        key,
-        Some("dev_peer".into()),
-    );
+    devices
+        .register_host(
+            h4rn_protocol::HostId::new("host_peer"),
+            key,
+            Some("dev_peer".into()),
+        )
+        .expect("persist");
     assert_eq!(devices.scopes_for_key(&key), None);
     let daemon = boot_with(Arc::clone(&service), devices).await;
     let mut client = SecureClient::connect(&daemon, peer_identity, None).await;
@@ -621,8 +625,12 @@ async fn a_relay_claim_cannot_replace_the_authenticated_key() {
         SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([key])),
     ));
     let devices = Arc::new(DeviceRegistry::in_memory());
-    devices.insert_scoped("viewer", key, vec![PairScope::View]);
-    devices.insert_scoped("admin", [0x77u8; 32], PairScope::ALL.to_vec());
+    devices
+        .insert_scoped("viewer", key, vec![PairScope::View])
+        .expect("persist");
+    devices
+        .insert_scoped("admin", [0x77u8; 32], PairScope::ALL.to_vec())
+        .expect("persist");
     let daemon = boot_with(Arc::clone(&service), devices).await;
     let mut client = SecureClient::connect(&daemon, client_identity, None).await;
     client.hello().await;
@@ -644,7 +652,9 @@ async fn a_view_only_device_cannot_type_into_a_terminal() {
         SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([key])),
     ));
     let devices = Arc::new(DeviceRegistry::in_memory());
-    devices.insert_scoped("viewer", key, vec![PairScope::View]);
+    devices
+        .insert_scoped("viewer", key, vec![PairScope::View])
+        .expect("persist");
     let daemon = boot_with(Arc::clone(&service), devices).await;
     let mut client = SecureClient::connect(&daemon, client_identity, None).await;
     client.hello().await;
@@ -668,8 +678,12 @@ async fn a_pending_device_is_admitted_only_after_the_host_confirms() {
         SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([admin_key])),
     ));
     let devices = Arc::new(DeviceRegistry::in_memory());
-    devices.insert_scoped("dev_admin", admin_key, PairScope::ALL.to_vec());
-    devices.provision_scoped("dev_phone", phone_key, vec![PairScope::View]);
+    devices
+        .insert_scoped("dev_admin", admin_key, PairScope::ALL.to_vec())
+        .expect("persist");
+    devices
+        .provision_scoped("dev_phone", phone_key, vec![PairScope::View])
+        .expect("persist");
     let daemon = boot_with(Arc::clone(&service), Arc::clone(&devices)).await;
 
     expect_rejected(&daemon, phone_identity.clone(), [0u8; TOKEN_LEN]).await;
@@ -719,8 +733,12 @@ async fn a_view_only_device_cannot_confirm_a_pending_pairing() {
         SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([viewer_key])),
     ));
     let devices = Arc::new(DeviceRegistry::in_memory());
-    devices.insert_scoped("dev_viewer", viewer_key, vec![PairScope::View]);
-    devices.provision_scoped("dev_phone", phone_key, vec![PairScope::View]);
+    devices
+        .insert_scoped("dev_viewer", viewer_key, vec![PairScope::View])
+        .expect("persist");
+    devices
+        .provision_scoped("dev_phone", phone_key, vec![PairScope::View])
+        .expect("persist");
     let daemon = boot_with(Arc::clone(&service), Arc::clone(&devices)).await;
 
     let mut viewer = SecureClient::connect(&daemon, viewer_identity, None).await;
@@ -752,7 +770,9 @@ async fn terminal_ownership_uses_the_verified_device_not_the_hello_claim() {
         SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([key])),
     ));
     let devices = Arc::new(DeviceRegistry::in_memory());
-    devices.insert_scoped("dev_real", key, PairScope::ALL.to_vec());
+    devices
+        .insert_scoped("dev_real", key, PairScope::ALL.to_vec())
+        .expect("persist");
     let daemon = boot_with(Arc::clone(&service), devices).await;
     let mut client = SecureClient::connect(&daemon, client_identity, None).await;
     client.hello_as("dev_attacker").await;
@@ -818,8 +838,12 @@ async fn a_view_only_device_cannot_read_a_file_diff() {
     let workspace_path = workspace.path().display().to_string();
 
     let devices = Arc::new(DeviceRegistry::in_memory());
-    devices.insert_scoped("viewer", viewer_key, vec![PairScope::View]);
-    devices.insert_scoped("admin", admin_key, PairScope::ALL.to_vec());
+    devices
+        .insert_scoped("viewer", viewer_key, vec![PairScope::View])
+        .expect("persist");
+    devices
+        .insert_scoped("admin", admin_key, PairScope::ALL.to_vec())
+        .expect("persist");
     let daemon = boot_with(Arc::clone(&service), devices).await;
 
     let mut admin = SecureClient::connect_in(&daemon, admin_identity, None, 12).await;

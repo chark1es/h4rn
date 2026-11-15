@@ -5,6 +5,28 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### Council round 3: pairing and registry fail-closed
+
+- **QR pairing now completes the SAS comparison and waits for the host (H1).** The phone derives
+  the string in Rust from its own key and the daemon key pinned by the QR, shows the comparison
+  screen, and pins nothing until "They match". It then waits in a pending state until the host
+  approves the device; a timeout explains what to do and never reports success early. Both QR and
+  typed-code flows are covered in vitest and the remote e2e now pairs the QR path through host
+  confirmation as well.
+- **A restart no longer re-admits devices revoked while connect was unreachable (H2).**
+  Connect-provenance clients and peer hosts load unverified: off the transport allowlist and
+  without effective scopes until the first connect snapshot or peer report of this run. Direct
+  pairings stay admitted. Trade-off documented in ADR-042 and `docs/transport.md`: a
+  connect-paired phone cannot use a direct or tailnet path until the daemon has reached connect
+  once.
+- **A failed direct-pairing invalidation hook refuses the pairing (H3).** `consume_psk` takes a
+  fallible hook; if the one-time file cannot be deleted, the handshake gets `not paired` and the
+  PSK stays consumed, so the QR cannot be re-armed after a restart.
+- **Registry write failures are reported instead of swallowed (H4).** `persist` returns an error:
+  confirmations that cannot be written roll back and surface through `ConfirmPairing`, while
+  revocations stay revoked in memory and are recorded in a `devices.revoked` sidecar that the next
+  start applies and clears. Peer-host updates log and skip admission rather than pretending.
+
 ### Council round 2: pairing, direct pairing and registry lifecycle
 
 - **`h4rnd pair --direct` can pair again (E1).** A live one-time secret now opens PSK pairing;

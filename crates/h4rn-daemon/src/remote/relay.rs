@@ -419,9 +419,13 @@ async fn handle_event(
             registry.topology().notify_one();
         }
         RelayServerEvent::DeviceRevoked { device_id, .. } => {
-            if let Some(key) = registry.remove(&device_id) {
+            let (key, persisted) = registry.remove(&device_id);
+            if let Some(key) = key {
                 service.revoke(key);
                 tracing::info!(device = %device_id, "revoked a paired device");
+            }
+            if let Err(error) = persisted {
+                tracing::warn!(device = %device_id, %error, "the device revocation could not be saved");
             }
             registry.topology().notify_one();
         }
@@ -470,7 +474,10 @@ async fn handle_event(
 /// session. Direct pairings and peer daemons are not connect's to revoke.
 fn apply_snapshot(service: &SecureService, registry: &DeviceRegistry, devices: &[ConnectDevice]) {
     let entries: Vec<ConnectEntry> = devices.iter().filter_map(connect_entry).collect();
-    let removed = registry.reconcile_connect(&entries);
+    let (removed, persisted) = registry.reconcile_connect(&entries);
+    if let Err(error) = persisted {
+        tracing::warn!(%error, "the connect snapshot could not be persisted");
+    }
     for entry in &entries {
         // A snapshot is authoritative for scopes, never for admission: a
         // pending device stays off the allowlist until the host confirms it.
@@ -519,7 +526,13 @@ fn register_device(service: &SecureService, registry: &DeviceRegistry, device: &
     let Some(entry) = connect_entry(device) else {
         return;
     };
-    registry.provision_scoped(entry.device_id.clone(), entry.key, entry.scopes);
+    if let Err(error) = registry.provision_scoped(entry.device_id.clone(), entry.key, entry.scopes)
+    {
+        // The key was not recorded, so it cannot be confirmed or admitted. A
+        // later snapshot retries the write.
+        tracing::warn!(device = %device.name, %error, "could not record a relay pairing");
+        return;
+    }
     if registry.is_admitted(&entry.key) {
         // An already-confirmed device reappearing (a re-pair event) is admitted
         // as before; only a pending one waits.
@@ -623,9 +636,11 @@ mod tests {
         );
         // The host confirmed `kept` while both were present.
         let kept = registry.key_for_device("kept").expect("kept key");
-        registry.decide_pending("kept", true);
+        registry.decide_pending("kept", true).1.expect("persist");
         service.allow(kept);
-        registry.insert_direct([3u8; KEY_LEN], PairScope::ALL.to_vec());
+        registry
+            .insert_direct([3u8; KEY_LEN], PairScope::ALL.to_vec())
+            .expect("persist");
         service.allow([3u8; KEY_LEN]);
         apply_snapshot(
             &service,
@@ -682,6 +697,7 @@ mod tests {
         // Only the host's decision admits it.
         let (key, confirm) = registry
             .decide_pending("d1", true)
+            .0
             .expect("the pending pairing");
         assert_eq!(key, [7u8; KEY_LEN]);
         assert!(confirm);
@@ -694,7 +710,7 @@ mod tests {
         assert!(registry.pending_confirmations().is_empty());
 
         // A revoked device is no longer listed.
-        registry.remove("d1");
+        registry.remove("d1").1.expect("persist");
         assert!(registry.pending_confirmations().is_empty());
     }
 
@@ -707,6 +723,7 @@ mod tests {
         register_device(&service, &registry, &device("d1", 3, vec![PairScope::View]));
         let (key, confirm) = registry
             .decide_pending("d1", false)
+            .0
             .expect("the pending pairing");
         assert!(!confirm);
         service.revoke(key);
@@ -714,7 +731,7 @@ mod tests {
         assert!(!service.is_allowed(&[3u8; KEY_LEN]));
         assert!(registry.pending_confirmations().is_empty());
         assert!(
-            registry.decide_pending("d1", true).is_none(),
+            registry.decide_pending("d1", true).0.is_none(),
             "already decided"
         );
     }

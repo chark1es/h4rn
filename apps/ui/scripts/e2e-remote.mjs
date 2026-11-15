@@ -624,21 +624,35 @@ async function main() {
       (link) => window.dispatchEvent(new CustomEvent("h4rn-connect-pair", { detail: link })),
       pairingLink,
     );
-    await page.getByText(/Paired with atlas/).waitFor({ timeout: 30_000 });
 
-    // The relay only announced this device's key, so the phone's handshake is
-    // still refused. The host compares the code and confirms; only then does
-    // the daemon allowlist the key and the relay let the phone through.
-    await waitForLog(logs, "NotPaired", 30_000);
+    // The relay only announced this device's key, so the host keeps it
+    // pending. The phone derives the SAS from the key pinned by the QR, and
+    // both sides compare it before the host admits the key.
+    const phoneQrSas = (
+      await page.getByTestId("pair-sas").textContent({ timeout: 30_000 })
+    )?.trim();
+    if (!phoneQrSas || !/^\d{4} \d{4} \d{4}$/.test(phoneQrSas)) {
+      throw new Error(`the QR phone did not show a 12-digit code: ${phoneQrSas}`);
+    }
     await hostUi.getByTestId("host-sas").first().waitFor({ timeout: 30_000 });
     const hostCardSas = (await hostUi.getByTestId("host-sas").first().textContent())?.trim();
     if (!hostCardSas || !/^\d{4} \d{4} \d{4}$/.test(hostCardSas)) {
       throw new Error(`the host did not show a 12-digit code: ${hostCardSas}`);
     }
+    if (hostCardSas !== phoneQrSas) {
+      throw new Error(
+        `the host and QR phone codes differ: host ${hostCardSas}, phone ${phoneQrSas}`,
+      );
+    }
     console.log(`--- host SAS: ${hostCardSas}`);
+    // The phone confirms the comparison, pins the key and waits; the host's
+    // approval is still the admission gate.
+    await page.getByRole("button", { name: "They match" }).click();
+    await page.getByTestId("pair-waiting").waitFor({ timeout: 20_000 });
     await hostUi.getByTestId("confirm-pairing").first().click();
     await hostUi.getByTestId("host-sas").first().waitFor({ state: "detached", timeout: 20_000 });
     await hostUi.close();
+    await page.getByText(/Paired with atlas/).waitFor({ timeout: 30_000 });
 
     // Signing in and pairing happen on the Settings route. Booting the app
     // again at the thread route with no query string is a full reload, so the
@@ -769,11 +783,13 @@ async function main() {
       throw new Error(`the host and phone codes differ: host ${hostSas}, phone ${phoneSas}`);
     }
     // The host's confirmation is the admission gate: a malicious relay that
-    // swapped the key cannot pass this step.
+    // swapped the key cannot pass this step. The phone confirms first and
+    // waits, so its pending screen proves the pairing is not reported early.
+    await page.getByRole("button", { name: "They match" }).click();
+    await page.getByTestId("pair-waiting").waitFor({ timeout: 20_000 });
     await hostPage.getByTestId("confirm-pairing").first().click();
     await hostPage.getByTestId("host-sas").first().waitFor({ state: "detached", timeout: 20_000 });
     await hostPage.close();
-    await page.getByRole("button", { name: "They match" }).click();
     await page.getByText(/Paired with atlas/).waitFor({ timeout: 30_000 });
 
     // The code is single-use.

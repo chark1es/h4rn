@@ -16,7 +16,12 @@ import {
   removeSessionState,
   writeSessionState,
 } from "@/lib/platform/sessionState";
-import { pushToast, restartConnection } from "@/lib/store/appStore";
+import {
+  getState as getAppState,
+  navigate,
+  pushToast,
+  restartConnection,
+} from "@/lib/store/appStore";
 import {
   type ActiveRemote,
   clearActiveRemote,
@@ -74,7 +79,7 @@ export type RemoteState = {
 };
 
 /**
- * What the phone shows after claiming a typed code and before it trusts the
+ * What the phone shows after claiming a pairing and before it trusts the
  * daemon key connect handed over. The string is derived in Rust (wasm) from
  * this device's key and that daemon key; the host shows its own derivation.
  */
@@ -82,6 +87,13 @@ export type SasConfirm = {
   sas: string;
   machineName: string;
   active: ActiveRemote;
+  /** Which claim produced the key: a scanned QR or a typed code. */
+  method: "qr" | "code";
+  /**
+   * The person confirmed the code and this device is pinned, but the host has
+   * not admitted it yet. The page stays here until the transport comes online.
+   */
+  waiting: boolean;
 };
 
 const PENDING_LOGIN_KEY = "h4rn.remote.pending-login";
@@ -840,8 +852,25 @@ export async function pairMachine(raw: string): Promise<boolean> {
     return false;
   }
   if (mockFixtures) {
-    patch({ activeMachineId: payload.machineId });
-    return true;
+    const active: ActiveRemote = {
+      connectUrl: payload.connectUrl,
+      machineId: payload.machineId,
+      machineName: payload.machineId,
+      daemonNoiseKey: payload.daemonNoiseKey,
+      addresses: [],
+      online: true,
+      relay: true,
+    };
+    patch({
+      sasConfirm: {
+        sas: "1234 5678 9012",
+        machineName: payload.machineId,
+        active,
+        method: "qr",
+        waiting: false,
+      },
+    });
+    return false;
   }
 
   const state = remoteStore.getState();
@@ -876,12 +905,16 @@ export async function pairMachine(raw: string): Promise<boolean> {
       online: machine.online,
       relay: true,
     };
-    writeActiveRemote(active);
-    patch({ active, activeMachineId: machine.id, busy: null });
-    await refresh();
-    restartConnection();
-    pushToast({ variant: "success", title: `Paired with ${machine.name}.` });
-    return true;
+    // The relay only announced this device to the host; the host keeps it
+    // pending until a person compares the code. Derive it from the key the QR
+    // pinned, not from anything connect could have substituted.
+    const sas = await client.pairingSas(payload.daemonNoiseKey);
+    patch({
+      sasConfirm: { sas, machineName: machine.name, active, method: "qr", waiting: false },
+      busy: null,
+    });
+    navigate({ kind: "placeholder", surface: "pairing", path: "/pairing" });
+    return false;
   } catch (error) {
     patch({ busy: null, error: describe(error) });
     pushToast({
@@ -939,8 +972,28 @@ export async function createPairing(
  */
 export async function pairByCode(code: string): Promise<boolean> {
   if (mockFixtures) {
-    pushToast({ variant: "success", title: "Paired with atlas." });
-    return true;
+    const machines = remoteStore.getState().machines;
+    const machine = machines[0] ?? mockMachines()[0];
+    if (!machine) return false;
+    const active: ActiveRemote = {
+      connectUrl: MOCK_CONNECT_URL,
+      machineId: machine.id,
+      machineName: machine.name,
+      daemonNoiseKey: "00".repeat(32),
+      addresses: machine.addresses,
+      online: machine.online,
+      relay: true,
+    };
+    patch({
+      sasConfirm: {
+        sas: "1234 5678 9012",
+        machineName: machine.name,
+        active,
+        method: "code",
+        waiting: false,
+      },
+    });
+    return false;
   }
   const client = await loadConnectClient();
   if (!client) {
@@ -962,7 +1015,10 @@ export async function pairByCode(code: string): Promise<boolean> {
       relay: true,
     };
     const sas = await client.pairingSas(daemonNoiseKey);
-    patch({ sasConfirm: { sas, machineName: machine.name, active }, busy: null });
+    patch({
+      sasConfirm: { sas, machineName: machine.name, active, method: "code", waiting: false },
+      busy: null,
+    });
     return false;
   } catch (error) {
     patch({ busy: null, error: describe(error) });
@@ -970,16 +1026,67 @@ export async function pairByCode(code: string): Promise<boolean> {
   }
 }
 
-/** The person confirmed the code matches: pin the daemon key and connect. */
+/**
+ * The person confirmed the code matches: pin the daemon key and connect.
+ *
+ * The host still has to admit this device. We wait here, showing the pending
+ * state, until the transport comes online; a timeout leaves the screen in
+ * place with an explanation and a retry, so nothing is reported as paired
+ * before the host actually approved it.
+ */
 export async function confirmPairingSas(): Promise<boolean> {
   const pending = remoteStore.getState().sasConfirm;
-  if (!pending) return false;
+  if (!pending || pending.waiting) return false;
+  if (mockFixtures) {
+    writeActiveRemote(pending.active);
+    patch({
+      active: pending.active,
+      activeMachineId: pending.active.machineId,
+      sasConfirm: null,
+    });
+    pushToast({ variant: "success", title: `Paired with ${pending.machineName}.` });
+    return true;
+  }
   writeActiveRemote(pending.active);
-  patch({ active: pending.active, activeMachineId: pending.active.machineId, sasConfirm: null });
-  await refresh();
+  patch({
+    active: pending.active,
+    activeMachineId: pending.active.machineId,
+    sasConfirm: { ...pending, waiting: true },
+    error: null,
+  });
   restartConnection();
+  const approved = await waitForHostApproval();
+  if (!approved) {
+    patch({
+      sasConfirm: { ...pending, waiting: false },
+      error: `${pending.machineName} has not approved this device yet. Open Settings → Devices on ${pending.machineName}, confirm the same code, then try again.`,
+    });
+    return false;
+  }
+  patch({ sasConfirm: null });
+  await refresh();
   pushToast({ variant: "success", title: `Paired with ${pending.machineName}.` });
   return true;
+}
+
+const HOST_APPROVAL_TIMEOUT_MS = 5 * 60_000;
+const HOST_APPROVAL_RETRY_MS = 2_000;
+
+/**
+ * Waits for the host's admission to show up as a live connection.
+ *
+ * A reconnect that fails because the device is still pending is normal here:
+ * restart it on the next attempt instead of giving up.
+ */
+async function waitForHostApproval(): Promise<boolean> {
+  const deadline = Date.now() + HOST_APPROVAL_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const status = getAppState().connection.status;
+    if (status === "online" || status === "degraded") return true;
+    if (status === "offline") restartConnection();
+    await new Promise((resolve) => setTimeout(resolve, HOST_APPROVAL_RETRY_MS));
+  }
+  return false;
 }
 
 /**

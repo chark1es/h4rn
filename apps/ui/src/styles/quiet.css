@@ -3342,6 +3342,32 @@
   padding: 16px 0 8px;
   font-variant-numeric: tabular-nums;
 }
+.q-sas-waiting {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding-top: 12px;
+  color: var(--fg-muted);
+  font-size: 13px;
+}
+.q-sas-waiting::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: q-sas-pulse 1.4s ease-in-out infinite;
+}
+@keyframes q-sas-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
 .q-sas-host {
   margin-top: 14px;
   margin-inline: 0;
@@ -4649,7 +4675,8 @@
     opacity: 0.7;
   }
   .q-caret,
-  .q-term-cur {
+  .q-term-cur,
+  .q-sas-waiting::before {
     animation: none;
   }
 }

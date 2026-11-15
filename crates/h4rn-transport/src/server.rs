@@ -211,7 +211,7 @@ struct SessionEndpoint {
 }
 
 type PairingHook = Arc<dyn Fn([u8; KEY_LEN]) + Send + Sync>;
-type PskConsumedHook = Arc<dyn Fn([u8; TOKEN_LEN]) + Send + Sync>;
+type PskConsumedHook = Arc<dyn Fn([u8; TOKEN_LEN]) -> Result<(), String> + Send + Sync>;
 
 /// The daemon's secure transport service.
 pub struct SecureService {
@@ -343,7 +343,9 @@ impl SecureService {
     /// secret. A second handshake that started with the same secret (it took a
     /// snapshot before the first finished) gets `false` and must be rejected.
     /// The consumed hook runs before `true` is returned, so a durable record of
-    /// the secret can be invalidated before the device is authorised.
+    /// the secret can be invalidated before the device is authorised. A hook
+    /// that fails returns `false` too: the secret stays consumed, the pairing
+    /// is refused, and a restart cannot find the secret still armed.
     pub fn consume_psk(&self, used: &[u8; TOKEN_LEN]) -> bool {
         use subtle::ConstantTimeEq as _;
         let consumed = {
@@ -373,8 +375,14 @@ impl SecureService {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        if let Some(hook) = hook {
-            hook(*used);
+        if let Some(hook) = hook
+            && let Err(error) = hook(*used)
+        {
+            tracing::warn!(
+                %error,
+                "the one-time pairing secret was consumed but its durable record could not be invalidated; refusing the pairing"
+            );
+            return false;
         }
         true
     }
@@ -383,8 +391,12 @@ impl SecureService {
     /// consumed, before the device is allowed.
     ///
     /// The daemon uses it to delete the `direct-pairing.json` that carried the
-    /// secret, so a restart cannot re-arm a used QR.
-    pub fn set_psk_consumed_hook(&self, hook: Arc<dyn Fn([u8; TOKEN_LEN]) + Send + Sync>) {
+    /// secret, so a restart cannot re-arm a used QR. A hook error refuses the
+    /// pairing: it must not report success while the durable record survives.
+    pub fn set_psk_consumed_hook(
+        &self,
+        hook: Arc<dyn Fn([u8; TOKEN_LEN]) -> Result<(), String> + Send + Sync>,
+    ) {
         *self
             .psk_consumed_hook
             .write()
@@ -1078,6 +1090,33 @@ mod tests {
     use crate::keys::KEY_LEN;
     use crate::noise::{Handshake, HandshakeConfig};
     use crate::wire::SESSION_ID_LEN;
+
+    #[test]
+    fn a_failed_consumed_hook_refuses_the_pairing_and_keeps_the_secret_closed() {
+        // A pairing that cannot delete its durable one-time secret must not be
+        // reported as paired: otherwise a restart re-arms the same QR.
+        let service = SecureService::new(
+            SecureOptions::new(DeviceIdentity::generate().unwrap()).with_psk([9u8; TOKEN_LEN]),
+        );
+        service.set_psk_consumed_hook(Arc::new(|_| Err("disk full".into())));
+        assert!(!service.paired_through_psk(Some([9u8; TOKEN_LEN]), [4u8; KEY_LEN]));
+        assert!(!service.is_allowed(&[4u8; KEY_LEN]));
+        assert_eq!(service.psk(), None, "the secret must stay consumed");
+        assert!(
+            !service.consume_psk(&[9u8; TOKEN_LEN]),
+            "a consumed secret cannot be retried"
+        );
+    }
+
+    #[test]
+    fn a_successful_consumed_hook_allows_the_pairing() {
+        let service = SecureService::new(
+            SecureOptions::new(DeviceIdentity::generate().unwrap()).with_psk([9u8; TOKEN_LEN]),
+        );
+        service.set_psk_consumed_hook(Arc::new(|_| Ok(())));
+        assert!(service.paired_through_psk(Some([9u8; TOKEN_LEN]), [4u8; KEY_LEN]));
+        assert!(service.is_allowed(&[4u8; KEY_LEN]));
+    }
 
     #[test]
     fn default_policy_rejects_unknown_devices() {

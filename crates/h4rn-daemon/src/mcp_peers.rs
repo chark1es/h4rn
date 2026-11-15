@@ -188,13 +188,21 @@ impl PeerDirectory {
                 if after.iter().any(|peer| peer.noise_public == key) {
                     continue;
                 }
-                if devices.remove_key(&key) {
+                let (removed, persisted) = devices.remove_key(&key);
+                if removed {
                     if let Some(service) = &service {
                         service.revoke(key);
                     }
                     tracing::info!(
                         key = %hex::encode(key),
                         "revoked a peer daemon missing from the connect peer set"
+                    );
+                }
+                if let Err(error) = persisted {
+                    tracing::warn!(
+                        key = %hex::encode(key),
+                        %error,
+                        "the peer revocation could not be persisted"
                     );
                 }
             }
@@ -206,18 +214,23 @@ impl PeerDirectory {
             }
             if let Some(devices) = &devices {
                 // A key that already holds client scopes is never silently
-                // re-roled into a peer daemon.
-                if devices
-                    .authorization(&peer.noise_public)
-                    .is_some_and(|auth| auth.role == Role::Client)
-                {
+                // re-roled into a peer daemon. A persisted entry still waiting
+                // for its own source counts too: the role is the dangerous part.
+                if devices.registered_role(&peer.noise_public) == Some(Role::Client) {
                     tracing::warn!(
                         peer = %peer.host,
                         "a peer daemon key is already a paired client; not registering it as a host"
                     );
                     continue;
                 }
-                devices.register_host(peer.host.clone(), peer.noise_public, peer.device_id.clone());
+                if let Err(error) = devices.register_host(
+                    peer.host.clone(),
+                    peer.noise_public,
+                    peer.device_id.clone(),
+                ) {
+                    tracing::warn!(peer = %peer.host, %error, "could not register a peer daemon");
+                    continue;
+                }
             }
             if let Some(service) = &service {
                 service.allow(peer.noise_public);
@@ -231,11 +244,14 @@ impl PeerDirectory {
                 continue;
             }
             if let Some(devices) = &devices
-                && devices
-                    .authorization(&old.noise_public)
-                    .is_some_and(|auth| auth.role == Role::Host)
+                && devices.registered_role(&old.noise_public) == Some(Role::Host)
             {
-                devices.remove_key(&old.noise_public);
+                let (removed, persisted) = devices.remove_key(&old.noise_public);
+                if let Err(error) = persisted
+                    && removed
+                {
+                    tracing::warn!(peer = %old.host, %error, "a peer revocation could not be saved");
+                }
             }
             if let Some(service) = &service {
                 service.revoke(old.noise_public);
@@ -695,7 +711,9 @@ mod tests {
     fn a_paired_client_key_is_never_reroled_into_a_peer() {
         let directory = PeerDirectory::new();
         let devices = Arc::new(DeviceRegistry::in_memory());
-        devices.insert_direct([1; KEY_LEN], vec![h4rn_protocol::PairScope::View]);
+        devices
+            .insert_direct([1; KEY_LEN], vec![h4rn_protocol::PairScope::View])
+            .expect("persist");
         directory.attach_devices(Arc::clone(&devices));
         directory.replace_source("connect", vec![peer("host_a", 1)]);
         assert_eq!(
@@ -714,8 +732,12 @@ mod tests {
         // Regression for E6: a key that is a peer daemon must stay a host.
         // Re-roling it into a client breaks the MCP tunnel authorisation.
         let devices = DeviceRegistry::in_memory();
-        devices.register_host(HostId::new("host_a"), [1; KEY_LEN], None);
-        devices.insert_scoped("phone", [1; KEY_LEN], vec![h4rn_protocol::PairScope::View]);
+        devices
+            .register_host(HostId::new("host_a"), [1; KEY_LEN], None)
+            .expect("persist");
+        devices
+            .insert_scoped("phone", [1; KEY_LEN], vec![h4rn_protocol::PairScope::View])
+            .expect("persist");
         let auth = devices
             .authorization(&[1; KEY_LEN])
             .expect("still registered");
@@ -732,11 +754,18 @@ mod tests {
         let path = dir.path().join("devices.json");
         {
             let devices = DeviceRegistry::open(&path);
-            devices.register_host(HostId::new("host_a"), [1; KEY_LEN], None);
-            devices.register_host(HostId::new("host_gone"), [2; KEY_LEN], None);
+            devices
+                .register_host(HostId::new("host_a"), [1; KEY_LEN], None)
+                .expect("persist");
+            devices
+                .register_host(HostId::new("host_gone"), [2; KEY_LEN], None)
+                .expect("persist");
         }
         let devices = Arc::new(DeviceRegistry::open(&path));
-        assert!(devices.authorization(&[2; KEY_LEN]).is_some());
+        // H2: a persisted host loads unverified, so it is not admitted until
+        // its authoritative source reports it.
+        assert!(devices.keys().contains(&[2; KEY_LEN]));
+        assert!(devices.authorization(&[2; KEY_LEN]).is_none());
         let service = Arc::new(SecureService::new(
             h4rn_transport::server::SecureOptions::new(
                 DeviceIdentity::generate().expect("identity"),
@@ -750,8 +779,10 @@ mod tests {
         directory.attach_devices(Arc::clone(&devices));
         directory.attach_secure(Arc::clone(&service));
         // Nothing has reported yet: startup must not wipe the persisted hosts
-        // before connect has had a chance to answer.
-        assert!(devices.authorization(&[2; KEY_LEN]).is_some());
+        // before connect has had a chance to answer, but it must not admit them
+        // either.
+        assert!(devices.keys().contains(&[2; KEY_LEN]));
+        assert!(devices.authorization(&[2; KEY_LEN]).is_none());
         directory.replace_source("connect", vec![peer("host_a", 1)]);
         assert!(devices.authorization(&[1; KEY_LEN]).is_some());
         assert!(

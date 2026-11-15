@@ -17,8 +17,8 @@
 //! A key with no entry is denied. The file survives restarts so pairing state
 //! and scopes are not forgotten, and the transport allowlist is rebuilt from it.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{BTreeSet, HashMap};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, RwLock};
 
 use h4rn_protocol::{HostId, PairScope, PairingConfirmation};
@@ -66,13 +66,45 @@ pub struct Entry {
     /// scopes and are kept off the transport allowlist.
     #[serde(default)]
     pub pending: bool,
+    /// Confirmed by this run's authoritative source: a connect snapshot for a
+    /// connect client, a peer report for a peer daemon, or the pairing itself
+    /// for a direct one. Never serialised: every connect entry starts a restart
+    /// unverified, so a revocation that happened while the daemon could not
+    /// reach connect cannot outlive it.
+    #[serde(skip)]
+    pub verified: bool,
 }
 
 impl Entry {
     fn key_bytes(&self) -> Option<[u8; KEY_LEN]> {
         hex::decode(&self.key).ok()?.as_slice().try_into().ok()
     }
+
+    fn admits(&self) -> bool {
+        !self.pending && self.verified
+    }
 }
+
+/// Why a registry change could not be made durable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PersistError(String);
+impl PersistError {
+    fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+impl std::fmt::Display for PersistError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PersistError {}
+
+/// The key a pairing decision applied to and whether it was a confirmation.
+/// `None` means there was no pending device to decide.
+pub type PairingDecision = Option<([u8; KEY_LEN], bool)>;
 
 /// What the registry knows about an authenticated key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,6 +145,9 @@ pub struct DeviceRegistry {
     /// have changed (snapshot, presence, pairing, revocation), so the peer
     /// directory refreshes on a push instead of polling connect.
     topology: tokio::sync::Notify,
+    /// Test-only failure injection for the durable write.
+    #[cfg(test)]
+    fail_persist: std::sync::atomic::AtomicBool,
 }
 
 impl DeviceRegistry {
@@ -125,13 +160,19 @@ impl DeviceRegistry {
     ///
     /// A missing file is an empty registry. A corrupt file is *also* an empty
     /// registry, never an open one: every device must pair again.
+    ///
+    /// Connect entries load unverified: connect is the authority for them, and
+    /// until this run's first snapshot (or peer report) arrives, a device that
+    /// was revoked while the daemon was offline must not be admitted. Direct
+    /// pairings do not depend on connect, so they load admitted.
     pub fn open(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
         let mut entries = HashMap::new();
         match read_secret_file(&path) {
             Ok(Some(bytes)) => match serde_json::from_slice::<Vec<Entry>>(&bytes) {
                 Ok(list) => {
-                    for entry in list {
+                    for mut entry in list {
+                        entry.verified = entry.provenance == Provenance::Direct;
                         if let Some(key) = entry.key_bytes() {
                             entries.insert(key, entry);
                         }
@@ -146,13 +187,17 @@ impl DeviceRegistry {
                 tracing::warn!(%error, "could not read the device registry; devices must pair again")
             }
         }
-        Self {
+        let registry = Self {
             entries: RwLock::new(entries),
             path: Some(path),
             pending_direct: Mutex::new(None),
             confirmations: Mutex::new(Vec::new()),
             topology: tokio::sync::Notify::new(),
-        }
+            #[cfg(test)]
+            fail_persist: std::sync::atomic::AtomicBool::new(false),
+        };
+        registry.apply_pending_revocations();
+        registry
     }
 
     /// The topology-change signal; see the field docs.
@@ -166,27 +211,117 @@ impl DeviceRegistry {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn mutate<R>(&self, change: impl FnOnce(&mut HashMap<[u8; KEY_LEN], Entry>) -> R) -> R {
+    /// Applies `change`, then persists. When `rollback` is set, a failed write
+    /// restores the previous entries so an admission the file cannot record is
+    /// not in effect for this run either. A revocation passes `false`: staying
+    /// revoked in memory is safer than putting a revoked key back.
+    fn mutate<R>(
+        &self,
+        rollback: bool,
+        change: impl FnOnce(&mut HashMap<[u8; KEY_LEN], Entry>) -> R,
+    ) -> (R, Result<(), PersistError>) {
         let mut guard = self
             .entries
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = rollback.then(|| guard.clone());
         let result = change(&mut guard);
-        self.persist(&guard);
-        result
+        let persisted = self.persist(&guard);
+        if persisted.is_err()
+            && let Some(before) = before
+        {
+            *guard = before;
+        }
+        (result, persisted)
     }
 
-    fn persist(&self, entries: &HashMap<[u8; KEY_LEN], Entry>) {
-        let Some(path) = &self.path else { return };
+    fn persist(&self, entries: &HashMap<[u8; KEY_LEN], Entry>) -> Result<(), PersistError> {
+        #[cfg(test)]
+        if self
+            .fail_persist
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(PersistError::new("injected persist failure"));
+        }
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
         let mut list: Vec<&Entry> = entries.values().collect();
         list.sort_by(|a, b| a.key.cmp(&b.key));
-        match serde_json::to_vec(&list) {
-            Ok(body) => {
-                if let Err(error) = write_secret_file(path, &body) {
-                    tracing::warn!(%error, "could not persist the device registry");
+        let body = serde_json::to_vec(&list).map_err(|error| {
+            PersistError::new(format!("serialise the device registry: {error}"))
+        })?;
+        write_secret_file(path, &body)
+            .map_err(|error| PersistError::new(format!("write the device registry: {error}")))
+    }
+
+    /// The sidecar listing keys whose revocation could not be written into the
+    /// registry file. It is tiny, so it is the retry that survives a crash.
+    fn revocation_path(&self) -> Option<PathBuf> {
+        self.path
+            .as_ref()
+            .map(|path| path.with_file_name("devices.revoked"))
+    }
+
+    fn read_revocations(path: &Path) -> BTreeSet<[u8; KEY_LEN]> {
+        let Ok(Some(bytes)) = read_secret_file(path) else {
+            return BTreeSet::new();
+        };
+        String::from_utf8_lossy(&bytes)
+            .lines()
+            .filter_map(|line| hex::decode(line.trim()).ok())
+            .filter_map(|key| key.as_slice().try_into().ok())
+            .collect()
+    }
+
+    /// Records keys that must not be admitted even if the registry file still
+    /// lists them. Called only after the main write failed.
+    fn remember_revocations(&self, keys: &[[u8; KEY_LEN]]) {
+        let Some(path) = self.revocation_path() else {
+            return;
+        };
+        let mut revoked = Self::read_revocations(&path);
+        revoked.extend(keys.iter().copied());
+        let body = revoked
+            .iter()
+            .map(hex::encode)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if let Err(error) = write_secret_file(&path, body.as_bytes()) {
+            tracing::warn!(
+                %error,
+                keys = keys.len(),
+                "could not record a pending device revocation; a restart may re-admit it"
+            );
+        }
+    }
+
+    /// Drops keys a previous run failed to remove from the registry file, then
+    /// rewrites the file and clears the sidecar once that succeeds.
+    fn apply_pending_revocations(&self) {
+        let Some(path) = self.revocation_path() else {
+            return;
+        };
+        let revoked = Self::read_revocations(&path);
+        if revoked.is_empty() {
+            return;
+        }
+        let mut guard = self
+            .entries
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.retain(|key, _| !revoked.contains(key));
+        match self.persist(&guard) {
+            Ok(()) => {
+                if let Err(error) = std::fs::remove_file(&path) {
+                    tracing::warn!(%error, "could not clear the device revocation sidecar");
                 }
             }
-            Err(error) => tracing::warn!(%error, "could not serialise the device registry"),
+            Err(error) => {
+                // Keep the sidecar: the next start retries, and this run keeps
+                // the keys out of the registry regardless.
+                tracing::warn!(%error, "could not persist the applied device revocations");
+            }
         }
     }
 
@@ -198,8 +333,8 @@ impl DeviceRegistry {
         device_id: impl Into<String>,
         key: [u8; KEY_LEN],
         scopes: Vec<PairScope>,
-    ) {
-        self.upsert_connect(device_id.into(), key, scopes, Some(false));
+    ) -> Result<(), PersistError> {
+        self.upsert_connect(device_id.into(), key, scopes, Some(false))
     }
 
     /// Registers a relay-announced device that is not admitted yet.
@@ -212,13 +347,17 @@ impl DeviceRegistry {
         device_id: impl Into<String>,
         key: [u8; KEY_LEN],
         scopes: Vec<PairScope>,
-    ) {
-        self.upsert_connect(device_id.into(), key, scopes, None);
+    ) -> Result<(), PersistError> {
+        self.upsert_connect(device_id.into(), key, scopes, None)
     }
 
     /// Registers a connect-paired client with `view` only.
-    pub fn insert(&self, device_id: impl Into<String>, key: [u8; KEY_LEN]) {
-        self.insert_scoped(device_id, key, Vec::new());
+    pub fn insert(
+        &self,
+        device_id: impl Into<String>,
+        key: [u8; KEY_LEN],
+    ) -> Result<(), PersistError> {
+        self.insert_scoped(device_id, key, Vec::new())
     }
 
     /// Inserts or updates a connect-managed client without ever re-rolling a
@@ -230,7 +369,7 @@ impl DeviceRegistry {
         key: [u8; KEY_LEN],
         scopes: Vec<PairScope>,
         pending: Option<bool>,
-    ) {
+    ) -> Result<(), PersistError> {
         let scopes = PairScope::normalize(scopes);
         let entry = Entry {
             key: hex::encode(key),
@@ -240,8 +379,9 @@ impl DeviceRegistry {
             provenance: Provenance::Connect,
             machine: None,
             pending: pending.unwrap_or(true),
+            verified: true,
         };
-        self.mutate(|entries| {
+        let ((), persisted) = self.mutate(true, |entries| {
             // A peer daemon key is never silently re-roled into a client: MCP
             // peering depends on the host entry staying a host.
             if entries
@@ -271,16 +411,22 @@ impl DeviceRegistry {
                     existing.provenance = Provenance::Connect;
                     existing.machine = None;
                     existing.pending = pending.unwrap_or(existing.pending);
+                    existing.verified = true;
                 }
                 None => {
                     entries.insert(key, entry);
                 }
             }
         });
+        persisted
     }
 
     /// Registers a direct (LAN/tailnet) pairing with explicit scopes.
-    pub fn insert_direct(&self, key: [u8; KEY_LEN], scopes: Vec<PairScope>) {
+    pub fn insert_direct(
+        &self,
+        key: [u8; KEY_LEN],
+        scopes: Vec<PairScope>,
+    ) -> Result<(), PersistError> {
         let entry = Entry {
             key: hex::encode(key),
             device_id: None,
@@ -289,15 +435,22 @@ impl DeviceRegistry {
             provenance: Provenance::Direct,
             machine: None,
             pending: false,
+            verified: true,
         };
-        self.mutate(|entries| {
+        let ((), persisted) = self.mutate(true, |entries| {
             entries.insert(key, entry);
         });
+        persisted
     }
 
     /// Registers a peer daemon, identified by its Noise key, as the host for
     /// `machine`. It may use the MCP tunnel and nothing else.
-    pub fn register_host(&self, machine: HostId, key: [u8; KEY_LEN], device_id: Option<String>) {
+    pub fn register_host(
+        &self,
+        machine: HostId,
+        key: [u8; KEY_LEN],
+        device_id: Option<String>,
+    ) -> Result<(), PersistError> {
         let entry = Entry {
             key: hex::encode(key),
             device_id,
@@ -306,10 +459,12 @@ impl DeviceRegistry {
             provenance: Provenance::Connect,
             machine: Some(machine.to_string()),
             pending: false,
+            verified: true,
         };
-        self.mutate(|entries| {
+        let ((), persisted) = self.mutate(true, |entries| {
             entries.insert(key, entry);
         });
+        persisted
     }
 
     /// Scopes the next direct pairing will grant. The caller arms this before
@@ -338,14 +493,14 @@ impl DeviceRegistry {
     /// With nothing armed (an operator-provisioned `H4RN_PAIRING_PSK`) the
     /// device gets `view` and `approve`: the same safe default as a CLI direct
     /// pairing without `--scope`. Wider authority needs an explicit arm.
-    pub fn complete_direct(&self, key: [u8; KEY_LEN]) {
+    pub fn complete_direct(&self, key: [u8; KEY_LEN]) -> Result<(), PersistError> {
         let scopes = self
             .pending_direct
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take()
             .unwrap_or_else(|| PairScope::MINIMAL.to_vec());
-        self.insert_direct(key, scopes);
+        self.insert_direct(key, scopes)
     }
 
     /// Records a newly connect-paired device so the person can confirm the
@@ -401,9 +556,19 @@ impl DeviceRegistry {
     ///
     /// Returns the key and the decision so the caller can admit or revoke it
     /// on the transport. `None` means the device is no longer pending, which
-    /// makes the request safe to retry.
-    pub fn decide_pending(&self, device_id: &str, confirm: bool) -> Option<([u8; KEY_LEN], bool)> {
-        let decided = self.mutate(|entries| {
+    /// makes the request safe to retry. The paired [`Result`] says whether the
+    /// decision was written to disk:
+    ///
+    /// - a confirmation that cannot be persisted is rolled back, so the device
+    ///   stays pending and the caller must not admit it;
+    /// - a rejection that cannot be persisted stays revoked in memory and is
+    ///   recorded in the revocation sidecar, so a restart still refuses it.
+    pub fn decide_pending(
+        &self,
+        device_id: &str,
+        confirm: bool,
+    ) -> (PairingDecision, Result<(), PersistError>) {
+        let (decided, persisted) = self.mutate(confirm, |entries| {
             let key = entries
                 .iter()
                 .find(|(_, entry)| {
@@ -413,7 +578,9 @@ impl DeviceRegistry {
                 })
                 .map(|(key, _)| *key)?;
             if confirm {
-                entries.get_mut(&key)?.pending = false;
+                let entry = entries.get_mut(&key)?;
+                entry.pending = false;
+                entry.verified = true;
             } else {
                 entries.remove(&key);
             }
@@ -422,16 +589,31 @@ impl DeviceRegistry {
         self.confirmations
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .retain(|entry| entry.device_id != device_id);
-        decided.map(|key| (key, confirm))
+            .retain(|entry| entry.device_id != device_id || (confirm && persisted.is_err()));
+        let decided = decided.map(|key| (key, confirm));
+        // A confirmation whose write failed was rolled back: the device is
+        // still pending, so the caller must not admit it.
+        let decided = if confirm && persisted.is_err() {
+            None
+        } else {
+            decided
+        };
+        if let Err(error) = &persisted
+            && let Some((key, false)) = decided
+        {
+            self.remember_revocations(&[key]);
+            tracing::warn!(device = %device_id, %error, "a pairing rejection could not be saved");
+        }
+        (decided, persisted)
     }
 
-    /// What `key` is authorised as, or `None` when it has no entry or is still
-    /// waiting for the host to confirm its pairing.
+    /// What `key` is authorised as, or `None` when it has no entry, is still
+    /// waiting for the host to confirm its pairing, or has not been confirmed
+    /// by this run's authoritative connect or peer source.
     pub fn authorization(&self, key: &[u8; KEY_LEN]) -> Option<Authorization> {
         self.read()
             .get(key)
-            .filter(|entry| !entry.pending)
+            .filter(|entry| entry.admits())
             .map(|entry| Authorization {
                 role: entry.role,
                 scopes: entry.scopes.clone(),
@@ -445,7 +627,7 @@ impl DeviceRegistry {
     pub fn device_for_key(&self, key: &[u8; KEY_LEN]) -> Option<String> {
         self.read()
             .get(key)
-            .filter(|entry| !entry.pending)
+            .filter(|entry| entry.admits())
             .and_then(|entry| entry.device_id.clone())
     }
 
@@ -465,31 +647,53 @@ impl DeviceRegistry {
     }
 
     /// Removes a connect device by id, returning its key.
-    pub fn remove(&self, device_id: &str) -> Option<[u8; KEY_LEN]> {
-        self.mutate(|entries| {
+    ///
+    /// A failed write keeps the removal in memory and records it in the
+    /// revocation sidecar: a restart must not bring a revoked device back.
+    pub fn remove(&self, device_id: &str) -> (Option<[u8; KEY_LEN]>, Result<(), PersistError>) {
+        let (removed, persisted) = self.mutate(false, |entries| {
             let key = entries
                 .iter()
                 .find(|(_, entry)| entry.device_id.as_deref() == Some(device_id))
                 .map(|(key, _)| *key)?;
             entries.remove(&key);
             Some(key)
-        })
+        });
+        if let Err(error) = &persisted
+            && let Some(key) = removed
+        {
+            self.remember_revocations(&[key]);
+            tracing::warn!(device = %device_id, %error, "a device removal could not be saved");
+        }
+        (removed, persisted)
     }
 
     /// Removes one key, whatever its provenance (an explicit revoke).
-    pub fn remove_key(&self, key: &[u8; KEY_LEN]) -> bool {
-        self.mutate(|entries| entries.remove(key).is_some())
+    pub fn remove_key(&self, key: &[u8; KEY_LEN]) -> (bool, Result<(), PersistError>) {
+        let (removed, persisted) = self.mutate(false, |entries| entries.remove(key).is_some());
+        if let Err(error) = &persisted
+            && removed
+        {
+            self.remember_revocations(&[*key]);
+            tracing::warn!(%error, "a key removal could not be saved");
+        }
+        (removed, persisted)
     }
 
     /// Makes a connect snapshot authoritative for connect-managed clients.
     ///
-    /// Every device in `devices` is inserted or updated; every connect-managed
-    /// client entry that is *absent* is removed and its key returned so the
-    /// caller can terminate its sessions. Direct pairings and hosts are kept.
-    pub fn reconcile_connect(&self, devices: &[ConnectEntry]) -> Vec<[u8; KEY_LEN]> {
+    /// Every device in `devices` is inserted or updated and marked verified;
+    /// every connect-managed client entry that is *absent* is removed and its
+    /// key returned so the caller can terminate its sessions. Direct pairings
+    /// and hosts are kept. The [`Result`] reports the first write failure; a
+    /// removal stays in memory and is recorded in the revocation sidecar.
+    pub fn reconcile_connect(
+        &self,
+        devices: &[ConnectEntry],
+    ) -> (Vec<[u8; KEY_LEN]>, Result<(), PersistError>) {
         let present: std::collections::HashSet<[u8; KEY_LEN]> =
             devices.iter().map(|device| device.key).collect();
-        let removed = self.mutate(|entries| {
+        let (removed, mut persisted) = self.mutate(false, |entries| {
             let stale: Vec<[u8; KEY_LEN]> = entries
                 .iter()
                 .filter(|(key, entry)| {
@@ -504,12 +708,23 @@ impl DeviceRegistry {
             }
             stale
         });
+        if let Err(error) = &persisted
+            && !removed.is_empty()
+        {
+            self.remember_revocations(&removed);
+            tracing::warn!(%error, devices = removed.len(), "a snapshot revocation could not be saved");
+        }
         for device in devices {
             // A snapshot may refresh scopes, but it must never promote a
             // device the host has not confirmed.
-            self.provision_scoped(device.device_id.clone(), device.key, device.scopes.clone());
+            if let Err(error) =
+                self.provision_scoped(device.device_id.clone(), device.key, device.scopes.clone())
+                && persisted.is_ok()
+            {
+                persisted = Err(error);
+            }
         }
-        removed
+        (removed, persisted)
     }
 
     /// Every registered key, pending ones included.
@@ -518,24 +733,33 @@ impl DeviceRegistry {
     }
 
     /// Keys the transport may admit: every registered entry whose pairing the
-    /// host has confirmed. A pending relay device is deliberately absent.
+    /// host has confirmed *and* whose connect source has verified it this run.
+    /// A pending relay device and an unverified connect entry are deliberately
+    /// absent.
     pub fn admitted_keys(&self) -> Vec<[u8; KEY_LEN]> {
         self.read()
             .iter()
-            .filter(|(_, entry)| !entry.pending)
+            .filter(|(_, entry)| entry.admits())
             .map(|(key, _)| *key)
             .collect()
     }
 
     /// Whether `key` may be admitted to the transport right now.
     pub fn is_admitted(&self, key: &[u8; KEY_LEN]) -> bool {
-        self.read().get(key).is_some_and(|entry| !entry.pending)
+        self.read().get(key).is_some_and(Entry::admits)
     }
 
     /// Whether `key` is registered but still waiting for the host to confirm
     /// the pairing.
     pub fn is_pending(&self, key: &[u8; KEY_LEN]) -> bool {
         self.read().get(key).is_some_and(|entry| entry.pending)
+    }
+
+    /// The role a key is registered with, ignoring whether this run has
+    /// verified it. Used to keep a re-role from overwriting an entry that is
+    /// merely waiting for its authoritative source.
+    pub fn registered_role(&self, key: &[u8; KEY_LEN]) -> Option<Role> {
+        self.read().get(key).map(|entry| entry.role)
     }
 
     /// Every connect-managed peer-daemon key, for reconciliation after a
@@ -559,11 +783,22 @@ impl DeviceRegistry {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Makes the next durable write fail, for the rollback tests.
+    #[cfg(test)]
+    fn fail_persist_once(&self) {
+        self.fail_persist
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn open_registry(path: &Path) -> DeviceRegistry {
+        DeviceRegistry::open(path)
+    }
 
     #[test]
     fn a_pending_pairing_survives_a_restart_without_admitting_the_key() {
@@ -572,14 +807,18 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("devices.json");
         {
-            let devices = DeviceRegistry::open(&path);
-            devices.provision_scoped("d1", [7u8; KEY_LEN], vec![PairScope::View]);
+            let devices = open_registry(&path);
+            devices
+                .provision_scoped("d1", [7u8; KEY_LEN], vec![PairScope::View])
+                .expect("persist");
         }
-        let devices = DeviceRegistry::open(&path);
+        let devices = open_registry(&path);
         assert!(devices.is_pending(&[7u8; KEY_LEN]));
         assert!(devices.authorization(&[7u8; KEY_LEN]).is_none());
         assert!(!devices.admitted_keys().contains(&[7u8; KEY_LEN]));
-        let (key, confirm) = devices.decide_pending("d1", true).expect("pending");
+        let (key, persisted) = devices.decide_pending("d1", true);
+        persisted.expect("persist");
+        let (key, confirm) = key.expect("pending");
         assert_eq!(key, [7u8; KEY_LEN]);
         assert!(confirm);
         assert!(devices.is_admitted(&[7u8; KEY_LEN]));
@@ -587,5 +826,163 @@ mod tests {
             devices.scopes_for_key(&[7u8; KEY_LEN]),
             Some(vec![PairScope::View])
         );
+    }
+
+    #[test]
+    fn a_restart_does_not_admit_unverified_connect_clients_or_hosts() {
+        // H2: connect is the authority for its entries. A device revoked while
+        // the daemon was offline from connect must not be admitted by a restart
+        // before the first snapshot or peer report reconciles it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("devices.json");
+        {
+            let devices = open_registry(&path);
+            devices
+                .insert_scoped("phone", [1u8; KEY_LEN], vec![PairScope::View])
+                .expect("persist");
+            devices
+                .register_host(HostId::new("host_b"), [2u8; KEY_LEN], None)
+                .expect("persist");
+            devices
+                .insert_direct([3u8; KEY_LEN], vec![PairScope::View])
+                .expect("persist");
+            assert!(devices.is_admitted(&[1u8; KEY_LEN]));
+            assert!(devices.is_admitted(&[2u8; KEY_LEN]));
+        }
+        let devices = open_registry(&path);
+        assert!(!devices.is_admitted(&[1u8; KEY_LEN]), "connect client");
+        assert!(devices.authorization(&[1u8; KEY_LEN]).is_none());
+        assert!(devices.scopes_for_key(&[1u8; KEY_LEN]).is_none());
+        assert!(!devices.is_admitted(&[2u8; KEY_LEN]), "peer host");
+        assert!(devices.authorization(&[2u8; KEY_LEN]).is_none());
+        assert!(
+            devices.is_admitted(&[3u8; KEY_LEN]),
+            "a direct pairing does not depend on connect"
+        );
+        assert_eq!(
+            devices.admitted_keys(),
+            vec![[3u8; KEY_LEN]],
+            "only the direct pairing may reach the transport"
+        );
+    }
+
+    #[test]
+    fn a_restart_snapshot_omitting_a_client_revokes_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("devices.json");
+        {
+            let devices = open_registry(&path);
+            devices
+                .insert_scoped("gone", [1u8; KEY_LEN], vec![PairScope::View])
+                .expect("persist");
+        }
+        let devices = open_registry(&path);
+        let (removed, persisted) = devices.reconcile_connect(&[]);
+        persisted.expect("persist");
+        assert_eq!(removed, vec![[1u8; KEY_LEN]]);
+        assert!(devices.authorization(&[1u8; KEY_LEN]).is_none());
+        assert!(!devices.is_admitted(&[1u8; KEY_LEN]));
+    }
+
+    #[test]
+    fn a_restart_snapshot_including_a_client_admits_it_again() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("devices.json");
+        {
+            let devices = open_registry(&path);
+            devices
+                .insert_scoped("kept", [1u8; KEY_LEN], vec![PairScope::View])
+                .expect("persist");
+        }
+        let devices = open_registry(&path);
+        assert!(!devices.is_admitted(&[1u8; KEY_LEN]));
+        let (removed, persisted) = devices.reconcile_connect(&[ConnectEntry {
+            device_id: "kept".into(),
+            key: [1u8; KEY_LEN],
+            scopes: vec![PairScope::View, PairScope::Approve],
+        }]);
+        persisted.expect("persist");
+        assert!(removed.is_empty());
+        assert!(devices.is_admitted(&[1u8; KEY_LEN]));
+        assert_eq!(
+            devices.scopes_for_key(&[1u8; KEY_LEN]),
+            Some(vec![PairScope::View, PairScope::Approve])
+        );
+    }
+
+    #[test]
+    fn an_unpersistable_confirmation_rolls_back_and_reports() {
+        // H4: a confirm the file cannot record must leave the device pending
+        // and tell the caller, not report success and admit it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("devices.json");
+        let devices = open_registry(&path);
+        devices
+            .provision_scoped("d1", [7u8; KEY_LEN], vec![PairScope::View])
+            .expect("persist");
+        devices.fail_persist_once();
+        let (decided, persisted) = devices.decide_pending("d1", true);
+        assert!(
+            decided.is_none(),
+            "a rolled-back confirmation admits nothing"
+        );
+        assert!(persisted.is_err());
+        assert!(devices.is_pending(&[7u8; KEY_LEN]));
+        assert!(devices.authorization(&[7u8; KEY_LEN]).is_none());
+        // The in-memory card is still there for a retry, which persists.
+        assert_eq!(devices.pending_confirmations().len(), 0);
+        let (decided, persisted) = devices.decide_pending("d1", true);
+        persisted.expect("persist");
+        assert!(decided.is_some());
+        assert!(devices.is_admitted(&[7u8; KEY_LEN]));
+    }
+
+    #[test]
+    fn an_unpersistable_rejection_stays_revoked_and_survives_a_restart() {
+        // H4: a revoke is safer in memory than on disk, so it stays revoked
+        // and the sidecar keeps a restart from re-admitting it.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("devices.json");
+        let devices = open_registry(&path);
+        devices
+            .insert_direct([7u8; KEY_LEN], vec![PairScope::View])
+            .expect("persist");
+        devices.fail_persist_once();
+        let (removed, persisted) = devices.remove_key(&[7u8; KEY_LEN]);
+        assert!(removed);
+        assert!(persisted.is_err());
+        assert!(!devices.is_admitted(&[7u8; KEY_LEN]));
+        assert!(
+            path.with_file_name("devices.revoked").exists(),
+            "the revocation sidecar is the retry that survives a crash"
+        );
+        drop(devices);
+        let reopened = open_registry(&path);
+        assert!(reopened.authorization(&[7u8; KEY_LEN]).is_none());
+        assert!(reopened.keys().is_empty());
+        assert!(
+            !path.with_file_name("devices.revoked").exists(),
+            "a successful rewrite clears the sidecar"
+        );
+    }
+
+    #[test]
+    fn an_unpersistable_pairing_rejection_is_recorded_in_the_sidecar() {
+        // The exact path `ConfirmPairing { confirm: false }` takes.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("devices.json");
+        let devices = open_registry(&path);
+        devices
+            .provision_scoped("d1", [7u8; KEY_LEN], vec![PairScope::View])
+            .expect("persist");
+        devices.fail_persist_once();
+        let (decided, persisted) = devices.decide_pending("d1", false);
+        assert_eq!(decided, Some(([7u8; KEY_LEN], false)));
+        assert!(persisted.is_err());
+        assert!(!devices.is_pending(&[7u8; KEY_LEN]));
+        assert!(!devices.authorization(&[7u8; KEY_LEN]).is_some());
+        drop(devices);
+        let reopened = open_registry(&path);
+        assert!(reopened.keys().is_empty());
     }
 }

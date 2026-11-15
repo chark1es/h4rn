@@ -649,11 +649,11 @@ impl Connection {
                     confirmations: self.state.devices.pending_confirmations(),
                 }),
                 ClientRequest::ConfirmPairing { device_id, confirm } => {
-                    let decided = self
+                    let (decided, persisted) = self
                         .state
                         .devices
                         .decide_pending(device_id.as_str(), confirm);
-                    match decided {
+                    let result = match decided {
                         Some((key, true)) => {
                             if let Some(service) = &self.state.secure {
                                 service.allow(key);
@@ -682,6 +682,14 @@ impl Connection {
                             ProtoErrorCode::NotFound,
                             format!("no pending pairing for {device_id}"),
                             "Refresh Settings → Devices; the pairing may already be decided",
+                        )),
+                    };
+                    match persisted {
+                        Ok(()) => result,
+                        Err(error) => Err(ProtoError::new(
+                            ProtoErrorCode::Internal,
+                            format!("the pairing decision could not be saved: {error}"),
+                            "Free disk space or fix the data directory, then try again. A device that could not be revoked stays blocked in memory.",
                         )),
                     }
                 }

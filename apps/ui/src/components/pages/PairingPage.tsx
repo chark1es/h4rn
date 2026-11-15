@@ -76,27 +76,52 @@ export function PairingPage() {
   };
 
   if (sasConfirm) {
+    const waiting = sasConfirm.waiting;
     return (
-      <main className="q-main" aria-label={`Check the code for ${sasConfirm.machineName}`}>
+      <main
+        className="q-main"
+        aria-label={
+          waiting
+            ? `Waiting for ${sasConfirm.machineName} to approve this phone`
+            : `Check the code for ${sasConfirm.machineName}`
+        }
+      >
         <div className="q-ph-nav">
           <span style={{ width: 60 }} />
-          <span className="ttl">Check the code</span>
+          <span className="ttl">{waiting ? "Waiting for approval" : "Check the code"}</span>
           <span style={{ width: 60 }} />
         </div>
         <div className="q-ph-body q-pair-body">
           <div className="q-pair-hero">
             <div className="ttl">{sasConfirm.machineName}</div>
-            <div className="note">Paired through a typed code. Compare before you trust it.</div>
+            <div className="note">
+              {waiting
+                ? `${sasConfirm.machineName} must approve this phone before it can connect.`
+                : sasConfirm.method === "qr"
+                  ? "Scanned code. Compare it before you trust the host."
+                  : "Paired through a typed code. Compare it before you trust the host."}
+            </div>
           </div>
           <div className="q-sas">
             <div className="q-sas-code num" data-testid="pair-sas">
               {sasConfirm.sas}
             </div>
             <p className="q-pair-note">
-              {sasConfirm.machineName} shows a code under Settings → Devices. If it reads the same,
-              the connection is private. If it does not, something between you and the host changed
-              the key.
+              {waiting
+                ? `On ${sasConfirm.machineName}, open Settings → Devices and confirm the same code. This screen updates when it approves this phone.`
+                : `${sasConfirm.machineName} shows this code under Settings → Devices. If it reads the same, the connection is private. If it does not, something between you and the host changed the key.`}
             </p>
+            {waiting ? (
+              <div className="q-sas-waiting" data-testid="pair-waiting" role="status">
+                Waiting for {sasConfirm.machineName}
+              </div>
+            ) : (
+              <p className="q-pair-note">
+                Host approval is required: after you confirm here, approve the same code on{" "}
+                {sasConfirm.machineName}.
+              </p>
+            )}
+            {error ? <p className="q-pair-note q-danger">{error}</p> : null}
           </div>
         </div>
         <div className="q-pair-foot">
@@ -106,13 +131,14 @@ export function PairingPage() {
           <button
             type="button"
             className="q-btn primary"
+            disabled={waiting}
             onClick={() => {
               void confirmPairingSas().then((ok) => {
                 if (ok) navigate({ kind: "inbox" });
               });
             }}
           >
-            They match
+            {waiting ? "Waiting for host…" : "They match"}
           </button>
         </div>
       </main>

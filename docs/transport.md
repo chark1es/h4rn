@@ -313,7 +313,8 @@ retried with exponential backoff (1 s to 30 s); logical sessions stay
 resumable in `SecureService` meanwhile. The daemon pings every 30 s to keep
 presence warm.
 
-`DevicePaired` adds the device's Noise key to the allowlist and persists it;
+`DevicePaired` registers the device's Noise key as pending and persists it; it is
+not on the allowlist until the host confirms the SAS with `ConfirmPairing`.
 `DeviceRevoked` removes the key and drops every matching live session, which
 sends a transport `Close` control so the client learns immediately rather than
 waiting for a probe timeout.
@@ -375,6 +376,30 @@ and revokes it. The relay therefore cannot swap in a device key and use the
 granted scopes before a person compares the codes. This applies to QR pairings
 too: the QR pins the daemon key for the phone, but the host still learns the
 device key from the relay. Pending entries do not expire while undecided.
+
+The phone uses the same comparison screen on both paths. A QR pairing derives the
+SAS from the daemon key *pinned by the QR* (not the key connect echoes back), and
+a typed code from the key connect supplied. After "They match", the phone pins
+the key, reconnects and shows a waiting state until the host approves it; a
+timeout explains what to do on the host and never reports the pairing as
+complete. Nothing is activated before that.
+
+Startup is fail-closed for connect-managed entries. A client or peer host loaded
+from `devices.json` is unverified for this run: it is absent from the transport
+allowlist and holds no effective scopes until the first authoritative connect
+snapshot (clients) or peer report (hosts) reconciles it. Direct-provenance
+pairings load admitted, because they do not depend on connect. Trade-off: a
+connect-paired phone cannot use a direct or tailnet path until the daemon has
+reached connect once in this run; a device revoked while connect was unreachable
+therefore cannot be re-admitted by a restart. A consumed direct-pairing hook that
+fails to delete its file now refuses the pairing (`not paired`) and keeps the
+PSK closed.
+
+Registry writes are checked. `persist` returns an error, and an admission or
+confirmation that cannot be written is rolled back and surfaced to the UI. A
+revocation that cannot be written stays revoked in memory and is appended to
+`devices.revoked`; the next `DeviceRegistry::open` applies that sidecar before
+admitting anyone and clears it after a successful rewrite.
 
 `--direct` skips connect: the CLI writes `<data_dir>/direct-pairing.json`
 (mode `0600`) with a fresh PSK, expiry and address candidates. The running
