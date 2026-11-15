@@ -22,7 +22,10 @@ use crate::journal::{Journal, SqliteJournal};
 use crate::mcp::McpService;
 use crate::remote::{
     ConnectClient, DeviceRegistry, RemoteState, TailscaleMode, advertised_addresses,
-    pairing::{invalidate_direct_pairing, read_direct_pairing, remove_direct_pairing},
+    pairing::{
+        direct_pairing_is_consumed, invalidate_direct_pairing, pending_direct_pairing,
+        read_direct_pairing, remove_direct_pairing,
+    },
 };
 use crate::server::{self, AppState};
 use crate::subagents::{SubagentManager, SubagentOptions, SubagentProvider};
@@ -321,9 +324,10 @@ impl DaemonBuilder {
             // the pairing was armed with, recorded before it is allowed.
             let registry = Arc::clone(&devices);
             service.set_pairing_hook(Arc::new(move |key| {
-                if let Err(error) = registry.complete_direct(key) {
+                registry.complete_direct(key).map_err(|error| {
                     tracing::warn!(%error, "could not record a direct pairing");
-                }
+                    error.to_string()
+                })
             }));
             // Invalidate the durable pairing file the moment its secret is
             // consumed, before the device is authorised: a restart must never
@@ -942,7 +946,7 @@ async fn watch_direct_pairing(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         ticker.tick().await;
-        match read_direct_pairing(&data_dir) {
+        match pending_direct_pairing(&data_dir) {
             Ok(Some(pairing)) if !pairing.expired() => {
                 if applied.as_deref() == Some(pairing.psk.as_str())
                     || blocked.as_deref() == Some(pairing.psk.as_str())
@@ -995,9 +999,15 @@ async fn watch_direct_pairing(
                     tracing::info!("direct pairing expired, was used or was closed");
                 }
                 blocked = None;
-                // A consumed or expired secret must not survive a restart.
+                // A consumed or expired secret must not survive a restart. A
+                // consumed file that could not be deleted is also retried
+                // here, now that its sidecar keeps the watcher from arming it.
                 if let Ok(Some(pairing)) = read_direct_pairing(&data_dir)
-                    && pairing.expired()
+                    && (pairing.expired()
+                        || pairing
+                            .psk()
+                            .ok()
+                            .is_some_and(|psk| direct_pairing_is_consumed(&data_dir, &psk)))
                     && let Err(error) = remove_direct_pairing(&data_dir)
                 {
                     tracing::debug!(%error, "could not delete the expired direct pairing");

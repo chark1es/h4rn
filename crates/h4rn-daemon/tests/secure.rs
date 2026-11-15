@@ -1199,3 +1199,78 @@ async fn the_pairing_secret_pairs_one_device_even_when_handshakes_race() {
     assert_eq!(service.psk(), None);
     daemon.stop().await;
 }
+
+#[tokio::test]
+async fn a_pairing_whose_registry_write_fails_is_refused_not_admitted() {
+    // K3(a): the pairing hook only logged a registry write failure, then the
+    // device was still allowed -> a phantom "paired" device whose every
+    // request is Forbidden. The hook is fallible now: NotPaired, no allowlist.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("devices.json");
+    std::fs::create_dir(&path).expect("a directory in place of the registry file");
+    let devices = Arc::new(DeviceRegistry::open(&path));
+    let psk = [0x7eu8; TOKEN_LEN];
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_psk(psk),
+    ));
+    let daemon = boot_with(Arc::clone(&service), Arc::clone(&devices)).await;
+    let identity = device_identity();
+    expect_rejected(&daemon, identity.clone(), psk).await;
+    assert!(
+        devices
+            .authorization(&identity.public().noise_public)
+            .is_none(),
+        "a pairing whose authorisation could not be recorded must not be admitted"
+    );
+    daemon.stop().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_consumed_pairing_that_cannot_be_deleted_is_not_rearmed_on_restart() {
+    // K3(b): if the consumed file cannot be deleted, a restart re-armed the
+    // same PSK. The failed delete now leaves a consumed marker the watcher
+    // honours.
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let psk = [0x7fu8; TOKEN_LEN];
+    write_pairing(dir.path(), psk, 300, vec![PairScope::View]);
+    // Pre-create the marker so the best-effort write can succeed while the
+    // directory itself is read-only; deleting the pairing file cannot.
+    std::fs::write(dir.path().join("direct-pairing.consumed"), b"").expect("marker");
+
+    let mut permissions = std::fs::metadata(dir.path()).expect("metadata").permissions();
+    permissions.set_mode(0o555);
+    std::fs::set_permissions(dir.path(), permissions).expect("read-only dir");
+    let failed = h4rn_daemon::remote::pairing::invalidate_direct_pairing(dir.path(), &psk);
+    let mut permissions = std::fs::metadata(dir.path()).expect("metadata").permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(dir.path(), permissions).expect("writable dir");
+    assert!(
+        failed.is_err(),
+        "an undeletable consumed file must still be reported"
+    );
+    assert!(
+        h4rn_daemon::remote::pairing::direct_pairing_path(dir.path()).exists(),
+        "the fixture must still show the failed delete"
+    );
+
+    // Restart on the same data directory before the original expiry.
+    let service = Arc::new(SecureService::new(SecureOptions::new(device_identity())));
+    let daemon = boot_at(
+        dir.path().to_path_buf(),
+        Arc::clone(&service),
+        Arc::new(DeviceRegistry::in_memory()),
+        None,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        service.psk(),
+        None,
+        "a restart re-armed a consumed direct pairing"
+    );
+    expect_rejected(&daemon, device_identity(), psk).await;
+    daemon.stop().await;
+}

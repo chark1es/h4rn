@@ -22,6 +22,10 @@ use serde::{Deserialize, Serialize};
 /// File the CLI writes and the daemon watches.
 pub const DIRECT_PAIRING_FILE: &str = "direct-pairing.json";
 
+/// Sidecar listing the hashes of consumed secrets whose file could not be
+/// deleted. A restart must never re-arm one of them.
+pub const DIRECT_PAIRING_CONSUMED_FILE: &str = "direct-pairing.consumed";
+
 /// How long a direct pairing stays open.
 pub const DEFAULT_DIRECT_TTL_SECS: i64 = 300;
 
@@ -68,6 +72,45 @@ pub fn direct_pairing_path(data_dir: &Path) -> PathBuf {
     data_dir.join(DIRECT_PAIRING_FILE)
 }
 
+/// Path of the consumed-secret sidecar.
+pub fn direct_pairing_consumed_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(DIRECT_PAIRING_CONSUMED_FILE)
+}
+
+/// A stable, non-secret marker for a consumed one-time secret.
+fn consumed_marker(psk: &[u8; KEY_LEN]) -> String {
+    blake3::hash(psk).to_hex().to_string()
+}
+
+fn read_consumed_markers(data_dir: &Path) -> std::collections::BTreeSet<String> {
+    std::fs::read_to_string(direct_pairing_consumed_path(data_dir))
+        .map(|body| {
+            body.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether `psk` was consumed but its file could not be deleted.
+pub(crate) fn direct_pairing_is_consumed(data_dir: &Path, psk: &[u8; KEY_LEN]) -> bool {
+    read_consumed_markers(data_dir).contains(&consumed_marker(psk))
+}
+
+/// Records that `psk` was consumed, so the watcher refuses to arm its file
+/// again. Best effort: the caller reports the failure that made this necessary.
+fn mark_direct_pairing_consumed(data_dir: &Path, psk: &[u8; KEY_LEN]) -> std::io::Result<()> {
+    let path = direct_pairing_consumed_path(data_dir);
+    let mut markers = read_consumed_markers(data_dir);
+    if !markers.insert(consumed_marker(psk)) {
+        return Ok(());
+    }
+    let body = markers.into_iter().collect::<Vec<_>>().join("\n");
+    std::fs::write(path, body)
+}
+
 /// Writes the direct pairing file with private permissions.
 pub fn write_direct_pairing(data_dir: &Path, pairing: &DirectPairingFile) -> Result<PathBuf> {
     let path = direct_pairing_path(data_dir);
@@ -109,6 +152,9 @@ pub fn remove_direct_pairing(data_dir: &Path) -> Result<()> {
 ///
 /// The one-time secret is consumed in the transport; this runs from the
 /// consumed hook so the durable copy is gone before the device is authorised.
+/// If the file cannot be deleted, its secret is recorded in the consumed
+/// sidecar so the watcher refuses to arm it after a restart; the error is still
+/// returned, which refuses the pairing.
 pub fn invalidate_direct_pairing(data_dir: &Path, psk: &[u8; KEY_LEN]) -> Result<bool> {
     let Some(pairing) = read_direct_pairing(data_dir)? else {
         return Ok(false);
@@ -116,8 +162,34 @@ pub fn invalidate_direct_pairing(data_dir: &Path, psk: &[u8; KEY_LEN]) -> Result
     if pairing.psk().ok().as_ref() != Some(psk) {
         return Ok(false);
     }
-    remove_direct_pairing(data_dir)?;
-    Ok(true)
+    match remove_direct_pairing(data_dir) {
+        Ok(()) => Ok(true),
+        Err(error) => {
+            if let Err(marker_error) = mark_direct_pairing_consumed(data_dir, psk) {
+                tracing::warn!(
+                    %marker_error,
+                    "could not mark a consumed direct pairing; a restart might re-arm it"
+                );
+            }
+            Err(error)
+        }
+    }
+}
+
+/// The pairing file the watcher may arm: absent, expired, or already consumed
+/// files are not returned.
+pub fn pending_direct_pairing(data_dir: &Path) -> Result<Option<DirectPairingFile>> {
+    let Some(pairing) = read_direct_pairing(data_dir)? else {
+        return Ok(None);
+    };
+    if pairing
+        .psk()
+        .ok()
+        .is_some_and(|psk| direct_pairing_is_consumed(data_dir, &psk))
+    {
+        return Ok(None);
+    }
+    Ok(Some(pairing))
 }
 
 /// Builds the QR payload for a direct pairing.
