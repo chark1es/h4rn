@@ -157,6 +157,39 @@ pub fn resolve_inside(root: &Path, rel: &str, mode: ResolveMode) -> Result<PathB
     Ok(resolved)
 }
 
+/// Resolves a path for a diff read.
+///
+/// A diff is allowed to target something that no longer exists: a deletion is
+/// exactly what it must show. So this resolves like [`ResolveMode::Create`],
+/// walking to the nearest existing ancestor and appending missing components.
+///
+/// The one difference is the leaf: a diff must not follow a link that is
+/// dangling or points outside the workspace. Reading through such a link either
+/// fails or exposes a file the workspace boundary forbids. Those leaves resolve
+/// to `None`, so the diff reports the path with `after: None` (the same way a
+/// snapshot records a link it could not read) instead of erroring. A link that
+/// resolves inside the workspace is followed exactly as a read would follow it.
+///
+/// Writes and creates must keep using [`ResolveMode::Create`], which refuses
+/// dangling and escaping links outright.
+pub fn resolve_for_diff(root: &Path, rel: &str) -> Result<Option<PathBuf>, FsError> {
+    let relative = normalize_relative(rel)?;
+    let joined = root.join(&relative);
+    let leaf_is_symlink = joined
+        .symlink_metadata()
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false);
+    if leaf_is_symlink {
+        return match joined.canonicalize() {
+            Ok(canonical) if ensure_inside(root, &canonical).is_ok() => Ok(Some(canonical)),
+            // Dangling, looping or escaping: do not follow it, and do not read
+            // through it. The path itself stays workspace-relative.
+            _ => Ok(None),
+        };
+    }
+    resolve_inside(root, rel, ResolveMode::Create).map(Some)
+}
+
 fn ensure_inside(root: &Path, candidate: &Path) -> Result<(), FsError> {
     if candidate == root || candidate.starts_with(root) {
         Ok(())

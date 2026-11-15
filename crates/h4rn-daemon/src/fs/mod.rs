@@ -46,7 +46,7 @@ use tokio::sync::mpsc;
 
 pub use paths::{
     FsError, MAX_ENTRIES, MAX_READ_BYTES, MAX_WRITE_BYTES, ResolveMode, normalize_relative,
-    relative_of, resolve_inside,
+    relative_of, resolve_for_diff, resolve_inside,
 };
 pub use snapshots::{SnapshotEntry, SnapshotStore};
 pub use watcher::{FsChange, WatcherHub};
@@ -538,11 +538,13 @@ impl FsService {
         // canonicalise the target and refuse anything that escapes the root.
         // The target may be gone — a deletion is exactly what a diff must show
         // — so resolve the way `create` does: canonicalise the nearest existing
-        // ancestor, refuse a dangling symlink, and append the missing parts.
-        // A missing target then reads as `after: None`, never as an error.
-        let path = resolve_inside(&root, rel, ResolveMode::Create)?;
-        let rel_path = relative_of(&root, &path);
-        let current = fs::read(&path).ok();
+        // ancestor and append the missing parts. The leaf is special: a dangling
+        // or escaping symlink is not followed (reading it would fail or leave
+        // the workspace), so it reads as `after: None`, never as an error.
+        let relative = normalize_relative(rel)?;
+        let rel_path = relative_of(&root, &root.join(&relative));
+        let path = resolve_for_diff(&root, rel)?;
+        let current = path.and_then(|path| fs::read(path).ok());
         let after = current.as_deref().and_then(text::decode);
         let after_text = after.as_ref().map(|decoded| decoded.text.clone());
         let binary = current
