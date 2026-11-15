@@ -24,7 +24,7 @@ Legend: **verified** = executed on this machine in this session; **read** = pres
 
 | Check | Result |
 |---|---|
-| `which agy` | `/home/chark1es/.local/bin/agy` **verified** |
+| `which agy` | `~/.local/bin/agy` **verified** |
 | `agy --version` | `1.5.7` **verified** |
 | Binary | 280,564,136 bytes (~268 MiB), single self-contained Go binary. It carries a full Go runtime and, judging by embedded strings (`[CDP Discovery]`, Playwright-style selectors), a browser-automation client — the 24 `browser_*` tools drive a Chromium instance rather than a bundled renderer. **UNVERIFIED** whether that Chromium is bundled or downloaded on demand. |
 | `which antigravity` | not found |
@@ -38,7 +38,7 @@ Profile layout (`~/.gemini/antigravity-cli/`) — **verified** by listing:
 
 ```
 antigravity-oauth-token        # saved Google credential (present)
-settings.json                  # {"colorScheme":"light","trustedWorkspaces":["/home/chark1es/Github/h4rn"]}
+settings.json                  # {"colorScheme":"light","trustedWorkspaces":["~/Github/h4rn"]}
 conversations/<uuid>.db        # one SQLite DB per conversation
 conversation_summaries.db      # index of conversations
 builtin/skills/…               # bundled skills (agy-customizations, antigravity_guide, native_swarm, …)

@@ -9,6 +9,5 @@ All connections, costs, model names, host state, terminal output and QR codes ar
 - `REVIEW.md`: direction contract, critique and fix verification.
 - `shots/`: 96 screen captures: 22 routes plus Done and Settled, at 1440×900 and 390×844, in light and dark. Twelve contact sheets support quick review. JSON reports record viewport/error and contrast/interaction checks.
 
-Reproduce captures using `node design/b-editorial/capture.cjs` from the repository root. `verify.cjs` exercises approval, switches, comparison, command palette navigation, auto-resume, terminal input, Done, phone frame and the More sheet. `review.cjs` creates contact sheets. Scripts use the repository's Playwright Core installation and the installed Chromium 1248 executable. On this machine Chromium needs additional shared libraries; the captured runs used `LD_LIBRARY_PATH=/tmp/h4rn-browser-libs/unpack/usr/lib/x86_64-linux-gnu`. These libraries are verification infrastructure, not prototype dependencies.
 
 No application source or root product/design files are part of this direction.

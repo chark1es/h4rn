@@ -3,7 +3,40 @@
 All notable changes to h4rn are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses semantic versioning.
 
-## [Unreleased]
+## 1.0.0 — 2026-11-15
+
+The first stable release. h4rn is a single Rust daemon (`h4rnd`) behind one typed WebSocket
+protocol, with the desktop, mobile and browser clients as pure views over it. v1 ships:
+
+- **Daemon and protocol:** a typed protocol with generated TypeScript bindings, an
+  event-sourced thread lifecycle (SQLite), and Claude Code, Codex, OpenCode and Antigravity
+  harnesses with approvals, terminals, blobs and metering.
+- **Transport and pairing:** the Noise `IK` / `IKpsk2` secure transport (native and wasm), direct
+  and relay paths with resume, scoped pairing with a typed short code, and the PSK-possession fix
+  (a wrong one-time secret no longer admits a device).
+- **Connect and sharing:** the OrbitID-backed relay and registry, MCP sharing and the tunnel,
+  content-addressed skills, subagents as child threads with daemon-enforced delegation policy, and
+  forge integrations.
+- **Clients and updates:** the quiet native UI, the desktop updater notice, Settings → About,
+  and Settings → Harnesses with CLI versions and updates (ADR-043).
+- **Packaging:** installers, daemon archives, winget/Homebrew/AUR templates, the Helm chart and
+  the Docker image.
+
+### Known limitations
+
+- macOS and iOS builds and flows are unverified: they were not exercised on the Linux
+  development host.
+- The Android UI was built but not driven end to end on a device or emulator.
+- A new thread cannot request a worktree (`CreateThread` with `worktree` returns
+  `NotImplemented`); per-thread worktrees are not implemented. Subagent worktree isolation is.
+- Remote-host subagents are not implemented: a subagent runs only on its parent's host.
+- Gitea and Forgejo have no workflow re-run API, so re-run is unavailable for them.
+- The desktop updater needs a signing key: the repository carries a development placeholder, and
+  release builds must supply the real updater key and `latest.json` endpoint.
+- The OrbitID-backed suite was not run for the final release commit, and the Docker-based suites
+  (relay, connect, remote, forges) were skipped on the release host.
+
+## Development history (pre-1.0)
 
 ### Council round 6: a wrong PSK no longer pairs a device (P0, N1–N4)
 

@@ -1195,12 +1195,15 @@ async fn expect_refused_without_secret(daemon: &TestDaemon, identity: DeviceIden
 
 /// Dials with `psk` and reports whether the session was ever established
 /// within `window`.
-async fn dial_for(
+/// Dial with `psk` and wait for the outcome: `Ok(())` is a session,
+/// `Err(reason)` is the handshake failure or refusal. Waits on that event, never on
+/// a fixed window, so a loaded machine cannot turn "not answered yet" into
+/// "refused".
+async fn dial_outcome(
     daemon: &TestDaemon,
     identity: DeviceIdentity,
     psk: [u8; TOKEN_LEN],
-    window: Duration,
-) -> bool {
+) -> Result<(), String> {
     let mut engine = EngineConfig::new(
         [23u8; SESSION_ID_LEN],
         identity,
@@ -1212,19 +1215,27 @@ async fn dial_for(
         format!("ws://{}/secure", daemon.addr),
     )];
     let mut client = Client::connect(ClientConfig::new(engine, paths)).expect("start client");
-    let established = tokio::time::timeout(window, async {
+    let outcome = tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             match client.recv().await {
-                Some(ClientEvent::Established(_)) => return true,
-                Some(ClientEvent::Closed { .. }) | None => return false,
+                Some(ClientEvent::Established(_)) => return Ok(()),
+                Some(ClientEvent::Closed { reason }) => return Err(reason),
+                // A wrong secret fails the initiator's IKpsk2 attempt (it
+                // cannot open message 2): the first handshake error is the
+                // terminal answer. The client keeps retrying with backoff and
+                // never reports `Closed`, so this is the event to wait on.
+                Some(ClientEvent::Error { message, .. }) if message.contains("handshake") => {
+                    return Err(message);
+                }
                 Some(_) => {}
+                None => return Err("the client stopped without a reason".to_owned()),
             }
         }
     })
     .await
-    .unwrap_or(false);
+    .expect("timed out waiting for the handshake outcome");
     client.close().await;
-    established
+    outcome
 }
 
 fn assert_untouched(daemon: &TestDaemon, key: &[u8; 32], armed: [u8; TOKEN_LEN]) {
@@ -1262,15 +1273,16 @@ async fn a_wrong_psk_is_refused_and_touches_nothing() {
         let daemon = boot(Arc::clone(&service)).await;
         let attacker = device_identity();
         let key = attacker.public().noise_public;
-        let admitted = dial_for(
-            &daemon,
-            attacker.clone(),
-            [0x11u8; TOKEN_LEN],
-            Duration::from_secs(3),
-        )
-        .await;
-        assert!(!admitted, "a wrong secret established a session");
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        let refusal = dial_outcome(&daemon, attacker.clone(), [0x11u8; TOKEN_LEN]).await;
+        match refusal {
+            Ok(()) => panic!("a wrong secret established a session"),
+            Err(reason) => assert!(
+                reason.contains("handshake failed") || reason.contains("device is not paired"),
+                "a wrong secret must fail the handshake, got: {reason}"
+            ),
+        }
+        // The wrong-secret client could not finish the handshake, so it never
+        // sent the first record that would let the daemon record the device.
         assert_untouched(&daemon, &key, armed);
 
         // The same key cannot come back over plain IK either.

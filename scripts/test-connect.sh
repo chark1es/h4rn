@@ -5,7 +5,8 @@
 #   ./scripts/test-connect.sh --orbitid  # also run the real OrbitID e2e suite
 #
 # The script owns the lifecycle. It starts Postgres (and, with --orbitid, a
-# real OrbitID from the TS tree in $H4RN_ORBITID_SOURCE) in Docker on free
+# real OrbitID from the TS tree in $H4RN_ORBITID_SOURCE, default
+# $HOME/.t3/projects/orbitid) in Docker on free
 # ports, waits for discovery, creates the test user/session and OIDC clients
 # through OrbitID's own APIs, runs the `#[ignore]`d tests, and always tears the
 # stack down with `docker compose down -v --remove-orphans` (including on
@@ -21,7 +22,7 @@ for arg in "$@"; do
   case "$arg" in
     --orbitid) ORBITID=1 ;;
     -h|--help)
-      sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -134,7 +135,7 @@ build_orbitid() {
   if "$DOCKER" image inspect "$H4RN_ORBITID_IMAGE" >/dev/null 2>&1; then
     return 0
   fi
-  local source="${H4RN_ORBITID_SOURCE:-/home/chark1es/.t3/projects/orbitid}"
+  local source="${H4RN_ORBITID_SOURCE:-$HOME/.t3/projects/orbitid}"
   if [[ ! -f "$source/Dockerfile" ]]; then
     cat >&2 <<EOF
 --- ${H4RN_ORBITID_IMAGE} is not built and no OrbitID source tree was found.

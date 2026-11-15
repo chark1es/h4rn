@@ -48,8 +48,8 @@ daemon, Android, iOS and relay-image jobs succeed.
 3. Merge to `dev`, then tag the merge commit:
 
    ```sh
-   git tag -a v0.1.0 -m "h4rn 0.1.0"
-   git push origin v0.1.0
+   git tag -a v1.0.0 -m "h4rn 1.0.0"
+   git push origin v1.0.0
    ```
 
 The workflow rejects tags that are not `v<semver>` (pre-release suffixes such as
@@ -314,7 +314,7 @@ does not have, so they run only through scripts before a release:
 | `h4rn-connect` `orbitid` (OIDC, device grant, issuer checks) | `./scripts/test-connect.sh --orbitid` |
 | `h4rn-daemon` `remote` (device-grant sign-in, pairing, relay) | `./scripts/test-remote.sh` |
 
-Both need Docker and an OrbitID image (`H4RN_ORBITID_SOURCE`).
+Both need Docker and an OrbitID image (`H4RN_ORBITID_SOURCE`, default `$HOME/.t3/projects/orbitid`).
 
 ## 9. Release checklist
 

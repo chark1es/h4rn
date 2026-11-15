@@ -12,8 +12,8 @@ import {
 
 function status(overrides: Partial<AppUpdateStatus> = {}): AppUpdateStatus {
   return {
-    current_version: "0.1.0",
-    available: { version: "0.2.0", notes: null },
+    current_version: "1.0.0",
+    available: { version: "1.1.0", notes: null },
     checked_at_ms: 1_700_000_000_000,
     auto_check: true,
     error: null,
@@ -26,7 +26,7 @@ describe("app update store", () => {
 
   it("shows nothing until the shell says it can update", () => {
     applyStatus(status());
-    expect(getAppUpdateState().availableVersion).toBe("0.2.0");
+    expect(getAppUpdateState().availableVersion).toBe("1.1.0");
     // Web and mobile never set `supported`, so no notice.
     expect(noticeVisible(getAppUpdateState())).toBe(false);
   });
