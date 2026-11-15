@@ -1217,3 +1217,160 @@ async fn a_policy_change_that_drops_the_tool_during_an_approval_refuses_the_call
     );
     rig.a.stop().await;
 }
+
+#[tokio::test]
+async fn one_pending_approval_does_not_block_the_next_call_on_the_tunnel() {
+    // I2: the owner loop awaited the approval, so the next tools/call on the
+    // same tunnel sat unanswered behind it.
+    let policy = McpSharePolicy {
+        confirm_all: true,
+        ..McpSharePolicy::default()
+    };
+    let rig = tunnel_rig(
+        |devices, host, key| devices.register_host(host.clone(), key, Some("dev_b".into())),
+        policy,
+        None,
+        None,
+    )
+    .await;
+    let mut owner = owner_ui(&rig.a).await;
+    let session = rig.tunnel.open("local").await.expect("open tunnel");
+
+    let first = {
+        let session = Arc::clone(&session);
+        tokio::spawn(async move {
+            session
+                .request(
+                    "tools/call",
+                    json!({"name": "echo", "arguments": {"message": "first waits"}}),
+                    Duration::from_secs(10),
+                )
+                .await
+        })
+    };
+    let first_card = next_approval(&mut owner).await;
+    assert!(first_card.arguments_preview.contains("first waits"));
+
+    // The second call is read, admitted and raises its own card while the
+    // first is still waiting for the owner.
+    let second = {
+        let session = Arc::clone(&session);
+        tokio::spawn(async move {
+            session
+                .request(
+                    "tools/call",
+                    json!({"name": "echo", "arguments": {"message": "second runs"}}),
+                    Duration::from_secs(10),
+                )
+                .await
+        })
+    };
+    let second_card = next_approval(&mut owner).await;
+    assert_eq!(second_card.tool, "echo");
+    assert!(second_card.arguments_preview.contains("second runs"));
+    assert_ne!(second_card.approval_id, first_card.approval_id);
+
+    rig.a
+        .mcp
+        .handle(McpRequest::RespondApproval {
+            approval_id: second_card.approval_id,
+            decision: ApprovalDecision::Approve,
+        })
+        .await
+        .expect("approve the second call");
+    let ran = second.await.expect("second call task").expect("approved");
+    assert_eq!(ran["content"][0]["text"], "owner:second runs");
+
+    // The first card is still pending until the owner answers it.
+    match rig
+        .a
+        .mcp
+        .handle(McpRequest::PendingApprovals)
+        .await
+        .expect("list approvals")
+    {
+        ResponseBody::McpApprovals { approvals } => {
+            assert_eq!(approvals.len(), 1);
+            assert_eq!(approvals[0].approval_id, first_card.approval_id);
+        }
+        other => panic!("unexpected approvals response: {other:?}"),
+    }
+    rig.a
+        .mcp
+        .handle(McpRequest::RespondApproval {
+            approval_id: first_card.approval_id,
+            decision: ApprovalDecision::Deny,
+        })
+        .await
+        .expect("deny the first call");
+    assert!(first.await.expect("first call task").is_err());
+    rig.a.stop().await;
+}
+
+#[tokio::test]
+async fn dropping_the_caller_withdraws_its_pending_approval() {
+    // I2: a pending card outlived the tunnel that raised it, so the owner
+    // could answer a call whose caller was gone.
+    let policy = McpSharePolicy {
+        confirm_all: true,
+        ..McpSharePolicy::default()
+    };
+    let rig = tunnel_rig(
+        |devices, host, key| devices.register_host(host.clone(), key, Some("dev_b".into())),
+        policy,
+        None,
+        None,
+    )
+    .await;
+    let mut owner = owner_ui(&rig.a).await;
+    let session = rig.tunnel.open("local").await.expect("open tunnel");
+
+    let call = {
+        let session = Arc::clone(&session);
+        tokio::spawn(async move {
+            session
+                .request(
+                    "tools/call",
+                    json!({"name": "echo", "arguments": {"message": "caller hangs up"}}),
+                    Duration::from_secs(30),
+                )
+                .await
+        })
+    };
+    let approval = next_approval(&mut owner).await;
+
+    // The caller drops its tunnel while the owner is deciding.
+    session.shutdown().await;
+
+    // The card is withdrawn through the event the UI listens for.
+    match owner
+        .wait_event(|event| matches!(event, Event::McpShareApprovalResolved { .. }))
+        .await
+    {
+        Event::McpShareApprovalResolved {
+            approval_id,
+            decision,
+        } => {
+            assert_eq!(approval_id, approval.approval_id);
+            assert_eq!(decision, ApprovalDecision::Cancel);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+    match rig
+        .a
+        .mcp
+        .handle(McpRequest::PendingApprovals)
+        .await
+        .expect("list approvals")
+    {
+        ResponseBody::McpApprovals { approvals } => {
+            assert!(approvals.is_empty(), "the card must be gone: {approvals:?}")
+        }
+        other => panic!("unexpected approvals response: {other:?}"),
+    }
+    assert!(
+        call.await.expect("call task").is_err(),
+        "the dropped caller does not get a result"
+    );
+    rig.a.stop().await;
+}

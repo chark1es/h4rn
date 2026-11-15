@@ -16,12 +16,12 @@
 //! alive. Losing that path leaves the session resumable, not dead.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::DEFAULT_MAX_FRAME_BYTES;
 use crate::engine::PathId;
@@ -118,6 +118,7 @@ pub struct SessionHandle {
     pub frames: mpsc::Receiver<AppFrame>,
     commands: mpsc::UnboundedSender<SessionCommand>,
     closed: Arc<AtomicBool>,
+    liveness: SessionLiveness,
 }
 
 impl SessionHandle {
@@ -136,6 +137,16 @@ impl SessionHandle {
     /// Returns the next frame without waiting.
     pub fn try_recv(&mut self) -> Result<AppFrame, mpsc::error::TryRecvError> {
         self.frames.try_recv()
+    }
+
+    /// Observes whether the peer still has a path attached.
+    ///
+    /// A peer closing one path is not the end of the logical session: the
+    /// session stays resumable and a failover path may attach a moment later.
+    /// The application loop uses this to notice when every path is gone, which
+    /// is the point at which the peer can no longer hear a response.
+    pub fn liveness(&self) -> SessionLiveness {
+        self.liveness.clone()
     }
 
     /// Closes the session and lets the peer reconcile.
@@ -167,7 +178,6 @@ pub struct SessionSender {
     commands: mpsc::UnboundedSender<SessionCommand>,
     closed: Arc<AtomicBool>,
 }
-
 impl SessionSender {
     /// Queues one application frame for the client.
     pub fn send(&self, frame: AppFrame) -> Result<(), SecureError> {
@@ -180,6 +190,46 @@ impl SessionSender {
     pub fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
         let _ = self.commands.send(SessionCommand::Close);
+    }
+}
+
+/// Observes whether a logical session still has a live path.
+///
+/// A peer that closes one path leaves the session resumable: a failover path
+/// may attach before the old one is gone. [`Self::gone`] resolves only when
+/// the session has had a path and then lost every one, which is the point at
+/// which the peer can no longer receive a response.
+#[derive(Clone)]
+pub struct SessionLiveness {
+    attached: watch::Receiver<bool>,
+}
+
+impl SessionLiveness {
+    /// Whether at least one path is attached right now.
+    pub fn attached(&self) -> bool {
+        *self.attached.borrow()
+    }
+
+    /// Resolves once the session had a path and every path has since detached.
+    ///
+    /// Waiting for the first attachment matters because the handle is built
+    /// just before the path task starts; without it a caller that checks
+    /// immediately would race the first attach and see a session that was
+    /// never alive. Cancel-safe.
+    pub async fn gone(&mut self) {
+        while !*self.attached.borrow_and_update() {
+            if self.attached.changed().await.is_err() {
+                return;
+            }
+        }
+        loop {
+            if !*self.attached.borrow_and_update() {
+                return;
+            }
+            if self.attached.changed().await.is_err() {
+                return;
+            }
+        }
     }
 }
 
@@ -208,6 +258,36 @@ struct SessionEndpoint {
     commands: mpsc::UnboundedSender<SessionCommand>,
     closed: Arc<AtomicBool>,
     notify: Arc<tokio::sync::Notify>,
+    /// How many path tasks are currently attached. Failover may briefly hold
+    /// two; a drop to zero means the peer has no way back to this session.
+    live_paths: AtomicUsize,
+    liveness: watch::Sender<bool>,
+}
+
+/// Keeps one live-path count in the session for as long as its task runs.
+///
+/// Counted when the path is attached, not when its task first polls, so a
+/// caller that subscribes to [`SessionLiveness`] can never race the first
+/// attachment and wait forever for a "live" transition it missed.
+struct LivePath {
+    endpoint: Arc<SessionEndpoint>,
+}
+
+impl LivePath {
+    fn new(endpoint: Arc<SessionEndpoint>) -> Self {
+        if endpoint.live_paths.fetch_add(1, Ordering::SeqCst) == 0 {
+            endpoint.liveness.send_replace(true);
+        }
+        Self { endpoint }
+    }
+}
+
+impl Drop for LivePath {
+    fn drop(&mut self) {
+        if self.endpoint.live_paths.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.endpoint.liveness.send_replace(false);
+        }
+    }
 }
 
 type PairingHook = Arc<dyn Fn([u8; KEY_LEN]) + Send + Sync>;
@@ -570,6 +650,8 @@ impl SecureService {
                         commands,
                         closed: Arc::new(AtomicBool::new(false)),
                         notify: Arc::new(tokio::sync::Notify::new()),
+                        live_paths: AtomicUsize::new(0),
+                        liveness: watch::channel(false).0,
                     });
                     sessions.insert(session_id, Arc::clone(&endpoint));
                     (endpoint, Some((frames_rx, commands_rx)))
@@ -604,7 +686,11 @@ impl SecureService {
 
         let service = Arc::clone(self);
         let path_endpoint = Arc::clone(&endpoint);
+        // Counted before the task starts, so a caller never misses the first
+        // attach, and released when the task ends, whatever ended it.
+        let live_path = LivePath::new(Arc::clone(&endpoint));
         tokio::spawn(async move {
+            let _live = live_path;
             service.serve_path(path_endpoint, path_id, path, link).await;
         });
 
@@ -631,6 +717,9 @@ impl SecureService {
             frames: frames_rx,
             commands: endpoint.commands.clone(),
             closed: Arc::clone(&endpoint.closed),
+            liveness: SessionLiveness {
+                attached: endpoint.liveness.subscribe(),
+            },
         }))
     }
 
