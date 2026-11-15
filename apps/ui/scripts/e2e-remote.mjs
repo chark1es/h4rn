@@ -724,7 +724,7 @@ async function main() {
         .catch(async (error) => {
           const seen = await hostPage
             .locator("body")
-            .innerText()
+            .textContent()
             .catch(() => "");
           throw new Error(
             `the host never showed a code: ${error.message}\n${seen.slice(seen.indexOf("Pair a device"), seen.indexOf("Pair a device") + 1500)}`,
