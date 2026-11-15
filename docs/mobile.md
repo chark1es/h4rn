@@ -174,9 +174,14 @@ trusted differently from a typed one.
 - **Back button.** `MainActivity` installs an `OnBackPressedCallback` that calls
   `WebView.goBack()` while history remains. The React app listens for `popstate`, so
   thread → inbox works and the app exits only at the root.
-- **Network security.** Release builds permit cleartext only to `localhost`, `127.0.0.1`,
-  `10.0.2.2` and `10.0.3.2` (the emulator host aliases). Debug builds permit any cleartext host
-  so a daemon on the LAN can be used; production must use `wss://`.
+- **Network security.** The Noise session, not the socket, is the security boundary: the
+  daemon key is pinned from the pairing payload and an on-path observer sees only opaque
+  packets, so a `ws://` candidate adds no exposure ([ADR-010](decisions.md#adr-010-noise-e2e-between-device-and-daemon-the-relay-sees-metadata-only),
+  [ADR-031](decisions.md#adr-031-one-noise-ik-handshake-per-path-pinned-daemon-key-and-device-allowlist)).
+  Release builds therefore permit cleartext in the Android base config so LAN, `.local`,
+  MagicDNS and CGNAT/Tailscale candidates work; see
+  [Cleartext candidates on mobile](#cleartext-candidates-on-mobile) above. `wss://` remains
+  the relay's transport and adds defence in depth there, not a requirement for direct paths.
 - **Icons and id.** `dev.h4rn.app`, product name `h4rn`, scaffold icons, min SDK 26, target SDK
   37.
 
