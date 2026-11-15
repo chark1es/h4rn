@@ -17,7 +17,10 @@ import { chromium } from "playwright-core";
 
 const uiRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = resolve(uiRoot, "..", "..");
-const daemonBin = process.env.H4RN_DAEMON_BIN ?? join(repoRoot, "target", "debug", "h4rnd");
+// Cargo honours CARGO_TARGET_DIR, so the binaries we launch have to come from
+// the same directory it built into rather than a hardcoded `<repo>/target`.
+const targetDir = resolve(repoRoot, process.env.CARGO_TARGET_DIR ?? "target");
+const daemonBin = process.env.H4RN_DAEMON_BIN ?? join(targetDir, "debug", "h4rnd");
 const cargoBin =
   process.env.CARGO ??
   (existsSync(join(homedir(), ".cargo", "bin", "cargo"))
@@ -153,7 +156,7 @@ async function main() {
     run(cargoBin, ["build", "--quiet", "-p", "h4rn-mcp", "--bin", "mcp-fixture"], {
       cwd: repoRoot,
     });
-    const fixtureBin = join(repoRoot, "target", "debug", "mcp-fixture");
+    const fixtureBin = join(targetDir, "debug", "mcp-fixture");
 
     const [daemonPort, uiPort] = await Promise.all([freePort(), freePort()]);
     const token = run(daemonBin, ["--data-dir", dataDir, "token"]).trim();
