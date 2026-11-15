@@ -28,7 +28,7 @@ use crate::registry::{
 };
 use crate::secrets::{SecretError, SecretStore, secret_id};
 use crate::session::{AuthorizedSession, IssuedToken, McpScope, McpSessionRegistry};
-use crate::sharing::{McpTunnel, ShareCall};
+use crate::sharing::{ApprovalFilter, ConfirmationGate, McpTunnel, ShareCall};
 use crate::types::{CallToolResult, PromptMessage, ResourceContents, ToolDefinition};
 use crate::upstream::{
     UpstreamConfig, UpstreamError, UpstreamEvent, UpstreamLimits, UpstreamManager,
@@ -221,6 +221,9 @@ pub struct McpHub {
     /// Bumped whenever a share grant is added, changed or removed, so the
     /// daemon can push the new grant set to the machines it affects.
     grants: watch::Sender<u64>,
+    /// The daemon's approval gate, when it registered one. A grant change
+    /// cancels the cards it invalidates so no answer can run a revoked call.
+    share_gate: RwLock<Option<Arc<dyn ConfirmationGate>>>,
     bridge: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -245,6 +248,7 @@ impl McpHub {
             endpoint: Mutex::new(None),
             remotes: RwLock::new(BTreeMap::new()),
             grants: watch::channel(0).0,
+            share_gate: RwLock::new(None),
             bridge: std::sync::Mutex::new(None),
         };
         hub.reload().await;
@@ -771,6 +775,8 @@ impl McpHub {
         self.registry.remove_shares_for(&record.id).await?;
         self.registry.remove(&record.id).await?;
         self.grants.send_modify(|version| *version += 1);
+        // Every grant for the server is gone; so is every card waiting on one.
+        self.invalidate_approvals(&ApprovalFilter::server(name.clone()));
         self.upstreams.remove(&name).await;
         Ok(())
     }
@@ -911,12 +917,15 @@ impl McpHub {
         self.registry
             .put_share(&ShareRecord {
                 server_id: record.id.clone(),
-                machine: to_machine,
+                machine: to_machine.clone(),
                 policy,
                 created_at: Utc::now(),
             })
             .await?;
         self.grants.send_modify(|version| *version += 1);
+        // The grant was replaced: a card raised under the old policy must not
+        // be answerable into the new one.
+        self.invalidate_approvals(&ApprovalFilter::grant(name.clone(), to_machine));
         let shares = self.registry.list_shares().await?;
         Ok(self.view_for(&record, &shares).await)
     }
@@ -931,12 +940,45 @@ impl McpHub {
             .ok_or_else(|| HubError::NotFound(name.clone()))?;
         self.registry.remove_share(&record.id, &machine).await?;
         self.grants.send_modify(|version| *version += 1);
+        // The grant is gone: withdraw any card waiting on it.
+        self.invalidate_approvals(&ApprovalFilter::grant(name, machine));
         Ok(())
     }
 
     /// A receiver that changes every time a share grant does.
     pub fn subscribe_grants(&self) -> watch::Receiver<u64> {
         self.grants.subscribe()
+    }
+
+    /// Registers the gate whose pending cards a grant change invalidates.
+    ///
+    /// The daemon owns the gate (it publishes cards to the UI), so the hub
+    /// learns about it here. Without one, grant changes still fail closed on
+    /// revalidation; the cards simply are not withdrawn early.
+    pub fn set_share_gate(&self, gate: Arc<dyn ConfirmationGate>) {
+        *self
+            .share_gate
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(gate);
+    }
+
+    /// Withdraws the approval cards a grant change made unauthorised.
+    fn invalidate_approvals(&self, filter: &ApprovalFilter) {
+        let gate = self
+            .share_gate
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(gate) = gate else {
+            return;
+        };
+        let cancelled = gate.cancel_matching(filter);
+        if cancelled > 0 {
+            tracing::info!(
+                cancelled,
+                "cancelled MCP approvals invalidated by a share change"
+            );
+        }
     }
 
     /// The servers shared with `machine` and the policy for each, by name.

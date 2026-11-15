@@ -120,6 +120,9 @@ impl McpService {
         // The production gate raises real approval cards on this daemon. Tests
         // and embedders may inject a fixed gate instead.
         let gate = gate.unwrap_or_else(|| Arc::new(ApprovalGate::new(hub.event_sender())));
+        // A grant change withdraws the cards it invalidates, so an answer
+        // cannot run a call the owner just revoked.
+        hub.set_share_gate(Arc::clone(&gate));
         let authorizer = Arc::new(ShareAuthorizer::new(
             registry,
             Arc::clone(&gate),
@@ -297,6 +300,22 @@ impl McpService {
     /// peer daemon; `None` for any other key (clients, unknown keys).
     fn verified_peer(&self, key: &[u8; KEY_LEN]) -> Option<(HostId, String)> {
         verified_peer(self.devices().as_deref(), key)
+    }
+
+    /// Whether `key` is still the registered daemon key of `machine` under
+    /// `device_id`. A revocation between the handshake and dispatch shows up
+    /// here, so a call never runs for a key the owner no longer admits.
+    fn peer_still_verified(
+        &self,
+        key: &[u8; KEY_LEN],
+        machine: &HostId,
+        device_id: Option<&str>,
+    ) -> bool {
+        self.verified_peer(key)
+            .is_some_and(|(current, registered)| {
+                &current == machine
+                    && device_id.is_none_or(|expected| expected == registered.as_str())
+            })
     }
 
     /// Serves the owner half of one `/secure-mcp` session.
@@ -603,6 +622,21 @@ impl McpService {
                 jsonrpc::INVALID_REQUEST,
                 error.to_string(),
             ));
+        }
+        // An approval is answered asynchronously, and an unshare or a
+        // revocation can land between the answer and this point. Take one more
+        // look at the grant and at the authenticated key immediately before
+        // dispatch: the newest state wins, not the one the card showed.
+        if let Err(error) = self.authorizer.revalidate(&record, &call).await {
+            return Err(RpcErrorObject::new(
+                jsonrpc::INVALID_REQUEST,
+                error.to_string(),
+            ));
+        }
+        if !self.peer_still_verified(&device, machine, device_id.as_deref()) {
+            let error = "the peer is no longer a registered daemon";
+            self.audit.record(device, &call, false, Some(error));
+            return Err(RpcErrorObject::new(jsonrpc::INVALID_REQUEST, error));
         }
         let qualified = names::qualified(server, tool);
         let context = ToolCallContext::new(scope.clone(), server, DEFAULT_TOOL_TIMEOUT);
