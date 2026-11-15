@@ -416,8 +416,8 @@ mod tests {
         assert_eq!(codex.latest.as_deref(), Some("0.169.0"));
         assert!(codex.update_available);
         assert_eq!(
+            codex.path.as_deref(),
             Path::new("/usr/lib/node_modules/@openai/codex/bin/codex").to_str()
-            Path::new("/opt/homebrew/bin/codex").to_str()
         );
     }
 
