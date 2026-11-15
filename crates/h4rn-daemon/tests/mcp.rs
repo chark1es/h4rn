@@ -1112,7 +1112,11 @@ async fn unsharing_during_an_approval_withdraws_the_card_and_refuses_the_call() 
         ..McpSharePolicy::default()
     };
     let rig = tunnel_rig(
-        |devices, host, key| devices.register_host(host.clone(), key, Some("dev_b".into())),
+        |devices, host, key| {
+            devices
+                .register_host(host.clone(), key, Some("dev_b".into()))
+                .expect("persist");
+        },
         policy,
         None,
         None,
@@ -1188,7 +1192,11 @@ async fn a_policy_change_that_drops_the_tool_during_an_approval_refuses_the_call
         ..McpSharePolicy::default()
     };
     let rig = tunnel_rig(
-        |devices, host, key| devices.register_host(host.clone(), key, Some("dev_b".into())),
+        |devices, host, key| {
+            devices
+                .register_host(host.clone(), key, Some("dev_b".into()))
+                .expect("persist");
+        },
         policy,
         None,
         None,
@@ -1253,7 +1261,11 @@ async fn one_pending_approval_does_not_block_the_next_call_on_the_tunnel() {
         ..McpSharePolicy::default()
     };
     let rig = tunnel_rig(
-        |devices, host, key| devices.register_host(host.clone(), key, Some("dev_b".into())),
+        |devices, host, key| {
+            devices
+                .register_host(host.clone(), key, Some("dev_b".into()))
+                .expect("persist");
+        },
         policy,
         None,
         None,
@@ -1342,7 +1354,11 @@ async fn dropping_the_caller_withdraws_its_pending_approval() {
         ..McpSharePolicy::default()
     };
     let rig = tunnel_rig(
-        |devices, host, key| devices.register_host(host.clone(), key, Some("dev_b".into())),
+        |devices, host, key| {
+            devices
+                .register_host(host.clone(), key, Some("dev_b".into()))
+                .expect("persist");
+        },
         policy,
         None,
         None,
