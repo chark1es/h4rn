@@ -186,11 +186,7 @@ impl PeerDirectory {
                     );
                     continue;
                 }
-                devices.register_host(
-                    peer.host.clone(),
-                    peer.noise_public,
-                    peer.device_id.clone(),
-                );
+                devices.register_host(peer.host.clone(), peer.noise_public, peer.device_id.clone());
             }
             if let Some(service) = &service {
                 service.allow(peer.noise_public);
@@ -318,10 +314,7 @@ pub(crate) fn endpoint_urls(peer: &Peer) -> Vec<String> {
 /// Direct and tailnet sockets are probed in parallel by the engine, which
 /// ranks the relay last. The relay path is only built when both the peer's
 /// connect machine id and this daemon's shared relay socket are known.
-pub(crate) fn peer_paths(
-    peer: &Peer,
-    relay: Option<&Arc<RelayDialer>>,
-) -> Vec<ClientPath> {
+pub(crate) fn peer_paths(peer: &Peer, relay: Option<&Arc<RelayDialer>>) -> Vec<ClientPath> {
     let mut paths: Vec<ClientPath> = endpoint_urls(peer)
         .into_iter()
         .map(|url| {

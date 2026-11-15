@@ -14,6 +14,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
+use axum::http::{StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::post;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use futures::{SinkExt as _, StreamExt as _};
@@ -23,11 +27,14 @@ use h4rn_connect::crypto::random_b64;
 use h4rn_core::LifecycleSettings;
 use h4rn_daemon::config::Config;
 use h4rn_daemon::daemon::DaemonBuilder;
+use h4rn_daemon::mcp::McpService;
 use h4rn_daemon::remote::{ConnectClient, TailscaleMode};
 use h4rn_daemon::threads::ThreadManagerOptions;
 use h4rn_harness::FakeHarness;
+use h4rn_mcp::session::McpScope;
 use h4rn_protocol::{
-    ClientFrame, ClientRequest, ConnectDeviceKind, DeviceId, DeviceInfo, HarnessKind,
+    ClientFrame, ClientRequest, ConnectDeviceKind, DeviceId, DeviceInfo, HarnessKind, HostId,
+    McpEnabledMatrix, McpRequest, McpServerInput, McpSharePolicy, McpTransportInput,
     PairingClaimRequest, ProtoError, RelayOpen, RelayService, ResponseBody, RuntimeMode,
     ServerFrame, TransportPathKind,
 };
@@ -35,11 +42,11 @@ use h4rn_transport::client::{Client, ClientConfig, ClientEvent, ClientPath};
 use h4rn_transport::engine::EngineConfig;
 use h4rn_transport::keys::{DeviceIdentity, FileKeyStore, load_or_create};
 use h4rn_transport::relay::{
-    RelayConnector, RelayError, RelayFrame as WireRelayFrame, RelayRequest,
+    RelayConnector, RelayError, RelayFrame as WireRelayFrame, RelayRequest, RelayRole,
 };
 use h4rn_transport::server::{SecureOptions, SecureService};
 use h4rn_transport::wire::SESSION_ID_LEN;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
@@ -426,6 +433,7 @@ struct TestDaemon {
     addr: SocketAddr,
     shutdown: Option<oneshot::Sender<()>>,
     task: JoinHandle<anyhow::Result<()>>,
+    mcp: Arc<McpService>,
 }
 
 impl TestDaemon {
@@ -438,6 +446,15 @@ impl TestDaemon {
 }
 
 async fn boot(data_dir: &Path, service: Arc<SecureService>, bind: SocketAddr) -> TestDaemon {
+    boot_with_host(data_dir, service, bind, None).await
+}
+
+async fn boot_with_host(
+    data_dir: &Path,
+    service: Arc<SecureService>,
+    bind: SocketAddr,
+    local_host: Option<(HostId, &str)>,
+) -> TestDaemon {
     let config = Config {
         data_dir: data_dir.to_path_buf(),
         bind,
@@ -452,13 +469,15 @@ async fn boot(data_dir: &Path, service: Arc<SecureService>, bind: SocketAddr) ->
         tick_interval: Duration::from_millis(20),
         clock: None,
     };
-    let daemon = DaemonBuilder::new(config)
+    let mut builder = DaemonBuilder::new(config)
         .with_harness(Arc::new(FakeHarness::new()))
         .with_lifecycle(options)
-        .with_secure(Arc::clone(&service))
-        .build()
-        .await
-        .expect("build daemon");
+        .with_secure(Arc::clone(&service));
+    if let Some((id, name)) = local_host {
+        builder = builder.with_local_host(id, name);
+    }
+    let daemon = builder.build().await.expect("build daemon");
+    let mcp = daemon.mcp();
     let bound = daemon.bind().await.expect("bind daemon");
     let addr = bound.local_addr();
     let (shutdown, rx) = oneshot::channel();
@@ -473,6 +492,7 @@ async fn boot(data_dir: &Path, service: Arc<SecureService>, bind: SocketAddr) ->
         addr,
         shutdown: Some(shutdown),
         task,
+        mcp,
     }
 }
 
@@ -686,6 +706,350 @@ async fn run_wasm_relay_client(
     // Let the relay observe the wasm socket close before the native client
     // registers the same device id again.
     tokio::time::sleep(Duration::from_millis(300)).await;
+}
+
+/// Waits until connect reports `machine_id` online.
+async fn wait_machine_online(client: &ConnectClient, machine_id: &str) {
+    for _ in 0..200 {
+        if let Ok(machines) = client.machines().await
+            && machines
+                .iter()
+                .any(|machine| machine.id == machine_id && machine.online)
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("{machine_id} never came online");
+}
+
+/// A minimal Streamable-HTTP MCP server exposing one echo tool.
+async fn start_http_upstream(name: &'static str) -> String {
+    let app = Router::new().route(
+        "/mcp",
+        post(move |body: String| async move { http_mcp(name, &body).await }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let address = listener.local_addr().expect("upstream address");
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{address}/mcp")
+}
+
+async fn http_mcp(name: &str, body: &str) -> Response {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let Some(id) = value.get("id").cloned() else {
+        return StatusCode::ACCEPTED.into_response();
+    };
+    let method = value
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let params = value.get("params").cloned().unwrap_or(Value::Null);
+    let result = match method {
+        "initialize" => json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": {"tools": {"listChanged": false}},
+            "serverInfo": {"name": name, "version": "0.1.0"}
+        }),
+        "ping" => json!({}),
+        "tools/list" => json!({
+            "tools": [{
+                "name": "echo",
+                "description": "Echo a message.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {"message": {"type": "string"}},
+                    "required": ["message"]
+                }
+            }]
+        }),
+        "tools/call" => {
+            let message = params
+                .get("arguments")
+                .and_then(|arguments| arguments.get("message"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            json!({
+                "content": [{"type": "text", "text": format!("{name}:{message}")}],
+                "isError": false
+            })
+        }
+        "resources/list" => json!({"resources": []}),
+        "prompts/list" => json!({"prompts": []}),
+        other => {
+            return (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": {"code": -32601, "message": format!("no method {other}")}
+                })
+                .to_string(),
+            )
+                .into_response();
+        }
+    };
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string(),
+    )
+        .into_response()
+}
+
+fn http_server(url: String) -> McpServerInput {
+    McpServerInput {
+        name: "local".into(),
+        transport: McpTransportInput::Http {
+            url,
+            headers: Vec::new(),
+        },
+        tags: Vec::new(),
+        enabled: McpEnabledMatrix::default(),
+    }
+}
+
+/// Two daemons on the same account, each bound only to loopback, so a
+/// daemon-to-daemon MCP session has no direct or tailnet candidate: the
+/// shared relay is the only path.
+#[tokio::test]
+#[ignore = "requires Postgres and OrbitID (use ./scripts/test-remote.sh)"]
+async fn mcp_sharing_and_revocation_use_a_relay_only_path() {
+    h4rn_daemon::init_tracing("h4rn_daemon=debug,h4rn_transport=debug,h4rn_connect=debug");
+    let orbit = Orbit::load();
+    let relay = RelayServer::start(&orbit).await;
+
+    let a_dir = tempfile::tempdir().expect("A dir");
+    let a_identity = load_or_create(&FileKeyStore::new(a_dir.path().join("transport-identity")))
+        .expect("A identity");
+    let a_connect = login(
+        a_dir.path(),
+        a_identity.clone(),
+        &relay.base_url,
+        ConnectDeviceKind::Daemon,
+        Some("relay-share-a"),
+        &orbit,
+    )
+    .await;
+    let a_machine = a_connect.machine_id().expect("A machine");
+    let a_service = Arc::new(SecureService::new(SecureOptions::new(a_identity.clone())));
+    let a = boot_with_host(
+        a_dir.path(),
+        Arc::clone(&a_service),
+        "127.0.0.1:0".parse().unwrap(),
+        Some((HostId::new("host_relay_share_a"), "relay-share-a")),
+    )
+    .await;
+
+    let b_dir = tempfile::tempdir().expect("B dir");
+    let b_identity = load_or_create(&FileKeyStore::new(b_dir.path().join("transport-identity")))
+        .expect("B identity");
+    let b_connect = login(
+        b_dir.path(),
+        b_identity.clone(),
+        &relay.base_url,
+        ConnectDeviceKind::Daemon,
+        Some("relay-share-b"),
+        &orbit,
+    )
+    .await;
+    let b_machine = b_connect.machine_id().expect("B machine");
+    let b_service = Arc::new(SecureService::new(SecureOptions::new(b_identity.clone())));
+    let b = boot_with_host(
+        b_dir.path(),
+        b_service,
+        "127.0.0.1:0".parse().unwrap(),
+        Some((HostId::new("host_relay_share_b"), "relay-share-b")),
+    )
+    .await;
+
+    wait_machine_online(&a_connect, &a_machine).await;
+    wait_machine_online(&b_connect, &b_machine).await;
+
+    // Both daemons learned each other from connect, including the relay
+    // machine id and the peer device id, before sharing is attempted.
+    let a_host = a.mcp.hub().local_host().clone();
+    let b_host = b.mcp.hub().local_host().clone();
+    let mut peer = None;
+    for _ in 0..200 {
+        if let Some(found) = b
+            .mcp
+            .peers()
+            .peers()
+            .into_iter()
+            .find(|peer| peer.host == a_host)
+        {
+            peer = Some(found);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let peer = peer.expect("B should discover A as a peer");
+    assert!(peer.machine_id.is_some(), "relay machine id is required");
+    assert!(peer.device_id.is_some(), "connect device id is required");
+    assert!(peer.relay.is_some(), "relay address is required");
+    // A listens on loopback only, so no advertised LAN candidate can answer.
+    // Clear them anyway so this test fails if the tunnel ever needs anything
+    // but the relay: the only path left is the multiplexed relay session.
+    let mut relay_only = peer.clone();
+    relay_only.endpoints.clear();
+    b.mcp
+        .peers()
+        .replace_source("connect", vec![relay_only.clone()]);
+    assert!(
+        relay_only.endpoints.is_empty(),
+        "the relay is the only remaining path"
+    );
+
+    // `/secure-mcp` is peer-only: a user device cannot open the route even
+    // when the relay lets it reach the machine for the client protocol.
+    let c_dir = tempfile::tempdir().expect("C dir");
+    let c_identity = DeviceIdentity::generate().expect("C identity");
+    let c_connect = login(
+        c_dir.path(),
+        c_identity,
+        &relay.base_url,
+        ConnectDeviceKind::Desktop,
+        Some("relay-share-c"),
+        &orbit,
+    )
+    .await;
+    let c_device = c_connect
+        .me()
+        .await
+        .expect("C identity")
+        .devices
+        .into_iter()
+        .find(|device| device.kind == ConnectDeviceKind::Desktop)
+        .map(|device| device.id)
+        .expect("C device id");
+    let user_device = ConnectRelayConnector {
+        client: Arc::new(c_connect),
+        machine_id: a_machine.clone(),
+        device_id: c_device,
+        service: RelayService::SecureMcp,
+    };
+    let mut link = user_device
+        .connect(RelayRequest {
+            endpoint: format!("relay:{}", relay.base_url),
+            session_id: [9u8; SESSION_ID_LEN],
+            role: RelayRole::Client,
+            token: None,
+        })
+        .await
+        .expect("the relay accepts the open frame");
+    let error = link
+        .recv()
+        .await
+        .expect_err("a user device cannot open /secure-mcp");
+    assert!(
+        error.to_string().contains("open_forbidden"),
+        "the refusal must name the route: {error}"
+    );
+
+    // A owns the server and shares it with B's machine. B has a relay-only
+    // path because A listens on loopback only.
+    let upstream = start_http_upstream("owner").await;
+    a.mcp
+        .handle(McpRequest::Upsert {
+            input: http_server(upstream),
+        })
+        .await
+        .expect("upsert on A");
+    a.mcp
+        .handle(McpRequest::Share {
+            name: "local".into(),
+            to_machine: b_host.clone(),
+            policy: McpSharePolicy::default(),
+        })
+        .await
+        .expect("share from A");
+
+    let endpoint = b.mcp.hub().endpoint().await.expect("B endpoint");
+    let token = b
+        .mcp
+        .hub()
+        .issue_session(McpScope::client(b_host.clone()))
+        .token;
+    let http = reqwest::Client::new();
+    let mut discovered = false;
+    for _ in 0..200 {
+        let listed: Value = http
+            .post(&endpoint)
+            .bearer_auth(&token)
+            .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+            .send()
+            .await
+            .expect("tools/list on B")
+            .json()
+            .await
+            .expect("JSON");
+        if listed["result"]["tools"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "local__echo"))
+        {
+            discovered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        discovered,
+        "B never received the grant over the relay-only path"
+    );
+
+    let called: Value = http
+        .post(&endpoint)
+        .bearer_auth(&token)
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "local__echo", "arguments": {"message": "over the relay"}}
+        }))
+        .send()
+        .await
+        .expect("tools/call on B")
+        .json()
+        .await
+        .expect("JSON");
+    assert_eq!(
+        called["result"]["content"][0]["text"],
+        "owner:over the relay"
+    );
+
+    // Revocation travels the same push channel: the tunnel is unregistered.
+    a.mcp
+        .handle(McpRequest::Unshare {
+            name: "local".into(),
+            machine: b_host.clone(),
+        })
+        .await
+        .expect("unshare");
+    let mut revoked = false;
+    for _ in 0..200 {
+        let servers = b.mcp.hub().list_servers().await.expect("list on B");
+        if !servers.iter().any(|server| server.name == "local") {
+            revoked = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        revoked,
+        "revoking the share must unregister B's relay-only tunnel"
+    );
+
+    b.stop().await;
+    a.stop().await;
+    relay.stop().await;
 }
 
 #[tokio::test]

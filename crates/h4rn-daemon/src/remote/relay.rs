@@ -194,7 +194,10 @@ impl TransportRelayLink for RelayPathLink {
             LinkFrame::Data { packet, .. } => RelayFrame::data(self.conn_id.clone(), packet),
             LinkFrame::Close { .. } => RelayFrame::close(self.conn_id.clone()),
         };
-        self.outbound.send(frame).await.map_err(|_| RelayError::Closed)
+        self.outbound
+            .send(frame)
+            .await
+            .map_err(|_| RelayError::Closed)
     }
 
     async fn recv(&mut self) -> Result<Option<LinkFrame>, RelayError> {
@@ -209,7 +212,9 @@ impl TransportRelayLink for RelayPathLink {
     }
 
     async fn close(&mut self) -> Result<(), RelayError> {
-        let _ = self.outbound.try_send(RelayFrame::close(self.conn_id.clone()));
+        let _ = self
+            .outbound
+            .try_send(RelayFrame::close(self.conn_id.clone()));
         Ok(())
     }
 }
@@ -389,7 +394,10 @@ async fn handle_event(
                     .get(&frame.conn_id)
                     .cloned();
                 if let Some(sender) = sender
-                    && sender.send(RelayInbound::Data(frame.payload)).await.is_err()
+                    && sender
+                        .send(RelayInbound::Data(frame.payload))
+                        .await
+                        .is_err()
                 {
                     tracing::debug!(conn = %frame.conn_id, "relay session already closed");
                 }
