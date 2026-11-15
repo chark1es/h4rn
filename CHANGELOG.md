@@ -13,7 +13,10 @@ protocol, with the desktop, mobile and browser clients as pure views over it. v1
   harnesses with approvals, terminals, blobs and metering.
 - **Transport and pairing:** the Noise `IK` / `IKpsk2` secure transport (native and wasm), direct
   and relay paths with resume, scoped pairing with a typed short code, and the PSK-possession fix
-  (a wrong one-time secret no longer admits a device).
+  (a wrong one-time secret no longer admits a device). The pre-attach handshake is bounded
+  (`handshake_timeout` 10 s, `restart_timeout` 5 s, enforced inside `SecureService::accept`), the
+  `Open` record is validated before authorisation, and every failed `Open` gets the same
+  `NotPaired` reject.
 - **Connect and sharing:** the OrbitID-backed relay and registry, MCP sharing and the tunnel,
   content-addressed skills, subagents as child threads with daemon-enforced delegation policy, and
   forge integrations.
@@ -60,6 +63,19 @@ protocol, with the desktop, mobile and browser clients as pure views over it. v1
 - **Docs (N4).** `docs/transport.md`, ADR-042 and the round-5 entry describe possession being
   proven by the first transport record and the plain-first fallback; the round-4 K2 backoff
   wording is corrected.
+- **An unknown key can no longer hold a daemon task open (Q1).** After a `NotPaired` reject the
+  server waited for the restart with no deadline, and `/secure` needs no credentials. `accept` now
+  bounds the whole pre-attach phase (`handshake_timeout`, 10 s) and the restart wait
+  (`restart_timeout`, 5 s), so every caller (`/secure`, the relay connector, `/secure-mcp`) is
+  covered.
+- **A PSK with a bogus resume token no longer pairs (Q2).** The `Open` record is decoded before
+  authorisation, and a PSK-authorised device that also sends a token is refused with `NotPaired`
+  before it is allowlisted or the secret is consumed.
+- **A failed `Open` rejects alike for every key (Q3).** The `NotPaired` reject no longer depends
+  on whether a secret is armed, so it cannot tell an allowed key from an unknown one.
+- **Paired devices leave the secret armed, now pinned (Q4).** Documented and tested.
+- **Test gaps closed (Q5).** The native `retry_with_psk` path and the daemon's forged-first-record
+  branch over a real WebSocket are covered.
 
 ### Desktop app updates and harness CLI updates (v1)
 

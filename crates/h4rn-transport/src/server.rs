@@ -72,6 +72,13 @@ pub struct SecureOptions {
     pub tick: Duration,
     /// Largest application frame accepted from a client.
     pub max_frame_bytes: usize,
+    /// Deadline for the whole pre-attach phase of `accept`: handshake, the
+    /// first `Open` record and the `Welcome`. An unauthenticated peer can
+    /// otherwise hold a task open by going silent.
+    pub handshake_timeout: Duration,
+    /// How long the socket may stay silent after a `NotPaired` reject before
+    /// the server gives up waiting for the client's `IKpsk2` restart.
+    pub restart_timeout: Duration,
 }
 
 impl SecureOptions {
@@ -87,6 +94,8 @@ impl SecureOptions {
             ack_delay_ms: 40,
             tick: Duration::from_millis(25),
             max_frame_bytes: DEFAULT_MAX_FRAME_BYTES,
+            handshake_timeout: Duration::from_secs(10),
+            restart_timeout: Duration::from_secs(5),
         }
     }
 
@@ -591,7 +600,22 @@ impl SecureService {
     /// A resumed path deliberately returns no handle: the application loop that
     /// owns the original session keeps running, so a direct-to-relay failover
     /// never restarts `Hello` or replays application state.
+    ///
+    /// The pre-attach phase is bounded by `SecureOptions::handshake_timeout`,
+    /// so a peer that goes silent cannot hold the caller's task open.
     pub async fn accept(
+        self: &Arc<Self>,
+        link: Box<dyn Link>,
+    ) -> Result<AcceptOutcome, SecureError> {
+        match tokio::time::timeout(self.options.handshake_timeout, self.accept_unbounded(link))
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => Err(SecureError::Link("handshake timed out".into())),
+        }
+    }
+
+    async fn accept_unbounded(
         self: &Arc<Self>,
         mut link: Box<dyn Link>,
     ) -> Result<AcceptOutcome, SecureError> {
@@ -629,34 +653,13 @@ impl SecureService {
         if packet.kind != PacketKind::Record {
             return Err(SecureError::Protocol("expected an encrypted Open record"));
         }
-        let plaintext = match path.open(&packet.body) {
-            Ok(plaintext) => plaintext,
-            Err(error) => {
-                // For a provisional device this is a wrong secret: touch
-                // nothing, and say why.
-                if provisional_psk.is_some() {
-                    let _ = reject(&mut *link, session_id, RejectReason::NotPaired).await;
-                    return Err(SecureError::Rejected(RejectReason::NotPaired));
-                }
-                return Err(error.into());
-            }
+        // Any failure to open the first record is refused the same way,
+        // whether the device is allowed or not, so a failed `Open` cannot tell
+        // an allowed key from an unknown one. Nothing is consumed or allowed.
+        let Ok(plaintext) = path.open(&packet.body) else {
+            let _ = reject(&mut *link, session_id, RejectReason::NotPaired).await;
+            return Err(SecureError::Rejected(RejectReason::NotPaired));
         };
-        // Read the policy afresh: a revoke that landed during the handshake
-        // must not be missed.
-        let policy = self.policy_snapshot();
-        match policy.authorize(&device, provisional_psk.is_some()) {
-            Ok(true) => {
-                if !self.paired_through_psk(provisional_psk, device) {
-                    let _ = reject(&mut *link, session_id, RejectReason::NotPaired).await;
-                    return Err(SecureError::Rejected(RejectReason::NotPaired));
-                }
-            }
-            Ok(false) => {}
-            Err(reason) => {
-                let _ = reject(&mut *link, session_id, reason).await;
-                return Err(SecureError::Rejected(reason));
-            }
-        }
         let record = Record::decode_plaintext(&plaintext)?;
         if record.kind != RecordKind::Control {
             return Err(SecureError::Protocol("expected an Open control record"));
@@ -669,6 +672,31 @@ impl SecureService {
         else {
             return Err(SecureError::Protocol("expected an Open control record"));
         };
+        // A client never sends the secret together with a resume ticket. Refuse
+        // before pairing, so a bogus token cannot burn the secret and allow a
+        // device whose session then fails.
+        if provisional_psk.is_some() && token.is_some() {
+            let _ = reject(&mut *link, session_id, RejectReason::NotPaired).await;
+            return Err(SecureError::Rejected(RejectReason::NotPaired));
+        }
+        // Read the policy afresh: a revoke that landed during the handshake
+        // must not be missed.
+        let policy = self.policy_snapshot();
+        match policy.authorize(&device, provisional_psk.is_some()) {
+            Ok(true) => {
+                if !self.paired_through_psk(provisional_psk, device) {
+                    let _ = reject(&mut *link, session_id, RejectReason::NotPaired).await;
+                    return Err(SecureError::Rejected(RejectReason::NotPaired));
+                }
+            }
+            // An already-allowed device leaves the secret armed even when it
+            // presents the right one: only a new device consumes it.
+            Ok(false) => {}
+            Err(reason) => {
+                let _ = reject(&mut *link, session_id, reason).await;
+                return Err(SecureError::Rejected(reason));
+            }
+        }
 
         let now = self.now_ms();
         let path_id = self.next_path.fetch_add(1, Ordering::Relaxed);
@@ -842,10 +870,15 @@ impl SecureService {
             match self.handshake_once(link, session_id, message).await {
                 Err(SecureError::Rejected(RejectReason::NotPaired)) if !restarted => {
                     restarted = true;
-                    let Some(next) = link
-                        .recv_packet()
-                        .await
-                        .map_err(|error| SecureError::Link(error.to_string()))?
+                    let Ok(next) =
+                        tokio::time::timeout(self.options.restart_timeout, link.recv_packet())
+                            .await
+                    else {
+                        return Err(SecureError::Link(
+                            "restart after NotPaired timed out".into(),
+                        ));
+                    };
+                    let Some(next) = next.map_err(|error| SecureError::Link(error.to_string()))?
                     else {
                         return Err(SecureError::Rejected(RejectReason::NotPaired));
                     };
@@ -1593,5 +1626,199 @@ mod tests {
         assert_eq!(reject_reason(&answer), Some(RejectReason::Revoked));
         assert!(task.await.unwrap().is_err());
         assert_eq!(service.session_count(), 0);
+    }
+
+    // ---- round 6 follow-up: deadlines, ordering, uniform rejects ----
+
+    fn forged_record(session: SessionId) -> Vec<u8> {
+        Packet {
+            kind: PacketKind::Record,
+            session_id: session,
+            body: vec![0xAB; 64],
+        }
+        .encode()
+    }
+
+    fn open_with_token(
+        channel: &mut SecureChannel,
+        session: SessionId,
+        token: Option<[u8; TOKEN_LEN]>,
+    ) -> Vec<u8> {
+        let record = Record::control(&Control::Open {
+            token,
+            recv_next: 0,
+            send_next: 0,
+        });
+        Packet {
+            kind: PacketKind::Record,
+            session_id: session,
+            body: channel.seal(&record.encode_plaintext().unwrap()).unwrap(),
+        }
+        .encode()
+    }
+
+    /// Opens a handshake as `device` and returns the completed channel.
+    async fn client_handshake(
+        client: &mut MemLink,
+        service: &SecureService,
+        device: &DeviceIdentity,
+        session: SessionId,
+        psk: Option<&[u8; TOKEN_LEN]>,
+    ) -> SecureChannel {
+        let (mut handshake, message) = Handshake::start_initiator(&HandshakeConfig {
+            session_id: &session,
+            local_static: device.noise_secret(),
+            remote_static: Some(&service.public_identity().noise_public),
+            psk,
+        })
+        .unwrap();
+        client
+            .send_packet(hs_packet(session, message))
+            .await
+            .unwrap();
+        let reply = Packet::decode(&client.recv_packet().await.unwrap().unwrap()).unwrap();
+        handshake.read(&reply.body).unwrap();
+        handshake.into_channel(RekeyLimits::default()).unwrap()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_unknown_key_cannot_hold_the_task_open() {
+        let secret = [0x21u8; TOKEN_LEN];
+        let service = armed_service(secret);
+        let stranger = DeviceIdentity::generate().unwrap();
+        let session = [8u8; SESSION_ID_LEN];
+        let (mut client, server) = mem_pair();
+        let task = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move { service.accept(Box::new(server)).await.map(|_| ()) }
+        });
+        // Plain IK from an unknown key is answered with NotPaired; the client
+        // then goes silent but keeps the socket open.
+        let (_handshake, message) = Handshake::start_initiator(&HandshakeConfig {
+            session_id: &session,
+            local_static: stranger.noise_secret(),
+            remote_static: Some(&service.public_identity().noise_public),
+            psk: None,
+        })
+        .unwrap();
+        client
+            .send_packet(hs_packet(session, message))
+            .await
+            .unwrap();
+        let answer = client.recv_packet().await.unwrap().unwrap();
+        assert_eq!(reject_reason(&answer), Some(RejectReason::NotPaired));
+        let finished = tokio::time::timeout(Duration::from_secs(11), task).await;
+        assert!(
+            finished.is_ok(),
+            "the server task must end within the handshake deadline"
+        );
+        assert!(finished.unwrap().unwrap().is_err());
+        drop(client);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_silent_peer_after_the_handshake_is_dropped_too() {
+        let service = armed_service([0x22u8; TOKEN_LEN]);
+        let device = DeviceIdentity::generate().unwrap();
+        service.allow(device.public().noise_public);
+        let session = [9u8; SESSION_ID_LEN];
+        let (mut client, server) = mem_pair();
+        let task = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move { service.accept(Box::new(server)).await.map(|_| ()) }
+        });
+        let _channel = client_handshake(&mut client, &service, &device, session, None).await;
+        // The Open record never comes.
+        let finished = tokio::time::timeout(Duration::from_secs(11), task).await;
+        assert!(finished.is_ok(), "a silent peer must hit the deadline");
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn a_psk_with_a_bogus_token_is_refused_before_pairing() {
+        let secret = [0x23u8; TOKEN_LEN];
+        let service = armed_service(secret);
+        let device = DeviceIdentity::generate().unwrap();
+        let key = device.public().noise_public;
+        let session = [10u8; SESSION_ID_LEN];
+        let (mut client, server) = mem_pair();
+        let task = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move { service.accept(Box::new(server)).await.map(|_| ()) }
+        });
+        let mut channel =
+            client_handshake(&mut client, &service, &device, session, Some(&secret)).await;
+        client
+            .send_packet(open_with_token(
+                &mut channel,
+                session,
+                Some([0x99; TOKEN_LEN]),
+            ))
+            .await
+            .unwrap();
+        let answer = client.recv_packet().await.unwrap().unwrap();
+        assert_eq!(reject_reason(&answer), Some(RejectReason::NotPaired));
+        assert!(task.await.unwrap().is_err());
+        assert!(!service.is_allowed(&key), "the key must not be allowlisted");
+        assert_eq!(service.psk(), Some(secret), "the secret must stay armed");
+    }
+
+    #[tokio::test]
+    async fn a_failed_open_is_rejected_alike_for_allowed_and_unknown_keys() {
+        let secret = [0x24u8; TOKEN_LEN];
+        let service = armed_service(secret);
+        let allowed = DeviceIdentity::generate().unwrap();
+        service.allow(allowed.public().noise_public);
+        let unknown = DeviceIdentity::generate().unwrap();
+
+        let mut answers = Vec::new();
+        for (device, psk, tag) in [(&allowed, None, 11u8), (&unknown, Some(&secret), 12u8)] {
+            let session = [tag; SESSION_ID_LEN];
+            let (mut client, server) = mem_pair();
+            let task = tokio::spawn({
+                let service = Arc::clone(&service);
+                async move { service.accept(Box::new(server)).await.map(|_| ()) }
+            });
+            let _channel = client_handshake(&mut client, &service, device, session, psk).await;
+            client.send_packet(forged_record(session)).await.unwrap();
+            let answer = client.recv_packet().await.unwrap();
+            answers.push(answer.as_deref().and_then(reject_reason));
+            assert!(task.await.unwrap().is_err());
+        }
+        assert_eq!(
+            answers,
+            vec![Some(RejectReason::NotPaired), Some(RejectReason::NotPaired)],
+            "a failed Open must not tell an allowed key from an unknown one"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_allowed_device_with_the_secret_leaves_it_armed() {
+        let secret = [0x25u8; TOKEN_LEN];
+        let service = armed_service(secret);
+        let device = DeviceIdentity::generate().unwrap();
+        let key = device.public().noise_public;
+        service.allow(key);
+        let session = [13u8; SESSION_ID_LEN];
+        let (mut client, server) = mem_pair();
+        let task = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move { service.accept(Box::new(server)).await.map(|_| ()) }
+        });
+        let mut channel =
+            client_handshake(&mut client, &service, &device, session, Some(&secret)).await;
+        client
+            .send_packet(open_record(&mut channel, session))
+            .await
+            .unwrap();
+        let welcome = client.recv_packet().await.unwrap().unwrap();
+        assert_eq!(Packet::decode(&welcome).unwrap().kind, PacketKind::Record);
+        assert!(matches!(task.await.unwrap(), Ok(())));
+        assert!(service.is_allowed(&key));
+        assert_eq!(
+            service.psk(),
+            Some(secret),
+            "an already-paired device must not consume the secret"
+        );
     }
 }

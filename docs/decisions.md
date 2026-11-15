@@ -990,6 +990,17 @@ anyone and then clears after a successful rewrite. The sidecar is the retry that
 survives a crash, and the UI still sees the error. Peer-host updates log the error
 and skip admitting the peer rather than pretending the write succeeded.
 
+### Round-6 follow-up amendments
+
+**The first record is validated before anyone is paired, and the pre-attach phase has a deadline.**
+The `Open` record is decoded before the authorisation step, and a PSK-authorised device that
+presents a resume token is refused with `NotPaired` before pairing (a legitimate client never sends
+both). Any failure to open the first record gets the same `NotPaired` reject for every key, so it
+cannot distinguish allowed from unknown keys. A correct secret presented by an already-allowlisted
+device leaves the secret armed, matching the round-5 rule that paired devices do not consume it.
+`SecureService::accept` is bounded by `handshake_timeout` (10 s) and the post-reject restart wait by
+`restart_timeout` (5 s), enforced inside the transport so no caller can forget the deadline.
+
 ## ADR-043: App updates live in the shell; harness updates live in the daemon
 
 **Status:** Accepted
