@@ -179,6 +179,37 @@ async function bootstrapOrbit(orbitBase, encryptionKey, uiCallback) {
     }),
   });
 
+  const app = await jsonRequest(`${orbitBase}/v1/oauth_applications`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${secretKey}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      name: "h4rn-ui-e2e",
+      // The browser redirect lands on the UI; the mobile flow keeps its scheme.
+      redirect_uris: ["h4rn://callback", uiCallback],
+      scopes: "openid profile email offline_access",
+      public: false,
+      consent_screen_enabled: false,
+      pkce_required: true,
+    }),
+  });
+
+  await jsonRequest(`${orbitBase}/v1/instance`, {
+    method: "PATCH",
+    headers: { authorization: `Bearer ${secretKey}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      application: { homeUrl: orbitBase },
+      oidcProvider: {
+        deviceAuthorizationEnabled: true,
+        deviceCodeIntervalSeconds: 1,
+        deviceCodeLifetimeSeconds: 300,
+      },
+      session: { tokenLifetimeSeconds: 3600 },
+    }),
+  });
+
+  // Mint the session token after the lifetime patch: OrbitID defaults to a
+  // 60-second session token, and a cold build of the daemon and relay below
+  // easily outlives that, making the device-code approval 401.
   const signIn = await jsonRequest(`${orbitBase}/v1/client/sign_ins`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -213,34 +244,6 @@ async function bootstrapOrbit(orbitBase, encryptionKey, uiCallback) {
   );
   const clientCookie = clientTokens.at(-1);
   if (!clientCookie) throw new Error("OrbitID did not set a __client cookie");
-
-  const app = await jsonRequest(`${orbitBase}/v1/oauth_applications`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${secretKey}`, "content-type": "application/json" },
-    body: JSON.stringify({
-      name: "h4rn-ui-e2e",
-      // The browser redirect lands on the UI; the mobile flow keeps its scheme.
-      redirect_uris: ["h4rn://callback", uiCallback],
-      scopes: "openid profile email offline_access",
-      public: false,
-      consent_screen_enabled: false,
-      pkce_required: true,
-    }),
-  });
-
-  await jsonRequest(`${orbitBase}/v1/instance`, {
-    method: "PATCH",
-    headers: { authorization: `Bearer ${secretKey}`, "content-type": "application/json" },
-    body: JSON.stringify({
-      application: { homeUrl: orbitBase },
-      oidcProvider: {
-        deviceAuthorizationEnabled: true,
-        deviceCodeIntervalSeconds: 1,
-        deviceCodeLifetimeSeconds: 300,
-      },
-      session: { tokenLifetimeSeconds: 3600 },
-    }),
-  });
 
   return {
     secretKey,
