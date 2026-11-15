@@ -281,12 +281,10 @@ impl PeerDirectory {
                 )
             {
                 tracing::warn!(peer = %peer.host, %error, "could not register a peer daemon");
-                let retry = retries
-                    .entry(peer.noise_public)
-                    .or_insert(RetryState {
-                        failures: 0,
-                        next_attempt: now,
-                    });
+                let retry = retries.entry(peer.noise_public).or_insert(RetryState {
+                    failures: 0,
+                    next_attempt: now,
+                });
                 retry.failures = retry.failures.saturating_add(1);
                 retry.next_attempt = now + RetryState::delay(retry.failures);
                 continue;

@@ -12,4 +12,4 @@ pub mod upload;
 pub use store::{
     AttachmentResolver, BlobError, BlobStore, DOWNLOAD_CHUNK_SIZE, sanitize_name, spawn_gc,
 };
-pub use upload::UPLOAD_CHUNK_SIZE;
+pub use upload::{UPLOAD_CHUNK_SIZE, UploadOwner};

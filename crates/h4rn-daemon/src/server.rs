@@ -41,7 +41,7 @@ use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::auth::{TokenStore, authorize};
-use crate::blobs::{BlobError, BlobStore};
+use crate::blobs::{BlobError, BlobStore, UploadOwner};
 use crate::forge::ForgeService;
 use crate::fs::{FsError, FsService};
 use crate::hosts::HostInventory;
@@ -435,6 +435,28 @@ impl Connection {
         } else {
             self.device.as_ref().map(|device| device.device_id.clone())
         }
+    }
+
+    /// Who may touch this session's blob uploads.
+    ///
+    /// A remote session is bound to the Noise key its handshake authenticated,
+    /// never to a `Hello` claim or a connection; the same device can resume
+    /// after reconnecting, but another device cannot. Loopback is the machine's
+    /// owner.
+    fn upload_owner(&self) -> Result<UploadOwner, ProtoError> {
+        if !self.origin.is_remote() {
+            return Ok(UploadOwner::Local);
+        }
+        self.origin
+            .device_key
+            .map(UploadOwner::Device)
+            .ok_or_else(|| {
+                ProtoError::new(
+                    ProtoErrorCode::Unauthorized,
+                    "this session has no authenticated device key",
+                    "Pair the device again",
+                )
+            })
     }
 
     /// Records one remote action, if this session came from another device.
@@ -1270,31 +1292,47 @@ impl Connection {
                     name,
                     size,
                     mime_hint,
-                } => self
-                    .state
-                    .blobs
-                    .begin_upload(&name, size, mime_hint)
-                    .map(|upload| ResponseBody::UploadStarted { upload })
-                    .map_err(BlobError::into_proto),
-                ClientRequest::CommitUpload { upload_id, blake3 } => self
-                    .state
-                    .blobs
-                    .commit_upload(&upload_id, &blake3)
-                    .await
-                    .map(|blob| ResponseBody::UploadCommitted { blob })
-                    .map_err(BlobError::into_proto),
-                ClientRequest::AbortUpload { upload_id } => self
-                    .state
-                    .blobs
-                    .abort_upload(&upload_id)
-                    .map(|()| ResponseBody::Ack)
-                    .map_err(BlobError::into_proto),
-                ClientRequest::QueryUpload { upload_id } => self
-                    .state
-                    .blobs
-                    .query_upload(&upload_id)
-                    .map(|upload| ResponseBody::UploadStatus { upload })
-                    .map_err(BlobError::into_proto),
+                } => match self.upload_owner() {
+                    Ok(owner) => self
+                        .state
+                        .blobs
+                        .begin_upload(owner, &name, size, mime_hint)
+                        .map(|upload| ResponseBody::UploadStarted { upload })
+                        .map_err(BlobError::into_proto),
+                    Err(error) => Err(error),
+                },
+                ClientRequest::CommitUpload { upload_id, blake3 } => {
+                    let committed = match self.upload_owner() {
+                        Ok(owner) => {
+                            self.state
+                                .blobs
+                                .commit_upload(owner, &upload_id, &blake3)
+                                .await
+                        }
+                        Err(error) => return Some(error_frame(reply_id, error)),
+                    };
+                    committed
+                        .map(|blob| ResponseBody::UploadCommitted { blob })
+                        .map_err(BlobError::into_proto)
+                }
+                ClientRequest::AbortUpload { upload_id } => match self.upload_owner() {
+                    Ok(owner) => self
+                        .state
+                        .blobs
+                        .abort_upload(owner, &upload_id)
+                        .map(|()| ResponseBody::Ack)
+                        .map_err(BlobError::into_proto),
+                    Err(error) => Err(error),
+                },
+                ClientRequest::QueryUpload { upload_id } => match self.upload_owner() {
+                    Ok(owner) => self
+                        .state
+                        .blobs
+                        .query_upload(owner, &upload_id)
+                        .map(|upload| ResponseBody::UploadStatus { upload })
+                        .map_err(BlobError::into_proto),
+                    Err(error) => Err(error),
+                },
                 ClientRequest::GetBlob {
                     id,
                     range,
@@ -1424,11 +1462,16 @@ impl Connection {
                 ) {
                     return Some(Outbound::Text(binary_error_frame(seq, error)));
                 }
-                match self
-                    .state
-                    .blobs
-                    .append_chunk(frame.stream_id, frame.seq, &frame.payload)
-                {
+                let owner = match self.upload_owner() {
+                    Ok(owner) => owner,
+                    Err(error) => return Some(Outbound::Text(binary_error_frame(seq, error))),
+                };
+                match self.state.blobs.append_chunk(
+                    owner,
+                    frame.stream_id,
+                    frame.seq,
+                    &frame.payload,
+                ) {
                     Ok(_) => Some(Outbound::Binary(
                         BinaryFrame::new(BinaryKind::Ack, frame.stream_id, frame.seq).encode(),
                     )),

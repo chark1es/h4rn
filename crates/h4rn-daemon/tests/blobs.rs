@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
 use h4rn_daemon::auth::TokenStore;
-use h4rn_daemon::blobs::{AttachmentResolver, BlobStore};
+use h4rn_daemon::blobs::{AttachmentResolver, BlobStore, UploadOwner};
 use h4rn_daemon::config::Config;
 use h4rn_daemon::daemon::DaemonBuilder;
 use h4rn_harness::FakeHarness;
@@ -500,11 +500,13 @@ async fn unreferenced_blobs_are_collected_but_retained_ones_survive() {
 
     let bytes = b"collect me";
     let upload = store
-        .begin_upload("collect.txt", bytes.len() as u64, None)
+        .begin_upload(UploadOwner::Local, "collect.txt", bytes.len() as u64, None)
         .unwrap();
-    store.append_chunk(upload.stream_id, 0, bytes).unwrap();
+    store
+        .append_chunk(UploadOwner::Local, upload.stream_id, 0, bytes)
+        .unwrap();
     let blob = store
-        .commit_upload(&upload.upload_id, &content_hash(bytes))
+        .commit_upload(UploadOwner::Local, &upload.upload_id, &content_hash(bytes))
         .await
         .expect("commit");
     let path = dir
@@ -519,11 +521,22 @@ async fn unreferenced_blobs_are_collected_but_retained_ones_survive() {
     assert!(!path.exists(), "unreferenced blob must be removed");
 
     let kept = store
-        .begin_upload("keep.txt", b"keep me".len() as u64, None)
+        .begin_upload(
+            UploadOwner::Local,
+            "keep.txt",
+            b"keep me".len() as u64,
+            None,
+        )
         .unwrap();
-    store.append_chunk(kept.stream_id, 0, b"keep me").unwrap();
+    store
+        .append_chunk(UploadOwner::Local, kept.stream_id, 0, b"keep me")
+        .unwrap();
     let kept = store
-        .commit_upload(&kept.upload_id, &content_hash(b"keep me"))
+        .commit_upload(
+            UploadOwner::Local,
+            &kept.upload_id,
+            &content_hash(b"keep me"),
+        )
         .await
         .expect("commit");
     let thread = h4rn_protocol::ThreadId::new("th_gc");
@@ -552,11 +565,18 @@ async fn display_names_cannot_traverse_out_of_the_thread_directory() {
 
     let bytes = b"traversal";
     let upload = store
-        .begin_upload("../../etc/passwd", bytes.len() as u64, None)
+        .begin_upload(
+            UploadOwner::Local,
+            "../../etc/passwd",
+            bytes.len() as u64,
+            None,
+        )
         .unwrap();
-    store.append_chunk(upload.stream_id, 0, bytes).unwrap();
+    store
+        .append_chunk(UploadOwner::Local, upload.stream_id, 0, bytes)
+        .unwrap();
     let blob = store
-        .commit_upload(&upload.upload_id, &content_hash(bytes))
+        .commit_upload(UploadOwner::Local, &upload.upload_id, &content_hash(bytes))
         .await
         .expect("commit");
     let resolved = store

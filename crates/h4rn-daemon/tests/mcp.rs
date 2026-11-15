@@ -1115,10 +1115,7 @@ async fn a_persistent_tunnel_revalidates_resources_and_prompts() {
     let session = rig.tunnel.open("local").await.expect("open tunnel");
     for (method, params) in [
         ("resources/list", json!({})),
-        (
-            "resources/read",
-            json!({"uri": "secret://account"}),
-        ),
+        ("resources/read", json!({"uri": "secret://account"})),
         ("prompts/list", json!({})),
         ("prompts/get", json!({"name": "brief"})),
     ] {
@@ -1170,10 +1167,7 @@ async fn a_persistent_tunnel_revalidates_resources_and_prompts() {
         .await
         .expect("narrow the grant");
     for (method, params) in [
-        (
-            "resources/read",
-            json!({"uri": "secret://account"}),
-        ),
+        ("resources/read", json!({"uri": "secret://account"})),
         ("prompts/get", json!({"name": "brief"})),
     ] {
         assert!(
@@ -1195,10 +1189,7 @@ async fn a_persistent_tunnel_revalidates_resources_and_prompts() {
     for (method, params) in [
         ("tools/list", json!({})),
         ("resources/list", json!({})),
-        (
-            "resources/read",
-            json!({"uri": "secret://account"}),
-        ),
+        ("resources/read", json!({"uri": "secret://account"})),
         ("prompts/list", json!({})),
         ("prompts/get", json!({"name": "brief"})),
     ] {
@@ -1214,7 +1205,8 @@ async fn a_persistent_tunnel_revalidates_resources_and_prompts() {
 }
 
 /// Opens the owner's UI connection, subscribed so approval cards arrive.
-async fn owner_ui(daemon: &TestDaemon) -> Client {    let mut owner = Client::connect(daemon).await;
+async fn owner_ui(daemon: &TestDaemon) -> Client {
+    let mut owner = Client::connect(daemon).await;
     owner.hello().await;
     owner
         .request(ClientRequest::Subscribe {
