@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use h4rn_mcp::hub::McpHub;
 use h4rn_mcp::sharing::McpTunnel;
@@ -96,9 +96,31 @@ pub struct PeerDirectory {
     secure: RwLock<Option<Arc<SecureService>>>,
     devices: RwLock<Option<Arc<DeviceRegistry>>>,
     version: watch::Sender<u64>,
+    /// Consecutive registry-write failures per peer key, and when the next
+    /// report may retry. A failed admission is never permanent for the run.
+    retries: std::sync::Mutex<HashMap<[u8; KEY_LEN], RetryState>>,
     /// Whether a source has reported the authoritative peer set at least once.
     /// Until then an empty directory is "not loaded yet", not "no peers".
     reconciled: AtomicBool,
+}
+
+/// Bounded backoff for a peer admission whose registry write keeps failing.
+struct RetryState {
+    failures: u32,
+    next_attempt: Instant,
+}
+
+impl RetryState {
+    /// The delay before the next attempt. The first retry is immediate so a
+    /// transient failure heals on the next report; later ones back off
+    /// exponentially up to 30 seconds.
+    fn delay(failures: u32) -> Duration {
+        if failures <= 1 {
+            return Duration::ZERO;
+        }
+        let factor = 1u64 << (failures.saturating_sub(1)).min(7);
+        Duration::from_millis((250 * factor).min(30_000))
+    }
 }
 
 impl Default for PeerDirectory {
@@ -115,6 +137,7 @@ impl PeerDirectory {
             secure: RwLock::new(None),
             devices: RwLock::new(None),
             version: watch::channel(0).0,
+            retries: std::sync::Mutex::new(HashMap::new()),
             reconciled: AtomicBool::new(false),
         }
     }
@@ -155,10 +178,10 @@ impl PeerDirectory {
         let after = self.peers();
         // A source has now reported: its union is authoritative even when
         // empty, so persisted hosts absent from it are revoked on this pass.
-        let first = !self.reconciled.swap(true, Ordering::SeqCst);
-        if before == after && !first {
-            return;
-        }
+        self.reconciled.store(true, Ordering::SeqCst);
+        // Even an unchanged report runs `apply`: a peer whose registry write
+        // failed while it stayed in the set must be retried, not skipped
+        // because the in-memory diff is empty.
         self.apply(&before, &after);
         self.version.send_modify(|version| *version += 1);
     }
@@ -207,11 +230,12 @@ impl PeerDirectory {
                 }
             }
         }
+        let now = Instant::now();
+        let mut retries = self
+            .retries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         for peer in after {
-            let known = before.iter().any(|old| old == peer);
-            if known {
-                continue;
-            }
             if let Some(devices) = &devices {
                 // A key that already holds client scopes is never silently
                 // re-roled into a peer daemon. A persisted entry still waiting
@@ -223,15 +247,51 @@ impl PeerDirectory {
                     );
                     continue;
                 }
-                if let Err(error) = devices.register_host(
+            }
+            // Skip only when the registry already records *this* host and the
+            // transport admitted it. An identical source report after a failed
+            // write is exactly the case that must try again.
+            let registered = devices.as_ref().is_some_and(|devices| {
+                devices
+                    .authorization(&peer.noise_public)
+                    .is_some_and(|auth| {
+                        auth.role == Role::Host
+                            && auth.machine.as_ref() == Some(&peer.host)
+                            && auth.device_id == peer.device_id
+                    })
+            });
+            let admitted = service
+                .as_ref()
+                .is_none_or(|service| service.is_allowed(&peer.noise_public));
+            if registered && admitted {
+                retries.remove(&peer.noise_public);
+                continue;
+            }
+            if retries
+                .get(&peer.noise_public)
+                .is_some_and(|retry| now < retry.next_attempt)
+            {
+                continue;
+            }
+            if let Some(devices) = &devices
+                && let Err(error) = devices.register_host(
                     peer.host.clone(),
                     peer.noise_public,
                     peer.device_id.clone(),
-                ) {
-                    tracing::warn!(peer = %peer.host, %error, "could not register a peer daemon");
-                    continue;
-                }
+                )
+            {
+                tracing::warn!(peer = %peer.host, %error, "could not register a peer daemon");
+                let retry = retries
+                    .entry(peer.noise_public)
+                    .or_insert(RetryState {
+                        failures: 0,
+                        next_attempt: now,
+                    });
+                retry.failures = retry.failures.saturating_add(1);
+                retry.next_attempt = now + RetryState::delay(retry.failures);
+                continue;
             }
+            retries.remove(&peer.noise_public);
             if let Some(service) = &service {
                 service.allow(peer.noise_public);
             }
@@ -256,6 +316,7 @@ impl PeerDirectory {
             if let Some(service) = &service {
                 service.revoke(old.noise_public);
             }
+            retries.remove(&old.noise_public);
         }
     }
 
