@@ -541,7 +541,9 @@ async fn a_slow_durable_pairing_write_does_not_fail_the_pairing() {
     let registry = Arc::clone(&daemon.devices);
     service.set_pairing_hook(Arc::new(move |key| {
         std::thread::sleep(Duration::from_millis(1_300));
-        registry.complete_direct(key).map_err(|error| error.to_string())
+        registry
+            .complete_direct(key)
+            .map_err(|error| error.to_string())
     }));
     let phone = device_identity();
     let mut client = SecureClient::connect(&daemon, phone.clone(), Some(psk)).await;

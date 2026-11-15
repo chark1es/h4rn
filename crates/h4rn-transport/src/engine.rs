@@ -848,7 +848,9 @@ impl TransportEngine {
                 let limit = if runtime.confirmed {
                     self.config.path_timeout_ms
                 } else {
-                    self.config.establish_timeout_ms.max(self.config.path_timeout_ms)
+                    self.config
+                        .establish_timeout_ms
+                        .max(self.config.path_timeout_ms)
                 };
                 if runtime.channel.is_some() && silent > limit {
                     Some(*id)
