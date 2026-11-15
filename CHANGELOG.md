@@ -5,6 +5,33 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### Council round 4: MCP tunnel authorization, peer admission, direct pairing and upload ownership (K1–K4)
+
+- **Every protected MCP tunnel operation revalidates its grant (K1).** Resources and prompts used
+  the scope fixed when the tunnel opened, so a device excluded by `allowed_devices` or a server
+  the owner had unshared was still readable through an open tunnel. One guard now re-checks the
+  authenticated peer, the current share and the device restrictions before `tools/list`,
+  `tools/call`, `resources/list`/`read`/`subscribe` and `prompts/list`/`get`; tool policy and
+  approvals stay in the shared call path. Covered by a persistent-tunnel test that unshares,
+  narrows the policy and excludes the device.
+- **A failed peer admission is retried instead of leaving the peer unadmitted (K2).** The
+  directory skipped any peer already in its in-memory set, so a `register_host` write failure
+  stuck for the rest of the run. It now decides from the registry: a peer is skipped only when a
+  `host` entry exists for its key and the transport already allows it; otherwise it retries with
+  an immediate first attempt and exponential backoff (250 ms doubling, capped at 30 s). A
+  `client` key is still never re-roled.
+- **A phantom direct pairing is refused, and an undeletable QR cannot be re-armed (K3).** The
+  transport pairing hook is fallible: if the new device's registry entry cannot be written, the
+  handshake gets `NotPaired` and the device is not added to the allowlist. If invalidating the
+  consumed `direct-pairing.json` fails, the daemon records the BLAKE3 hash of the PSK in
+  `direct-pairing.consumed` and the watcher refuses to arm that file after a restart (best
+  effort, no secret stored).
+- **An in-flight upload belongs to the device that opened it (K4).** `UploadSession` records an
+  owner — the authenticated Noise key for a remote session, `Local` for loopback — and
+  `begin_upload`, `append_chunk`, `commit_upload`, `abort_upload` and `query_upload` return
+  `UploadNotFound` to anyone else. Binding by device, not connection, keeps resume-after-reconnect
+  working while another paired device can no longer append to, query, commit or abort the stream.
+
 ### Council round 3: pairing, registry, approvals, resume claims and deleted-file diffs (H1–H4, I1–I4)
 
 - **QR pairing now completes the SAS comparison and waits for the host (H1).** The phone derives
