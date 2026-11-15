@@ -2009,6 +2009,89 @@ async fn a_slow_proxy_does_not_freeze_the_thread_it_resumes() {
     daemon.stop().await;
 }
 
+/// A cancellation that lands while the resume is choosing a failover must win.
+/// The resume only claims its attempt after the proxy answers, under the
+/// thread lock and with a conditional ledger update, so a card the user
+/// cancelled can never start a turn or switch the model.
+#[tokio::test]
+async fn cancelling_while_the_proxy_picks_a_failover_does_not_resume() {
+    let server = wiremock::MockServer::start().await;
+    let delay = Duration::from_secs(2);
+    mock_slow_proxy_catalog(&server, delay).await;
+
+    let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+    let daemon = boot_with(
+        resume_options(),
+        FakeHarness::with_session_scripts(vec![limit_script(Some(reset_at)), resume_script()]),
+    )
+    .await;
+    let host = host_id_for(&daemon).await;
+
+    let mut resumer = Client::connect(&daemon).await;
+    resumer.hello().await;
+    let thread_id = limited_thread_on_a_proxy(&mut resumer, host, &server).await;
+    stable_policy(&mut resumer, true).await;
+
+    let mut canceler = Client::connect(&daemon).await;
+    canceler.hello().await;
+
+    let resumed_thread = thread_id.clone();
+    let resume = tokio::spawn(async move {
+        resumer
+            .request(ClientRequest::ResumeNow {
+                thread_id: resumed_thread,
+            })
+            .await
+    });
+
+    // Let the resume reach the proxy call, then cancel it while it waits.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    match canceler
+        .request(ClientRequest::CancelResume {
+            thread_id: thread_id.clone(),
+        })
+        .await
+        .expect("cancel resume")
+    {
+        ResponseBody::ResumeChanged {
+            schedule: Some(schedule),
+        } => assert_eq!(schedule.state, ResumeState::Cancelled),
+        other => panic!("unexpected CancelResume response: {other:?}"),
+    }
+
+    let resumed = tokio::time::timeout(Duration::from_secs(20), resume)
+        .await
+        .expect("the paused resume finishes")
+        .expect("resume task")
+        .expect("resume now");
+    match resumed {
+        ResponseBody::ResumeChanged { schedule } => assert!(
+            schedule.is_none(),
+            "a cancelled resume reports no fired schedule: {schedule:?}"
+        ),
+        other => panic!("unexpected ResumeNow response: {other:?}"),
+    }
+
+    let quiet = tokio::time::timeout(
+        Duration::from_millis(600),
+        canceler.wait_event(|event| matches!(event, Event::TurnStarted { .. })),
+    )
+    .await;
+    assert!(quiet.is_err(), "a cancelled resume must not start a turn");
+
+    let cancelled = thread_summary(&mut canceler, &thread_id).await;
+    assert_eq!(
+        cancelled.model, "claude-sonnet-5",
+        "a cancelled resume must not switch models"
+    );
+    assert_eq!(
+        schedules(&mut canceler).await[0].state,
+        ResumeState::Cancelled
+    );
+
+    daemon.stop().await;
+}
+
 /// The shared setup of the fail-over tests: a mock proxy serving two Claude
 /// models, a Claude Code override through it and a policy that never fires on
 /// its own (the reset is an hour away).
