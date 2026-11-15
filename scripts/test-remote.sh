@@ -178,7 +178,7 @@ command -v wasm-bindgen >/dev/null 2>&1 || {
 WASM_DIR="$(mktemp -d -t h4rn-wasm.XXXXXX)"
 cargo build -p h4rn-transport-wasm --target wasm32-unknown-unknown --release
 wasm-bindgen --target nodejs --out-dir "$WASM_DIR" \
-  target/wasm32-unknown-unknown/release/h4rn_transport_wasm.wasm
+  "${CARGO_TARGET_DIR:-$ROOT/target}/wasm32-unknown-unknown/release/h4rn_transport_wasm.wasm"
 export H4RN_TEST_WASM_DIR="$WASM_DIR"
 export H4RN_TEST_NODE_SCRIPT="$ROOT/scripts/wasm-relay-client.mjs"
 

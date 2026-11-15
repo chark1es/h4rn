@@ -36,7 +36,8 @@
 #   H4RN_PORT              daemon port (default: 47800)
 #   H4RN_DATA_DIR          daemon data dir
 #                          (default: ~/.local/share/h4rn-mobile-daemon)
-#   H4RN_DAEMON_BIN        h4rnd binary (default: target/debug/h4rnd)
+#   H4RN_DAEMON_BIN        h4rnd binary (default: $CARGO_TARGET_DIR or
+#                          target/debug/h4rnd)
 #   H4RN_ADB / H4RN_EMULATOR  Windows tool paths
 #   H4RN_WIN_USER          Windows profile name for the default tool paths
 #                          (default: $USER)
@@ -67,7 +68,9 @@ AVD="${H4RN_AVD:-Medium_Phone_API_36.0}"
 PACKAGE="dev.h4rn.app"
 PORT="${H4RN_PORT:-47800}"
 DATA_DIR="${H4RN_DATA_DIR:-${HOME}/.local/share/h4rn-mobile-daemon}"
-DAEMON_BIN="${H4RN_DAEMON_BIN:-${REPO_ROOT}/target/debug/h4rnd}"
+TARGET_DIR="${CARGO_TARGET_DIR:-${REPO_ROOT}/target}"
+[[ "${TARGET_DIR}" = /* ]] || TARGET_DIR="${REPO_ROOT}/${TARGET_DIR}"
+DAEMON_BIN="${H4RN_DAEMON_BIN:-${TARGET_DIR}/debug/h4rnd}"
 TARGETS="${H4RN_ANDROID_TARGETS:-x86_64 aarch64}"
 
 log() {
