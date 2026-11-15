@@ -2591,9 +2591,10 @@ impl Inner {
             let Some(active) = record.active.as_mut() else {
                 continue;
             };
-            let due = active
-                .last_tick
-                .is_none_or(|last| (now - last) >= chrono::TimeDelta::seconds(1));
+            let due = active.last_tick.is_none_or(|last| {
+                let elapsed = now - last;
+                elapsed < chrono::TimeDelta::zero() || elapsed >= chrono::TimeDelta::seconds(1)
+            });
             if !due {
                 continue;
             }
@@ -2617,8 +2618,12 @@ impl Inner {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             // The scan reads the manager's clock, not a wall-clock stopwatch, so
-            // a manual clock makes a due schedule fire on the test's step.
-            if last.is_some_and(|at| (now - at) < chrono::TimeDelta::seconds(1)) {
+            // a manual clock makes a due schedule fire on the test's step. A
+            // clock that jumped backwards scans rather than waiting out the gap.
+            if last.is_some_and(|at| {
+                let elapsed = now - at;
+                elapsed >= chrono::TimeDelta::zero() && elapsed < chrono::TimeDelta::seconds(1)
+            }) {
                 return;
             }
             *last = Some(now);
