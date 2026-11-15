@@ -575,8 +575,9 @@ All notable changes to h4rn are recorded here. The format follows
   can pair again. iOS returns an explicit unimplemented error rather than falling back to
   plaintext.
 - **Native integration**: edge-to-edge window with `env(safe-area-inset-*)`, hardware back mapped
-  onto WebView history, and a network security config that allows cleartext only for loopback and
-  emulator host aliases in release (LAN hosts only in debug).
+  onto WebView history, and a network security config for the cleartext candidates. It originally
+  allowed loopback and emulator host aliases in release (LAN hosts only in debug); G2 below widened
+  the release base config to the LAN and tailnet candidates the daemon actually serves.
 - **Build pipeline** (`scripts/mobile-android.sh`): `init`, `build`, `install`, `run`,
   `screenshot`, `logs` and `daemon` commands. Builds one debug APK per ABI (x86_64 for the
   emulator, aarch64 for phones); `run` starts a fake-harness daemon, wires
