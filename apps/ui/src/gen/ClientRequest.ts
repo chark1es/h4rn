@@ -39,10 +39,10 @@ import type { WorktreeRequest } from "./WorktreeRequest";
 /**
  * Everything a client can ask a daemon to do.
  *
- * Variants after `Subscribe` are deliberately skeletal: the daemon rejects
- * them with [`crate::ProtoErrorCode::Unsupported`] until their phase lands.
- * They exist now so the generated TypeScript barrel is stable and later
- * phases append rather than rename.
+ * The daemon answers a request whose feature is not enabled on this host with
+ * [`crate::ProtoErrorCode::Unsupported`] and a hint, and a request the wire
+ * contract carries but this build does not implement with
+ * [`crate::ProtoErrorCode::NotImplemented`].
  */
 export type ClientRequest = { "type": "hello", 
 /**

@@ -29,6 +29,7 @@ import type { HarnessKind, HostId, RuntimeMode } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { HARNESS_LABELS, HARNESS_SLUGS } from "@/lib/entities";
 import { closeNewThread, createThread, useApp } from "@/lib/store/appStore";
+import { defaultThreadHostId, localOnlyHostOptions } from "@/lib/thread-hosts";
 import { cn } from "@/lib/utils";
 
 const DEFAULT_MODELS: Record<HarnessKind, string> = {
@@ -60,6 +61,7 @@ function FieldLabel({
 export function NewThreadDialog() {
   const open = useApp((state) => state.ui.newThreadOpen);
   const hosts = useApp((state) => state.hosts);
+  const localHostId = useApp((state) => state.localHostId);
   const connection = useApp((state) => state.connection.status);
   const isPhone = useIsPhone();
   useProxyCatalog();
@@ -84,7 +86,12 @@ export function NewThreadDialog() {
 
   useEffect(() => {
     if (!open) return;
-    const first = onlineHosts[0];
+    // A new thread can only run on this daemon's host for now; prefer it even
+    // when another online host sorts first.
+    const firstId = defaultThreadHostId(onlineHosts, localHostId);
+    const first = firstId
+      ? onlineHosts.find((candidate) => candidate.host_id === firstId)
+      : undefined;
     if (first) {
       setHost(first.host_id);
       const nextHarness = first.harnesses[0] ?? "claude_code";
@@ -92,7 +99,7 @@ export function NewThreadDialog() {
       setModel(proxyDefaultModel(nextHarness) ?? DEFAULT_MODELS[nextHarness]);
     }
     setStarting(false);
-  }, [open, onlineHosts]);
+  }, [open, onlineHosts, localHostId]);
 
   // The catalogue can arrive after the dialog opens; adopt its default only
   // while the user has not chosen a model of their own.
@@ -172,10 +179,11 @@ export function NewThreadDialog() {
               label="Host"
               placeholder="No online hosts"
               value={host}
-              options={onlineHosts.map((option) => ({
-                value: option.host_id,
-                label: option.name,
-              }))}
+              options={localOnlyHostOptions(
+                onlineHosts,
+                localHostId,
+                "Not yet: new threads run on this host",
+              )}
               onChange={(value) => {
                 const nextHost = hosts[value];
                 setHost(value);
@@ -260,7 +268,8 @@ export function NewThreadDialog() {
             />
             <span className="flex items-center gap-1 text-small text-fg-3">
               <GitBranchIcon className="size-3" aria-hidden />
-              The worktree is chosen by the harness for now.
+              The agent works in this directory. h4rn does not create a worktree for new threads
+              yet.
             </span>
           </div>
         </div>

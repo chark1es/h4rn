@@ -2663,8 +2663,22 @@ impl Inner {
                 return Ok(None);
             }
         };
-        let mut record = handle.lock().await;
-        if record.closed {
+        // Snapshot what the decision needs, then let go of the record lock.
+        // Everything below up to the re-checks is either network I/O (the
+        // proxy calls) or harness I/O (session shutdown), and holding the lock
+        // across it would freeze GetThread and SendMessage for this thread for
+        // as long as the proxy or the harness takes to answer.
+        let (harness, model, thread_id, closed, active) = {
+            let record = handle.lock().await;
+            (
+                record.meta.harness,
+                record.meta.model.clone(),
+                record.meta.thread_id.clone(),
+                record.closed,
+                record.active.is_some(),
+            )
+        };
+        if closed {
             let _ = meter
                 .finish_schedule(
                     schedule,
@@ -2674,13 +2688,13 @@ impl Inner {
                 .await;
             return Ok(None);
         }
-        if record.active.is_some() {
+        if active {
             // A turn is already running (a manual resume, or the limited turn
             // itself has not finished). Wait quietly: the schedule stays armed
             // and is re-checked on the next tick, and `send` cancels it when a
             // new turn supersedes it. Emitting here would repeat every second.
             tracing::debug!(
-                thread_id = %record.meta.thread_id,
+                thread_id = %thread_id,
                 "auto-resume due while the thread is active; waiting"
             );
             return Ok(None);
@@ -2692,11 +2706,11 @@ impl Inner {
         if schedule.failover.is_none()
             && policy.failover
             && let Some(proxy) = self.proxy.get()
-            && let Some(applied) = proxy.override_for(record.meta.harness, &record.meta.model)
+            && let Some(applied) = proxy.override_for(harness, &model)
             && let Ok(Some(choice)) = proxy
                 .pick_failover(
                     &applied.profile_id,
-                    &record.meta.model,
+                    &model,
                     &h4rn_protocol::ProxyFailoverPolicy::default(),
                 )
                 .await
@@ -2708,22 +2722,86 @@ impl Inner {
                 reason: choice.reason,
             });
         }
+
         // Whoever chose it (the policy at reset time, or a person through
         // `FailOver`), a changed model needs a fresh session: the live one was
-        // started on the limited model.
-        if let Some(failover) = &schedule.failover
-            && record.meta.model != failover.model
-        {
-            record.meta.model = failover.model.clone();
-            if let Some(session) = record.session.take() {
-                let mut session = session.lock().await;
-                if let Err(error) = session.shutdown().await {
-                    tracing::warn!(thread_id = %record.meta.thread_id, %error, "harness shutdown before failover failed");
+        // started on the limited model. Take it under the lock, then shut it
+        // down outside so its I/O does not hold the thread either.
+        if let Some(failover) = &schedule.failover {
+            enum Apply {
+                Closed,
+                Active,
+                Go(Option<SharedSession>, Option<JoinHandle<()>>),
+            }
+            let apply = {
+                let mut record = handle.lock().await;
+                if record.closed {
+                    Apply::Closed
+                } else if record.active.is_some() {
+                    Apply::Active
+                } else if record.meta.model == failover.model {
+                    Apply::Go(None, None)
+                } else {
+                    record.meta.model = failover.model.clone();
+                    let session = record.session.take();
+                    let pump = record.pump.take();
+                    Apply::Go(session, pump)
+                }
+            };
+            match apply {
+                Apply::Closed => {
+                    let _ = meter
+                        .finish_schedule(
+                            schedule,
+                            ResumeState::Cancelled,
+                            Some("the thread is closed".into()),
+                        )
+                        .await;
+                    return Ok(None);
+                }
+                Apply::Active => {
+                    tracing::debug!(
+                        thread_id = %thread_id,
+                        "auto-resume due while the thread is active; waiting"
+                    );
+                    return Ok(None);
+                }
+                Apply::Go(session, pump) => {
+                    if let Some(session) = session {
+                        let mut session = session.lock().await;
+                        if let Err(error) = session.shutdown().await {
+                            tracing::warn!(%thread_id, %error, "harness shutdown before failover failed");
+                        }
+                    }
+                    if let Some(pump) = pump {
+                        pump.abort();
+                    }
                 }
             }
-            if let Some(pump) = record.pump.take() {
-                pump.abort();
-            }
+        }
+
+        // Re-take the lock after the unlocked I/O and check that nothing
+        // replaced this schedule meanwhile: `send` may have started a turn
+        // (which cancels the schedule) or the daemon may have closed the thread.
+        let mut record = handle.lock().await;
+        if record.closed {
+            drop(record);
+            let _ = meter
+                .finish_schedule(
+                    schedule,
+                    ResumeState::Cancelled,
+                    Some("the thread is closed".into()),
+                )
+                .await;
+            return Ok(None);
+        }
+        if record.active.is_some() {
+            drop(record);
+            tracing::debug!(
+                thread_id = %thread_id,
+                "auto-resume due while the thread is active; waiting"
+            );
+            return Ok(None);
         }
 
         let prompt = schedule.prompt.clone();

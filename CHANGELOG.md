@@ -41,6 +41,32 @@ All notable changes to h4rn are recorded here. The format follows
   through discovery into `register_host`; the owner compares that recorded id, never a claim, and
   docs/mcp.md now states exactly what the list holds.
 
+### Council round 2: files, mobile reachability, sync ordering and thread locks
+
+- **Diffs require the `files` scope (G1).** `FsDiff` and `FsTurnChanges` were classified as
+  `View`, so a view-only device could read file contents. `diff` and snapshot turn changes now
+  also resolve through `resolve_inside(…, Existing)`, so a symlink pointing outside the workspace
+  is refused instead of followed.
+- **Release mobile builds reach the LAN and a tailnet again (G2).** Android's release network
+  security config `base-config` and iOS ATS (`NSAllowsLocalNetworking`, `.local`, `ts.net`, RFC
+  1918 and CGNAT CIDRs) now permit the cleartext candidates the daemon actually serves. Noise
+  end-to-end encryption with the pinned daemon key is the security boundary, so ws:// adds no
+  exposure; the rationale is in `docs/mobile.md` and `docs/transport.md`, and a unit test checks
+  both native configs and the candidate-URL builder.
+- **Skill-sync cursors are commit-ordered (G3).** `server_updated_at` is the transaction start
+  time, so a slow push that committed after a fast one could be skipped forever. Each push now
+  takes a per-user `BIGINT` sequence under a clock-row lock that is released at commit; the pull
+  cursor is that sequence (opaque string on the wire). A legacy RFC 3339 cursor replays the full
+  set instead of being misread.
+- **A due auto-resume no longer freezes its thread (G4).** `fire_schedule` held the thread record
+  lock across the proxy's failover HTTP calls and `session.shutdown()`, so `GetThread` and
+  `SendMessage` on that thread waited tens of seconds. It now reads what it needs, releases the
+  lock for the I/O, and re-checks `closed`/`active` before mutating.
+- **Docs and UI stop implying two unimplemented paths (G5).** README no longer claims a Phase 1a
+  scaffold, the stale protocol comments are corrected, ADR-022 records that only subagent
+  worktrees ship, and the New-thread dialog, the inbox composer and the Delegate dialog disable
+  other hosts with the reason that a new thread and a subagent both run on the daemon's host.
+
 ### Council round 1: authorization, transport and pairing
 
 - **Binary PTY input is authorised (A1).** It needs `Hello`, the `terminal` scope and a viewer

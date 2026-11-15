@@ -534,7 +534,9 @@ impl FsService {
         against: &DiffAgainst,
     ) -> Result<FsDiff, FsError> {
         let root = self.workspace(workspace)?;
-        let path = root.join(paths::normalize_relative(rel)?);
+        // A diff reads the file, so it crosses the same boundary as `read`:
+        // canonicalise the target and refuse anything that escapes the root.
+        let path = resolve_inside(&root, rel, ResolveMode::Existing)?;
         let rel_path = relative_of(&root, &path);
         let current = fs::read(&path).ok();
         let after = current.as_deref().and_then(text::decode);

@@ -1897,6 +1897,118 @@ async fn a_scheduled_resume_records_the_proxy_failover_choice() {
     daemon.stop().await;
 }
 
+/// Same catalogue as [`mock_proxy_catalog`], but the plain `/v1/models` read
+/// is delayed so a test can observe what waits on it.
+async fn mock_slow_proxy_catalog(server: &wiremock::MockServer, delay: Duration) {
+    use serde_json::json;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(WithoutHeader("anthropic-version"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(delay)
+                .set_body_json(json!({
+                    "data": [
+                        {"id": "claude-sonnet-5", "owned_by": "anthropic"},
+                        {"id": "claude-opus-5", "owned_by": "anthropic"}
+                    ]
+                })),
+        )
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .and(header("anthropic-version", "2023-06-01"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{"id": "claude-sonnet-5", "type": "model"}]
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1beta/models"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v0/management/auth-files"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"files": []})))
+        .mount(server)
+        .await;
+}
+
+/// A resume that is choosing a failover talks to the proxy. That HTTP call
+/// must not hold the thread record lock: GetThread from another connection has
+/// to answer while the proxy is still thinking. Before the fix the resume held
+/// the lock across `pick_failover`, so this request waited out the whole delay.
+#[tokio::test]
+async fn a_slow_proxy_does_not_freeze_the_thread_it_resumes() {
+    let server = wiremock::MockServer::start().await;
+    let delay = Duration::from_secs(5);
+    mock_slow_proxy_catalog(&server, delay).await;
+
+    let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+    let daemon = boot_with(
+        resume_options(),
+        FakeHarness::with_session_scripts(vec![limit_script(Some(reset_at)), resume_script()]),
+    )
+    .await;
+    let host = host_id_for(&daemon).await;
+
+    let mut resumer = Client::connect(&daemon).await;
+    resumer.hello().await;
+    let thread_id = limited_thread_on_a_proxy(&mut resumer, host, &server).await;
+    stable_policy(&mut resumer, true).await;
+
+    let mut observer = Client::connect(&daemon).await;
+    observer.hello().await;
+
+    let resumed_thread = thread_id.clone();
+    let resume = tokio::spawn(async move {
+        resumer
+            .request(ClientRequest::ResumeNow {
+                thread_id: resumed_thread,
+            })
+            .await
+    });
+
+    // Let the resume reach the proxy call.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let answer = tokio::time::timeout(
+        Duration::from_secs(1),
+        observer.request(ClientRequest::GetThread {
+            thread_id: thread_id.clone(),
+            since_seq: 0,
+        }),
+    )
+    .await
+    .expect("GetThread must not wait for the proxy")
+    .expect("get thread");
+    assert!(matches!(answer, ResponseBody::Thread { .. }));
+
+    let fired = tokio::time::timeout(Duration::from_secs(20), resume)
+        .await
+        .expect("the resume finishes once the proxy answers")
+        .expect("resume task")
+        .expect("resume now");
+    let ResponseBody::ResumeChanged {
+        schedule: Some(schedule),
+    } = fired
+    else {
+        panic!("unexpected ResumeNow response: {fired:?}");
+    };
+    assert_eq!(schedule.state, ResumeState::Fired);
+    assert_eq!(
+        thread_summary(&mut observer, &thread_id).await.model,
+        "claude-opus-5"
+    );
+
+    daemon.stop().await;
+}
+
 /// The shared setup of the fail-over tests: a mock proxy serving two Claude
 /// models, a Claude Code override through it and a policy that never fires on
 /// its own (the reset is an hour away).

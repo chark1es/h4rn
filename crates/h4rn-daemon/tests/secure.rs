@@ -127,6 +127,17 @@ impl SecureClient {
         Self::connect_with_session(daemon, identity, psk, [11u8; SESSION_ID_LEN]).await
     }
 
+    /// Connects with an explicit session byte, for a test that needs two
+    /// simultaneous identities (a daemon refuses to reuse one session id).
+    async fn connect_in(
+        daemon: &TestDaemon,
+        identity: DeviceIdentity,
+        psk: Option<[u8; TOKEN_LEN]>,
+        session: u8,
+    ) -> Self {
+        Self::connect_with_session(daemon, identity, psk, [session; SESSION_ID_LEN]).await
+    }
+
     async fn connect_with_session(
         daemon: &TestDaemon,
         identity: DeviceIdentity,
@@ -444,10 +455,14 @@ async fn secure_transport_psk_pairs_a_new_device() {
 }
 
 fn create_thread_request(host: h4rn_protocol::HostId) -> ClientRequest {
+    create_thread_in(host, "/tmp/h4rn-secure-workspace")
+}
+
+fn create_thread_in(host: h4rn_protocol::HostId, workspace: &str) -> ClientRequest {
     ClientRequest::CreateThread {
         host,
         harness: HarnessKind::ClaudeCode,
-        workspace_path: "/tmp/h4rn-secure-workspace".into(),
+        workspace_path: workspace.into(),
         model: "fake-model".into(),
         prompt: "scope test".into(),
         attachments: Vec::new(),
@@ -779,6 +794,68 @@ async fn terminal_ownership_uses_the_verified_device_not_the_hello_claim() {
         !audit.contains("dev_attacker"),
         "audit trusted the Hello claim: {audit}"
     );
+    client.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_view_only_device_cannot_read_a_file_diff() {
+    // A diff carries file contents. It needs the files scope even though the
+    // rest of the thread view is readable with `view` alone.
+    let viewer_identity = device_identity();
+    let admin_identity = device_identity();
+    let viewer_key = viewer_identity.public().noise_public;
+    let admin_key = admin_identity.public().noise_public;
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity())
+            .with_policy(PairingPolicy::new([viewer_key, admin_key])),
+    ));
+    // A diff of an unauthorised root is refused before the scope check, which
+    // would let this test pass without the fix. Only a thread workspace becomes
+    // an authorised root at runtime, so the admin opens one in a real directory.
+    let workspace = tempfile::tempdir().expect("workspace");
+    std::fs::write(workspace.path().join("secret.txt"), "top secret\n").expect("secret");
+    let workspace_path = workspace.path().display().to_string();
+
+    let devices = Arc::new(DeviceRegistry::in_memory());
+    devices.insert_scoped("viewer", viewer_key, vec![PairScope::View]);
+    devices.insert_scoped("admin", admin_key, PairScope::ALL.to_vec());
+    let daemon = boot_with(Arc::clone(&service), devices).await;
+
+    let mut admin = SecureClient::connect_in(&daemon, admin_identity, None, 12).await;
+    admin.hello().await;
+    let host = host_of(&mut admin).await;
+    admin
+        .request(create_thread_in(host, &workspace_path))
+        .await
+        .expect("the admin may create the thread that authorises the workspace");
+    admin.close().await;
+
+    let mut client = SecureClient::connect(&daemon, viewer_identity, None).await;
+    client.hello().await;
+    let host = host_of(&mut client).await;
+
+    let denied = client
+        .request(ClientRequest::FsDiff {
+            host: host.clone(),
+            workspace: workspace_path.clone(),
+            path: "secret.txt".into(),
+            against: h4rn_protocol::DiffAgainst::Head,
+        })
+        .await
+        .expect_err("view-only may not read a file diff");
+    assert_eq!(denied.code, h4rn_protocol::ProtoErrorCode::Forbidden);
+
+    let denied = client
+        .request(ClientRequest::FsTurnChanges {
+            host: host.clone(),
+            workspace: workspace_path.clone(),
+            thread_id: h4rn_protocol::ThreadId::new("th_1"),
+            turn_id: h4rn_protocol::TurnId::new("turn_1"),
+        })
+        .await
+        .expect_err("view-only may not read a turn's changes");
+    assert_eq!(denied.code, h4rn_protocol::ProtoErrorCode::Forbidden);
     client.close().await;
     daemon.stop().await;
 }

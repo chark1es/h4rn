@@ -1,21 +1,30 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Release policy: no cleartext at all except the loopback addresses a local
-  daemon and the Android emulator's host alias use. Everything else must be
-  wss://. The debug source set (src/debug/res/xml) overrides this file with a
-  permissive policy for LAN development; see docs/mobile.md.
+  Release policy: cleartext is permitted.
+
+  The socket is not the security boundary. Device-to-daemon traffic runs inside
+  a Noise session whose daemon static key is pinned from the pairing payload
+  (ADR-010, ADR-031), so a ws:// candidate adds no confidentiality or integrity
+  loss: an on-path observer sees opaque Noise packets, and an impostor cannot
+  complete the handshake without the pinned key. The h4rn-connect relay
+  candidate is still wss:// and the relay only forwards Noise packets.
+
+  Android's <domain-config> can name exact hosts and IP literals, but not IP
+  ranges, so a release build cannot describe "RFC 1918, CGNAT/Tailscale and
+  .local/MagicDNS" there. Those are exactly the candidates a phone needs to
+  reach a daemon on the LAN or a tailnet, and falling back to the relay because
+  the OS vetoed the LAN socket breaks "relay and Tailscale at the same time".
+  The base config therefore permits cleartext for every host; TLS verification
+  for https/wss still uses the system trust anchors. See docs/mobile.md and
+  docs/transport.md.
+
+  The debug source set keeps its own permissive config; this file is the one
+  release builds ship.
 -->
 <network-security-config>
-    <base-config cleartextTrafficPermitted="false">
+    <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>
     </base-config>
-
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="false">localhost</domain>
-        <domain includeSubdomains="false">127.0.0.1</domain>
-        <domain includeSubdomains="false">10.0.2.2</domain>
-        <domain includeSubdomains="false">10.0.3.2</domain>
-    </domain-config>
 </network-security-config>

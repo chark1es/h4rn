@@ -207,6 +207,14 @@ deduplicate payloads, so push notifications and search must be computed daemon-s
 sizes need padding buckets to avoid leaking message shape. Multi-device revocation is handled with
 explicit device events, not key rotation of the daemon.
 
+**Note (mobile):** because Noise is the security boundary, the mobile shells
+permit `ws://` to LAN, `.local`/MagicDNS and RFC 1918/CGNAT candidates instead
+of letting Android's network security config and iOS ATS veto them. The daemon
+has no TLS listener, and the pinned daemon key makes a plaintext socket no less
+private than `wss://`; the relay path stays `wss://`. Android's domain config
+cannot express IP ranges, so its release base config permits cleartext, with
+the rationale recorded in `docs/mobile.md` and `docs/transport.md`.
+
 ## ADR-011: OIDC authorization code + PKCE, with OrbitID's quirks encoded
 
 **Status:** Accepted
@@ -394,6 +402,12 @@ orphaned harnesses.
 ## ADR-022: Checkpoints are git objects, worktrees isolate threads
 
 **Status:** Proposed
+
+**Implementation note.** Subagent isolation ships today: `spawn_subagent` creates a worktree at
+`<data_dir>/subagents/<id>/worktree` on branch `h4rn/sa-<short id>`, and removes it at
+settlement. Top-level thread creation does not: `CreateThread` with `worktree` set returns
+`NotImplemented`, so a new thread runs in the absolute `workspace_path` it was given. This ADR
+stays Proposed until checkpoints and CreateThread worktrees land.
 
 Before and after each turn the daemon writes a checkpoint as a git commit object under
 `refs/h4rn/checkpoints/<scope>/<ordinal>`, built with a temporary index (`write-tree`,
@@ -602,7 +616,7 @@ Installs are copies, not symlinks, because the `.h4rn-managed` marker must trave
 
 Skill sync reuses h4rn-connect as a per-user mailbox, not as an authority. Each push carries the full bundle and a Lamport-style version vector keyed by the registry's stable machine id. The registry's monotonic `revision` is that machine's clock, so two machines cannot silently reuse a counter. Bundles are validated (`SkillBundle::from_wire`) and must hash to the advertised version before the relay stores anything; the relay never decrypts them.
 
-Rows are envelope-encrypted at rest with the connect KEK and an AAD binding `user_id`, `skill_id` and `version`. Metadata (name, description, version, vector, ETag) stays plaintext so the relay can compare causality without reading skill contents. A push uses the server's stored vector: a dominating incoming vector wins, a dominated incoming vector is rejected with a conflict row, and concurrent vectors use `updated_at` as last-writer-wins while recording a conflict on the relay. A daemon whose push is rejected also records a local conflict pointing at its still-stored losing bundle, so the user can restore it; the winner has no equivalent local candidate and keeps the relay-side conflict row. The server returns a cursor derived from `server_updated_at`; a pull returns rows after that cursor, including tombstones. Conflicts are visible until the user resolves one by keeping local, keeping remote or keeping both (the last renames the candidate).
+Rows are envelope-encrypted at rest with the connect KEK and an AAD binding `user_id`, `skill_id` and `version`. Metadata (name, description, version, vector, ETag) stays plaintext so the relay can compare causality without reading skill contents. A push uses the server's stored vector: a dominating incoming vector wins, a dominated incoming vector is rejected with a conflict row, and concurrent vectors use `updated_at` as last-writer-wins while recording a conflict on the relay. A daemon whose push is rejected also records a local conflict pointing at its still-stored losing bundle, so the user can restore it; the winner has no equivalent local candidate and keeps the relay-side conflict row. The server returns an opaque cursor derived from a per-user sequence assigned at commit under a clock-row lock; a pull returns rows after that cursor, including tombstones. The sequence cannot be overtaken by a concurrent push that started earlier but commits later, so a pull never resumes past an entry it has not seen. Conflicts are visible until the user resolves one by keeping local, keeping remote or keeping both (the last renames the candidate).
 
 Before the first byte leaves the machine the daemon scans the exact bundle for private keys, cloud and provider tokens, JWTs and credential assignments. A finding blocks the sync with `Blocked` state and a file/line hint; it is a successful, visible refusal rather than a transport error. The tradeoff is a deliberately noisy scanner and a relay that stores opaque bytes, which is the correct bias for a feature whose whole purpose is moving text between machines.
 

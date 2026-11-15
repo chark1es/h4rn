@@ -1651,15 +1651,13 @@ async fn skills_pull(
     authed: Authed,
     Json(request): Json<SkillSyncPull>,
 ) -> Result<Json<SkillSyncPullResponse>> {
-    let since = match request.since.as_deref() {
+    // The cursor is an opaque per-user sequence. A client that still holds an
+    // RFC 3339 cursor from before the sequence existed cannot be mapped onto
+    // the new order, so treat anything non-numeric as "no cursor" and replay
+    // the full set instead of skipping entries.
+    let since = match request.since.as_deref().map(str::trim) {
         None | Some("") => None,
-        Some(value) => Some(
-            chrono::DateTime::parse_from_rfc3339(value)
-                .map_err(|_| {
-                    AppError::bad_request("skill_cursor_invalid", "the sync cursor is not RFC 3339")
-                })?
-                .with_timezone(&Utc),
-        ),
+        Some(value) => value.parse::<i64>().ok(),
     };
     let (rows, pull_cursor) = state.store.skill_pull(authed.user.id, since).await?;
     let mut entries = Vec::with_capacity(rows.len());
@@ -1696,7 +1694,7 @@ async fn skills_pull(
     let response = SkillSyncPullResponse {
         entries,
         conflicts: user_conflicts(&state, authed.user.id).await?,
-        etag: pull_cursor.map(|time| time.to_rfc3339()),
+        etag: pull_cursor.map(|seq| seq.to_string()),
         server_time: Utc::now(),
     };
     Ok(Json(response))
@@ -1768,7 +1766,7 @@ async fn cursor(state: &AppState, user_id: Uuid) -> Result<Option<String>> {
         .store
         .skill_cursor(user_id)
         .await?
-        .map(|time| time.to_rfc3339()))
+        .map(|seq| seq.to_string()))
 }
 
 // ---------------------------------------------------------------------------

@@ -28,10 +28,10 @@ pub struct ClientFrame {
 
 /// Everything a client can ask a daemon to do.
 ///
-/// Variants after `Subscribe` are deliberately skeletal: the daemon rejects
-/// them with [`crate::ProtoErrorCode::Unsupported`] until their phase lands.
-/// They exist now so the generated TypeScript barrel is stable and later
-/// phases append rather than rename.
+/// The daemon answers a request whose feature is not enabled on this host with
+/// [`crate::ProtoErrorCode::Unsupported`] and a hint, and a request the wire
+/// contract carries but this build does not implement with
+/// [`crate::ProtoErrorCode::NotImplemented`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientRequest {
@@ -182,8 +182,7 @@ pub enum ClientRequest {
         thumbnail: bool,
     },
     // ------------------------------------------------------------------
-    // TODO(phase 2+): terminal, filesystem, MCP, skills, proxy, usage and
-    // forge requests. Their payloads are intentionally minimal placeholders.
+    // Terminal, filesystem, MCP, skills, proxy, usage and forge requests.
     // ------------------------------------------------------------------
     /// Open a PTY on `host` in `cwd`, optionally from a thread.
     ///
@@ -861,8 +860,6 @@ impl ClientRequest {
             | Self::GetThread { .. }
             | Self::Subscribe { .. }
             | Self::GetBlob { .. }
-            | Self::FsDiff { .. }
-            | Self::FsTurnChanges { .. }
             | Self::McpList
             | Self::SkillsList { .. }
             | Self::SkillsConflicts { .. }
@@ -916,7 +913,9 @@ impl ClientRequest {
             | Self::FsRestore { .. }
             | Self::FsSearch { .. }
             | Self::FsWatch { .. }
-            | Self::FsUnwatch { .. } => Files,
+            | Self::FsUnwatch { .. }
+            | Self::FsDiff { .. }
+            | Self::FsTurnChanges { .. } => Files,
             Self::McpUpsert { .. }
             | Self::McpRemove { .. }
             | Self::SkillsAdd { .. }
@@ -1043,6 +1042,26 @@ mod tests {
                     host: HostId::new("h"),
                     workspace: "/w".into(),
                     path: "a".into(),
+                },
+                Files,
+            ),
+            // A diff carries file contents, so a view-only device must not
+            // be able to ask for one.
+            (
+                ClientRequest::FsDiff {
+                    host: HostId::new("h"),
+                    workspace: "/w".into(),
+                    path: "a".into(),
+                    against: crate::fs::DiffAgainst::Head,
+                },
+                Files,
+            ),
+            (
+                ClientRequest::FsTurnChanges {
+                    host: HostId::new("h"),
+                    workspace: "/w".into(),
+                    thread_id: thread(),
+                    turn_id: crate::ids::TurnId::new("turn_1"),
                 },
                 Files,
             ),

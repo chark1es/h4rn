@@ -38,7 +38,10 @@ android {
     compileSdk = 37
     namespace = "dev.h4rn.app"
     defaultConfig {
-        manifestPlaceholders["usesCleartextTraffic"] = "false"
+        // The transport is Noise end-to-end encrypted over a pinned daemon key,
+        // so release builds permit cleartext candidates too; see
+        // src/main/res/xml/network_security_config.xml and docs/mobile.md.
+        manifestPlaceholders["usesCleartextTraffic"] = "true"
         applicationId = "dev.h4rn.app"
         minSdk = 26
         targetSdk = 37

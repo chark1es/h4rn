@@ -151,11 +151,14 @@ Causality rules:
 - the same version is acknowledged without a write even when the other machine
   has a newer local revision.
 
-A pull takes a cursor derived from the server's receive time and returns every
-entry after it, including deletions. A tombstone removes the registry row but
-still leaves managed copies removable by the normal remove path on each machine.
-The cursor is persisted in `skill_state`, so an incremental sync survives a
-daemon restart.
+A pull takes an opaque cursor derived from a per-user, commit-ordered sequence
+and returns every entry after it, including deletions. A tombstone removes the
+registry row but still leaves managed copies removable by the normal remove path
+on each machine. Sequence numbers are assigned while holding a per-user clock
+row lock that is released only at commit, so a slow push cannot have its older
+number overtake a fast one that commits first; a pull can therefore never
+advance past an entry that is still uncommitted. The cursor is persisted in
+`skill_state`, so an incremental sync survives a daemon restart.
 
 ### Secret scanning
 

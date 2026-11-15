@@ -2272,8 +2272,10 @@ pub struct SkillEntryRow {
     pub ciphertext: Vec<u8>,
     /// Sender's wall clock.
     pub updated_at: DateTime<Utc>,
-    /// Server receive time, used as the pull cursor.
+    /// Server receive time, for diagnostics only.
     pub server_updated_at: DateTime<Utc>,
+    /// Commit-ordered per-user sequence, used as the pull cursor.
+    pub sync_seq: i64,
 }
 
 /// Input for [`Store::upsert_skill_entry`].
@@ -2326,7 +2328,7 @@ impl Store {
         sqlx::query_as::<_, SkillEntryRow>(
             "SELECT user_id, skill_id, name, description, version, vector_json, etag,
                     deleted, dek_nonce, wrapped_dek, nonce, ciphertext, updated_at,
-                    server_updated_at
+                    server_updated_at, sync_seq
                FROM skill_sync_entries WHERE user_id = $1 AND skill_id = $2",
         )
         .bind(user_id)
@@ -2336,19 +2338,20 @@ impl Store {
         .map_err(Into::into)
     }
 
-    /// Every entry changed after `since`, or all entries when `since` is `None`.
+    /// Every entry after `since` in commit order, or all entries when `since`
+    /// is `None`.
     pub async fn skill_entries_since(
         &self,
         user_id: Uuid,
-        since: Option<DateTime<Utc>>,
+        since: Option<i64>,
     ) -> Result<Vec<SkillEntryRow>> {
         sqlx::query_as::<_, SkillEntryRow>(
             "SELECT user_id, skill_id, name, description, version, vector_json, etag,
                     deleted, dek_nonce, wrapped_dek, nonce, ciphertext, updated_at,
-                    server_updated_at
+                    server_updated_at, sync_seq
                FROM skill_sync_entries
-              WHERE user_id = $1 AND ($2::timestamptz IS NULL OR server_updated_at > $2)
-              ORDER BY server_updated_at, skill_id",
+              WHERE user_id = $1 AND ($2::bigint IS NULL OR sync_seq > $2)
+              ORDER BY sync_seq",
         )
         .bind(user_id)
         .bind(since)
@@ -2357,19 +2360,47 @@ impl Store {
         .map_err(Into::into)
     }
 
-    /// Inserts or replaces one entry.
+    /// Inserts or replaces one entry in its own transaction.
     pub async fn upsert_skill_entry(
         &self,
         user_id: Uuid,
         device_id: Option<Uuid>,
         entry: &NewSkillEntry<'_>,
     ) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        Self::upsert_skill_entry_in(&mut tx, user_id, device_id, entry).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Inserts or replaces one entry inside `tx`.
+    ///
+    /// The entry's cursor is a per-user sequence taken under the user's clock
+    /// row lock. Because that lock is held until the transaction commits,
+    /// sequence order is commit order: a pull can never observe a later
+    /// sequence while an earlier one is still uncommitted, which is what makes
+    /// the cursor safe under concurrent pushes.
+    pub async fn upsert_skill_entry_in(
+        tx: &mut Transaction<'_, Postgres>,
+        user_id: Uuid,
+        device_id: Option<Uuid>,
+        entry: &NewSkillEntry<'_>,
+    ) -> Result<()> {
+        let sync_seq = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO skill_sync_clock (user_id, last_seq) VALUES ($1, 1)
+             ON CONFLICT (user_id) DO UPDATE SET last_seq = skill_sync_clock.last_seq + 1
+             RETURNING last_seq",
+        )
+        .bind(user_id)
+        .fetch_one(&mut **tx)
+        .await?;
+
         sqlx::query(
             "INSERT INTO skill_sync_entries
                 (user_id, skill_id, name, description, version, vector_json, etag, deleted,
                  dek_nonce, wrapped_dek, nonce, ciphertext, updated_at, server_updated_at,
-                 updated_by_device)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now(), $14)
+                 updated_by_device, sync_seq)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13, now(), $14, $15)
              ON CONFLICT(user_id, skill_id) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
@@ -2383,7 +2414,8 @@ impl Store {
                 ciphertext = excluded.ciphertext,
                 updated_at = excluded.updated_at,
                 server_updated_at = now(),
-                updated_by_device = excluded.updated_by_device",
+                updated_by_device = excluded.updated_by_device,
+                sync_seq = excluded.sync_seq",
         )
         .bind(user_id)
         .bind(entry.skill_id)
@@ -2399,7 +2431,8 @@ impl Store {
         .bind(&entry.sealed.ciphertext)
         .bind(entry.updated_at)
         .bind(device_id)
-        .execute(&self.pool)
+        .bind(sync_seq)
+        .execute(&mut **tx)
         .await?;
         Ok(())
     }
@@ -2452,17 +2485,17 @@ impl Store {
     pub async fn skill_pull(
         &self,
         user_id: Uuid,
-        since: Option<DateTime<Utc>>,
-    ) -> Result<(Vec<SkillEntryRow>, Option<DateTime<Utc>>)> {
+        since: Option<i64>,
+    ) -> Result<(Vec<SkillEntryRow>, Option<i64>)> {
         let rows = self.skill_entries_since(user_id, since).await?;
-        let cursor = rows.iter().map(|row| row.server_updated_at).max().or(since);
+        let cursor = rows.iter().map(|row| row.sync_seq).max().or(since);
         Ok((rows, cursor))
     }
 
-    /// The newest server receive time, used as the pull cursor.
-    pub async fn skill_cursor(&self, user_id: Uuid) -> Result<Option<DateTime<Utc>>> {
-        sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
-            "SELECT MAX(server_updated_at) FROM skill_sync_entries WHERE user_id = $1",
+    /// The newest commit-ordered sequence, used as the pull cursor.
+    pub async fn skill_cursor(&self, user_id: Uuid) -> Result<Option<i64>> {
+        sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT MAX(sync_seq) FROM skill_sync_entries WHERE user_id = $1",
         )
         .bind(user_id)
         .fetch_one(&self.pool)

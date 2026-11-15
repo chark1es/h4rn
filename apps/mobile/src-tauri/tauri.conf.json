@@ -32,7 +32,8 @@
       "minSdkVersion": 26
     },
     "iOS": {
-      "minimumSystemVersion": "16.0"
+      "minimumSystemVersion": "16.0",
+      "infoPlist": "Info.plist"
     },
     "icon": [
       "icons/32x32.png",
