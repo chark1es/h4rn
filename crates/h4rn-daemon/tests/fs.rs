@@ -107,6 +107,55 @@ fn symlink_escape_is_rejected() {
     assert!(matches!(error, FsError::Forbidden(_)), "got {error:?}");
 }
 
+#[cfg(unix)]
+#[test]
+fn diff_refuses_a_symlink_that_points_outside_the_workspace() {
+    let fixture = Fixture::new();
+    let outside = fixture.dir.path().join("secret.txt");
+    fs::write(&outside, "top secret\n").expect("outside file");
+    std::os::unix::fs::symlink(&outside, fixture.workspace.join("escape.txt")).expect("symlink");
+
+    let error = fixture
+        .service
+        .diff(fixture.workspace(), "escape.txt", &DiffAgainst::Head)
+        .expect_err("a symlink out of the workspace must not be diffed");
+    assert!(matches!(error, FsError::Forbidden(_)), "got {error:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn turn_changes_does_not_follow_a_symlink_out_of_the_workspace() {
+    let fixture = Fixture::new();
+    let thread = ThreadId::new("th_escape");
+    let turn = TurnId::new("turn_escape");
+    let snapshots = fixture.service.snapshots();
+    // The turn announces a file that does not exist yet, so the snapshot
+    // records its absence and the diff would treat everything as added.
+    snapshots
+        .capture(
+            &fixture.workspace,
+            &thread,
+            &turn,
+            &["escape.txt".to_owned()],
+        )
+        .expect("capture");
+
+    // The path becomes a link to a file outside the workspace after capture.
+    let outside = fixture.dir.path().join("secret.txt");
+    fs::write(&outside, "top secret\n").expect("outside file");
+    std::os::unix::fs::symlink(&outside, fixture.workspace.join("escape.txt")).expect("symlink");
+
+    let changes = fixture
+        .service
+        .turn_changes(fixture.workspace(), &thread, &turn)
+        .expect("turn changes");
+    assert!(
+        changes.files.is_empty(),
+        "content outside the workspace must never be reported: {:?}",
+        changes.files
+    );
+}
+
 #[test]
 fn listing_respects_gitignore_and_reports_statuses() {
     let fixture = Fixture::new();

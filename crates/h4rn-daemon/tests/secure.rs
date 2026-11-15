@@ -618,6 +618,46 @@ async fn a_view_only_device_cannot_type_into_a_terminal() {
 }
 
 #[tokio::test]
+async fn a_view_only_device_cannot_read_a_file_diff() {
+    // A diff carries file contents. It needs the files scope even though the
+    // rest of the thread view is readable with `view` alone.
+    let client_identity = device_identity();
+    let key = client_identity.public().noise_public;
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([key])),
+    ));
+    let devices = Arc::new(DeviceRegistry::in_memory());
+    devices.insert_scoped("viewer", key, vec![PairScope::View]);
+    let daemon = boot_with(Arc::clone(&service), devices).await;
+    let mut client = SecureClient::connect(&daemon, client_identity, None).await;
+    client.hello().await;
+    let host = host_of(&mut client).await;
+
+    for request in [
+        ClientRequest::FsDiff {
+            host: host.clone(),
+            workspace: "/tmp".into(),
+            path: "secret.txt".into(),
+            against: h4rn_protocol::DiffAgainst::Head,
+        },
+        ClientRequest::FsTurnChanges {
+            host: host.clone(),
+            workspace: "/tmp".into(),
+            thread_id: h4rn_protocol::ThreadId::new("th_1"),
+            turn_id: h4rn_protocol::TurnId::new("turn_1"),
+        },
+    ] {
+        let denied = client
+            .request(request)
+            .await
+            .expect_err("view-only may not read a diff");
+        assert_eq!(denied.code, h4rn_protocol::ProtoErrorCode::Forbidden);
+    }
+    client.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn a_direct_pairing_grants_exactly_the_requested_scopes() {
     // `h4rnd pair --direct --scope files` writes the scopes into the pairing
     // file; the daemon arms them, and the device that pairs holds only those.

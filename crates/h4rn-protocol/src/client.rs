@@ -851,8 +851,6 @@ impl ClientRequest {
             | Self::GetThread { .. }
             | Self::Subscribe { .. }
             | Self::GetBlob { .. }
-            | Self::FsDiff { .. }
-            | Self::FsTurnChanges { .. }
             | Self::McpList
             | Self::SkillsList { .. }
             | Self::SkillsConflicts { .. }
@@ -906,7 +904,9 @@ impl ClientRequest {
             | Self::FsRestore { .. }
             | Self::FsSearch { .. }
             | Self::FsWatch { .. }
-            | Self::FsUnwatch { .. } => Files,
+            | Self::FsUnwatch { .. }
+            | Self::FsDiff { .. }
+            | Self::FsTurnChanges { .. } => Files,
             Self::McpUpsert { .. }
             | Self::McpRemove { .. }
             | Self::SkillsAdd { .. }
@@ -1029,6 +1029,26 @@ mod tests {
                     host: HostId::new("h"),
                     workspace: "/w".into(),
                     path: "a".into(),
+                },
+                Files,
+            ),
+            // A diff carries file contents, so a view-only device must not
+            // be able to ask for one.
+            (
+                ClientRequest::FsDiff {
+                    host: HostId::new("h"),
+                    workspace: "/w".into(),
+                    path: "a".into(),
+                    against: crate::fs::DiffAgainst::Head,
+                },
+                Files,
+            ),
+            (
+                ClientRequest::FsTurnChanges {
+                    host: HostId::new("h"),
+                    workspace: "/w".into(),
+                    thread_id: thread(),
+                    turn_id: crate::ids::TurnId::new("turn_1"),
                 },
                 Files,
             ),

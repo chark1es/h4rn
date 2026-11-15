@@ -191,10 +191,13 @@ impl SnapshotStore {
         let entries = self.entries(thread_id, turn_id);
         let mut files = Vec::new();
         for entry in &entries {
-            let Ok(relative) = normalize_relative(&entry.path) else {
-                continue;
+            // Reading the current bytes must not follow a symlink out of the
+            // workspace. A path that now escapes is skipped, never reported.
+            let current = match resolve_inside(workspace, &entry.path, ResolveMode::Existing) {
+                Ok(path) => fs::read(path).ok(),
+                Err(FsError::NotFound(_)) => None,
+                Err(_) => continue,
             };
-            let current = fs::read(workspace.join(relative)).ok();
             let before = entry.blob.as_deref().and_then(|blob| self.read_blob(blob));
             let before_text = before.as_deref().and_then(text::decode);
             let after_text = current.as_deref().and_then(text::decode);
