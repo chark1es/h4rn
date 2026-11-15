@@ -512,6 +512,47 @@ impl McpService {
         }
     }
 
+    /// The guard every protected tunnel operation runs first.
+    ///
+    /// The tunnel is long-lived: the share can be withdrawn, its policy
+    /// narrowed or the peer's registry entry revoked while it stays open. The
+    /// handshake proves who opened it once; this re-reads the current grant,
+    /// the authenticated peer and the device restrictions on every request.
+    /// Tool-specific policy and approval checks stay in [`Self::call_shared`].
+    async fn authorize_tunnel(
+        &self,
+        server: &str,
+        machine: &HostId,
+        device_id: Option<&str>,
+        device: [u8; KEY_LEN],
+    ) -> Result<(), RpcErrorObject> {
+        if !self.peer_still_verified(&device, machine, device_id) {
+            let error = "the peer is no longer a registered daemon";
+            tracing::warn!(%server, %machine, error, "refused a tunnel request");
+            return Err(RpcErrorObject::new(jsonrpc::INVALID_REQUEST, error));
+        }
+        let Some((_record, share)) = self
+            .hub
+            .share_record(server, machine)
+            .await
+            .map_err(hub_error)?
+        else {
+            return Err(RpcErrorObject::new(
+                jsonrpc::INVALID_REQUEST,
+                format!("\"{server}\" is not shared with {machine}"),
+            ));
+        };
+        if let Some(allowed) = &share.policy.allowed_devices
+            && !device_id.is_some_and(|device| allowed.iter().any(|candidate| candidate == device))
+        {
+            return Err(RpcErrorObject::new(
+                jsonrpc::INVALID_REQUEST,
+                format!("this device is not allowed to use \"{server}\""),
+            ));
+        }
+        Ok(())
+    }
+
     async fn tunnel_request(
         &self,
         server: &str,
@@ -523,6 +564,12 @@ impl McpService {
     ) -> Result<Value, RpcErrorObject> {
         let scope = McpScope::remote(machine.clone(), device_id.clone())
             .with_servers(vec![server.to_owned()]);
+        // `initialize` and `ping` are the MCP bootstrap and carry no data;
+        // everything else re-checks the live grant before it runs.
+        if !matches!(method, "initialize" | "ping") {
+            self.authorize_tunnel(server, machine, device_id.as_deref(), device)
+                .await?;
+        }
         match method {
             "initialize" => Ok(json!({
                 "protocolVersion": h4rn_mcp::negotiate_protocol_version(

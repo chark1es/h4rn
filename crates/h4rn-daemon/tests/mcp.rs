@@ -293,8 +293,27 @@ async fn http_mcp(name: &str, body: &str) -> Response {
                 "isError": false
             })
         }
-        "resources/list" => json!({"resources": []}),
-        "prompts/list" => json!({"prompts": []}),
+        "resources/list" => json!({"resources": [{
+            "uri": "secret://account",
+            "name": "account",
+            "mimeType": "text/plain"
+        }]}),
+        "resources/read" => json!({"contents": [{
+            "uri": "secret://account",
+            "mimeType": "text/plain",
+            "text": "fixture confidential data"
+        }]}),
+        "prompts/list" => json!({"prompts": [{
+            "name": "brief",
+            "description": "A fixture prompt."
+        }]}),
+        "prompts/get" => json!({
+            "description": "A fixture prompt.",
+            "messages": [{
+                "role": "user",
+                "content": {"type": "text", "text": "fixture prompt"}
+            }]
+        }),
         other => {
             return (
                 StatusCode::OK,
@@ -1078,9 +1097,124 @@ async fn an_explicit_device_list_compares_the_verified_device_only() {
     rig.a.stop().await;
 }
 
+#[tokio::test]
+async fn a_persistent_tunnel_revalidates_resources_and_prompts() {
+    // K1: resources/read and prompts/get used the scope fixed at handshake
+    // time, so an excluded device could read them and a tunnel kept reading
+    // after the owner unshared.
+    fn register(devices: &DeviceRegistry, host: &HostId, key: [u8; 32]) {
+        devices
+            .register_host(host.clone(), key, Some("dev_b".into()))
+            .expect("persist");
+    }
+    let others = McpSharePolicy {
+        allowed_devices: Some(vec!["dev_other".into()]),
+        ..McpSharePolicy::default()
+    };
+    let rig = tunnel_rig(register, others, None, None).await;
+    let session = rig.tunnel.open("local").await.expect("open tunnel");
+    for (method, params) in [
+        ("resources/list", json!({})),
+        (
+            "resources/read",
+            json!({"uri": "secret://account"}),
+        ),
+        ("prompts/list", json!({})),
+        ("prompts/get", json!({"name": "brief"})),
+    ] {
+        assert!(
+            session
+                .request(method, params, Duration::from_secs(5))
+                .await
+                .is_err(),
+            "{method} must be refused for an excluded device"
+        );
+    }
+    assert!(
+        session
+            .request(
+                "tools/call",
+                json!({"name": "echo", "arguments": {"message": "hi"}}),
+                Duration::from_secs(5),
+            )
+            .await
+            .is_err(),
+        "tools/call must stay refused"
+    );
+    rig.a.stop().await;
+
+    // A live policy change and an unshare both apply to the same tunnel.
+    let rig = tunnel_rig(register, McpSharePolicy::default(), None, None).await;
+    let mut owner = Client::connect(&rig.a).await;
+    owner.hello().await;
+    let session = rig.tunnel.open("local").await.expect("open tunnel");
+    let leaked = session
+        .request(
+            "resources/read",
+            json!({"uri": "secret://account"}),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("a permitted device reads the resource");
+    assert_eq!(leaked["contents"][0]["text"], "fixture confidential data");
+
+    owner
+        .mcp(McpRequest::Share {
+            name: "local".into(),
+            to_machine: HostId::new("host_b"),
+            policy: McpSharePolicy {
+                allowed_devices: Some(vec!["dev_other".into()]),
+                ..McpSharePolicy::default()
+            },
+        })
+        .await
+        .expect("narrow the grant");
+    for (method, params) in [
+        (
+            "resources/read",
+            json!({"uri": "secret://account"}),
+        ),
+        ("prompts/get", json!({"name": "brief"})),
+    ] {
+        assert!(
+            session
+                .request(method, params, Duration::from_secs(5))
+                .await
+                .is_err(),
+            "{method} must honour a policy change on an open tunnel"
+        );
+    }
+
+    owner
+        .mcp(McpRequest::Unshare {
+            name: "local".into(),
+            machine: HostId::new("host_b"),
+        })
+        .await
+        .expect("unshare");
+    for (method, params) in [
+        ("tools/list", json!({})),
+        ("resources/list", json!({})),
+        (
+            "resources/read",
+            json!({"uri": "secret://account"}),
+        ),
+        ("prompts/list", json!({})),
+        ("prompts/get", json!({"name": "brief"})),
+    ] {
+        assert!(
+            session
+                .request(method, params, Duration::from_secs(5))
+                .await
+                .is_err(),
+            "{method} must be refused after unshare"
+        );
+    }
+    rig.a.stop().await;
+}
+
 /// Opens the owner's UI connection, subscribed so approval cards arrive.
-async fn owner_ui(daemon: &TestDaemon) -> Client {
-    let mut owner = Client::connect(daemon).await;
+async fn owner_ui(daemon: &TestDaemon) -> Client {    let mut owner = Client::connect(daemon).await;
     owner.hello().await;
     owner
         .request(ClientRequest::Subscribe {
