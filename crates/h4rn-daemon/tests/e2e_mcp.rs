@@ -91,6 +91,7 @@ async fn boot(catalog: Arc<StaticHarnessCatalog>) -> Daemon {
         settings: LifecycleSettings::default()
             .with_working_exit_grace(chrono::TimeDelta::milliseconds(200)),
         tick_interval: Duration::from_millis(20),
+        clock: None,
     };
     let daemon = DaemonBuilder::new(config)
         .with_catalog(catalog)

@@ -60,6 +60,7 @@ fn options() -> ThreadManagerOptions {
         settings: LifecycleSettings::default()
             .with_working_exit_grace(chrono::TimeDelta::milliseconds(200)),
         tick_interval: Duration::from_millis(20),
+        clock: None,
     }
 }
 

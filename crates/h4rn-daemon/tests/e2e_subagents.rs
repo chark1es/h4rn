@@ -104,6 +104,7 @@ async fn boot_in(data_dir: std::path::PathBuf, catalog: Arc<StaticHarnessCatalog
         settings: LifecycleSettings::default()
             .with_working_exit_grace(chrono::TimeDelta::milliseconds(200)),
         tick_interval: Duration::from_millis(20),
+        clock: None,
     };
     let daemon = DaemonBuilder::new(config)
         .with_catalog(catalog)
@@ -274,6 +275,43 @@ async fn wait_for_parent_approval(
         assert!(
             tokio::time::Instant::now() < deadline,
             "the child approval never reached the parent thread"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Waits until `parent` has journaled `count` resolutions of one mirrored
+/// approval. Cancelling a child resolves the mirror on a task of its own, so
+/// the count is a state to wait for, not a fact to read once.
+async fn wait_for_mirrored_resolutions(
+    manager: &ThreadManager,
+    parent: &ThreadId,
+    approval_id: &str,
+    count: usize,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let snapshot = manager.get_thread(parent, 0).await.expect("parent thread");
+        let resolved = snapshot
+            .events
+            .iter()
+            .filter(|wire| {
+                matches!(
+                    &wire.event,
+                    Event::ApprovalResolved { approval_id: id, .. } if id == approval_id
+                )
+            })
+            .count();
+        if resolved >= count {
+            assert_eq!(
+                resolved, count,
+                "the mirror resolves once per answered or settled hand"
+            );
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "expected {count} resolutions of {approval_id}, saw {resolved}"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -470,38 +508,9 @@ async fn subagents_round_trip_through_the_mcp_hub() {
         .as_str()
         .expect("child thread id")
         .to_owned();
-    let child_snapshot = daemon
-        .manager
-        .get_thread(&ThreadId::new(child_thread), 0)
-        .await
-        .expect("child projection");
-    assert!(
-        child_snapshot.events.iter().any(|wire| matches!(
-            &wire.event,
-            Event::ApprovalResolved { approval_id, .. } if approval_id == "a1"
-        )),
-        "the child's own stale approval must resolve too"
-    );
+    wait_for_mirrored_resolutions(&daemon.manager, &ThreadId::new(child_thread), "a1", 1).await;
 
-    let snapshot = daemon
-        .manager
-        .get_thread(&parent, 0)
-        .await
-        .expect("parent projection");
-    let resolved = snapshot
-        .events
-        .iter()
-        .filter(|wire| {
-            matches!(
-                &wire.event,
-                Event::ApprovalResolved { approval_id, .. } if approval_id == "sa:a1"
-            )
-        })
-        .count();
-    assert_eq!(
-        resolved, 2,
-        "both answered and settled mirrored approvals must resolve"
-    );
+    wait_for_mirrored_resolutions(&daemon.manager, &parent, "sa:a1", 2).await;
 
     // 4. A token scoped to another thread cannot touch this parent's child.
     let stranger = create_parent(&daemon, repo.path()).await;

@@ -161,6 +161,10 @@ struct Inner {
     store: SubagentStore,
     options: SubagentOptions,
     records: Mutex<HashMap<String, Record>>,
+    /// Serialises record writes. Without it a progress update that read the
+    /// record before a terminal transition could land after the terminal
+    /// write, and a restart would resurrect the child as still running.
+    persist_lock: Mutex<()>,
     events: broadcast::Sender<SubagentEvent>,
     watcher: std::sync::Mutex<Option<JoinHandle<()>>>,
     closed: AtomicBool,
@@ -268,6 +272,7 @@ impl SubagentManager {
                 store,
                 options,
                 records: Mutex::new(HashMap::new()),
+                persist_lock: Mutex::new(()),
                 events,
                 watcher: std::sync::Mutex::new(None),
                 closed: AtomicBool::new(false),
@@ -332,6 +337,10 @@ impl SubagentManager {
         {
             handle.abort();
         }
+        // Flush the live map: a terminal card may have become visible before
+        // its background write landed, and a record written as still running
+        // would be folded into `Failed` by the next daemon's restore.
+        self.inner.flush().await;
     }
 
     /// Spawns a child thread and starts its first turn.
@@ -462,8 +471,24 @@ impl Inner {
         }
     }
 
+    /// Writes every live record through to the store, in map order.
+    async fn flush(&self) {
+        let ids: Vec<String> = {
+            let records = self.records.lock().await;
+            records.keys().cloned().collect()
+        };
+        for id in ids {
+            self.persist_id(&id).await;
+        }
+    }
+
     /// Persists one record by id, if it still exists.
+    ///
+    /// Writes are serialised and each one re-reads the live record, so the last
+    /// write always carries the newest state: a snapshot taken before a
+    /// terminal transition can never overwrite it.
     async fn persist_id(&self, id: &str) {
+        let _writing = self.persist_lock.lock().await;
         let record = {
             let records = self.records.lock().await;
             records.get(id).cloned()

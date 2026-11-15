@@ -26,7 +26,7 @@ use h4rn_protocol::{
     AgentState, ApprovalDecision, AutoResumePolicy, ClientFrame, ClientRequest, DeviceId,
     DeviceInfo, Event, HarnessKind, HostId, Item, MessageRole, ProtoError, ProtoErrorCode,
     ProxyProfileDraft, ResponseBody, ResumeState, ServerFrame, ThreadFilter, ThreadId, ThreadTab,
-    Topic, TurnStatus, UsageGroupBy, UsageRange, UsageScope,
+    ToolCallStatus, Topic, TurnStatus, UsageGroupBy, UsageRange, UsageScope,
 };
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
@@ -60,6 +60,7 @@ async fn boot() -> TestDaemon {
                 .with_working_exit_grace(chrono::TimeDelta::milliseconds(80))
                 .with_stale_bypass(chrono::TimeDelta::seconds(60)),
             tick_interval: Duration::from_millis(20),
+            clock: None,
         },
         FakeHarness::new(),
     )
@@ -103,6 +104,55 @@ async fn boot_with(options: ThreadManagerOptions, harness: FakeHarness) -> TestD
         _dir: Some(dir),
         shutdown: Some(shutdown),
         task,
+    }
+}
+
+/// A clock the test moves by hand.
+///
+/// Lifecycle windows (post-turn grace, auto-settle, snooze, a provider reset)
+/// are then crossed on the test's step, so a slow CI machine cannot skip a tab
+/// or expire a snooze before the assertion runs.
+#[derive(Clone, Debug)]
+struct ManualClock {
+    millis: Arc<std::sync::atomic::AtomicI64>,
+}
+
+impl ManualClock {
+    fn new() -> Self {
+        Self {
+            millis: Arc::new(std::sync::atomic::AtomicI64::new(
+                chrono::Utc::now().timestamp_millis(),
+            )),
+        }
+    }
+
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp_millis(
+            self.millis.load(std::sync::atomic::Ordering::SeqCst),
+        )
+        .expect("a valid timestamp")
+    }
+
+    fn advance(&self, delta: chrono::TimeDelta) {
+        self.millis.fetch_add(
+            delta.num_milliseconds(),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+}
+
+impl h4rn_daemon::threads::Clock for ManualClock {
+    fn now(&self) -> chrono::DateTime<chrono::Utc> {
+        ManualClock::now(self)
+    }
+}
+
+/// Options that read `clock`, so every derived placement is the test's call.
+fn clocked_options(clock: &ManualClock, settings: LifecycleSettings) -> ThreadManagerOptions {
+    ThreadManagerOptions {
+        settings,
+        tick_interval: Duration::from_millis(20),
+        clock: Some(Arc::new(clock.clone())),
     }
 }
 
@@ -249,12 +299,8 @@ impl Client {
     }
 
     async fn wait_for_turn_completed(&mut self) -> (u64, TurnStatus) {
-        self.wait_for_turn_completed_within(EVENT_TIMEOUT).await
-    }
-
-    async fn wait_for_turn_completed_within(&mut self, budget: Duration) -> (u64, TurnStatus) {
         let (seq, event) = self
-            .wait_event_within(budget, |event| matches!(event, Event::TurnCompleted { .. }))
+            .wait_event(|event| matches!(event, Event::TurnCompleted { .. }))
             .await;
         match event {
             Event::TurnCompleted { status, .. } => (seq, status),
@@ -584,13 +630,14 @@ async fn send_message_starts_a_new_turn_and_clears_a_pin() {
 
 #[tokio::test]
 async fn auto_settle_moves_a_done_thread_to_settled() {
-    let options = ThreadManagerOptions {
-        settings: LifecycleSettings::default()
-            .with_working_exit_grace(chrono::TimeDelta::milliseconds(30))
-            .with_auto_settle(chrono::TimeDelta::milliseconds(1_000))
+    let clock = ManualClock::new();
+    let options = clocked_options(
+        &clock,
+        LifecycleSettings::default()
+            .with_working_exit_grace(chrono::TimeDelta::seconds(1))
+            .with_auto_settle(chrono::TimeDelta::seconds(2))
             .with_stale_bypass(chrono::TimeDelta::seconds(60)),
-        tick_interval: Duration::from_millis(20),
-    };
+    );
     let daemon = boot_with(options, FakeHarness::new()).await;
     let host = host_id_for(&daemon).await;
 
@@ -598,15 +645,30 @@ async fn auto_settle_moves_a_done_thread_to_settled() {
     client.hello().await;
     create_with_host(&mut client, host, "settle me", HarnessKind::ClaudeCode).await;
     client.wait_for_turn_completed().await;
+
+    // Cross the post-turn grace: Done is the tab, and moves only on a tick.
+    clock.advance(chrono::TimeDelta::seconds(1) + chrono::TimeDelta::milliseconds(1));
     client.wait_for_tab(ThreadTab::Done).await;
-    client.wait_for_tab(ThreadTab::Settled).await;
+
+    // Cross the auto-settle window. Virtual time cannot jump over the tab, so
+    // the Done row above is always observed first.
+    clock.advance(chrono::TimeDelta::seconds(2) + chrono::TimeDelta::milliseconds(1));
+    let (_, settled) = client.wait_for_tab(ThreadTab::Settled).await;
+    assert!(!settled.unread, "settling clears the unread marker");
 
     daemon.stop().await;
 }
 
 #[tokio::test]
 async fn snooze_hides_a_thread_and_the_ticker_wakes_it() {
-    let daemon = boot().await;
+    let clock = ManualClock::new();
+    let options = clocked_options(
+        &clock,
+        LifecycleSettings::default()
+            .with_working_exit_grace(chrono::TimeDelta::seconds(1))
+            .with_stale_bypass(chrono::TimeDelta::seconds(60)),
+    );
+    let daemon = boot_with(options, FakeHarness::new()).await;
     let host = host_id_for(&daemon).await;
 
     let mut client = Client::connect(&daemon).await;
@@ -614,9 +676,10 @@ async fn snooze_hides_a_thread_and_the_ticker_wakes_it() {
     let summary = create_with_host(&mut client, host, "snooze me", HarnessKind::ClaudeCode).await;
     let thread_id = summary.thread_id.clone();
     client.wait_for_turn_completed().await;
+    clock.advance(chrono::TimeDelta::seconds(1) + chrono::TimeDelta::milliseconds(1));
     client.wait_for_tab(ThreadTab::Done).await;
 
-    let until = chrono::Utc::now() + chrono::Duration::milliseconds(1_000);
+    let until = clock.now() + chrono::TimeDelta::seconds(5);
     client
         .request(ClientRequest::Snooze {
             thread_id: thread_id.clone(),
@@ -651,7 +714,9 @@ async fn snooze_hides_a_thread_and_the_ticker_wakes_it() {
         other => panic!("unexpected list response: {other:?}"),
     }
 
-    // The ticker clears the snooze when it expires and re-emits the row.
+    // The ticker clears the snooze when it expires and re-emits the row. Time
+    // only moves here, so the row above cannot expire before it is read.
+    clock.advance(chrono::TimeDelta::seconds(6));
     client
         .wait_event(|event| {
             matches!(event, Event::ThreadUpserted(summary) if summary.snoozed_until.is_none())
@@ -773,6 +838,7 @@ async fn approvals_are_answered_through_the_stream() {
             settings: LifecycleSettings::default()
                 .with_working_exit_grace(chrono::TimeDelta::milliseconds(30)),
             tick_interval: Duration::from_millis(20),
+            clock: None,
         },
         FakeHarness::with_events(script),
     )
@@ -857,6 +923,7 @@ async fn list_threads_filters_by_tab_and_search() {
                 .with_working_exit_grace(chrono::TimeDelta::milliseconds(80))
                 .with_stale_bypass(chrono::TimeDelta::seconds(60)),
             tick_interval: Duration::from_millis(20),
+            clock: None,
         },
         FakeHarness::with_events(Vec::new()),
     )
@@ -933,6 +1000,7 @@ async fn restored_threads_replay_after_a_daemon_restart() {
         settings: LifecycleSettings::default()
             .with_working_exit_grace(chrono::TimeDelta::milliseconds(40)),
         tick_interval: Duration::from_millis(20),
+        clock: None,
     };
 
     let daemon = DaemonBuilder::new(config.clone())
@@ -1205,12 +1273,17 @@ fn resume_script() -> Vec<h4rn_harness::HarnessEvent> {
     ]
 }
 
+fn resume_settings() -> LifecycleSettings {
+    LifecycleSettings::default()
+        .with_working_exit_grace(chrono::TimeDelta::milliseconds(80))
+        .with_stale_bypass(chrono::TimeDelta::seconds(60))
+}
+
 fn resume_options() -> ThreadManagerOptions {
     ThreadManagerOptions {
-        settings: LifecycleSettings::default()
-            .with_working_exit_grace(chrono::TimeDelta::milliseconds(80))
-            .with_stale_bypass(chrono::TimeDelta::seconds(60)),
+        settings: resume_settings(),
         tick_interval: Duration::from_millis(20),
+        clock: None,
     }
 }
 
@@ -1273,9 +1346,10 @@ async fn schedules(client: &mut Client) -> Vec<h4rn_protocol::ResumeSchedule> {
 
 #[tokio::test]
 async fn a_limit_hit_stays_working_and_auto_resumes_at_the_provider_reset() {
-    let reset_at = chrono::Utc::now() + chrono::Duration::milliseconds(4_000);
+    let clock = ManualClock::new();
+    let reset_at = clock.now() + chrono::TimeDelta::seconds(4);
     let daemon = boot_with(
-        resume_options(),
+        clocked_options(&clock, resume_settings()),
         FakeHarness::with_session_scripts(vec![limit_script(Some(reset_at)), resume_script()]),
     )
     .await;
@@ -1339,7 +1413,10 @@ async fn a_limit_hit_stays_working_and_auto_resumes_at_the_provider_reset() {
     assert_eq!(persisted[0].thread_id, thread_id);
     assert_eq!(persisted[0].state, ResumeState::Scheduled);
 
-    // The scheduled resume sends the policy prompt and starts a new turn.
+    // The provider resets: the schedule fires on the next tick and starts a
+    // new turn. Time is the test's to move, so the schedule cannot come due
+    // while the limit is being asserted.
+    clock.advance(chrono::TimeDelta::seconds(5));
     client
         .wait_event(|event| {
             matches!(
@@ -1367,6 +1444,8 @@ async fn a_limit_hit_stays_working_and_auto_resumes_at_the_provider_reset() {
     assert_eq!(resets[0].state, ResumeState::Fired);
     assert!(resets[0].last_error.is_none());
 
+    // Cross the post-turn grace so the resumed turn is projected as done.
+    clock.advance(chrono::TimeDelta::milliseconds(200));
     let (_, done) = client.wait_for_tab(ThreadTab::Done).await;
     assert_eq!(done.agent_state, AgentState::Done);
     assert!(
@@ -1512,20 +1591,15 @@ async fn resume_now_fires_a_scheduled_thread_without_waiting_for_the_reset() {
     daemon.stop().await;
 }
 
-/// Event budget for tests that configure a harness send delay of up to 5 s.
-const SLOW_SEND_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
-
 #[tokio::test]
 async fn resume_now_acknowledges_before_a_slow_first_send() {
     let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
-    let daemon = boot_with(
-        resume_options(),
+    // The adapter holds the resumed turn's input until the test opens this
+    // gate, so an answer that arrives first provably did not wait for the send.
+    let (harness, gate) =
         FakeHarness::with_session_scripts(vec![limit_script(Some(reset_at)), resume_script()])
-            // The resumed turn takes seconds to produce its first token; the
-            // ResumeNow request must still be acknowledged immediately.
-            .with_send_delay(std::time::Duration::from_secs(5)),
-    )
-    .await;
+            .with_send_gate();
+    let daemon = boot_with(resume_options(), harness).await;
     let host = host_id_for(&daemon).await;
 
     let mut client = Client::connect(&daemon).await;
@@ -1545,7 +1619,6 @@ async fn resume_now_acknowledges_before_a_slow_first_send() {
         .await;
     client.wait_for_turn_completed().await;
 
-    let started = std::time::Instant::now();
     match client
         .request(ClientRequest::ResumeNow {
             thread_id: thread_id.clone(),
@@ -1558,22 +1631,18 @@ async fn resume_now_acknowledges_before_a_slow_first_send() {
         } => assert_eq!(schedule.state, ResumeState::Fired),
         other => panic!("unexpected ResumeNow response: {other:?}"),
     }
-    let acknowledged = started.elapsed();
     assert!(
-        acknowledged < std::time::Duration::from_secs(2),
-        "ResumeNow waited for the slow harness send: {acknowledged:?}"
+        !gate.is_released(),
+        "ResumeNow answered while the harness was still holding the input"
     );
 
-    // The resumed turn still runs and reports progress through events.
-    // Budgets exceed the 5 s harness delay so the wait cannot race it.
+    // The resumed turn still runs and reports progress through events once the
+    // adapter accepts the input.
+    gate.release();
     client
-        .wait_event_within(SLOW_SEND_BUDGET, |event| {
-            matches!(event, Event::TurnStarted { .. })
-        })
+        .wait_event(|event| matches!(event, Event::TurnStarted { .. }))
         .await;
-    let (_, status) = client
-        .wait_for_turn_completed_within(SLOW_SEND_BUDGET)
-        .await;
+    let (_, status) = client.wait_for_turn_completed().await;
     assert_eq!(status, TurnStatus::Completed);
     assert_eq!(thread_usage(&mut client, &thread_id).await.totals.turns, 2);
 
@@ -1582,11 +1651,8 @@ async fn resume_now_acknowledges_before_a_slow_first_send() {
 
 #[tokio::test]
 async fn send_message_acknowledges_before_a_slow_harness_write() {
-    let daemon = boot_with(
-        resume_options(),
-        FakeHarness::new().with_send_delay(std::time::Duration::from_secs(3)),
-    )
-    .await;
+    let (harness, gate) = FakeHarness::new().with_send_gate();
+    let daemon = boot_with(resume_options(), harness).await;
     let host = host_id_for(&daemon).await;
 
     let mut client = Client::connect(&daemon).await;
@@ -1595,9 +1661,8 @@ async fn send_message_acknowledges_before_a_slow_harness_write() {
     let thread_id = summary.thread_id;
     client.wait_for_turn_completed().await;
 
-    // The adapter now takes seconds to accept the text. The request must be
-    // acknowledged as soon as the turn is recorded, not when the write lands.
-    let started = std::time::Instant::now();
+    // The adapter now holds the text. The request must be acknowledged as soon
+    // as the turn is recorded, not when the write lands.
     let accepted = client
         .request(ClientRequest::SendMessage {
             thread_id: thread_id.clone(),
@@ -1607,15 +1672,13 @@ async fn send_message_acknowledges_before_a_slow_harness_write() {
         .await
         .expect("send");
     assert!(matches!(accepted, ResponseBody::MessageAccepted { .. }));
-    let acknowledged = started.elapsed();
     assert!(
-        acknowledged < std::time::Duration::from_secs(2),
-        "SendMessage waited for the slow harness write: {acknowledged:?}"
+        !gate.is_released(),
+        "SendMessage answered while the harness was still holding the write"
     );
 
     // The thread record stays available while that write is in flight, so a
-    // snapshot or settings request queued behind it still answers promptly.
-    let started = std::time::Instant::now();
+    // snapshot or settings request queued behind it still answers.
     client
         .request(ClientRequest::GetThread {
             thread_id: thread_id.clone(),
@@ -1623,15 +1686,10 @@ async fn send_message_acknowledges_before_a_slow_harness_write() {
         })
         .await
         .expect("get thread");
-    let snapshot = started.elapsed();
-    assert!(
-        snapshot < std::time::Duration::from_secs(2),
-        "a snapshot waited for the slow harness write: {snapshot:?}"
-    );
+    assert!(!gate.is_released());
 
-    let (_, status) = client
-        .wait_for_turn_completed_within(SLOW_SEND_BUDGET)
-        .await;
+    gate.release();
+    let (_, status) = client.wait_for_turn_completed().await;
     assert_eq!(status, TurnStatus::Completed);
 
     daemon.stop().await;
@@ -2077,7 +2135,22 @@ async fn an_edit_tool_call_reaches_the_client_with_its_diffstat() {
 
 #[tokio::test]
 async fn turn_completed_carries_the_turns_change_set() {
-    let daemon = boot().await;
+    // The harness announces the edit, then waits for the test: the daemon
+    // journals the announced tool call only after it captured the pre-turn
+    // snapshot, so releasing the gate here is what makes the diff base the
+    // file's pre-turn state instead of a race against a fixed sleep.
+    let (harness, write_gate) = FakeHarness::new().with_write_gate();
+    let daemon = boot_with(
+        ThreadManagerOptions {
+            settings: LifecycleSettings::default()
+                .with_working_exit_grace(chrono::TimeDelta::milliseconds(80))
+                .with_stale_bypass(chrono::TimeDelta::seconds(60)),
+            tick_interval: Duration::from_millis(20),
+            clock: None,
+        },
+        harness,
+    )
+    .await;
     let host = host_id_for(&daemon).await;
     let workspace = tempfile::tempdir().expect("temp workspace");
 
@@ -2098,6 +2171,17 @@ async fn turn_completed_carries_the_turns_change_set() {
         .await
         .expect("create thread");
     assert!(matches!(result, ResponseBody::ThreadCreated { .. }));
+
+    client
+        .wait_event(|event| {
+            matches!(
+                event,
+                Event::ToolCall { tool_call, .. }
+                    if tool_call.status == ToolCallStatus::Running
+            )
+        })
+        .await;
+    write_gate.release();
 
     let (_, event) = client
         .wait_event(|event| matches!(event, Event::TurnCompleted { .. }))

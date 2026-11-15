@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -30,6 +30,53 @@ pub struct FakeHarness {
     session_scripts: Option<Arc<SessionScripts>>,
     /// A test-only pause before a turn's input is answered.
     send_delay: Option<Duration>,
+    /// A test-only latch before a turn's input is answered.
+    send_gate: Option<Gate>,
+    /// A test-only latch before a write directive's file appears.
+    write_gate: Option<Gate>,
+}
+
+/// A latch a test releases when the daemon should be allowed to proceed.
+///
+/// The fake harness uses it instead of a sleep, so a test proves an ordering
+/// (for example "the request is answered before the adapter accepts input")
+/// by the ordering itself rather than by a wall-clock guess.
+#[derive(Clone, Debug, Default)]
+pub struct Gate {
+    released: Arc<AtomicBool>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl Gate {
+    /// A closed gate.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Opens the gate for every waiter, now and later.
+    pub fn release(&self) {
+        self.released.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    /// Whether the gate is open.
+    pub fn is_released(&self) -> bool {
+        self.released.load(Ordering::SeqCst)
+    }
+
+    /// Waits until the gate opens.
+    pub async fn wait(&self) {
+        loop {
+            if self.is_released() {
+                return;
+            }
+            let notified = self.notify.notified();
+            if self.is_released() {
+                return;
+            }
+            notified.await;
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -63,6 +110,8 @@ impl Default for FakeHarness {
             script: None,
             session_scripts: None,
             send_delay: None,
+            send_gate: None,
+            write_gate: None,
         }
     }
 }
@@ -119,6 +168,29 @@ impl FakeHarness {
     pub fn with_send_delay(mut self, delay: Duration) -> Self {
         self.send_delay = Some(delay);
         self
+    }
+
+    /// Holds every non-priming `send` until the returned [`Gate`] is released.
+    ///
+    /// A test uses this to prove that a request is answered before the adapter
+    /// accepts the input: the request cannot have waited for a send that the
+    /// test has not unblocked yet.
+    pub fn with_send_gate(mut self) -> (Self, Gate) {
+        let gate = Gate::new();
+        self.send_gate = Some(gate.clone());
+        (self, gate)
+    }
+
+    /// Holds a write directive's file write until the returned [`Gate`] is
+    /// released, after the harness has announced the edit.
+    ///
+    /// A test releases it once it has seen the announced tool call, which the
+    /// daemon journals only after it captured the pre-turn snapshot, so the
+    /// change set is computed against the file's pre-turn bytes.
+    pub fn with_write_gate(mut self) -> (Self, Gate) {
+        let gate = Gate::new();
+        self.write_gate = Some(gate.clone());
+        (self, gate)
     }
 }
 
@@ -178,6 +250,9 @@ impl Harness for FakeHarness {
             session_scripts,
             primed,
             delay,
+            send_gate: self.send_gate.clone(),
+            has_answered: false,
+            write_gate: self.write_gate.clone(),
             closed: false,
         }))
     }
@@ -195,6 +270,13 @@ pub struct FakeSession {
     primed: bool,
     /// Env-gated pause before an echo turn, for cancel-flow e2e tests.
     delay: Duration,
+    /// A test-controlled latch on a turn's input.
+    send_gate: Option<Gate>,
+    /// Whether this session has already answered one send, so the gate only
+    /// holds later turns and not the one that creates the thread.
+    has_answered: bool,
+    /// A test-controlled latch on a write directive's file write.
+    write_gate: Option<Gate>,
     closed: bool,
 }
 
@@ -208,9 +290,19 @@ impl HarnessSession for FakeSession {
             });
         }
 
+        // The first send starts the thread; a test gates later turns so a
+        // request that must not wait for the adapter stays observable.
+        let first_send = !self.has_answered;
+        self.has_answered = true;
+        if let Some(gate) = &self.send_gate
+            && !first_send
+        {
+            gate.wait().await;
+        }
+
         // The priming send only announces the first script; it is not a turn
         // whose latency a test is modelling.
-        if !self.delay.is_zero() && !self.primed {
+        if !self.primed && !self.delay.is_zero() {
             tokio::time::sleep(self.delay).await;
         }
 
@@ -263,8 +355,14 @@ impl HarnessSession for FakeSession {
             let workspace = self.workspace.clone();
             let usage = usage_for(&input.text);
             let text = input.text;
+            let write_gate = self.write_gate.clone();
             tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                match write_gate {
+                    // The test releases this once the announced edit is
+                    // journaled, which is after the pre-turn snapshot.
+                    Some(gate) => gate.wait().await,
+                    None => tokio::time::sleep(std::time::Duration::from_millis(400)).await,
+                }
                 if let Some((written, stats)) = apply_write_directive(&workspace, &text) {
                     send(
                         &sender,

@@ -82,6 +82,7 @@ async fn boot_with_devices(
             .with_working_exit_grace(chrono::TimeDelta::milliseconds(80))
             .with_stale_bypass(chrono::TimeDelta::seconds(60)),
         tick_interval: Duration::from_millis(20),
+        clock: None,
     };
     let mut builder = DaemonBuilder::new(config)
         .with_harness(Arc::new(FakeHarness::new()))

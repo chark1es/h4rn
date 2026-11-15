@@ -65,6 +65,26 @@ pub trait McpSessionProvider: Send + Sync {
     fn prepare(&self, harness: HarnessKind, thread_id: &ThreadId) -> Option<McpSession>;
 }
 
+/// The source of "now" for every lifecycle decision.
+///
+/// Production uses [`SystemClock`]. Tests inject a manual clock so a grace,
+/// auto-settle or snooze window passes when the test says so, not when a wall
+/// clock and a ticker happen to line up.
+pub trait Clock: Send + Sync + std::fmt::Debug {
+    /// The current instant.
+    fn now(&self) -> DateTime<Utc>;
+}
+
+/// The wall clock.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+}
+
 /// Options for the manager.
 #[derive(Clone, Debug)]
 pub struct ThreadManagerOptions {
@@ -72,6 +92,9 @@ pub struct ThreadManagerOptions {
     pub settings: LifecycleSettings,
     /// How often derived placement is re-evaluated.
     pub tick_interval: Duration,
+    /// Clock for derived placement. Defaults to the wall clock; tests pass a
+    /// manual clock so timing assertions do not depend on wall-clock latency.
+    pub clock: Option<Arc<dyn Clock>>,
 }
 
 impl Default for ThreadManagerOptions {
@@ -79,6 +102,7 @@ impl Default for ThreadManagerOptions {
         Self {
             settings: LifecycleSettings::default(),
             tick_interval: Duration::from_millis(250),
+            clock: None,
         }
     }
 }
@@ -240,7 +264,9 @@ struct Inner {
     /// Durable metering, limits and auto-resume (ADR-024).
     meter: std::sync::OnceLock<Arc<MeterHub>>,
     /// Throttles the due-schedule scan to about once a second.
-    last_schedule_check: std::sync::Mutex<Option<std::time::Instant>>,
+    last_schedule_check: std::sync::Mutex<Option<DateTime<Utc>>>,
+    /// The clock every lifecycle decision reads.
+    clock: Arc<dyn Clock>,
 }
 
 type ThreadHandle = Arc<Mutex<ThreadRecord>>;
@@ -285,7 +311,7 @@ struct ActiveTurn {
     meter: TurnMeter,
     /// Tool call id -> whether the call is currently counted as running.
     tools: HashMap<String, bool>,
-    last_tick: Option<std::time::Instant>,
+    last_tick: Option<DateTime<Utc>>,
 }
 
 /// The limit observation that keeps a thread in `Scheduled`.
@@ -351,8 +377,7 @@ impl SummarySignature {
 }
 
 impl ThreadRecord {
-    fn summary(&self, settings: &LifecycleSettings) -> ThreadSummary {
-        let now = Utc::now();
+    fn summary(&self, settings: &LifecycleSettings, now: DateTime<Utc>) -> ThreadSummary {
         let tab = tab_for(&self.state, now, settings);
         ThreadSummary {
             thread_id: self.meta.thread_id.clone(),
@@ -381,8 +406,8 @@ impl ThreadRecord {
         }
     }
 
-    fn signature(&self, settings: &LifecycleSettings) -> SummarySignature {
-        SummarySignature::of(&self.summary(settings))
+    fn signature(&self, settings: &LifecycleSettings, now: DateTime<Utc>) -> SummarySignature {
+        SummarySignature::of(&self.summary(settings, now))
     }
 
     fn begin_turn(&mut self, _at: DateTime<Utc>) -> (TurnId, String) {
@@ -425,6 +450,10 @@ impl ThreadManager {
         attachments: Option<Arc<dyn AttachmentResolver>>,
     ) -> Result<Self, ManagerError> {
         let (events, _) = broadcast::channel(BROADCAST_CAPACITY);
+        let clock = options
+            .clock
+            .clone()
+            .unwrap_or_else(|| Arc::new(SystemClock));
         let manager = Self {
             inner: Arc::new(Inner {
                 journal,
@@ -442,6 +471,7 @@ impl ThreadManager {
                 mcp: std::sync::OnceLock::new(),
                 meter: std::sync::OnceLock::new(),
                 last_schedule_check: std::sync::Mutex::new(None),
+                clock,
             }),
         };
         manager.inner.restore().await?;
@@ -451,6 +481,12 @@ impl ThreadManager {
     /// Subscribes to the live projected event stream.
     pub fn subscribe(&self) -> broadcast::Receiver<WireEvent> {
         self.inner.events.subscribe()
+    }
+
+    /// The manager's clock. Every lifecycle decision reads this so a test can
+    /// move time without sleeping.
+    fn now(&self) -> DateTime<Utc> {
+        self.inner.clock.now()
     }
 
     /// Attaches CLIProxyAPI routing so new sessions receive harness overrides.
@@ -571,7 +607,7 @@ impl ThreadManager {
     pub async fn thread_summary(&self, thread_id: &ThreadId) -> Option<ThreadSummary> {
         let handle = self.inner.handle(thread_id).await.ok()?;
         let record = handle.lock().await;
-        Some(record.summary(&self.inner.options.settings))
+        Some(record.summary(&self.inner.options.settings, self.now()))
     }
 
     /// The turn a thread would attach a new item to.
@@ -632,7 +668,7 @@ impl ThreadManager {
                 .map(|(approval_id, pending)| (approval_id.clone(), pending.kind))
                 .collect();
             if !pending.is_empty() {
-                let now = Utc::now();
+                let now = self.now();
                 let mut domain = Vec::new();
                 let mut wire = Vec::new();
                 for (approval_id, kind) in pending {
@@ -665,7 +701,7 @@ impl ThreadManager {
         if pending.is_empty() {
             return Ok(());
         }
-        let now = Utc::now();
+        let now = self.now();
         let mut domain = Vec::new();
         let mut wire = Vec::new();
         for (approval_id, kind) in pending {
@@ -774,7 +810,7 @@ impl ThreadManager {
             ));
         }
 
-        let now = Utc::now();
+        let now = self.now();
         let thread_id = request
             .thread_id
             .clone()
@@ -892,7 +928,7 @@ impl ThreadManager {
             )));
         }
 
-        let now = Utc::now();
+        let now = self.now();
         if let Some(active_turn_id) = record.active.as_ref().map(|active| active.turn_id.clone()) {
             // A turn is running: the message waits its turn, and the thread
             // stays Working. `MessageReceived` records the user activity. Any
@@ -1150,7 +1186,7 @@ impl ThreadManager {
                 let mut target_record = target.lock().await;
                 target_record.pending_approvals.remove(&target_approval);
                 let kind = pending.kind;
-                let now = Utc::now();
+                let now = self.now();
                 let domain = if kind == ApprovalKind::Question {
                     vec![ThreadEvent::QuestionAnswered { at: now }]
                 } else {
@@ -1199,7 +1235,7 @@ impl ThreadManager {
         let domain = vec![ThreadEvent::ManualMove {
             tab,
             pinned,
-            at: Utc::now(),
+            at: self.now(),
         }];
         self.inner
             .emit(&mut record, domain, Vec::new())
@@ -1217,7 +1253,7 @@ impl ThreadManager {
         let mut record = handle.lock().await;
         let domain = vec![ThreadEvent::Snooze {
             until,
-            at: Utc::now(),
+            at: self.now(),
         }];
         self.inner
             .emit(&mut record, domain, Vec::new())
@@ -1234,7 +1270,7 @@ impl ThreadManager {
         let handle = self.inner.handle(thread_id).await?;
         let summary = {
             let record = handle.lock().await;
-            record.summary(&self.inner.options.settings)
+            record.summary(&self.inner.options.settings, self.now())
         };
         let events = self
             .inner
@@ -1288,8 +1324,8 @@ impl ThreadManager {
         let mut summaries = Vec::with_capacity(handles.len());
         for handle in handles {
             let record = handle.lock().await;
-            let summary = record.summary(&self.inner.options.settings);
-            let snoozed = is_snoozed(&record.state, Utc::now());
+            let summary = record.summary(&self.inner.options.settings, self.now());
+            let snoozed = is_snoozed(&record.state, self.now());
             drop(record);
 
             if snoozed && !filter.include_snoozed {
@@ -1416,7 +1452,7 @@ impl ThreadManager {
                         &mut record,
                         vec![ThreadEvent::LimitAutoResumeSet {
                             auto_resume: false,
-                            at: Utc::now(),
+                            at: self.now(),
                         }],
                         Vec::new(),
                     )
@@ -1452,7 +1488,7 @@ impl ThreadManager {
                 schedule.state
             )));
         }
-        schedule.resume_at = Utc::now();
+        schedule.resume_at = self.now();
         self.inner
             .fire_schedule(schedule)
             .await
@@ -1577,7 +1613,7 @@ impl ThreadManager {
             account_label: choice.account_label,
             reason: format!("chosen now: {}", choice.reason),
         });
-        schedule.resume_at = Utc::now();
+        schedule.resume_at = self.now();
         self.inner
             .fire_schedule(schedule)
             .await
@@ -1606,7 +1642,7 @@ impl ThreadManager {
             let mut record = handle.lock().await;
             record.closed = true;
             if record.active.is_some() {
-                let now = Utc::now();
+                let now = self.now();
                 record.active = None;
                 let domain = vec![ThreadEvent::TurnCompleted {
                     status: TurnStatus::Interrupted,
@@ -1635,6 +1671,11 @@ impl ThreadManager {
 }
 
 impl Inner {
+    /// The clock every lifecycle decision reads.
+    fn now(&self) -> DateTime<Utc> {
+        self.clock.now()
+    }
+
     fn local_host_is(&self, host: &HostId) -> bool {
         &self.local_host == host
     }
@@ -1695,7 +1736,7 @@ impl Inner {
                 }),
             },
         );
-        let now = Utc::now();
+        let now = self.now();
         let domain = if request.kind == ApprovalKind::Question {
             vec![ThreadEvent::QuestionAsked { at: now }]
         } else {
@@ -1726,7 +1767,7 @@ impl Inner {
         for event in &domain {
             record.state = record.state.clone().apply(event);
         }
-        let summary = record.summary(&self.options.settings);
+        let summary = record.summary(&self.options.settings, self.now());
         wire.push(Event::ThreadUpserted(summary.clone()));
         record.last_signature = Some(SummarySignature::of(&summary));
 
@@ -1796,13 +1837,13 @@ impl Inner {
                 }];
                 self.emit(
                     &mut record,
-                    vec![ThreadEvent::HostLost { at: Utc::now() }],
+                    vec![ThreadEvent::HostLost { at: self.now() }],
                     wire,
                 )
                 .await?;
             }
 
-            record.last_signature = Some(record.signature(&self.options.settings));
+            record.last_signature = Some(record.signature(&self.options.settings, self.now()));
             self.threads.lock().await.insert(
                 record.meta.thread_id.as_str().to_owned(),
                 Arc::new(Mutex::new(record)),
@@ -1917,7 +1958,7 @@ impl Inner {
             let sent = session.lock().await.send(input).await;
             if let Err(error) = sent {
                 let mut record = handle.lock().await;
-                let now = Utc::now();
+                let now = self.now();
                 record.active = None;
                 let wire = vec![Event::Error {
                     thread_id: Some(record.meta.thread_id.clone()),
@@ -1944,7 +1985,7 @@ impl Inner {
 
     async fn fail_session(&self, handle: ThreadHandle, message: String) {
         let mut record = handle.lock().await;
-        let now = Utc::now();
+        let now = self.now();
         record.active = None;
         let wire = vec![Event::Error {
             thread_id: Some(record.meta.thread_id.clone()),
@@ -1982,7 +2023,7 @@ impl Inner {
         let sent = session.lock().await.send(input).await;
         if let Err(error) = sent {
             let mut record = handle.lock().await;
-            let now = Utc::now();
+            let now = self.now();
             record.active = None;
             let wire = vec![Event::Error {
                 thread_id: Some(record.meta.thread_id.clone()),
@@ -2016,7 +2057,7 @@ impl Inner {
                 break;
             }
             let mut record = handle.lock().await;
-            let now = Utc::now();
+            let now = self.now();
             let thread_id = record.meta.thread_id.clone();
             let mut domain = Vec::new();
             let mut wire = Vec::new();
@@ -2450,7 +2491,7 @@ impl Inner {
         record.session = None;
         record.pump = None;
         if record.active.is_some() {
-            let now = Utc::now();
+            let now = self.now();
             record.active = None;
             let turn_id = record.turn_id_for_event();
             let hint = if stderr_tail.trim().is_empty() {
@@ -2505,7 +2546,7 @@ impl Inner {
             let Some(input) = record.queued.pop_front() else {
                 return;
             };
-            let now = Utc::now();
+            let now = self.now();
             let (turn_id, _) = record.begin_turn(now);
             let domain = vec![
                 ThreadEvent::TurnQueued { at: now },
@@ -2543,7 +2584,7 @@ impl Inner {
             let threads = self.threads.lock().await;
             threads.values().cloned().collect()
         };
-        let now = Utc::now();
+        let now = self.now();
         for handle in handles {
             let mut record = handle.lock().await;
             let thread_id = record.meta.thread_id.clone();
@@ -2552,11 +2593,11 @@ impl Inner {
             };
             let due = active
                 .last_tick
-                .is_none_or(|last| last.elapsed() >= Duration::from_secs(1));
+                .is_none_or(|last| (now - last) >= chrono::TimeDelta::seconds(1));
             if !due {
                 continue;
             }
-            active.last_tick = Some(std::time::Instant::now());
+            active.last_tick = Some(now);
             let live = active.meter.live(now);
             let run_id = Some(active.turn_id.as_str().to_owned());
             drop(record);
@@ -2569,17 +2610,20 @@ impl Inner {
         let Some(meter) = self.meter.get().cloned() else {
             return;
         };
+        let now = self.now();
         {
             let mut last = self
                 .last_schedule_check
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if last.is_some_and(|at| at.elapsed() < Duration::from_secs(1)) {
+            // The scan reads the manager's clock, not a wall-clock stopwatch, so
+            // a manual clock makes a due schedule fire on the test's step.
+            if last.is_some_and(|at| (now - at) < chrono::TimeDelta::seconds(1)) {
                 return;
             }
-            *last = Some(std::time::Instant::now());
+            *last = Some(now);
         }
-        let due = match meter.due_schedules(Utc::now()).await {
+        let due = match meter.due_schedules(now).await {
             Ok(due) => due,
             Err(error) => {
                 tracing::warn!(%error, "could not read due auto-resume schedules");
@@ -2678,7 +2722,7 @@ impl Inner {
         }
 
         let prompt = schedule.prompt.clone();
-        let now = Utc::now();
+        let now = self.now();
         record.scheduled_limit = None;
         let (turn_id, _) = record.begin_turn(now);
         let domain = vec![
@@ -2750,7 +2794,7 @@ impl Inner {
                 return;
             }
             let mut record = handle.lock().await;
-            let summary = record.summary(&self.options.settings);
+            let summary = record.summary(&self.options.settings, self.now());
             let signature = SummarySignature::of(&summary);
             if record.last_signature.as_ref() == Some(&signature) {
                 continue;

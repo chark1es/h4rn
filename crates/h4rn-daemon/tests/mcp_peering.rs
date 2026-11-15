@@ -76,6 +76,7 @@ async fn boot(host: &str) -> TestDaemon {
     let options = ThreadManagerOptions {
         settings: LifecycleSettings::default(),
         tick_interval: Duration::from_millis(20),
+        clock: None,
     };
     let host = HostId::new(host);
     let daemon = DaemonBuilder::new(config)

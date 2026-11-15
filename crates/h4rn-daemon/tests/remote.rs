@@ -448,6 +448,7 @@ async fn boot(data_dir: &Path, service: Arc<SecureService>, bind: SocketAddr) ->
             .with_working_exit_grace(chrono::TimeDelta::milliseconds(80))
             .with_stale_bypass(chrono::TimeDelta::seconds(60)),
         tick_interval: Duration::from_millis(20),
+        clock: None,
     };
     let daemon = DaemonBuilder::new(config)
         .with_harness(Arc::new(FakeHarness::new()))
