@@ -536,7 +536,11 @@ impl FsService {
         let root = self.workspace(workspace)?;
         // A diff reads the file, so it crosses the same boundary as `read`:
         // canonicalise the target and refuse anything that escapes the root.
-        let path = resolve_inside(&root, rel, ResolveMode::Existing)?;
+        // The target may be gone — a deletion is exactly what a diff must show
+        // — so resolve the way `create` does: canonicalise the nearest existing
+        // ancestor, refuse a dangling symlink, and append the missing parts.
+        // A missing target then reads as `after: None`, never as an error.
+        let path = resolve_inside(&root, rel, ResolveMode::Create)?;
         let rel_path = relative_of(&root, &path);
         let current = fs::read(&path).ok();
         let after = current.as_deref().and_then(text::decode);

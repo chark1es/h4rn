@@ -172,6 +172,12 @@ pub enum ShareError {
         /// Tool name.
         tool: String,
     },
+    /// The grant changed while the owner was deciding.
+    #[error("\"{server}\" was unshared or its policy changed while the call waited for approval")]
+    GrantChanged {
+        /// Server name.
+        server: String,
+    },
     /// The server failed.
     #[error(transparent)]
     Upstream(#[from] UpstreamError),
@@ -210,6 +216,63 @@ pub trait ConfirmationGate: Send + Sync {
 
     /// Denies every waiting request, for shutdown or a revoked peer.
     fn cancel_all(&self) {}
+
+    /// Denies every waiting request that `filter` selects, because a grant
+    /// change or a peer revocation made them unauthorised. Returns how many
+    /// approvals were cancelled.
+    fn cancel_matching(&self, _filter: &ApprovalFilter) -> usize {
+        0
+    }
+}
+
+/// Selects the pending approvals that a grant or peer change invalidates.
+///
+/// An approval card outlives the policy that raised it: the owner can unshare
+/// the server, narrow the grant or revoke the peer while the card is up. This
+/// filter names the cards such a change must cancel so none of them can be
+/// answered into a call that no longer has a grant.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ApprovalFilter {
+    /// Restrict the match to this machine.
+    pub machine: Option<HostId>,
+    /// Restrict the match to this server.
+    pub server: Option<String>,
+}
+
+impl ApprovalFilter {
+    /// Every approval for one `server -> machine` grant.
+    pub fn grant(server: impl Into<String>, machine: HostId) -> Self {
+        Self {
+            machine: Some(machine),
+            server: Some(server.into()),
+        }
+    }
+
+    /// Every approval for `server`, for any machine.
+    pub fn server(server: impl Into<String>) -> Self {
+        Self {
+            machine: None,
+            server: Some(server.into()),
+        }
+    }
+
+    /// Every approval raised by `machine`, for any server.
+    pub fn machine(machine: HostId) -> Self {
+        Self {
+            machine: Some(machine),
+            server: None,
+        }
+    }
+
+    fn matches(&self, approval: &McpShareApproval) -> bool {
+        self.machine
+            .as_ref()
+            .is_none_or(|machine| &approval.machine == machine)
+            && self
+                .server
+                .as_ref()
+                .is_none_or(|server| &approval.server == server)
+    }
 }
 
 /// How long an approval waits before it fails closed.
@@ -380,14 +443,48 @@ impl ConfirmationGate for ApprovalGate {
     }
 
     fn cancel_all(&self) {
-        let drained: Vec<(String, PendingApproval)> = self.lock().drain().collect();
+        self.cancel_where(|_| true, ApprovalDecision::Deny);
+    }
+
+    fn cancel_matching(&self, filter: &ApprovalFilter) -> usize {
+        self.cancel_where(
+            |approval| filter.matches(approval),
+            ApprovalDecision::Cancel,
+        )
+    }
+}
+
+impl ApprovalGate {
+    /// Removes every request `matches` accepts and publishes its outcome.
+    fn cancel_where(
+        &self,
+        matches: impl Fn(&McpShareApproval) -> bool,
+        decision: ApprovalDecision,
+    ) -> usize {
+        let drained: Vec<(String, PendingApproval)> = {
+            let mut pending = self.lock();
+            let ids: Vec<String> = pending
+                .iter()
+                .filter(|(_, pending)| matches(&pending.approval))
+                .map(|(approval_id, _)| approval_id.clone())
+                .collect();
+            ids.into_iter()
+                .filter_map(|approval_id| {
+                    pending
+                        .remove(&approval_id)
+                        .map(|pending| (approval_id, pending))
+                })
+                .collect()
+        };
+        let cancelled = drained.len();
         for (approval_id, pending) in drained {
             let _ = self.events.send(HubEvent::ShareApprovalResolved {
                 approval_id,
-                decision: ApprovalDecision::Deny,
+                decision,
             });
-            let _ = pending.decision.send(ApprovalDecision::Deny);
+            let _ = pending.decision.send(decision);
         }
+        cancelled
     }
 }
 
@@ -504,6 +601,54 @@ impl ShareAuthorizer {
         record: &ServerRecord,
         call: &ShareCall,
     ) -> Result<McpSharePolicy, ShareError> {
+        let policy = self.current_policy(record, call).await?;
+        if !policy.requires_confirmation(&call.tool) {
+            return Ok(policy);
+        }
+        if !self.gate.confirm(call).await {
+            self.audit
+                .remote_call(call, false, Some("confirmation denied"));
+            return Err(ShareError::ConfirmationDenied {
+                tool: call.tool.clone(),
+            });
+        }
+        // The card can stay up for two minutes: the owner may unshare the
+        // server, narrow the grant or revoke the tool while it waits. An
+        // approval answers the card the owner saw, not a grant that changed
+        // underneath it, so re-read the grant and compare before running.
+        let current = self.current_policy(record, call).await?;
+        if current != policy {
+            self.audit.remote_call(
+                call,
+                false,
+                Some("the share grant changed while the call waited for approval"),
+            );
+            return Err(ShareError::GrantChanged {
+                server: record.name.clone(),
+            });
+        }
+        Ok(current)
+    }
+
+    /// Re-checks the grant and the caller immediately before dispatch.
+    ///
+    /// [`Self::authorize`] already does this after an approval; the daemon also
+    /// calls it once more at the last moment, so a revocation that lands in
+    /// between cannot run a call its grant no longer covers.
+    pub async fn revalidate(
+        &self,
+        record: &ServerRecord,
+        call: &ShareCall,
+    ) -> Result<McpSharePolicy, ShareError> {
+        self.current_policy(record, call).await
+    }
+
+    /// Reads the grant in force and applies every non-interactive check.
+    async fn current_policy(
+        &self,
+        record: &ServerRecord,
+        call: &ShareCall,
+    ) -> Result<McpSharePolicy, ShareError> {
         let grant =
             self.grant(record, &call.machine)
                 .await?
@@ -511,7 +656,17 @@ impl ShareAuthorizer {
                     server: record.name.clone(),
                     machine: call.machine.clone(),
                 })?;
-        let policy = grant.policy;
+        self.check(record, call, &grant.policy)?;
+        Ok(grant.policy)
+    }
+
+    /// The checks that need no owner interaction.
+    fn check(
+        &self,
+        record: &ServerRecord,
+        call: &ShareCall,
+        policy: &McpSharePolicy,
+    ) -> Result<(), ShareError> {
         if !call.peer_verified {
             self.audit
                 .remote_call(call, false, Some("peer is not the target machine"));
@@ -539,14 +694,7 @@ impl ShareAuthorizer {
                 tool: call.tool.clone(),
             });
         }
-        if policy.requires_confirmation(&call.tool) && !self.gate.confirm(call).await {
-            self.audit
-                .remote_call(call, false, Some("confirmation denied"));
-            return Err(ShareError::ConfirmationDenied {
-                tool: call.tool.clone(),
-            });
-        }
-        Ok(policy)
+        Ok(())
     }
 
     /// Records a call the owner actually executed.
@@ -789,5 +937,184 @@ mod tests {
             authorizer.authorize(&record, &anonymous).await,
             Err(ShareError::DeviceNotAllowed { .. })
         ));
+    }
+
+    /// The change a test applies while an approval card is up.
+    enum Change {
+        /// The grant is removed.
+        Unshare,
+        /// The grant is replaced with a narrower policy.
+        Repolicy(McpSharePolicy),
+    }
+
+    /// Answers "approve" only after it has changed the grant, reproducing an
+    /// owner who unshares or narrows the share while the card is on screen.
+    struct MutatingConfirmation {
+        registry: Arc<MemoryRegistry>,
+        record: ServerRecord,
+        machine: HostId,
+        change: Change,
+    }
+
+    #[async_trait]
+    impl ConfirmationGate for MutatingConfirmation {
+        async fn confirm(&self, _request: &ShareCall) -> bool {
+            match &self.change {
+                Change::Unshare => self
+                    .registry
+                    .remove_share(&self.record.id, &self.machine)
+                    .await
+                    .expect("unshare while approving"),
+                Change::Repolicy(policy) => self
+                    .registry
+                    .put_share(&ShareRecord {
+                        server_id: self.record.id.clone(),
+                        machine: self.machine.clone(),
+                        policy: policy.clone(),
+                        created_at: Utc::now(),
+                    })
+                    .await
+                    .expect("repolicy while approving"),
+            }
+            true
+        }
+    }
+
+    async fn approving_while(
+        change: Change,
+        policy: McpSharePolicy,
+    ) -> (ShareAuthorizer, ServerRecord) {
+        let registry = Arc::new(MemoryRegistry::new());
+        let record = record();
+        registry.put(&record).await.unwrap();
+        registry
+            .put_share(&ShareRecord {
+                server_id: record.id.clone(),
+                machine: HostId::new("host_b"),
+                policy,
+                created_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        let gate = Arc::new(MutatingConfirmation {
+            registry: Arc::clone(&registry),
+            record: record.clone(),
+            machine: HostId::new("host_b"),
+            change,
+        });
+        let store: Arc<dyn RegistryStore> = registry;
+        (ShareAuthorizer::new(store, gate, Arc::new(NoAudit)), record)
+    }
+
+    #[tokio::test]
+    async fn a_grant_unshared_during_approval_never_runs_the_call() {
+        // I1 reproduction: the policy was read before the wait, so an answer
+        // to the stale card used to run the tool after the unshare.
+        let (authorizer, record) = approving_while(
+            Change::Unshare,
+            McpSharePolicy {
+                confirm_all: true,
+                ..McpSharePolicy::default()
+            },
+        )
+        .await;
+        let error = authorizer
+            .authorize(&record, &call("write"))
+            .await
+            .expect_err("an approval for a removed grant must not run");
+        assert!(
+            matches!(error, ShareError::NotShared { .. }),
+            "got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_policy_change_that_drops_the_tool_during_approval_never_runs_it() {
+        let (authorizer, record) = approving_while(
+            Change::Repolicy(McpSharePolicy {
+                allowed_tools: Some(vec!["read".into()]),
+                ..McpSharePolicy::default()
+            }),
+            McpSharePolicy {
+                confirm_all: true,
+                ..McpSharePolicy::default()
+            },
+        )
+        .await;
+        let error = authorizer
+            .authorize(&record, &call("write"))
+            .await
+            .expect_err("the tool was dropped from the grant while the card was up");
+        assert!(
+            matches!(error, ShareError::ToolNotAllowed { .. }),
+            "got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn revalidation_refuses_a_grant_removed_after_the_answer() {
+        // The window between `authorize` and dispatch: the daemon revalidates,
+        // and this is the check it relies on.
+        let (authorizer, record) =
+            authorizer(McpSharePolicy::default(), Arc::new(AllowConfirmation)).await;
+        assert!(authorizer.authorize(&record, &call("read")).await.is_ok());
+        let shares = authorizer.registry.list_shares().await.unwrap();
+        assert_eq!(shares.len(), 1);
+        authorizer
+            .registry
+            .remove_share(&record.id, &HostId::new("host_b"))
+            .await
+            .unwrap();
+        assert!(matches!(
+            authorizer.revalidate(&record, &call("read")).await,
+            Err(ShareError::NotShared { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_grant_change_cancels_only_the_matching_cards() {
+        let (events, mut received) = broadcast::channel(32);
+        let gate = Arc::new(ApprovalGate::new(events));
+        let mut github = call("write");
+        github.server = "github".into();
+        github.machine = HostId::new("host_b");
+        let mut gitlab = call("write");
+        gitlab.server = "gitlab".into();
+        gitlab.machine = HostId::new("host_b");
+        let mut other_machine = call("write");
+        other_machine.server = "github".into();
+        other_machine.machine = HostId::new("host_c");
+        let mut waiters = Vec::new();
+        for request in [github, gitlab, other_machine] {
+            let gate = Arc::clone(&gate);
+            waiters.push(tokio::spawn(async move { gate.confirm(&request).await }));
+        }
+        while gate.pending().len() < 3 {
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(
+            gate.cancel_matching(&ApprovalFilter::grant("github", HostId::new("host_b"))),
+            1,
+            "only the github -> host_b card is invalidated"
+        );
+        assert_eq!(gate.pending().len(), 2);
+        // The cancelled card reports its outcome, so the UI drops it.
+        let mut saw_cancel = false;
+        while let Ok(event) = received.try_recv() {
+            if let HubEvent::ShareApprovalResolved { decision, .. } = event {
+                assert_eq!(decision, ApprovalDecision::Cancel);
+                saw_cancel = true;
+            }
+        }
+        assert!(saw_cancel, "a cancelled card is published as resolved");
+        assert!(!waiters.remove(0).await.expect("waiter"));
+
+        gate.cancel_matching(&ApprovalFilter::server("gitlab"));
+        gate.cancel_matching(&ApprovalFilter::machine(HostId::new("host_c")));
+        assert!(gate.pending().is_empty());
+        for waiter in waiters {
+            assert!(!waiter.await.expect("waiter"));
+        }
     }
 }

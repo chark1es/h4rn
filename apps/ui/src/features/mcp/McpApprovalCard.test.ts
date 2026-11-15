@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { getState, store } from "@/lib/store/appStore";
 import { McpApprovalCard } from "./McpApprovalCard";
-import { applyMcpEvent, resetMcpStore } from "./store";
+import { applyMcpEvent, getMcpState, resetMcpStore } from "./store";
 
 const approval = {
   approval_id: "mcp-1",
@@ -50,6 +50,19 @@ describe("McpApprovalCard", () => {
       decision: "deny",
     });
     expect(render()).toBe("");
+  });
+
+  it("removes the card when the caller drops and the daemon cancels it", () => {
+    // I2: a tunnel that closed withdrew its approvals with `cancel`, and the
+    // owner must not be left with a card for a caller that is gone.
+    applyMcpEvent({ type: "mcp_share_approval_requested", approval });
+    applyMcpEvent({
+      type: "mcp_share_approval_resolved",
+      approval_id: approval.approval_id,
+      decision: "cancel",
+    });
+    expect(render()).toBe("");
+    expect(getMcpState().approvals).toEqual([]);
   });
 
   it("hides approvals that have already expired", () => {

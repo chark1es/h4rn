@@ -545,6 +545,88 @@ impl MeterStore {
         Ok(())
     }
 
+    /// Cancels one thread's schedule if it has not fired yet.
+    ///
+    /// Cancellation and the fire claim are both single conditional updates, so
+    /// exactly one of them wins an attempt: a resume that already claimed the
+    /// row cannot be cancelled out from under its turn, and a cancelled or
+    /// superseded row can never be claimed.
+    pub async fn cancel_schedule(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Option<ResumeSchedule>, StoreError> {
+        let row = sqlx::query(
+            "UPDATE meter_schedules SET state = ?
+             WHERE thread_id = ? AND state IN (?, ?)
+             RETURNING *",
+        )
+        .bind(state_str(ResumeState::Cancelled))
+        .bind(thread_id.as_str())
+        .bind(state_str(ResumeState::Scheduled))
+        .bind(state_str(ResumeState::Waiting))
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(schedule_from_sql).transpose()
+    }
+
+    /// Claims one schedule attempt for firing.
+    ///
+    /// Returns `true` only for the caller that moved this exact attempt from
+    /// `Scheduled`/`Waiting` to `Fired`. A retry of the same attempt, a newer
+    /// attempt (which replaced the row) and a concurrent cancellation all see
+    /// `false` and must not start a turn.
+    pub async fn claim_schedule(
+        &self,
+        schedule_id: &str,
+        attempt: u32,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "UPDATE meter_schedules SET state = ?, last_error = NULL
+             WHERE schedule_id = ? AND attempt = ? AND state IN (?, ?)",
+        )
+        .bind(state_str(ResumeState::Fired))
+        .bind(schedule_id)
+        .bind(i64::from(attempt))
+        .bind(state_str(ResumeState::Scheduled))
+        .bind(state_str(ResumeState::Waiting))
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Records the outcome of one attempt, unless it was cancelled or
+    /// superseded by a newer attempt.
+    ///
+    /// Returns the stored row, or `None` when this attempt no longer owns the
+    /// schedule. Callers must not broadcast a `None` outcome as if it landed:
+    /// the ledger already reflects whichever row won.
+    pub async fn finish_schedule(
+        &self,
+        schedule: &ResumeSchedule,
+        state: ResumeState,
+        error: Option<&str>,
+    ) -> Result<Option<ResumeSchedule>, StoreError> {
+        let failover = schedule
+            .failover
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        let row = sqlx::query(
+            "UPDATE meter_schedules SET state = ?, last_error = ?, failover_json = ?
+             WHERE schedule_id = ? AND attempt = ? AND state <> ?
+             RETURNING *",
+        )
+        .bind(state_str(state))
+        .bind(error)
+        .bind(failover)
+        .bind(&schedule.schedule_id)
+        .bind(i64::from(schedule.attempt))
+        .bind(state_str(ResumeState::Cancelled))
+        .fetch_optional(&self.pool)
+        .await?;
+        row.as_ref().map(schedule_from_sql).transpose()
+    }
+
     /// Every schedule, soonest first.
     pub async fn schedules(&self) -> Result<Vec<ResumeSchedule>, StoreError> {
         let rows = sqlx::query("SELECT * FROM meter_schedules ORDER BY resume_at ASC")

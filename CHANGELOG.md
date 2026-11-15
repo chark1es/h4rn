@@ -5,7 +5,7 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
-### Council round 3: pairing and registry fail-closed
+### Council round 3: pairing, registry, approvals, resume claims and deleted-file diffs (H1–H4, I1–I4)
 
 - **QR pairing now completes the SAS comparison and waits for the host (H1).** The phone derives
   the string in Rust from its own key and the daemon key pinned by the QR, shows the comparison
@@ -26,6 +26,27 @@ All notable changes to h4rn are recorded here. The format follows
   confirmations that cannot be written roll back and surface through `ConfirmPairing`, while
   revocations stay revoked in memory and are recorded in a `devices.revoked` sidecar that the next
   start applies and clears. Peer-host updates log and skip admission rather than pretending.
+- **An approval cannot outlive its grant (I1).** `confirm_tools` / `confirm_all` approvals were
+  raised from a grant snapshot read before the wait, so unsharing the server, narrowing its policy
+  or removing it during the wait still ran the call after the owner approved. Grant changes now
+  withdraw the matching cards (`mcp_share_approval_resolved` with `cancel`), and the daemon
+  re-reads the grant and re-checks the authenticated peer after the answer and again immediately
+  before dispatch. A changed grant fails the call with `GrantChanged`.
+- **A dropped caller withdraws its approvals (I2).** The owner's `/secure-mcp` loop awaited each
+  call, so a pending approval blocked every later call on the tunnel and a card outlived the
+  caller. It now keeps reading frames, runs at most eight calls at once, and — when the transport
+  reports that the session has no live path left — withdraws that `server → machine` grant's cards
+  and drops the in-flight calls.
+- **A cancelled auto-resume cannot fire (I3).** `fire_schedule` re-checked only `closed`/`active`
+  after the proxy and session I/O, and `finish_schedule` then overwrote a `Cancelled` row with
+  `Fired`. Firing now claims the exact attempt (`schedule_id` + `attempt`, `Scheduled`/`Waiting`
+  → `Fired`) under the thread lock that `cancel_resume` also takes; cancellation and the claim are
+  conditional ledger updates, so exactly one wins. `finish_schedule` refuses a cancelled or
+  superseded row, and a cancelled resume starts no turn and does not switch models.
+- **A deleted file diffs again (I4).** `diff` resolved the target with `Existing`, so a file the
+  IDE was asked to show after deletion failed with `NotFound`. It now resolves with
+  `ResolveMode::Create`: the nearest existing ancestor is canonicalised, dangling symlinks and
+  escapes are refused, and a missing target is `after: None` for both `HEAD` and agent-turn diffs.
 
 ### Council round 2: pairing, direct pairing and registry lifecycle
 

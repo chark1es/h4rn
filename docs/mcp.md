@@ -116,7 +116,11 @@ is enforced by the **owner**:
   The owner's daemon raises a pending card showing the caller, `server__tool` and a bounded
   arguments preview. It is answered with `RespondApproval { approval_id, decision }` by a client
   holding the `approve` scope; `PendingApprovals` re-reads the set after a reconnect. An approval
-  expires after two minutes, is cancelled when the tunnel drops, and fails closed on either;
+  expires after two minutes, is cancelled when the tunnel drops, and fails closed on either. A
+  grant change — unshare, policy narrowing, server removal or peer revocation — withdraws the
+  matching cards. After the answer, and again immediately before dispatch, the owner re-reads the
+  grant and re-checks the authenticated peer, so a call whose grant changed while its card was up
+  is refused (`GrantChanged`) instead of running;
 - `allowed_devices` holds **connect device ids of peer daemons**, not ids of phones or other user
   devices. `None` admits the target machine's own daemon only. `Some(list)` compares the device id
   the owner recorded on that peer daemon's `host` registry entry when the peer was discovered
@@ -135,6 +139,11 @@ same Noise transport as `/secure`, on A's `/secure-mcp` route, authenticating as
 key**. After the internal handshake the tunnel carries JSON-RPC frames. The owner re-authorizes
 every call, strips namespaces on `tools/list` and re-adds them on `tools/call`, and never forwards
 credentials: the upstream server runs on the owner. A proxied server cannot be re-shared.
+
+The owner does not stop reading the tunnel while a call waits for approval: a pending card never
+blocks the next `tools/call` on the same tunnel, and at most eight calls run at once. When every
+path to the caller is gone, that tunnel's pending cards are withdrawn through
+`mcp_share_approval_resolved` with decision `cancel`, and the calls still in flight are dropped.
 
 ### How a share reaches the target
 

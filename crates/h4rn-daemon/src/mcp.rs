@@ -29,8 +29,8 @@ use h4rn_mcp::secrets::OpenSecretStore;
 use h4rn_mcp::server::McpServerState;
 use h4rn_mcp::session::McpScope;
 use h4rn_mcp::sharing::{
-    ApprovalGate, ConfirmationGate, McpTunnel, ShareAudit, ShareAuthorizer, ShareCall, ShareError,
-    TunnelSession,
+    ApprovalFilter, ApprovalGate, ConfirmationGate, McpTunnel, ShareAudit, ShareAuthorizer,
+    ShareCall, ShareError, TunnelSession,
 };
 use h4rn_mcp::upstream::{DEFAULT_TOOL_TIMEOUT, UpstreamError, UpstreamLimits};
 use h4rn_protocol::{
@@ -54,6 +54,11 @@ const TUNNEL_HANDSHAKE: &str = "h4rn-mcp-tunnel-1";
 
 /// How long `/secure-mcp` waits for the tunnel handshake.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How many calls one tunnel may have in flight at once. A pending approval
+/// must not stop the peer's next call, but an unbounded fan-out must not turn
+/// one peer into a fork bomb either.
+const TUNNEL_CONCURRENCY: usize = 8;
 
 /// The daemon-wide MCP service.
 pub struct McpService {
@@ -120,6 +125,9 @@ impl McpService {
         // The production gate raises real approval cards on this daemon. Tests
         // and embedders may inject a fixed gate instead.
         let gate = gate.unwrap_or_else(|| Arc::new(ApprovalGate::new(hub.event_sender())));
+        // A grant change withdraws the cards it invalidates, so an answer
+        // cannot run a call the owner just revoked.
+        hub.set_share_gate(Arc::clone(&gate));
         let authorizer = Arc::new(ShareAuthorizer::new(
             registry,
             Arc::clone(&gate),
@@ -299,6 +307,22 @@ impl McpService {
         verified_peer(self.devices().as_deref(), key)
     }
 
+    /// Whether `key` is still the registered daemon key of `machine` under
+    /// `device_id`. A revocation between the handshake and dispatch shows up
+    /// here, so a call never runs for a key the owner no longer admits.
+    fn peer_still_verified(
+        &self,
+        key: &[u8; KEY_LEN],
+        machine: &HostId,
+        device_id: Option<&str>,
+    ) -> bool {
+        self.verified_peer(key)
+            .is_some_and(|(current, registered)| {
+                &current == machine
+                    && device_id.is_none_or(|expected| expected == registered.as_str())
+            })
+    }
+
     /// Serves the owner half of one `/secure-mcp` session.
     pub async fn serve_secure_mcp(
         self: Arc<Self>,
@@ -320,6 +344,7 @@ impl McpService {
             }
         };
         let device = handle.device;
+        let mut liveness = handle.liveness();
         let (sender, mut frames) = handle.into_parts();
 
         let handshake = match tokio::time::timeout(HANDSHAKE_TIMEOUT, frames.recv()).await {
@@ -410,7 +435,25 @@ impl McpService {
         }
 
         tracing::info!(%server, %machine, "opened a shared MCP tunnel");
-        while let Some(frame) = frames.recv().await {
+        // One approval can wait for the owner for two minutes. Keep reading
+        // frames while it waits, so the next call on this tunnel (or the same
+        // peer hanging up) is noticed, and run a bounded number of calls at a
+        // time. The bound applies to execution, not to reading.
+        let permits = Arc::new(tokio::sync::Semaphore::new(TUNNEL_CONCURRENCY));
+        let mut calls = tokio::task::JoinSet::new();
+        loop {
+            let frame = tokio::select! {
+                frame = frames.recv() => match frame {
+                    Some(frame) => frame,
+                    None => break,
+                },
+                // Every path is gone, so the caller can no longer receive an
+                // answer. A pending approval must not outlive it.
+                _ = liveness.gone() => {
+                    tracing::debug!(%server, %machine, "shared MCP tunnel has no live path");
+                    break;
+                }
+            };
             let Some(text) = frame.as_text() else {
                 continue;
             };
@@ -423,25 +466,49 @@ impl McpService {
             match incoming {
                 Incoming::Notification { .. } | Incoming::Response { .. } => {}
                 Incoming::Request { id, method, params } => {
-                    let outcome = self
-                        .tunnel_request(
-                            &server,
-                            &machine,
-                            device_id.clone(),
-                            device,
-                            &method,
-                            params,
-                        )
-                        .await;
-                    let response = match outcome {
-                        Ok(result) => jsonrpc::success(id, result),
-                        Err(error) => error.response(id),
-                    };
-                    if sender.send(AppFrame::text(response.to_string())).is_err() {
-                        break;
-                    }
+                    let this = Arc::clone(&self);
+                    let sender = sender.clone();
+                    let permits = Arc::clone(&permits);
+                    let server = server.clone();
+                    let machine = machine.clone();
+                    let device_id = device_id.clone();
+                    calls.spawn(async move {
+                        let _permit = permits
+                            .acquire_owned()
+                            .await
+                            .expect("the tunnel semaphore is never closed");
+                        let outcome = this
+                            .tunnel_request(&server, &machine, device_id, device, &method, params)
+                            .await;
+                        let response = match outcome {
+                            Ok(result) => jsonrpc::success(id, result),
+                            Err(error) => error.response(id),
+                        };
+                        let _ = sender.send(AppFrame::text(response.to_string()));
+                    });
                 }
             }
+        }
+        // The peer is gone. Withdraw every card this tunnel raised (its caller
+        // can no longer receive an answer, and the grant left nothing to
+        // approve), then stop whatever is still in flight.
+        let mut withdrawn = self
+            .gate
+            .cancel_matching(&ApprovalFilter::grant(server.clone(), machine.clone()));
+        calls.shutdown().await;
+        // A call that was between "admitted" and "raised a card" when the
+        // tunnel closed can still have inserted one; with every task joined,
+        // sweep again so no orphan card survives.
+        withdrawn += self
+            .gate
+            .cancel_matching(&ApprovalFilter::grant(server.clone(), machine.clone()));
+        if withdrawn > 0 {
+            tracing::info!(
+                %server,
+                %machine,
+                withdrawn,
+                "withdrew approvals whose tunnel closed"
+            );
         }
     }
 
@@ -603,6 +670,21 @@ impl McpService {
                 jsonrpc::INVALID_REQUEST,
                 error.to_string(),
             ));
+        }
+        // An approval is answered asynchronously, and an unshare or a
+        // revocation can land between the answer and this point. Take one more
+        // look at the grant and at the authenticated key immediately before
+        // dispatch: the newest state wins, not the one the card showed.
+        if let Err(error) = self.authorizer.revalidate(&record, &call).await {
+            return Err(RpcErrorObject::new(
+                jsonrpc::INVALID_REQUEST,
+                error.to_string(),
+            ));
+        }
+        if !self.peer_still_verified(&device, machine, device_id.as_deref()) {
+            let error = "the peer is no longer a registered daemon";
+            self.audit.record(device, &call, false, Some(error));
+            return Err(RpcErrorObject::new(jsonrpc::INVALID_REQUEST, error));
         }
         let qualified = names::qualified(server, tool);
         let context = ToolCallContext::new(scope.clone(), server, DEFAULT_TOOL_TIMEOUT);
@@ -831,7 +913,7 @@ mod tunnel {
         outbound: mpsc::Sender<TunnelOutbound>,
         pending: TunnelPending,
         next_id: AtomicI64,
-        reader: JoinHandle<()>,
+        reader: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     }
 
     type TunnelPending =
@@ -912,7 +994,7 @@ mod tunnel {
                 outbound,
                 pending,
                 next_id: AtomicI64::new(1),
-                reader,
+                reader: tokio::sync::Mutex::new(Some(reader)),
             }
         }
     }
@@ -963,7 +1045,18 @@ mod tunnel {
 
         async fn shutdown(&self) {
             let _ = self.outbound.send(TunnelOutbound::Close).await;
-            self.reader.abort();
+            // Let the reader close the transport before it exits. Aborting
+            // first would kill the socket instead of closing it, and the owner
+            // would keep waiting on a tunnel the caller already left.
+            let Some(mut reader) = self.reader.lock().await.take() else {
+                return;
+            };
+            if tokio::time::timeout(Duration::from_secs(2), &mut reader)
+                .await
+                .is_err()
+            {
+                reader.abort();
+            }
         }
     }
 }

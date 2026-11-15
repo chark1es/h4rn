@@ -299,6 +299,45 @@ fn diff_against_head_shows_both_sides() {
 }
 
 #[test]
+fn a_deleted_file_diffs_against_head_as_a_deletion() {
+    // I4: the diff resolved the target with `Existing`, so a file the IDE was
+    // asked to show after deletion failed instead of showing the deletion.
+    let fixture = Fixture::new();
+    fixture.write("src/gone.rs", "fn gone() {}\n");
+    git_repo(&fixture);
+    // Remove the parent too, so resolution must walk to an existing ancestor.
+    fs::remove_dir_all(fixture.workspace.join("src")).expect("delete");
+
+    let diff = fixture
+        .service
+        .diff(fixture.workspace(), "src/gone.rs", &DiffAgainst::Head)
+        .expect("a deleted file must still diff");
+    assert_eq!(diff.path, "src/gone.rs");
+    assert_eq!(diff.before.as_deref(), Some("fn gone() {}\n"));
+    assert!(
+        diff.after.is_none(),
+        "a deleted file has no current side: {diff:?}"
+    );
+    assert!(!diff.binary);
+}
+
+#[cfg(unix)]
+#[test]
+fn diff_refuses_a_dangling_symlink_leaf() {
+    // `ResolveMode::Create` must not follow a link whose target does not exist:
+    // that would let a deletion diff describe a path outside the workspace.
+    let fixture = Fixture::new();
+    let outside = fixture.dir.path().join("not-yet.txt");
+    std::os::unix::fs::symlink(&outside, fixture.workspace.join("trap.txt")).expect("symlink");
+
+    let error = fixture
+        .service
+        .diff(fixture.workspace(), "trap.txt", &DiffAgainst::Head)
+        .expect_err("a dangling symlink must not be diffed");
+    assert!(matches!(error, FsError::Forbidden(_)), "got {error:?}");
+}
+
+#[test]
 fn diff_against_an_agent_turn_uses_the_pre_turn_snapshot() {
     let fixture = Fixture::new();
     fixture.write("notes.txt", "before the turn\n");
@@ -367,6 +406,48 @@ fn a_file_the_turn_created_diffs_from_nothing() {
     );
     assert_eq!(diff.after.as_deref(), Some("written by the turn\n"));
     assert!(diff.note.is_some());
+}
+
+#[test]
+fn a_file_deleted_after_the_pre_turn_snapshot_diffs_as_a_deletion() {
+    let fixture = Fixture::new();
+    fixture.write("notes.txt", "before the turn\n");
+    let thread = ThreadId::new("th_deleted");
+    let turn = TurnId::new("turn_deleted");
+    let snapshots = fixture.service.snapshots();
+    snapshots
+        .capture(
+            &fixture.workspace,
+            &thread,
+            &turn,
+            &["notes.txt".to_owned()],
+        )
+        .expect("capture");
+    fs::remove_file(fixture.workspace.join("notes.txt")).expect("delete");
+
+    let diff = fixture
+        .service
+        .diff(
+            fixture.workspace(),
+            "notes.txt",
+            &DiffAgainst::AgentTurn {
+                thread_id: thread.clone(),
+                turn_id: turn.clone(),
+            },
+        )
+        .expect("a deletion must diff against the snapshot");
+    assert_eq!(diff.before.as_deref(), Some("before the turn\n"));
+    assert!(
+        diff.after.is_none(),
+        "a deleted file has no current side: {diff:?}"
+    );
+
+    let changes = fixture
+        .service
+        .turn_changes(fixture.workspace(), &thread, &turn)
+        .expect("turn changes");
+    assert_eq!(changes.files.len(), 1);
+    assert_eq!(changes.files[0].path, "notes.txt");
 }
 
 #[tokio::test(flavor = "multi_thread")]

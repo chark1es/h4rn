@@ -247,39 +247,55 @@ impl MeterHub {
     }
 
     /// Cancels a schedule and broadcasts the cleared state.
+    ///
+    /// Only an attempt that has not fired can be cancelled. When the resume
+    /// already claimed the attempt, this returns `None` and leaves the fired
+    /// row in place, so a cancellation racing the resume cannot report a state
+    /// the ledger does not have.
     pub async fn cancel_schedule(
         &self,
         thread_id: &ThreadId,
     ) -> Result<Option<ResumeSchedule>, StoreError> {
-        let mut schedule = self
-            .inner
-            .store
-            .schedules()
-            .await?
-            .into_iter()
-            .find(|schedule| &schedule.thread_id == thread_id);
-        if let Some(schedule) = &mut schedule {
-            schedule.state = ResumeState::Cancelled;
-            self.inner.store.upsert_schedule(schedule).await?;
+        let schedule = self.inner.store.cancel_schedule(thread_id).await?;
+        if schedule.is_some() {
+            self.emit(UsageStreamEvent::ScheduleChanged { schedule: None });
         }
-        self.emit(UsageStreamEvent::ScheduleChanged { schedule: None });
         Ok(schedule)
     }
 
+    /// Claims one due attempt for firing, under the thread record lock.
+    ///
+    /// `false` means the attempt was cancelled or replaced before this caller
+    /// reached the claim, and the caller must not start a turn.
+    pub async fn claim_schedule(&self, schedule: &ResumeSchedule) -> Result<bool, StoreError> {
+        self.inner
+            .store
+            .claim_schedule(&schedule.schedule_id, schedule.attempt)
+            .await
+    }
+
     /// Marks a schedule fired (or failed) and broadcasts it.
+    ///
+    /// A cancelled or superseded attempt is refused: the fire that lost the
+    /// race must not overwrite the cancellation or a newer attempt.
     pub async fn finish_schedule(
         &self,
-        mut schedule: ResumeSchedule,
+        schedule: ResumeSchedule,
         state: ResumeState,
         error: Option<String>,
-    ) -> Result<ResumeSchedule, StoreError> {
-        schedule.state = state;
-        schedule.last_error = error;
-        self.inner.store.upsert_schedule(&schedule).await?;
+    ) -> Result<Option<ResumeSchedule>, StoreError> {
+        let Some(schedule) = self
+            .inner
+            .store
+            .finish_schedule(&schedule, state, error.as_deref())
+            .await?
+        else {
+            return Ok(None);
+        };
         self.emit(UsageStreamEvent::ScheduleChanged {
             schedule: Some(schedule.clone()),
         });
-        Ok(schedule)
+        Ok(Some(schedule))
     }
 
     /// Rows h4rn-connect has not accepted yet.
@@ -474,6 +490,56 @@ mod tests {
         assert_eq!(second.attempt, 1);
         assert_eq!(second.failover, Some(failover));
         assert_eq!(second.resume_at, at(1) + Duration::seconds(60));
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_or_superseded_attempt_cannot_claim_or_finish() {
+        let hub = MeterHub::in_memory().await.expect("hub");
+        hub.set_policy(AutoResumePolicy {
+            jitter_ms: 0,
+            ..AutoResumePolicy::default()
+        });
+        let thread_id = ThreadId::new("th_cancel");
+        let first = hub
+            .arm_schedule(&thread_id, None, "continue".into(), None, at(0))
+            .await
+            .expect("arm");
+
+        // Cancelling wins the attempt; the old fire can neither claim it nor
+        // write a Fired row over the cancellation.
+        assert!(
+            hub.cancel_schedule(&thread_id)
+                .await
+                .expect("cancel")
+                .is_some()
+        );
+        assert!(!hub.claim_schedule(&first).await.expect("claim cancelled"));
+        assert!(
+            hub.finish_schedule(first.clone(), ResumeState::Fired, None)
+                .await
+                .expect("finish cancelled")
+                .is_none()
+        );
+        assert_eq!(
+            hub.schedules().await.expect("schedules")[0].state,
+            ResumeState::Cancelled
+        );
+
+        // A newer attempt replaces the row; the old fire is stale for both
+        // operations and the new attempt is claimable.
+        let second = hub
+            .arm_schedule(&thread_id, None, "continue".into(), None, at(1))
+            .await
+            .expect("rearm");
+        assert_ne!(second.schedule_id, first.schedule_id);
+        assert!(!hub.claim_schedule(&first).await.expect("stale claim"));
+        assert!(
+            hub.finish_schedule(first, ResumeState::Fired, None)
+                .await
+                .expect("stale finish")
+                .is_none()
+        );
+        assert!(hub.claim_schedule(&second).await.expect("claim newer"));
     }
 
     #[tokio::test]

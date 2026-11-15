@@ -1438,18 +1438,26 @@ impl ThreadManager {
         let meter = self
             .meter()
             .ok_or_else(|| ManagerError::Unsupported("metering is not enabled".into()))?;
+        // Take the record lock before touching the ledger. A fire claims its
+        // attempt under this lock, so the lock orders the two conditional
+        // writes: either the cancellation lands first and the fire's claim
+        // fails, or the fire has claimed and the cancellation is too late.
+        let handle = self.inner.handle(thread_id).await.ok();
+        let mut record = match &handle {
+            Some(handle) => Some(handle.lock().await),
+            None => None,
+        };
         let schedule = meter
             .cancel_schedule(thread_id)
             .await
             .map_err(|error| ManagerError::Internal(error.to_string()))?;
-        if let Ok(handle) = self.inner.handle(thread_id).await {
-            let mut record = handle.lock().await;
+        if let Some(record) = record.as_mut() {
             record.scheduled_limit = None;
             record.resume_at = None;
             if record.state.phase == h4rn_core::Phase::RateLimited {
                 self.inner
                     .emit(
-                        &mut record,
+                        record,
                         vec![ThreadEvent::LimitAutoResumeSet {
                             auto_resume: false,
                             at: self.now(),
@@ -2725,21 +2733,31 @@ impl Inner {
 
         // Whoever chose it (the policy at reset time, or a person through
         // `FailOver`), a changed model needs a fresh session: the live one was
-        // started on the limited model. Take it under the lock, then shut it
-        // down outside so its I/O does not hold the thread either.
-        if let Some(failover) = &schedule.failover {
-            enum Apply {
-                Closed,
-                Active,
-                Go(Option<SharedSession>, Option<JoinHandle<()>>),
-            }
-            let apply = {
-                let mut record = handle.lock().await;
-                if record.closed {
-                    Apply::Closed
-                } else if record.active.is_some() {
-                    Apply::Active
-                } else if record.meta.model == failover.model {
+        // started on the limited model. Claim the attempt first, under the
+        // thread lock and before any model change: `cancel_resume` takes the
+        // same lock before it writes `Cancelled`, so exactly one of the two
+        // wins. A cancellation that landed while the proxy was thinking makes
+        // the claim fail here and no turn runs.
+        enum Apply {
+            Closed,
+            Active,
+            Stale,
+            Go(Option<SharedSession>, Option<JoinHandle<()>>),
+        }
+        let apply = {
+            let mut record = handle.lock().await;
+            if record.closed {
+                Apply::Closed
+            } else if record.active.is_some() {
+                Apply::Active
+            } else if !meter
+                .claim_schedule(&schedule)
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                Apply::Stale
+            } else if let Some(failover) = &schedule.failover {
+                if record.meta.model == failover.model {
                     Apply::Go(None, None)
                 } else {
                     record.meta.model = failover.model.clone();
@@ -2747,35 +2765,45 @@ impl Inner {
                     let pump = record.pump.take();
                     Apply::Go(session, pump)
                 }
-            };
-            match apply {
-                Apply::Closed => {
-                    let _ = meter
-                        .finish_schedule(
-                            schedule,
-                            ResumeState::Cancelled,
-                            Some("the thread is closed".into()),
-                        )
-                        .await;
-                    return Ok(None);
-                }
-                Apply::Active => {
-                    tracing::debug!(
-                        thread_id = %thread_id,
-                        "auto-resume due while the thread is active; waiting"
-                    );
-                    return Ok(None);
-                }
-                Apply::Go(session, pump) => {
-                    if let Some(session) = session {
-                        let mut session = session.lock().await;
-                        if let Err(error) = session.shutdown().await {
-                            tracing::warn!(%thread_id, %error, "harness shutdown before failover failed");
-                        }
+            } else {
+                Apply::Go(None, None)
+            }
+        };
+        match apply {
+            Apply::Closed => {
+                let _ = meter
+                    .finish_schedule(
+                        schedule,
+                        ResumeState::Cancelled,
+                        Some("the thread is closed".into()),
+                    )
+                    .await;
+                return Ok(None);
+            }
+            Apply::Active => {
+                tracing::debug!(
+                    thread_id = %thread_id,
+                    "auto-resume due while the thread is active; waiting"
+                );
+                return Ok(None);
+            }
+            Apply::Stale => {
+                tracing::debug!(
+                    thread_id = %thread_id,
+                    schedule = %schedule.schedule_id,
+                    "auto-resume was cancelled or superseded before it claimed; not starting it"
+                );
+                return Ok(None);
+            }
+            Apply::Go(session, pump) => {
+                if let Some(session) = session {
+                    let mut session = session.lock().await;
+                    if let Err(error) = session.shutdown().await {
+                        tracing::warn!(%thread_id, %error, "harness shutdown before failover failed");
                     }
-                    if let Some(pump) = pump {
-                        pump.abort();
-                    }
+                }
+                if let Some(pump) = pump {
+                    pump.abort();
                 }
             }
         }
@@ -2838,7 +2866,7 @@ impl Inner {
                 .finish_schedule(schedule, ResumeState::Waiting, Some(error.to_string()))
                 .await
                 .map_err(|error| error.to_string())?;
-            return Ok(Some(schedule));
+            return Ok(schedule);
         }
         let needs_session = record.session.is_none();
         drop(record);
@@ -2863,7 +2891,7 @@ impl Inner {
                 this.deliver(handle, input).await;
             });
         }
-        Ok(Some(fired))
+        Ok(fired)
     }
 
     async fn tick(self: &Arc<Self>) {

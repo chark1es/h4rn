@@ -30,7 +30,7 @@ use h4rn_protocol::TransportPathKind;
 use h4rn_protocol::{
     ClientFrame, ClientRequest, DeviceId, DeviceInfo, Event, HarnessKind, McpConflictResolution,
     McpEnabledMatrix, McpRequest, McpSecretInput, McpServerInput, McpSharePolicy,
-    McpTransportInput, ResponseBody, ServerFrame,
+    McpTransportInput, ResponseBody, ServerFrame, Topic,
 };
 use h4rn_transport::keys::DeviceIdentity;
 use h4rn_transport::server::{SecureOptions, SecureService};
@@ -208,6 +208,31 @@ impl Client {
         request: McpRequest,
     ) -> Result<ResponseBody, h4rn_protocol::ProtoError> {
         self.request(ClientRequest::Mcp { request }).await
+    }
+
+    /// Waits for a subscribed event the test cares about, keeping any others.
+    async fn wait_event(&mut self, matches: impl Fn(&Event) -> bool) -> Event {
+        if let Some(index) = self.pending.iter().position(&matches) {
+            return self.pending.remove(index).expect("queued event");
+        }
+        loop {
+            let message = tokio::time::timeout(Duration::from_secs(10), self.ws.next())
+                .await
+                .expect("timed out waiting for an event")
+                .expect("socket closed")
+                .expect("websocket error");
+            let Message::Text(text) = message else {
+                continue;
+            };
+            if let ServerFrame::Event { event, .. } =
+                serde_json::from_str::<ServerFrame>(&text).expect("frame")
+            {
+                if matches(&event) {
+                    return event;
+                }
+                self.pending.push_back(event);
+            }
+        }
     }
 }
 
@@ -1049,6 +1074,329 @@ async fn an_explicit_device_list_compares_the_verified_device_only() {
             )
             .await
             .is_err()
+    );
+    rig.a.stop().await;
+}
+
+/// Opens the owner's UI connection, subscribed so approval cards arrive.
+async fn owner_ui(daemon: &TestDaemon) -> Client {
+    let mut owner = Client::connect(daemon).await;
+    owner.hello().await;
+    owner
+        .request(ClientRequest::Subscribe {
+            topics: vec![Topic::Mcp],
+            since_seq: None,
+        })
+        .await
+        .expect("subscribe to MCP events");
+    owner
+}
+
+/// Waits for the card the owner's daemon raised for this tunnel's call.
+async fn next_approval(owner: &mut Client) -> h4rn_protocol::McpShareApproval {
+    match owner
+        .wait_event(|event| matches!(event, Event::McpShareApprovalRequested { .. }))
+        .await
+    {
+        Event::McpShareApprovalRequested { approval } => approval,
+        other => panic!("unexpected event: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn unsharing_during_an_approval_withdraws_the_card_and_refuses_the_call() {
+    // I1: reading the grant before the wait let an answer to the stale card
+    // run a tool after the owner had already unshared its server.
+    let policy = McpSharePolicy {
+        confirm_all: true,
+        ..McpSharePolicy::default()
+    };
+    let rig = tunnel_rig(
+        |devices, host, key| devices.register_host(host.clone(), key, Some("dev_b".into())),
+        policy,
+        None,
+        None,
+    )
+    .await;
+    let mut owner = owner_ui(&rig.a).await;
+    let session = rig.tunnel.open("local").await.expect("open tunnel");
+
+    let call = {
+        let session = Arc::clone(&session);
+        tokio::spawn(async move {
+            session
+                .request(
+                    "tools/call",
+                    json!({"name": "echo", "arguments": {"message": "after unshare"}}),
+                    Duration::from_secs(10),
+                )
+                .await
+        })
+    };
+    let approval = next_approval(&mut owner).await;
+
+    owner
+        .mcp(McpRequest::Unshare {
+            name: "local".into(),
+            machine: HostId::new("host_b"),
+        })
+        .await
+        .expect("unshare while the card is up");
+
+    // The card is withdrawn through the event the UI listens for.
+    match owner
+        .wait_event(|event| matches!(event, Event::McpShareApprovalResolved { .. }))
+        .await
+    {
+        Event::McpShareApprovalResolved {
+            approval_id,
+            decision,
+        } => {
+            assert_eq!(approval_id, approval.approval_id);
+            assert_eq!(decision, ApprovalDecision::Cancel);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+    // The call never ran, and there is nothing left to approve.
+    assert!(
+        call.await.expect("call task").is_err(),
+        "an unshared call must not run"
+    );
+    match rig
+        .a
+        .mcp
+        .handle(McpRequest::PendingApprovals)
+        .await
+        .expect("list approvals")
+    {
+        ResponseBody::McpApprovals { approvals } => {
+            assert!(
+                approvals.is_empty(),
+                "the withdrawn card is gone: {approvals:?}"
+            )
+        }
+        other => panic!("unexpected approvals response: {other:?}"),
+    }
+    rig.a.stop().await;
+}
+
+#[tokio::test]
+async fn a_policy_change_that_drops_the_tool_during_an_approval_refuses_the_call() {
+    let policy = McpSharePolicy {
+        allowed_tools: Some(vec!["echo".into()]),
+        confirm_all: true,
+        ..McpSharePolicy::default()
+    };
+    let rig = tunnel_rig(
+        |devices, host, key| devices.register_host(host.clone(), key, Some("dev_b".into())),
+        policy,
+        None,
+        None,
+    )
+    .await;
+    let mut owner = owner_ui(&rig.a).await;
+    let session = rig.tunnel.open("local").await.expect("open tunnel");
+
+    let call = {
+        let session = Arc::clone(&session);
+        tokio::spawn(async move {
+            session
+                .request(
+                    "tools/call",
+                    json!({"name": "echo", "arguments": {"message": "dropped"}}),
+                    Duration::from_secs(10),
+                )
+                .await
+        })
+    };
+    let approval = next_approval(&mut owner).await;
+
+    // The owner narrows the grant while the approval waits: `echo` is gone.
+    owner
+        .mcp(McpRequest::Share {
+            name: "local".into(),
+            to_machine: HostId::new("host_b"),
+            policy: McpSharePolicy {
+                allowed_tools: Some(vec!["other".into()]),
+                ..McpSharePolicy::default()
+            },
+        })
+        .await
+        .expect("replace the grant");
+
+    match owner
+        .wait_event(|event| matches!(event, Event::McpShareApprovalResolved { .. }))
+        .await
+    {
+        Event::McpShareApprovalResolved {
+            approval_id,
+            decision,
+        } => {
+            assert_eq!(approval_id, approval.approval_id);
+            assert_eq!(decision, ApprovalDecision::Cancel);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+    assert!(
+        call.await.expect("call task").is_err(),
+        "a tool dropped from the grant must not run"
+    );
+    rig.a.stop().await;
+}
+
+#[tokio::test]
+async fn one_pending_approval_does_not_block_the_next_call_on_the_tunnel() {
+    // I2: the owner loop awaited the approval, so the next tools/call on the
+    // same tunnel sat unanswered behind it.
+    let policy = McpSharePolicy {
+        confirm_all: true,
+        ..McpSharePolicy::default()
+    };
+    let rig = tunnel_rig(
+        |devices, host, key| devices.register_host(host.clone(), key, Some("dev_b".into())),
+        policy,
+        None,
+        None,
+    )
+    .await;
+    let mut owner = owner_ui(&rig.a).await;
+    let session = rig.tunnel.open("local").await.expect("open tunnel");
+
+    let first = {
+        let session = Arc::clone(&session);
+        tokio::spawn(async move {
+            session
+                .request(
+                    "tools/call",
+                    json!({"name": "echo", "arguments": {"message": "first waits"}}),
+                    Duration::from_secs(10),
+                )
+                .await
+        })
+    };
+    let first_card = next_approval(&mut owner).await;
+    assert!(first_card.arguments_preview.contains("first waits"));
+
+    // The second call is read, admitted and raises its own card while the
+    // first is still waiting for the owner.
+    let second = {
+        let session = Arc::clone(&session);
+        tokio::spawn(async move {
+            session
+                .request(
+                    "tools/call",
+                    json!({"name": "echo", "arguments": {"message": "second runs"}}),
+                    Duration::from_secs(10),
+                )
+                .await
+        })
+    };
+    let second_card = next_approval(&mut owner).await;
+    assert_eq!(second_card.tool, "echo");
+    assert!(second_card.arguments_preview.contains("second runs"));
+    assert_ne!(second_card.approval_id, first_card.approval_id);
+
+    rig.a
+        .mcp
+        .handle(McpRequest::RespondApproval {
+            approval_id: second_card.approval_id,
+            decision: ApprovalDecision::Approve,
+        })
+        .await
+        .expect("approve the second call");
+    let ran = second.await.expect("second call task").expect("approved");
+    assert_eq!(ran["content"][0]["text"], "owner:second runs");
+
+    // The first card is still pending until the owner answers it.
+    match rig
+        .a
+        .mcp
+        .handle(McpRequest::PendingApprovals)
+        .await
+        .expect("list approvals")
+    {
+        ResponseBody::McpApprovals { approvals } => {
+            assert_eq!(approvals.len(), 1);
+            assert_eq!(approvals[0].approval_id, first_card.approval_id);
+        }
+        other => panic!("unexpected approvals response: {other:?}"),
+    }
+    rig.a
+        .mcp
+        .handle(McpRequest::RespondApproval {
+            approval_id: first_card.approval_id,
+            decision: ApprovalDecision::Deny,
+        })
+        .await
+        .expect("deny the first call");
+    assert!(first.await.expect("first call task").is_err());
+    rig.a.stop().await;
+}
+
+#[tokio::test]
+async fn dropping_the_caller_withdraws_its_pending_approval() {
+    // I2: a pending card outlived the tunnel that raised it, so the owner
+    // could answer a call whose caller was gone.
+    let policy = McpSharePolicy {
+        confirm_all: true,
+        ..McpSharePolicy::default()
+    };
+    let rig = tunnel_rig(
+        |devices, host, key| devices.register_host(host.clone(), key, Some("dev_b".into())),
+        policy,
+        None,
+        None,
+    )
+    .await;
+    let mut owner = owner_ui(&rig.a).await;
+    let session = rig.tunnel.open("local").await.expect("open tunnel");
+
+    let call = {
+        let session = Arc::clone(&session);
+        tokio::spawn(async move {
+            session
+                .request(
+                    "tools/call",
+                    json!({"name": "echo", "arguments": {"message": "caller hangs up"}}),
+                    Duration::from_secs(30),
+                )
+                .await
+        })
+    };
+    let approval = next_approval(&mut owner).await;
+
+    // The caller drops its tunnel while the owner is deciding.
+    session.shutdown().await;
+
+    // The card is withdrawn through the event the UI listens for.
+    match owner
+        .wait_event(|event| matches!(event, Event::McpShareApprovalResolved { .. }))
+        .await
+    {
+        Event::McpShareApprovalResolved {
+            approval_id,
+            decision,
+        } => {
+            assert_eq!(approval_id, approval.approval_id);
+            assert_eq!(decision, ApprovalDecision::Cancel);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+    match rig
+        .a
+        .mcp
+        .handle(McpRequest::PendingApprovals)
+        .await
+        .expect("list approvals")
+    {
+        ResponseBody::McpApprovals { approvals } => {
+            assert!(approvals.is_empty(), "the card must be gone: {approvals:?}")
+        }
+        other => panic!("unexpected approvals response: {other:?}"),
+    }
+    assert!(
+        call.await.expect("call task").is_err(),
+        "the dropped caller does not get a result"
     );
     rig.a.stop().await;
 }
