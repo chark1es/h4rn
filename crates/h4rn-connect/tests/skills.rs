@@ -411,7 +411,7 @@ async fn the_pull_cursor_never_skips_a_push_that_lands_after_the_read() {
     let user = api_a.actor.user_id;
     let (rows, cursor) = state.store.skill_pull(user, None).await.unwrap();
     assert_eq!(rows.len(), 1);
-    let newest = rows.iter().map(|row| row.server_updated_at).max();
+    let newest = rows.iter().map(|row| row.sync_seq).max();
     assert_eq!(
         cursor, newest,
         "the cursor is derived from the returned rows"
@@ -428,7 +428,8 @@ async fn the_pull_cursor_never_skips_a_push_that_lands_after_the_read() {
 
     // The table-wide maximum is now ahead of pull 1's cursor: the old
     // `skill_cursor` answer would have skipped the second skill.
-    assert!(state.store.skill_cursor(user).await.unwrap() > cursor);
+    let newest = state.store.skill_cursor(user).await.unwrap().unwrap();
+    assert!(newest > cursor.unwrap());
     let (later, _) = state.store.skill_pull(user, cursor).await.unwrap();
     assert_eq!(later.len(), 1, "the later push is still visible");
     assert_eq!(later[0].name, "second");
@@ -441,4 +442,89 @@ async fn the_pull_cursor_never_skips_a_push_that_lands_after_the_read() {
         .unwrap();
     assert!(none.is_empty());
     assert_eq!(same, state.store.skill_cursor(user).await.unwrap());
+}
+
+/// Two concurrent transactions must receive commit-ordered sequences.
+///
+/// `now()` is the transaction start time, not the commit time, so the older
+/// `server_updated_at` cursor could order a slow push before a fast one that
+/// committed first. Here the first transaction holds its clock row lock while
+/// the second tries to push: the second must block, and only after the first
+/// commits may it take the next sequence.
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn concurrent_pushes_are_sequenced_in_commit_order() {
+    use h4rn_connect::crypto::SealedSecret;
+    use h4rn_connect::store::{NewSkillEntry, Store};
+    use std::time::Duration;
+
+    let state = test_state().await;
+    let subject = format!("skills-seq-{}", Uuid::now_v7());
+    let api = TestApi {
+        state: state.clone(),
+        actor: actor(&state, &subject).await,
+    };
+    let user = api.actor.user_id;
+
+    let entry = |skill_id: &'static str, name: &'static str| NewSkillEntry {
+        skill_id,
+        name,
+        description: "demo",
+        version: "0000000000000000000000000000000000000000000000000000000000000000",
+        vector_json: "{}",
+        etag: "0000000000000000000000000000000000000000000000000000000000000000",
+        deleted: false,
+        sealed: SealedSecret {
+            dek_nonce: vec![0; 24],
+            wrapped_dek: vec![0; 48],
+            nonce: vec![0; 24],
+            ciphertext: vec![0; 16],
+        },
+        updated_at: Utc::now(),
+    };
+
+    let mut first = state.store.pool().begin().await.unwrap();
+    Store::upsert_skill_entry_in(&mut first, user, None, &entry("first", "first"))
+        .await
+        .unwrap();
+
+    // The second push races the first. It cannot take a sequence until the
+    // first transaction commits and releases the clock row lock.
+    let store = state.store.clone();
+    let mut second = store.pool().begin().await.unwrap();
+    let mut blocked = tokio::spawn(async move {
+        Store::upsert_skill_entry_in(&mut second, user, None, &entry("second", "second"))
+            .await
+            .unwrap();
+        second.commit().await.unwrap();
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut blocked)
+            .await
+            .is_err(),
+        "the second push must wait for the first transaction to commit"
+    );
+
+    first.commit().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), blocked)
+        .await
+        .expect("the second push unblocks once the first commits")
+        .expect("the second push task panics");
+
+    let (rows, cursor) = store.skill_pull(user, None).await.unwrap();
+    let ids: Vec<&str> = rows.iter().map(|row| row.skill_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["first", "second"],
+        "rows are returned in commit order"
+    );
+    assert_eq!(rows[1].sync_seq, rows[0].sync_seq + 1);
+    assert_eq!(cursor, Some(rows[1].sync_seq));
+
+    let (after_first, _) = store
+        .skill_pull(user, Some(rows[0].sync_seq))
+        .await
+        .unwrap();
+    assert_eq!(after_first.len(), 1);
+    assert_eq!(after_first[0].skill_id, "second");
 }
