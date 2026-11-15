@@ -46,18 +46,16 @@ describe("mobile cleartext policy", () => {
     expect(gradle).toMatch(/manifestPlaceholders\["usesCleartextTraffic"\] = "true"/);
   });
 
-  it("lets iOS reach local, MagicDNS, RFC 1918 and CGNAT candidates", () => {
+  it("keeps iOS ATS to DNS-name exceptions instead of inert CIDR keys", () => {
     const plist = read("apps/mobile/src-tauri/Info.plist");
     expect(plist).toContain("<key>NSAllowsLocalNetworking</key>");
-    for (const host of [
-      "local",
-      "ts.net",
-      "10.0.0.0/8",
-      "172.16.0.0/12",
-      "192.168.0.0/16",
-      "100.64.0.0/10",
-    ]) {
+    for (const host of ["local", "ts.net"]) {
       expect(plist).toContain(`<key>${host}</key>`);
+    }
+    // ATS matches DNS names, not address ranges, so a CIDR key is inert and
+    // must not creep back in as if it excepted private/CGNAT IP literals.
+    for (const cidr of ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"]) {
+      expect(plist).not.toContain(`<key>${cidr}</key>`);
     }
 
     const tauri = JSON.parse(read("apps/mobile/src-tauri/tauri.conf.json")) as {

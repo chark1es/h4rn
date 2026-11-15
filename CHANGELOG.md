@@ -91,8 +91,8 @@ All notable changes to h4rn are recorded here. The format follows
   also resolve through `resolve_inside(…, Existing)`, so a symlink pointing outside the workspace
   is refused instead of followed.
 - **Release mobile builds reach the LAN and a tailnet again (G2).** Android's release network
-  security config `base-config` and iOS ATS (`NSAllowsLocalNetworking`, `.local`, `ts.net`, RFC
-  1918 and CGNAT CIDRs) now permit the cleartext candidates the daemon actually serves. Noise
+  security config `base-config` and iOS ATS (`NSAllowsLocalNetworking`, `.local`, `ts.net`
+  exception domains) now permit the cleartext candidates the daemon actually serves. Noise
   end-to-end encryption with the pinned daemon key is the security boundary, so ws:// adds no
   exposure; the rationale is in `docs/mobile.md` and `docs/transport.md`, and a unit test checks
   both native configs and the candidate-URL builder.
@@ -618,8 +618,9 @@ All notable changes to h4rn are recorded here. The format follows
   can pair again. iOS returns an explicit unimplemented error rather than falling back to
   plaintext.
 - **Native integration**: edge-to-edge window with `env(safe-area-inset-*)`, hardware back mapped
-  onto WebView history, and a network security config that allows cleartext only for loopback and
-  emulator host aliases in release (LAN hosts only in debug).
+  onto WebView history, and a network security config for the cleartext candidates. It originally
+  allowed loopback and emulator host aliases in release (LAN hosts only in debug); G2 below widened
+  the release base config to the LAN and tailnet candidates the daemon actually serves.
 - **Build pipeline** (`scripts/mobile-android.sh`): `init`, `build`, `install`, `run`,
   `screenshot`, `logs` and `daemon` commands. Builds one debug APK per ABI (x86_64 for the
   emulator, aarch64 for phones); `run` starts a fake-harness daemon, wires
@@ -629,9 +630,12 @@ All notable changes to h4rn are recorded here. The format follows
   27.1.12297006; `mobile-ios` builds an unsigned simulator app on `macos-latest`. TestFlight
   signing requirements and the current Android/iOS limitations are documented in
   `docs/mobile.md`.
-- **Verified on the Android emulator**: connect screen, deep-link pairing, online inbox,
-  fake-harness thread with streamed output, Keystore cold-start reuse, QR camera permission,
-  safe-area layout and hardware back. Screenshots are in `apps/mobile/screenshots/`.
+- **Checked on the Android emulator**: a debug APK was built, installed and launched against a
+  fake-harness daemon. Screenshots captured between 11:50 and 11:57 show the connect screen, the
+  online inbox and a fake-harness thread, and logcat was checked for WebView, Tauri and Keystore
+  errors (`apps/mobile/screenshots/`). The QR-scan permission prompt, Keystore cold-start reuse,
+  hardware back and notched safe-area layout were not exercised. CI builds both APKs but does not
+  run the UI; iOS is built only as an unsigned simulator app.
 
 ### Phase 2 — more harnesses, terminal, attachments and IDE mode
 

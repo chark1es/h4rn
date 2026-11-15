@@ -90,6 +90,12 @@ jobs:
       # suites (`orbitid`, and the daemon `remote` test) cannot run here; see
       # docs/release.md.
       - run: cargo test -p h4rn-connect --test postgres --test skills -- --ignored --test-threads=1
+      # The daemon relay paths against an in-process h4rn-connect on this
+      # Postgres, with sessions minted through the relay's own store instead of
+      # an OIDC device grant. Covers relay-only MCP sharing with revocation and
+      # relay pairing that waits for the host's SAS confirmation. The full
+      # OrbitID e2e remains `scripts/test-remote.sh`.
+      - run: cargo test -p h4rn-daemon --test relay_ci -- --ignored --test-threads=1
 
   tauri-desktop:
     name: Tauri desktop crate compiles

@@ -123,11 +123,14 @@ listener to offer them.
 That is why the mobile shells ship OS policies that permit plaintext to the
 hosts those candidates use. Android's release network security config allows
 cleartext in its base config because `<domain-config>` cannot express IP ranges;
-iOS sets `NSAllowsLocalNetworking` and lists `.local`, `ts.net` and the RFC 1918
-and `100.64.0.0/10` ranges as ATS exceptions (required from iOS 17, which stopped
-allowing IP connections by default). Without those entries the phone silently
-falls back to the relay and the "relay and Tailscale at the same time" path
-disappears; see [docs/mobile.md](mobile.md#cleartext-candidates-on-mobile).
+iOS sets `NSAllowsLocalNetworking` for unqualified names and `.local`, and lists
+`.local`/`ts.net` as ATS exception domains for MagicDNS. ATS matches DNS names,
+not address ranges, so private and CGNAT IP literals cannot be excepted with
+CIDR keys; whether iOS 17 admits those raw `ws://` candidates is unverified
+because the iOS app is built only in macOS CI and never run there. This is an
+accepted limitation: a phone that cannot reach an IP candidate falls back to the
+relay, and the "relay and Tailscale at the same time" path disappears for it;
+see [docs/mobile.md](mobile.md#cleartext-candidates-on-mobile).
 
 ### Pairing
 
