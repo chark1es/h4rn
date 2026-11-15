@@ -212,6 +212,10 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: android-actions/setup-android@v3
+        with:
+          # The next step installs the exact SDK packages; the default `tools`
+          # package no longer exists in sdkmanager.
+          packages: ''
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.4
@@ -416,9 +420,12 @@ jobs:
       - name: Write checksums
         run: |
           cd dist
+          # Write outside dist/ so the checksum file is never read and written
+          # in the same pipeline, then move it into place.
           find . -type f ! -name SHA256SUMS ! -name '*.sha256' -print0 \
             | sort -z \
-            | xargs -0 sha256sum >SHA256SUMS
+            | xargs -0 sha256sum >"$RUNNER_TEMP/sums.txt"
+          mv "$RUNNER_TEMP/sums.txt" SHA256SUMS
       - name: Upload assets and publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

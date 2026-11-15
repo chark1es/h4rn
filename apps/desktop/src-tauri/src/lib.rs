@@ -17,10 +17,12 @@ mod commands;
 mod daemon;
 mod diagnostics;
 mod platform;
+mod updates;
 
 use tauri::{Manager, RunEvent};
 
 pub use daemon::DaemonState;
+pub use updates::UpdateState;
 
 /// Build and run the desktop shell.
 pub fn run() {
@@ -44,6 +46,7 @@ pub fn run() {
                 .build(),
         )
         .manage(DaemonState::default())
+        .manage(UpdateState::default())
         .invoke_handler(tauri::generate_handler![
             commands::daemon_endpoints,
             commands::auth_loopback,
@@ -51,6 +54,10 @@ pub fn run() {
             commands::keychain_get,
             commands::keychain_set,
             commands::keychain_delete,
+            updates::app_update_status,
+            updates::app_update_check,
+            updates::app_update_set_auto,
+            updates::app_update_install,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -79,6 +86,8 @@ pub fn run() {
                     }
                 });
             }
+
+            updates::spawn_background_checks(handle.clone());
 
             tauri::async_runtime::spawn(async move {
                 daemon::bootstrap(handle).await;

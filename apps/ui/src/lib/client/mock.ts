@@ -19,6 +19,8 @@ import type {
   Event,
   FsTurnChanges,
   HarnessKind,
+  HarnessUpdateEvent,
+  HarnessVersionInfo,
   HostSummary,
   Item,
   LimitStatus,
@@ -1856,6 +1858,8 @@ class MockDaemon {
   private schedules: ResumeSchedule[] = [];
   private limitHistory: LimitStatus[] = [];
   private proxyProfiles: ProxyProfile[] = [];
+  private harnessVersions: HarnessVersionInfo[] = mockHarnessVersions();
+  private harnessUpdating = new Set<HarnessKind>();
   private proxyCatalogs = new Map<string, ProxyModelCatalog>();
 
   constructor(
@@ -2114,7 +2118,7 @@ class MockDaemon {
         this.ok(frame.id, {
           type: "hello",
           protocol_version: 1,
-          server_version: "0.1.0-mock",
+          server_version: "1.0.0-mock",
           device_id: "mock-device",
           local_host: "atlas",
           hosts: this.hosts,
@@ -2722,6 +2726,12 @@ class MockDaemon {
       case "set_auto_resume_policy":
         this.resumePolicy = body.policy;
         this.ok(frame.id, { type: "ack" });
+        return;
+      case "list_harness_versions":
+        this.ok(frame.id, { type: "harness_versions", harnesses: this.harnessVersions });
+        return;
+      case "update_harness":
+        this.updateHarness(frame.id, body.harness);
         return;
       case "list_proxy_profiles":
         this.ok(frame.id, { type: "proxy_profiles", profiles: this.proxyProfiles });
@@ -4086,6 +4096,75 @@ class MockDaemon {
     this.sendEvent(seq, event);
   }
 
+  private sendHarness(event: HarnessUpdateEvent): void {
+    if (this.disposed) return;
+    this.handlers.onMessage(wire({ kind: "harness_event", event }));
+  }
+
+  /** Streams a believable update, then re-reads the version like the daemon. */
+  private updateHarness(id: number, harness: HarnessKind): void {
+    const row = this.harnessVersions.find((candidate) => candidate.harness === harness);
+    const runnable = row && row.method.kind !== "manual" && row.method.kind !== "unavailable";
+    if (!row || !runnable) {
+      this.err(
+        id,
+        "unsupported",
+        "h4rn cannot update this harness automatically on this host.",
+        "Run the command shown in Settings yourself.",
+      );
+      return;
+    }
+    if (this.harnessUpdating.has(harness)) {
+      this.err(id, "conflict", "This harness is already updating.", "Wait for it to finish.");
+      return;
+    }
+    if (harness === "claude_code" && this.mockTurnRunning("claude_code")) {
+      this.err(
+        id,
+        "conflict",
+        "Claude Code is working on a turn.",
+        "Finish or stop the turn, then try again.",
+      );
+      return;
+    }
+    this.harnessUpdating.add(harness);
+    this.ok(id, { type: "ack" });
+    const lines =
+      row.method.kind === "self_update"
+        ? ["Checking for updates…", `Downloading ${row.latest}…`, "Installed."]
+        : [`added 1 package in 4s`, `${row.method.kind === "npm" ? "npm" : "bun"}: updated`];
+    lines.forEach((line, index) => {
+      this.later(350 * (index + 1), () =>
+        this.sendHarness({ type: "output", harness, stream: "stdout", line }),
+      );
+    });
+    this.later(350 * (lines.length + 1), () => {
+      const from = row.installed;
+      const to = row.latest;
+      this.harnessVersions = this.harnessVersions.map((candidate) =>
+        candidate.harness === harness
+          ? { ...candidate, installed: to, update_available: false }
+          : candidate,
+      );
+      this.harnessUpdating.delete(harness);
+      this.sendHarness({
+        type: "finished",
+        harness,
+        ok: true,
+        message: `Updated ${harnessName(harness)} from ${from} to ${to}.`,
+        from_version: from,
+        to_version: to,
+      });
+    });
+  }
+
+  private mockTurnRunning(harness: HarnessKind): boolean {
+    for (const thread of this.threads.values()) {
+      if (thread.summary.harness === harness && thread.summary.tab === "working") return true;
+    }
+    return false;
+  }
+
   private ok(id: number, result: ResponseBody): void {
     if (this.disposed) return;
     const frame: ServerFrame = { kind: "response", id, result: { Ok: result } };
@@ -4106,6 +4185,58 @@ class MockDaemon {
     }, ms);
     this.timers.add(timer);
   }
+}
+
+function harnessName(harness: HarnessKind): string {
+  return {
+    claude_code: "Claude Code",
+    codex: "Codex",
+    opencode: "OpenCode",
+    antigravity: "Antigravity",
+  }[harness];
+}
+
+/** Four harnesses in four states: self-update, npm, hand-run, and no source. */
+function mockHarnessVersions(): HarnessVersionInfo[] {
+  return [
+    {
+      harness: "claude_code",
+      installed: "2.1.323",
+      latest: "2.2.0",
+      update_available: true,
+      method: {
+        kind: "self_update",
+        program: "/home/you/.local/bin/claude",
+        args: ["update"],
+        command: "claude update",
+      },
+      path: "/home/you/.local/bin/claude",
+    },
+    {
+      harness: "codex",
+      installed: "0.168.0",
+      latest: "0.169.0",
+      update_available: true,
+      method: { kind: "npm", package: "@openai/codex", command: "npm i -g @openai/codex@latest" },
+      path: "/usr/local/lib/node_modules/@openai/codex/bin/codex",
+    },
+    {
+      harness: "opencode",
+      installed: "2.2.7",
+      latest: "2.3.0",
+      update_available: true,
+      method: { kind: "manual", command: "npm i -g opencode-ai@latest" },
+      path: "/opt/homebrew/bin/opencode",
+    },
+    {
+      harness: "antigravity",
+      installed: "1.5.8",
+      latest: null,
+      update_available: false,
+      method: { kind: "unavailable" },
+      path: "/usr/local/bin/agy",
+    },
+  ];
 }
 
 export function createMockTransport(scenario: string, attempt = 0): Transport {

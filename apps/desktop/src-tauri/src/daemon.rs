@@ -27,6 +27,7 @@ pub const LOCAL_PORT: u16 = 47800;
 ///
 /// WSL2 forwards loopback listeners to Windows, so this is reachable as
 /// `127.0.0.1:47801` without a proxy.
+#[cfg(windows)]
 pub const WSL_PORT: u16 = 47801;
 
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(800);
@@ -59,6 +60,7 @@ pub enum EndpointKind {
     /// This Windows/macOS/Linux machine, via the bundled sidecar.
     Local,
     /// A WSL2 distribution on this Windows machine.
+    #[cfg(windows)]
     Wsl,
 }
 
@@ -379,6 +381,11 @@ mod tests {
     #[test]
     fn websocket_urls_point_at_the_daemon_route() {
         assert_eq!(ws_url(LOCAL_PORT), "ws://127.0.0.1:47800/ws");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wsl_websocket_url_uses_the_wsl_port() {
         assert_eq!(ws_url(WSL_PORT), "ws://127.0.0.1:47801/ws");
     }
 

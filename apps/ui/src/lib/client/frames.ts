@@ -1,4 +1,4 @@
-import type { ProxyEvent, UsageStreamEvent } from "@/gen";
+import type { HarnessUpdateEvent, ProxyEvent, UsageStreamEvent } from "@/gen";
 
 /**
  * Ephemeral server frames do not belong to the journal, so they bypass the
@@ -31,4 +31,19 @@ export function onProxyFrame(listener: ProxyListener): () => void {
 
 export function emitProxyFrame(event: ProxyEvent): void {
   for (const listener of proxyListeners) listener(event);
+}
+
+type HarnessListener = (event: HarnessUpdateEvent) => void;
+
+const harnessListeners = new Set<HarnessListener>();
+
+export function onHarnessFrame(listener: HarnessListener): () => void {
+  harnessListeners.add(listener);
+  return () => {
+    harnessListeners.delete(listener);
+  };
+}
+
+export function emitHarnessFrame(event: HarnessUpdateEvent): void {
+  for (const listener of harnessListeners) listener(event);
 }

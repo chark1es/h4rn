@@ -69,6 +69,13 @@ pub struct EngineConfig {
     /// How long a path may go without any authenticated packet before it is
     /// declared dead.
     pub path_timeout_ms: u64,
+    /// How long a path whose handshake finished may wait for the daemon's first
+    /// reply (`Welcome`) before it is declared dead. The daemon records a new
+    /// pairing durably between the handshake and `Welcome`, which on a slow or
+    /// loaded disk takes far longer than a probe round trip, so this is a
+    /// separate, longer limit than `path_timeout_ms`. It matches the daemon's
+    /// own pre-attach handshake deadline.
+    pub establish_timeout_ms: u64,
     /// How long to coalesce acknowledgements.
     pub ack_delay_ms: u64,
     /// RTT margin a same-class path must beat by to trigger a switch back.
@@ -91,6 +98,7 @@ impl EngineConfig {
             rto_ms: 250,
             probe_interval_ms: 250,
             path_timeout_ms: 1_000,
+            establish_timeout_ms: 10_000,
             ack_delay_ms: 40,
             switch_margin_ms: 40,
             switch_confirmations: 2,
@@ -131,6 +139,11 @@ struct PathRuntime {
     last_packet_ms: u64,
     pending_ping: Option<(u64, u64)>,
     failure: Option<String>,
+    /// Whether the handshake in flight mixed the one-time PSK in.
+    used_psk: bool,
+    /// Whether an authenticated record has arrived on the current channel.
+    /// Until then the longer `establish_timeout_ms` applies.
+    confirmed: bool,
 }
 
 /// One client transport session across several paths.
@@ -223,6 +236,8 @@ impl TransportEngine {
                 last_packet_ms: 0,
                 pending_ping: None,
                 failure: None,
+                used_psk: false,
+                confirmed: false,
             },
         );
         id
@@ -254,7 +269,24 @@ impl TransportEngine {
     }
 
     /// Starts the handshake on a path whose socket just opened.
+    ///
+    /// A resume ticket proves this device completed a handshake before, so the
+    /// daemon has already allowlisted it, and a paired device must never mix
+    /// the one-time pairing secret into a handshake. Even without a ticket the
+    /// initiator starts with plain `IK`: a device that was admitted but lost
+    /// its ticket (the socket dropped first) is allowlisted and the secret is
+    /// long consumed, so a stale `IKpsk2` would never get a reply. Only a
+    /// `NotPaired` reject restarts the path with the secret, once.
     pub fn on_path_open(&mut self, path: PathId, now_ms: u64) -> Result<Vec<Effect>, EngineError> {
+        self.start_handshake(path, now_ms, false)
+    }
+
+    fn start_handshake(
+        &mut self,
+        path: PathId,
+        now_ms: u64,
+        with_psk: bool,
+    ) -> Result<Vec<Effect>, EngineError> {
         if self.closed {
             return Err(EngineError::Closed);
         }
@@ -263,15 +295,13 @@ impl TransportEngine {
             .get_mut(&path)
             .ok_or(EngineError::UnknownPath(path))?;
         let mut effects = Vec::new();
-        // A resume ticket proves this device completed a handshake before, so
-        // the daemon has already allowlisted it. A paired device must never mix
-        // the one-time pairing secret into a handshake: that is only for a
-        // device that has no allowlist entry yet.
-        let psk = if self.ticket.is_some() {
-            None
-        } else {
+        let psk = if with_psk && self.ticket.is_none() {
             self.config.psk.as_ref()
+        } else {
+            None
         };
+        runtime.used_psk = psk.is_some();
+        runtime.confirmed = false;
         let handshake_config = HandshakeConfig {
             session_id: &self.config.session_id,
             local_static: self.config.identity.noise_secret(),
@@ -282,6 +312,7 @@ impl TransportEngine {
         runtime.handshake = Some(handshake);
         runtime.channel = None;
         runtime.state = TransportPathState::Probing;
+        runtime.failure = None;
         runtime.last_packet_ms = now_ms;
         runtime.pending_ping = None;
         effects.push(Effect::Send {
@@ -343,6 +374,19 @@ impl TransportEngine {
                     .and_then(RejectReason::from_u8)
                     .map(RejectReason::as_str)
                     .unwrap_or("peer rejected the path");
+                let retry_with_psk = packet.body.first().copied().and_then(RejectReason::from_u8)
+                    == Some(RejectReason::NotPaired)
+                    && self.config.psk.is_some()
+                    && self.ticket.is_none()
+                    && self
+                        .paths
+                        .get(&path)
+                        .is_some_and(|runtime| !runtime.used_psk);
+                if retry_with_psk {
+                    // The plain `IK` was refused as unpaired. Restart this
+                    // path's handshake once, now mixing in the secret.
+                    return self.start_handshake(path, now_ms, true);
+                }
                 self.fail_path(path, reason.to_owned());
                 let mut effects = Vec::new();
                 self.recover(now_ms, &mut effects);
@@ -478,6 +522,7 @@ impl TransportEngine {
         let handshake = runtime.handshake.take().expect("handshake exists");
         let channel = handshake.into_channel(self.config.rekey)?;
         runtime.channel = Some(channel);
+        runtime.confirmed = false;
         runtime.state = TransportPathState::Ready;
         let token = self.ticket.map(|ticket| ticket.token);
         let (recv_next, send_next) = self.session.resume_state();
@@ -512,7 +557,10 @@ impl TransportEngine {
                 return Err(EngineError::Protocol("record before handshake"));
             };
             match channel.open(ciphertext) {
-                Ok(plaintext) => plaintext,
+                Ok(plaintext) => {
+                    runtime.confirmed = true;
+                    plaintext
+                }
                 Err(error) => {
                     self.fail_path(path, format!("record did not authenticate: {error}"));
                     return Err(EngineError::Noise(error));
@@ -797,7 +845,14 @@ impl TransportEngine {
                 {
                     return None;
                 }
-                if runtime.channel.is_some() && silent > self.config.path_timeout_ms {
+                let limit = if runtime.confirmed {
+                    self.config.path_timeout_ms
+                } else {
+                    self.config
+                        .establish_timeout_ms
+                        .max(self.config.path_timeout_ms)
+                };
+                if runtime.channel.is_some() && silent > limit {
                     Some(*id)
                 } else {
                     None
@@ -1167,5 +1222,74 @@ mod tests {
         responder
             .read(&packet.body)
             .expect("a resumed handshake message 1 must be readable as plain IK");
+    }
+
+    #[test]
+    fn a_not_paired_reject_restarts_the_path_once_with_the_psk() {
+        // The plain `IK` is refused as unpaired; the engine restarts that
+        // path's handshake once, now mixing in the secret, and never twice.
+        let daemon = DeviceIdentity::generate().unwrap();
+        let identity = DeviceIdentity::generate().unwrap();
+        let session = [4u8; SESSION_ID_LEN];
+        let psk = [7u8; TOKEN_LEN];
+        let mut config = EngineConfig::new(session, identity, daemon.public().noise_public);
+        config.psk = Some(psk);
+        let mut engine = TransportEngine::new(config).unwrap();
+        let path = engine.add_path(PathSpec {
+            kind: TransportPathKind::Direct,
+            endpoint: "127.0.0.1:1".into(),
+        });
+        let message_one = |effects: Vec<Effect>| {
+            let packet = effects
+                .into_iter()
+                .find_map(|effect| match effect {
+                    Effect::Send { packet, .. } => Some(packet),
+                    _ => None,
+                })
+                .expect("the engine sends handshake message 1");
+            Packet::decode(&packet).unwrap().body
+        };
+        let read_as_daemon = |body: &[u8], psk: Option<&[u8; TOKEN_LEN]>| {
+            Handshake::start_responder(&HandshakeConfig {
+                session_id: &session,
+                local_static: daemon.noise_secret(),
+                remote_static: None,
+                psk,
+            })
+            .unwrap()
+            .read(body)
+        };
+        let first = message_one(engine.on_path_open(path, 0).unwrap());
+        assert!(
+            read_as_daemon(&first, None).is_ok(),
+            "first attempt is plain IK"
+        );
+
+        let reject = Packet {
+            kind: PacketKind::Reject,
+            session_id: session,
+            body: vec![RejectReason::NotPaired as u8],
+        }
+        .encode();
+        let second = message_one(engine.on_packet(path, &reject, 10).unwrap());
+        assert!(
+            read_as_daemon(&second, Some(&psk)).is_ok(),
+            "the retry must be IKpsk2 with the configured secret"
+        );
+        assert!(
+            read_as_daemon(&second, None).is_err(),
+            "the retry must not be readable as plain IK"
+        );
+
+        // A second NotPaired is final: the path fails instead of looping.
+        let effects = engine.on_packet(path, &reject, 20).unwrap();
+        assert!(
+            effects.iter().all(|effect| !matches!(
+                effect,
+                Effect::Send { packet, .. }
+                    if Packet::decode(packet).map(|p| p.kind) == Ok(PacketKind::Handshake)
+            )),
+            "a second reject must not trigger another handshake"
+        );
     }
 }

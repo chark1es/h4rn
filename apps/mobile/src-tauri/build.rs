@@ -29,10 +29,14 @@ fn link_ios_secret_store() {
             return;
         }
 
-        let manifest_dir = PathBuf::from(
-            std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set"),
-        );
-        let source = manifest_dir.join("native").join("ios");
+        let manifest_dir =
+            PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set"));
+        // The package lives beside `src-tauri`, at `apps/mobile/native/ios`.
+        let source = manifest_dir
+            .parent()
+            .expect("src-tauri has a parent")
+            .join("native")
+            .join("ios");
 
         // The Swift package imports Tauri, so give it the same local copy of
         // the iOS API package that plugin build scripts receive.

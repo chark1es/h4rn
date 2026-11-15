@@ -35,6 +35,7 @@ mod common;
 pub mod connect;
 pub mod forge;
 mod fs;
+mod harness;
 mod ids;
 pub mod mcp;
 mod proxy;
@@ -61,6 +62,9 @@ pub use fs::{
     DiffAgainst, FileEntry, FileEntryKind, FsChangeKind, FsCreateKind, FsDeleteResult, FsDiff,
     FsFileContent, FsListing, FsSearchBatch, FsSearchMatch, FsTurnChanges, FsTurnFile,
     FsWriteConflict, FsWriteResult, GitFileStatus,
+};
+pub use harness::{
+    HarnessOutputStream, HarnessUpdateEvent, HarnessUpdateMethod, HarnessVersionInfo,
 };
 pub use ids::{
     AttachmentId, AttachmentIdError, DeviceId, HostId, SubagentId, TerminalId, ThreadId, TurnId,

@@ -688,6 +688,16 @@ own backoff timer and stops arming the timer when nothing is pending. The tunnel
 now advertises `resources.subscribe: false`, matching the fact that the tunnel has no
 `resources/subscribe` method; the earlier docs claimed that operation was guarded.
 
+**Amendment (council round 6).** `IKpsk2` mixes the PSK only into the responder's message 2, so
+message 1 cannot prove possession and round 5 let a wrong secret allowlist the key and burn the
+real one. A PSK-authorised new device is now provisional: nothing is consumed, allowed or hooked
+at message 1 or handshake completion. Possession is proven by the first transport record
+decrypting under the PSK-derived keys; only then does the daemon consume the secret, run the
+pairing hook and allow the device, before any `Welcome` or ticket. The initiator always opens
+with plain `IK` and falls back to `IKpsk2` once, after a `NotPaired` reject, so a device that
+lost its ticket after being admitted no longer retries a consumed secret forever. The policy is
+re-read after the handshake so a mid-handshake revoke is honoured.
+
 ## ADR-038: A subagent is a child thread, not a second session type
 
 **Status:** Accepted
@@ -979,3 +989,50 @@ back: a failed write keeps the key revoked in memory and appends it to
 anyone and then clears after a successful rewrite. The sidecar is the retry that
 survives a crash, and the UI still sees the error. Peer-host updates log the error
 and skip admitting the peer rather than pretending the write succeeded.
+
+### Round-6 follow-up amendments
+
+**The first record is validated before anyone is paired, and the pre-attach phase has a deadline.**
+The `Open` record is decoded before the authorisation step, and a PSK-authorised device that
+presents a resume token is refused with `NotPaired` before pairing (a legitimate client never sends
+both). Any failure to open the first record gets the same `NotPaired` reject for every key, so it
+cannot distinguish allowed from unknown keys. A correct secret presented by an already-allowlisted
+device leaves the secret armed, matching the round-5 rule that paired devices do not consume it.
+`SecureService::accept` is bounded by `handshake_timeout` (10 s) and the post-reject restart wait by
+`restart_timeout` (5 s), enforced inside the transport so no caller can forget the deadline.
+
+**The client waits longer for the first reply than for a probe.** Between the handshake and
+`Welcome` the daemon records a new pairing durably (registry write, pairing-file delete). The
+client's 1 s `path_timeout_ms` applied as soon as the channel existed, so on a slow or loaded disk
+it declared the path dead, dropped the late `Welcome` and ended with "transport client stopped"
+once the daemon closed the idle socket. A path now uses `establish_timeout_ms` (10 s) until its
+first authenticated record arrives, and `path_timeout_ms` after that.
+
+## ADR-043: App updates live in the shell; harness updates live in the daemon
+
+**Status:** Accepted
+
+Two things called "update" have different owners. The **desktop app** is replaced by the Tauri
+updater, so the shell owns the check, the six-hour timer, the download and the relaunch, and the
+view only renders `h4rn://update-checked` and `h4rn://update-progress`. A check that cannot run
+(no endpoint, the `__H4RN_UPDATER_PUBKEY__` development placeholder, offline) is logged and never
+shown: an update notice is a convenience, not an error. "Later" is a view-side snooze that the next
+check clears. The saved auto-check choice is the view's (`localStorage`), pushed to the shell at
+startup, and the shell waits 20 seconds before its first check so that choice arrives first.
+
+The **harness CLIs** are installation facts of a host, so the daemon owns them. It reads each CLI's
+version through the existing detection, asks the npm registry for the latest version of
+`@anthropic-ai/claude-code`, `@openai/codex` and `opencode-ai` (cached three hours; an offline
+registry is cached for five minutes and reported as unknown, never as an error), and classifies the
+install: the CLI's own updater first (`claude update`, `opencode upgrade`), then `npm i -g` for a
+`node_modules` install or `bun add -g` under the bun global directory, otherwise a command shown to
+the person and never run (Homebrew, a distro package, a manual copy). Antigravity has no registry
+source, so its latest version is unknown and no update is offered.
+
+`UpdateHarness` replaces a binary a live session may be running, so it needs the admin scope and is
+refused while any thread on that harness has an active turn. The command runs as a child process
+with no shell and its arguments as an array, streams output as transient `HarnessEvent` frames
+(not replayed after a reconnect; the client re-reads the versions), then re-detects the version so
+the result names what is on disk, not what the registry promised. The registry client and the
+process runner are injectable seams, so no test touches the network or a real global CLI.
+

@@ -8,7 +8,8 @@
 # `h4rn-daemon` remote test. The test signs a daemon in with the device grant,
 # pairs a native device, creates a thread over the relay with `FakeHarness`,
 # switches from a direct path to the relay after the direct socket dies, and
-# revokes the device. Everything is torn down with
+# revokes the device. OrbitID is built from $H4RN_ORBITID_SOURCE (default
+# $HOME/.t3/projects/orbitid). Everything is torn down with
 # `docker compose down -v --remove-orphans`, including on failure.
 set -euo pipefail
 
@@ -18,7 +19,7 @@ cd "$ROOT"
 for arg in "$@"; do
   case "$arg" in
     -h|--help)
-      sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -135,7 +136,7 @@ build_orbitid() {
   if "$DOCKER" image inspect "$H4RN_ORBITID_IMAGE" >/dev/null 2>&1; then
     return 0
   fi
-  local source="${H4RN_ORBITID_SOURCE:-/home/chark1es/.t3/projects/orbitid}"
+  local source="${H4RN_ORBITID_SOURCE:-$HOME/.t3/projects/orbitid}"
   if [[ ! -f "$source/Dockerfile" ]]; then
     cat >&2 <<EOF
 --- ${H4RN_ORBITID_IMAGE} is not built and no OrbitID source tree was found.

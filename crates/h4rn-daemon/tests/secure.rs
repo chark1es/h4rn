@@ -166,7 +166,7 @@ impl SecureClient {
         )];
         let mut client = Client::connect(ClientConfig::new(engine, paths)).expect("start client");
         let mut ticket = None;
-        let established = tokio::time::timeout(Duration::from_secs(10), async {
+        let established = tokio::time::timeout(Duration::from_secs(60), async {
             loop {
                 match client.recv().await {
                     Some(ClientEvent::Established(value)) => {
@@ -523,6 +523,32 @@ async fn secure_transport_psk_pairs_a_new_device() {
         None,
         "a completed pairing must consume the one-time secret"
     );
+    client.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_slow_durable_pairing_write_does_not_fail_the_pairing() {
+    // The daemon records a pairing durably (registry write, pairing-file
+    // delete) between the handshake and `Welcome`. On a slow or loaded disk
+    // that can take longer than the client's 1 s established-path liveness
+    // limit; a legitimate pairing must still complete.
+    let psk = [0x5cu8; TOKEN_LEN];
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_psk(psk),
+    ));
+    let daemon = boot(Arc::clone(&service)).await;
+    let registry = Arc::clone(&daemon.devices);
+    service.set_pairing_hook(Arc::new(move |key| {
+        std::thread::sleep(Duration::from_millis(1_300));
+        registry
+            .complete_direct(key)
+            .map_err(|error| error.to_string())
+    }));
+    let phone = device_identity();
+    let mut client = SecureClient::connect(&daemon, phone.clone(), Some(psk)).await;
+    client.hello().await;
+    assert!(service.is_allowed(&phone.public().noise_public));
     client.close().await;
     daemon.stop().await;
 }
@@ -1183,14 +1209,146 @@ async fn expect_refused_without_secret(daemon: &TestDaemon, identity: DeviceIden
     .await
     .expect("timed out waiting for the rejection");
     assert!(
-        outcome.contains("not paired") || outcome.contains("transport client stopped"),
-        "unexpected rejection reason: {outcome}"
+        outcome.contains("device is not paired"),
+        "the daemon must answer a plain unpaired device with NotPaired, got: {outcome}"
     );
     assert!(
         !daemon.service.is_allowed(&public),
         "a device without the secret ended up on the allowlist"
     );
     client.close().await;
+}
+
+/// Dials with `psk` and reports whether the session was ever established
+/// within `window`.
+/// Dial with `psk` and wait for the outcome: `Ok(())` is a session,
+/// `Err(reason)` is the handshake failure or refusal. Waits on that event, never on
+/// a fixed window, so a loaded machine cannot turn "not answered yet" into
+/// "refused".
+async fn dial_outcome(
+    daemon: &TestDaemon,
+    identity: DeviceIdentity,
+    psk: [u8; TOKEN_LEN],
+) -> Result<(), String> {
+    let mut engine = EngineConfig::new(
+        [23u8; SESSION_ID_LEN],
+        identity,
+        daemon.service.public_identity().noise_public,
+    );
+    engine.psk = Some(psk);
+    let paths = vec![ClientPath::websocket(
+        TransportPathKind::Direct,
+        format!("ws://{}/secure", daemon.addr),
+    )];
+    let mut client = Client::connect(ClientConfig::new(engine, paths)).expect("start client");
+    let outcome = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            match client.recv().await {
+                Some(ClientEvent::Established(_)) => return Ok(()),
+                Some(ClientEvent::Closed { reason }) => return Err(reason),
+                // A wrong secret fails the initiator's IKpsk2 attempt (it
+                // cannot open message 2): the first handshake error is the
+                // terminal answer. The client keeps retrying with backoff and
+                // never reports `Closed`, so this is the event to wait on.
+                Some(ClientEvent::Error { message, .. }) if message.contains("handshake") => {
+                    return Err(message);
+                }
+                Some(_) => {}
+                None => return Err("the client stopped without a reason".to_owned()),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for the handshake outcome");
+    client.close().await;
+    outcome
+}
+
+fn assert_untouched(daemon: &TestDaemon, key: &[u8; 32], armed: [u8; TOKEN_LEN]) {
+    assert!(
+        !daemon.service.is_allowed(key),
+        "a device without the secret was allowlisted"
+    );
+    assert_eq!(
+        daemon.service.psk(),
+        Some(armed),
+        "a wrong secret burned the armed one"
+    );
+    assert_eq!(
+        daemon.devices.scopes_for_key(key),
+        None,
+        "a wrong secret recorded a device"
+    );
+}
+
+#[tokio::test]
+async fn a_wrong_psk_is_refused_and_touches_nothing() {
+    // Round 6 P0: IKpsk2 message 1 cannot prove the secret. A wrong one used to
+    // allowlist the key, burn the secret and record the device.
+    for armed_via_set_psk in [false, true] {
+        let armed = [0x7eu8; TOKEN_LEN];
+        let options = SecureOptions::new(device_identity());
+        let service = Arc::new(SecureService::new(if armed_via_set_psk {
+            options
+        } else {
+            options.with_psk(armed)
+        }));
+        if armed_via_set_psk {
+            service.set_psk(armed);
+        }
+        let daemon = boot(Arc::clone(&service)).await;
+        let attacker = device_identity();
+        let key = attacker.public().noise_public;
+        let refusal = dial_outcome(&daemon, attacker.clone(), [0x11u8; TOKEN_LEN]).await;
+        match refusal {
+            Ok(()) => panic!("a wrong secret established a session"),
+            Err(reason) => assert!(
+                reason.contains("handshake failed") || reason.contains("device is not paired"),
+                "a wrong secret must fail the handshake, got: {reason}"
+            ),
+        }
+        // The wrong-secret client could not finish the handshake, so it never
+        // sent the first record that would let the daemon record the device.
+        assert_untouched(&daemon, &key, armed);
+
+        // The same key cannot come back over plain IK either.
+        expect_refused_without_secret(&daemon, attacker).await;
+        assert_untouched(&daemon, &key, armed);
+
+        // And the failed attempt did not lock the real device out.
+        let phone = device_identity();
+        let mut client = SecureClient::connect(&daemon, phone.clone(), Some(armed)).await;
+        client.hello().await;
+        assert!(service.is_allowed(&phone.public().noise_public));
+        assert_eq!(service.psk(), None, "the correct pairing consumes the PSK");
+        assert!(
+            daemon
+                .devices
+                .scopes_for_key(&phone.public().noise_public)
+                .is_some()
+        );
+        client.close().await;
+        daemon.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn a_paired_device_that_lost_its_ticket_reconnects_plainly() {
+    // Round 6 N1: the device was admitted and the secret consumed, but the
+    // socket dropped before the ticket arrived. It still holds the stale
+    // secret and no ticket; it must not retry IKpsk2 forever.
+    let stale = [0x44u8; TOKEN_LEN];
+    let identity = device_identity();
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity())
+            .with_policy(PairingPolicy::new([identity.public().noise_public])),
+    ));
+    let daemon = boot(Arc::clone(&service)).await;
+    assert_eq!(service.psk(), None);
+    let mut client = SecureClient::connect(&daemon, identity, Some(stale)).await;
+    client.hello().await;
+    client.close().await;
+    daemon.stop().await;
 }
 
 #[tokio::test]
@@ -1585,5 +1743,70 @@ async fn an_upload_is_owned_by_the_device_that_opened_it() {
 
     resumed.close().await;
     b.close().await;
+    daemon.stop().await;
+}
+
+/// Round 6 follow-up: an attacker armed with a wrong secret reaches the
+/// forged-first-record branch over a real WebSocket, is told `NotPaired`, and
+/// touches nothing.
+#[tokio::test]
+async fn a_forged_open_record_over_the_websocket_is_refused_and_touches_nothing() {
+    use futures::{SinkExt, StreamExt};
+    use h4rn_transport::noise::{Handshake, HandshakeConfig};
+    use h4rn_transport::wire::{Packet, PacketKind, RejectReason};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let secret = [0x5au8; TOKEN_LEN];
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_psk(secret),
+    ));
+    let daemon = boot(Arc::clone(&service)).await;
+    let attacker = device_identity();
+    let session = [31u8; SESSION_ID_LEN];
+    let wrong = [0x11u8; TOKEN_LEN];
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}/secure", daemon.addr))
+        .await
+        .expect("connect");
+    let (_handshake, message) = Handshake::start_initiator(&HandshakeConfig {
+        session_id: &session,
+        local_static: attacker.noise_secret(),
+        remote_static: Some(&service.public_identity().noise_public),
+        psk: Some(&wrong),
+    })
+    .expect("start");
+    let send = |kind, body: Vec<u8>| {
+        Message::Binary(
+            Packet {
+                kind,
+                session_id: session,
+                body,
+            }
+            .encode()
+            .into(),
+        )
+    };
+    ws.send(send(PacketKind::Handshake, message))
+        .await
+        .expect("send message 1");
+    let _msg2 = ws.next().await.expect("message 2").expect("ws");
+    ws.send(send(PacketKind::Record, vec![0xAB; 64]))
+        .await
+        .expect("send forged record");
+    let answer = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .expect("the daemon must answer the forged record")
+        .expect("a frame")
+        .expect("ws");
+    let Message::Binary(bytes) = answer else {
+        panic!("expected a binary reject, got {answer:?}");
+    };
+    let packet = Packet::decode(&bytes).expect("packet");
+    assert_eq!(packet.kind, PacketKind::Reject);
+    assert_eq!(
+        packet.body.first().copied().and_then(RejectReason::from_u8),
+        Some(RejectReason::NotPaired)
+    );
+    assert!(!service.is_allowed(&attacker.public().noise_public));
+    assert_eq!(service.psk(), Some(secret), "the secret must stay armed");
     daemon.stop().await;
 }

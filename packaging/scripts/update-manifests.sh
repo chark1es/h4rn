@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Fill the winget, Homebrew cask and AUR templates from release artifacts.
 #
-#   packaging/scripts/update-manifests.sh --version 0.1.0 --dist dist --out packaging-out
+#   packaging/scripts/update-manifests.sh --version 1.0.0 --dist dist --out packaging-out
 #
 # The output is PR-ready but never published: CI uploads it as a workflow
 # artifact and a release asset so a maintainer can review and submit it.

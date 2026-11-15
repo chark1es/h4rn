@@ -83,6 +83,12 @@ impl PairingPolicy {
     ///
     /// Returns `Ok(true)` when the device is newly paired through the PSK and
     /// the caller must persist it, `Ok(false)` when it was already known.
+    ///
+    /// `used_psk` only says the initiator *claimed* the PSK pattern. `IKpsk2`
+    /// mixes the PSK into the responder's message 2, so message 1 proves
+    /// nothing: `Ok(true)` is a provisional result, and the caller must see the
+    /// first transport record decrypt before it consumes the secret or allows
+    /// the device.
     pub fn authorize(&self, key: &[u8; KEY_LEN], used_psk: bool) -> Result<bool, RejectReason> {
         if self.revoked.contains(key) {
             return Err(RejectReason::Revoked);

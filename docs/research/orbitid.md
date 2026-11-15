@@ -6,8 +6,8 @@ Research notes for wiring `h4rn-connect` (Rust, axum + sqlx) to OrbitID.
 
 | Legend | Path | What it is |
 |---|---|---|
-| `[TS]` | `/home/chark1es/.t3/projects/orbitid` | Git `main`: TypeScript + Hono backend (`packages/server`), the released/reference implementation. `docker-compose.yml` and `Dockerfile` here build this. |
-| `[Rust]` | `/home/chark1es/.t3/worktrees/orbitid/t3-f011ae99-f1d7062ac35686f3` | Uncommitted Rust rewrite (axum + sqlx + Postgres) under review. Same HTTP contract, a few intentional additions. |
+| `[TS]` | `~/.t3/projects/orbitid` | Git `main`: TypeScript + Hono backend (`packages/server`), the released/reference implementation. `docker-compose.yml` and `Dockerfile` here build this. |
+| `[Rust]` | `~/.t3/worktrees/orbitid/t3-f011ae99-f1d7062ac35686f3` | Uncommitted Rust rewrite (axum + sqlx + Postgres) under review. Same HTTP contract, a few intentional additions. |
 
 Statements marked **verified** were checked by running the TS server locally on a throwaway
 Postgres database (`NODE_ENV=development`, port 4111) and driving the full flow with `curl`;
