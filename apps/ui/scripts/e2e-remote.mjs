@@ -593,10 +593,27 @@ async function main() {
     if (new URL(page.url()).origin !== uiOrigin) {
       throw new Error(`the redirect flow did not return to the UI: ${page.url()}`);
     }
-    const qr = page.getByRole("img", { name: "Pairing QR code for atlas" });
+    // The host is the machine's own loopback UI, so it gets its own page
+    // connected directly with the admin-scoped local token. The phone page
+    // pairs over the relay and, until the host confirms, cannot reach the
+    // daemon at all; it therefore cannot confirm its own pairing.
+    const hostUi = await context.newPage();
+    hostUi.setDefaultTimeout(20_000);
+    hostUi.on("console", (message) => logs.push(`host: ${message.type()} ${message.text()}\n`));
+    const loopbackUrl =
+      `${uiOrigin}/?token=${encodeURIComponent(token)}` +
+      `&daemon=${encodeURIComponent(`ws://127.0.0.1:${daemonPort}/ws`)}`;
+    await hostUi.goto(loopbackUrl);
+    await hostUi.locator('[title="Hosts and connection"]').click();
+    await hostUi
+      .getByRole("menu", { name: "Hosts" })
+      .getByRole("menuitem", { name: /Pair a device/ })
+      .click();
+    await hostUi.getByRole("heading", { name: /^Pair a device/ }).waitFor();
+    const qr = hostUi.getByRole("img", { name: "Pairing QR code for atlas" });
     await qr.waitFor({ timeout: 30_000 });
-    await page.getByRole("button", { name: "Copy link", exact: true }).click();
-    const pairingLink = await page.evaluate(() => window.__h4rnCopied ?? null);
+    await hostUi.getByRole("button", { name: "Copy link", exact: true }).click();
+    const pairingLink = await hostUi.evaluate(() => window.__h4rnCopied ?? null);
     if (!pairingLink?.startsWith("h4rn://pair?")) {
       throw new Error(`the pairing link was not copied: ${pairingLink}`);
     }
@@ -606,12 +623,19 @@ async function main() {
     );
     await page.getByText(/Paired with atlas/).waitFor({ timeout: 30_000 });
 
-    // The relay only announced this device's key. The host must compare the
-    // code and confirm before the relay can use it; the browser is also the
-    // host here, so the same page shows its own confirmation card.
-    await page.getByTestId("host-sas").first().waitFor({ timeout: 30_000 });
-    await page.getByTestId("confirm-pairing").first().click();
-    await page.getByTestId("host-sas").first().waitFor({ state: "detached", timeout: 20_000 });
+    // The relay only announced this device's key, so the phone's handshake is
+    // still refused. The host compares the code and confirms; only then does
+    // the daemon allowlist the key and the relay let the phone through.
+    await waitForLog(logs, "NotPaired", 30_000);
+    await hostUi.getByTestId("host-sas").first().waitFor({ timeout: 30_000 });
+    const hostCardSas = (await hostUi.getByTestId("host-sas").first().textContent())?.trim();
+    if (!hostCardSas || !/^\d{4} \d{4} \d{4}$/.test(hostCardSas)) {
+      throw new Error(`the host did not show a 12-digit code: ${hostCardSas}`);
+    }
+    console.log(`--- host SAS: ${hostCardSas}`);
+    await hostUi.getByTestId("confirm-pairing").first().click();
+    await hostUi.getByTestId("host-sas").first().waitFor({ state: "detached", timeout: 20_000 });
+    await hostUi.close();
 
     // Signing in and pairing happen on the Settings route. Booting the app
     // again at the thread route with no query string is a full reload, so the
