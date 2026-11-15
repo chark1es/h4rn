@@ -5,6 +5,29 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### Council round 6: a wrong PSK no longer pairs a device (P0, N1–N4)
+
+- **A wrong one-time secret no longer admits a device or burns the real one (P0).** `IKpsk2`
+  mixes the PSK only into the responder's message 2, so the daemon could not verify possession at
+  message 1, yet it consumed the secret, allowlisted the key and ran the pairing hook there. Anyone
+  who knew the daemon's public key could pair with a random secret during a `pair --direct`
+  window, lock the real phone out and later connect over plain `IK`. A PSK-authorised new device is
+  now provisional: possession is proven by the first transport record decrypting under the
+  PSK-derived keys, and only then is the secret consumed, the device recorded and allowed, before
+  any `Welcome` or ticket. A record that does not decrypt is refused as `NotPaired` and nothing is
+  touched.
+- **A paired client is no longer wedged by a stale secret (N1).** A device admitted just before
+  its socket dropped kept retrying `IKpsk2` with a consumed secret and got no reject. The
+  initiator (native and wasm) now always opens with plain `IK` and restarts once with `IKpsk2`
+  only after a `NotPaired` reject.
+- **Revocation is read afresh during the handshake (N2).** The policy was cloned once before
+  message 1; it is now re-read after the handshake, so a mid-handshake `revoke()` refuses the
+  session.
+- **The unpaired-device refusal test is exact (N3).** It now requires `device is not paired`.
+- **Docs (N4).** `docs/transport.md`, ADR-042 and the round-5 entry describe possession being
+  proven by the first transport record and the plain-first fallback; the round-4 K2 backoff
+  wording is corrected.
+
 ### Council round 5: per-device handshake patterns, self-driving peer retries and honest tunnel capabilities (M1–M3)
 
 - **An armed one-time PSK no longer locks out paired devices (M1).** The daemon passed the live
@@ -14,7 +37,7 @@ All notable changes to h4rn are recorded here. The format follows
   daemon reads message 1 with a no-PSK responder first and replays it through an `IKpsk2`
   responder only when that cannot use it. A paired device connects and leaves the secret armed; a
   new device pairs and consumes it; a device without the secret is refused. A client holding a
-  resume ticket never sends the PSK.
+  resume ticket never sends the PSK. (Round 6 corrected where possession is proven: see below.)
 - **Peer admission retries on its own timer (M2).** A failed `register_host` used to wait for the
   next topology report, which may never arrive while the peer set is stable. The directory keeps
   the last merged set and a background driver re-applies it on the bounded backoff deadline; the
@@ -38,7 +61,7 @@ All notable changes to h4rn are recorded here. The format follows
   directory skipped any peer already in its in-memory set, so a `register_host` write failure
   stuck for the rest of the run. It now decides from the registry: a peer is skipped only when a
   `host` entry exists for its key and the transport already allows it; otherwise it retries with
-  an immediate first attempt and exponential backoff (500 ms for the second attempt, doubling, capped at 30 s). A
+  an immediate first retry, then exponential backoff (500 ms before the third attempt, doubling, capped at 30 s). A
   `client` key is still never re-roled.
 - **A phantom direct pairing is refused, and an undeletable QR cannot be re-armed (K3).** The
   transport pairing hook is fallible: if the new device's registry entry cannot be written, the

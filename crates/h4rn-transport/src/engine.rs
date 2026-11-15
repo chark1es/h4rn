@@ -131,6 +131,8 @@ struct PathRuntime {
     last_packet_ms: u64,
     pending_ping: Option<(u64, u64)>,
     failure: Option<String>,
+    /// Whether the handshake in flight mixed the one-time PSK in.
+    used_psk: bool,
 }
 
 /// One client transport session across several paths.
@@ -223,6 +225,7 @@ impl TransportEngine {
                 last_packet_ms: 0,
                 pending_ping: None,
                 failure: None,
+                used_psk: false,
             },
         );
         id
@@ -254,7 +257,24 @@ impl TransportEngine {
     }
 
     /// Starts the handshake on a path whose socket just opened.
+    ///
+    /// A resume ticket proves this device completed a handshake before, so the
+    /// daemon has already allowlisted it, and a paired device must never mix
+    /// the one-time pairing secret into a handshake. Even without a ticket the
+    /// initiator starts with plain `IK`: a device that was admitted but lost
+    /// its ticket (the socket dropped first) is allowlisted and the secret is
+    /// long consumed, so a stale `IKpsk2` would never get a reply. Only a
+    /// `NotPaired` reject restarts the path with the secret, once.
     pub fn on_path_open(&mut self, path: PathId, now_ms: u64) -> Result<Vec<Effect>, EngineError> {
+        self.start_handshake(path, now_ms, false)
+    }
+
+    fn start_handshake(
+        &mut self,
+        path: PathId,
+        now_ms: u64,
+        with_psk: bool,
+    ) -> Result<Vec<Effect>, EngineError> {
         if self.closed {
             return Err(EngineError::Closed);
         }
@@ -263,15 +283,12 @@ impl TransportEngine {
             .get_mut(&path)
             .ok_or(EngineError::UnknownPath(path))?;
         let mut effects = Vec::new();
-        // A resume ticket proves this device completed a handshake before, so
-        // the daemon has already allowlisted it. A paired device must never mix
-        // the one-time pairing secret into a handshake: that is only for a
-        // device that has no allowlist entry yet.
-        let psk = if self.ticket.is_some() {
-            None
-        } else {
+        let psk = if with_psk && self.ticket.is_none() {
             self.config.psk.as_ref()
+        } else {
+            None
         };
+        runtime.used_psk = psk.is_some();
         let handshake_config = HandshakeConfig {
             session_id: &self.config.session_id,
             local_static: self.config.identity.noise_secret(),
@@ -282,6 +299,7 @@ impl TransportEngine {
         runtime.handshake = Some(handshake);
         runtime.channel = None;
         runtime.state = TransportPathState::Probing;
+        runtime.failure = None;
         runtime.last_packet_ms = now_ms;
         runtime.pending_ping = None;
         effects.push(Effect::Send {
@@ -343,6 +361,19 @@ impl TransportEngine {
                     .and_then(RejectReason::from_u8)
                     .map(RejectReason::as_str)
                     .unwrap_or("peer rejected the path");
+                let retry_with_psk = packet.body.first().copied().and_then(RejectReason::from_u8)
+                    == Some(RejectReason::NotPaired)
+                    && self.config.psk.is_some()
+                    && self.ticket.is_none()
+                    && self
+                        .paths
+                        .get(&path)
+                        .is_some_and(|runtime| !runtime.used_psk);
+                if retry_with_psk {
+                    // The plain `IK` was refused as unpaired. Restart this
+                    // path's handshake once, now mixing in the secret.
+                    return self.start_handshake(path, now_ms, true);
+                }
                 self.fail_path(path, reason.to_owned());
                 let mut effects = Vec::new();
                 self.recover(now_ms, &mut effects);
