@@ -586,9 +586,12 @@ All notable changes to h4rn are recorded here. The format follows
   27.1.12297006; `mobile-ios` builds an unsigned simulator app on `macos-latest`. TestFlight
   signing requirements and the current Android/iOS limitations are documented in
   `docs/mobile.md`.
-- **Verified on the Android emulator**: connect screen, deep-link pairing, online inbox,
-  fake-harness thread with streamed output, Keystore cold-start reuse, QR camera permission,
-  safe-area layout and hardware back. Screenshots are in `apps/mobile/screenshots/`.
+- **Checked on the Android emulator**: a debug APK was built, installed and launched against a
+  fake-harness daemon. Screenshots captured between 11:50 and 11:57 show the connect screen, the
+  online inbox and a fake-harness thread, and logcat was checked for WebView, Tauri and Keystore
+  errors (`apps/mobile/screenshots/`). The QR-scan permission prompt, Keystore cold-start reuse,
+  hardware back and notched safe-area layout were not exercised. CI builds both APKs but does not
+  run the UI; iOS is built only as an unsigned simulator app.
 
 ### Phase 2 — more harnesses, terminal, attachments and IDE mode
 
