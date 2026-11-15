@@ -264,7 +264,7 @@ impl HarnessSession for FakeSession {
             let usage = usage_for(&input.text);
             let text = input.text;
             tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
                 if let Some((written, stats)) = apply_write_directive(&workspace, &text) {
                     send(
                         &sender,
@@ -441,6 +441,7 @@ fn usage_for(text: &str) -> Usage {
         cached_input_tokens: 64,
         cost_micros: 0,
         duration_ms: 0,
+        ..Usage::default()
     }
 }
 

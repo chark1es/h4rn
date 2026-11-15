@@ -248,6 +248,7 @@ impl CodexParser {
             cached_input_tokens: u64_field(last, "cachedInputTokens"),
             cost_micros: 0,
             duration_ms: self.usage.duration_ms,
+            ..Usage::default()
         };
         self.usage = usage.clone();
         self.usage_emitted = true;

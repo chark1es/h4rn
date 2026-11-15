@@ -1512,8 +1512,6 @@ fn request_name(request: &ClientRequest) -> &'static str {
         ClientRequest::McpRemove { .. } => "mcp_remove",
         ClientRequest::SkillsList { .. } => "skills_list",
         ClientRequest::SkillsSetEnabled { .. } => "skills_set_enabled",
-        ClientRequest::ProxyProbe { .. } => "proxy_probe",
-        ClientRequest::ProxyConfigure { .. } => "proxy_configure",
         ClientRequest::UsageQuery { .. } => "usage_query",
         ClientRequest::ForgeListAccounts => "forge_list_accounts",
         ClientRequest::ForgeAddAccount { .. } => "forge_add_account",

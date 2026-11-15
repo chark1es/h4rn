@@ -182,6 +182,9 @@ function usage(input: number, output: number, durationMs: number, costMicros: nu
     cached_input_tokens: Math.round(input * 0.42),
     cost_micros: costMicros,
     duration_ms: durationMs,
+    // The daemon derives these; the mock fixes a plausible tool-free share.
+    generation_ms: Math.round(durationMs * 0.8),
+    tps: Math.round(output / (durationMs * 0.0008)),
   };
 }
 
@@ -497,6 +500,7 @@ function summary(input: {
     resume_at: input.resumeAtMs === undefined ? null : iso(input.resumeAtMs),
     ttft_ms: input.ttftMs ?? 640,
     context_window: input.contextWindow ?? 200_000,
+    context_fill_percent: 6,
     limit:
       input.limitResetAtMs === undefined
         ? null
@@ -1520,6 +1524,8 @@ function buildSubagents(scenario: string): Map<string, SubagentView> {
           cached_input_tokens: 6_000,
           cost_micros: 0,
           duration_ms: 214_000,
+          generation_ms: 180_000,
+          tps: 50,
         },
         files_changed: [
           { path: "src/auth/session.ts", status: "M" },
@@ -2202,6 +2208,7 @@ class MockDaemon {
           limit: null,
           ttft_ms: 0,
           context_window: 200_000,
+          context_fill_percent: 0,
         };
         this.threads.set(id, { summary: thread, events: [], wire: [] });
         this.ok(frame.id, {
@@ -4016,6 +4023,8 @@ class MockDaemon {
             cached_input_tokens: 0,
             cost_micros: 0,
             duration_ms: elapsed,
+            generation_ms: elapsed,
+            tps: 0,
           },
           files_changed: [],
           error: null,

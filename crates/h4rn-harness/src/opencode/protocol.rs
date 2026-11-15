@@ -870,6 +870,7 @@ fn step_usage(data: &Value, duration_ms: u64) -> Usage {
         cached_input_tokens: u64_field(&tokens["cache"], "read"),
         cost_micros: cost_micros(&data["cost"]),
         duration_ms,
+        ..Usage::default()
     }
 }
 
@@ -881,6 +882,7 @@ fn session_usage(data: &Value, duration_ms: u64) -> Usage {
         cached_input_tokens: u64_field(&tokens["cache"], "read"),
         cost_micros: cost_micros(&data["cost"]),
         duration_ms,
+        ..Usage::default()
     }
 }
 

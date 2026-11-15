@@ -63,6 +63,34 @@ jobs:
       - run: bun run --cwd apps/ui test
       - run: bun run --cwd apps/ui build
 
+  connect-postgres:
+    name: Connect Postgres integration tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: h4rn
+          POSTGRES_PASSWORD: h4rn-test-password
+          POSTGRES_DB: h4rn
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U h4rn -d h4rn"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      H4RN_TEST_DATABASE_URL: postgres://h4rn:h4rn-test-password@127.0.0.1:5432/h4rn
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: Swatinem/rust-cache@v2
+      # The `#[ignore]`d suites that need only Postgres. The OrbitID-backed
+      # suites (`orbitid`, and the daemon `remote` test) cannot run here; see
+      # docs/release.md.
+      - run: cargo test -p h4rn-connect --test postgres --test skills -- --ignored --test-threads=1
+
   tauri-desktop:
     name: Tauri desktop crate compiles
     runs-on: ubuntu-24.04

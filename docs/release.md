@@ -280,6 +280,20 @@ Windows bundles are built from WSL with `scripts/desktop-build-windows.sh build`
 screenshots it and confirms the sidecar exits. macOS bundles require a Mac, and
 iOS requires macOS plus Xcode.
 
+## 8a. Suites that run only through scripts
+
+CI runs the Postgres-only `#[ignore]`d suites (`h4rn-connect` `postgres` and
+`skills`) in the `connect-postgres` job against a `postgres:16` service. No
+daemon test needs Postgres alone. These suites need a real OrbitID, which CI
+does not have, so they run only through scripts before a release:
+
+| Suite | Command |
+|---|---|
+| `h4rn-connect` `orbitid` (OIDC, device grant, issuer checks) | `./scripts/test-connect.sh --orbitid` |
+| `h4rn-daemon` `remote` (device-grant sign-in, pairing, relay) | `./scripts/test-remote.sh` |
+
+Both need Docker and an OrbitID image (`H4RN_ORBITID_SOURCE`).
+
 ## 9. Release checklist
 
 1. `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`

@@ -10,6 +10,8 @@ const USAGE: Usage = {
   cached_input_tokens: 10,
   cost_micros: 1200,
   duration_ms: 900,
+  generation_ms: 900,
+  tps: 0,
 };
 
 const TOOL: ToolCall = {

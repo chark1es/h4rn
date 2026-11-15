@@ -29,6 +29,14 @@ export type BootConfig = {
   remote: boolean;
 };
 
+/**
+ * The mock daemon (`?mock=1`) exists for `bun run dev`, tests and screenshots.
+ * Both operands are build-time constants, so a production build folds this to
+ * `false` and drops the mock modules unless it opts in with
+ * `VITE_H4RN_MOCK=1`.
+ */
+export const MOCK_ALLOWED = import.meta.env.DEV || import.meta.env.VITE_H4RN_MOCK === "1";
+
 export function readBootConfig(): BootConfig {
   if (typeof window === "undefined") {
     return {
@@ -50,7 +58,7 @@ export function readBootConfig(): BootConfig {
   const pairing = params.get("pair") ?? peekSecret(PAIRING_URI_KEY);
   const active = readActiveRemote();
   return {
-    mock: params.get("mock") === "1",
+    mock: MOCK_ALLOWED && params.get("mock") === "1",
     scenario: params.get("scenario") ?? "default",
     // `preparePlatform()` moves a `?token=` bootstrap value into the platform
     // secret store and strips it from the address bar before this runs. The
@@ -92,7 +100,7 @@ function readDaemonUrl(value: string | null): string | null {
 export function createClientFromEnv(): H4rnClient {
   const config = readBootConfig();
 
-  if (config.mock) {
+  if (MOCK_ALLOWED && config.mock) {
     const transportFactory: TransportFactory = (context) =>
       createMockTransport(config.scenario, context.attempt);
     const options: ClientOptions = {

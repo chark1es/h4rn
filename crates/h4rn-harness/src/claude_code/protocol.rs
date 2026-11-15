@@ -698,6 +698,7 @@ fn map_usage(raw: &UsageRaw, total_cost_usd: Option<f64>, duration_ms: u64) -> U
         cached_input_tokens: cache_read,
         cost_micros: cost_micros(total_cost_usd),
         duration_ms,
+        ..Usage::default()
     }
 }
 

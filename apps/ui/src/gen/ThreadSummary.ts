@@ -79,6 +79,11 @@ ttft_ms: number | null,
  */
 context_window: number | null, 
 /**
+ * Share of the context window the thread has filled, 0-100, when the
+ * window is known. Derived here so clients only format it.
+ */
+context_fill_percent: number | null, 
+/**
  * Whether the thread is raising a hand.
  */
 needs_attention: boolean, 

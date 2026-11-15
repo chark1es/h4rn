@@ -373,6 +373,7 @@ impl ThreadRecord {
             usage: self.meta.usage.clone(),
             ttft_ms: self.ttft_ms,
             context_window: self.context_window,
+            context_fill_percent: self.meta.usage.context_fill_percent(self.context_window),
             needs_attention: needs_attention(&self.state, now, settings),
             unread: tab == ThreadTab::Done && !self.state.acknowledged,
             resume_at: self.resume_at,
@@ -2348,6 +2349,16 @@ impl Inner {
                             turn.set_final_usage(&usage);
                             Some(turn.finish(now, status, meter.prices(), &record.meta.model))
                         };
+                        if let Some(metered) = &metered {
+                            // The meter owns the generation time (wall minus
+                            // tool time); the thread's TPS derives from it.
+                            record.meta.usage.generation_ms = record
+                                .meta
+                                .usage
+                                .generation_ms
+                                .saturating_add(metered.generation_ms);
+                            record.meta.usage.refresh_tps();
+                        }
                         if let Some(metered) = metered
                             && let Err(error) = meter.record_turn(context, &metered).await
                         {

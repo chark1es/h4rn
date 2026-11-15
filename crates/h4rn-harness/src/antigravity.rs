@@ -1203,6 +1203,7 @@ fn usage_from_acp(usage: &AcpUsage, duration_ms: u64) -> Usage {
         cached_input_tokens: usage.cached_read_tokens,
         cost_micros: 0,
         duration_ms,
+        ..Usage::default()
     }
 }
 

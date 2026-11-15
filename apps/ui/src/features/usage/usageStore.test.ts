@@ -145,6 +145,8 @@ describe("usage stream", () => {
         cached_input_tokens: 0,
         cost_micros: 0,
         duration_ms: 1_000,
+        generation_ms: 1_000,
+        tps: 0,
       },
       ttft_ms: 420,
       tps: 4,

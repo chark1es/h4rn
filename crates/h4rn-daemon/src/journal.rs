@@ -516,6 +516,7 @@ mod tests {
             usage: Usage::default(),
             ttft_ms: None,
             context_window: None,
+            context_fill_percent: None,
             needs_attention: false,
             unread: false,
             resume_at: None,

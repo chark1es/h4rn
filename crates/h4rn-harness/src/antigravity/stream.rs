@@ -416,6 +416,7 @@ fn usage_from_stream(raw: &Value, duration_ms: u64) -> Usage {
         cached_input_tokens: cache,
         cost_micros: 0,
         duration_ms,
+        ..Usage::default()
     }
 }
 

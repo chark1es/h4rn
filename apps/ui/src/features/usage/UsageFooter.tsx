@@ -19,27 +19,23 @@ export function UsageFooter({ threadId }: { threadId: string }) {
   if (!usage) return null;
 
   const total = usage.input_tokens + usage.output_tokens;
-  const tps =
-    live?.tps ?? (usage.duration_ms > 0 ? usage.output_tokens / (usage.duration_ms / 1000) : 0);
+  const tps = live?.tps ?? usage.tps;
   const ttft = live?.ttft_ms ?? summary?.ttft_ms ?? 0;
   const active = live?.elapsed_ms ?? usage.duration_ms;
-  const context = summary?.context_window ?? 0;
-  const filled = context > 0 ? Math.min(100, Math.round((total / context) * 100)) : 0;
+  const filled = summary?.context_fill_percent ?? null;
 
   return (
     <div className="q-usage-foot q-num">
       <span>{tokens(total)} tokens</span>
       <span>{cost(usage.cost_micros)} est.</span>
-      <span>
-        {tps > 0 ? Math.round(tps) : tokensPerSecond(usage.output_tokens, usage.duration_ms)} tok/s
-      </span>
+      <span>{tokensPerSecond(tps)} tok/s</span>
       {isPhone ? null : <span>TTFT {firstToken(ttft)}</span>}
       {isPhone ? null : <span>{duration(active)} active</span>}
       {isPhone ? null : <span className="grow" />}
-      {context > 0 ? (
+      {filled !== null ? (
         <span>
           <span className="q-ctxbar" aria-hidden>
-            <i style={{ width: `${Math.max(filled, 2)}%` }} />
+            <i style={{ width: `${filled}%` }} />
           </span>
           {filled}% context
         </span>
