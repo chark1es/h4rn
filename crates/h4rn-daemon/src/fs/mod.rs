@@ -345,7 +345,7 @@ impl FsService {
                             .map(to_utc),
                         conflict: Some(FsWriteConflict {
                             expected_etag: base_etag.map(str::to_owned),
-                            current_etag: text::etag(&bytes),
+                            current_etag: Some(text::etag(&bytes)),
                             current_content: decoded.as_ref().map(|text| text.text.clone()),
                             current_encoding: decoded
                                 .map(|text| text.encoding.to_owned())
@@ -353,6 +353,23 @@ impl FsService {
                         }),
                     });
                 }
+                // The file the edit was based on is gone (deleted or moved
+                // mid-edit). Recreating it silently would resurrect a file
+                // someone removed on purpose, so report a conflict with no
+                // current etag; the client can retry as a create.
+                let _ = self.audit(device, "write-conflict", &root, &rel_path, "deleted");
+                return Ok(FsWriteResult {
+                    path: rel_path,
+                    etag: String::new(),
+                    size_bytes: 0,
+                    modified_at: None,
+                    conflict: Some(FsWriteConflict {
+                        expected_etag: base_etag.map(str::to_owned),
+                        current_etag: None,
+                        current_content: None,
+                        current_encoding: "utf-8".into(),
+                    }),
+                });
             }
         } else if current_etag.is_some() {
             // The caller asked to create a new file and it already exists.
@@ -366,7 +383,7 @@ impl FsService {
                 modified_at: None,
                 conflict: Some(FsWriteConflict {
                     expected_etag: None,
-                    current_etag: text::etag(&bytes),
+                    current_etag: Some(text::etag(&bytes)),
                     current_content: decoded.as_ref().map(|text| text.text.clone()),
                     current_encoding: decoded
                         .map(|text| text.encoding.to_owned())

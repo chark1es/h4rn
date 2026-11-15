@@ -50,6 +50,28 @@ impl SqliteEventStore {
         Ok(Self { pool })
     }
 
+    /// Appends `events` inside a caller-owned transaction, so a caller can make
+    /// the append atomic with writes of its own. The caller commits.
+    pub async fn append_in(
+        tx: &mut Transaction<'_, sqlx::Sqlite>,
+        thread_id: &ThreadId,
+        events: &[ThreadEvent],
+    ) -> Result<Vec<StoredEvent>, StoreError> {
+        let current: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(seq), 0) FROM thread_events WHERE thread_id = ?",
+        )
+        .bind(thread_id.as_str())
+        .fetch_one(&mut **tx)
+        .await?;
+
+        let mut stored = Vec::with_capacity(events.len());
+        let start = current.max(0) as u64 + 1;
+        for (seq, event) in (start..).zip(events) {
+            stored.push(insert_event(tx, thread_id, seq, event).await?);
+        }
+        Ok(stored)
+    }
+
     /// Borrows the underlying pool for projections and diagnostics.
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
@@ -68,18 +90,7 @@ impl EventStore for SqliteEventStore {
         }
 
         let mut tx = self.pool.begin().await?;
-        let current: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(MAX(seq), 0) FROM thread_events WHERE thread_id = ?",
-        )
-        .bind(thread_id.as_str())
-        .fetch_one(&mut *tx)
-        .await?;
-
-        let mut stored = Vec::with_capacity(events.len());
-        let start = current.max(0) as u64 + 1;
-        for (seq, event) in (start..).zip(events) {
-            stored.push(insert_event(&mut tx, thread_id, seq, event).await?);
-        }
+        let stored = Self::append_in(&mut tx, thread_id, events).await?;
         tx.commit().await?;
         Ok(stored)
     }

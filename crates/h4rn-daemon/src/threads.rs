@@ -894,7 +894,14 @@ impl ThreadManager {
         let now = Utc::now();
         if let Some(active_turn_id) = record.active.as_ref().map(|active| active.turn_id.clone()) {
             // A turn is running: the message waits its turn, and the thread
-            // stays Working. `MessageReceived` records the user activity.
+            // stays Working. `MessageReceived` records the user activity. Any
+            // armed resume is now stale (the new message is the next turn), so
+            // cancel it rather than let it fire a duplicate prompt.
+            if record.scheduled_limit.take().is_some()
+                && let Some(meter) = self.inner.meter.get()
+            {
+                let _ = meter.cancel_schedule(thread_id).await;
+            }
             record.queued.push_back(UserInput {
                 text: text.clone(),
                 attachments: harness_attachments,
@@ -2608,21 +2615,14 @@ impl Inner {
             return Ok(None);
         }
         if record.active.is_some() {
-            let thread_id = record.meta.thread_id.clone();
-            let _ = self
-                .emit(
-                    &mut record,
-                    Vec::new(),
-                    vec![Event::Error {
-                        thread_id: Some(thread_id),
-                        message: "auto-resume found the thread already running".into(),
-                        hint: Some(
-                            "The schedule was left in place; it retries on the next tick".into(),
-                        ),
-                        retryable: true,
-                    }],
-                )
-                .await;
+            // A turn is already running (a manual resume, or the limited turn
+            // itself has not finished). Wait quietly: the schedule stays armed
+            // and is re-checked on the next tick, and `send` cancels it when a
+            // new turn supersedes it. Emitting here would repeat every second.
+            tracing::debug!(
+                thread_id = %record.meta.thread_id,
+                "auto-resume due while the thread is active; waiting"
+            );
             return Ok(None);
         }
 

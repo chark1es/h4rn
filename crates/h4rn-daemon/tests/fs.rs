@@ -198,7 +198,7 @@ fn write_conflict_returns_current_content_instead_of_clobbering() {
         .expect("write");
     let conflict = conflict.conflict.expect("conflict payload");
     assert_eq!(conflict.current_content.as_deref(), Some("theirs\n"));
-    assert_ne!(conflict.current_etag, first.etag);
+    assert_ne!(conflict.current_etag.as_deref(), Some(first.etag.as_str()));
     assert_eq!(
         fs::read_to_string(fixture.workspace.join("doc.md")).expect("file"),
         "theirs\n",
@@ -380,4 +380,71 @@ async fn watcher_reports_a_change_once_a_watch_exists() {
     .await
     .expect("watcher event within timeout");
     assert_eq!(change.change, h4rn_protocol::FsChangeKind::Modified);
+}
+
+#[cfg(unix)]
+#[test]
+fn create_refuses_a_dangling_symlink_leaf_that_points_outside() {
+    let fixture = Fixture::new();
+    let outside = fixture.dir.path().join("not-yet.txt");
+    std::os::unix::fs::symlink(&outside, fixture.workspace.join("trap.txt")).expect("symlink");
+
+    let error = fixture
+        .service
+        .create(
+            fixture.workspace(),
+            "trap.txt",
+            FsCreateKind::File,
+            Some("test"),
+        )
+        .expect_err("dangling symlink must not be followed");
+    assert!(matches!(error, FsError::Forbidden(_)), "got {error:?}");
+    assert!(
+        !outside.exists(),
+        "nothing may be created outside the workspace"
+    );
+
+    let error = fixture
+        .service
+        .write(fixture.workspace(), "trap.txt", "pwned", None, Some("test"))
+        .expect_err("write through a dangling link must fail");
+    assert!(matches!(error, FsError::Forbidden(_)), "got {error:?}");
+    assert!(!outside.exists());
+}
+
+#[test]
+fn saving_a_file_deleted_mid_edit_reports_a_conflict_instead_of_recreating_it() {
+    let fixture = Fixture::new();
+    fixture.write("gone.md", "original\n");
+    let opened = fixture
+        .service
+        .read(fixture.workspace(), "gone.md")
+        .expect("read");
+    fs::remove_file(fixture.workspace.join("gone.md")).expect("delete");
+
+    let result = fixture
+        .service
+        .write(
+            fixture.workspace(),
+            "gone.md",
+            "mine\n",
+            opened.etag.as_deref(),
+            Some("test"),
+        )
+        .expect("write");
+    let conflict = result.conflict.expect("deleted file must conflict");
+    assert_eq!(conflict.current_etag, None);
+    assert_eq!(conflict.current_content, None);
+    assert_eq!(conflict.expected_etag, opened.etag);
+    assert!(
+        !fixture.workspace.join("gone.md").exists(),
+        "the file must stay deleted"
+    );
+
+    // Keep-mine retries as a create (no base etag) and succeeds.
+    let retry = fixture
+        .service
+        .write(fixture.workspace(), "gone.md", "mine\n", None, Some("test"))
+        .expect("retry");
+    assert!(retry.conflict.is_none());
 }

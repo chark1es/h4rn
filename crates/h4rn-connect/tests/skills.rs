@@ -52,6 +52,7 @@ async fn test_state() -> AppState {
 }
 
 struct Actor {
+    user_id: Uuid,
     seed: [u8; 32],
     access: String,
 }
@@ -116,6 +117,7 @@ async fn actor(state: &AppState, subject: &str) -> Actor {
         .await
         .expect("issue session");
     Actor {
+        user_id: user.id,
         seed,
         access: issued.tokens.access_token,
     }
@@ -368,4 +370,75 @@ fn request_with(
     body: serde_json::Value,
 ) -> Request<Body> {
     request(method, path, actor, Some(body))
+}
+
+/// A push that lands after a pull read its rows must not be skipped by the
+/// cursor that pull returned. The old code read the cursor with a second
+/// `MAX(server_updated_at)` query, so a push between the two reads advanced the
+/// cursor past a row the pull never returned.
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn the_pull_cursor_never_skips_a_push_that_lands_after_the_read() {
+    let state = test_state().await;
+    let subject = format!("skills-cursor-{}", Uuid::now_v7());
+    let api_a = TestApi {
+        state: state.clone(),
+        actor: actor(&state, &subject).await,
+    };
+    let api_b = TestApi {
+        state: state.clone(),
+        actor: actor(&state, &subject).await,
+    };
+    let (_dir_a, registry_a) = registry().await;
+    let (_dir_b, registry_b) = registry().await;
+    let machine_a = registry_a.machine_id().await.unwrap();
+    let machine_b = registry_b.machine_id().await.unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let source_of = |name: &str| h4rn_protocol::SkillSource::LocalFolder {
+        path: format!("/skills/{name}"),
+    };
+
+    let one = make_skill(source.path(), "first", "one");
+    registry_a
+        .insert(&one, &source_of("first"), Utc::now())
+        .await
+        .unwrap();
+    h4rn_skills::sync::sync_now(&registry_a, &api_a, &machine_a, None)
+        .await
+        .unwrap();
+
+    // Pull 1 reads the first entry, then a second skill is pushed.
+    let user = api_a.actor.user_id;
+    let (rows, cursor) = state.store.skill_pull(user, None).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    let newest = rows.iter().map(|row| row.server_updated_at).max();
+    assert_eq!(
+        cursor, newest,
+        "the cursor is derived from the returned rows"
+    );
+
+    let two = make_skill(source.path(), "second", "two");
+    registry_b
+        .insert(&two, &source_of("second"), Utc::now())
+        .await
+        .unwrap();
+    h4rn_skills::sync::sync_now(&registry_b, &api_b, &machine_b, None)
+        .await
+        .unwrap();
+
+    // The table-wide maximum is now ahead of pull 1's cursor: the old
+    // `skill_cursor` answer would have skipped the second skill.
+    assert!(state.store.skill_cursor(user).await.unwrap() > cursor);
+    let (later, _) = state.store.skill_pull(user, cursor).await.unwrap();
+    assert_eq!(later.len(), 1, "the later push is still visible");
+    assert_eq!(later[0].name, "second");
+
+    // An empty pull keeps the caller's cursor instead of inventing one.
+    let (none, same) = state
+        .store
+        .skill_pull(user, state.store.skill_cursor(user).await.unwrap())
+        .await
+        .unwrap();
+    assert!(none.is_empty());
+    assert_eq!(same, state.store.skill_cursor(user).await.unwrap());
 }

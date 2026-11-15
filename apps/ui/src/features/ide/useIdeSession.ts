@@ -6,6 +6,7 @@ import type {
   FsListing,
   FsSearchMatch,
   FsTurnChanges,
+  FsWriteConflict,
   GitFileStatus,
   HarnessKind,
   HostId,
@@ -15,6 +16,7 @@ import type {
 } from "@/gen";
 import { toProtoError } from "@/lib/client/errors";
 import { getClient } from "@/lib/store/appStore";
+import { conflictFromWrite, keepMineBaseEtag } from "./conflict";
 import {
   activeTab,
   closeTab,
@@ -54,7 +56,10 @@ export type ConflictState = {
   mine: string;
   theirs: string;
   expectedEtag: string | null;
-  currentEtag: string;
+  /** Null when the file no longer exists on disk. */
+  currentEtag: string | null;
+  /** The file was deleted or moved while it was open. */
+  deleted: boolean;
 };
 
 export type ExternalChange = "modified" | "deleted";
@@ -339,13 +344,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
             ...current,
             saveState: "idle",
             tabs: updateTab(current.tabs, path, { savedContent: previousSaved }),
-            conflict: {
-              path,
-              mine: content,
-              theirs: result.conflict?.current_content ?? "",
-              expectedEtag: result.conflict?.expected_etag ?? null,
-              currentEtag: result.conflict?.current_etag ?? result.etag,
-            },
+            conflict: conflictFromWrite(path, content, result.conflict as FsWriteConflict),
           }));
           return;
         }
@@ -410,7 +409,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
         workspace: target.path,
         path: conflict.path,
         content: conflict.mine,
-        base_etag: conflict.currentEtag,
+        base_etag: keepMineBaseEtag(conflict),
       });
       if (response.type !== "fs_written" || response.result.conflict) return;
       setState((current) => ({
@@ -434,6 +433,16 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
   const resolveConflictTakeTheirs = useCallback(() => {
     const conflict = stateRef.current.conflict;
     if (!conflict) return;
+    if (conflict.deleted) {
+      // Nothing on disk to take: keep the tab open and flag it as deleted.
+      setState((current) => ({
+        ...current,
+        conflict: null,
+        saveState: "idle",
+        external: { ...current.external, [conflict.path]: "deleted" },
+      }));
+      return;
+    }
     setState((current) => ({
       ...current,
       conflict: null,
@@ -442,7 +451,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
       tabs: updateTab(current.tabs, conflict.path, {
         content: conflict.theirs,
         savedContent: conflict.theirs,
-        etag: conflict.currentEtag,
+        etag: conflict.currentEtag ?? null,
       }),
     }));
   }, [setState]);

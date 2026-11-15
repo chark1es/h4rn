@@ -144,8 +144,8 @@ pub struct FsFileContent {
 pub struct FsWriteConflict {
     /// The etag the client based its edit on.
     pub expected_etag: Option<String>,
-    /// The etag the daemon found on disk.
-    pub current_etag: String,
+    /// The etag the daemon found on disk; `None` when the file no longer exists.
+    pub current_etag: Option<String>,
     /// The current bytes as text, when they decode.
     pub current_content: Option<String>,
     /// Encoding of the current bytes.

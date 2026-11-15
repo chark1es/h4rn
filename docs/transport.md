@@ -377,12 +377,10 @@ local file is always the first write.
 
 ## Browser client
 
-`apps/ui/src/gen/transport-wasm` is built with:
-
-```sh
-wasm-pack build crates/h4rn-transport-wasm --target web \
-  --out-name h4rn_transport_wasm --out-dir apps/ui/src/gen/transport-wasm
-```
+`apps/ui/src/gen/transport-wasm` is built with `scripts/wasm.sh build` and
+verified by `scripts/wasm.sh check`, which CI runs: it rebuilds with the pinned
+`wasm-bindgen` CLI and a path-remapped release build (no machine paths in the
+artifact) and fails on any byte difference from the committed files.
 
 The `wasm-bindgen` CLI must match the `wasm-bindgen` crate in `Cargo.lock`
 (for example `cargo install wasm-bindgen-cli --version 0.2.130 --locked`).

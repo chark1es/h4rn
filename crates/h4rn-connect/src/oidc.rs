@@ -414,11 +414,18 @@ impl OidcRegistry {
         code: &str,
         verifier: &str,
         nonce: &str,
+        redirect_uri: &str,
     ) -> Result<OidcLogin> {
         let provider = self.provider(provider_id).await?;
+        // RFC 6749 4.1.3: the redirect_uri sent to the authorization endpoint
+        // must be repeated at the token endpoint, or strict providers refuse.
+        let redirect = RedirectUrl::new(redirect_uri.to_string()).map_err(|_| {
+            AppError::bad_request("redirect_uri_invalid", "redirect_uri is not a URL")
+        })?;
         let response = provider
             .client
             .exchange_code(AuthorizationCode::new(code.to_string()))
+            .set_redirect_uri(std::borrow::Cow::Owned(redirect))
             .set_pkce_verifier(PkceCodeVerifier::new(verifier.to_string()))
             .request_async(async_http_client)
             .await
@@ -906,5 +913,121 @@ mod tests {
     fn endpoint_errors_are_classified() {
         let error = provider_error(429, serde_json::json!({"error": "slow_down"}));
         assert_eq!(error.status().as_u16(), 429);
+    }
+
+    /// A throwaway IdP: serves discovery, an empty JWKS and a token endpoint
+    /// that records the form body it receives and refuses it.
+    async fn mock_idp() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = bodies.clone();
+        let issuer = base.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let seen = seen.clone();
+                let issuer = issuer.clone();
+                tokio::spawn(async move {
+                    let mut buffer = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let (head_end, length) = loop {
+                        let read = socket.read(&mut chunk).await.unwrap_or(0);
+                        if read == 0 {
+                            return;
+                        }
+                        buffer.extend_from_slice(&chunk[..read]);
+                        let text = String::from_utf8_lossy(&buffer).to_string();
+                        if let Some(end) = text.find("\r\n\r\n") {
+                            let length = text
+                                .lines()
+                                .find_map(|line| {
+                                    line.to_ascii_lowercase()
+                                        .strip_prefix("content-length:")
+                                        .and_then(|value| value.trim().parse::<usize>().ok())
+                                })
+                                .unwrap_or(0);
+                            break (end + 4, length);
+                        }
+                    };
+                    while buffer.len() < head_end + length {
+                        let read = socket.read(&mut chunk).await.unwrap_or(0);
+                        if read == 0 {
+                            break;
+                        }
+                        buffer.extend_from_slice(&chunk[..read]);
+                    }
+                    let text = String::from_utf8_lossy(&buffer).to_string();
+                    let path = text.split_whitespace().nth(1).unwrap_or("").to_string();
+                    let (status, body) = if path.contains("openid-configuration") {
+                        (
+                            "200 OK",
+                            serde_json::json!({
+                                "issuer": issuer,
+                                "authorization_endpoint": format!("{issuer}/authorize"),
+                                "token_endpoint": format!("{issuer}/token"),
+                                "jwks_uri": format!("{issuer}/jwks"),
+                                "response_types_supported": ["code"],
+                                "subject_types_supported": ["public"],
+                                "id_token_signing_alg_values_supported": ["RS256"],
+                            })
+                            .to_string(),
+                        )
+                    } else if path.contains("jwks") {
+                        ("200 OK", r#"{"keys":[]}"#.to_string())
+                    } else {
+                        seen.lock().unwrap().push(text[head_end..].to_string());
+                        (
+                            "400 Bad Request",
+                            r#"{"error":"invalid_grant"}"#.to_string(),
+                        )
+                    };
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        (base, bodies)
+    }
+
+    #[tokio::test]
+    async fn the_token_exchange_repeats_the_redirect_uri() {
+        let (issuer, bodies) = mock_idp().await;
+        let config = Config {
+            providers: vec![ProviderConfig {
+                id: "mock".into(),
+                display_name: "Mock".into(),
+                issuer,
+                client_id: "client".into(),
+                client_secret: None,
+                scopes: Vec::new(),
+                redirect_uris: vec!["https://app.example/callback".into()],
+                device_grant: false,
+            }],
+            ..Config::default()
+        };
+        let service = OidcRegistry::new(Arc::new(config)).unwrap();
+        let _ = service
+            .complete_login(
+                "mock",
+                "the-code",
+                "the-verifier",
+                "the-nonce",
+                "https://app.example/callback",
+            )
+            .await;
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 1, "one token request: {bodies:?}");
+        assert!(
+            bodies[0].contains("redirect_uri=https%3A%2F%2Fapp.example%2Fcallback"),
+            "token request must carry redirect_uri: {}",
+            bodies[0]
+        );
     }
 }

@@ -680,10 +680,13 @@ export function IdePane() {
       >
         <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
-            <DialogTitle>{state.conflict?.path} changed on disk.</DialogTitle>
+            <DialogTitle>
+              {state.conflict?.path} {state.conflict?.deleted ? "was deleted" : "changed"} on disk.
+            </DialogTitle>
             <DialogDescription>
-              Someone else saved this file after you opened it. Keep your version, take theirs, or
-              cancel and keep editing.
+              {state.conflict?.deleted
+                ? "This file was removed after you opened it. Recreate it with your version, leave it deleted, or cancel and keep editing."
+                : "Someone else saved this file after you opened it. Keep your version, take theirs, or cancel and keep editing."}
             </DialogDescription>
           </DialogHeader>
           {state.conflict ? (
@@ -717,7 +720,7 @@ export function IdePane() {
                 session.resolveConflictTakeTheirs();
               }}
             >
-              Take theirs
+              {state.conflict?.deleted ? "Leave deleted" : "Take theirs"}
             </Button>
             <Button
               disabled={resolving}
@@ -730,7 +733,7 @@ export function IdePane() {
               }}
             >
               {resolving ? <Loader2Icon className="animate-spin" aria-hidden /> : null}
-              Keep mine
+              {state.conflict?.deleted ? "Recreate with mine" : "Keep mine"}
             </Button>
           </DialogFooter>
         </DialogContent>

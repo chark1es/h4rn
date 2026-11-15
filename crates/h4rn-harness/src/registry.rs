@@ -1,9 +1,8 @@
 //! The adapter registry the daemon resolves harnesses through.
 //!
-//! Phase 1b ships the Claude Code adapter and Phase 2 adds Antigravity. Codex
-//! and OpenCode become entries here as their adapters land; the daemon must
-//! never match on a concrete adapter type, only on
-//! [`h4rn_protocol::HarnessKind`].
+//! Every built-in adapter (Claude Code, Codex, OpenCode and Antigravity) is
+//! registered here; the daemon must never match on a concrete adapter type,
+//! only on [`h4rn_protocol::HarnessKind`].
 
 use std::sync::Arc;
 

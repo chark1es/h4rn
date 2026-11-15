@@ -12,9 +12,9 @@ export type FsWriteConflict = {
  */
 expected_etag: string | null, 
 /**
- * The etag the daemon found on disk.
+ * The etag the daemon found on disk; `None` when the file no longer exists.
  */
-current_etag: string, 
+current_etag: string | null, 
 /**
  * The current bytes as text, when they decode.
  */

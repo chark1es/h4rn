@@ -36,6 +36,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/check-bindings.sh
 
+  wasm:
+    name: Browser transport wasm is current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the pinned wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --version "$(scripts/wasm.sh version)" --locked
+      - run: scripts/wasm.sh check
+
   ui:
     name: UI (typecheck, lint, test, build)
     runs-on: ubuntu-latest

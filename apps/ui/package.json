@@ -7,7 +7,7 @@
     "dev": "vite --port 1420",
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
-    "lint": "biome check .",
+    "lint": "biome check --error-on-warnings .",
     "lint:fix": "biome check --write .",
     "test": "vitest run",
     "e2e": "bun run build && node scripts/e2e.mjs && node scripts/e2e-remote.mjs",
