@@ -24,6 +24,7 @@ use crate::session::{AppFrame, ResumeTicket};
 use crate::wire::{SessionId, TOKEN_LEN};
 
 /// How a candidate path is opened.
+#[derive(Clone)]
 pub enum PathLink {
     /// A WebSocket URL, `ws://` on loopback or `wss:///secure` remotely.
     WebSocket {
@@ -40,6 +41,7 @@ pub enum PathLink {
 }
 
 /// One candidate path to probe in parallel with the others.
+#[derive(Clone)]
 pub struct ClientPath {
     /// Physical kind, which drives preference.
     pub kind: TransportPathKind,

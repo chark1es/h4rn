@@ -11,13 +11,18 @@
 //! like any other [`Upstream`](crate::upstream::Upstream), and
 //! [`ShareAuthorizer`] is the policy check A performs before executing a tool.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use h4rn_protocol::{HostId, McpSharePolicy};
+use chrono::Utc;
+use h4rn_protocol::{ApprovalDecision, HostId, McpShareApproval, McpSharePolicy};
 use serde_json::Value;
+use tokio::sync::{broadcast, oneshot};
 
+use crate::hub::HubEvent;
 use crate::provider::ToolError;
 use crate::registry::{RegistryStore, ServerRecord, ShareRecord};
 use crate::types::{CallToolResult, ServerCapabilities};
@@ -183,9 +188,221 @@ impl ShareError {
 }
 
 /// An explicit "yes" from the owner of a machine.
+///
+/// Confirmation is asynchronous because the shipping gate raises a request on
+/// the owner's UI, which may take seconds or never answer. Every implementation
+/// fails closed: a timeout, a dropped waiter or a cancelled wait denies the
+/// call.
+#[async_trait]
 pub trait ConfirmationGate: Send + Sync {
     /// Returns true when the call may proceed.
-    fn confirm(&self, request: &ShareCall) -> bool;
+    async fn confirm(&self, request: &ShareCall) -> bool;
+
+    /// Requests waiting for the owner's decision, oldest first.
+    fn pending(&self) -> Vec<McpShareApproval> {
+        Vec::new()
+    }
+
+    /// Answers one pending request. Returns whether the id was still pending.
+    fn respond(&self, _approval_id: &str, _decision: ApprovalDecision) -> bool {
+        false
+    }
+
+    /// Denies every waiting request, for shutdown or a revoked peer.
+    fn cancel_all(&self) {}
+}
+
+/// How long an approval waits before it fails closed.
+pub const DEFAULT_APPROVAL_TTL: Duration = Duration::from_secs(120);
+
+/// The longest argument preview an approval card carries.
+const ARGUMENTS_PREVIEW_LIMIT: usize = 1024;
+
+struct PendingApproval {
+    approval: McpShareApproval,
+    decision: oneshot::Sender<ApprovalDecision>,
+}
+
+/// The production gate: raises a pending approval and waits for the owner.
+///
+/// Requests are published as [`HubEvent`]s so every connected UI sees them,
+/// and the pending set can be re-read after a reconnect. Nothing is durable:
+/// a daemon restart drops pending calls, which is the fail-closed outcome.
+pub struct ApprovalGate {
+    pending: std::sync::Mutex<HashMap<String, PendingApproval>>,
+    events: broadcast::Sender<HubEvent>,
+    ttl: Duration,
+    next: AtomicU64,
+}
+
+impl ApprovalGate {
+    /// Creates a gate with the default expiry.
+    pub fn new(events: broadcast::Sender<HubEvent>) -> Self {
+        Self::with_ttl(events, DEFAULT_APPROVAL_TTL)
+    }
+
+    /// Creates a gate whose requests expire after `ttl`.
+    pub fn with_ttl(events: broadcast::Sender<HubEvent>, ttl: Duration) -> Self {
+        Self {
+            pending: std::sync::Mutex::new(HashMap::new()),
+            events,
+            ttl,
+            next: AtomicU64::new(0),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, PendingApproval>> {
+        self.pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Test seam: inserts a request whose expiry is already in the past, so
+    /// the late-answer guard can be exercised without a timing race.
+    #[cfg(test)]
+    fn insert_expired_for_test(&self, approval_id: &str) {
+        let now = Utc::now();
+        let (decision, _wait) = oneshot::channel();
+        self.lock().insert(
+            approval_id.to_owned(),
+            PendingApproval {
+                approval: McpShareApproval {
+                    approval_id: approval_id.to_owned(),
+                    machine: HostId::new("host_b"),
+                    server: "github".into(),
+                    tool: "write".into(),
+                    arguments_preview: String::new(),
+                    requested_at: now - chrono::Duration::minutes(5),
+                    expires_at: now - chrono::Duration::minutes(1),
+                },
+                decision,
+            },
+        );
+    }
+
+    /// Removes one request and publishes its outcome. Returns false when it
+    /// was already answered or had expired.
+    fn finish(&self, approval_id: &str, decision: ApprovalDecision) -> bool {
+        let pending = self.lock().remove(approval_id);
+        let Some(pending) = pending else {
+            return false;
+        };
+        let _ = self.events.send(HubEvent::ShareApprovalResolved {
+            approval_id: approval_id.to_owned(),
+            decision,
+        });
+        let _ = pending.decision.send(decision);
+        true
+    }
+}
+
+impl Default for ApprovalGate {
+    fn default() -> Self {
+        Self::new(broadcast::channel(64).0)
+    }
+}
+
+#[async_trait]
+impl ConfirmationGate for ApprovalGate {
+    async fn confirm(&self, request: &ShareCall) -> bool {
+        let requested_at = Utc::now();
+        let expires_at = requested_at
+            + chrono::Duration::from_std(self.ttl).unwrap_or_else(|_| chrono::Duration::zero());
+        let approval_id = format!(
+            "mcp-{}-{}",
+            requested_at.timestamp_millis(),
+            self.next.fetch_add(1, Ordering::Relaxed)
+        );
+        let approval = McpShareApproval {
+            approval_id: approval_id.clone(),
+            machine: request.machine.clone(),
+            server: request.server.clone(),
+            tool: request.tool.clone(),
+            arguments_preview: preview_arguments(request.arguments.as_ref()),
+            requested_at,
+            expires_at,
+        };
+        let (decision, wait) = oneshot::channel();
+        self.lock().insert(
+            approval_id.clone(),
+            PendingApproval {
+                approval: approval.clone(),
+                decision,
+            },
+        );
+        let _ = self
+            .events
+            .send(HubEvent::ShareApprovalRequested { approval });
+        match tokio::time::timeout(self.ttl, wait).await {
+            Ok(Ok(ApprovalDecision::Approve)) => true,
+            // `respond` already published the deny/cancel outcome.
+            Ok(Ok(_)) => false,
+            // The waiter was dropped; nobody can answer it now.
+            Ok(Err(_)) => {
+                self.finish(&approval_id, ApprovalDecision::Cancel);
+                false
+            }
+            // Fail closed when the owner never answers.
+            Err(_) => {
+                self.finish(&approval_id, ApprovalDecision::Deny);
+                false
+            }
+        }
+    }
+
+    fn pending(&self) -> Vec<McpShareApproval> {
+        let mut approvals: Vec<McpShareApproval> = self
+            .lock()
+            .values()
+            .map(|pending| pending.approval.clone())
+            .collect();
+        approvals.sort_by(|a, b| {
+            a.requested_at
+                .cmp(&b.requested_at)
+                .then_with(|| a.approval_id.cmp(&b.approval_id))
+        });
+        approvals
+    }
+
+    fn respond(&self, approval_id: &str, decision: ApprovalDecision) -> bool {
+        // An answer that arrives after the card's expiry is too late: the call
+        // must not run even if the timeout task has not woken yet. Deny it and
+        // report that the id is no longer pending.
+        let expired = self
+            .lock()
+            .get(approval_id)
+            .is_some_and(|pending| pending.approval.expires_at <= Utc::now());
+        if expired {
+            self.finish(approval_id, ApprovalDecision::Deny);
+            return false;
+        }
+        self.finish(approval_id, decision)
+    }
+
+    fn cancel_all(&self) {
+        let drained: Vec<(String, PendingApproval)> = self.lock().drain().collect();
+        for (approval_id, pending) in drained {
+            let _ = self.events.send(HubEvent::ShareApprovalResolved {
+                approval_id,
+                decision: ApprovalDecision::Deny,
+            });
+            let _ = pending.decision.send(ApprovalDecision::Deny);
+        }
+    }
+}
+
+/// A bounded, single-line rendering of tool arguments for the approval card.
+fn preview_arguments(arguments: Option<&Value>) -> String {
+    let Some(arguments) = arguments else {
+        return String::new();
+    };
+    let rendered = arguments.to_string();
+    if rendered.chars().count() <= ARGUMENTS_PREVIEW_LIMIT {
+        return rendered;
+    }
+    let mut preview: String = rendered.chars().take(ARGUMENTS_PREVIEW_LIMIT).collect();
+    preview.push('…');
+    preview
 }
 
 /// What the owner is asked to approve.
@@ -212,8 +429,9 @@ pub struct ShareCall {
 #[derive(Default)]
 pub struct DenyConfirmation;
 
+#[async_trait]
 impl ConfirmationGate for DenyConfirmation {
-    fn confirm(&self, _request: &ShareCall) -> bool {
+    async fn confirm(&self, _request: &ShareCall) -> bool {
         false
     }
 }
@@ -223,8 +441,9 @@ impl ConfirmationGate for DenyConfirmation {
 #[derive(Default)]
 pub struct AllowConfirmation;
 
+#[async_trait]
 impl ConfirmationGate for AllowConfirmation {
-    fn confirm(&self, _request: &ShareCall) -> bool {
+    async fn confirm(&self, _request: &ShareCall) -> bool {
         true
     }
 }
@@ -320,7 +539,7 @@ impl ShareAuthorizer {
                 tool: call.tool.clone(),
             });
         }
-        if policy.requires_confirmation(&call.tool) && !self.gate.confirm(call) {
+        if policy.requires_confirmation(&call.tool) && !self.gate.confirm(call).await {
             self.audit
                 .remote_call(call, false, Some("confirmation denied"));
             return Err(ShareError::ConfirmationDenied {
@@ -396,6 +615,112 @@ mod tests {
             ShareAuthorizer::new(registry, gate, Arc::new(NoAudit)),
             record,
         )
+    }
+
+    #[tokio::test]
+    async fn confirmation_can_be_answered_from_the_pending_set() {
+        let (events, mut received) = broadcast::channel(16);
+        let gate = Arc::new(ApprovalGate::new(events));
+        let request = call("write");
+        let waiter = {
+            let gate = Arc::clone(&gate);
+            let request = request.clone();
+            tokio::spawn(async move { gate.confirm(&request).await })
+        };
+        // The card the owner sees names the tool and previews its arguments.
+        let approval = loop {
+            match received.recv().await.expect("approval event") {
+                HubEvent::ShareApprovalRequested { approval } => break approval,
+                _ => continue,
+            }
+        };
+        assert_eq!(approval.tool, "write");
+        assert_eq!(approval.server, "github");
+        assert_eq!(approval.machine, HostId::new("host_b"));
+        assert_eq!(gate.pending(), vec![approval.clone()]);
+        assert!(gate.respond(&approval.approval_id, ApprovalDecision::Approve));
+        assert!(waiter.await.expect("waiter"));
+        assert!(gate.pending().is_empty());
+        assert!(matches!(
+            received.recv().await.expect("resolved event"),
+            HubEvent::ShareApprovalResolved {
+                decision: ApprovalDecision::Approve,
+                ..
+            }
+        ));
+        // Answering twice is not an error the owner can trigger a second run
+        // with: the second response finds nothing pending.
+        assert!(!gate.respond(&approval.approval_id, ApprovalDecision::Approve));
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_approval_expires_closed() {
+        let (events, _received) = broadcast::channel(16);
+        let gate = Arc::new(ApprovalGate::with_ttl(events, Duration::from_millis(20)));
+        let request = call("write");
+        assert!(!gate.confirm(&request).await, "expiry must deny");
+        assert!(
+            gate.pending().is_empty(),
+            "an expired approval is not pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_late_approval_after_expiry_is_refused() {
+        let (events, mut received) = broadcast::channel(16);
+        let gate = Arc::new(ApprovalGate::new(events));
+        gate.insert_expired_for_test("mcp-late");
+        assert!(
+            !gate.respond("mcp-late", ApprovalDecision::Approve),
+            "an approval past its expiry must never run the call"
+        );
+        assert!(gate.pending().is_empty());
+        assert!(matches!(
+            received.recv().await.expect("resolved event"),
+            HubEvent::ShareApprovalResolved {
+                decision: ApprovalDecision::Deny,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_denied_or_cancelled_approval_never_runs_the_tool() {
+        for decision in [ApprovalDecision::Deny, ApprovalDecision::Cancel] {
+            let (events, mut received) = broadcast::channel(16);
+            let gate = Arc::new(ApprovalGate::new(events));
+            let request = call("write");
+            let waiter = {
+                let gate = Arc::clone(&gate);
+                let request = request.clone();
+                tokio::spawn(async move { gate.confirm(&request).await })
+            };
+            let approval = loop {
+                match received.recv().await.expect("approval event") {
+                    HubEvent::ShareApprovalRequested { approval } => break approval,
+                    _ => continue,
+                }
+            };
+            assert!(gate.respond(&approval.approval_id, decision));
+            assert!(!waiter.await.expect("waiter"));
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_denies_every_waiter_on_shutdown() {
+        let (events, _received) = broadcast::channel(16);
+        let gate = Arc::new(ApprovalGate::new(events));
+        let request = call("write");
+        let waiter = {
+            let gate = Arc::clone(&gate);
+            let request = request.clone();
+            tokio::spawn(async move { gate.confirm(&request).await })
+        };
+        while gate.pending().is_empty() {
+            tokio::task::yield_now().await;
+        }
+        gate.cancel_all();
+        assert!(!waiter.await.expect("waiter"));
     }
 
     #[tokio::test]

@@ -29,7 +29,7 @@ import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { KeyCaps, MOD, SHIFT } from "@/components/common/Kbd";
 import { ThreadRow } from "@/components/inbox/ThreadRow";
 import { serverStatus } from "@/features/mcp/labels";
-import { loadMcpServers, useMcp } from "@/features/mcp/store";
+import { loadMcpServers, pendingMcpApprovals, useMcp } from "@/features/mcp/store";
 import { activateMachine, forgetMachine, useRemote } from "@/features/remote/remoteStore";
 import { loadSkills, useSkills } from "@/features/skills/store";
 import type { ThreadSummary, ThreadTab } from "@/gen";
@@ -533,13 +533,14 @@ function SidebarFooter({
 
 function useNeedsYouCount(): number {
   const threads = useApp((state) => state.threads);
+  const approvals = useMcp((state) => state.approvals);
   const now = useNow();
   return useMemo(
     () =>
       Object.values(threads).filter(
         (thread) => !isSnoozed(thread, now) && needsAttention(thread, now),
-      ).length,
-    [threads, now],
+      ).length + pendingMcpApprovals(approvals).length,
+    [threads, approvals, now],
   );
 }
 

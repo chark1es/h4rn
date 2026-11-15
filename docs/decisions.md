@@ -622,6 +622,12 @@ get `_2`, `_3` in sorted-namespace order so the same configuration always expose
 The tradeoff is that new MCP revisions are our work; `negotiate_protocol_version` keeps the
 accepted list explicit and tests pin the handshake.
 
+**Amendment (council round 2).** Approval requests ride the same transient MCP event stream as
+server status and tool-call audits (`McpShareApprovalRequested` / `McpShareApprovalResolved`), so
+the UI has one forwarder and one reconnect story rather than a second notification channel. The
+pending set is also readable on demand; nothing about an approval is durable, so a restart denies
+waiting calls.
+
 ## ADR-037: MCP configuration and secrets live apart; sharing is owner-executed
 
 **Status:** Accepted
@@ -637,6 +643,16 @@ owning machine executes the server and keeps the secret, a second secure session
 with the authenticated device key. A proxy cannot be re-shared, so a chain cannot be used to
 launder access. The tradeoff is one extra encrypted hop for remote calls and the need to clean up
 secret references on update and removal; both are covered by tests.
+
+**Amendment (council round 2, F1–F3).** The tunnel now has three path kinds ranked direct,
+tailnet and relay, so two machines with no shared LAN or tailnet still share servers. The relay
+frame carries an explicit `service`; daemon-initiated sessions use a peer-only `secure_mcp` route,
+and connect admits them only within one account, never to the caller's own machine.
+`confirm_all` / `confirm_tools` no longer deny unconditionally: the owner's daemon raises a
+pending approval (tool name plus bounded argument preview), answered with the `approve` scope,
+expiring closed after two minutes and cancelled when the tunnel drops. `allowed_devices` compares
+the connect device id recorded on the peer daemon's host entry, which is why that id is carried
+from peer discovery into `register_host`.
 
 ## ADR-038: A subagent is a child thread, not a second session type
 

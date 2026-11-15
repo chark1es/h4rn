@@ -29,6 +29,7 @@ import type { HostSummary } from "./HostSummary";
 import type { LimitsReport } from "./LimitsReport";
 import type { McpImportPreview } from "./McpImportPreview";
 import type { McpServerView } from "./McpServerView";
+import type { McpShareApproval } from "./McpShareApproval";
 import type { McpTestCallResult } from "./McpTestCallResult";
 import type { McpToolInfo } from "./McpToolInfo";
 import type { PairingConfirmation } from "./PairingConfirmation";
@@ -365,7 +366,11 @@ tools: Array<McpToolInfo>, } | { "type": "mcp_call",
 /**
  * Flattened result.
  */
-result: McpTestCallResult, } | { "type": "usage_report", 
+result: McpTestCallResult, } | { "type": "mcp_approvals", 
+/**
+ * Pending requests, oldest first.
+ */
+approvals: Array<McpShareApproval>, } | { "type": "usage_report", 
 /**
  * The report.
  */

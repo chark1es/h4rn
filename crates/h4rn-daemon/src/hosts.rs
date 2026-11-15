@@ -77,9 +77,16 @@ impl HostInventory {
 
     /// Replaces the detected local host id and name (embedders and tests that
     /// run several daemons on one machine).
+    ///
+    /// The platform is reset to this process's own OS: an overridden name is
+    /// the local host, not a WSL distribution entry. Connect only publishes a
+    /// host's name and kind, and the peer derives the host id from them, so a
+    /// leftover `wsl:<distro>` platform would make the peer's id disagree
+    /// with the id this daemon reports locally.
     pub fn with_local(mut self, id: HostId, name: impl Into<String>) -> Self {
         self.local.host_id = id;
         self.local.name = name.into();
+        self.local.platform = local_platform(None);
         self
     }
 
@@ -298,5 +305,23 @@ mod tests {
         assert!(hosts[0].online);
         assert_eq!(hosts[0].host_id, inventory.local_id());
         assert!(inventory.is_local(&inventory.local_id()));
+    }
+
+    #[test]
+    fn an_overridden_local_host_is_not_a_wsl_distro() {
+        let catalog = std::sync::Arc::new(StaticHarnessCatalog::new());
+        let id = HostId::new("host_relay_share_a");
+        let inventory = HostInventory::detect(catalog).with_local(id.clone(), "relay-share-a");
+        let local = inventory
+            .summaries()
+            .into_iter()
+            .next()
+            .expect("local host");
+        assert_eq!(local.host_id, id);
+        assert_eq!(local.name, "relay-share-a");
+        assert!(!local.platform.starts_with("wsl:"));
+        // Connect publishes only the name and kind; the peer derives its host
+        // id from them, so the two views must agree.
+        assert_eq!(host_id_for(&local.name, None), id);
     }
 }

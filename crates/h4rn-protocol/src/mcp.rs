@@ -259,8 +259,10 @@ pub struct McpSharePolicy {
     /// Require an approval for every call, regardless of `confirm_tools`.
     #[serde(default)]
     pub confirm_all: bool,
-    /// Device ids allowed to use the grant. `None` admits the target machine's
-    /// paired device only.
+    /// Device ids allowed to use the grant. These are **connect device ids of
+    /// peer daemons** (the daemon device in Settings → Devices), not ids of
+    /// phones or other user devices, and never a value claimed in a handshake
+    /// frame. `None` admits the target machine's own daemon only.
     #[serde(default)]
     pub allowed_devices: Option<Vec<String>>,
 }
@@ -277,6 +279,31 @@ impl McpSharePolicy {
     pub fn requires_confirmation(&self, tool: &str) -> bool {
         self.confirm_all || self.confirm_tools.iter().any(|candidate| candidate == tool)
     }
+}
+
+/// One remote tool call waiting for the owner's decision.
+///
+/// The owner's daemon raises it when a `confirm_tools` / `confirm_all` policy
+/// matches. It fails closed: when it expires, is cancelled or the owner
+/// disconnects, the call is denied. `arguments_preview` is a bounded,
+/// human-readable rendering for the approval card, never a secret value the
+/// policy did not already send.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct McpShareApproval {
+    /// Opaque daemon-assigned id echoed back with the decision.
+    pub approval_id: String,
+    /// Machine that asked.
+    pub machine: HostId,
+    /// Server name.
+    pub server: String,
+    /// Unqualified tool name.
+    pub tool: String,
+    /// Bounded JSON rendering of the arguments.
+    pub arguments_preview: String,
+    /// When the request was raised.
+    pub requested_at: DateTime<Utc>,
+    /// When it stops waiting and the call is denied.
+    pub expires_at: DateTime<Utc>,
 }
 
 /// One active share grant.
@@ -502,6 +529,15 @@ pub enum McpRequest {
         name: String,
         /// Machine to revoke.
         machine: HostId,
+    },
+    /// List remote tool calls waiting for the owner's decision.
+    PendingApprovals,
+    /// Approve or deny one pending remote tool call.
+    RespondApproval {
+        /// Id from [`McpShareApproval`].
+        approval_id: String,
+        /// `approve` runs the call; `deny` and `cancel` fail it closed.
+        decision: crate::ApprovalDecision,
     },
     /// List the tools one server currently exposes, starting it if needed.
     ListTools {

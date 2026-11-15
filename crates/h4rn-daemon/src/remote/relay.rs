@@ -12,13 +12,19 @@
 //! used only to maintain the allowlist, never to bypass a handshake.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{SinkExt as _, StreamExt as _};
-use h4rn_protocol::{ConnectDevice, RelayFrame, RelayFrameKind, RelayOpen, RelayServerEvent};
+use h4rn_protocol::{
+    ConnectDevice, RelayFrame, RelayFrameKind, RelayOpen, RelayServerEvent, RelayService,
+};
 use h4rn_transport::keys::KEY_LEN;
+use h4rn_transport::relay::{
+    RelayError, RelayFrame as LinkFrame, RelayLink as TransportRelayLink, RelayRequest, RelayRole,
+};
 use h4rn_transport::server::{Link, LinkError, SecureService};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -33,8 +39,197 @@ const PING_INTERVAL: Duration = Duration::from_secs(30);
 /// Reconnect backoff ceiling.
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
-/// In-flight relay connections, keyed by `conn_id`.
-type Connections = Arc<Mutex<HashMap<String, mpsc::Sender<Vec<u8>>>>>;
+/// What a relay session's inbound queue carries.
+enum RelayInbound {
+    /// Ciphertext for the Noise session.
+    Data(Vec<u8>),
+    /// The relay rejected the session (for example `machine_forbidden`).
+    Error(String),
+}
+
+/// In-flight relay connections, keyed by `conn_id`. It holds both sessions
+/// this daemon serves (inbound) and sessions it dialled through the same
+/// authenticated relay socket (outbound).
+type Connections = Arc<Mutex<HashMap<String, mpsc::Sender<RelayInbound>>>>;
+
+/// A handle for opening peer MCP sessions over the daemon's one relay socket.
+///
+/// h4rn-connect keys a relay peer by device id, so a second WebSocket
+/// authenticated as this daemon would evict its control connection. Peer
+/// dialling therefore multiplexes new `conn_id`s through the socket that
+/// [`run_relay`] already owns. When the relay is offline the dialer reports
+/// unreachable and the multipath engine retries later.
+#[derive(Default)]
+pub struct RelayDialer {
+    state: Mutex<Option<DialerState>>,
+    next: AtomicU64,
+}
+
+impl std::fmt::Debug for RelayDialer {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RelayDialer")
+            .field("connected", &self.is_connected())
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone)]
+struct DialerState {
+    outbound: mpsc::Sender<RelayFrame>,
+    connections: Connections,
+}
+
+impl RelayDialer {
+    /// Creates a dialer with no socket yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn attach(&self, outbound: mpsc::Sender<RelayFrame>, connections: Connections) {
+        *self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(DialerState {
+            outbound,
+            connections,
+        });
+    }
+
+    /// Clears the dialer only when it still points at this socket.
+    fn detach(&self, connections: &Connections) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let same = state
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(&current.connections, connections));
+        if same {
+            *state = None;
+        }
+    }
+
+    /// Whether the daemon's relay socket is currently attached.
+    pub fn is_connected(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+    }
+
+    /// Opens one peer MCP session to `machine_id` over the shared socket.
+    pub async fn dial(
+        &self,
+        machine_id: &str,
+        service: RelayService,
+        request: RelayRequest,
+    ) -> Result<Box<dyn TransportRelayLink>, RelayError> {
+        let Some(state) = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        else {
+            return Err(RelayError::Unreachable(
+                "the daemon's relay socket is not connected".into(),
+            ));
+        };
+        let session_id = request.session_id;
+        let conn_id = format!(
+            "peer-{}-{}",
+            hex::encode(session_id),
+            self.next.fetch_add(1, Ordering::Relaxed)
+        );
+        let (in_tx, in_rx) = mpsc::channel(256);
+        state
+            .connections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(conn_id.clone(), in_tx);
+        let frame = RelayFrame::open_service(conn_id.clone(), machine_id, service);
+        if state.outbound.send(frame).await.is_err() {
+            state
+                .connections
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&conn_id);
+            return Err(RelayError::Closed);
+        }
+        Ok(Box::new(RelayPathLink {
+            conn_id,
+            session_id,
+            inbound: in_rx,
+            outbound: state.outbound,
+            connections: state.connections,
+            _role: request.role,
+        }))
+    }
+}
+
+/// The client side of one multiplexed peer session.
+struct RelayPathLink {
+    conn_id: String,
+    session_id: [u8; h4rn_transport::wire::SESSION_ID_LEN],
+    inbound: mpsc::Receiver<RelayInbound>,
+    outbound: mpsc::Sender<RelayFrame>,
+    connections: Connections,
+    _role: RelayRole,
+}
+
+impl std::fmt::Debug for RelayPathLink {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RelayPathLink")
+            .field("conn_id", &self.conn_id)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait]
+impl TransportRelayLink for RelayPathLink {
+    async fn send(&mut self, frame: LinkFrame) -> Result<(), RelayError> {
+        let frame = match frame {
+            LinkFrame::Register { .. } => return Ok(()),
+            LinkFrame::Data { packet, .. } => RelayFrame::data(self.conn_id.clone(), packet),
+            LinkFrame::Close { .. } => RelayFrame::close(self.conn_id.clone()),
+        };
+        self.outbound
+            .send(frame)
+            .await
+            .map_err(|_| RelayError::Closed)
+    }
+
+    async fn recv(&mut self) -> Result<Option<LinkFrame>, RelayError> {
+        match self.inbound.recv().await {
+            Some(RelayInbound::Data(packet)) => Ok(Some(LinkFrame::Data {
+                session_id: self.session_id,
+                packet,
+            })),
+            Some(RelayInbound::Error(message)) => Err(RelayError::Rejected(message)),
+            None => Ok(None),
+        }
+    }
+
+    async fn close(&mut self) -> Result<(), RelayError> {
+        let _ = self
+            .outbound
+            .try_send(RelayFrame::close(self.conn_id.clone()));
+        Ok(())
+    }
+}
+
+impl Drop for RelayPathLink {
+    fn drop(&mut self) {
+        self.connections
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.conn_id);
+        let _ = self
+            .outbound
+            .try_send(RelayFrame::close(self.conn_id.clone()));
+    }
+}
 
 /// Runs the relay connector forever, reconnecting with exponential backoff.
 ///
@@ -46,10 +241,11 @@ pub async fn run_relay(
     service: Arc<SecureService>,
     client: Arc<ConnectClient>,
     registry: Arc<DeviceRegistry>,
+    dialer: Arc<RelayDialer>,
 ) {
     let mut backoff = Duration::from_secs(1);
     loop {
-        match run_once(&state, &service, &client, &registry).await {
+        match run_once(&state, &service, &client, &registry, &dialer).await {
             Ok(()) => {
                 tracing::info!("relay connection closed; reconnecting");
                 backoff = Duration::from_secs(1);
@@ -68,6 +264,7 @@ async fn run_once(
     service: &Arc<SecureService>,
     client: &Arc<ConnectClient>,
     registry: &Arc<DeviceRegistry>,
+    dialer: &Arc<RelayDialer>,
 ) -> anyhow::Result<()> {
     let url = client.relay_websocket_url().await?;
     let (socket, _) = tokio_tungstenite::connect_async(url.as_str())
@@ -77,49 +274,61 @@ async fn run_once(
     let (mut sink, mut stream) = socket.split();
     let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
     let (out_tx, mut out_rx) = mpsc::channel::<RelayFrame>(256);
+    dialer.attach(out_tx.clone(), Arc::clone(&connections));
     let mut ping = tokio::time::interval(PING_INTERVAL);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-    loop {
-        tokio::select! {
-            outgoing = out_rx.recv() => {
-                let Some(frame) = outgoing else { return Ok(()); };
-                let text = serde_json::to_string(&frame)?;
-                sink.send(Message::Text(text.into()))
-                    .await
-                    .map_err(|error| anyhow::anyhow!("relay write failed: {error}"))?;
-            }
-            incoming = stream.next() => {
-                let Some(message) = incoming else { return Ok(()); };
-                match message {
-                    Ok(Message::Text(text)) => {
-                        let event: RelayServerEvent = match serde_json::from_str(&text) {
-                            Ok(event) => event,
-                            Err(error) => {
-                                tracing::warn!(%error, "ignoring a malformed relay event");
-                                continue;
-                            }
-                        };
-                        handle_event(event, state, service, client, registry, &connections, &out_tx).await?;
+    let outcome = loop {
+        let step: anyhow::Result<bool> = async {
+            tokio::select! {
+                outgoing = out_rx.recv() => {
+                    let Some(frame) = outgoing else { return Ok(false); };
+                    let text = serde_json::to_string(&frame)?;
+                    sink.send(Message::Text(text.into()))
+                        .await
+                        .map_err(|error| anyhow::anyhow!("relay write failed: {error}"))?;
+                }
+                incoming = stream.next() => {
+                    let Some(message) = incoming else { return Ok(false); };
+                    match message {
+                        Ok(Message::Text(text)) => {
+                            let event: RelayServerEvent = match serde_json::from_str(&text) {
+                                Ok(event) => event,
+                                Err(error) => {
+                                    tracing::warn!(%error, "ignoring a malformed relay event");
+                                    return Ok(true);
+                                }
+                            };
+                            handle_event(event, state, service, client, registry, &connections, &out_tx).await?;
+                        }
+                        Ok(Message::Close(_)) | Err(_) => return Ok(false),
+                        // Control frames are handled by the WebSocket layer.
+                        Ok(_) => {}
                     }
-                    Ok(Message::Close(_)) | Err(_) => return Ok(()),
-                    // Control frames are handled by the WebSocket layer.
-                    Ok(_) => {}
+                }
+                _ = ping.tick() => {
+                    let frame = RelayFrame {
+                        conn_id: String::new(),
+                        kind: RelayFrameKind::Ping,
+                        payload: Vec::new(),
+                    };
+                    let text = serde_json::to_string(&frame)?;
+                    sink.send(Message::Text(text.into()))
+                        .await
+                        .map_err(|error| anyhow::anyhow!("relay ping failed: {error}"))?;
                 }
             }
-            _ = ping.tick() => {
-                let frame = RelayFrame {
-                    conn_id: String::new(),
-                    kind: RelayFrameKind::Ping,
-                    payload: Vec::new(),
-                };
-                let text = serde_json::to_string(&frame)?;
-                sink.send(Message::Text(text.into()))
-                    .await
-                    .map_err(|error| anyhow::anyhow!("relay ping failed: {error}"))?;
-            }
+            Ok(true)
         }
-    }
+        .await;
+        match step {
+            Ok(true) => {}
+            Ok(false) => break Ok(()),
+            Err(error) => break Err(error),
+        }
+    };
+    dialer.detach(&connections);
+    outcome
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -144,14 +353,14 @@ async fn handle_event(
                     );
                     return Ok(());
                 }
-                let (in_tx, in_rx) = mpsc::channel::<Vec<u8>>(256);
+                let (in_tx, in_rx) = mpsc::channel::<RelayInbound>(256);
                 connections
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .insert(frame.conn_id.clone(), in_tx);
                 // The relay's device id is a claim. The session's identity is
-                // the Noise key authenticated by the handshake, resolved in
-                // `serve_secure_link`; a disagreeing claim is discarded there.
+                // the Noise key authenticated by the handshake; a disagreeing
+                // claim is discarded by the registry check.
                 let origin = SessionOrigin::relay(open.device_id, None);
                 let link = RelayLink {
                     conn_id: frame.conn_id,
@@ -161,9 +370,22 @@ async fn handle_event(
                 };
                 let service = Arc::clone(service);
                 let state = state.clone();
-                tokio::spawn(async move {
-                    serve_secure_link(service, Box::new(link), state, origin).await;
-                });
+                match open.service {
+                    RelayService::Secure => {
+                        tokio::spawn(async move {
+                            serve_secure_link(service, Box::new(link), state, origin).await;
+                        });
+                    }
+                    RelayService::SecureMcp => {
+                        // Peer-only: `serve_secure_mcp` resolves the caller's
+                        // machine from the device registry and refuses a user
+                        // device key before any tunnel frame is read.
+                        let mcp = Arc::clone(&state.mcp);
+                        tokio::spawn(async move {
+                            mcp.serve_secure_mcp(service, Box::new(link)).await;
+                        });
+                    }
+                }
             }
             RelayFrameKind::Data => {
                 let sender = connections
@@ -172,7 +394,10 @@ async fn handle_event(
                     .get(&frame.conn_id)
                     .cloned();
                 if let Some(sender) = sender
-                    && sender.send(frame.payload).await.is_err()
+                    && sender
+                        .send(RelayInbound::Data(frame.payload))
+                        .await
+                        .is_err()
                 {
                     tracing::debug!(conn = %frame.conn_id, "relay session already closed");
                 }
@@ -215,6 +440,23 @@ async fn handle_event(
                 message = %error.message,
                 "relay reported an error"
             );
+            // A dialled peer session is waiting on this error: surface it as a
+            // rejected path so the multipath engine can settle the attempt.
+            if let Some(conn_id) = conn_id {
+                let sender = connections
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .get(&conn_id)
+                    .cloned();
+                if let Some(sender) = sender {
+                    let _ = sender
+                        .send(RelayInbound::Error(format!(
+                            "{}: {}",
+                            error.code, error.message
+                        )))
+                        .await;
+                }
+            }
         }
     }
     Ok(())
@@ -304,7 +546,7 @@ fn decode_key(value: &str) -> Option<[u8; KEY_LEN]> {
 /// One relay connection's view as a transport [`Link`].
 struct RelayLink {
     conn_id: String,
-    inbound: mpsc::Receiver<Vec<u8>>,
+    inbound: mpsc::Receiver<RelayInbound>,
     outbound: mpsc::Sender<RelayFrame>,
     connections: Connections,
 }
@@ -319,7 +561,14 @@ impl Link for RelayLink {
     }
 
     async fn recv_packet(&mut self) -> Result<Option<Vec<u8>>, LinkError> {
-        Ok(self.inbound.recv().await)
+        match self.inbound.recv().await {
+            Some(RelayInbound::Data(packet)) => Ok(Some(packet)),
+            Some(RelayInbound::Error(message)) => {
+                tracing::debug!(conn = %self.conn_id, %message, "relay rejected a session");
+                Ok(None)
+            }
+            None => Ok(None),
+        }
     }
 }
 

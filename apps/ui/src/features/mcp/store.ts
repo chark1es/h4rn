@@ -19,6 +19,7 @@ import type {
   McpRequest,
   McpServerInput,
   McpServerView,
+  McpShareApproval,
   McpSharePolicy,
   McpTestCallResult,
   McpToolInfo,
@@ -43,6 +44,8 @@ export type McpState = {
   activity: McpToolActivity[];
   /** In-flight mutations, keyed by `name:kind`. */
   pending: Record<string, boolean>;
+  /** Shared tool calls waiting for this machine's decision, oldest first. */
+  approvals: McpShareApproval[];
 };
 
 export type McpToolActivity = {
@@ -69,6 +72,7 @@ const initialState: McpState = {
   calls: {},
   activity: [],
   pending: {},
+  approvals: [],
 };
 
 let state: McpState = initialState;
@@ -116,6 +120,24 @@ export function useMcp<T>(selector: (value: McpState) => T): T {
 
 function sortServers(servers: McpServerView[]): McpServerView[] {
   return [...servers].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function sortApprovals(approvals: McpShareApproval[]): McpShareApproval[] {
+  return [...approvals].sort((left, right) => {
+    const byTime = Date.parse(left.requested_at) - Date.parse(right.requested_at);
+    return byTime === 0 ? left.approval_id.localeCompare(right.approval_id) : byTime;
+  });
+}
+
+/** Approvals that have not already expired locally. */
+export function pendingMcpApprovals(
+  approvals: McpShareApproval[] = state.approvals,
+  now: number = Date.now(),
+): McpShareApproval[] {
+  return approvals.filter((approval) => {
+    const expires = Date.parse(approval.expires_at);
+    return Number.isNaN(expires) || expires > now;
+  });
 }
 
 function replaceServer(server: McpServerView): McpServerView[] {
@@ -461,21 +483,80 @@ export async function testMcpTool(
   }
 }
 
+/** Re-reads the shared calls waiting for this machine's decision. */
+export async function loadMcpApprovals(): Promise<void> {
+  try {
+    const response = await send({ type: "pending_approvals" });
+    if (response.type !== "mcp_approvals") {
+      throw new Error(`The daemon answered \`${response.type}\`, not the pending approvals.`);
+    }
+    set({ approvals: sortApprovals(response.approvals) });
+  } catch (error) {
+    // The inbox must not block on a nicety; the event stream will repair it.
+    const proto = toProtoError(error);
+    pushToast({
+      title: "Couldn't read shared tool approvals.",
+      description: `${proto.message}${proto.hint ? ` ${proto.hint}` : ""}`,
+      variant: "error",
+    });
+  }
+}
+
+/**
+ * Approves or denies one shared tool call.
+ *
+ * The card disappears immediately; a rejection restores it so the owner never
+ * believes a call ran when it did not.
+ */
+export async function respondMcpApproval(
+  approvalId: string,
+  decision: "approve" | "deny" | "cancel",
+): Promise<boolean> {
+  const before = state.approvals;
+  set({
+    approvals: state.approvals.filter((approval) => approval.approval_id !== approvalId),
+  });
+  try {
+    await send({ type: "respond_approval", approval_id: approvalId, decision });
+    return true;
+  } catch (error) {
+    const proto = toProtoError(error);
+    set({ approvals: before });
+    pushToast({
+      title: "Couldn't answer that approval.",
+      description: `${proto.message} The call stays blocked.${proto.hint ? ` ${proto.hint}` : ""}`,
+      variant: "error",
+    });
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Transient daemon events
 // ---------------------------------------------------------------------------
 
 let unsubscribe: (() => void) | null = null;
+let unsubscribeReady: (() => void) | null = null;
 
 /** Subscribes to hub events once; call from the surface's first mount. */
 export function ensureMcpEvents(): void {
   if (unsubscribe) return;
-  unsubscribe = getClient().onEvent(({ event }) => applyMcpEvent(event));
+  const client = getClient();
+  unsubscribe = client.onEvent(({ event }) => applyMcpEvent(event));
+  // Approvals are transient. Re-read them after every handshake so a reconnect
+  // never loses a call that is still waiting; before the first handshake the
+  // ready callback does the read.
+  unsubscribeReady = client.onReady(() => {
+    void loadMcpApprovals();
+  });
+  if (getState().connection.status === "online") void loadMcpApprovals();
 }
 
 export function stopMcpEvents(): void {
   unsubscribe?.();
   unsubscribe = null;
+  unsubscribeReady?.();
+  unsubscribeReady = null;
 }
 
 /** Applies one event; exported so tests do not need a socket. */
@@ -491,6 +572,19 @@ export function applyMcpEvent(event: Event): void {
         last_error: event.message,
       }),
       checkedAt: Date.parse(event.at) || Date.now(),
+    });
+    return;
+  }
+  if (event.type === "mcp_share_approval_requested") {
+    const approvals = state.approvals.filter(
+      (approval) => approval.approval_id !== event.approval.approval_id,
+    );
+    set({ approvals: sortApprovals([...approvals, event.approval]) });
+    return;
+  }
+  if (event.type === "mcp_share_approval_resolved") {
+    set({
+      approvals: state.approvals.filter((approval) => approval.approval_id !== event.approval_id),
     });
     return;
   }

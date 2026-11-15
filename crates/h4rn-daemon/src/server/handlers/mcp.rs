@@ -102,6 +102,16 @@ fn map_event(event: HubEvent, last: &AtomicU64) -> Option<ForwardFrame> {
             error,
             at,
         },
+        HubEvent::ShareApprovalRequested { approval } => {
+            Event::McpShareApprovalRequested { approval }
+        }
+        HubEvent::ShareApprovalResolved {
+            approval_id,
+            decision,
+        } => Event::McpShareApprovalResolved {
+            approval_id,
+            decision,
+        },
         // Cache invalidation is internal; the UI learns the new list when it
         // asks for it.
         HubEvent::ToolsChanged { .. } => return None,

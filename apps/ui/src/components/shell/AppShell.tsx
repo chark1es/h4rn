@@ -27,6 +27,8 @@ import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts } from "@/features/attachments/use-attachments";
 import { IdePane } from "@/features/ide/IdePane";
+import { McpApprovalCard } from "@/features/mcp/McpApprovalCard";
+import { ensureMcpEvents } from "@/features/mcp/store";
 import {
   proxyDefaultModel,
   proxyModelsFor,
@@ -440,6 +442,11 @@ export function AppShell() {
   const threads = useApp((state) => state.threads);
   const selectedThreadId = useApp((state) => state.ui.selectedThreadId);
   const isPhone = useIsPhone();
+  // The relay can hand this daemon a shared call at any time, so the approval
+  // stream must run before the owner visits the MCP screen.
+  useEffect(() => {
+    ensureMcpEvents();
+  }, []);
   const isThread = route.kind === "thread";
   const pairing = route.kind === "placeholder" && route.surface === "pairing";
   const surface =
@@ -462,6 +469,7 @@ export function AppShell() {
     return (
       <div className="q-app q-ph" style={{ flexDirection: "column", height: "100%", minHeight: 0 }}>
         {surface ? <OfflineBanner /> : null}
+        <McpApprovalCard />
         <div
           className="q-ph-content"
           style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}
@@ -499,6 +507,7 @@ export function AppShell() {
       {layout.sidebarOpen ? <Sidebar /> : null}
       <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", minHeight: 0 }}>
         {surface ? <OfflineBanner /> : null}
+        <McpApprovalCard />
         <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
           {main}
           {showPanel && thread ? <RightPanel thread={thread} ide={ide} /> : null}

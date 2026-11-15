@@ -943,9 +943,12 @@ impl ClientRequest {
             | Self::ConfirmPairing { .. }
             | Self::ForgeImportCli { .. } => Admin,
             Self::Mcp { request } => match request {
-                crate::mcp::McpRequest::ListServers | crate::mcp::McpRequest::ListTools { .. } => {
-                    View
-                }
+                crate::mcp::McpRequest::ListServers
+                | crate::mcp::McpRequest::ListTools { .. }
+                | crate::mcp::McpRequest::PendingApprovals => View,
+                // Answering a remote call is the owner's approval, not an
+                // administrative reconfiguration.
+                crate::mcp::McpRequest::RespondApproval { .. } => Approve,
                 _ => Admin,
             },
             Self::Subagent { request } => match request {
@@ -1044,6 +1047,21 @@ mod tests {
                 Files,
             ),
             (ClientRequest::McpList, View),
+            (
+                ClientRequest::Mcp {
+                    request: crate::mcp::McpRequest::PendingApprovals,
+                },
+                View,
+            ),
+            (
+                ClientRequest::Mcp {
+                    request: crate::mcp::McpRequest::RespondApproval {
+                        approval_id: "mcp-1".into(),
+                        decision: ApprovalDecision::Approve,
+                    },
+                },
+                Approve,
+            ),
             // Both persist per-thread state, so a view-only device must not
             // be able to send them.
             (

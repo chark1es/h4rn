@@ -57,6 +57,9 @@ impl TestDaemon {
             name: self.host.as_str().to_owned(),
             noise_public: self.identity.public().noise_public,
             endpoints: vec![self.addr.to_string()],
+            machine_id: None,
+            relay: None,
+            device_id: None,
             online: true,
         }
     }
