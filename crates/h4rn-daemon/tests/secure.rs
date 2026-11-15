@@ -1707,3 +1707,68 @@ async fn an_upload_is_owned_by_the_device_that_opened_it() {
     b.close().await;
     daemon.stop().await;
 }
+
+/// Round 6 follow-up: an attacker armed with a wrong secret reaches the
+/// forged-first-record branch over a real WebSocket, is told `NotPaired`, and
+/// touches nothing.
+#[tokio::test]
+async fn a_forged_open_record_over_the_websocket_is_refused_and_touches_nothing() {
+    use futures::{SinkExt, StreamExt};
+    use h4rn_transport::noise::{Handshake, HandshakeConfig};
+    use h4rn_transport::wire::{Packet, PacketKind, RejectReason};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let secret = [0x5au8; TOKEN_LEN];
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_psk(secret),
+    ));
+    let daemon = boot(Arc::clone(&service)).await;
+    let attacker = device_identity();
+    let session = [31u8; SESSION_ID_LEN];
+    let wrong = [0x11u8; TOKEN_LEN];
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{}/secure", daemon.addr))
+        .await
+        .expect("connect");
+    let (_handshake, message) = Handshake::start_initiator(&HandshakeConfig {
+        session_id: &session,
+        local_static: attacker.noise_secret(),
+        remote_static: Some(&service.public_identity().noise_public),
+        psk: Some(&wrong),
+    })
+    .expect("start");
+    let send = |kind, body: Vec<u8>| {
+        Message::Binary(
+            Packet {
+                kind,
+                session_id: session,
+                body,
+            }
+            .encode()
+            .into(),
+        )
+    };
+    ws.send(send(PacketKind::Handshake, message))
+        .await
+        .expect("send message 1");
+    let _msg2 = ws.next().await.expect("message 2").expect("ws");
+    ws.send(send(PacketKind::Record, vec![0xAB; 64]))
+        .await
+        .expect("send forged record");
+    let answer = tokio::time::timeout(Duration::from_secs(5), ws.next())
+        .await
+        .expect("the daemon must answer the forged record")
+        .expect("a frame")
+        .expect("ws");
+    let Message::Binary(bytes) = answer else {
+        panic!("expected a binary reject, got {answer:?}");
+    };
+    let packet = Packet::decode(&bytes).expect("packet");
+    assert_eq!(packet.kind, PacketKind::Reject);
+    assert_eq!(
+        packet.body.first().copied().and_then(RejectReason::from_u8),
+        Some(RejectReason::NotPaired)
+    );
+    assert!(!service.is_allowed(&attacker.public().noise_public));
+    assert_eq!(service.psk(), Some(secret), "the secret must stay armed");
+    daemon.stop().await;
+}

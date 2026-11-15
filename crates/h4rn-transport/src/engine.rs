@@ -1199,4 +1199,73 @@ mod tests {
             .read(&packet.body)
             .expect("a resumed handshake message 1 must be readable as plain IK");
     }
+
+    #[test]
+    fn a_not_paired_reject_restarts_the_path_once_with_the_psk() {
+        // The plain `IK` is refused as unpaired; the engine restarts that
+        // path's handshake once, now mixing in the secret, and never twice.
+        let daemon = DeviceIdentity::generate().unwrap();
+        let identity = DeviceIdentity::generate().unwrap();
+        let session = [4u8; SESSION_ID_LEN];
+        let psk = [7u8; TOKEN_LEN];
+        let mut config = EngineConfig::new(session, identity, daemon.public().noise_public);
+        config.psk = Some(psk);
+        let mut engine = TransportEngine::new(config).unwrap();
+        let path = engine.add_path(PathSpec {
+            kind: TransportPathKind::Direct,
+            endpoint: "127.0.0.1:1".into(),
+        });
+        let message_one = |effects: Vec<Effect>| {
+            let packet = effects
+                .into_iter()
+                .find_map(|effect| match effect {
+                    Effect::Send { packet, .. } => Some(packet),
+                    _ => None,
+                })
+                .expect("the engine sends handshake message 1");
+            Packet::decode(&packet).unwrap().body
+        };
+        let read_as_daemon = |body: &[u8], psk: Option<&[u8; TOKEN_LEN]>| {
+            Handshake::start_responder(&HandshakeConfig {
+                session_id: &session,
+                local_static: daemon.noise_secret(),
+                remote_static: None,
+                psk,
+            })
+            .unwrap()
+            .read(body)
+        };
+        let first = message_one(engine.on_path_open(path, 0).unwrap());
+        assert!(
+            read_as_daemon(&first, None).is_ok(),
+            "first attempt is plain IK"
+        );
+
+        let reject = Packet {
+            kind: PacketKind::Reject,
+            session_id: session,
+            body: vec![RejectReason::NotPaired as u8],
+        }
+        .encode();
+        let second = message_one(engine.on_packet(path, &reject, 10).unwrap());
+        assert!(
+            read_as_daemon(&second, Some(&psk)).is_ok(),
+            "the retry must be IKpsk2 with the configured secret"
+        );
+        assert!(
+            read_as_daemon(&second, None).is_err(),
+            "the retry must not be readable as plain IK"
+        );
+
+        // A second NotPaired is final: the path fails instead of looping.
+        let effects = engine.on_packet(path, &reject, 20).unwrap();
+        assert!(
+            effects.iter().all(|effect| !matches!(
+                effect,
+                Effect::Send { packet, .. }
+                    if Packet::decode(packet).map(|p| p.kind) == Ok(PacketKind::Handshake)
+            )),
+            "a second reject must not trigger another handshake"
+        );
+    }
 }
