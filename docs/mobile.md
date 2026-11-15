@@ -12,7 +12,7 @@ cannot do on its own:
 | `h4rn://` links | `tauri-plugin-deep-link`, generated intent filter / `CFBundleURLTypes` from `tauri.conf.json` |
 | Android back button | `MainActivity` maps back onto WebView history, which the React router already owns |
 | Edge-to-edge | `enableEdgeToEdge()` + `windowLayoutInDisplayCutoutMode=shortEdges` + `viewport-fit=cover`; the UI can read `env(safe-area-inset-*)` (also exposed as `--h4rn-safe-area-*`) |
-| Cleartext dev traffic | `network_security_config.xml`: loopback and emulator aliases in release, LAN in debug builds only |
+| Cleartext dev traffic | Noise end-to-end encryption with the daemon key pinned; the release network security config and iOS ATS allow ws:// to LAN, `.local`, MagicDNS and CGNAT/Tailscale candidates (see below) |
 | Pairing screen | `apps/ui/src/lib/platform/mobile.ts`, the only mobile branch in the shared UI |
 
 The pairing screen is a small DOM overlay rather than a React route because the UI is a pure view
@@ -96,6 +96,36 @@ pair against `ws://10.0.2.2:47800/ws` only when `networkingMode=mirrored` or
 
 `scripts/mobile-android.sh` verifies the whole path: it checks `/healthz` from WSL, then from
 Windows through `curl.exe`, before launching the app.
+
+## Cleartext candidates on mobile
+
+The daemon has no TLS listener. Confidentiality, integrity and authentication
+come from the Noise session, whose daemon static key is pinned from the pairing
+payload ([ADR-010](decisions.md#adr-010-noise-e2e-between-device-and-daemon-the-relay-sees-metadata-only),
+[ADR-031](decisions.md#adr-031-one-noise-ik-handshake-per-path-pinned-daemon-key-and-device-allowlist)).
+A `ws://` candidate therefore adds no exposure: an on-path observer sees opaque
+Noise packets, and an impostor cannot finish the handshake without the pinned
+key. Only the relay candidate uses `wss://`, and the relay forwards Noise packets
+too.
+
+Both mobile OSes ship a policy that would otherwise veto the plaintext
+candidates a phone needs — the daemon on the LAN, a `.local` name, a MagicDNS
+name or a Tailscale/CGNAT address — and silently leave only the relay:
+
+- **Android** (`apps/mobile/native/android/app/src/main/res/xml/network_security_config.xml`)
+  permits cleartext in the release base config. `<domain-config>` can name exact
+  hosts and IP literals but not IP ranges, so RFC 1918, `100.64.0.0/10` and
+  `.local`/MagicDNS cannot all be expressed there. The debug source set keeps
+  its own permissive config.
+- **iOS** (`apps/mobile/src-tauri/Info.plist`, merged by Tauri) sets
+  `NSAllowsLocalNetworking` for unqualified names, `.local` and IP addresses,
+  and lists `ts.net` plus the private and CGNAT ranges as exception domains.
+  iOS 17 stopped allowing IP connections by default, so the CIDR entries are
+  required there; iOS 16 allows them without an exception.
+
+`apps/ui/src/lib/client/secure.test.ts` checks both checked-in configs and the
+candidate-URL builder, so a future "tighten the release policy" change fails a
+test instead of quietly breaking direct mobile access.
 
 ## Pairing
 

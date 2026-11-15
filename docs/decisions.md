@@ -207,6 +207,14 @@ deduplicate payloads, so push notifications and search must be computed daemon-s
 sizes need padding buckets to avoid leaking message shape. Multi-device revocation is handled with
 explicit device events, not key rotation of the daemon.
 
+**Note (mobile):** because Noise is the security boundary, the mobile shells
+permit `ws://` to LAN, `.local`/MagicDNS and RFC 1918/CGNAT candidates instead
+of letting Android's network security config and iOS ATS veto them. The daemon
+has no TLS listener, and the pinned daemon key makes a plaintext socket no less
+private than `wss://`; the relay path stays `wss://`. Android's domain config
+cannot express IP ranges, so its release base config permits cleartext, with
+the rationale recorded in `docs/mobile.md` and `docs/transport.md`.
+
 ## ADR-011: OIDC authorization code + PKCE, with OrbitID's quirks encoded
 
 **Status:** Accepted

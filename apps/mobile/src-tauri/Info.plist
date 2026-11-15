@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Merged into the generated Info.plist by Tauri (bundle.iOS.infoPlist).
+
+  The socket is not the security boundary: device-to-daemon traffic runs inside
+  a Noise session whose daemon static key is pinned from the pairing payload
+  (ADR-010, ADR-031), so a ws:// candidate adds no confidentiality or integrity
+  loss. Apple's App Transport Security would otherwise veto the LAN, .local,
+  MagicDNS and CGNAT/Tailscale candidates a phone needs, leaving only the relay.
+
+  NSAllowsLocalNetworking covers unqualified names, .local and IP addresses on
+  iOS 10-16. From iOS 17, ATS no longer permits IP connections by default, so
+  the private and CGNAT ranges are listed explicitly as CIDR exceptions. See
+  docs/mobile.md and docs/transport.md.
+-->
+<plist version="1.0">
+<dict>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+        <key>NSExceptionDomains</key>
+        <dict>
+            <key>local</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+                <key>NSIncludesSubdomains</key>
+                <true/>
+            </dict>
+            <key>ts.net</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+                <key>NSIncludesSubdomains</key>
+                <true/>
+            </dict>
+            <key>10.0.0.0/8</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+            </dict>
+            <key>172.16.0.0/12</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+            </dict>
+            <key>192.168.0.0/16</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+            </dict>
+            <key>100.64.0.0/10</key>
+            <dict>
+                <key>NSExceptionAllowsInsecureHTTPLoads</key>
+                <true/>
+            </dict>
+        </dict>
+    </dict>
+</dict>
+</plist>

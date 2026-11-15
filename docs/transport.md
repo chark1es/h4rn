@@ -110,6 +110,25 @@ The prologue is `h4rn-transport/1 || session_id`, binding each Noise channel
 to one logical session. A channel from another session cannot be replayed onto
 this one even if keys were somehow shared.
 
+### Cleartext sockets are safe here, including on mobile
+
+The Noise layer, not the socket, is the security boundary. A `ws://` candidate
+carries Noise transport messages, the daemon key is pinned from the pairing
+payload and the prologue binds the channel to the session, so an on-path
+observer learns only packet sizes and timing, and an active impostor fails the
+handshake. TLS on `wss://` adds defence in depth for the relay path but is not
+required for the direct and Tailscale candidates; the daemon has no TLS
+listener to offer them.
+
+That is why the mobile shells ship OS policies that permit plaintext to the
+hosts those candidates use. Android's release network security config allows
+cleartext in its base config because `<domain-config>` cannot express IP ranges;
+iOS sets `NSAllowsLocalNetworking` and lists `.local`, `ts.net` and the RFC 1918
+and `100.64.0.0/10` ranges as ATS exceptions (required from iOS 17, which stopped
+allowing IP connections by default). Without those entries the phone silently
+falls back to the relay and the "relay and Tailscale at the same time" path
+disappears; see [docs/mobile.md](mobile.md#cleartext-candidates-on-mobile).
+
 ### Pairing
 
 A pairing payload is a URI:
