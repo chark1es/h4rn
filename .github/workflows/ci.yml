@@ -126,6 +126,10 @@ jobs:
           distribution: temurin
           java-version: "21"
       - uses: android-actions/setup-android@v3
+        with:
+          # The next step installs the exact SDK packages; the default `tools`
+          # package no longer exists in sdkmanager.
+          packages: ''
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.4

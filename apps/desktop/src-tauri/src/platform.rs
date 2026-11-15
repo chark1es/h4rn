@@ -46,12 +46,6 @@ pub fn wsl_distros() -> Vec<String> {
         .collect()
 }
 
-/// No WSL outside Windows.
-#[cfg(not(windows))]
-pub fn wsl_distros() -> Vec<String> {
-    Vec::new()
-}
-
 /// Runs `wsl.exe -d <distro> -- <args>` and returns trimmed stdout.
 ///
 /// Returns `None` when WSL is unavailable, the command is missing in the
@@ -101,6 +95,10 @@ fn run_hidden(program: &str, args: &[&str]) -> Option<Output> {
 }
 
 /// Decodes `wsl.exe` output, which may be UTF-16LE or UTF-8.
+///
+/// Only Windows calls it; it is also built for tests so the decoder stays
+/// covered on every CI platform.
+#[cfg(any(windows, test))]
 pub fn decode_wsl_output(bytes: &[u8]) -> String {
     if bytes.len() >= 2 && bytes.iter().filter(|byte| **byte == 0).count() > bytes.len() / 4 {
         let units: Vec<u16> = bytes
