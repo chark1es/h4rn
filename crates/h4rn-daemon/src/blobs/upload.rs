@@ -10,6 +10,21 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use h4rn_protocol::{AttachmentId, UploadState};
+use h4rn_transport::keys::KEY_LEN;
+
+/// Who may touch an in-flight upload.
+///
+/// A loopback client is the machine's owner; a remote uploader is bound to the
+/// Noise key its handshake authenticated. Binding by device (not connection)
+/// lets the same device resume after reconnecting, while another device can
+/// never append to or query the stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UploadOwner {
+    /// The user at this machine.
+    Local,
+    /// A remote device, by its authenticated static key.
+    Device([u8; KEY_LEN]),
+}
 
 /// Chunk size advertised to clients and enforced on every `blob_chunk` frame.
 ///
@@ -36,6 +51,8 @@ pub struct UploadSession {
     pub received: u64,
     /// Next chunk sequence number expected.
     pub next_seq: u64,
+    /// Who opened the upload and may append to it.
+    pub owner: UploadOwner,
     /// Creation time, used by the pending-upload sweeper.
     pub created_at: DateTime<Utc>,
     /// Set once `CommitUpload` produced an address; makes a retried commit
@@ -52,6 +69,7 @@ impl UploadSession {
         size: u64,
         mime_hint: Option<String>,
         path: PathBuf,
+        owner: UploadOwner,
     ) -> Self {
         Self {
             upload_id,
@@ -62,6 +80,7 @@ impl UploadSession {
             path,
             received: 0,
             next_seq: 0,
+            owner,
             created_at: Utc::now(),
             committed: None,
         }
@@ -164,7 +183,15 @@ mod tests {
     use super::*;
 
     fn session(path: PathBuf, size: u64) -> UploadSession {
-        UploadSession::new("up_1".into(), 7, "a.txt".into(), size, None, path)
+        UploadSession::new(
+            "up_1".into(),
+            7,
+            "a.txt".into(),
+            size,
+            None,
+            path,
+            UploadOwner::Local,
+        )
     }
 
     #[test]

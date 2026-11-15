@@ -126,6 +126,11 @@ is enforced by the **owner**:
   the owner recorded on that peer daemon's `host` registry entry when the peer was discovered
   (the `device_id` column of the daemon device in Settings → Devices), never a value claimed in
   the handshake frame;
+- every protected operation on a persistent tunnel — `tools/list`, `tools/call`,
+  `resources/list`/`read`/`subscribe` and `prompts/list`/`get` — passes one guard before
+  dispatch. It re-checks the authenticated peer, the current share and `allowed_devices` on the
+  request itself, so unsharing, narrowing the policy or restricting devices applies to a tunnel
+  that is already open, not only to the next `tools/call`;
 - every remote call is audit-logged locally with the authenticated device key, the machine, the
   server, the tool and the outcome.
 
@@ -137,7 +142,8 @@ registry and refused on any disagreement.
 The target machine (B) is a sibling daemon of the same account. It reaches the owner (A) over the
 same Noise transport as `/secure`, on A's `/secure-mcp` route, authenticating as **its own daemon
 key**. After the internal handshake the tunnel carries JSON-RPC frames. The owner re-authorizes
-every call, strips namespaces on `tools/list` and re-adds them on `tools/call`, and never forwards
+every protected request (tools, resources and prompts), strips namespaces on `tools/list` and
+re-adds them on `tools/call`, and never forwards
 credentials: the upstream server runs on the owner. A proxied server cannot be re-shared.
 
 The owner does not stop reading the tunnel while a call waits for approval: a pending card never
@@ -152,7 +158,10 @@ path to the caller is gone, that tunnel's pending cards are withdrawn through
    `ip:port` endpoints (LAN, tailnet). A signed-in daemon fills it from h4rn-connect (the account's
    daemon devices and machines), re-reading it when the relay reports a snapshot, presence change,
    pairing or revocation. Embedders can add peers with `PeerDirectory::replace_source`. Peer keys
-   are admitted to, and revoked from, the secure transport allowlist by the directory.
+   are admitted to, and revoked from, the secure transport allowlist by the directory. Admission
+   is decided from the registry: a peer is skipped only when a `host` entry for its key exists and
+   the transport already allows it. A failed `register_host` write is retried on the next peer
+   report with bounded backoff, and a `client` key is never re-roled to make it fit.
 2. **Grant discovery (pushed).** B opens a `grants` session on A's `/secure-mcp`
    (`{"h4rn_mcp_grants": "h4rn-mcp-grants-1"}`). A derives B's machine from the verified key,
    sends the full set of grants for it, and sends a new snapshot whenever a share is added, changed

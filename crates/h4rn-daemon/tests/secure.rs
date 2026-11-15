@@ -16,8 +16,9 @@ use h4rn_daemon::remote::DeviceRegistry;
 use h4rn_daemon::threads::ThreadManagerOptions;
 use h4rn_harness::FakeHarness;
 use h4rn_protocol::{
-    ClientFrame, ClientRequest, DeviceId, DeviceInfo, Event, HarnessKind, PairScope, ProtoError,
-    ResponseBody, RuntimeMode, ServerFrame, ThreadSummary, TransportPathKind,
+    BinaryFrame, BinaryKind, ClientFrame, ClientRequest, DeviceId, DeviceInfo, Event, HarnessKind,
+    PairScope, ProtoError, ProtoErrorCode, ResponseBody, RuntimeMode, ServerFrame, ThreadSummary,
+    TransportPathKind,
 };
 use h4rn_transport::client::{Client, ClientConfig, ClientEvent, ClientPath};
 use h4rn_transport::engine::EngineConfig;
@@ -120,6 +121,13 @@ struct SecureClient {
     ticket: Option<h4rn_transport::session::ResumeTicket>,
 }
 
+/// One frame the daemon sent over the secure session.
+#[derive(Debug)]
+enum SecureFrame {
+    Text(Box<ServerFrame>),
+    Binary(Vec<u8>),
+}
+
 impl SecureClient {
     async fn connect(
         daemon: &TestDaemon,
@@ -217,6 +225,64 @@ impl SecureClient {
                 Some(ClientEvent::Status(_) | ClientEvent::Established(_)) => {}
                 None => panic!("secure client stopped while waiting"),
             }
+        }
+    }
+
+    /// Reads the next frame without assuming it is text, for binary paths.
+    async fn next_any(&mut self) -> SecureFrame {
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(10), self.client.recv())
+                .await
+                .expect("timed out waiting for a secure frame");
+            match event {
+                Some(ClientEvent::Frame(frame)) => {
+                    return match frame.as_text() {
+                        Some(text) => SecureFrame::Text(
+                            serde_json::from_str(text).expect("parse ServerFrame"),
+                        ),
+                        None => SecureFrame::Binary(frame.payload),
+                    };
+                }
+                Some(ClientEvent::Closed { reason }) => {
+                    panic!("secure session closed while waiting: {reason}")
+                }
+                Some(ClientEvent::Error { message, .. }) => {
+                    panic!("secure transport error while waiting: {message}")
+                }
+                Some(ClientEvent::Status(_) | ClientEvent::Established(_)) => {}
+                None => panic!("secure client stopped while waiting"),
+            }
+        }
+    }
+
+    /// Writes one upload chunk and reports the daemon's acknowledgement or the
+    /// error event it sent instead.
+    async fn send_chunk(&mut self, stream_id: u32, seq: u64, payload: &[u8]) -> Result<(), String> {
+        let frame = BinaryFrame {
+            kind: BinaryKind::BlobChunk,
+            stream_id,
+            seq,
+            payload: payload.to_vec(),
+        };
+        self.client
+            .send(h4rn_transport::AppFrame::binary(frame.encode()))
+            .await
+            .expect("send secure chunk");
+        match self.next_any().await {
+            SecureFrame::Binary(bytes) => {
+                let ack = BinaryFrame::decode(&bytes).expect("decode chunk ack");
+                assert_eq!(ack.kind, BinaryKind::Ack, "unexpected binary reply");
+                assert_eq!(ack.stream_id, stream_id);
+                assert_eq!(ack.seq, seq);
+                Ok(())
+            }
+            SecureFrame::Text(frame) => match *frame {
+                ServerFrame::Event {
+                    event: Event::Error { message, .. },
+                    ..
+                } => Err(message),
+                other => panic!("unexpected reply to a chunk: {other:?}"),
+            },
         }
     }
 
@@ -1197,5 +1263,198 @@ async fn the_pairing_secret_pairs_one_device_even_when_handshakes_race() {
     assert_eq!(established, 1, "one QR must pair exactly one device");
     assert_eq!(service.allowed_devices().len(), 1);
     assert_eq!(service.psk(), None);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_pairing_whose_registry_write_fails_is_refused_not_admitted() {
+    // K3(a): the pairing hook only logged a registry write failure, then the
+    // device was still allowed -> a phantom "paired" device whose every
+    // request is Forbidden. The hook is fallible now: NotPaired, no allowlist.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("devices.json");
+    std::fs::create_dir(&path).expect("a directory in place of the registry file");
+    let devices = Arc::new(DeviceRegistry::open(&path));
+    let psk = [0x7eu8; TOKEN_LEN];
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_psk(psk),
+    ));
+    let daemon = boot_with(Arc::clone(&service), Arc::clone(&devices)).await;
+    let identity = device_identity();
+    expect_rejected(&daemon, identity.clone(), psk).await;
+    assert!(
+        devices
+            .authorization(&identity.public().noise_public)
+            .is_none(),
+        "a pairing whose authorisation could not be recorded must not be admitted"
+    );
+    daemon.stop().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_consumed_pairing_that_cannot_be_deleted_is_not_rearmed_on_restart() {
+    // K3(b): if the consumed file cannot be deleted, a restart re-armed the
+    // same PSK. The failed delete now leaves a consumed marker the watcher
+    // honours.
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let psk = [0x7fu8; TOKEN_LEN];
+    write_pairing(dir.path(), psk, 300, vec![PairScope::View]);
+    // Pre-create the marker so the best-effort write can succeed while the
+    // directory itself is read-only; deleting the pairing file cannot.
+    std::fs::write(dir.path().join("direct-pairing.consumed"), b"").expect("marker");
+
+    let mut permissions = std::fs::metadata(dir.path())
+        .expect("metadata")
+        .permissions();
+    permissions.set_mode(0o555);
+    std::fs::set_permissions(dir.path(), permissions).expect("read-only dir");
+    let failed = h4rn_daemon::remote::pairing::invalidate_direct_pairing(dir.path(), &psk);
+    let mut permissions = std::fs::metadata(dir.path())
+        .expect("metadata")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(dir.path(), permissions).expect("writable dir");
+    assert!(
+        failed.is_err(),
+        "an undeletable consumed file must still be reported"
+    );
+    assert!(
+        h4rn_daemon::remote::pairing::direct_pairing_path(dir.path()).exists(),
+        "the fixture must still show the failed delete"
+    );
+
+    // Restart on the same data directory before the original expiry.
+    let service = Arc::new(SecureService::new(SecureOptions::new(device_identity())));
+    let daemon = boot_at(
+        dir.path().to_path_buf(),
+        Arc::clone(&service),
+        Arc::new(DeviceRegistry::in_memory()),
+        None,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        service.psk(),
+        None,
+        "a restart re-armed a consumed direct pairing"
+    );
+    expect_rejected(&daemon, device_identity(), psk).await;
+    daemon.stop().await;
+}
+
+fn assert_upload_not_found(result: Result<ResponseBody, ProtoError>, upload_id: &str) {
+    let error = result.expect_err("another device must not see this upload");
+    assert_eq!(error.code, ProtoErrorCode::NotFound);
+    assert!(
+        error.message.contains(upload_id),
+        "the error should name the upload: {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_upload_is_owned_by_the_device_that_opened_it() {
+    // K4: any paired device could append to, query, commit or abort another
+    // device's upload by id. An upload now belongs to the key the handshake
+    // authenticated, so it follows the device across reconnects.
+    let owner = device_identity();
+    let other = device_identity();
+    let allowed = PairingPolicy::new([owner.public().noise_public, other.public().noise_public]);
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_policy(allowed),
+    ));
+    let daemon = boot(Arc::clone(&service)).await;
+
+    let mut a = SecureClient::connect_in(&daemon, owner.clone(), None, 11).await;
+    let mut b = SecureClient::connect_in(&daemon, other, None, 22).await;
+    a.hello_as("dev_upload_owner").await;
+    b.hello_as("dev_upload_other").await;
+
+    let bytes = b"an upload belongs to the device that opened it";
+    let split = bytes.len() / 2;
+    let hash = blake3::hash(bytes).to_hex().to_string();
+    let ResponseBody::UploadStarted { upload } = a
+        .request(ClientRequest::BeginUpload {
+            name: "owned.txt".into(),
+            size: bytes.len() as u64,
+            mime_hint: None,
+        })
+        .await
+        .expect("begin upload")
+    else {
+        panic!("unexpected BeginUpload response");
+    };
+    a.send_chunk(upload.stream_id, 0, &bytes[..split])
+        .await
+        .expect("the owner may append");
+
+    assert_upload_not_found(
+        b.request(ClientRequest::QueryUpload {
+            upload_id: upload.upload_id.clone(),
+        })
+        .await,
+        &upload.upload_id,
+    );
+    let append = b
+        .send_chunk(upload.stream_id, 1, &bytes[split..])
+        .await
+        .expect_err("another device must not append");
+    assert!(
+        append.contains(&upload.upload_id),
+        "the chunk error should name the upload: {append}"
+    );
+    assert_upload_not_found(
+        b.request(ClientRequest::CommitUpload {
+            upload_id: upload.upload_id.clone(),
+            blake3: hash.clone(),
+        })
+        .await,
+        &upload.upload_id,
+    );
+    assert_upload_not_found(
+        b.request(ClientRequest::AbortUpload {
+            upload_id: upload.upload_id.clone(),
+        })
+        .await,
+        &upload.upload_id,
+    );
+
+    // The owner reconnects as a new secure session: ownership follows the
+    // device key, not the connection that opened it.
+    let upload_id = upload.upload_id.clone();
+    let stream_id = upload.stream_id;
+    a.close().await;
+    let mut resumed = SecureClient::connect_in(&daemon, owner, None, 33).await;
+    resumed.hello_as("dev_upload_owner").await;
+    let ResponseBody::UploadStatus { upload: status } = resumed
+        .request(ClientRequest::QueryUpload {
+            upload_id: upload_id.clone(),
+        })
+        .await
+        .expect("the owner may resume")
+    else {
+        panic!("unexpected QueryUpload response");
+    };
+    assert_eq!(status.received_bytes, split as u64);
+    resumed
+        .send_chunk(stream_id, 1, &bytes[split..])
+        .await
+        .expect("the owner may append after reconnecting");
+    let ResponseBody::UploadCommitted { blob } = resumed
+        .request(ClientRequest::CommitUpload {
+            upload_id,
+            blake3: hash,
+        })
+        .await
+        .expect("the owner may commit")
+    else {
+        panic!("unexpected CommitUpload response");
+    };
+    assert_eq!(blob.size, bytes.len() as u64);
+
+    resumed.close().await;
+    b.close().await;
     daemon.stop().await;
 }

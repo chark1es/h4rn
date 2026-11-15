@@ -32,7 +32,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 
 use super::upload::AppendError;
-use super::upload::{UPLOAD_CHUNK_SIZE, UploadSession};
+use super::upload::{UPLOAD_CHUNK_SIZE, UploadOwner, UploadSession};
 
 /// Bytes returned per binary frame by `GetBlob`.
 pub const DOWNLOAD_CHUNK_SIZE: usize = 256 * 1024;
@@ -202,6 +202,15 @@ struct UploadBook {
     by_stream: HashMap<u32, String>,
 }
 
+/// Refuses an upload the caller does not own, without revealing it exists.
+fn check_owner(session: &UploadSession, owner: UploadOwner) -> Result<(), BlobError> {
+    if session.owner == owner {
+        Ok(())
+    } else {
+        Err(BlobError::UploadNotFound(session.upload_id.clone()))
+    }
+}
+
 impl std::fmt::Debug for BlobStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BlobStore")
@@ -289,6 +298,7 @@ impl BlobStore {
     /// Opens a chunked upload and returns the stream id to write to.
     pub fn begin_upload(
         &self,
+        owner: UploadOwner,
         name: &str,
         size: u64,
         mime_hint: Option<String>,
@@ -304,7 +314,15 @@ impl BlobStore {
         let stream_id = self.next_stream.fetch_add(1, Ordering::SeqCst);
         let path = self.root.join("pending").join(format!("{upload_id}.part"));
         std::fs::write(&path, [])?;
-        let session = UploadSession::new(upload_id.clone(), stream_id, name, size, mime_hint, path);
+        let session = UploadSession::new(
+            upload_id.clone(),
+            stream_id,
+            name,
+            size,
+            mime_hint,
+            path,
+            owner,
+        );
         let mut book = self.book();
         book.by_stream.insert(stream_id, upload_id.clone());
         book.by_id.insert(upload_id.clone(), session);
@@ -318,6 +336,7 @@ impl BlobStore {
     /// Appends one binary chunk and returns the new resumable state.
     pub fn append_chunk(
         &self,
+        owner: UploadOwner,
         stream_id: u32,
         seq: u64,
         payload: &[u8],
@@ -338,6 +357,7 @@ impl BlobStore {
             .by_id
             .get_mut(&upload_id)
             .ok_or_else(|| BlobError::UploadNotFound(upload_id.clone()))?;
+        check_owner(session, owner)?;
         session
             .append(seq, payload, self.max_bytes)
             .map_err(|error| match error {
@@ -355,6 +375,7 @@ impl BlobStore {
     /// Verifies and finishes an upload, deduping against an existing blob.
     pub async fn commit_upload(
         &self,
+        owner: UploadOwner,
         upload_id: &str,
         declared_blake3: &str,
     ) -> Result<BlobInfo, BlobError> {
@@ -367,6 +388,7 @@ impl BlobStore {
                 .by_id
                 .get(upload_id)
                 .ok_or_else(|| BlobError::UploadNotFound(upload_id.to_owned()))?;
+            check_owner(session, owner)?;
             match &session.committed {
                 Some(committed) => (None, Some(committed.clone())),
                 None => (
@@ -444,7 +466,21 @@ impl BlobStore {
     }
 
     /// Discards an upload and its partial bytes.
-    pub fn abort_upload(&self, upload_id: &str) -> Result<(), BlobError> {
+    pub fn abort_upload(&self, owner: UploadOwner, upload_id: &str) -> Result<(), BlobError> {
+        {
+            let book = self.book();
+            let session = book
+                .by_id
+                .get(upload_id)
+                .ok_or_else(|| BlobError::UploadNotFound(upload_id.to_owned()))?;
+            check_owner(session, owner)?;
+        }
+        self.remove_upload(upload_id)
+    }
+
+    /// Removes one upload regardless of owner (the sweeper and an authorised
+    /// abort use this).
+    fn remove_upload(&self, upload_id: &str) -> Result<(), BlobError> {
         let mut book = self.book();
         let session = book
             .by_id
@@ -456,12 +492,18 @@ impl BlobStore {
     }
 
     /// Resumable progress of one upload.
-    pub fn query_upload(&self, upload_id: &str) -> Result<UploadState, BlobError> {
-        self.book()
+    pub fn query_upload(
+        &self,
+        owner: UploadOwner,
+        upload_id: &str,
+    ) -> Result<UploadState, BlobError> {
+        let book = self.book();
+        let session = book
             .by_id
             .get(upload_id)
-            .map(UploadSession::state)
-            .ok_or_else(|| BlobError::UploadNotFound(upload_id.to_owned()))
+            .ok_or_else(|| BlobError::UploadNotFound(upload_id.to_owned()))?;
+        check_owner(session, owner)?;
+        Ok(session.state())
     }
 
     /// Metadata for one committed blob.
@@ -591,7 +633,7 @@ impl BlobStore {
                 .collect()
         };
         for upload_id in stale {
-            let _ = self.abort_upload(&upload_id);
+            let _ = self.remove_upload(&upload_id);
         }
 
         // A crash can leave a `.part` file with no session; sweep those too.

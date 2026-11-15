@@ -15,7 +15,8 @@ use h4rn_core::LifecycleSettings;
 use h4rn_daemon::auth::TokenStore;
 use h4rn_daemon::config::Config;
 use h4rn_daemon::daemon::DaemonBuilder;
-use h4rn_daemon::mcp_peers::Peer;
+use h4rn_daemon::mcp_peers::{Peer, PeerDirectory};
+use h4rn_daemon::remote::DeviceRegistry;
 use h4rn_daemon::threads::ThreadManagerOptions;
 use h4rn_harness::FakeHarness;
 use h4rn_mcp::session::McpScope;
@@ -400,4 +401,47 @@ async fn a_shared_stdio_server_reaches_the_target_daemon_and_unshare_removes_it(
 
     b.stop().await;
     a.stop().await;
+}
+
+#[test]
+fn a_failed_peer_admission_is_retried_after_storage_recovers() {
+    // K2: the `known` fast path and the unchanged-set early return meant one
+    // registry write failure blocked admission for the rest of the run, even
+    // after the same peer report was sent again with storage working.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("devices.json");
+    std::fs::create_dir(&path).expect("a directory in place of the registry file");
+    let devices = Arc::new(DeviceRegistry::open(&path));
+    let service = Arc::new(SecureService::new(SecureOptions::new(
+        DeviceIdentity::generate().expect("identity"),
+    )));
+    let peers = PeerDirectory::new();
+    peers.attach_devices(Arc::clone(&devices));
+    peers.attach_secure(Arc::clone(&service));
+    let peer = Peer {
+        host: HostId::new("host_b"),
+        name: "B".into(),
+        noise_public: [33; 32],
+        endpoints: Vec::new(),
+        machine_id: Some("machine_b".into()),
+        relay: None,
+        device_id: Some("dev_b".into()),
+        online: true,
+    };
+
+    peers.replace_source("connect", vec![peer.clone()]);
+    assert!(
+        devices.authorization(&peer.noise_public).is_none(),
+        "the write failure must leave the peer unregistered"
+    );
+    assert!(!service.is_allowed(&peer.noise_public));
+
+    // The storage recovers; the same authoritative report arrives again.
+    std::fs::remove_dir(&path).expect("storage recovers");
+    peers.replace_source("connect", vec![peer.clone()]);
+    let auth = devices
+        .authorization(&peer.noise_public)
+        .expect("the retry must admit the peer once storage works");
+    assert_eq!(auth.role, h4rn_daemon::remote::Role::Host);
+    assert!(service.is_allowed(&peer.noise_public));
 }

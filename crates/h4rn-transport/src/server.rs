@@ -299,7 +299,7 @@ impl Drop for LivePath {
     }
 }
 
-type PairingHook = Arc<dyn Fn([u8; KEY_LEN]) + Send + Sync>;
+type PairingHook = Arc<dyn Fn([u8; KEY_LEN]) -> Result<(), String> + Send + Sync>;
 type PskConsumedHook = Arc<dyn Fn([u8; TOKEN_LEN]) -> Result<(), String> + Send + Sync>;
 
 /// The daemon's secure transport service.
@@ -433,8 +433,10 @@ impl SecureService {
     /// snapshot before the first finished) gets `false` and must be rejected.
     /// The consumed hook runs before `true` is returned, so a durable record of
     /// the secret can be invalidated before the device is authorised. A hook
-    /// that fails returns `false` too: the secret stays consumed, the pairing
-    /// is refused, and a restart cannot find the secret still armed.
+    /// that fails returns `false` too: the secret stays consumed and the
+    /// pairing is refused. If the hook could not delete the pairing file it
+    /// marks it consumed, so the watcher will not arm it again after a restart
+    /// (best effort: the marker write can itself fail, which the hook logs).
     pub fn consume_psk(&self, used: &[u8; TOKEN_LEN]) -> bool {
         use subtle::ConstantTimeEq as _;
         let consumed = {
@@ -495,8 +497,14 @@ impl SecureService {
     /// Registers a hook run when a device pairs through the one-time secret,
     /// after the secret is consumed and before the device is allowed.
     ///
-    /// The daemon uses it to record the new device's scopes and provenance.
-    pub fn set_pairing_hook(&self, hook: Arc<dyn Fn([u8; KEY_LEN]) + Send + Sync>) {
+    /// The daemon uses it to record the new device's scopes and provenance. A
+    /// hook error refuses the pairing: a device whose authorisation could not
+    /// be recorded must not end up on the allowlist as a phantom that is
+    /// forbidden on every request.
+    pub fn set_pairing_hook(
+        &self,
+        hook: Arc<dyn Fn([u8; KEY_LEN]) -> Result<(), String> + Send + Sync>,
+    ) {
         *self
             .pairing_hook
             .write()
@@ -513,8 +521,14 @@ impl SecureService {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        if let Some(hook) = hook {
-            hook(device);
+        if let Some(hook) = hook
+            && let Err(error) = hook(device)
+        {
+            tracing::warn!(
+                %error,
+                "the paired device could not be recorded; refusing the pairing"
+            );
+            return false;
         }
         self.allow(device);
         true

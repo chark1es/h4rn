@@ -668,6 +668,16 @@ expiring closed after two minutes and cancelled when the tunnel drops. `allowed_
 the connect device id recorded on the peer daemon's host entry, which is why that id is carried
 from peer discovery into `register_host`.
 
+**Amendment (council round 4).** The tunnel guard runs before every protected operation, not only
+`tools/call`: `tools/list`, `resources/list`/`read`/`subscribe` and `prompts/list`/`get`
+re-check the authenticated peer, the current grant and `allowed_devices` on each request, so
+unsharing, narrowing the policy or restricting devices reaches a tunnel that is already open.
+Tool-specific policy and approval checks stay in the shared call path. Peer admission is decided
+from the registry rather than the in-memory set: a peer is skipped only when a `host` entry exists
+for its key and the transport already allows it, and a failed `register_host` write is retried on
+the next peer report with bounded backoff instead of leaving the peer unadmitted for the rest of
+the run. A `client` key is still never re-roled.
+
 ## ADR-038: A subagent is a child thread, not a second session type
 
 **Status:** Accepted
@@ -872,7 +882,10 @@ logged and left alone.
 consumed hook runs before the device is authorised and removes the matching
 `direct-pairing.json`; the watcher deletes expired files and drops the armed scopes
 with the secret. A restart before the old expiry can no longer re-arm a QR that
-already paired one device.
+already paired one device. If the delete fails, the hook records the BLAKE3 hash of
+the consumed PSK in `direct-pairing.consumed` and the watcher refuses to arm a file
+whose hash is listed; the marker stores no secret and is best effort, so a write
+that also fails leaves only the in-memory consumption until the file expires.
 
 **A direct pairing without `--scope` grants `view` and `approve`.** A QR can be
 photographed and the LAN/tailnet window is short, so `terminal`, `files` and
@@ -937,11 +950,13 @@ serialised: a relay-announced device stays pending and unadmitted across a
 restart until the host decides.
 
 **A failing consumed hook refuses the pairing, and keeps the PSK closed.**
-`consume_psk` now takes a fallible hook. If deleting the one-time
+`consume_psk` now takes a fallible hook. If invalidating the one-time
 `direct-pairing.json` fails, the transport returns `NotPaired` rather than
-authorising the device, and the secret is already consumed, so the QR cannot be
-replayed from memory. The daemon logs the hook error; the transport cannot do
-more than refuse.
+authorising the device. The secret is already consumed, and the failed delete
+leaves a consumed marker so the watcher does not re-arm the file on a restart
+(best effort: if the marker write also fails, only the in-memory consumption
+protects the QR until it expires). The daemon logs the hook error; the transport
+cannot do more than refuse.
 
 **A registry write failure is reported, not swallowed.** `persist` returns a
 `PersistError`; `mutate` returns both the change's result and the write result.
