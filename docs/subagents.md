@@ -9,6 +9,11 @@ harness. The design is recorded in
 and
 [ADR-039](decisions.md#adr-039-delegation-policy-is-enforced-by-the-daemon-not-the-parent).
 
+The child always runs on the same **host** as the parent. Cross-host delegation
+is not implemented yet: a request naming another host fails with `Unsupported`
+before any thread is created, and the Delegate dialog lists other online hosts
+but disables them with that reason.
+
 ## Using it
 
 ### From a parent agent
@@ -38,7 +43,8 @@ Spawn arguments:
 ```
 
 `harness` defaults to the parent's harness; `model` defaults to the parent's
-model; `isolation` is `shared` (default) or `worktree`. Context is one of:
+model; `isolation` is `shared` (default) or `worktree`. There is no host
+argument: the child runs on the parent's host. Context is one of:
 
 - `{"kind":"none"}` — only the task text;
 - `{"kind":"summary","summary":"..."}` — the task plus a caller-written handoff;

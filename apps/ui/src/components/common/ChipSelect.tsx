@@ -14,6 +14,8 @@ export type ChipOption<T extends string> = {
   /** Muted second line, for example a path or a hint. */
   hint?: string;
   icon?: ReactNode;
+  /** Shown but not selectable, for a path the daemon does not support yet. */
+  disabled?: boolean;
 };
 
 /**
@@ -67,7 +69,11 @@ export function ChipSelect<T extends string>({
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" className="min-w-[160px] max-w-[320px]">
         {options.map((option) => (
-          <DropdownMenuItem key={option.value} onSelect={() => onChange(option.value)}>
+          <DropdownMenuItem
+            key={option.value}
+            disabled={option.disabled}
+            onSelect={() => onChange(option.value)}
+          >
             {option.icon}
             <span className="min-w-0 flex-1">
               <span className="block truncate">{option.label}</span>

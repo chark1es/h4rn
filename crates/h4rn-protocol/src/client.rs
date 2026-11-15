@@ -28,10 +28,10 @@ pub struct ClientFrame {
 
 /// Everything a client can ask a daemon to do.
 ///
-/// Variants after `Subscribe` are deliberately skeletal: the daemon rejects
-/// them with [`crate::ProtoErrorCode::Unsupported`] until their phase lands.
-/// They exist now so the generated TypeScript barrel is stable and later
-/// phases append rather than rename.
+/// The daemon answers a request whose feature is not enabled on this host with
+/// [`crate::ProtoErrorCode::Unsupported`] and a hint, and a request the wire
+/// contract carries but this build does not implement with
+/// [`crate::ProtoErrorCode::NotImplemented`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientRequest {
@@ -182,8 +182,7 @@ pub enum ClientRequest {
         thumbnail: bool,
     },
     // ------------------------------------------------------------------
-    // TODO(phase 2+): terminal, filesystem, MCP, skills, proxy, usage and
-    // forge requests. Their payloads are intentionally minimal placeholders.
+    // Terminal, filesystem, MCP, skills, proxy, usage and forge requests.
     // ------------------------------------------------------------------
     /// Open a PTY on `host` in `cwd`, optionally from a thread.
     ///

@@ -6,9 +6,10 @@ h4rn is one instrument for every agent you run: Claude Code, Codex, OpenCode, An
 whatever comes next, on this machine or another one. The desktop, mobile and browser clients are
 pure views over a single Rust daemon and one typed WebSocket protocol.
 
-> **Status: Phase 1a scaffold.** The workspace compiles, the lifecycle core is tested, and the
-> generated protocol bindings are checked in. There are no harness adapters or product screens
-> yet. See [CHANGELOG.md](CHANGELOG.md).
+> **Status: Phase 5 working build.** The daemon, the typed protocol, the Noise transport, the
+> relay, MCP sharing, skills and metering are implemented and tested; the desktop, mobile and
+> browser clients are pure views over the daemon. Two paths are deliberately not implemented yet —
+> see [Known limits](#known-limits). The detailed history is in [CHANGELOG.md](CHANGELOG.md).
 
 ## What is here
 
@@ -17,12 +18,13 @@ pure views over a single Rust daemon and one typed WebSocket protocol.
 | `crates/h4rn-protocol` | The wire contract: IDs, client/server frames, events, projections, PTY framing. TypeScript is generated from it. |
 | `crates/h4rn-core` | ADR-004 lifecycle state machine, thread projections, event store (SQLite + in-memory). |
 | `crates/h4rn-harness` | The async `Harness`/`HarnessSession` trait, normalized harness events, and a `FakeHarness` for tests. |
-| `crates/h4rn-daemon` | The process that owns threads, sessions and the local store. |
-| `crates/h4rn-connect` | The self-hostable relay (axum). Serves `/healthz`; sync lands in a later phase. |
-| `crates/h4rn-transport` | WebSocket transport and resume logic. |
+| `crates/h4rn-daemon` | The process that owns threads, sessions, files, terminals, MCP, skills, proxy routing and the local store. |
+| `crates/h4rn-connect` | The self-hostable relay (axum + Postgres): OIDC/DPoP auth, pairing scopes, enrollment and skill/usage sync. |
+| `crates/h4rn-transport` | Noise end-to-end encrypted multipath transport: session layer, path selection and relay connector (ADR-009/010/031/032). |
+| `crates/h4rn-transport-wasm` | `wasm-bindgen` facade over the same transport for the browser. |
 | `crates/h4rn-vt` | Terminal (VT) handling for PTY output. |
-| `crates/h4rn-mcp`, `h4rn-skills` | MCP servers and skill discovery. |
-| `crates/h4rn-proxy`, `h4rn-meter` | Provider proxying and usage accounting. |
+| `crates/h4rn-mcp`, `h4rn-skills` | The in-tree MCP hub with cross-machine sharing, and skill bundles with registry sync. |
+| `crates/h4rn-proxy`, `h4rn-meter` | CLIProxyAPI routing and failover, and the durable usage ledger. |
 | `crates/h4rn-forge` | Forge integration (branches, PRs). |
 | `apps/ui` | React 19 + Vite + Tailwind v4 shell; shadcn primitives, design tokens from `DESIGN.md`. |
 | `apps/desktop`, `apps/mobile` | Tauri v2 shells. Excluded from the Cargo workspace; they consume `apps/ui/dist`. |
@@ -33,6 +35,20 @@ Architecture decisions live in [docs/decisions.md](docs/decisions.md); product i
 [PRODUCT.md](PRODUCT.md) and the design system in [DESIGN.md](DESIGN.md). Packaging and the
 tag-driven release process are in [docs/release.md](docs/release.md); relay deployment is in
 [docs/self-hosting.md](docs/self-hosting.md).
+
+## Known limits
+
+These paths exist in the protocol but not in the daemon yet. The UI never
+offers them: the new-thread dialog says it does not create a worktree, and the
+Delegate dialog lists other online hosts as a disabled option with the reason.
+
+- **A new thread cannot request a worktree.** `CreateThread` with `worktree`
+  set fails with `NotImplemented`; a new thread runs directly in the workspace
+  directory you choose. Subagent worktree isolation is implemented and is a
+  different path ([docs/subagents.md](docs/subagents.md)).
+- **A subagent runs only on its parent's host.** `spawn_subagent` with another
+  host fails with `Unsupported` before creating a thread; the Delegate dialog
+  lists other online hosts but disables them with that reason.
 
 ## Prerequisites
 

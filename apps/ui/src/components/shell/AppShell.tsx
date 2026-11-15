@@ -157,8 +157,8 @@ function InboxDetailEmpty() {
             Start a thread
           </h2>
           <p className="q-muted" style={{ margin: "0 0 18px", lineHeight: "19px" }}>
-            Pick where it runs. The agent works in a worktree on that host, and you can supervise it
-            from any paired device.
+            Pick where it runs. The agent works in a directory you choose on that host, and you can
+            supervise it from any paired device.
           </p>
 
           <div className="q-chips" style={{ marginBottom: 10 }}>

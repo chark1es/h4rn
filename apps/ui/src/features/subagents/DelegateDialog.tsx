@@ -30,8 +30,10 @@ function parseCount(value: string): number | null {
  * Delegate form.
  *
  * Defaults follow the parent thread: same host and harness, the parent's model,
- * and an isolated worktree so the child cannot edit the parent's tree. Blank
- * limits mean the daemon's defaults, which are not "unlimited".
+ * and an isolated worktree so the child cannot edit the parent's tree. Other
+ * hosts are shown but disabled until cross-host delegation exists, so the form
+ * never offers a spawn the daemon will reject. Blank limits mean the daemon's
+ * defaults, which are not "unlimited".
  */
 export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
   const open = useSubagentStore((state) => state.delegateOpen);
@@ -94,8 +96,8 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
         <DialogHeader>
           <DialogTitle>Delegate a subagent</DialogTitle>
           <DialogDescription>
-            The child gets its own thread and reports to this one. Approvals still come to this
-            thread.
+            The child gets its own thread on this thread's host and reports to this one. Approvals
+            still come to this thread.
           </DialogDescription>
         </DialogHeader>
 
@@ -124,10 +126,16 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
               value={host}
               placeholder="No online hosts"
               width={160}
-              options={onlineHosts.map((option) => ({
-                value: option.host_id,
-                label: option.name,
-              }))}
+              options={onlineHosts.map((option) =>
+                option.host_id === thread.host
+                  ? { value: option.host_id, label: option.name }
+                  : {
+                      value: option.host_id,
+                      label: option.name,
+                      disabled: true,
+                      hint: "Not yet: delegation runs on this thread's host",
+                    },
+              )}
               onChange={(next) => {
                 setHost(next);
                 const options = hosts[next]?.harnesses;
@@ -235,8 +243,9 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
         </div>
 
         <p className="text-[11.5px] leading-[16px] text-[var(--fg-3)]">
-          Blank limits use the daemon defaults (20 turns, 15 minutes, 50k tokens). Cancelling the
-          child cleans up its worktree.
+          Cross-host delegation is not implemented yet: the child runs on this thread's host. Blank
+          limits use the daemon defaults (20 turns, 15 minutes, 50k tokens). Cancelling the child
+          cleans up its worktree.
         </p>
 
         <DialogFooter>
