@@ -259,8 +259,10 @@ pub struct McpSharePolicy {
     /// Require an approval for every call, regardless of `confirm_tools`.
     #[serde(default)]
     pub confirm_all: bool,
-    /// Device ids allowed to use the grant. `None` admits the target machine's
-    /// paired device only.
+    /// Device ids allowed to use the grant. These are **connect device ids of
+    /// peer daemons** (the daemon device in Settings → Devices), not ids of
+    /// phones or other user devices, and never a value claimed in a handshake
+    /// frame. `None` admits the target machine's own daemon only.
     #[serde(default)]
     pub allowed_devices: Option<Vec<String>>,
 }

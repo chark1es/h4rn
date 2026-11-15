@@ -5,6 +5,20 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### Council round 2: MCP sharing over the relay, real approvals, device ids (F1–F3)
+
+- **MCP tunnels can use the relay (F1).** Relay frames carry an explicit `service` (`secure` for
+  clients, `secure_mcp` for peer daemons). A daemon multiplexes peer sessions over its existing
+  relay socket, targeting another machine of the same account with a live daemon; user devices
+  cannot open `secure_mcp`. Direct and tailnet paths still rank ahead of relay.
+- **Confirmation policies raise a real approval (F2).** `confirm_all` / `confirm_tools` produce a
+  pending card in the owner's UI with the tool name and a bounded argument preview. It needs the
+  `approve` scope, expires closed after two minutes, is cancelled when the tunnel drops, and is
+  re-read with `PendingApprovals` after a reconnect.
+- **`allowed_devices` matches a real id (F3).** The peer daemon's connect device id is carried
+  through discovery into `register_host`; the owner compares that recorded id, never a claim, and
+  docs/mcp.md now states exactly what the list holds.
+
 ### Council round 1: authorization, transport and pairing
 
 - **Binary PTY input is authorised (A1).** It needs `Hello`, the `terminal` scope and a viewer
@@ -34,7 +48,7 @@ All notable changes to h4rn are recorded here. The format follows
   grants as pushed snapshots (share, unshare, policy change, server removal, peer revoked), builds
   the tunnel itself and registers the server with its hub. Unshare, revocation and a dropped
   session unregister it. B's MCP list shows the server as running on the owner.
-- Limits: LAN/tailnet endpoints only (no relay path for MCP tunnels yet).
+- At that point the tunnel needed a LAN or tailnet path; council round 2 added the relay fallback.
 
 ### Council round 1: correctness and hygiene
 

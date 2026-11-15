@@ -112,9 +112,16 @@ A server can be shared with another machine with `Share { name, to_machine, poli
 is enforced by the **owner**:
 
 - `allowed_tools: None` allows every tool; `Some(list)` is authoritative;
-- `confirm_tools` (and `confirm_all`) require an approval on the owning machine before each call;
-- `allowed_devices: None` admits the target machine's own daemon only; `Some(list)` compares the
-  verified device id of the calling daemon (never a caller-supplied claim);
+- `confirm_tools` (and `confirm_all`) require an approval on the owning machine before each call.
+  The owner's daemon raises a pending card showing the caller, `server__tool` and a bounded
+  arguments preview. It is answered with `RespondApproval { approval_id, decision }` by a client
+  holding the `approve` scope; `PendingApprovals` re-reads the set after a reconnect. An approval
+  expires after two minutes, is cancelled when the tunnel drops, and fails closed on either;
+- `allowed_devices` holds **connect device ids of peer daemons**, not ids of phones or other user
+  devices. `None` admits the target machine's own daemon only. `Some(list)` compares the device id
+  the owner recorded on that peer daemon's `host` registry entry when the peer was discovered
+  (the `device_id` column of the daemon device in Settings → Devices), never a value claimed in
+  the handshake frame;
 - every remote call is audit-logged locally with the authenticated device key, the machine, the
   server, the tool and the outcome.
 
@@ -132,37 +139,50 @@ credentials: the upstream server runs on the owner. A proxied server cannot be r
 ### How a share reaches the target
 
 1. **Peers.** Each daemon keeps a `PeerDirectory`: for every other daemon it may talk to, the host
-   id a share names, the pinned Noise key and `ip:port` endpoints (LAN, tailnet). A signed-in daemon
-   fills it from h4rn-connect (the account's daemon devices and machines), re-reading it when the
-   relay reports a snapshot, presence change, pairing or revocation. Embedders can add peers with
-   `PeerDirectory::replace_source`. Peer keys are admitted to, and revoked from, the secure
-   transport allowlist by the directory.
+   id a share names, the pinned Noise key, its connect machine id and its relay address, plus any
+   `ip:port` endpoints (LAN, tailnet). A signed-in daemon fills it from h4rn-connect (the account's
+   daemon devices and machines), re-reading it when the relay reports a snapshot, presence change,
+   pairing or revocation. Embedders can add peers with `PeerDirectory::replace_source`. Peer keys
+   are admitted to, and revoked from, the secure transport allowlist by the directory.
 2. **Grant discovery (pushed).** B opens a `grants` session on A's `/secure-mcp`
    (`{"h4rn_mcp_grants": "h4rn-mcp-grants-1"}`). A derives B's machine from the verified key,
    sends the full set of grants for it, and sends a new snapshot whenever a share is added, changed
    or removed, a server is removed, or B stops being a peer. Nothing polls. If the session drops, B
    unregisters everything from that peer and reconnects with backoff (500 ms to 30 s); the fresh
    snapshot is the reconciliation.
-3. **Registration.** For each granted server B builds a `TransportMcpTunnel` from the peer's
-   endpoints (probed in parallel by the multipath engine; tailnet addresses are tagged Tailscale)
-   and calls `McpHub::register_remote`. B's harnesses then see `server__tool` like any other
-   server, and B's `ListServers` shows it with `runs_on` set to the owner. If the name is already
-   taken on B (a local server or another peer's), it is registered as `<name>-<owner host>`.
+3. **Registration.** For each granted server B builds a `TransportMcpTunnel` from every candidate
+   path and calls `McpHub::register_remote`. The multipath engine probes direct LAN and tailnet
+   sockets first and ranks the relay last, so a relay-only pair still connects. B's harnesses then
+   see `server__tool` like any other server, and B's `ListServers` shows it with `runs_on` set to
+   the owner. If the name is already taken on B (a local server or another peer's), it is
+   registered as `<name>-<owner host>`.
 4. **Teardown.** `Unshare`, removing the server on A, revoking B's device or machine (the peer
    disappears from A's directory, which also revokes its key and closes live sessions), a dropped
    connection, or the owner leaving B's directory all call `McpHub::unregister_remote`.
 
-Known limits: the tunnel does not use the connect relay (connect refuses daemon-initiated relay
-sessions, and the relay has no per-service route), so two machines need a LAN or tailnet path;
-`relay:` candidates are ignored. Phones are clients and never run servers or hold shares.
-Revocation of a sibling daemon is noticed on the next relay event, not instantly.
+### Relay path
+
+When two machines share no LAN or tailnet route, the tunnel uses the same h4rn-connect relay as
+the client protocol. A daemon cannot open a second relay WebSocket (connect keys a peer by device
+id, so the second socket would evict the control connection), so peer sessions are multiplexed as
+new `conn_id`s over the daemon's existing authenticated socket. Each `RelayOpen` carries an
+explicit `service`: `secure` is the original client route, and `secure_mcp` reaches only the
+peer-only `/secure-mcp` listener.
+
+Connect admits a daemon-initiated session only when the target machine belongs to the same
+account and is not the caller's own machine, and only when its daemon is online. The owner still
+authorizes the actual caller by the Noise key registered as a `host`; the relay check narrows who
+may ask, it does not grant access. User devices are refused `secure_mcp` outright.
+
+Phones are clients and never run servers or hold shares. Revocation of a sibling daemon is
+noticed on the next relay event, not instantly.
 
 ## Protocol operations
 
 `ClientRequest::Mcp { request }` carries every operation:
 
 `ListServers`, `Upsert`, `Remove`, `SetEnabled`, `Import`, `ApplyImport`, `ResolveConflict`,
-`Share`, `Unshare`, `ListTools`, `TestCall`.
+`Share`, `Unshare`, `PendingApprovals`, `RespondApproval`, `ListTools`, `TestCall`.
 
 The legacy `McpList`, `McpUpsert` and `McpRemove` requests are mapped onto `ListServers`, `Upsert`
 and `Remove` for older clients. Responses use `McpServers`, `McpServer`, `McpImportPreview`,

@@ -23,7 +23,9 @@ confirm_tools: Array<string>,
  */
 confirm_all: boolean, 
 /**
- * Device ids allowed to use the grant. `None` admits the target machine's
- * paired device only.
+ * Device ids allowed to use the grant. These are **connect device ids of
+ * peer daemons** (the daemon device in Settings → Devices), not ids of
+ * phones or other user devices, and never a value claimed in a handshake
+ * frame. `None` admits the target machine's own daemon only.
  */
 allowed_devices: Array<string> | null, };
