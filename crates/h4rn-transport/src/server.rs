@@ -202,6 +202,7 @@ impl SessionSender {
 #[derive(Clone)]
 pub struct SessionLiveness {
     attached: watch::Receiver<bool>,
+    ever_live: Arc<AtomicBool>,
 }
 
 impl SessionLiveness {
@@ -215,8 +216,13 @@ impl SessionLiveness {
     /// Waiting for the first attachment matters because the handle is built
     /// just before the path task starts; without it a caller that checks
     /// immediately would race the first attach and see a session that was
-    /// never alive. Cancel-safe.
+    /// never alive. A session whose only path detached before the caller
+    /// subscribed has already published the change it would wait for, so the
+    /// flag makes that case return instead of blocking forever. Cancel-safe.
     pub async fn gone(&mut self) {
+        if !*self.attached.borrow() && self.ever_live.load(Ordering::SeqCst) {
+            return;
+        }
         while !*self.attached.borrow_and_update() {
             if self.attached.changed().await.is_err() {
                 return;
@@ -262,6 +268,8 @@ struct SessionEndpoint {
     /// two; a drop to zero means the peer has no way back to this session.
     live_paths: AtomicUsize,
     liveness: watch::Sender<bool>,
+    /// Set by the first attached path; see [`SessionLiveness::gone`].
+    ever_live: Arc<AtomicBool>,
 }
 
 /// Keeps one live-path count in the session for as long as its task runs.
@@ -275,6 +283,7 @@ struct LivePath {
 
 impl LivePath {
     fn new(endpoint: Arc<SessionEndpoint>) -> Self {
+        endpoint.ever_live.store(true, Ordering::SeqCst);
         if endpoint.live_paths.fetch_add(1, Ordering::SeqCst) == 0 {
             endpoint.liveness.send_replace(true);
         }
@@ -652,6 +661,7 @@ impl SecureService {
                         notify: Arc::new(tokio::sync::Notify::new()),
                         live_paths: AtomicUsize::new(0),
                         liveness: watch::channel(false).0,
+                        ever_live: Arc::new(AtomicBool::new(false)),
                     });
                     sessions.insert(session_id, Arc::clone(&endpoint));
                     (endpoint, Some((frames_rx, commands_rx)))
@@ -719,6 +729,7 @@ impl SecureService {
             closed: Arc::clone(&endpoint.closed),
             liveness: SessionLiveness {
                 attached: endpoint.liveness.subscribe(),
+                ever_live: Arc::clone(&endpoint.ever_live),
             },
         }))
     }
