@@ -62,7 +62,7 @@ export function serverStatus(server: McpServerView): {
   if (server.runs_on) {
     return server.status === "error"
       ? { label: "Unreachable", tone: "danger" }
-      : { label: `On ${server.runs_on}`, tone: "off" };
+      : { label: `Shared from ${server.runs_on}`, tone: "off" };
   }
   if (needsCredential(server)) return { label: "Needs credential", tone: "warn" };
   switch (server.status) {

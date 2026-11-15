@@ -33,7 +33,6 @@ use h4rn_protocol::{
 use h4rn_transport::keys::DeviceIdentity;
 use h4rn_transport::server::{SecureOptions, SecureService};
 use h4rn_transport::server_session::PairingPolicy;
-use h4rn_transport::wire::SESSION_ID_LEN;
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
@@ -563,10 +562,9 @@ async fn a_remote_hub_proxies_a_shared_server_over_the_secure_tunnel() {
 
     // B proxies it through the encrypted tunnel.
     let tunnel = TransportMcpTunnel::new(TunnelConnection {
-        url: format!("ws://{}/secure-mcp", a.addr),
+        urls: vec![format!("ws://{}/secure-mcp", a.addr)],
         identity: b_identity,
         daemon_public: a_secure.public_identity().noise_public,
-        session_id: [7u8; SESSION_ID_LEN],
         machine: b_host.clone(),
         device_id: Some("dev_b".into()),
     });
@@ -637,6 +635,8 @@ async fn a_remote_hub_proxies_a_shared_server_over_the_secure_tunnel() {
 struct TunnelRig {
     a: TestDaemon,
     tunnel: TransportMcpTunnel,
+    identity: DeviceIdentity,
+    daemon_public: [u8; 32],
 }
 
 async fn tunnel_rig(
@@ -673,14 +673,18 @@ async fn tunnel_rig(
         .await
         .expect("share");
     let tunnel = TransportMcpTunnel::new(TunnelConnection {
-        url: format!("ws://{}/secure-mcp", a.addr),
-        identity: b_identity,
+        urls: vec![format!("ws://{}/secure-mcp", a.addr)],
+        identity: b_identity.clone(),
         daemon_public: a_secure.public_identity().noise_public,
-        session_id: [9u8; SESSION_ID_LEN],
         machine: HostId::new(claimed_machine.unwrap_or("host_b")),
         device_id: claimed_device.map(str::to_owned),
     });
-    TunnelRig { a, tunnel }
+    TunnelRig {
+        a,
+        tunnel,
+        identity: b_identity,
+        daemon_public: a_secure.public_identity().noise_public,
+    }
 }
 
 async fn list_tools_over(rig: &TunnelRig) -> Result<Value, String> {
@@ -689,6 +693,95 @@ async fn list_tools_over(rig: &TunnelRig) -> Result<Value, String> {
         .request("tools/list", json!({}), Duration::from_secs(5))
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Opens the grants handshake on the rig's `/secure-mcp` with the rig's key and
+/// returns the first grants snapshot, or why the owner refused.
+async fn open_grants(rig: &TunnelRig) -> Result<Value, String> {
+    use h4rn_transport::client::{Client, ClientConfig, ClientEvent, ClientPath};
+    use h4rn_transport::engine::EngineConfig;
+    let engine = EngineConfig::new([7u8; 16], rig.identity.clone(), rig.daemon_public);
+    let paths = vec![ClientPath::websocket(
+        h4rn_protocol::TransportPathKind::Direct,
+        format!("ws://{}/secure-mcp", rig.a.addr),
+    )];
+    let mut client =
+        Client::connect(ClientConfig::new(engine, paths)).map_err(|e| e.to_string())?;
+    let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+        let mut sent = false;
+        loop {
+            match client.recv().await {
+                Some(ClientEvent::Established(_)) if !sent => {
+                    sent = true;
+                    client
+                        .send(h4rn_transport::AppFrame::text(
+                            json!({"h4rn_mcp_grants": "h4rn-mcp-grants-1"}).to_string(),
+                        ))
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+                Some(ClientEvent::Frame(frame)) => {
+                    let value: Value = serde_json::from_str(frame.as_text().unwrap_or("null"))
+                        .map_err(|e| e.to_string())?;
+                    return if value.get("grants").is_some() {
+                        Ok(value)
+                    } else {
+                        Err(value.to_string())
+                    };
+                }
+                Some(ClientEvent::Closed { reason }) => return Err(format!("closed: {reason}")),
+                Some(_) => {}
+                None => return Err("client stopped".into()),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| Err("timed out".into()));
+    client.close().await;
+    outcome
+}
+
+#[tokio::test]
+async fn a_registered_peer_daemon_can_open_the_grants_handshake() {
+    let rig = tunnel_rig(
+        |devices, host, key| devices.register_host(host.clone(), key, Some("dev_b".into())),
+        McpSharePolicy::default(),
+        None,
+        None,
+    )
+    .await;
+    let grants = open_grants(&rig).await.expect("peer daemon is admitted");
+    let servers: Vec<&str> = grants["grants"]
+        .as_array()
+        .expect("grants array")
+        .iter()
+        .filter_map(|grant| grant["server"].as_str())
+        .collect();
+    assert_eq!(servers, ["local"], "machine comes from the key: {grants}");
+    rig.a.stop().await;
+}
+
+#[tokio::test]
+async fn a_view_only_client_key_cannot_open_the_grants_handshake() {
+    let rig = tunnel_rig(
+        |devices, _host, key| {
+            devices.insert_scoped("phone", key, vec![h4rn_protocol::PairScope::View])
+        },
+        McpSharePolicy::default(),
+        None,
+        None,
+    )
+    .await;
+    let refused = open_grants(&rig).await.expect_err("a client is not a peer");
+    assert!(!refused.contains("local"), "no grant may leak: {refused}");
+    rig.a.stop().await;
+}
+
+#[tokio::test]
+async fn a_key_with_no_registry_entry_cannot_open_the_grants_handshake() {
+    let rig = tunnel_rig(|_, _, _| {}, McpSharePolicy::default(), None, None).await;
+    assert!(open_grants(&rig).await.is_err());
+    rig.a.stop().await;
 }
 
 #[tokio::test]

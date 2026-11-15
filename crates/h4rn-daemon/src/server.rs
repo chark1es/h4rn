@@ -225,6 +225,10 @@ async fn secure_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> 
         let link = Box::new(WsLink { socket });
         match service.accept(link).await {
             Ok(AcceptOutcome::New(handle)) => {
+                if refuse_peer_daemon(&state, &handle.device) {
+                    handle.into_parts().0.close();
+                    return;
+                }
                 let mut origin = SessionOrigin::secure(handle.device);
                 origin.device_id = state.devices.device_for_key(&handle.device);
                 let (sender, frames) = handle.into_parts();
@@ -244,6 +248,23 @@ async fn secure_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> 
     })
 }
 
+/// Whether `key` is a registered peer daemon. Peer daemons authenticate on
+/// `/secure-mcp` only: on the client protocol route they get no session at all,
+/// whatever the allowlist says.
+fn refuse_peer_daemon(state: &AppState, key: &[u8; h4rn_transport::keys::KEY_LEN]) -> bool {
+    let peer = state
+        .devices
+        .authorization(key)
+        .is_some_and(|auth| auth.role == crate::remote::Role::Host);
+    if peer {
+        tracing::warn!(
+            key = %hex::encode(key),
+            "refused a peer daemon key on the client route; peers may only use /secure-mcp"
+        );
+    }
+    peer
+}
+
 /// Runs one accepted secure session through the normal protocol loop.
 ///
 /// Both `/secure` and the relay connector call this, so a relayed session is
@@ -257,6 +278,10 @@ pub(crate) async fn serve_secure_link(
 ) {
     match service.accept(link).await {
         Ok(AcceptOutcome::New(handle)) => {
+            if refuse_peer_daemon(&state, &handle.device) {
+                handle.into_parts().0.close();
+                return;
+            }
             // Identity is the key the Noise handshake authenticated. A device id
             // the relay put in its open frame is only a claim: it is replaced by
             // the registry's answer for that key, even when they disagree.

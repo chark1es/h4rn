@@ -104,6 +104,10 @@ pub struct DeviceRegistry {
     pending_direct: Mutex<Option<Vec<PairScope>>>,
     /// Typed-code pairings waiting for a human to compare the SAS.
     confirmations: Mutex<Vec<PairingConfirmation>>,
+    /// Fired when the relay reports that the account's machines or devices may
+    /// have changed (snapshot, presence, pairing, revocation), so the peer
+    /// directory refreshes on a push instead of polling connect.
+    topology: tokio::sync::Notify,
 }
 
 /// How long a pairing confirmation stays listed.
@@ -145,7 +149,13 @@ impl DeviceRegistry {
             path: Some(path),
             pending_direct: Mutex::new(None),
             confirmations: Mutex::new(Vec::new()),
+            topology: tokio::sync::Notify::new(),
         }
+    }
+
+    /// The topology-change signal; see the field docs.
+    pub fn topology(&self) -> &tokio::sync::Notify {
+        &self.topology
     }
 
     fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<[u8; KEY_LEN], Entry>> {

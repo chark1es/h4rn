@@ -32,24 +32,20 @@ use h4rn_mcp::sharing::{
     ConfirmationGate, DenyConfirmation, McpTunnel, ShareAudit, ShareAuthorizer, ShareCall,
     ShareError, TunnelSession,
 };
-use h4rn_mcp::upstream::{
-    DEFAULT_REQUEST_TIMEOUT, DEFAULT_TOOL_TIMEOUT, UpstreamError, UpstreamLimits,
-};
+use h4rn_mcp::upstream::{DEFAULT_TOOL_TIMEOUT, UpstreamError, UpstreamLimits};
 use h4rn_protocol::{
     ClientRequest, HarnessKind, HostId, McpRequest, ProtoError, ResponseBody, ThreadId,
-    TransportPathKind,
 };
 use h4rn_transport::AppFrame;
-use h4rn_transport::client::{Client, ClientConfig, ClientEvent, ClientPath};
-use h4rn_transport::engine::EngineConfig;
+use h4rn_transport::client::{Client, ClientEvent};
 use h4rn_transport::keys::{DeviceIdentity, KEY_LEN};
 use h4rn_transport::server::{AcceptOutcome, Link, SecureService};
-use h4rn_transport::wire::SESSION_ID_LEN;
 use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::config::Config;
+use crate::mcp_peers::{GRANTS_HANDSHAKE, PeerDirectory, PeerLinks, serve_grants};
 use crate::remote::{RemoteAudit, SessionOrigin};
 use crate::threads::{McpSession, McpSessionProvider};
 
@@ -70,6 +66,8 @@ pub struct McpService {
     /// Registry that decides which Noise keys are peer daemons. Without one,
     /// `/secure-mcp` admits nobody.
     devices: std::sync::RwLock<Option<Arc<crate::remote::DeviceRegistry>>>,
+    peers: Arc<PeerDirectory>,
+    peering: std::sync::Mutex<Option<(tokio::sync::watch::Sender<bool>, JoinHandle<()>)>>,
 }
 
 impl McpService {
@@ -130,6 +128,8 @@ impl McpService {
             endpoint: Arc::new(RwLock::new(None)),
             background: std::sync::Mutex::new(None),
             devices: std::sync::RwLock::new(None),
+            peers: Arc::new(PeerDirectory::new()),
+            peering: std::sync::Mutex::new(None),
         };
         service.start_background();
         Ok(service)
@@ -143,6 +143,32 @@ impl McpService {
     /// The shared Streamable-HTTP route state.
     pub fn http_state(&self) -> McpServerState {
         self.state.clone()
+    }
+
+    /// The sibling daemons this machine may share MCP servers with.
+    pub fn peers(&self) -> Arc<PeerDirectory> {
+        Arc::clone(&self.peers)
+    }
+
+    /// Starts following peers' grants: for every online peer, mirror the
+    /// servers it shared with this machine into the hub, authenticating the
+    /// tunnels as this daemon's own `identity`. Idempotent.
+    pub fn start_peering(&self, identity: DeviceIdentity) {
+        let mut peering = self
+            .peering
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if peering.is_some() {
+            return;
+        }
+        let links = PeerLinks::new(
+            Arc::clone(&self.hub),
+            Arc::clone(&self.peers),
+            identity,
+            self.hub.local_host().clone(),
+        );
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        *peering = Some((stop, tokio::spawn(links.run(stopped))));
     }
 
     /// Sets the loopback URL injected into harness sessions.
@@ -174,6 +200,15 @@ impl McpService {
 
     /// Stops the background pass, every upstream and the hub event bridge.
     pub async fn shutdown(&self) {
+        let peering = self
+            .peering
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some((stop, handle)) = peering {
+            let _ = stop.send(true);
+            let _ = handle.await;
+        }
         if let Some(handle) = self
             .background
             .lock()
@@ -220,6 +255,20 @@ impl McpService {
         }
     }
 
+    /// The registry that authenticates peer daemons, if one is wired.
+    fn devices(&self) -> Option<Arc<crate::remote::DeviceRegistry>> {
+        self.devices
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// The machine and device id of `key` when the registry lists it as a
+    /// peer daemon; `None` for any other key (clients, unknown keys).
+    fn verified_peer(&self, key: &[u8; KEY_LEN]) -> Option<(HostId, String)> {
+        verified_peer(self.devices().as_deref(), key)
+    }
+
     /// Serves the owner half of one `/secure-mcp` session.
     pub async fn serve_secure_mcp(
         self: Arc<Self>,
@@ -256,30 +305,11 @@ impl McpService {
         let Ok(value) = serde_json::from_str::<Value>(text) else {
             return;
         };
-        if value.get("h4rn_mcp_tunnel").and_then(Value::as_str) != Some(TUNNEL_HANDSHAKE) {
-            return;
-        }
-        let Some(server) = value.get("server").and_then(Value::as_str) else {
-            return;
-        };
-        let server = names::normalise_server_name(server);
-        // Identity comes from the authenticated Noise key alone. The handshake
-        // frame's `machine` and `device_id` are claims: they may repeat what
-        // the registry says but never override it.
-        let registry = self
-            .devices
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        let peer = registry
-            .as_ref()
-            .and_then(|registry| registry.authorization(&device))
-            .filter(|auth| auth.role == crate::remote::Role::Host);
-        let Some((machine, device_id)) = peer.and_then(|auth| {
-            let machine = auth.machine?;
-            let verified = auth.device_id.unwrap_or_else(|| hex::encode(device));
-            Some((machine, verified))
-        }) else {
+        // Both the grants handshake and the tool tunnel are peer-daemon only:
+        // identity comes from the authenticated Noise key alone, resolved
+        // through the device registry. Anything the frame says about the
+        // machine or device is a claim, never an override.
+        let Some((machine, device_id)) = self.verified_peer(&device) else {
             tracing::warn!(
                 key = %hex::encode(device),
                 "refused a secure MCP peer that is not a registered daemon"
@@ -291,6 +321,30 @@ impl McpService {
             let _ = sender.send(AppFrame::text(error.response(Value::Null).to_string()));
             return;
         };
+        if value.get("h4rn_mcp_grants").and_then(Value::as_str) == Some(GRANTS_HANDSHAKE) {
+            let registry = self.devices();
+            let verified = machine.clone();
+            serve_grants(
+                Arc::clone(&self.hub),
+                Arc::clone(&self.peers),
+                machine,
+                move || {
+                    verified_peer(registry.as_deref(), &device)
+                        .is_some_and(|(current, _)| current == verified)
+                },
+                sender,
+                frames,
+            )
+            .await;
+            return;
+        }
+        if value.get("h4rn_mcp_tunnel").and_then(Value::as_str) != Some(TUNNEL_HANDSHAKE) {
+            return;
+        }
+        let Some(server) = value.get("server").and_then(Value::as_str) else {
+            return;
+        };
+        let server = names::normalise_server_name(server);
         let claimed_machine = value.get("machine").and_then(Value::as_str);
         let claimed_device = value.get("device_id").and_then(Value::as_str);
         if claimed_machine.is_some_and(|claimed| claimed != machine.as_str())
@@ -617,6 +671,20 @@ impl ShareAudit for DaemonShareAudit {
     }
 }
 
+/// Resolves a Noise key to `(machine, device id)` when `registry` lists it as a
+/// peer daemon. Client keys, unknown keys and a missing registry give `None`.
+pub(crate) fn verified_peer(
+    registry: Option<&crate::remote::DeviceRegistry>,
+    key: &[u8; KEY_LEN],
+) -> Option<(HostId, String)> {
+    let auth = registry?
+        .authorization(key)
+        .filter(|auth| auth.role == crate::remote::Role::Host)?;
+    let machine = auth.machine?;
+    let device_id = auth.device_id.unwrap_or_else(|| hex::encode(key));
+    Some((machine, device_id))
+}
+
 fn hub_error(error: HubError) -> RpcErrorObject {
     match error {
         HubError::Upstream(UpstreamError::Rpc(error)) => error,
@@ -685,14 +753,14 @@ mod tunnel {
     /// Everything needed to dial another daemon's `/secure-mcp` route.
     #[derive(Clone)]
     pub struct TunnelConnection {
-        /// `ws://host:port/secure-mcp` on the owning daemon.
-        pub url: String,
-        /// This daemon's transport identity.
+        /// `ws://host:port/secure-mcp` candidates on the owning daemon (LAN,
+        /// tailnet), probed in parallel by the multipath engine.
+        pub urls: Vec<String>,
+        /// This daemon's transport identity. The owner authenticates the
+        /// tunnel by this key.
         pub identity: DeviceIdentity,
         /// The owning daemon's pinned X25519 key.
         pub daemon_public: [u8; 32],
-        /// Session id for the client engine (32 hex characters' worth of bytes).
-        pub session_id: [u8; SESSION_ID_LEN],
         /// This daemon's host id, used by the owner's share policy.
         pub machine: HostId,
         /// Connect device id, when known.
@@ -714,39 +782,13 @@ mod tunnel {
     #[async_trait::async_trait]
     impl McpTunnel for TransportMcpTunnel {
         async fn open(&self, server: &str) -> Result<Arc<dyn TunnelSession>, UpstreamError> {
-            let engine = EngineConfig::new(
-                self.connection.session_id,
-                self.connection.identity.clone(),
+            let client = crate::mcp_peers::establish(
+                &self.connection.urls,
+                &self.connection.identity,
                 self.connection.daemon_public,
-            );
-            let paths = vec![ClientPath::websocket(
-                TransportPathKind::Direct,
-                self.connection.url.clone(),
-            )];
-            let mut client = Client::connect(ClientConfig::new(engine, paths))
-                .map_err(|error| UpstreamError::Unavailable(error.to_string()))?;
-
-            loop {
-                match tokio::time::timeout(DEFAULT_REQUEST_TIMEOUT, client.recv()).await {
-                    Ok(Some(ClientEvent::Established(_))) => break,
-                    Ok(Some(ClientEvent::Closed { reason })) => {
-                        return Err(UpstreamError::Unavailable(format!(
-                            "the secure MCP tunnel closed: {reason}"
-                        )));
-                    }
-                    Ok(Some(_)) => {}
-                    Ok(None) => {
-                        return Err(UpstreamError::Unavailable(
-                            "the secure MCP client stopped during connect".into(),
-                        ));
-                    }
-                    Err(_) => {
-                        return Err(UpstreamError::Unavailable(
-                            "timed out opening the secure MCP tunnel".into(),
-                        ));
-                    }
-                }
-            }
+            )
+            .await
+            .map_err(UpstreamError::Unavailable)?;
 
             let handshake = json!({
                 "h4rn_mcp_tunnel": TUNNEL_HANDSHAKE,

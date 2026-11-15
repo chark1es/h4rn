@@ -187,17 +187,21 @@ async fn handle_event(
         },
         RelayServerEvent::Snapshot { devices, .. } => {
             apply_snapshot(service, registry, &devices);
+            registry.topology().notify_one();
         }
         RelayServerEvent::DevicePaired { device, .. } => {
             register_device(service, registry, &device);
+            registry.topology().notify_one();
         }
         RelayServerEvent::DeviceRevoked { device_id, .. } => {
             if let Some(key) = registry.remove(&device_id) {
                 service.revoke(key);
                 tracing::info!(device = %device_id, "revoked a paired device");
             }
+            registry.topology().notify_one();
         }
         RelayServerEvent::Presence { presence } => {
+            registry.topology().notify_one();
             tracing::debug!(
                 machine = %presence.machine_id,
                 online = presence.online,

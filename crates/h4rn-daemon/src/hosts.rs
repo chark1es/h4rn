@@ -75,6 +75,14 @@ impl HostInventory {
         }
     }
 
+    /// Replaces the detected local host id and name (embedders and tests that
+    /// run several daemons on one machine).
+    pub fn with_local(mut self, id: HostId, name: impl Into<String>) -> Self {
+        self.local.host_id = id;
+        self.local.name = name.into();
+        self
+    }
+
     /// The id of the host this daemon process runs on.
     pub fn local_id(&self) -> HostId {
         self.local.host_id.clone()
@@ -115,6 +123,16 @@ impl HostInventory {
     /// Harnesses available on this host.
     pub fn available_harnesses(&self) -> Vec<HarnessKind> {
         self.catalog.available()
+    }
+}
+
+/// The id a daemon derives for a host that another daemon reported to connect
+/// (`name`, plus the distribution name for a WSL host). It mirrors
+/// [`HostInventory::detect`], so both sides agree on who `to_machine` names.
+pub fn host_id_for(name: &str, distro: Option<&str>) -> HostId {
+    match distro {
+        Some(distro) => HostId::new(format!("host_wsl_{}", slug(distro))),
+        None => HostId::new(format!("host_{}", slug(name))),
     }
 }
 

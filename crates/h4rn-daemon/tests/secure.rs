@@ -508,6 +508,70 @@ async fn a_transport_key_without_a_registry_entry_is_refused() {
 }
 
 #[tokio::test]
+async fn a_peer_daemon_key_cannot_issue_client_requests_on_secure() {
+    // A peer daemon key is admitted by the transport (it must be, to reach
+    // `/secure-mcp`) and is registered as a host with no client scopes. On the
+    // client route it may not do anything: not even Hello.
+    let peer_identity = device_identity();
+    let key = peer_identity.public().noise_public;
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([key])),
+    ));
+    let devices = Arc::new(DeviceRegistry::in_memory());
+    devices.register_host(
+        h4rn_protocol::HostId::new("host_peer"),
+        key,
+        Some("dev_peer".into()),
+    );
+    assert_eq!(devices.scopes_for_key(&key), None);
+    let daemon = boot_with(Arc::clone(&service), devices).await;
+    let mut client = SecureClient::connect(&daemon, peer_identity, None).await;
+    let id = client.next_id;
+    let text = serde_json::to_string(&ClientFrame {
+        id,
+        body: ClientRequest::ListHosts,
+    })
+    .expect("serialise frame");
+    // The daemon may already have closed the session; a refused send is a
+    // refusal, not a test failure.
+    let sent = client
+        .client
+        .send(h4rn_transport::AppFrame::text(text))
+        .await
+        .is_ok();
+    let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+        if !sent {
+            return None;
+        }
+        loop {
+            match client.client.recv().await {
+                Some(ClientEvent::Frame(frame)) => {
+                    if let Ok(ServerFrame::Response {
+                        id: response_id,
+                        result,
+                    }) = serde_json::from_str(frame.as_text().unwrap_or_default())
+                        && response_id == id
+                    {
+                        return Some(result);
+                    }
+                }
+                Some(ClientEvent::Closed { .. }) | None => return None,
+                Some(_) => {}
+            }
+        }
+    })
+    .await
+    .expect("the daemon must refuse promptly");
+    match outcome {
+        None => {}
+        Some(Err(denied)) => assert_eq!(denied.code, h4rn_protocol::ProtoErrorCode::Forbidden),
+        Some(Ok(body)) => panic!("a peer daemon key issued a client request: {body:?}"),
+    }
+    client.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn a_relay_claim_cannot_replace_the_authenticated_key() {
     // The viewer's key is registered view-only; whatever device id a relay
     // might attach, the daemon resolves the identity from the key.

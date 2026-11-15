@@ -121,14 +121,41 @@ is enforced by the **owner**:
 The caller is authenticated by its Noise key alone. The owner's device registry must list that key
 as a peer daemon (`host` role) for the target machine; a user device key (even one with every
 scope) is refused, and the `machine` / `device_id` in the handshake frame are checked against the
-registry and refused on any disagreement. The unknown machine dials the owner's `/secure-mcp` route over the same Noise transport as
-`/secure` (a second secure session; multiplexing is not required). After the internal handshake
-the tunnel carries JSON-RPC frames. The owner re-authorizes every call, strips namespaces on
-`tools/list` and re-adds them on `tools/call`, and never forwards credentials: the upstream server
-runs on the owner.
+registry and refused on any disagreement.
 
-Phase 4 registers remote bindings at runtime (`McpHub::register_remote`); the daemon's tunnel
-client is `TransportMcpTunnel`. A proxied server cannot be re-shared.
+The target machine (B) is a sibling daemon of the same account. It reaches the owner (A) over the
+same Noise transport as `/secure`, on A's `/secure-mcp` route, authenticating as **its own daemon
+key**. After the internal handshake the tunnel carries JSON-RPC frames. The owner re-authorizes
+every call, strips namespaces on `tools/list` and re-adds them on `tools/call`, and never forwards
+credentials: the upstream server runs on the owner. A proxied server cannot be re-shared.
+
+### How a share reaches the target
+
+1. **Peers.** Each daemon keeps a `PeerDirectory`: for every other daemon it may talk to, the host
+   id a share names, the pinned Noise key and `ip:port` endpoints (LAN, tailnet). A signed-in daemon
+   fills it from h4rn-connect (the account's daemon devices and machines), re-reading it when the
+   relay reports a snapshot, presence change, pairing or revocation. Embedders can add peers with
+   `PeerDirectory::replace_source`. Peer keys are admitted to, and revoked from, the secure
+   transport allowlist by the directory.
+2. **Grant discovery (pushed).** B opens a `grants` session on A's `/secure-mcp`
+   (`{"h4rn_mcp_grants": "h4rn-mcp-grants-1"}`). A derives B's machine from the verified key,
+   sends the full set of grants for it, and sends a new snapshot whenever a share is added, changed
+   or removed, a server is removed, or B stops being a peer. Nothing polls. If the session drops, B
+   unregisters everything from that peer and reconnects with backoff (500 ms to 30 s); the fresh
+   snapshot is the reconciliation.
+3. **Registration.** For each granted server B builds a `TransportMcpTunnel` from the peer's
+   endpoints (probed in parallel by the multipath engine; tailnet addresses are tagged Tailscale)
+   and calls `McpHub::register_remote`. B's harnesses then see `server__tool` like any other
+   server, and B's `ListServers` shows it with `runs_on` set to the owner. If the name is already
+   taken on B (a local server or another peer's), it is registered as `<name>-<owner host>`.
+4. **Teardown.** `Unshare`, removing the server on A, revoking B's device or machine (the peer
+   disappears from A's directory, which also revokes its key and closes live sessions), a dropped
+   connection, or the owner leaving B's directory all call `McpHub::unregister_remote`.
+
+Known limits: the tunnel does not use the connect relay (connect refuses daemon-initiated relay
+sessions, and the relay has no per-service route), so two machines need a LAN or tailnet path;
+`relay:` candidates are ignored. Phones are clients and never run servers or hold shares.
+Revocation of a sibling daemon is noticed on the next relay event, not instantly.
 
 ## Protocol operations
 
@@ -154,6 +181,9 @@ way without changing the hub, the HTTP layer or any adapter.
   and covers auth, negotiation, namespacing, tool calls, resources, prompts and token scopes.
 - `crates/h4rn-daemon/tests/mcp.rs` covers the protocol operations, secret non-leakage in the
   SQLite registry and views, and two daemons proxying a shared server over the encrypted tunnel.
+- `crates/h4rn-daemon/tests/mcp_peering.rs` boots two daemons with no hand-built tunnel, shares a
+  real stdio server, and asserts it appears on B, is callable, follows a policy change and
+  disappears on unshare and on peer removal.
 - `crates/h4rn-daemon/tests/e2e_mcp.rs` (ignored by default) injects the real endpoint into Claude
   Code and Codex and asserts the model calls `h4rn__echo`:
 

@@ -18,7 +18,7 @@ use h4rn_protocol::{
     McpToolInfo, McpTransportInput, McpTransportView, ProtoError, ProtoErrorCode,
 };
 use serde_json::Value;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::{Mutex, broadcast, watch};
 
 use crate::import::{self, ImportError, ImportedServer, ImportedTransport};
 use crate::names::{self, NameError};
@@ -206,6 +206,9 @@ pub struct McpHub {
     events: broadcast::Sender<HubEvent>,
     endpoint: Mutex<Option<String>>,
     remotes: RwLock<BTreeMap<String, RemoteBinding>>,
+    /// Bumped whenever a share grant is added, changed or removed, so the
+    /// daemon can push the new grant set to the machines it affects.
+    grants: watch::Sender<u64>,
     bridge: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -229,6 +232,7 @@ impl McpHub {
             events,
             endpoint: Mutex::new(None),
             remotes: RwLock::new(BTreeMap::new()),
+            grants: watch::channel(0).0,
             bridge: std::sync::Mutex::new(None),
         };
         hub.reload().await;
@@ -490,6 +494,34 @@ impl McpHub {
             .await;
     }
 
+    /// Drops a remote binding and stops its tunnel. Returns whether it existed.
+    pub async fn unregister_remote(&self, name: &str) -> bool {
+        let existed = self
+            .remotes
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(name)
+            .is_some();
+        if existed {
+            self.upstreams.remove(name).await;
+        }
+        existed
+    }
+
+    /// Whether a locally configured server already uses `name`.
+    pub async fn has_local_server(&self, name: &str) -> bool {
+        let name = names::normalise_server_name(name);
+        matches!(self.registry.get(&name).await, Ok(Some(_)))
+    }
+
+    /// Whether `name` is a remote binding (not a local server).
+    pub fn is_remote(&self, name: &str) -> bool {
+        self.remotes
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(name)
+    }
+
     /// Every configured server plus remote bindings, with runtime status.
     pub async fn list_servers(&self) -> Result<Vec<McpServerView>, HubError> {
         let records = self.registry.list().await?;
@@ -718,7 +750,9 @@ impl McpHub {
         for secret in record.transport.secrets() {
             self.secrets.delete(&secret.secret_id)?;
         }
+        self.registry.remove_shares_for(&record.id).await?;
         self.registry.remove(&record.id).await?;
+        self.grants.send_modify(|version| *version += 1);
         self.upstreams.remove(&name).await;
         Ok(())
     }
@@ -864,6 +898,7 @@ impl McpHub {
                 created_at: Utc::now(),
             })
             .await?;
+        self.grants.send_modify(|version| *version += 1);
         let shares = self.registry.list_shares().await?;
         Ok(self.view_for(&record, &shares).await)
     }
@@ -877,7 +912,34 @@ impl McpHub {
             .await?
             .ok_or_else(|| HubError::NotFound(name.clone()))?;
         self.registry.remove_share(&record.id, &machine).await?;
+        self.grants.send_modify(|version| *version += 1);
         Ok(())
+    }
+
+    /// A receiver that changes every time a share grant does.
+    pub fn subscribe_grants(&self) -> watch::Receiver<u64> {
+        self.grants.subscribe()
+    }
+
+    /// The servers shared with `machine` and the policy for each, by name.
+    pub async fn grants_for(
+        &self,
+        machine: &HostId,
+    ) -> Result<Vec<(String, McpSharePolicy)>, HubError> {
+        let shares = self.registry.list_shares().await?;
+        let records = self.registry.list().await?;
+        let mut grants: Vec<(String, McpSharePolicy)> = shares
+            .into_iter()
+            .filter(|share| &share.machine == machine)
+            .filter_map(|share| {
+                records
+                    .iter()
+                    .find(|record| record.id == share.server_id)
+                    .map(|record| (record.name.clone(), share.policy))
+            })
+            .collect();
+        grants.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(grants)
     }
 
     /// Every server the scope may see, honouring the enable matrix.
