@@ -291,16 +291,22 @@ impl DaemonBuilder {
 
         if let Some(service) = &secure {
             // The registry is the only source of authorisation, so the
-            // transport allowlist is rebuilt from it. A key the old allowlist
-            // file holds but the registry does not (a pairing from before
-            // scopes were recorded) is not admitted: it must pair again.
-            let known: std::collections::HashSet<_> = devices.admitted_keys().into_iter().collect();
-            for key in &known {
+            // transport allowlist is rebuilt from it. Only entries whose
+            // authoritative source has verified them this run are admitted: a
+            // connect-managed key waits for the first snapshot (or, for a peer
+            // daemon, the first peer report), so a device revoked while the
+            // daemon could not reach connect is not let in by a restart.
+            let admitted: std::collections::HashSet<_> =
+                devices.admitted_keys().into_iter().collect();
+            for key in &admitted {
                 service.allow(*key);
             }
+            // Pending and not-yet-verified entries are still recorded; only a
+            // key with no entry at all means the allowlist is stale.
+            let registered: std::collections::HashSet<_> = devices.keys().into_iter().collect();
             match h4rn_transport::keys::read_allowlist(&self.config.allowlist_path()) {
                 Ok(keys) => {
-                    let orphaned = keys.iter().filter(|key| !known.contains(*key)).count();
+                    let orphaned = keys.iter().filter(|key| !registered.contains(*key)).count();
                     if orphaned > 0 {
                         tracing::warn!(
                             orphaned,
@@ -314,18 +320,25 @@ impl DaemonBuilder {
             // A device that pairs through the one-time secret gets the scopes
             // the pairing was armed with, recorded before it is allowed.
             let registry = Arc::clone(&devices);
-            service.set_pairing_hook(Arc::new(move |key| registry.complete_direct(key)));
+            service.set_pairing_hook(Arc::new(move |key| {
+                if let Err(error) = registry.complete_direct(key) {
+                    tracing::warn!(%error, "could not record a direct pairing");
+                }
+            }));
             // Invalidate the durable pairing file the moment its secret is
             // consumed, before the device is authorised: a restart must never
-            // re-arm a used QR.
+            // re-arm a used QR. A failure here refuses the pairing, so the PSK
+            // stays closed and a restart still cannot re-arm it through this
+            // handshake.
             let pairing_dir = self.config.data_dir.clone();
             service.set_psk_consumed_hook(Arc::new(move |psk| {
                 match invalidate_direct_pairing(&pairing_dir, &psk) {
-                    Ok(true) => tracing::info!("deleted the consumed direct pairing file"),
-                    Ok(false) => {}
-                    Err(error) => {
-                        tracing::warn!(%error, "could not delete the consumed direct pairing file")
+                    Ok(true) => {
+                        tracing::info!("deleted the consumed direct pairing file");
+                        Ok(())
                     }
+                    Ok(false) => Ok(()),
+                    Err(error) => Err(error.to_string()),
                 }
             }));
             tracing::info!(

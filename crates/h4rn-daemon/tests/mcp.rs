@@ -535,11 +535,13 @@ async fn a_remote_hub_proxies_a_shared_server_over_the_secure_tunnel() {
     let b_host = b.mcp.hub().local_host().clone();
     // ... and registers that key as the daemon of machine B.
     let a_devices = Arc::new(DeviceRegistry::in_memory());
-    a_devices.register_host(
-        b_host.clone(),
-        b_identity.public().noise_public,
-        Some("dev_b".into()),
-    );
+    a_devices
+        .register_host(
+            b_host.clone(),
+            b_identity.public().noise_public,
+            Some("dev_b".into()),
+        )
+        .expect("persist");
     let a = boot_with_devices(Some(Arc::clone(&a_secure)), Some(a_devices)).await;
 
     let a_host = a.mcp.hub().local_host().clone();
@@ -753,7 +755,11 @@ async fn open_grants(rig: &TunnelRig) -> Result<Value, String> {
 #[tokio::test]
 async fn a_registered_peer_daemon_can_open_the_grants_handshake() {
     let rig = tunnel_rig(
-        |devices, host, key| devices.register_host(host.clone(), key, Some("dev_b".into())),
+        |devices, host, key| {
+            devices
+                .register_host(host.clone(), key, Some("dev_b".into()))
+                .expect("persist");
+        },
         McpSharePolicy::default(),
         None,
         None,
@@ -774,7 +780,9 @@ async fn a_registered_peer_daemon_can_open_the_grants_handshake() {
 async fn a_view_only_client_key_cannot_open_the_grants_handshake() {
     let rig = tunnel_rig(
         |devices, _host, key| {
-            devices.insert_scoped("phone", key, vec![h4rn_protocol::PairScope::View])
+            devices
+                .insert_scoped("phone", key, vec![h4rn_protocol::PairScope::View])
+                .expect("persist");
         },
         McpSharePolicy::default(),
         None,
@@ -796,7 +804,11 @@ async fn a_key_with_no_registry_entry_cannot_open_the_grants_handshake() {
 #[tokio::test]
 async fn a_registered_peer_daemon_can_use_its_grant() {
     let rig = tunnel_rig(
-        |devices, host, key| devices.register_host(host.clone(), key, Some("dev_b".into())),
+        |devices, host, key| {
+            devices
+                .register_host(host.clone(), key, Some("dev_b".into()))
+                .expect("persist");
+        },
         McpSharePolicy::default(),
         None,
         None,
@@ -819,7 +831,11 @@ async fn a_device_limited_grant_matches_the_registered_peer_device_id() {
         ..McpSharePolicy::default()
     };
     let rig = tunnel_rig(
-        |devices, host, key| devices.register_host(host.clone(), key, Some("dev_b".into())),
+        |devices, host, key| {
+            devices
+                .register_host(host.clone(), key, Some("dev_b".into()))
+                .expect("persist");
+        },
         policy,
         None,
         None,
@@ -839,7 +855,11 @@ async fn a_confirmable_share_waits_for_the_owner_before_running() {
         ..McpSharePolicy::default()
     };
     let rig = tunnel_rig(
-        |devices, host, key| devices.register_host(host.clone(), key, Some("dev_b".into())),
+        |devices, host, key| {
+            devices
+                .register_host(host.clone(), key, Some("dev_b".into()))
+                .expect("persist");
+        },
         policy,
         None,
         None,
@@ -953,7 +973,9 @@ async fn a_view_only_client_key_cannot_use_the_tunnel() {
     // a user device with `view`, not a peer daemon.
     let rig = tunnel_rig(
         |devices, _host, key| {
-            devices.insert_scoped("phone", key, vec![h4rn_protocol::PairScope::View])
+            devices
+                .insert_scoped("phone", key, vec![h4rn_protocol::PairScope::View])
+                .expect("persist");
         },
         McpSharePolicy::default(),
         None,
@@ -974,7 +996,9 @@ async fn a_key_with_no_registry_entry_cannot_use_the_tunnel() {
 #[tokio::test]
 async fn a_spoofed_machine_or_device_claim_is_refused() {
     let register = |devices: &DeviceRegistry, host: &HostId, key: [u8; 32]| {
-        devices.register_host(host.clone(), key, Some("dev_b".into()))
+        devices
+            .register_host(host.clone(), key, Some("dev_b".into()))
+            .expect("persist");
     };
     // Claims to be another machine that holds a grant.
     let rig = tunnel_rig(register, McpSharePolicy::default(), Some("host_c"), None).await;
@@ -989,7 +1013,9 @@ async fn a_spoofed_machine_or_device_claim_is_refused() {
 #[tokio::test]
 async fn an_explicit_device_list_compares_the_verified_device_only() {
     let register = |devices: &DeviceRegistry, host: &HostId, key: [u8; 32]| {
-        devices.register_host(host.clone(), key, Some("dev_b".into()))
+        devices
+            .register_host(host.clone(), key, Some("dev_b".into()))
+            .expect("persist");
     };
     let allowed = McpSharePolicy {
         allowed_devices: Some(vec!["dev_b".into()]),

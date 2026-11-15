@@ -215,7 +215,9 @@ mod tests {
     #[test]
     fn a_view_only_device_cannot_approve_but_can_read() {
         let devices = DeviceRegistry::in_memory();
-        devices.insert_scoped("phone", [1u8; KEY_LEN], vec![PairScope::View]);
+        devices
+            .insert_scoped("phone", [1u8; KEY_LEN], vec![PairScope::View])
+            .expect("persist");
         let origin = SessionOrigin::secure([1u8; KEY_LEN]);
         let denied = authorize_scopes(&devices, &origin, &approve()).unwrap_err();
         assert_eq!(denied.code, ProtoErrorCode::Forbidden);
@@ -226,11 +228,13 @@ mod tests {
     #[test]
     fn granted_scopes_pass_and_others_stay_blocked() {
         let devices = DeviceRegistry::in_memory();
-        devices.insert_scoped(
-            "phone",
-            [1u8; KEY_LEN],
-            vec![PairScope::View, PairScope::Approve],
-        );
+        devices
+            .insert_scoped(
+                "phone",
+                [1u8; KEY_LEN],
+                vec![PairScope::View, PairScope::Approve],
+            )
+            .expect("persist");
         let origin = SessionOrigin::secure([1u8; KEY_LEN]);
         assert!(authorize_scopes(&devices, &origin, &approve()).is_ok());
         let terminal = ClientRequest::TerminalList { thread_id: None };
@@ -262,8 +266,12 @@ mod tests {
     #[test]
     fn a_relay_claimed_device_id_cannot_borrow_another_devices_scopes() {
         let devices = DeviceRegistry::in_memory();
-        devices.insert_scoped("admin", [1u8; KEY_LEN], PairScope::ALL.to_vec());
-        devices.insert_scoped("viewer", [2u8; KEY_LEN], vec![PairScope::View]);
+        devices
+            .insert_scoped("admin", [1u8; KEY_LEN], PairScope::ALL.to_vec())
+            .expect("persist");
+        devices
+            .insert_scoped("viewer", [2u8; KEY_LEN], vec![PairScope::View])
+            .expect("persist");
         // The viewer's handshake key, but the relay claims the admin's id.
         let origin = SessionOrigin::relay(Some("admin".into()), Some([2u8; KEY_LEN]));
         assert!(authorize_scopes(&devices, &origin, &approve()).is_err());
@@ -272,7 +280,9 @@ mod tests {
     #[test]
     fn a_peer_daemon_key_is_not_a_client_device() {
         let devices = DeviceRegistry::in_memory();
-        devices.register_host(h4rn_protocol::HostId::new("b"), [4u8; KEY_LEN], None);
+        devices
+            .register_host(h4rn_protocol::HostId::new("b"), [4u8; KEY_LEN], None)
+            .expect("persist");
         let origin = SessionOrigin::secure([4u8; KEY_LEN]);
         assert!(authorize_scopes(&devices, &origin, &ClientRequest::ListHosts).is_err());
     }
@@ -281,7 +291,7 @@ mod tests {
     fn a_direct_pairing_carries_the_armed_scopes() {
         let devices = DeviceRegistry::in_memory();
         devices.arm_direct(vec![PairScope::View]);
-        devices.complete_direct([5u8; KEY_LEN]);
+        devices.complete_direct([5u8; KEY_LEN]).expect("persist");
         let origin = SessionOrigin::secure([5u8; KEY_LEN]);
         assert!(authorize_scopes(&devices, &origin, &approve()).is_err());
         assert!(authorize_scopes(&devices, &origin, &ClientRequest::ListHosts).is_ok());
@@ -294,7 +304,7 @@ mod tests {
         // An operator PSK with nothing armed grants read and reply, never the
         // full set: widening needs an explicit arm.
         let devices = DeviceRegistry::in_memory();
-        devices.complete_direct([5u8; KEY_LEN]);
+        devices.complete_direct([5u8; KEY_LEN]).expect("persist");
         let origin = SessionOrigin::secure([5u8; KEY_LEN]);
         let devices_scopes = devices.scopes_for_key(&[5u8; KEY_LEN]).unwrap();
         assert_eq!(
@@ -320,7 +330,7 @@ mod tests {
         let devices = DeviceRegistry::in_memory();
         devices.arm_direct(PairScope::ALL.to_vec());
         devices.clear_direct();
-        devices.complete_direct([6u8; KEY_LEN]);
+        devices.complete_direct([6u8; KEY_LEN]).expect("persist");
         assert_eq!(
             devices.scopes_for_key(&[6u8; KEY_LEN]),
             Some(vec![PairScope::View, PairScope::Approve])
@@ -330,14 +340,18 @@ mod tests {
     #[test]
     fn re_pairing_replaces_scopes() {
         let devices = DeviceRegistry::in_memory();
-        devices.insert_scoped("d", [3u8; KEY_LEN], vec![PairScope::View]);
+        devices
+            .insert_scoped("d", [3u8; KEY_LEN], vec![PairScope::View])
+            .expect("persist");
         let origin = SessionOrigin::secure([3u8; KEY_LEN]);
         assert!(authorize_scopes(&devices, &origin, &approve()).is_err());
-        devices.insert_scoped(
-            "d",
-            [3u8; KEY_LEN],
-            vec![PairScope::View, PairScope::Approve],
-        );
+        devices
+            .insert_scoped(
+                "d",
+                [3u8; KEY_LEN],
+                vec![PairScope::View, PairScope::Approve],
+            )
+            .expect("persist");
         assert!(authorize_scopes(&devices, &origin, &approve()).is_ok());
     }
 
@@ -346,20 +360,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("devices.json");
         let devices = DeviceRegistry::open(&path);
-        devices.insert_scoped("phone", [1u8; KEY_LEN], vec![PairScope::View]);
+        devices
+            .insert_scoped("phone", [1u8; KEY_LEN], vec![PairScope::View])
+            .expect("persist");
         devices.arm_direct(vec![PairScope::View, PairScope::Files]);
-        devices.complete_direct([2u8; KEY_LEN]);
+        devices.complete_direct([2u8; KEY_LEN]).expect("persist");
         drop(devices);
         let reopened = DeviceRegistry::open(&path);
-        assert_eq!(
-            reopened.scopes_for_key(&[1u8; KEY_LEN]),
-            Some(vec![PairScope::View])
-        );
+        // H2: connect entries load unverified until their authoritative source
+        // reports them, so a revocation made while the daemon was offline is
+        // not undone by a restart.
+        assert_eq!(reopened.scopes_for_key(&[1u8; KEY_LEN]), None);
+        assert!(!reopened.is_admitted(&[1u8; KEY_LEN]));
+        assert_eq!(reopened.key_for_device("phone"), Some([1u8; KEY_LEN]));
+        // A direct pairing does not depend on connect.
         assert_eq!(
             reopened.scopes_for_key(&[2u8; KEY_LEN]),
             Some(vec![PairScope::View, PairScope::Files])
         );
-        assert_eq!(reopened.key_for_device("phone"), Some([1u8; KEY_LEN]));
     }
 
     #[test]
@@ -374,15 +392,24 @@ mod tests {
     #[test]
     fn a_connect_snapshot_is_authoritative_for_connect_devices_only() {
         let devices = DeviceRegistry::in_memory();
-        devices.insert_scoped("old", [1u8; KEY_LEN], vec![PairScope::View]);
-        devices.insert_scoped("kept", [2u8; KEY_LEN], vec![PairScope::View]);
-        devices.insert_direct([3u8; KEY_LEN], PairScope::ALL.to_vec());
-        devices.register_host(h4rn_protocol::HostId::new("b"), [4u8; KEY_LEN], None);
-        let removed = devices.reconcile_connect(&[ConnectEntry {
+        devices
+            .insert_scoped("old", [1u8; KEY_LEN], vec![PairScope::View])
+            .expect("persist");
+        devices
+            .insert_scoped("kept", [2u8; KEY_LEN], vec![PairScope::View])
+            .expect("persist");
+        devices
+            .insert_direct([3u8; KEY_LEN], PairScope::ALL.to_vec())
+            .expect("persist");
+        devices
+            .register_host(h4rn_protocol::HostId::new("b"), [4u8; KEY_LEN], None)
+            .expect("persist");
+        let (removed, persisted) = devices.reconcile_connect(&[ConnectEntry {
             device_id: "kept".into(),
             key: [2u8; KEY_LEN],
             scopes: vec![PairScope::View, PairScope::Approve],
         }]);
+        persisted.expect("persist");
         assert_eq!(removed, vec![[1u8; KEY_LEN]]);
         assert!(devices.authorization(&[1u8; KEY_LEN]).is_none());
         assert_eq!(
