@@ -837,10 +837,13 @@ key connect gave it and its own key, and lists it under Settings → Devices
 match"; "They differ" revokes the device and signs it out. A swapped key on either
 side makes the two strings differ. It is 12 digits (about 40 bits), not 6: a short
 string can be ground in real time by generating key pairs until two strings
-collide. The QR path pins the daemon key out of band, so the phone side needs no
-confirmation; see the round-2 amendment for the host-side gate. Limits: a
-pairing claimed while the daemon is offline queues no confirmation until the
-relay snapshot arrives.
+collide. Both paths show the phone the same comparison: for a typed code the
+string is derived from the key connect supplied, and for a QR from the key the
+code pinned out of band, so a relay substitution makes the two screens differ.
+The host-side confirmation is the admission gate (see the round-2 amendment);
+the phone's own confirmation pins the key it will trust (see the round-3
+amendment). Limits: a pairing claimed while the daemon is offline queues no
+confirmation until the relay snapshot arrives.
 
 **Scopes are per machine.** `h4rn-connect` authorises machine-scoped actions
 (creating or revoking a pairing, revoking another device) against the link's
@@ -901,3 +904,53 @@ revoked from the transport and its sessions closed. Terminal ownership and the
 remote audit trail use the registry id (or the verified key when a direct
 pairing has no connect id), never the device id a remote client claimed in
 `Hello`.
+
+### Round-3 council amendments
+
+**The phone compares the SAS on the QR path too, and waits for the host.**
+Claiming a QR used to activate the phone immediately, but since round 2 the host
+keeps every relay-provisioned device pending until it confirms the SAS, so the
+phone connected to a host that had not admitted it. The phone now derives the
+string in Rust from its own key and the daemon key *pinned by the QR* (not the
+copy connect echoes back), shows it, and pins nothing until the person taps
+"They match". After that the phone shows a waiting state until the transport
+comes online, which only happens after the host confirms. A timeout keeps the
+comparison screen with an explanation and a retry; it is never reported as
+paired. The typed-code path uses the same screen and ordering. This is a
+deliberate two-sided gate: the phone pins the daemon key it will trust, and the
+host admits the device key it learned from the relay.
+
+**Connect entries start a run unverified; direct pairings do not.**
+`devices.json` still records connect clients and peer hosts, but `open()` loads
+those entries with `verified = false`: they are neither in the transport
+allowlist nor authorised, and `scopes_for_key`/`authorization` return nothing,
+until the first authoritative source for this run reconciles them — a connect
+snapshot for clients, a peer report for hosts. `admitted_keys()` is what startup
+passes to the transport, so a device revoked while the daemon was offline from
+connect cannot be re-admitted by a restart. Direct-provenance pairings load
+admitted because they do not depend on connect. The trade-off is explicit:
+connect-paired phones cannot use a direct or tailnet path until the daemon has
+reached connect once in this run. An entry still keeps its `device_id`, and
+`registered_role()` ignores verification where the registry only needs to know
+what a key is (for example, refusing to re-role a peer). Pending state is still
+serialised: a relay-announced device stays pending and unadmitted across a
+restart until the host decides.
+
+**A failing consumed hook refuses the pairing, and keeps the PSK closed.**
+`consume_psk` now takes a fallible hook. If deleting the one-time
+`direct-pairing.json` fails, the transport returns `NotPaired` rather than
+authorising the device, and the secret is already consumed, so the QR cannot be
+replayed from memory. The daemon logs the hook error; the transport cannot do
+more than refuse.
+
+**A registry write failure is reported, not swallowed.** `persist` returns a
+`PersistError`; `mutate` returns both the change's result and the write result.
+Admissions (confirming a pending device, inserting or updating a pairing) roll
+back in memory when the file cannot record them, and the error reaches
+`ConfirmPairing` and the UI, so a device is never admitted for this run if it
+would not be admitted after a restart. Revocations deliberately do not roll
+back: a failed write keeps the key revoked in memory and appends it to
+`devices.revoked`, a sidecar that `DeviceRegistry::open` applies before allowing
+anyone and then clears after a successful rewrite. The sidecar is the retry that
+survives a crash, and the UI still sees the error. Peer-host updates log the error
+and skip admitting the peer rather than pretending the write succeeded.

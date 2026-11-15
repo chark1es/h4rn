@@ -88,7 +88,6 @@ impl Entry {
 /// Why a registry change could not be made durable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PersistError(String);
-
 impl PersistError {
     fn new(message: impl Into<String>) -> Self {
         Self(message.into())
@@ -102,6 +101,10 @@ impl std::fmt::Display for PersistError {
 }
 
 impl std::error::Error for PersistError {}
+
+/// The key a pairing decision applied to and whether it was a confirmation.
+/// `None` means there was no pending device to decide.
+pub type PairingDecision = Option<([u8; KEY_LEN], bool)>;
 
 /// What the registry knows about an authenticated key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -564,7 +567,7 @@ impl DeviceRegistry {
         &self,
         device_id: &str,
         confirm: bool,
-    ) -> (Option<([u8; KEY_LEN], bool)>, Result<(), PersistError>) {
+    ) -> (PairingDecision, Result<(), PersistError>) {
         let (decided, persisted) = self.mutate(confirm, |entries| {
             let key = entries
                 .iter()

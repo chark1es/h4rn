@@ -625,8 +625,8 @@ async function main() {
       pairingLink,
     );
 
-    // The relay only announced this device's key, so the phone's handshake is
-    // still refused. The phone derives the SAS from the key pinned by the QR;
+    // The relay only announced this device's key, so the host keeps it
+    // pending. The phone derives the SAS from the key pinned by the QR, and
     // both sides compare it before the host admits the key.
     const phoneQrSas = (
       await page.getByTestId("pair-sas").textContent({ timeout: 30_000 })
@@ -634,7 +634,6 @@ async function main() {
     if (!phoneQrSas || !/^\d{4} \d{4} \d{4}$/.test(phoneQrSas)) {
       throw new Error(`the QR phone did not show a 12-digit code: ${phoneQrSas}`);
     }
-    await waitForLog(logs, "NotPaired", 30_000);
     await hostUi.getByTestId("host-sas").first().waitFor({ timeout: 30_000 });
     const hostCardSas = (await hostUi.getByTestId("host-sas").first().textContent())?.trim();
     if (!hostCardSas || !/^\d{4} \d{4} \d{4}$/.test(hostCardSas)) {
