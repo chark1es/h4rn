@@ -1036,6 +1036,21 @@ mod tests {
                 Files,
             ),
             (ClientRequest::McpList, View),
+            (
+                ClientRequest::Mcp {
+                    request: crate::mcp::McpRequest::PendingApprovals,
+                },
+                View,
+            ),
+            (
+                ClientRequest::Mcp {
+                    request: crate::mcp::McpRequest::RespondApproval {
+                        approval_id: "mcp-1".into(),
+                        decision: ApprovalDecision::Approve,
+                    },
+                },
+                Approve,
+            ),
             // Both persist per-thread state, so a view-only device must not
             // be able to send them.
             (

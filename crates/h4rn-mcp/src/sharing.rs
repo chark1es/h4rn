@@ -257,6 +257,29 @@ impl ApprovalGate {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Test seam: inserts a request whose expiry is already in the past, so
+    /// the late-answer guard can be exercised without a timing race.
+    #[cfg(test)]
+    fn insert_expired_for_test(&self, approval_id: &str) {
+        let now = Utc::now();
+        let (decision, _wait) = oneshot::channel();
+        self.lock().insert(
+            approval_id.to_owned(),
+            PendingApproval {
+                approval: McpShareApproval {
+                    approval_id: approval_id.to_owned(),
+                    machine: HostId::new("host_b"),
+                    server: "github".into(),
+                    tool: "write".into(),
+                    arguments_preview: String::new(),
+                    requested_at: now - chrono::Duration::minutes(5),
+                    expires_at: now - chrono::Duration::minutes(1),
+                },
+                decision,
+            },
+        );
+    }
+
     /// Removes one request and publishes its outcome. Returns false when it
     /// was already answered or had expired.
     fn finish(&self, approval_id: &str, decision: ApprovalDecision) -> bool {
@@ -307,7 +330,9 @@ impl ConfirmationGate for ApprovalGate {
                 decision,
             },
         );
-        let _ = self.events.send(HubEvent::ShareApprovalRequested { approval });
+        let _ = self
+            .events
+            .send(HubEvent::ShareApprovalRequested { approval });
         match tokio::time::timeout(self.ttl, wait).await {
             Ok(Ok(ApprovalDecision::Approve)) => true,
             // `respond` already published the deny/cancel outcome.
@@ -340,6 +365,17 @@ impl ConfirmationGate for ApprovalGate {
     }
 
     fn respond(&self, approval_id: &str, decision: ApprovalDecision) -> bool {
+        // An answer that arrives after the card's expiry is too late: the call
+        // must not run even if the timeout task has not woken yet. Deny it and
+        // report that the id is no longer pending.
+        let expired = self
+            .lock()
+            .get(approval_id)
+            .is_some_and(|pending| pending.approval.expires_at <= Utc::now());
+        if expired {
+            self.finish(approval_id, ApprovalDecision::Deny);
+            return false;
+        }
         self.finish(approval_id, decision)
     }
 
@@ -620,16 +656,32 @@ mod tests {
     #[tokio::test]
     async fn an_unanswered_approval_expires_closed() {
         let (events, _received) = broadcast::channel(16);
-        let gate = Arc::new(ApprovalGate::with_ttl(
-            events,
-            Duration::from_millis(20),
-        ));
+        let gate = Arc::new(ApprovalGate::with_ttl(events, Duration::from_millis(20)));
         let request = call("write");
         assert!(!gate.confirm(&request).await, "expiry must deny");
         assert!(
             gate.pending().is_empty(),
             "an expired approval is not pending"
         );
+    }
+
+    #[tokio::test]
+    async fn a_late_approval_after_expiry_is_refused() {
+        let (events, mut received) = broadcast::channel(16);
+        let gate = Arc::new(ApprovalGate::new(events));
+        gate.insert_expired_for_test("mcp-late");
+        assert!(
+            !gate.respond("mcp-late", ApprovalDecision::Approve),
+            "an approval past its expiry must never run the call"
+        );
+        assert!(gate.pending().is_empty());
+        assert!(matches!(
+            received.recv().await.expect("resolved event"),
+            HubEvent::ShareApprovalResolved {
+                decision: ApprovalDecision::Deny,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -649,7 +701,7 @@ mod tests {
                     _ => continue,
                 }
             };
-            assert!(gate.respond(&approval.approval_id, decision.clone()));
+            assert!(gate.respond(&approval.approval_id, decision));
             assert!(!waiter.await.expect("waiter"));
         }
     }

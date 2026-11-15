@@ -24,6 +24,7 @@ use h4rn_daemon::threads::ThreadManagerOptions;
 use h4rn_harness::FakeHarness;
 use h4rn_mcp::session::McpScope;
 use h4rn_mcp::sharing::McpTunnel as _;
+use h4rn_protocol::ApprovalDecision;
 use h4rn_protocol::HostId;
 use h4rn_protocol::TransportPathKind;
 use h4rn_protocol::{
@@ -805,6 +806,144 @@ async fn a_registered_peer_daemon_can_use_its_grant() {
         .await
         .expect("peer daemon is admitted");
     assert!(tools["tools"].as_array().is_some_and(|t| !t.is_empty()));
+    rig.a.stop().await;
+}
+
+#[tokio::test]
+async fn a_device_limited_grant_matches_the_registered_peer_device_id() {
+    // F3: `allowed_devices` compares the id the *owner* recorded for the peer
+    // daemon's connect device, not a caller-supplied claim. The tunnel below
+    // claims no device id at all.
+    let policy = McpSharePolicy {
+        allowed_devices: Some(vec!["dev_b".into()]),
+        ..McpSharePolicy::default()
+    };
+    let rig = tunnel_rig(
+        |devices, host, key| devices.register_host(host.clone(), key, Some("dev_b".into())),
+        policy,
+        None,
+        None,
+    )
+    .await;
+    let tools = list_tools_over(&rig)
+        .await
+        .expect("the registered device id is admitted");
+    assert!(tools["tools"].as_array().is_some_and(|t| !t.is_empty()));
+    rig.a.stop().await;
+}
+
+#[tokio::test]
+async fn a_confirmable_share_waits_for_the_owner_before_running() {
+    let policy = McpSharePolicy {
+        confirm_all: true,
+        ..McpSharePolicy::default()
+    };
+    let rig = tunnel_rig(
+        |devices, host, key| devices.register_host(host.clone(), key, Some("dev_b".into())),
+        policy,
+        None,
+        None,
+    )
+    .await;
+    let session = rig.tunnel.open("local").await.expect("open tunnel");
+
+    let call = {
+        let session = Arc::clone(&session);
+        tokio::spawn(async move {
+            session
+                .request(
+                    "tools/call",
+                    json!({"name": "echo", "arguments": {"message": "needs approval"}}),
+                    Duration::from_secs(10),
+                )
+                .await
+        })
+    };
+
+    // The owner's production gate raised an approval instead of denying.
+    let approval = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rig
+                .a
+                .mcp
+                .handle(McpRequest::PendingApprovals)
+                .await
+                .expect("list approvals")
+            {
+                ResponseBody::McpApprovals { approvals } if !approvals.is_empty() => {
+                    break approvals[0].clone();
+                }
+                _ => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+    })
+    .await
+    .expect("an approval should be pending");
+    assert_eq!(approval.server, "local");
+    assert_eq!(approval.tool, "echo");
+    assert!(
+        approval.arguments_preview.contains("needs approval"),
+        "the card must show what will run: {}",
+        approval.arguments_preview
+    );
+
+    let response = rig
+        .a
+        .mcp
+        .handle(McpRequest::RespondApproval {
+            approval_id: approval.approval_id.clone(),
+            decision: ApprovalDecision::Approve,
+        })
+        .await
+        .expect("approve");
+    assert!(matches!(response, ResponseBody::Ack));
+    let result = call.await.expect("call task").expect("approved call runs");
+    assert_eq!(result["content"][0]["text"], "owner:needs approval");
+
+    // A denied call fails closed and is never executed.
+    let denied = {
+        let session = Arc::clone(&session);
+        tokio::spawn(async move {
+            session
+                .request(
+                    "tools/call",
+                    json!({"name": "echo", "arguments": {"message": "denied"}}),
+                    Duration::from_secs(10),
+                )
+                .await
+        })
+    };
+    let second = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match rig
+                .a
+                .mcp
+                .handle(McpRequest::PendingApprovals)
+                .await
+                .expect("list approvals")
+            {
+                ResponseBody::McpApprovals { approvals } if !approvals.is_empty() => {
+                    break approvals[0].clone();
+                }
+                _ => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+    })
+    .await
+    .expect("a second approval should be pending");
+    rig.a
+        .mcp
+        .handle(McpRequest::RespondApproval {
+            approval_id: second.approval_id,
+            decision: ApprovalDecision::Deny,
+        })
+        .await
+        .expect("deny");
+    assert!(
+        denied.await.expect("deny task").is_err(),
+        "a denied shared call must not run"
+    );
+
     rig.a.stop().await;
 }
 

@@ -111,6 +111,7 @@ export type * from "./McpSecretInput";
 export type * from "./McpServerInput";
 export type * from "./McpServerStatusKind";
 export type * from "./McpServerView";
+export type * from "./McpShareApproval";
 export type * from "./McpSharePolicy";
 export type * from "./McpTestCallResult";
 export type * from "./McpToolInfo";

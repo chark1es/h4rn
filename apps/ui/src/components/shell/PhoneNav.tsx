@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import type * as React from "react";
 
+import { pendingMcpApprovals, useMcp } from "@/features/mcp/store";
 import { useNow } from "@/hooks/use-now";
 import { isSnoozed } from "@/lib/inbox";
 import type { Route } from "@/lib/router";
@@ -58,14 +59,16 @@ function active(route: Route, key: string): boolean {
 export function PhoneNav() {
   const route = useApp((state) => state.ui.route);
   const threads = useApp((state) => state.threads);
+  const approvals = useMcp((state) => state.approvals);
   const now = useNow();
-  const needsYou = Object.values(threads).filter(
-    (thread) =>
-      !isSnoozed(thread, now) &&
-      (thread.needs_attention ||
-        thread.agent_state === "awaiting_approval" ||
-        thread.agent_state === "error"),
-  ).length;
+  const needsYou =
+    Object.values(threads).filter(
+      (thread) =>
+        !isSnoozed(thread, now) &&
+        (thread.needs_attention ||
+          thread.agent_state === "awaiting_approval" ||
+          thread.agent_state === "error"),
+    ).length + pendingMcpApprovals(approvals).length;
 
   return (
     <nav className="q-ph-tabbar" aria-label="Main">

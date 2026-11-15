@@ -1324,11 +1324,9 @@ impl McpHub {
             }
             // Share approvals live on the daemon's confirmation gate, not in
             // the hub; `McpService::handle` answers these before dispatch.
-            McpRequest::PendingApprovals | McpRequest::RespondApproval { .. } => {
-                Err(HubError::Invalid(
-                    "share approvals are handled by the daemon".into(),
-                ))
-            }
+            McpRequest::PendingApprovals | McpRequest::RespondApproval { .. } => Err(
+                HubError::Invalid("share approvals are handled by the daemon".into()),
+            ),
             McpRequest::TestCall {
                 name,
                 tool,
