@@ -15,16 +15,19 @@ use h4rn_core::LifecycleSettings;
 use h4rn_daemon::auth::TokenStore;
 use h4rn_daemon::config::Config;
 use h4rn_daemon::daemon::DaemonBuilder;
+use h4rn_daemon::mcp::{TransportMcpTunnel, TunnelConnection};
 use h4rn_daemon::mcp_peers::{Peer, PeerDirectory};
 use h4rn_daemon::remote::DeviceRegistry;
 use h4rn_daemon::threads::ThreadManagerOptions;
 use h4rn_harness::FakeHarness;
 use h4rn_mcp::session::McpScope;
+use h4rn_mcp::sharing::McpTunnel;
 use h4rn_protocol::{
     ClientFrame, ClientRequest, DeviceId, DeviceInfo, Event, HarnessKind, HostId, McpEnabledMatrix,
     McpRequest, McpServerInput, McpServerView, McpSharePolicy, McpTransportInput, ResponseBody,
-    ServerFrame,
+    ServerFrame, TransportPathKind,
 };
+use h4rn_transport::client::ClientPath;
 use h4rn_transport::keys::DeviceIdentity;
 use h4rn_transport::server::{SecureOptions, SecureService};
 use serde_json::{Value, json};
@@ -260,21 +263,67 @@ async fn tool_names(daemon: &TestDaemon) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// How long a test waits for pushed, asynchronous state to become observable.
+/// Deliberately generous: the first upstream connect may spawn a child process
+/// or open a tunnel, and the product allows up to its own request timeout for
+/// that, so a short fixed poll can give up while the product is still working.
+const WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+
 /// Waits for a pushed grant to land. The product never polls; the test has to
-/// wait for an asynchronous push.
+/// wait for an asynchronous push. It checks the target hub's real tool list and
+/// wakes early on hub events instead of assuming a fixed number of polls is
+/// enough.
 async fn wait_for_tool(daemon: &TestDaemon, tool: &str, present: bool) {
-    for _ in 0..200 {
-        if tool_names(daemon).await.iter().any(|name| name == tool) == present {
-            return;
+    let hub = daemon.mcp.hub();
+    let mut events = hub.subscribe();
+    let wait = async {
+        loop {
+            if tool_names(daemon).await.iter().any(|name| name == tool) == present {
+                return;
+            }
+            // The tool list only changes after an upstream status change or a
+            // refresh; either produces a hub event. The sleep is a safety net
+            // for the state the product does not announce (an unregistration).
+            tokio::select! {
+                _ = events.recv() => {}
+                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            }
         }
+    };
+    if tokio::time::timeout(WAIT_TIMEOUT, wait).await.is_err() {
+        panic!(
+            "{tool} never became {} on {}: {:?}",
+            if present { "visible" } else { "hidden" },
+            daemon.host,
+            tool_names(daemon).await
+        );
+    }
+}
+
+/// Waits for the owner's narrowed policy to be the reason a call is refused.
+///
+/// A call can race the grant push or an upstream restart and come back with
+/// `no tool named ... is available` even though the narrowed policy has not
+/// been consulted yet. That transient availability error is not proof the
+/// policy landed, so keep waiting for the actual refusal.
+async fn wait_for_denial(daemon: &TestDaemon, tool: &str) -> Value {
+    let deadline = tokio::time::Instant::now() + WAIT_TIMEOUT;
+    loop {
+        let reply = hub_rpc(
+            daemon,
+            "tools/call",
+            json!({"name": tool, "arguments": {"message": "nope"}}),
+        )
+        .await;
+        if reply.to_string().contains("not shared") {
+            return reply;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the owner never enforced the narrowed policy: {reply}"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    panic!(
-        "{tool} never became {} on {}: {:?}",
-        if present { "visible" } else { "hidden" },
-        daemon.host,
-        tool_names(daemon).await
-    );
 }
 
 #[tokio::test]
@@ -352,22 +401,7 @@ async fn a_shared_stdio_server_reaches_the_target_daemon_and_unshare_removes_it(
         })
         .await;
     // (The owner enforces the policy on every call.)
-    let denied = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let reply = hub_rpc(
-                &b,
-                "tools/call",
-                json!({"name": "fixture__echo", "arguments": {"message": "nope"}}),
-            )
-            .await;
-            if reply.get("error").is_some() || reply["result"]["isError"] == true {
-                return reply;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    })
-    .await
-    .expect("the owner never enforced the narrowed policy");
+    let denied = wait_for_denial(&b, "fixture__echo").await;
     assert!(denied.to_string().contains("not shared"), "{denied}");
 
     // Unshare removes it from B's hub and McpList.
@@ -444,4 +478,88 @@ fn a_failed_peer_admission_is_retried_after_storage_recovers() {
         .expect("the retry must admit the peer once storage works");
     assert_eq!(auth.role, h4rn_daemon::remote::Role::Host);
     assert!(service.is_allowed(&peer.noise_public));
+}
+
+/// A tunnel B can use to re-register a server on `a`, reproducing what the
+/// peer manager builds during `reconcile`.
+fn tunnel_to(a: &TestDaemon, b: &TestDaemon) -> Arc<dyn McpTunnel> {
+    Arc::new(TransportMcpTunnel::new(TunnelConnection {
+        paths: vec![ClientPath::websocket(
+            TransportPathKind::Direct,
+            format!("ws://{}/secure-mcp", a.addr),
+        )],
+        identity: b.identity.clone(),
+        daemon_public: a.identity.public().noise_public,
+        machine: b.host.clone(),
+        device_id: None,
+    }))
+}
+
+/// L1 regression: a `tools/call` that lands while the remote binding is being
+/// re-established must not be mistaken for the narrowed policy. The old poll
+/// accepted the transient `no tool named ...` error and failed here.
+#[tokio::test]
+async fn a_call_during_a_registration_gap_waits_for_the_policy_denial() {
+    let a = boot("host_owner").await;
+    let b = boot("host_target").await;
+    a.mcp.peers().replace_source("static", vec![b.as_peer()]);
+    b.mcp.peers().replace_source("static", vec![a.as_peer()]);
+
+    let mut a_client = Client::connect(&a).await;
+    let upserted = a_client
+        .mcp(McpRequest::Upsert {
+            input: McpServerInput {
+                name: "fixture".into(),
+                transport: McpTransportInput::Stdio {
+                    command: fixture_binary().to_string_lossy().into_owned(),
+                    args: Vec::new(),
+                    cwd: None,
+                    env: Vec::new(),
+                },
+                tags: Vec::new(),
+                enabled: McpEnabledMatrix::default(),
+            },
+        })
+        .await;
+    assert!(matches!(upserted, ResponseBody::McpServer { .. }));
+    a_client
+        .mcp(McpRequest::Share {
+            name: "fixture".into(),
+            to_machine: b.host.clone(),
+            policy: McpSharePolicy::default(),
+        })
+        .await;
+    wait_for_tool(&b, "fixture__echo", true).await;
+
+    // Narrow the grant, then force the transient state the flake used to trip
+    // on: the binding disappears briefly and comes back.
+    a_client
+        .mcp(McpRequest::Share {
+            name: "fixture".into(),
+            to_machine: b.host.clone(),
+            policy: McpSharePolicy {
+                allowed_tools: Some(vec!["fail".into()]),
+                ..McpSharePolicy::default()
+            },
+        })
+        .await;
+
+    let tunnel = tunnel_to(&a, &b);
+    assert!(
+        b.mcp.hub().unregister_remote("fixture").await,
+        "the shared server was not registered to begin with"
+    );
+    let hub = b.mcp.hub();
+    let machine = a.host.clone();
+    let restore = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        hub.register_remote("fixture", machine, tunnel).await;
+    });
+
+    let denied = wait_for_denial(&b, "fixture__echo").await;
+    assert!(denied.to_string().contains("not shared"), "{denied}");
+    restore.await.expect("restore task");
+
+    b.stop().await;
+    a.stop().await;
 }

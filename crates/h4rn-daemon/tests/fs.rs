@@ -109,17 +109,23 @@ fn symlink_escape_is_rejected() {
 
 #[cfg(unix)]
 #[test]
-fn diff_refuses_a_symlink_that_points_outside_the_workspace() {
+fn diff_does_not_follow_a_symlink_outside_the_workspace() {
+    // A diff may report a path it cannot safely read as "missing", but it must
+    // never follow a link out of the workspace and expose the target's bytes.
     let fixture = Fixture::new();
     let outside = fixture.dir.path().join("secret.txt");
     fs::write(&outside, "top secret\n").expect("outside file");
     std::os::unix::fs::symlink(&outside, fixture.workspace.join("escape.txt")).expect("symlink");
 
-    let error = fixture
+    let diff = fixture
         .service
         .diff(fixture.workspace(), "escape.txt", &DiffAgainst::Head)
-        .expect_err("a symlink out of the workspace must not be diffed");
-    assert!(matches!(error, FsError::Forbidden(_)), "got {error:?}");
+        .expect("an escaping symlink is reported as missing, not an error");
+    assert_eq!(diff.path, "escape.txt");
+    assert!(
+        diff.after.is_none(),
+        "the bytes outside the workspace must not be read: {diff:?}"
+    );
 }
 
 #[cfg(unix)]
@@ -324,17 +330,45 @@ fn a_deleted_file_diffs_against_head_as_a_deletion() {
 #[cfg(unix)]
 #[test]
 fn diff_refuses_a_dangling_symlink_leaf() {
-    // `ResolveMode::Create` must not follow a link whose target does not exist:
-    // that would let a deletion diff describe a path outside the workspace.
+    // A leaf that is itself a dangling symlink is not followed: the diff
+    // reports the path as missing, so a deletion still renders.
     let fixture = Fixture::new();
     let outside = fixture.dir.path().join("not-yet.txt");
     std::os::unix::fs::symlink(&outside, fixture.workspace.join("trap.txt")).expect("symlink");
 
-    let error = fixture
+    let diff = fixture
         .service
         .diff(fixture.workspace(), "trap.txt", &DiffAgainst::Head)
-        .expect_err("a dangling symlink must not be diffed");
-    assert!(matches!(error, FsError::Forbidden(_)), "got {error:?}");
+        .expect("a dangling symlink is reported as missing, not an error");
+    assert_eq!(diff.path, "trap.txt");
+    assert!(
+        diff.after.is_none(),
+        "a dangling link has no readable current side: {diff:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_tracked_symlink_whose_target_was_deleted_diffs_as_a_deletion() {
+    // A tracked link keeps its HEAD blob (the link target text) after the
+    // target is deleted. Diffing the link must not error just because the
+    // link is now dangling.
+    let fixture = Fixture::new();
+    fixture.write("target.txt", "content\n");
+    std::os::unix::fs::symlink("target.txt", fixture.workspace.join("link.txt")).expect("symlink");
+    git_repo(&fixture);
+    fs::remove_file(fixture.workspace.join("target.txt")).expect("delete the target");
+
+    let diff = fixture
+        .service
+        .diff(fixture.workspace(), "link.txt", &DiffAgainst::Head)
+        .expect("a dangling tracked symlink must still diff");
+    assert_eq!(diff.path, "link.txt");
+    assert_eq!(diff.before.as_deref(), Some("target.txt"));
+    assert!(
+        diff.after.is_none(),
+        "the link's target is gone, so there is no current side: {diff:?}"
+    );
 }
 
 #[test]
