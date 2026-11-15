@@ -478,14 +478,7 @@ impl McpService {
                             .await
                             .expect("the tunnel semaphore is never closed");
                         let outcome = this
-                            .tunnel_request(
-                                &server,
-                                &machine,
-                                device_id,
-                                device,
-                                &method,
-                                params,
-                            )
+                            .tunnel_request(&server, &machine, device_id, device, &method, params)
                             .await;
                         let response = match outcome {
                             Ok(result) => jsonrpc::success(id, result),

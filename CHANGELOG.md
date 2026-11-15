@@ -5,6 +5,30 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### Council round 3: approval races, resume claims and deleted-file diffs (I1–I4)
+
+- **An approval cannot outlive its grant (I1).** `confirm_tools` / `confirm_all` approvals were
+  raised from a grant snapshot read before the wait, so unsharing the server, narrowing its policy
+  or removing it during the wait still ran the call after the owner approved. Grant changes now
+  withdraw the matching cards (`mcp_share_approval_resolved` with `cancel`), and the daemon
+  re-reads the grant and re-checks the authenticated peer after the answer and again immediately
+  before dispatch. A changed grant fails the call with `GrantChanged`.
+- **A dropped caller withdraws its approvals (I2).** The owner's `/secure-mcp` loop awaited each
+  call, so a pending approval blocked every later call on the tunnel and a card outlived the
+  caller. It now keeps reading frames, runs at most eight calls at once, and — when the transport
+  reports that the session has no live path left — withdraws that `server → machine` grant's cards
+  and drops the in-flight calls.
+- **A cancelled auto-resume cannot fire (I3).** `fire_schedule` re-checked only `closed`/`active`
+  after the proxy and session I/O, and `finish_schedule` then overwrote a `Cancelled` row with
+  `Fired`. Firing now claims the exact attempt (`schedule_id` + `attempt`, `Scheduled`/`Waiting`
+  → `Fired`) under the thread lock that `cancel_resume` also takes; cancellation and the claim are
+  conditional ledger updates, so exactly one wins. `finish_schedule` refuses a cancelled or
+  superseded row, and a cancelled resume starts no turn and does not switch models.
+- **A deleted file diffs again (I4).** `diff` resolved the target with `Existing`, so a file the
+  IDE was asked to show after deletion failed with `NotFound`. It now resolves with
+  `ResolveMode::Create`: the nearest existing ancestor is canonicalised, dangling symlinks and
+  escapes are refused, and a missing target is `after: None` for both `HEAD` and agent-turn diffs.
+
 ### Council round 2: pairing, direct pairing and registry lifecycle
 
 - **`h4rnd pair --direct` can pair again (E1).** A live one-time secret now opens PSK pairing;
