@@ -437,11 +437,12 @@ async fn a_shared_stdio_server_reaches_the_target_daemon_and_unshare_removes_it(
     a.stop().await;
 }
 
-#[test]
-fn a_failed_peer_admission_is_retried_after_storage_recovers() {
+#[tokio::test]
+async fn a_failed_peer_admission_is_retried_after_storage_recovers() {
     // K2: the `known` fast path and the unchanged-set early return meant one
     // registry write failure blocked admission for the rest of the run, even
-    // after the same peer report was sent again with storage working.
+    // after the same peer report was sent again with storage working. The
+    // directory must now retry on its own backoff timer.
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("devices.json");
     std::fs::create_dir(&path).expect("a directory in place of the registry file");
@@ -449,7 +450,7 @@ fn a_failed_peer_admission_is_retried_after_storage_recovers() {
     let service = Arc::new(SecureService::new(SecureOptions::new(
         DeviceIdentity::generate().expect("identity"),
     )));
-    let peers = PeerDirectory::new();
+    let peers = Arc::new(PeerDirectory::new());
     peers.attach_devices(Arc::clone(&devices));
     peers.attach_secure(Arc::clone(&service));
     let peer = Peer {
@@ -470,14 +471,31 @@ fn a_failed_peer_admission_is_retried_after_storage_recovers() {
     );
     assert!(!service.is_allowed(&peer.noise_public));
 
-    // The storage recovers; the same authoritative report arrives again.
+    // The retry driver runs with storage still broken, so this attempt fails
+    // too and arms the backoff timer.
+    let retries = tokio::spawn(Arc::clone(&peers).run_retries());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        devices.authorization(&peer.noise_public).is_none(),
+        "storage is still broken"
+    );
+
+    // Storage recovers. No second source report arrives; the timer alone must
+    // admit the peer.
     std::fs::remove_dir(&path).expect("storage recovers");
-    peers.replace_source("connect", vec![peer.clone()]);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while devices.authorization(&peer.noise_public).is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the pending retry must admit the peer without another report");
     let auth = devices
         .authorization(&peer.noise_public)
         .expect("the retry must admit the peer once storage works");
     assert_eq!(auth.role, h4rn_daemon::remote::Role::Host);
     assert!(service.is_allowed(&peer.noise_public));
+    retries.abort();
 }
 
 /// A tunnel B can use to re-register a server on `a`, reproducing what the

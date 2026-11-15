@@ -802,20 +802,70 @@ impl SecureService {
         // started must be usable on the next handshake. The snapshot is only
         // a candidate; `consume_psk` decides who actually owns it.
         let psk_snapshot = self.psk();
+        let policy = {
+            self.policy
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        };
+        // The pattern is chosen per device, not per daemon: an allowlisted
+        // device always speaks plain `IK`, and only a device with no allowlist
+        // entry may use the one-time PSK (`IKpsk2`). Reading message 1 has no
+        // external side effects, so while a secret is armed we try a no-PSK
+        // responder first and replay the same message through a PSK responder
+        // only when the plain one cannot use it. Nothing is consumed by the
+        // attempt; only a completed new-device pairing burns the secret.
         let mut path = ServerPath::new(
             session_id,
             self.options.identity.clone(),
-            psk_snapshot,
+            None,
             self.options.rekey,
         );
+        let mut first = path.on_handshake(&message, &policy);
+        if let Some(psk) = psk_snapshot {
+            let needs_psk = match &first {
+                // The device key was authenticated but is not on the
+                // allowlist, so the plain path rejected it rather than failed
+                // to read it.
+                Ok(ServerHandshakeStep::Rejected(RejectReason::NotPaired)) => true,
+                // `IK` and `IKpsk2` initialise the handshake hash with
+                // different protocol names, so an `IKpsk2` message 1 cannot be
+                // read by a plain responder at all.
+                Err(_) => true,
+                _ => false,
+            };
+            if needs_psk {
+                let mut psk_path = ServerPath::new(
+                    session_id,
+                    self.options.identity.clone(),
+                    Some(psk),
+                    self.options.rekey,
+                );
+                match psk_path.on_handshake(&message, &policy) {
+                    Ok(step) => {
+                        path = psk_path;
+                        first = Ok(step);
+                    }
+                    Err(error) => {
+                        // Neither pattern accepts this message. Keep the
+                        // plain responder's clean allowlist rejection when it
+                        // got that far; otherwise report the read failure.
+                        if !matches!(
+                            first,
+                            Ok(ServerHandshakeStep::Rejected(RejectReason::NotPaired))
+                        ) {
+                            return Err(SecureError::Noise(error));
+                        }
+                    }
+                }
+            }
+        }
+        let mut first = Some(first);
         let mut paired_through_psk = false;
         loop {
-            let step = {
-                let policy = self
-                    .policy
-                    .read()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                path.on_handshake(&message, &policy)?
+            let step = match first.take() {
+                Some(outcome) => outcome?,
+                None => path.on_handshake(&message, &policy)?,
             };
             match step {
                 ServerHandshakeStep::Rejected(reason) => {

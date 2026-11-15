@@ -866,6 +866,47 @@ async fn a_registered_peer_daemon_can_use_its_grant() {
 }
 
 #[tokio::test]
+async fn the_tunnel_initialize_advertises_no_resource_subscriptions() {
+    // M3: the tunnel has no `resources/subscribe` method, so its `initialize`
+    // must say so exactly like the local server does. Advertising the
+    // capability made clients subscribe and then fail with METHOD_NOT_FOUND.
+    let rig = tunnel_rig(
+        |devices, host, key| {
+            devices
+                .register_host(host.clone(), key, Some("dev_b".into()))
+                .expect("persist");
+        },
+        McpSharePolicy::default(),
+        None,
+        None,
+    )
+    .await;
+    let session = rig.tunnel.open("local").await.expect("open the tunnel");
+    let initialized = session
+        .request(
+            "initialize",
+            json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"}
+            }),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("initialize over the tunnel");
+    assert_eq!(
+        initialized["capabilities"]["resources"]["subscribe"],
+        json!(false),
+        "the tunnel cannot serve resources/subscribe"
+    );
+    assert_eq!(
+        initialized["capabilities"]["resources"]["listChanged"],
+        json!(true)
+    );
+    rig.a.stop().await;
+}
+
+#[tokio::test]
 async fn a_device_limited_grant_matches_the_registered_peer_device_id() {
     // F3: `allowed_devices` compares the id the *owner* recorded for the peer
     // daemon's connect device, not a caller-supplied claim. The tunnel below

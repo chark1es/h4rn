@@ -518,7 +518,92 @@ async fn secure_transport_psk_pairs_a_new_device() {
         service.is_allowed(&client_identity.public().noise_public),
         "PSK pairing must add the device to the allowlist"
     );
+    assert_eq!(
+        service.psk(),
+        None,
+        "a completed pairing must consume the one-time secret"
+    );
     client.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn an_allowlisted_device_connects_plainly_while_a_psk_is_armed() {
+    // M1: the daemon used to pick `IKpsk2` for every handshake while a secret
+    // was armed, so an already-paired device that correctly speaks plain `IK`
+    // failed with `decrypt error`. The pattern must be chosen per device.
+    let client_identity = device_identity();
+    let client_key = client_identity.public().noise_public;
+    let psk = [0x7au8; TOKEN_LEN];
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity())
+            .with_policy(PairingPolicy::new([client_key]))
+            .with_psk(psk),
+    ));
+    let daemon = boot(Arc::clone(&service)).await;
+    assert_eq!(service.psk(), Some(psk), "the secret must start armed");
+
+    let mut client = SecureClient::connect(&daemon, client_identity, None).await;
+    client.hello().await;
+    assert!(
+        service.is_allowed(&client_key),
+        "the paired device must stay admitted"
+    );
+    assert_eq!(
+        service.psk(),
+        Some(psk),
+        "a paired device's handshake must not consume the pairing secret"
+    );
+    client.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_watcher_armed_psk_does_not_lock_out_an_allowlisted_device() {
+    // M1, watcher path: `h4rnd pair --direct` arms the secret with `set_psk`
+    // rather than `with_psk`, and the same per-device choice must apply.
+    let client_identity = device_identity();
+    let client_key = client_identity.public().noise_public;
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([client_key])),
+    ));
+    let daemon = boot(Arc::clone(&service)).await;
+    let psk = [0x7bu8; TOKEN_LEN];
+    write_pairing(
+        daemon.dir.as_ref().unwrap().path(),
+        psk,
+        120,
+        vec![PairScope::View],
+    );
+    wait_for_secret(&service, psk).await;
+
+    let mut client = SecureClient::connect(&daemon, client_identity, None).await;
+    client.hello().await;
+    assert_eq!(
+        service.psk(),
+        Some(psk),
+        "the watcher-armed secret must stay armed after a paired device connects"
+    );
+    assert!(service.is_allowed(&client_key));
+    client.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_fresh_device_without_the_psk_is_refused_while_one_is_armed() {
+    // M1(c): arming a secret must not turn `NotPaired` into admission for a
+    // device that cannot prove possession of it.
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_psk([0x7cu8; TOKEN_LEN]),
+    ));
+    let daemon = boot(Arc::clone(&service)).await;
+    let identity = device_identity();
+    expect_refused_without_secret(&daemon, identity).await;
+    assert_eq!(
+        service.psk(),
+        Some([0x7cu8; TOKEN_LEN]),
+        "a refused device must not consume the secret"
+    );
     daemon.stop().await;
 }
 
@@ -1069,6 +1154,45 @@ async fn expect_rejected(daemon: &TestDaemon, identity: DeviceIdentity, psk: [u8
     client.close().await;
 }
 
+/// Dials `/secure` as an unpaired device with no PSK and expects a refusal.
+async fn expect_refused_without_secret(daemon: &TestDaemon, identity: DeviceIdentity) {
+    let public = identity.public().noise_public;
+    let mut engine = EngineConfig::new(
+        [22u8; SESSION_ID_LEN],
+        identity,
+        daemon.service.public_identity().noise_public,
+    );
+    engine.psk = None;
+    let paths = vec![ClientPath::websocket(
+        TransportPathKind::Direct,
+        format!("ws://{}/secure", daemon.addr),
+    )];
+    let mut client = Client::connect(ClientConfig::new(engine, paths)).expect("start client");
+    let outcome = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match client.recv().await {
+                Some(ClientEvent::Closed { reason }) => return reason,
+                Some(ClientEvent::Established(_)) => {
+                    panic!("a device without the secret was admitted")
+                }
+                Some(_) => {}
+                None => panic!("the client stopped without a reason"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for the rejection");
+    assert!(
+        outcome.contains("not paired") || outcome.contains("transport client stopped"),
+        "unexpected rejection reason: {outcome}"
+    );
+    assert!(
+        !daemon.service.is_allowed(&public),
+        "a device without the secret ended up on the allowlist"
+    );
+    client.close().await;
+}
+
 #[tokio::test]
 async fn a_secret_armed_by_the_watcher_enables_psk_pairing() {
     // Regression for E1: `SecureOptions::new` with no `with_psk`, then arm
@@ -1099,6 +1223,11 @@ async fn a_secret_armed_by_the_watcher_enables_psk_pairing() {
     assert_eq!(
         devices.scopes_for_key(&client_identity.public().noise_public),
         Some(vec![PairScope::View])
+    );
+    assert_eq!(
+        service.psk(),
+        None,
+        "a completed pairing must consume the watcher-armed secret"
     );
     client.close().await;
     daemon.stop().await;

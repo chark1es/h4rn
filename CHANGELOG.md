@@ -5,20 +5,40 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## [Unreleased]
 
+### Council round 5: per-device handshake patterns, self-driving peer retries and honest tunnel capabilities (M1–M3)
+
+- **An armed one-time PSK no longer locks out paired devices (M1).** The daemon passed the live
+  secret into every responder, so an allowlisted device that correctly initiated plain `IK` failed
+  with `Handshake("decrypt error")` for the whole `h4rnd pair --direct` window (and permanently
+  with `H4RN_PAIRING_PSK`). The pattern is now chosen per device: while a secret is armed the
+  daemon reads message 1 with a no-PSK responder first and replays it through an `IKpsk2`
+  responder only when that cannot use it. A paired device connects and leaves the secret armed; a
+  new device pairs and consumes it; a device without the secret is refused. A client holding a
+  resume ticket never sends the PSK.
+- **Peer admission retries on its own timer (M2).** A failed `register_host` used to wait for the
+  next topology report, which may never arrive while the peer set is stable. The directory keeps
+  the last merged set and a background driver re-applies it on the bounded backoff deadline; the
+  timer is only armed while a retry is pending. A peer is admitted after storage recovers without
+  a second `replace_source`.
+- **The tunnel no longer advertises `resources/subscribe` (M3).** The tunnel has no subscribe
+  method (`METHOD_NOT_FOUND`), yet its `initialize` omitted `subscribe: false` that the local
+  server already sends. It now advertises `resources.subscribe: false`, and the docs no longer
+  claim that operation is guarded.
+
 ### Council round 4: MCP tunnel authorization, peer admission, direct pairing and upload ownership (K1–K4)
 
 - **Every protected MCP tunnel operation revalidates its grant (K1).** Resources and prompts used
   the scope fixed when the tunnel opened, so a device excluded by `allowed_devices` or a server
   the owner had unshared was still readable through an open tunnel. One guard now re-checks the
   authenticated peer, the current share and the device restrictions before `tools/list`,
-  `tools/call`, `resources/list`/`read`/`subscribe` and `prompts/list`/`get`; tool policy and
+  `tools/call`, `resources/list`/`read` and `prompts/list`/`get`; tool policy and
   approvals stay in the shared call path. Covered by a persistent-tunnel test that unshares,
   narrows the policy and excludes the device.
 - **A failed peer admission is retried instead of leaving the peer unadmitted (K2).** The
   directory skipped any peer already in its in-memory set, so a `register_host` write failure
   stuck for the rest of the run. It now decides from the registry: a peer is skipped only when a
   `host` entry exists for its key and the transport already allows it; otherwise it retries with
-  an immediate first attempt and exponential backoff (250 ms doubling, capped at 30 s). A
+  an immediate first attempt and exponential backoff (500 ms for the second attempt, doubling, capped at 30 s). A
   `client` key is still never re-roled.
 - **A phantom direct pairing is refused, and an undeletable QR cannot be re-armed (K3).** The
   transport pairing hook is fallible: if the new device's registry entry cannot be written, the

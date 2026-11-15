@@ -97,8 +97,14 @@ pub struct PeerDirectory {
     devices: RwLock<Option<Arc<DeviceRegistry>>>,
     version: watch::Sender<u64>,
     /// Consecutive registry-write failures per peer key, and when the next
-    /// report may retry. A failed admission is never permanent for the run.
+    /// attempt may retry. A failed admission is never permanent for the run.
     retries: std::sync::Mutex<HashMap<[u8; KEY_LEN], RetryState>>,
+    /// The last merged set a source reported. The retry driver re-applies it
+    /// without waiting for another report.
+    last: RwLock<Vec<Peer>>,
+    /// Wakes the retry driver when a source reports (or devices attach) so it
+    /// can recompute its earliest deadline or re-run `apply`.
+    retry_notify: tokio::sync::Notify,
     /// Whether a source has reported the authoritative peer set at least once.
     /// Until then an empty directory is "not loaded yet", not "no peers".
     reconciled: AtomicBool,
@@ -138,6 +144,8 @@ impl PeerDirectory {
             devices: RwLock::new(None),
             version: watch::channel(0).0,
             retries: std::sync::Mutex::new(HashMap::new()),
+            last: RwLock::new(Vec::new()),
+            retry_notify: tokio::sync::Notify::new(),
             reconciled: AtomicBool::new(false),
         }
     }
@@ -158,6 +166,7 @@ impl PeerDirectory {
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(devices);
         self.apply(&[], &self.peers());
+        self.retry_notify.notify_one();
     }
 
     /// Replaces every peer a named source reported. Sources are independent
@@ -176,6 +185,10 @@ impl PeerDirectory {
             }
         }
         let after = self.peers();
+        *self
+            .last
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = after.clone();
         // A source has now reported: its union is authoritative even when
         // empty, so persisted hosts absent from it are revoked on this pass.
         self.reconciled.store(true, Ordering::SeqCst);
@@ -183,7 +196,50 @@ impl PeerDirectory {
         // failed while it stayed in the set must be retried, not skipped
         // because the in-memory diff is empty.
         self.apply(&before, &after);
+        self.retry_notify.notify_one();
         self.version.send_modify(|version| *version += 1);
+    }
+
+    /// Re-applies the last merged set so a pending admission can retry without
+    /// waiting for another source report.
+    pub fn retry_pending(&self) {
+        let last = self
+            .last
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        self.apply(&last, &last);
+    }
+
+    /// The earliest backoff deadline among pending admissions, if any.
+    fn next_retry(&self) -> Option<Instant> {
+        self.retries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+            .map(|retry| retry.next_attempt)
+            .min()
+    }
+
+    /// Drives pending admissions on their own backoff timers.
+    ///
+    /// A failed `register_host` used to wait for another peer report, which may
+    /// never arrive while the peer set is stable. This task wakes on a report
+    /// and, whenever a retry is pending, on its earliest deadline; it stops
+    /// arming the timer when nothing is pending.
+    pub async fn run_retries(self: Arc<Self>) {
+        loop {
+            if let Some(deadline) = self.next_retry() {
+                tokio::select! {
+                    _ = self.retry_notify.notified() => {}
+                    _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
+                        self.retry_pending();
+                    }
+                }
+            } else {
+                self.retry_notify.notified().await;
+            }
+        }
     }
 
     /// Mirrors a change of the peer set into the device registry and the
@@ -245,6 +301,9 @@ impl PeerDirectory {
                         peer = %peer.host,
                         "a peer daemon key is already a paired client; not registering it as a host"
                     );
+                    // Drop any pending retry so the driver cannot spin on a
+                    // peer it will never admit.
+                    retries.remove(&peer.noise_public);
                     continue;
                 }
             }

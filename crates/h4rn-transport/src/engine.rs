@@ -263,11 +263,20 @@ impl TransportEngine {
             .get_mut(&path)
             .ok_or(EngineError::UnknownPath(path))?;
         let mut effects = Vec::new();
+        // A resume ticket proves this device completed a handshake before, so
+        // the daemon has already allowlisted it. A paired device must never mix
+        // the one-time pairing secret into a handshake: that is only for a
+        // device that has no allowlist entry yet.
+        let psk = if self.ticket.is_some() {
+            None
+        } else {
+            self.config.psk.as_ref()
+        };
         let handshake_config = HandshakeConfig {
             session_id: &self.config.session_id,
             local_static: self.config.identity.noise_secret(),
             remote_static: Some(&self.config.daemon_public),
-            psk: self.config.psk.as_ref(),
+            psk,
         };
         let (handshake, message) = Handshake::start_initiator(&handshake_config)?;
         runtime.handshake = Some(handshake);
@@ -1116,5 +1125,47 @@ mod tests {
         ))
         .unwrap_err();
         assert!(matches!(error, EngineError::Protocol(_)));
+    }
+
+    #[test]
+    fn a_resumed_engine_never_sends_the_pairing_psk() {
+        // M1: a resume ticket proves the daemon already allowlisted this
+        // device. Even if a one-time secret is still configured, the handshake
+        // must be plain `IK`, because the daemon selects the pattern per
+        // device and only a device without an entry may present a PSK.
+        let daemon = DeviceIdentity::generate().unwrap();
+        let identity = DeviceIdentity::generate().unwrap();
+        let session = [2u8; SESSION_ID_LEN];
+        let mut config = EngineConfig::new(session, identity, daemon.public().noise_public);
+        config.psk = Some([9u8; KEY_LEN]);
+        config.resume = Some(ResumeTicket {
+            session_id: session,
+            token: [3u8; TOKEN_LEN],
+        });
+        let mut engine = TransportEngine::new(config).unwrap();
+        let path = engine.add_path(PathSpec {
+            kind: TransportPathKind::Direct,
+            endpoint: "127.0.0.1:1".into(),
+        });
+        let effects = engine.on_path_open(path, 0).unwrap();
+        let packet = effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::Send { packet, .. } => Some(packet),
+                _ => None,
+            })
+            .expect("the engine sends handshake message 1");
+        let packet = Packet::decode(&packet).unwrap();
+        assert_eq!(packet.kind, PacketKind::Handshake);
+        let mut responder = Handshake::start_responder(&HandshakeConfig {
+            session_id: &session,
+            local_static: daemon.noise_secret(),
+            remote_static: None,
+            psk: None,
+        })
+        .unwrap();
+        responder
+            .read(&packet.body)
+            .expect("a resumed handshake message 1 must be readable as plain IK");
     }
 }

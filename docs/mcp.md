@@ -127,7 +127,7 @@ is enforced by the **owner**:
   (the `device_id` column of the daemon device in Settings → Devices), never a value claimed in
   the handshake frame;
 - every protected operation on a persistent tunnel — `tools/list`, `tools/call`,
-  `resources/list`/`read`/`subscribe` and `prompts/list`/`get` — passes one guard before
+  `resources/list`/`read` and `prompts/list`/`get` — passes one guard before
   dispatch. It re-checks the authenticated peer, the current share and `allowed_devices` on the
   request itself, so unsharing, narrowing the policy or restricting devices applies to a tunnel
   that is already open, not only to the next `tools/call`;

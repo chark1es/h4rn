@@ -435,6 +435,45 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_message_one_read_can_be_replayed_on_another_pattern() {
+        // M1: the daemon tries a no-PSK responder first and, when that cannot
+        // read the message, replays the *same* bytes through a PSK responder.
+        // snow's `read_message` only advances the one handshake state, and
+        // `IK`/`IKpsk2` differ in their protocol name, so this is the exact
+        // discrimination the daemon relies on.
+        let (client, daemon, session) = ids();
+        let psk = [7u8; KEY_LEN];
+        let (_initiator, message1) = Handshake::start_initiator(&HandshakeConfig {
+            session_id: &session,
+            local_static: client.noise_secret(),
+            remote_static: Some(&daemon.public().noise_public),
+            psk: Some(&psk),
+        })
+        .unwrap();
+        let mut plain = Handshake::start_responder(&HandshakeConfig {
+            session_id: &session,
+            local_static: daemon.noise_secret(),
+            remote_static: None,
+            psk: None,
+        })
+        .unwrap();
+        assert!(plain.read(&message1).is_err());
+        let mut psk_responder = Handshake::start_responder(&HandshakeConfig {
+            session_id: &session,
+            local_static: daemon.noise_secret(),
+            remote_static: None,
+            psk: Some(&psk),
+        })
+        .unwrap();
+        let reply = psk_responder.read(&message1).unwrap();
+        assert!(reply.is_some(), "the PSK responder answers message 1");
+        assert_eq!(
+            psk_responder.remote_static().unwrap(),
+            client.public().noise_public
+        );
+    }
+
+    #[test]
     fn a_different_session_id_breaks_the_handshake() {
         let (client, daemon, session) = ids();
         let other = [3u8; SESSION_ID_LEN];

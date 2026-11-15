@@ -571,6 +571,10 @@ impl Daemon {
         };
 
         let mut remote_tasks = Vec::new();
+        // A failed peer admission retries on its own backoff timer instead of
+        // waiting for the next topology report, which may never come while the
+        // peer set is stable.
+        remote_tasks.push(tokio::spawn(mcp.peers().run_retries()));
         remote_tasks.push(tokio::spawn(proxy_usage_ingest_loop(
             Arc::clone(&self.proxy),
             Arc::clone(&self.meter),

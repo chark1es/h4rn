@@ -669,14 +669,24 @@ the connect device id recorded on the peer daemon's host entry, which is why tha
 from peer discovery into `register_host`.
 
 **Amendment (council round 4).** The tunnel guard runs before every protected operation, not only
-`tools/call`: `tools/list`, `resources/list`/`read`/`subscribe` and `prompts/list`/`get`
+`tools/call`: `tools/list`, `resources/list`/`read` and `prompts/list`/`get`
 re-check the authenticated peer, the current grant and `allowed_devices` on each request, so
 unsharing, narrowing the policy or restricting devices reaches a tunnel that is already open.
 Tool-specific policy and approval checks stay in the shared call path. Peer admission is decided
 from the registry rather than the in-memory set: a peer is skipped only when a `host` entry exists
-for its key and the transport already allows it, and a failed `register_host` write is retried on
-the next peer report with bounded backoff instead of leaving the peer unadmitted for the rest of
-the run. A `client` key is still never re-roled.
+for its key and the transport already allows it, and a failed `register_host` write is retried
+with bounded backoff instead of leaving the peer unadmitted for the rest of the run. A `client`
+key is still never re-roled.
+
+**Amendment (council round 5).** Three follow-ups tightened the same areas. Pattern selection is
+per device: while a one-time PSK is armed the daemon first reads message 1 with a plain `IK`
+responder and replays it through `IKpsk2` only when that cannot use it, so an allowlisted device
+keeps connecting with plain `IK` and the secret is consumed only by a new device that actually
+pairs; a client holding a resume ticket never sends the PSK. A failed peer admission no longer
+waits for another topology report: the retry driver re-applies the last merged peer set on its
+own backoff timer and stops arming the timer when nothing is pending. The tunnel's `initialize`
+now advertises `resources.subscribe: false`, matching the fact that the tunnel has no
+`resources/subscribe` method; the earlier docs claimed that operation was guarded.
 
 ## ADR-038: A subagent is a child thread, not a second session type
 

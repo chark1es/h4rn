@@ -86,11 +86,21 @@ It is not a defence against traffic analysis over time.
 
 ## Handshake and identity
 
-The pattern is:
+The pattern is chosen **per device**, not per daemon:
 
-- `Noise_IK_25519_ChaChaPoly_BLAKE2s` when the device is already allowlisted;
-- `Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s` when a one-time pairing PSK is in
-  use.
+- `Noise_IK_25519_ChaChaPoly_BLAKE2s` for an already-allowlisted device;
+- `Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s` only for a device with no allowlist
+  entry that proves possession of the one-time pairing PSK.
+
+Arming a one-time PSK therefore never changes how an already-paired device
+connects. On message 1 the daemon reads a plain `IK` responder first; the
+initiator's static key is authenticated without touching any allowlist or
+secret state. Only when that responder cannot use the message — an unknown key
+rejected as `NotPaired`, or an `IKpsk2` message that the plain protocol name
+cannot decrypt — does the daemon replay the same message 1 through a PSK
+responder. The PSK is consumed only when a new device actually completes the
+pairing; a paired device's handshake leaves it armed. A client that holds a
+resume ticket is already paired and never sends a PSK.
 
 The device has two static keys:
 

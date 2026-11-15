@@ -577,7 +577,7 @@ impl McpService {
                 ),
                 "capabilities": {
                     "tools": {"listChanged": true},
-                    "resources": {"listChanged": true},
+                    "resources": {"listChanged": true, "subscribe": false},
                     "prompts": {"listChanged": true}
                 },
                 "serverInfo": {"name": server, "version": env!("CARGO_PKG_VERSION")},
