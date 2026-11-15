@@ -1,8 +1,13 @@
-import { absoluteTime } from "@/lib/format";
+import { relativeAge } from "@/lib/format";
 import { updateShell } from "@/lib/platform/appUpdate";
 import { useApp } from "@/lib/store/appStore";
 
 import { checkForAppUpdates, setAutoCheck, useAppUpdate } from "./appUpdateStore";
+
+function checkedLabel(checkedAtMs: number): string {
+  const age = relativeAge(new Date(checkedAtMs).toISOString());
+  return age === "now" ? "Just now" : `${age} ago`;
+}
 
 /** Settings → General → About: version, update check and the auto-check toggle. */
 export function AboutSettings() {
@@ -78,9 +83,7 @@ export function AboutSettings() {
           <div className="t">Last checked</div>
         </div>
         <div className="ctl">
-          <span className="q-muted">
-            {checkedAt ? absoluteTime(new Date(checkedAt).toISOString()) : "Never"}
-          </span>
+          <span className="q-muted">{checkedAt ? checkedLabel(checkedAt) : "Never"}</span>
         </div>
       </div>
       <div className="q-field">
