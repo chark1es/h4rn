@@ -688,6 +688,16 @@ own backoff timer and stops arming the timer when nothing is pending. The tunnel
 now advertises `resources.subscribe: false`, matching the fact that the tunnel has no
 `resources/subscribe` method; the earlier docs claimed that operation was guarded.
 
+**Amendment (council round 6).** `IKpsk2` mixes the PSK only into the responder's message 2, so
+message 1 cannot prove possession and round 5 let a wrong secret allowlist the key and burn the
+real one. A PSK-authorised new device is now provisional: nothing is consumed, allowed or hooked
+at message 1 or handshake completion. Possession is proven by the first transport record
+decrypting under the PSK-derived keys; only then does the daemon consume the secret, run the
+pairing hook and allow the device, before any `Welcome` or ticket. The initiator always opens
+with plain `IK` and falls back to `IKpsk2` once, after a `NotPaired` reject, so a device that
+lost its ticket after being admitted no longer retries a consumed secret forever. The policy is
+re-read after the handshake so a mid-handshake revoke is honoured.
+
 ## ADR-038: A subagent is a child thread, not a second session type
 
 **Status:** Accepted

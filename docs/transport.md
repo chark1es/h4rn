@@ -93,14 +93,29 @@ The pattern is chosen **per device**, not per daemon:
   entry that proves possession of the one-time pairing PSK.
 
 Arming a one-time PSK therefore never changes how an already-paired device
-connects. On message 1 the daemon reads a plain `IK` responder first; the
-initiator's static key is authenticated without touching any allowlist or
-secret state. Only when that responder cannot use the message — an unknown key
-rejected as `NotPaired`, or an `IKpsk2` message that the plain protocol name
-cannot decrypt — does the daemon replay the same message 1 through a PSK
-responder. The PSK is consumed only when a new device actually completes the
-pairing; a paired device's handshake leaves it armed. A client that holds a
-resume ticket is already paired and never sends a PSK.
+connects. The initiator **always opens with plain `IK`**; only when the daemon
+answers `NotPaired`, and only if a PSK is configured, does it restart that
+path's handshake once with `IKpsk2` on the same socket. A device that was
+admitted but lost its ticket (the socket dropped first) therefore reconnects
+plainly instead of retrying a consumed secret forever.
+
+On message 1 the daemon reads a plain `IK` responder first; the initiator's
+static key is authenticated without touching any allowlist or secret state.
+Only when that responder cannot use the message — an unknown key rejected as
+`NotPaired`, or an `IKpsk2` message the plain protocol name cannot decrypt —
+does the daemon replay the same message 1 through a PSK responder.
+
+`IKpsk2` mixes the PSK only into the responder's message 2, so message 1 proves
+nothing about the secret. A device admitted this way is **provisional**: the
+daemon does not consume the secret, allowlist the key or run the pairing hook
+at message 1 or at handshake completion. Possession is proven by the first
+transport record (`Open`) decrypting under the PSK-derived keys. Only then does
+the daemon consume the secret, record the device and allowlist it, before any
+`Welcome` or resume ticket is sent. A record that does not decrypt is answered
+with `NotPaired` and nothing is touched, so a wrong secret neither pairs the
+key nor burns the real one. The policy is re-read after the handshake, so a
+revoke that lands mid-handshake is honoured. A client that holds a resume
+ticket is already paired and never sends a PSK.
 
 The device has two static keys:
 
