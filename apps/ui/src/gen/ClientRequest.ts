@@ -915,4 +915,8 @@ target: ForgeAgentTarget | null, } | { "type": "subagent",
 /**
  * Operation to perform.
  */
-request: SubagentRequest, };
+request: SubagentRequest, } | { "type": "list_harness_versions" } | { "type": "update_harness", 
+/**
+ * Harness to update.
+ */
+harness: HarnessKind, };

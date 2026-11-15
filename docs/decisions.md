@@ -989,3 +989,32 @@ back: a failed write keeps the key revoked in memory and appends it to
 anyone and then clears after a successful rewrite. The sidecar is the retry that
 survives a crash, and the UI still sees the error. Peer-host updates log the error
 and skip admitting the peer rather than pretending the write succeeded.
+
+## ADR-043: App updates live in the shell; harness updates live in the daemon
+
+**Status:** Accepted
+
+Two things called "update" have different owners. The **desktop app** is replaced by the Tauri
+updater, so the shell owns the check, the six-hour timer, the download and the relaunch, and the
+view only renders `h4rn://update-checked` and `h4rn://update-progress`. A check that cannot run
+(no endpoint, the `__H4RN_UPDATER_PUBKEY__` development placeholder, offline) is logged and never
+shown: an update notice is a convenience, not an error. "Later" is a view-side snooze that the next
+check clears. The saved auto-check choice is the view's (`localStorage`), pushed to the shell at
+startup, and the shell waits 20 seconds before its first check so that choice arrives first.
+
+The **harness CLIs** are installation facts of a host, so the daemon owns them. It reads each CLI's
+version through the existing detection, asks the npm registry for the latest version of
+`@anthropic-ai/claude-code`, `@openai/codex` and `opencode-ai` (cached three hours; an offline
+registry is cached for five minutes and reported as unknown, never as an error), and classifies the
+install: the CLI's own updater first (`claude update`, `opencode upgrade`), then `npm i -g` for a
+`node_modules` install or `bun add -g` under the bun global directory, otherwise a command shown to
+the person and never run (Homebrew, a distro package, a manual copy). Antigravity has no registry
+source, so its latest version is unknown and no update is offered.
+
+`UpdateHarness` replaces a binary a live session may be running, so it needs the admin scope and is
+refused while any thread on that harness has an active turn. The command runs as a child process
+with no shell and its arguments as an array, streams output as transient `HarnessEvent` frames
+(not replayed after a reconnect; the client re-reads the versions), then re-detects the version so
+the result names what is on disk, not what the registry promised. The registry client and the
+process runner are injectable seams, so no test touches the network or a real global CLI.
+

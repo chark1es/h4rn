@@ -274,6 +274,42 @@ const SHOTS = [
     settle: 1200,
   },
   {
+    name: "set-harnesses",
+    device: "desktop",
+    path: "/settings/harnesses",
+    wait: "text=CLI versions",
+    settle: 1200,
+    action: async (page) => {
+      await page.getByRole("button", { name: "Update Codex" }).click();
+      await page.getByText("added 1 package in 4s").waitFor({ timeout: 5_000 });
+    },
+  },
+  {
+    name: "set-about",
+    device: "desktop",
+    path: "/settings/general?appupdate=1",
+    wait: "text=Check for updates",
+    settle: 1200,
+  },
+  {
+    name: "update-notice",
+    device: "desktop",
+    path: "/t/thr_a?appupdate=1",
+    wait: "text=is available",
+    settle: 2200,
+  },
+  {
+    name: "update-downloading",
+    device: "desktop",
+    path: "/t/thr_a?appupdate=1",
+    wait: "text=is available",
+    settle: 2200,
+    action: async (page) => {
+      await page.getByRole("button", { name: "Restart to update" }).click();
+      await page.getByText(/Downloading h4rn 0\.2\.0 · \d+%/).waitFor({ timeout: 5_000 });
+    },
+  },
+  {
     name: "hosts-menu",
     device: "desktop",
     path: "/t/thr_a",

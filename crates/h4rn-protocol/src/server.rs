@@ -63,6 +63,14 @@ pub enum ServerFrame {
         /// The tick, limit status or schedule change.
         event: crate::usage::UsageStreamEvent,
     },
+    /// Stepped output of a running harness update, outside the durable log.
+    ///
+    /// A reconnecting client re-reads the versions with
+    /// [`crate::ClientRequest::ListHarnessVersions`]; the stream is not replayed.
+    HarnessEvent {
+        /// One output line or the final result.
+        event: crate::HarnessUpdateEvent,
+    },
 }
 
 /// One durable event with its daemon-global sequence number.
@@ -456,6 +464,11 @@ pub enum ResponseBody {
     Subagent {
         /// Current view.
         subagent: SubagentView,
+    },
+    /// Harness CLIs on this host and their available updates.
+    HarnessVersions {
+        /// One row per harness, in stable order.
+        harnesses: Vec<crate::HarnessVersionInfo>,
     },
     /// A request with no payload completed successfully.
     Ack,

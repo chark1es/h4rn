@@ -844,6 +844,22 @@ pub enum ClientRequest {
         /// Operation to perform.
         request: crate::subagents::SubagentRequest,
     },
+    // ------------------------------------------------------------------
+    // Harness CLI versions and updates.
+    // ------------------------------------------------------------------
+    /// Report each harness CLI's installed and available version.
+    ///
+    /// The latest version comes from the npm registry and is cached for a few
+    /// hours. An offline registry is reported as unknown, never as an error.
+    ListHarnessVersions,
+    /// Update one harness CLI and stream its output as events.
+    ///
+    /// Refused while that harness has an active turn. The command runs with no
+    /// shell and arguments passed as an array.
+    UpdateHarness {
+        /// Harness to update.
+        harness: HarnessKind,
+    },
 }
 
 impl ClientRequest {
@@ -872,6 +888,7 @@ impl ClientRequest {
             | Self::GetLimits
             | Self::ListResets
             | Self::ListFailoverOptions { .. }
+            | Self::ListHarnessVersions
             | Self::ForgeListAccounts
             | Self::ForgeDetectRepo { .. }
             | Self::ForgeListPrs { .. }
@@ -940,7 +957,8 @@ impl ClientRequest {
             | Self::ForgeDeviceFlowPoll { .. }
             | Self::PairingConfirmations
             | Self::ConfirmPairing { .. }
-            | Self::ForgeImportCli { .. } => Admin,
+            | Self::ForgeImportCli { .. }
+            | Self::UpdateHarness { .. } => Admin,
             Self::Mcp { request } => match request {
                 crate::mcp::McpRequest::ListServers
                 | crate::mcp::McpRequest::ListTools { .. }
@@ -1099,6 +1117,14 @@ mod tests {
                 Approve,
             ),
             (ClientRequest::McpRemove { name: "x".into() }, Admin),
+            // Version reads are harmless; running a package manager is not.
+            (ClientRequest::ListHarnessVersions, View),
+            (
+                ClientRequest::UpdateHarness {
+                    harness: crate::common::HarnessKind::ClaudeCode,
+                },
+                Admin,
+            ),
             (ClientRequest::PairingConfirmations, Admin),
             (
                 ClientRequest::ConfirmPairing {

@@ -1021,6 +1021,24 @@ impl ThreadManager {
         })
     }
 
+    /// Whether any thread on `kind` has a turn in flight.
+    ///
+    /// Updating a harness CLI replaces the binary a live session is running, so
+    /// the update is refused until every turn on that harness has ended.
+    pub async fn harness_busy(&self, kind: HarnessKind) -> bool {
+        let handles: Vec<ThreadHandle> = {
+            let threads = self.inner.threads.lock().await;
+            threads.values().cloned().collect()
+        };
+        for handle in handles {
+            let record = handle.lock().await;
+            if record.meta.harness == kind && record.active.is_some() {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Drops the live harness session of every thread on one of `harnesses`,
     /// so its next message starts a session with the current proxy routing.
     ///

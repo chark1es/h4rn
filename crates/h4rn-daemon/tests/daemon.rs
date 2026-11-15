@@ -53,6 +53,31 @@ impl TestDaemon {
     }
 }
 
+/// A registry that is unreachable, so tests never touch the network.
+struct OfflineRegistry;
+
+#[async_trait::async_trait]
+impl h4rn_harness::RegistryClient for OfflineRegistry {
+    async fn latest(&self, _package: &str) -> Option<String> {
+        None
+    }
+}
+
+/// An update runner that fails, so a test can never touch a real global CLI.
+struct RefusingRunner;
+
+#[async_trait::async_trait]
+impl h4rn_harness::UpdateRunner for RefusingRunner {
+    async fn run(
+        &self,
+        _program: &str,
+        _args: &[String],
+        _on_line: &(dyn Fn(h4rn_harness::UpdateLine) + Send + Sync),
+    ) -> Result<i32, String> {
+        Err("tests never run a real update".to_owned())
+    }
+}
+
 async fn boot() -> TestDaemon {
     boot_with(
         ThreadManagerOptions {
@@ -68,6 +93,20 @@ async fn boot() -> TestDaemon {
 }
 
 async fn boot_with(options: ThreadManagerOptions, harness: FakeHarness) -> TestDaemon {
+    boot_inner(options, harness, false).await
+}
+
+/// A daemon whose catalog holds only the fake harness, so the host's real
+/// global CLIs are never detected, listed or updated.
+async fn boot_isolated() -> TestDaemon {
+    boot_inner(ThreadManagerOptions::default(), FakeHarness::new(), true).await
+}
+
+async fn boot_inner(
+    options: ThreadManagerOptions,
+    harness: FakeHarness,
+    isolated: bool,
+) -> TestDaemon {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = Config {
         data_dir: dir.path().to_path_buf(),
@@ -77,12 +116,19 @@ async fn boot_with(options: ThreadManagerOptions, harness: FakeHarness) -> TestD
         tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
     };
 
-    let daemon = DaemonBuilder::new(config)
-        .with_harness(Arc::new(harness))
-        .with_lifecycle(options)
-        .build()
-        .await
-        .expect("build daemon");
+    let mut builder = DaemonBuilder::new(config)
+        .with_harness_registry(Arc::new(OfflineRegistry))
+        // No test may run a package manager against the machine's real CLIs.
+        .with_update_runner(Arc::new(RefusingRunner))
+        .with_lifecycle(options);
+    builder = if isolated {
+        builder.with_catalog(Arc::new(
+            h4rn_daemon::harnesses::StaticHarnessCatalog::with(Arc::new(harness)),
+        ))
+    } else {
+        builder.with_harness(Arc::new(harness))
+    };
+    let daemon = builder.build().await.expect("build daemon");
     let token = TokenStore::new(dir.path())
         .load()
         .expect("read token")
@@ -261,7 +307,8 @@ impl Client {
                 ServerFrame::Response { .. }
                 | ServerFrame::TerminalEvent { .. }
                 | ServerFrame::ProxyEvent { .. }
-                | ServerFrame::UsageEvent { .. } => {}
+                | ServerFrame::UsageEvent { .. }
+                | ServerFrame::HarnessEvent { .. } => {}
             }
         }
     }
@@ -1221,6 +1268,43 @@ async fn skills_list_returns_the_install_matrix_and_conflicts() {
         ResponseBody::SkillConflicts { conflicts } => assert!(conflicts.is_empty()),
         other => panic!("unexpected conflicts response: {other:?}"),
     }
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn harness_versions_list_every_harness_and_treat_offline_as_unknown() {
+    let daemon = boot_isolated().await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+
+    match client
+        .request(ClientRequest::ListHarnessVersions)
+        .await
+        .expect("list harness versions")
+    {
+        ResponseBody::HarnessVersions { harnesses } => {
+            assert_eq!(harnesses.len(), 4);
+            // The offline registry is "unknown" for every row, not an error.
+            assert!(harnesses.iter().all(|row| row.latest.is_none()));
+            assert!(harnesses.iter().all(|row| !row.update_available));
+            let claude = harnesses
+                .iter()
+                .find(|row| row.harness == HarnessKind::ClaudeCode)
+                .expect("claude row");
+            assert!(claude.installed.is_some(), "the fake harness is installed");
+        }
+        other => panic!("unexpected harness versions response: {other:?}"),
+    }
+
+    // Codex is not registered in this daemon, so there is nothing to update.
+    let error = client
+        .request(ClientRequest::UpdateHarness {
+            harness: HarnessKind::Codex,
+        })
+        .await
+        .expect_err("an uninstalled harness cannot be updated");
+    assert_eq!(error.code, h4rn_protocol::ProtoErrorCode::NotFound);
 
     daemon.stop().await;
 }

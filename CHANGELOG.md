@@ -28,6 +28,26 @@ All notable changes to h4rn are recorded here. The format follows
   proven by the first transport record and the plain-first fallback; the round-4 K2 backoff
   wording is corrected.
 
+### Desktop app updates and harness CLI updates (v1)
+
+- **The desktop app tells you when a newer h4rn exists.** The Tauri shell checks the configured
+  updater endpoint (`latest.json` on GitHub Releases) 20 seconds after launch and every 6 hours.
+  A missing endpoint, the development placeholder key or no network is logged and otherwise silent.
+  A newer release shows a quiet notice, "h4rn X.Y.Z is available", with **Restart to update** and
+  **Later**; Later hides it until the next check. Download progress is shown, and the install
+  relaunches the app. Web and mobile never show it (mobile updates arrive through the stores).
+- **Settings → General → About** shows the app version, **Check for updates**, the last-checked
+  time and an automatic-check toggle. The shell exposes `app_update_status`, `app_update_check`,
+  `app_update_set_auto` and `app_update_install`, plus the `h4rn://update-checked` and
+  `h4rn://update-progress` events.
+- **Settings → Harnesses** lists Claude Code, Codex, OpenCode and Antigravity with the installed
+  version, the latest npm version and an **Update** button that streams the command's output. The
+  Settings nav shows how many harnesses have updates. `ListHarnessVersions` (view scope) and
+  `UpdateHarness` (admin scope) are new requests; output arrives as `HarnessEvent` frames. The
+  update runs without a shell, arguments as an array, and is refused while that harness has an
+  active turn. Homebrew or system-package installs show the command to run instead; Antigravity
+  has no registry source and reports "unknown". See ADR-043.
+
 ### Council round 5: per-device handshake patterns, self-driving peer retries and honest tunnel capabilities (M1–M3)
 
 - **An armed one-time PSK no longer locks out paired devices (M1).** The daemon passed the live

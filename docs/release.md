@@ -101,6 +101,28 @@ update server to run. Keep the endpoint versioned or swap `latest.json`
 atomically. The endpoint is baked into each build, so changing it requires a
 release (or the app-specific `plugins.updater.endpoints` override).
 
+### What the app does with it
+
+The desktop shell calls the endpoint 20 seconds after launch and then every 6
+hours (Settings → General → About has a toggle and a **Check for updates**
+button). When `latest.json` names a newer version the app shows "h4rn X.Y.Z is
+available" with **Restart to update** and **Later**; installing downloads the
+signed bundle, verifies it against `plugins.updater.pubkey`, and relaunches.
+
+- **No placeholder key in releases.** The committed `__H4RN_UPDATER_PUBKEY__` is
+  deliberately invalid: a development build fails its check quietly (it is
+  logged, never shown). A release must be built through
+  `generate-tauri-config.sh` with `H4RN_UPDATER_PUBKEY` set, or it ships
+  without a working updater.
+- **Never commit the private key.** `TAURI_SIGNING_PRIVATE_KEY` is a repository
+  secret only; `tauri signer generate -w` writes it outside the repository.
+- **Endpoint and workflow agree.** `tauri.conf.json` and the release workflow both
+  point at
+  `https://github.com/chark1es/h4rn/releases/latest/download/latest.json`, which
+  `tauri-action` uploads when `includeUpdaterJson` is on.
+- **Web and mobile** show no notice. Mobile updates come from the App Store and
+  Google Play.
+
 ## 4. Repository secrets and variables
 
 Set these under **Settings → Secrets and variables → Actions**. Names are used

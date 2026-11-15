@@ -12,6 +12,7 @@ use tokio::task::JoinHandle;
 use crate::server::Connection;
 
 pub(super) mod forge;
+pub(super) mod harness_versions;
 pub(super) mod mcp;
 pub(super) mod proxy;
 pub(super) mod skills;
@@ -74,6 +75,7 @@ declare_services! {
     Mcp => mcp,
     Subagents => subagents,
     Usage => usage,
+    HarnessVersions => harness_versions,
 }
 
 /// Spawns every registered service's forwarder for one connection.

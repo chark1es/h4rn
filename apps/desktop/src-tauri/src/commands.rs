@@ -90,13 +90,10 @@ pub async fn auth_loopback(
     let (mut socket, _) = accept;
 
     let mut buffer = vec![0_u8; 8 * 1024];
-    let read = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        socket.read(&mut buffer),
-    )
-    .await
-    .map_err(|_| "the sign-in callback did not send a request".to_owned())?
-    .map_err(|error| format!("could not read the sign-in callback: {error}"))?;
+    let read = tokio::time::timeout(std::time::Duration::from_secs(10), socket.read(&mut buffer))
+        .await
+        .map_err(|_| "the sign-in callback did not send a request".to_owned())?
+        .map_err(|error| format!("could not read the sign-in callback: {error}"))?;
     if read == 0 {
         return Err("the sign-in callback was empty".to_owned());
     }

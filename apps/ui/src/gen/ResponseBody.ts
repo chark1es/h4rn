@@ -24,6 +24,7 @@ import type { FsFileContent } from "./FsFileContent";
 import type { FsListing } from "./FsListing";
 import type { FsTurnChanges } from "./FsTurnChanges";
 import type { FsWriteResult } from "./FsWriteResult";
+import type { HarnessVersionInfo } from "./HarnessVersionInfo";
 import type { HostId } from "./HostId";
 import type { HostSummary } from "./HostSummary";
 import type { LimitsReport } from "./LimitsReport";
@@ -402,4 +403,8 @@ subagents: Array<SubagentView>, } | { "type": "subagent",
 /**
  * Current view.
  */
-subagent: SubagentView, } | { "type": "ack" };
+subagent: SubagentView, } | { "type": "harness_versions", 
+/**
+ * One row per harness, in stable order.
+ */
+harnesses: Array<HarnessVersionInfo>, } | { "type": "ack" };
