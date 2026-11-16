@@ -418,10 +418,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Download only the release payloads by name: docker/build-push-action
+      # also uploads a `.dockerbuild` build record that download-artifact
+      # cannot extract.
       - uses: actions/download-artifact@v4
         with:
+          pattern: daemon-*
           path: dist
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: android
+          path: dist
       - name: Download desktop assets from the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
