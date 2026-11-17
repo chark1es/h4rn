@@ -1262,42 +1262,76 @@ function mockSyncStatus(): SkillSyncStatus {
   };
 }
 
-function buildSkillImportPreview(): SkillImportPreview {
+/**
+ * What a scan of the harness folders finds. `imported` names are in the
+ * registry already (so they read as duplicates); `adopted` paths carry h4rn's
+ * marker after an import with `manage`.
+ */
+function buildSkillImportPreview(
+  imported: ReadonlySet<string> = new Set(),
+  adopted: ReadonlySet<string> = new Set(),
+): SkillImportPreview {
+  const found = [
+    {
+      id: "cand_release_notes",
+      name: "release-notes",
+      description: "Draft release notes from merged pull requests.",
+      version: "b7e2d41",
+      source_path: "~/.claude/skills/release-notes",
+      harness: "claude_code" as const,
+      conflict: null,
+      duplicate: imported.has("release-notes"),
+    },
+    {
+      id: "cand_changelog",
+      name: "changelog",
+      description: "Keep CHANGELOG.md in step with tagged releases.",
+      version: "4c90aa2",
+      source_path: "~/.claude/skills/changelog",
+      harness: "claude_code" as const,
+      conflict: null,
+      duplicate: imported.has("changelog"),
+    },
+    {
+      id: "cand_pdf",
+      name: "pdf",
+      description: "Read, split, merge and fill PDF files.",
+      version: "a4c8e21",
+      source_path: "~/.codex/skills/pdf",
+      harness: "codex" as const,
+      conflict: null,
+      duplicate: true,
+    },
+    {
+      id: "cand_browser",
+      name: "browser",
+      description: "Drive the in-app browser: open pages, click, type and screenshot.",
+      version: "3f6a1c0",
+      source_path: "~/.claude/skills/browser",
+      harness: "claude_code" as const,
+      conflict: null,
+      duplicate: true,
+      managed: true,
+    },
+    {
+      id: "cand_docs",
+      name: "docs",
+      description: "Read and edit shared documents without losing comments.",
+      version: "f1a7c30",
+      source_path: "~/.config/opencode/skills/docs",
+      harness: "opencode" as const,
+      conflict: "a different version already uses this name",
+      duplicate: false,
+    },
+  ];
+  const candidates = found.map((candidate) => ({
+    ...candidate,
+    managed: candidate.managed === true || adopted.has(candidate.source_path),
+  }));
   return {
-    candidates: [
-      {
-        id: "cand_release_notes",
-        name: "release-notes",
-        description: "Draft release notes from merged pull requests.",
-        version: "b7e2d41",
-        source_path: "~/.claude/skills/release-notes",
-        harness: "claude_code",
-        conflict: null,
-        duplicate: false,
-      },
-      {
-        id: "cand_pdf",
-        name: "pdf",
-        description: "Read, split, merge and fill PDF files.",
-        version: "a4c8e21",
-        source_path: "~/.codex/skills/pdf",
-        harness: "codex",
-        conflict: null,
-        duplicate: true,
-      },
-      {
-        id: "cand_docs",
-        name: "docs",
-        description: "Read and edit shared documents without losing comments.",
-        version: "f1a7c30",
-        source_path: "~/.config/opencode/skills/docs",
-        harness: "opencode",
-        conflict: "a different version already uses this name",
-        duplicate: false,
-      },
-    ],
-    conflicts: 1,
-    duplicates: 1,
+    candidates,
+    conflicts: candidates.filter((candidate) => candidate.conflict).length,
+    duplicates: candidates.filter((candidate) => candidate.duplicate).length,
   };
 }
 
@@ -1841,6 +1875,8 @@ class MockDaemon {
   private skillInventory: SkillInventory;
   private skillConflicts: SkillConflict[];
   private skillPreview: SkillImportPreview | null = null;
+  /** Harness folders that carry the h4rn marker after an import with `manage`. */
+  private adoptedSkillPaths = new Set<string>();
   private syncEmitted = false;
   private readonly forge = new MockForge();
   private created = 0;
@@ -3304,7 +3340,10 @@ class MockDaemon {
         return;
       }
       case "skills_import_preview": {
-        const preview = buildSkillImportPreview();
+        const preview = buildSkillImportPreview(
+          new Set(this.skillInventory.skills.map((skill) => skill.name)),
+          this.adoptedSkillPaths,
+        );
         this.skillPreview = preview;
         this.ok(id, { type: "skills_import_preview", preview });
         return;
@@ -3313,7 +3352,9 @@ class MockDaemon {
         const preview = this.skillPreview ?? buildSkillImportPreview();
         const ids = new Set(request.candidate_ids);
         for (const candidate of preview.candidates) {
-          if (!ids.has(candidate.id) || candidate.duplicate || candidate.conflict) continue;
+          if (!ids.has(candidate.id) || candidate.conflict) continue;
+          if (request.manage) this.adoptedSkillPaths.add(candidate.source_path);
+          if (candidate.duplicate) continue;
           if (this.skillInventory.skills.some((skill) => skill.name === candidate.name)) continue;
           const skill = skillFromSource(
             { type: "harness_dir", harness: candidate.harness, path: candidate.source_path },

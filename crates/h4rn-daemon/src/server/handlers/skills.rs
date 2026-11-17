@@ -118,13 +118,14 @@ pub(super) async fn handle(
         ClientRequest::SkillsImportCommit {
             host,
             candidate_ids,
+            manage,
         } => {
             if let Some(error) = conn.local_host_error(&host) {
                 return Err(error);
             }
             conn.state
                 .skills
-                .import_commit(&candidate_ids)
+                .import_commit(&candidate_ids, manage)
                 .await
                 .map(|_| ResponseBody::Ack)
                 .map_err(h4rn_skills::SkillError::into_proto)

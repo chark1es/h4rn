@@ -88,6 +88,7 @@ pub async fn scan(layouts: &[SkillLayout], registry: &Registry) -> Result<Import
                     harness: layout.harness,
                     duplicate,
                     conflict,
+                    managed: installed.marker.is_some(),
                 });
             }
         }
@@ -137,10 +138,20 @@ fn candidate_id(path: &Path, version: &str) -> String {
 /// The result of committing one candidate.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CommitOutcome {
-    /// A new registry row.
-    Added(String),
+    /// A new registry row, read from `target`.
+    Added {
+        /// Registry id.
+        skill_id: String,
+        /// Folder the skill was read from.
+        target: ImportTarget,
+    },
     /// The identical version was already present.
-    Duplicate(String),
+    Duplicate {
+        /// Registry id of the existing skill.
+        skill_id: String,
+        /// Folder that holds the identical copy.
+        target: ImportTarget,
+    },
     /// A conflict row was written.
     Conflict(String),
 }
@@ -170,7 +181,14 @@ pub async fn commit(
             path: target.path.display().to_string(),
         };
         if candidate.duplicate {
-            outcomes.push(CommitOutcome::Duplicate(candidate.name));
+            let existing = registry
+                .find_by_name(&bundle.manifest.name)
+                .await?
+                .ok_or_else(|| SkillError::NotFound(candidate.name.clone()))?;
+            outcomes.push(CommitOutcome::Duplicate {
+                skill_id: existing.id,
+                target,
+            });
             continue;
         }
         if candidate.conflict.is_some() {
@@ -193,7 +211,10 @@ pub async fn commit(
             continue;
         }
         let record = registry.insert(&bundle, &source, now).await?;
-        outcomes.push(CommitOutcome::Added(record.id));
+        outcomes.push(CommitOutcome::Added {
+            skill_id: record.id,
+            target,
+        });
     }
     Ok(outcomes)
 }
@@ -244,7 +265,7 @@ mod tests {
         let outcomes = commit(&layouts, &registry, &[id], chrono::Utc::now())
             .await
             .unwrap();
-        assert!(matches!(outcomes[0], CommitOutcome::Added(_)));
+        assert!(matches!(outcomes[0], CommitOutcome::Added { .. }));
         assert_eq!(registry.list().await.unwrap()[0].version, bundle.version());
 
         let again = scan(&layouts, &registry).await.unwrap();

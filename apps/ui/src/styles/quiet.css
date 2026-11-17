@@ -3483,6 +3483,40 @@ fieldset.q-seg-fs {
 .q-pair-scope .q-check {
   margin-top: 2px;
 }
+/* Skills import: the "manage these folders" choice and greyed rows. */
+.q-skill-manage {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg-sunk);
+  box-shadow: inset 0 0 0 1px var(--line);
+  cursor: pointer;
+}
+.q-skill-manage .q-check {
+  margin-top: 1px;
+}
+.q-skill-manage-t {
+  display: block;
+  font-weight: 500;
+  color: var(--fg);
+}
+.q-skill-manage-s {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--fg-2);
+}
+.q-skill-manage:has(input:focus-visible) .q-check,
+.q-li:has(input:focus-visible) .q-check {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.q-li.q-li-off .t {
+  color: var(--fg-2);
+}
 .q-pair-scope .sub {
   display: block;
   font-size: 12px;

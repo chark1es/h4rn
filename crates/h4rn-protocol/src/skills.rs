@@ -263,6 +263,11 @@ pub struct SkillImportCandidate {
     pub conflict: Option<String>,
     /// Whether an identical version is already in the registry.
     pub duplicate: bool,
+    /// Whether h4rn already manages this folder (it carries the
+    /// `.h4rn-managed` marker). Unmanaged folders can be adopted on import so
+    /// sync keeps them current.
+    #[serde(default)]
+    pub managed: bool,
 }
 
 /// Preview of one import scan.

@@ -22,7 +22,9 @@ import { cn } from "@/lib/utils";
 import { SkillAddDialog, SkillDetailsDialog, SkillImportDialog, sourceLabel } from "./SkillDialogs";
 import {
   ensureSkillEvents,
+  isUnmanagedCandidate,
   loadSkills,
+  previewSkillImport,
   resolveSkillConflict,
   setSkillEnabled,
   syncSkillsNow,
@@ -296,10 +298,19 @@ export function SkillsPage() {
   const [addOpen, setAddOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [details, setDetails] = useState<SkillSummary | null>(null);
+  const preview = useSkills((state) => state.preview);
+  const [foundDismissed, setFoundDismissed] = useState(false);
 
   useEffect(() => {
     ensureSkillEvents();
   }, []);
+
+  // Look for skills the harnesses already have, so the page can offer to
+  // bring them in. The scan only reads.
+  useEffect(() => {
+    if (localHost) void previewSkillImport({ quiet: true });
+  }, [localHost]);
+  const unmanaged = preview?.candidates.filter(isUnmanagedCandidate) ?? [];
 
   // A deep link can mount this page before the daemon's hello reports the
   // local host; retry as soon as it arrives instead of leaving the error up.
@@ -329,7 +340,7 @@ export function SkillsPage() {
                 </div>
               </div>
               <Button variant="secondary" onClick={() => setImportOpen(true)}>
-                <DownloadIcon className="q-icon s14" aria-hidden /> Import
+                <DownloadIcon className="q-icon s14" aria-hidden /> Find existing
               </Button>
               <Button onClick={() => setAddOpen(true)}>
                 <PlusIcon className="q-icon s14" aria-hidden /> Add skill
@@ -337,6 +348,29 @@ export function SkillsPage() {
             </div>
 
             <SyncBanner />
+
+            {unmanaged.length > 0 && !foundDismissed ? (
+              <div className="q-banner" style={{ margin: "0 0 18px" }} role="status">
+                <span className="ic">
+                  <BlocksIcon className="q-icon s14" aria-hidden />
+                </span>
+                <span className="grow">
+                  <b>
+                    {unmanaged.length === 1
+                      ? `${unmanaged[0]?.name} is in a harness folder`
+                      : `${unmanaged.length} skills are in your harness folders`}{" "}
+                    but not managed by h4rn.
+                  </b>{" "}
+                  Bring {unmanaged.length === 1 ? "it" : "them"} in to sync across your machines.
+                </span>
+                <Button variant="ghost" size="sm" onClick={() => setFoundDismissed(true)}>
+                  Not now
+                </Button>
+                <Button size="sm" onClick={() => setImportOpen(true)}>
+                  Review
+                </Button>
+              </div>
+            ) : null}
 
             {error ? (
               <div className="q-banner err" style={{ margin: "0 0 18px" }}>

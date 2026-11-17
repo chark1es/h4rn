@@ -524,7 +524,13 @@ host: HostId,
 /**
  * Candidate ids from [`ResponseBody::SkillsImportPreview`].
  */
-candidate_ids: Array<string>, } | { "type": "skills_conflicts", 
+candidate_ids: Array<string>, 
+/**
+ * Also take over each selected harness folder whose content matches
+ * the registry: h4rn writes its marker there (no skill file changes)
+ * and records the install, so later versions from sync replace it.
+ */
+manage: boolean, } | { "type": "skills_conflicts", 
 /**
  * Host that owns the registry.
  */
