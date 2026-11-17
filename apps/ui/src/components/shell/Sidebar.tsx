@@ -26,7 +26,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
-import { KeyCaps, MOD, SHIFT } from "@/components/common/Kbd";
+import { ShortcutCaps } from "@/components/common/Kbd";
 import { ThreadRow } from "@/components/inbox/ThreadRow";
 import {
   harnessUpdateCount,
@@ -51,6 +51,7 @@ import {
   tabCounts,
   threadsForTab,
 } from "@/lib/inbox";
+import { type CommandId, titleWithShortcut } from "@/lib/keybindings";
 import { SETTINGS_SECTIONS, settingsPath } from "@/lib/settings";
 import {
   acknowledgeThread,
@@ -425,28 +426,28 @@ const DESTINATIONS: Array<{
   label: string;
   icon: LucideIcon;
   path: string;
-  shortcut: string;
+  command: CommandId;
 }> = [
   {
     key: "pr",
     label: "Pull requests",
     icon: GitPullRequestIcon,
     path: "/pulls",
-    shortcut: "G P",
+    command: "nav.pulls",
   },
   {
     key: "usage",
     label: "Usage",
     icon: ChartNoAxesColumnIcon,
     path: "/usage",
-    shortcut: "G U",
+    command: "nav.usage",
   },
   {
     key: "settings",
     label: "Settings",
     icon: SettingsIcon,
-    path: settingsPath("hosts"),
-    shortcut: "⌘,",
+    path: settingsPath("general"),
+    command: "settings.open",
   },
 ];
 
@@ -499,7 +500,7 @@ function SidebarFooter({
             className={cn("q-ibtn q-side-dest", destination === item.key && "on")}
             aria-current={destination === item.key ? "page" : undefined}
             aria-label={item.label}
-            title={`${item.label}  ${item.shortcut}`}
+            title={titleWithShortcut(item.label, item.command)}
             onClick={() =>
               navigate({
                 kind: "placeholder",
@@ -576,7 +577,7 @@ function ThreadsSidebar() {
             type="button"
             className="q-ibtn"
             aria-label="Hide sidebar"
-            title={`Hide sidebar  ${MOD}B`}
+            title={titleWithShortcut("Hide sidebar", "sidebar.toggle")}
             onClick={toggleSidebar}
           >
             <PanelLeftIcon className="q-icon" strokeWidth={1.5} aria-hidden />
@@ -585,7 +586,7 @@ function ThreadsSidebar() {
             type="button"
             className="q-ibtn"
             aria-label="New thread"
-            title={`New thread  ${MOD}${SHIFT}N`}
+            title={titleWithShortcut("New thread", "thread.new")}
             onClick={openNewThread}
           >
             <SquarePenIcon className="q-icon" strokeWidth={1.5} aria-hidden />
@@ -598,7 +599,7 @@ function ThreadsSidebar() {
         >
           <SearchIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           <span>Search or run</span>
-          <KeyCaps value={`${MOD} K`} />
+          <ShortcutCaps command="palette.toggle" />
         </button>
         {allEmpty ? null : (
           <div className="q-seg" role="tablist" aria-label="Thread state">
@@ -1099,7 +1100,7 @@ export function SidebarReveal() {
         type="button"
         className="q-ibtn"
         aria-label={needsYou > 0 ? "Show sidebar. 1 thread needs you" : "Show sidebar"}
-        title={`Show sidebar  ${MOD}B`}
+        title={titleWithShortcut("Show sidebar", "sidebar.toggle")}
         onClick={toggleSidebar}
       >
         <PanelLeftIcon className="q-icon" strokeWidth={1.5} aria-hidden />
@@ -1109,7 +1110,7 @@ export function SidebarReveal() {
         type="button"
         className="q-ibtn"
         aria-label="New thread"
-        title={`New thread  ${MOD}${SHIFT}N`}
+        title={titleWithShortcut("New thread", "thread.new")}
         onClick={openNewThread}
       >
         <SquarePenIcon className="q-icon" strokeWidth={1.5} aria-hidden />

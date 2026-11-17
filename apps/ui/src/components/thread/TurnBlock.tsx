@@ -3,7 +3,6 @@ import type { ReactNode } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
-import { ALT, KeyCaps, SHIFT } from "@/components/common/Kbd";
 import { MessageAttachments } from "@/features/attachments/MessageAttachments";
 import { ChangeSetCard } from "@/features/changes/ChangeSetCard";
 import type { ThreadSummary } from "@/gen";
@@ -42,7 +41,7 @@ function LimitItemView({ resetAt, autoResume }: { resetAt: string | null; autoRe
       <span className="grow">
         <b>Usage limit hit.</b>{" "}
         {autoResume
-          ? `Auto-resume is armed${resetAt ? `; it resumes in ${countdown(resetAt)}` : ""}. Cancel it with ${ALT} R.`
+          ? `Auto-resume is armed${resetAt ? `; it resumes in ${countdown(resetAt)}` : ""}.`
           : `Auto-resume is off. Resume manually${resetAt ? ` after ${countdown(resetAt)}` : ""}.`}
       </span>
     </div>
@@ -223,7 +222,7 @@ export function TurnBlock({
           </span>
           <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onRetry}>
             <RotateCcwIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-            Retry <KeyCaps value={`${SHIFT} R`} />
+            Retry
           </button>
         </div>
       ) : null}

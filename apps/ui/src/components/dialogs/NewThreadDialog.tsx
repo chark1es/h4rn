@@ -17,7 +17,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
-import { useAttachmentDrafts } from "@/features/attachments/use-attachments";
+import { useAttachmentDrafts, useAttachShortcut } from "@/features/attachments/use-attachments";
 import { useHarnesses, useHarnessVersions } from "@/features/harnesses/harnessStore";
 import {
   proxyDefaultModel,
@@ -142,6 +142,8 @@ export function NewThreadDialog() {
     enabled: !offline && Boolean(host),
     disabledReason: offline ? "Reconnect to attach files." : "Pick an online host first.",
   });
+
+  useAttachShortcut(attachments.openPicker, open && !offline && Boolean(host));
 
   useEffect(() => {
     if (!open) attachments.clear();

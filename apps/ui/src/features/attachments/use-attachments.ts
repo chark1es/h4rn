@@ -232,3 +232,17 @@ export function useAttachmentDrafts(
     clear,
   };
 }
+
+/**
+ * Opens this composer's file picker on the attach shortcut. Only the
+ * composer that owns the screen listens: the New thread dialog while it is
+ * open, otherwise the thread or start-a-thread composer underneath.
+ */
+export function useAttachShortcut(openPicker: () => void, active: boolean): void {
+  useEffect(() => {
+    if (!active) return;
+    const handler = () => openPicker();
+    window.addEventListener("h4rn:attach", handler);
+    return () => window.removeEventListener("h4rn:attach", handler);
+  }, [openPicker, active]);
+}

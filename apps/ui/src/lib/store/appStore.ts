@@ -61,7 +61,8 @@ export type UiState = {
   filterOpen: boolean;
   moreOpen: boolean;
   limitsOpen: boolean;
-  sequenceHint: string | null;
+  /** Settings → Shortcuts is capturing a chord; global shortcuts stand down. */
+  recordingShortcut: boolean;
   focusSearchNonce: number;
   focusComposerNonce: number;
   focusFilesNonce: number;
@@ -204,7 +205,7 @@ function createInitialState(): AppState {
       filterOpen: false,
       moreOpen: false,
       limitsOpen: false,
-      sequenceHint: null,
+      recordingShortcut: false,
       focusSearchNonce: 0,
       focusComposerNonce: 0,
       focusFilesNonce: 0,

@@ -1,11 +1,11 @@
 import { XIcon } from "lucide-react";
 
-import { MOD, SHIFT } from "@/components/common/Kbd";
 import { Resizer } from "@/components/shell/Resizer";
 import { SubagentsPanel } from "@/features/subagents/SubagentsPanel";
 import { useSubagentCount } from "@/features/subagents/subagentStore";
 import type { ThreadSummary } from "@/gen";
 import { harnessLabel } from "@/lib/entities";
+import { titleWithShortcut } from "@/lib/keybindings";
 import { setPanelTab, setPanelWidth, togglePanel, useApp } from "@/lib/store/appStore";
 import { ChangesSection } from "./ChangesSection";
 import { usePanelChanges } from "./usePanelChanges";
@@ -67,7 +67,7 @@ export function RightPanel({ thread, ide = false }: { thread: ThreadSummary; ide
           type="button"
           className="q-ibtn"
           aria-label="Close panel"
-          title={`Close panel  ${MOD}${SHIFT}⌥B`}
+          title={titleWithShortcut("Close panel", "panel.toggle")}
           onClick={togglePanel}
         >
           <XIcon className="q-icon" strokeWidth={1.5} aria-hidden />

@@ -4,6 +4,7 @@ import type * as React from "react";
 import { Children } from "react";
 
 import { KeyGlyphs } from "@/components/common/Kbd";
+import { bindingFor, type CommandId, chordKeys, useKeybindingsVersion } from "@/lib/keybindings";
 import { cn } from "@/lib/utils";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "./dialog";
 
@@ -48,7 +49,11 @@ function CommandDialog({
         onOpenAutoFocus={onOpenAutoFocus}
         onCloseAutoFocus={onCloseAutoFocus}
       >
-        <Command {...(filter ? { filter } : {})}>{children}</Command>
+        {/* Vim-style Ctrl+J/K/N/P list movement would swallow app shortcuts such as
+            Ctrl+K to close the palette; arrows move the selection instead. */}
+        <Command vimBindings={false} {...(filter ? { filter } : {})}>
+          {children}
+        </Command>
       </DialogContent>
     </Dialog>
   );
@@ -134,10 +139,18 @@ function CommandItem({ className, ...props }: React.ComponentProps<typeof Comman
   );
 }
 
-function CommandShortcut({ className, children, ...props }: React.ComponentProps<"span">) {
-  const text = Children.toArray(children)
-    .map((child) => (typeof child === "string" ? child : ""))
-    .join("");
+function CommandShortcut({
+  className,
+  children,
+  command,
+  ...props
+}: React.ComponentProps<"span"> & { command?: CommandId }) {
+  useKeybindingsVersion();
+  const text = command
+    ? chordKeys(bindingFor(command)).join(" ")
+    : Children.toArray(children)
+        .map((child) => (typeof child === "string" ? child : ""))
+        .join("");
   const keys = text.trim().split(/\s+/).filter(Boolean);
   const seen = new Map<string, number>();
   const chips = keys.map((key) => {

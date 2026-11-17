@@ -242,31 +242,50 @@ Three columns at most, and only one of them is on the left.
 
 **Why a segmented control and not T3's stacked sections.** h4rn's lifecycle is a filter on attention, not a shelf. With Working / Done / Settled as a segment, the project grouping stays one level deep, and each project appears once on screen instead of once per section. Done stays a visible debt with its own count. Snoozed is the last row of Working (a sheet or popover on click), and Settled pages older threads behind "Show older".
 
-**Footer.** `● 3 of 4 hosts ▾` opens the hosts menu (presence, latency, route, Pair a device…, Manage hosts), followed by icon buttons for Pull requests (with the open count), MCP & skills, Usage and Settings. Each has a tooltip with its shortcut and a palette entry. This replaces the old nav list and the Hosts group.
+**Footer.** `● 3 of 4 hosts ▾` opens the hosts menu (presence, latency, route, Pair a device…, Manage hosts), followed by icon buttons for Pull requests, Usage and Settings (MCP servers and skills live under Settings → Tools). Each has a tooltip with its shortcut and a palette entry. This replaces the old nav list and the Hosts group.
 
 **IDE view.** ⌘E switches the main area to the IDE for the **selected thread's project**: editor tabs, path bar with `Edit | vs HEAD | vs agent`, the scope strip ("Changes by Claude Code in *Fix flaky auth test* since 12:03 · Revert file · Accept"), the code view, and the status bar. The file tree lives in the right panel's **Files** tab, not in a second left column. Selecting a thread in another project switches the IDE to that project's workspace and restores its open tabs ("Restored 3 tabs" appears quietly at the end of the tab strip). Tabs are kept per project. The header names the workspace (monogram, host, path) and carries a **thread chip** with the state glyph and title ("Needs approval" in accent when it applies). Clicking the chip, or pressing ⌘E, returns to the thread. The thread's context stays reachable in three places: the chip, the scope strip, and the Changes tab, which in IDE view collapses to a file list because the editor shows the diff. While the agent is still writing a file, the strip says so and Accept waits until the turn ends. A thread without a workspace shows "No files open in *project*" with ⌘P and Show files.
 
 ### Shortcuts
 
+Every command is ⌘ (Ctrl on Windows and Linux) plus a key, with optional ⇧ or ⌥. There are no single-key shortcuts and no `G`-sequences, so typing can never run a command. The registry is `apps/ui/src/lib/keybindings.ts`; Settings → Shortcuts rebinds any of them per device, and tooltips, the palette and the ⌘/ sheet all read the current binding.
+
 | Keys | Action |
 |---|---|
-| ⌘K | Search or run (palette) |
-| ⌘B | Show / hide sidebar |
-| ⌘E | Thread ↔ IDE |
-| ⌘⌥B | Show / hide right panel (opens to the last tab; Files in IDE view) |
-| D | Right panel → Changes |
-| ⌘J | Right panel → Subagents |
-| ⌘P | Open file in the selected thread's project (IDE) |
-| T | Terminal drawer |
-| ⌘⇧N | New thread (project picker; the `+` on a group skips it) |
-| ⌘↵ / ⌘⌫ | Approve / deny the pending request |
-| A | Acknowledge (Done) |
-| ⌘. | Interrupt turn |
-| G P · G M · G U · G H | Pull requests · MCP & skills · Usage · Hosts |
-| ⌘, | Settings |
-| Esc | Close palette / leave Settings |
-
-Single-letter keys only fire when focus is not in a text field.
+| `⌘K` | Search or run |
+| `⌘/` | Keyboard shortcuts |
+| `⌘⇧N` | New thread |
+| `⌘,` | Settings |
+| `⌘⇧L` | Toggle light and dark |
+| `⌘⇧H` | Go to threads |
+| `⌘⇧P` | Go to pull requests |
+| `⌘⇧U` | Go to usage |
+| `⌘⇧M` | Go to MCP servers and skills |
+| `⌘1` | Show Working |
+| `⌘2` | Show Done |
+| `⌘3` | Show Settled |
+| `⌘⌥↓` | Next thread |
+| `⌘⌥↑` | Previous thread |
+| `⌘L` | Focus the composer |
+| `⌘↵` | Approve pending action |
+| `⌘⌫` | Deny pending action |
+| `⌘.` | Interrupt turn |
+| `⌘[` | Previous message |
+| `⌘]` | Next message |
+| `⌘⇧S` | Settle thread |
+| `⌘⇧A` | Acknowledge (Done) |
+| `⌘⌥S` | Snooze for an hour |
+| `⌘⌥P` | Keep in Working |
+| `⌘⌥U` | Reopen a settled thread |
+| `⌘U` | Attach files |
+| `⌘B` | Toggle sidebar |
+| `⌘⌥B` | Toggle right panel |
+| `⌘E` | Switch thread and IDE |
+| <code>⌘`</code> | Toggle terminal |
+| `⌘⇧D` | Show changes |
+| `⌘J` | Show subagents |
+| `⌘P` | Find a file |
+| Esc | Close palette or dialog / leave Settings |
 
 ## Motion
 
