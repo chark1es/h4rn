@@ -2531,16 +2531,23 @@ fieldset.q-seg-fs {
     opacity: 0;
   }
 }
+/* Spotlight placement: horizontally centred in the window, high but never
+   taller than the window, so short windows scroll the list, not the page. */
 .q-palette {
+  --pal-top: clamp(16px, 12vh, 96px);
   position: fixed;
   transform: none;
   translate: none;
   z-index: 51;
-  left: 50%;
-  top: 96px;
-  width: 620px;
+  left: 0;
+  right: 0;
+  top: var(--pal-top);
+  width: min(620px, calc(100vw - 32px));
   max-width: none;
-  margin-left: -310px;
+  max-height: calc(100dvh - var(--pal-top) - 16px);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
   border-radius: 14px;
   background: var(--bg-raised);
   box-shadow:
@@ -2555,7 +2562,8 @@ fieldset.q-seg-fs {
     left: 0;
     width: 100%;
     height: 100%;
-    margin-left: 0;
+    max-height: none;
+    margin: 0;
     border-radius: 0;
   }
 }
@@ -2595,10 +2603,18 @@ fieldset.q-seg-fs {
   font-size: 12px;
   color: var(--fg-2);
 }
+.q-palette > [cmdk-root] {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
 .q-pal-list {
   /* Whole 34 px rows plus 6 px of padding either side: 13 units fit exactly
      (10 rows, 3 headings), so the resting list never slices a row in half. */
   max-height: 454px;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
   padding: 6px;
 }
