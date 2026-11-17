@@ -98,7 +98,7 @@ export type SasConfirm = {
 
 const PENDING_LOGIN_KEY = "h4rn.remote.pending-login";
 const LOOPBACK_PORT = 47812;
-export const DEFAULT_CONNECT_URL = "http://127.0.0.1:8787";
+export const DEFAULT_CONNECT_URL = "https://h4rn.spwnd.dev";
 
 function shellKind(): "desktop" | "mobile" | "web" {
   if (typeof window === "undefined") return "web";
@@ -123,7 +123,7 @@ function initialConnectUrl(): string {
   return (
     readBootConfig().connectUrl ??
     readActiveRemote()?.connectUrl ??
-    (readBootConfig().mock ? DEFAULT_CONNECT_URL : DEFAULT_CONNECT_URL)
+    DEFAULT_CONNECT_URL
   );
 }
 
