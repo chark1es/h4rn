@@ -11,6 +11,14 @@ function progressPercent(task: AttachmentDraft): number {
   return Math.min(99, Math.round((snapshot.sentBytes / snapshot.totalBytes) * 100));
 }
 
+/** Short type label from the extension ("JSON", "PNG"), or "File". */
+export function fileKind(name: string): string {
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0 || dot === name.length - 1) return "File";
+  const ext = name.slice(dot + 1);
+  return ext.length <= 5 ? ext.toUpperCase() : "File";
+}
+
 function statusLine(task: AttachmentDraft): string {
   const { snapshot } = task;
   if (task.invalid) return "Not attached";
@@ -20,11 +28,11 @@ function statusLine(task: AttachmentDraft): string {
     case "hashing":
       return "Reading";
     case "uploading":
-      return `${progressPercent(task)}%`;
+      return `Uploading ${progressPercent(task)}%`;
     case "committing":
       return "Finishing";
     case "done":
-      return formatBytes(snapshot.totalBytes);
+      return `${fileKind(task.file.name)} · ${formatBytes(snapshot.totalBytes)}`;
     case "failed":
       return "Failed";
     case "cancelled":
@@ -39,53 +47,32 @@ function Chip({ task, onRemove }: { task: AttachmentDraft; onRemove: () => void 
 
   return (
     <div
-      className={cn(
-        "relative flex h-11 min-w-0 items-center gap-1.5 overflow-hidden rounded-sm border bg-bg-side py-1 pr-0.5 pl-1.5 sm:h-8",
-        failed ? "border-danger/45" : "border-line",
-      )}
+      className={cn("q-att", failed && "bad")}
       title={`${task.file.name} · ${formatBytes(task.file.size)}`}
     >
-      {task.previewUrl ? (
-        <img
-          src={task.previewUrl}
-          alt=""
-          className="size-8 shrink-0 rounded-[2px] border border-line/70 object-cover sm:size-6"
-        />
-      ) : (
-        <FileTextIcon className="size-4 shrink-0 text-fg-3" aria-hidden />
-      )}
-
-      <div className="min-w-0">
-        <p className="max-w-[30ch] truncate text-small leading-tight text-fg">{task.file.name}</p>
-        <p
-          className={cn(
-            "font-mono text-small leading-tight tabular",
-            failed ? "text-danger" : "text-fg-3",
-          )}
-        >
-          {statusLine(task)}
-        </p>
-      </div>
-
+      <span className="q-att-ic" aria-hidden>
+        {task.previewUrl ? (
+          <img src={task.previewUrl} alt="" />
+        ) : failed ? (
+          <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} />
+        ) : (
+          <FileTextIcon className="q-icon s14" strokeWidth={1.5} />
+        )}
+      </span>
+      <span className="q-att-tx">
+        <span className="q-att-nm">{task.file.name}</span>
+        <span className="q-att-meta q-num">{statusLine(task)}</span>
+      </span>
       <button
         type="button"
         onClick={onRemove}
         aria-label={`Remove ${task.file.name}`}
-        className="ml-auto flex size-10 shrink-0 items-center justify-center rounded-sm text-fg-3 transition-colors duration-[var(--dur-instant)] hover:bg-bg hover:text-fg focus-visible:ring-2 focus-visible:ring-focus focus-visible:outline-none sm:size-6"
+        title="Remove"
+        className="q-att-x"
       >
-        <XIcon className="size-3.5" aria-hidden />
+        <XIcon className="q-icon s12" strokeWidth={2} aria-hidden />
       </button>
-
-      {busy ? (
-        <span
-          aria-hidden
-          className="absolute bottom-0 left-0 h-0.5 bg-accent transition-[width] duration-[var(--dur-fast)]"
-          style={{ width: `${percent}%` }}
-        />
-      ) : null}
-      {failed ? (
-        <span aria-hidden className="absolute bottom-0 left-0 h-0.5 w-full bg-danger/70" />
-      ) : null}
+      {busy ? <span aria-hidden className="q-att-bar" style={{ width: `${percent}%` }} /> : null}
     </div>
   );
 }
@@ -106,11 +93,8 @@ export function AttachmentTray({
   );
 
   return (
-    <fieldset
-      className="m-0 min-w-0 border-x-0 border-t-0 border-b border-line/70 p-0 px-2 py-2"
-      aria-label="Attachments"
-    >
-      <div className="flex flex-wrap gap-1.5">
+    <fieldset className="q-att-tray" aria-label="Attachments">
+      <div className="q-att-list">
         {tasks.map((task) => (
           <Chip key={task.key} task={task} onRemove={() => onRemove(task.key)} />
         ))}
