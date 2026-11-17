@@ -269,7 +269,8 @@
   color: var(--fg);
 }
 .q-seg > button[aria-selected="true"],
-.q-seg > button[aria-checked="true"] {
+.q-seg > button[aria-checked="true"],
+.q-seg > button[aria-pressed="true"] {
   background: var(--bg-raised);
   color: var(--fg);
   box-shadow:
@@ -279,7 +280,9 @@
 .q-tabs button[aria-selected="true"] {
   color: var(--fg);
 }
-.dark .q-seg > button[aria-selected="true"] {
+.dark .q-seg > button[aria-selected="true"],
+.dark .q-seg > button[aria-checked="true"],
+.dark .q-seg > button[aria-pressed="true"] {
   background: var(--fill-2);
   box-shadow: none;
 }
@@ -300,6 +303,11 @@
 }
 .q-seg.inline {
   display: inline-flex;
+}
+fieldset.q-seg-fs {
+  margin: 0;
+  border: 0;
+  min-width: 0;
 }
 .q-tabs button {
   height: 36px;
