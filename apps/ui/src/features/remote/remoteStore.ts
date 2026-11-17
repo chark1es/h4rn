@@ -120,11 +120,7 @@ function tauriInvoke<T>(command: string, args?: Record<string, unknown>): Promis
 }
 
 function initialConnectUrl(): string {
-  return (
-    readBootConfig().connectUrl ??
-    readActiveRemote()?.connectUrl ??
-    DEFAULT_CONNECT_URL
-  );
+  return readBootConfig().connectUrl ?? readActiveRemote()?.connectUrl ?? DEFAULT_CONNECT_URL;
 }
 
 function createInitialState(): RemoteState {

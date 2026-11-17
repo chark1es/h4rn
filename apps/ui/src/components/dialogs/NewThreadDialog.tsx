@@ -18,6 +18,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts } from "@/features/attachments/use-attachments";
+import { useHarnesses, useHarnessVersions } from "@/features/harnesses/harnessStore";
 import {
   proxyDefaultModel,
   proxyModelsFor,
@@ -25,7 +26,6 @@ import {
   useProxy,
   useProxyCatalog,
 } from "@/features/proxy/proxyStore";
-import { useHarnesses, useHarnessVersions } from "@/features/harnesses/harnessStore";
 import type { HarnessKind, HostId, RuntimeMode } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { HARNESS_LABELS, HARNESS_SLUGS } from "@/lib/entities";
