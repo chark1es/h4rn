@@ -20,6 +20,7 @@ import { createClientFromEnv, readBootConfig } from "@/lib/client/config";
 import { toProtoError } from "@/lib/client/errors";
 import type { ConnectionSnapshot, EventEnvelope } from "@/lib/client/types";
 import { pushRoute, type Route, readRoute, replaceRoute, routePath } from "@/lib/router";
+import { applyTerminalTheme } from "@/lib/terminalTheme";
 import { createThreadLog, foldEvent, type ThreadLog } from "./projection";
 
 export type Theme = "light" | "dark" | "system";
@@ -692,6 +693,7 @@ export function startConnection(): void {
   }
 
   applyTheme(getState().ui.theme);
+  applyTerminalTheme();
   app.start();
 }
 

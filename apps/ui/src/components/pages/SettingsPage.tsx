@@ -7,8 +7,18 @@ import { ProxySettings } from "@/features/proxy/ProxySettings";
 import { LiveAccountForm, LiveDevicesForm, LiveHostsForm } from "@/features/remote/SettingsRemote";
 import { AboutSettings } from "@/features/updates/AboutSettings";
 import { AutoResumeSettings } from "@/features/usage/AutoResumeSettings";
+import { setTheme, type Theme, useApp } from "@/lib/store/appStore";
+import { setTerminalMatchesApp, useTerminalMatchesApp } from "@/lib/terminalTheme";
 
-function Toggle({ checked, label }: { checked: boolean; label: string }) {
+function Toggle({
+  checked,
+  label,
+  onChange,
+}: {
+  checked: boolean;
+  label: string;
+  onChange?: (next: boolean) => void;
+}) {
   return (
     <button
       type="button"
@@ -16,9 +26,16 @@ function Toggle({ checked, label }: { checked: boolean; label: string }) {
       role="switch"
       aria-checked={checked}
       aria-label={label}
+      onClick={() => onChange?.(!checked)}
     />
   );
 }
+
+const SCHEMES: Array<{ value: Theme; label: string }> = [
+  { value: "system", label: "System" },
+  { value: "light", label: "Light" },
+  { value: "dark", label: "Dark" },
+];
 
 function GeneralForm() {
   return (
@@ -63,39 +80,49 @@ function GeneralForm() {
 }
 
 function AppearanceForm() {
+  const theme = useApp((state) => state.ui.theme);
+  const terminalMatches = useTerminalMatchesApp();
   return (
     <div className="q-form">
       <h1>Appearance</h1>
-      <p className="lead">
-        Quiet native follows the system by default. Theme applies to this device.
-      </p>
+      <p className="lead">h4rn follows your system by default. The theme applies to this device.</p>
       <div className="q-group">
         <h2>Theme</h2>
         <div className="q-field">
           <div className="lab">
-            <div className="t">Color scheme</div>
+            <div className="t" id="color-scheme-label">
+              Color scheme
+            </div>
+            <div className="s">
+              {theme === "system" ? "Follows your system setting" : `Always ${theme}`}
+            </div>
           </div>
           <div className="ctl">
-            <div className="q-seg inline" role="tablist" aria-label="Color scheme">
-              <button type="button" role="tab" aria-selected>
-                System
-              </button>
-              <button type="button" role="tab" aria-selected={false}>
-                Light
-              </button>
-              <button type="button" role="tab" aria-selected={false}>
-                Dark
-              </button>
-            </div>
+            <fieldset className="q-seg inline q-seg-fs" aria-labelledby="color-scheme-label">
+              {SCHEMES.map((scheme) => (
+                <button
+                  key={scheme.value}
+                  type="button"
+                  aria-pressed={theme === scheme.value}
+                  onClick={() => setTheme(scheme.value)}
+                >
+                  {scheme.label}
+                </button>
+              ))}
+            </fieldset>
           </div>
         </div>
         <div className="q-field">
           <div className="lab">
             <div className="t">Terminal</div>
-            <div className="s">Match the app theme</div>
+            <div className="s">{terminalMatches ? "Matches the app theme" : "Always dark"}</div>
           </div>
           <div className="ctl">
-            <Toggle checked label="Match the app theme" />
+            <Toggle
+              checked={terminalMatches}
+              label="Terminal matches the app theme"
+              onChange={setTerminalMatchesApp}
+            />
           </div>
         </div>
       </div>

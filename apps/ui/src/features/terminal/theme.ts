@@ -61,6 +61,7 @@ export function terminalTheme(dark: boolean): ITheme {
 /** Resolves the active theme without depending on a React render. */
 export function isDarkTheme(): boolean {
   const root = document.documentElement;
+  if (root.getAttribute("data-terminal-theme") === "dark") return true;
   if (root.classList.contains("dark")) return true;
   if (root.classList.contains("light")) return false;
   return window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;

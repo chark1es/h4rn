@@ -304,7 +304,10 @@ export class TerminalController {
       if (this.term) this.term.options.theme = terminalTheme(isDarkTheme());
     };
     const observer = new MutationObserver(refresh);
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class"] });
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class", "data-terminal-theme"],
+    });
     this.themeObserver = observer;
 
     this.mediaQuery = window.matchMedia?.("(prefers-color-scheme: dark)") ?? null;
