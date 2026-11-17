@@ -269,6 +269,11 @@ impl DaemonBuilder {
             }
         }
         manager.set_snapshot_store(fs.snapshots());
+        let projects = Arc::new(
+            crate::projects::ProjectService::open(&self.config.data_dir, hosts.local_id())
+                .map_err(|error| anyhow::anyhow!("open the project list: {error}"))?
+                .with_fs(Arc::clone(&fs)),
+        );
 
         let forge = ForgeService::open(&self.config.data_dir)
             .map_err(|error| anyhow::anyhow!("open the forge service: {error}"))?;
@@ -424,6 +429,7 @@ impl DaemonBuilder {
         Ok(Daemon {
             config: self.config,
             harness_versions,
+            projects,
             manager,
             subagents,
             hosts,
@@ -467,6 +473,7 @@ pub struct Daemon {
     proxy: Arc<h4rn_proxy::ProxyService>,
     meter: Arc<h4rn_meter::MeterHub>,
     harness_versions: Arc<crate::harness_versions::HarnessVersionService>,
+    projects: Arc<crate::projects::ProjectService>,
 }
 
 impl Daemon {
@@ -599,6 +606,7 @@ impl Daemon {
             proxy: Arc::clone(&self.proxy),
             meter: Arc::clone(&self.meter),
             harness_versions: Arc::clone(&self.harness_versions),
+            projects: Arc::clone(&self.projects),
         };
 
         let mut remote_tasks = Vec::new();

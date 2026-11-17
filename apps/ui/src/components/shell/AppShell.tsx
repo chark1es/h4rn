@@ -1,4 +1,11 @@
-import { ArrowUpIcon, AtSignIcon, ChevronDownIcon, PaperclipIcon } from "lucide-react";
+import {
+  ArrowUpIcon,
+  AtSignIcon,
+  ChevronDownIcon,
+  FolderIcon,
+  FolderPlusIcon,
+  PaperclipIcon,
+} from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
@@ -21,6 +28,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuLabel,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
@@ -29,6 +37,8 @@ import { useAttachmentDrafts, useAttachShortcut } from "@/features/attachments/u
 import { IdePane } from "@/features/ide/IdePane";
 import { McpApprovalCard } from "@/features/mcp/McpApprovalCard";
 import { ensureMcpEvents } from "@/features/mcp/store";
+import { AddProjectDialog } from "@/features/projects/AddProjectDialog";
+import { shortPath, useProjects } from "@/features/projects/store";
 import {
   proxyDefaultModel,
   proxyModelsFor,
@@ -41,8 +51,9 @@ import type { HarnessKind } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { useViewportWidth } from "@/hooks/use-viewport-width";
 import { HARNESS_LABELS, harnessLabel, harnessSeed, machineSeed } from "@/lib/entities";
+import { projectName } from "@/lib/grouping";
 import { titleWithShortcut } from "@/lib/keybindings";
-import { createThread, navigate, panelFits, useApp } from "@/lib/store/appStore";
+import { createThread, navigate, openAddProject, panelFits, useApp } from "@/lib/store/appStore";
 import { defaultThreadHostId, localOnlyHostOptions } from "@/lib/thread-hosts";
 import { activeThread } from "@/lib/thread-selection";
 
@@ -74,6 +85,9 @@ function InboxDetailEmpty() {
   const [harness, setHarness] = useState<HarnessKind>("claude_code");
   const [model, setModel] = useState(START_MODELS.claude_code);
   const [workspace, setWorkspace] = useState("~/code");
+  const [customFolder, setCustomFolder] = useState(false);
+  const projects = useProjects((state) => state.projects);
+  const threads = useApp((state) => state.threads);
   const [prompt, setPrompt] = useState("");
   const [starting, setStarting] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -86,6 +100,29 @@ function InboxDetailEmpty() {
   }, [host, onlineHosts, localHostId]);
 
   const selectedHost = hosts[host];
+  // Registered projects first, then folders that only have threads so far.
+  const folderChoices = useMemo(() => {
+    const seen = new Set<string>();
+    const choices: Array<{ name: string; path: string }> = [];
+    for (const project of projects) {
+      if (project.host !== host || seen.has(project.path)) continue;
+      seen.add(project.path);
+      choices.push({ name: project.name, path: project.path });
+    }
+    for (const thread of Object.values(threads)) {
+      if (thread.host !== host || seen.has(thread.workspace_path)) continue;
+      seen.add(thread.workspace_path);
+      choices.push({ name: projectName(thread.workspace_path), path: thread.workspace_path });
+    }
+    return choices;
+  }, [projects, threads, host]);
+  const selectedFolder = folderChoices.find((choice) => choice.path === workspace);
+  // Start in the first project once the list arrives, unless a path was typed.
+  useEffect(() => {
+    if (customFolder || selectedFolder) return;
+    const first = folderChoices[0];
+    if (first && workspace === "~/code") setWorkspace(first.path);
+  }, [customFolder, selectedFolder, folderChoices, workspace]);
   const harnessChoices = selectedHost?.harnesses.length ? selectedHost.harnesses : HARNESSES;
   const hostName = selectedHost?.name ?? "a host";
   const offline = connection !== "online";
@@ -254,15 +291,64 @@ function InboxDetailEmpty() {
               </DropdownMenuContent>
             </DropdownMenu>
 
-            <label className="q-chip q-chip-field">
-              <span className="sr-only">Workspace folder</span>
-              <input
-                value={workspace}
-                onChange={(event) => setWorkspace(event.target.value)}
-                placeholder="~/code/api"
-                spellCheck={false}
-              />
-            </label>
+            {customFolder || folderChoices.length === 0 ? (
+              <label className="q-chip q-chip-field">
+                <span className="sr-only">Workspace folder</span>
+                <input
+                  value={workspace}
+                  onChange={(event) => setWorkspace(event.target.value)}
+                  placeholder="~/code/api"
+                  spellCheck={false}
+                />
+              </label>
+            ) : null}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="q-chip"
+                  aria-label={`Project: ${selectedFolder?.name ?? workspace}`}
+                  title={workspace}
+                >
+                  <FolderIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                  <span className="q-chip-label">
+                    {customFolder || folderChoices.length === 0
+                      ? "Projects"
+                      : (selectedFolder?.name ?? shortPath(workspace))}
+                  </span>
+                  <ChevronDownIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-64">
+                <DropdownMenuLabel>Project on {hostName}</DropdownMenuLabel>
+                {folderChoices.length === 0 ? (
+                  <DropdownMenuItem disabled>No projects on this host yet</DropdownMenuItem>
+                ) : (
+                  folderChoices.map((choice) => (
+                    <DropdownMenuItem
+                      key={choice.path}
+                      onSelect={() => {
+                        setCustomFolder(false);
+                        setWorkspace(choice.path);
+                      }}
+                    >
+                      <span className="min-w-0 flex-1 truncate">{choice.name}</span>
+                      <span className="ml-2 max-w-[120px] shrink-0 truncate text-[11px] text-[var(--fg-3)]">
+                        {shortPath(choice.path)}
+                      </span>
+                    </DropdownMenuItem>
+                  ))
+                )}
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={() => setCustomFolder(true)}>
+                  Type a folder path…
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={openAddProject}>
+                  <FolderPlusIcon aria-hidden />
+                  Add project…
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
 
           <fieldset
@@ -503,6 +589,7 @@ export function AppShell() {
         {isThread || ide || pairing ? null : <PhoneNav />}
 
         <NewThreadDialog />
+        <AddProjectDialog />
         <CommandPalette />
         <ShortcutsDialog />
         <Toasts />
@@ -534,6 +621,7 @@ export function AppShell() {
       </div>
 
       <NewThreadDialog />
+      <AddProjectDialog />
       <CommandPalette />
       <ShortcutsDialog />
       <Toasts />

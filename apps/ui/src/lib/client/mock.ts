@@ -16,6 +16,7 @@ import type {
   BlobInfo,
   ClientFrame,
   ClientRequest,
+  DirectoryListing,
   Event,
   FsTurnChanges,
   HarnessKind,
@@ -32,6 +33,8 @@ import type {
   McpTestCallResult,
   McpToolInfo,
   McpTransportView,
+  Project,
+  ProjectSource,
   ProtoError,
   ProxyEnvLine,
   ProxyHarnessOverride,
@@ -1875,6 +1878,30 @@ class MockDaemon {
   private skillInventory: SkillInventory;
   private skillConflicts: SkillConflict[];
   private skillPreview: SkillImportPreview | null = null;
+  /** Registered projects and the fake folder tree the add-project browser walks. */
+  private projects: Project[] = [
+    {
+      id: "prj_infra",
+      host: "atlas",
+      path: "/home/you/code/infra",
+      name: "infra",
+      created_at: new Date(Date.now() - 86_400_000).toISOString(),
+      git: true,
+    },
+  ];
+  private folders = new Map<string, { git: boolean }>([
+    ["/home/you", { git: false }],
+    ["/home/you/code", { git: false }],
+    ["/home/you/code/api", { git: true }],
+    ["/home/you/code/h4rn", { git: true }],
+    ["/home/you/code/h4rn-connect", { git: true }],
+    ["/home/you/code/web", { git: true }],
+    ["/home/you/code/desktop", { git: true }],
+    ["/home/you/code/infra", { git: true }],
+    ["/home/you/code/scratch", { git: false }],
+    ["/home/you/Documents", { git: false }],
+    ["/home/you/Downloads", { git: false }],
+  ]);
   /** Harness folders that carry the h4rn marker after an import with `manage`. */
   private adoptedSkillPaths = new Set<string>();
   private syncEmitted = false;
@@ -2763,6 +2790,40 @@ class MockDaemon {
         this.resumePolicy = body.policy;
         this.ok(frame.id, { type: "ack" });
         return;
+      case "list_projects":
+        this.ok(frame.id, { type: "projects", projects: this.projects });
+        return;
+      case "add_project":
+        this.addProject(frame.id, body.host, body.source, body.name);
+        return;
+      case "rename_project": {
+        const project = this.projects.find((entry) => entry.id === body.project_id);
+        if (!project) {
+          this.err(frame.id, "not_found", `no project ${body.project_id}`, null);
+          return;
+        }
+        project.name = body.name.trim() || project.name;
+        this.ok(frame.id, { type: "project", project: { ...project } });
+        return;
+      }
+      case "remove_project":
+        this.projects = this.projects.filter((entry) => entry.id !== body.project_id);
+        this.ok(frame.id, { type: "ack" });
+        return;
+      case "browse_directories": {
+        const listing = this.browse(body.path);
+        if (!listing) {
+          this.err(
+            frame.id,
+            "invalid_request",
+            `cannot open ${body.path}`,
+            "Check the path, or start from your home folder.",
+          );
+          return;
+        }
+        this.ok(frame.id, { type: "directories", listing });
+        return;
+      }
       case "list_harness_versions":
         this.ok(frame.id, { type: "harness_versions", harnesses: this.harnessVersions });
         return;
@@ -4210,6 +4271,108 @@ class MockDaemon {
     if (this.disposed) return;
     const frame: ServerFrame = { kind: "response", id, result: { Ok: result } };
     this.handlers.onMessage(wire(frame));
+  }
+
+  private expand(path: string): string {
+    const trimmed = path.trim().replace(/\/+$/, "") || "/";
+    if (trimmed === "~") return "/home/you";
+    if (trimmed.startsWith("~/")) return `/home/you/${trimmed.slice(2)}`;
+    return trimmed;
+  }
+
+  private browse(path: string | null): DirectoryListing | null {
+    const target = this.expand(path ?? "~");
+    if (!this.folders.has(target)) return null;
+    const entries = [...this.folders.entries()]
+      .filter(([candidate]) => {
+        const parent = candidate.slice(0, candidate.lastIndexOf("/")) || "/";
+        return parent === target && candidate !== target;
+      })
+      .map(([candidate, info]) => ({
+        name: candidate.slice(candidate.lastIndexOf("/") + 1),
+        path: candidate,
+        git: info.git,
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    const parent = target.slice(0, target.lastIndexOf("/")) || null;
+    return {
+      path: target,
+      parent: parent && parent !== target ? parent : null,
+      home: "/home/you",
+      entries,
+      git: this.folders.get(target)?.git ?? false,
+    };
+  }
+
+  private addProject(id: number, host: string, source: ProjectSource, name: string | null): void {
+    let path: string;
+    let git = false;
+    if (source.type === "existing") {
+      path = this.expand(source.path);
+      if (!this.folders.has(path)) {
+        this.err(id, "invalid_request", `${path} is not a folder`, "Pick an existing folder.");
+        return;
+      }
+      git = this.folders.get(path)?.git ?? false;
+    } else {
+      const parent = this.expand(source.parent);
+      const folder =
+        source.type === "new_folder"
+          ? source.name.trim()
+          : ((source.name?.trim() ||
+              source.url
+                .trim()
+                .replace(/\/+$/, "")
+                .split(/[/:]/)
+                .pop()
+                ?.replace(/\.git$/, "")) ??
+            "");
+      if (!folder || folder.includes("/") || folder.startsWith("-") || folder === "..") {
+        this.err(id, "invalid_request", `“${folder}” is not a folder name`, "Use one folder name.");
+        return;
+      }
+      path = `${parent}/${folder}`;
+      if (this.folders.has(path)) {
+        this.err(
+          id,
+          "invalid_request",
+          `${path} already exists`,
+          "Choose another name, or open the existing folder instead.",
+        );
+        return;
+      }
+      if (
+        source.type === "clone" &&
+        !/^(https?:|git@|ssh:|[\w.-]+\/[\w.-]+$)/.test(source.url.trim())
+      ) {
+        this.err(
+          id,
+          "invalid_request",
+          `“${source.url}” is not a repository URL`,
+          "Paste an HTTPS or SSH clone URL, or type owner/repo for GitHub.",
+        );
+        return;
+      }
+      git = source.type === "clone" || source.git_init;
+      this.folders.set(path, { git });
+    }
+    const existing = this.projects.find((entry) => entry.path === path);
+    if (existing) {
+      this.ok(id, { type: "project", project: existing });
+      return;
+    }
+    const project: Project = {
+      id: uid("prj"),
+      host,
+      path,
+      name: name?.trim() || path.slice(path.lastIndexOf("/") + 1),
+      created_at: iso(),
+      git,
+    };
+    this.projects = [...this.projects, project];
+    // A clone takes a moment on a real host; mirror that so the busy state shows.
+    const delay = source.type === "clone" ? 900 : 120;
+    window.setTimeout(() => this.ok(id, { type: "project", project }), delay);
   }
 
   private err(id: number, code: ProtoError["code"], message: string, hint: string | null): void {

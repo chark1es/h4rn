@@ -865,6 +865,50 @@ pub enum ClientRequest {
         /// Harness to update.
         harness: HarnessKind,
     },
+    // ------------------------------------------------------------------
+    // Projects: sidebar folders that exist before their first thread.
+    // ------------------------------------------------------------------
+    /// List the registered projects on a host.
+    ListProjects {
+        /// Host to list.
+        host: HostId,
+    },
+    /// Add a project from an existing folder, a new folder or a clone.
+    ///
+    /// Adding a folder that is already registered returns that project.
+    AddProject {
+        /// Host that owns the folder.
+        host: HostId,
+        /// Where the project comes from.
+        source: crate::projects::ProjectSource,
+        /// Display name; defaults to the folder name.
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /// Rename a project. The folder is not touched.
+    RenameProject {
+        /// Host that owns the project.
+        host: HostId,
+        /// Project to rename.
+        project_id: String,
+        /// New display name.
+        name: String,
+    },
+    /// Remove a project from the sidebar. Its folder and threads are kept.
+    RemoveProject {
+        /// Host that owns the project.
+        host: HostId,
+        /// Project to remove.
+        project_id: String,
+    },
+    /// List the folders inside one directory, for picking a project location.
+    BrowseDirectories {
+        /// Host to browse.
+        host: HostId,
+        /// Directory to list; `None` or `~` lists the home directory.
+        #[serde(default)]
+        path: Option<String>,
+    },
 }
 
 impl ClientRequest {
@@ -901,7 +945,8 @@ impl ClientRequest {
             | Self::ForgeGetPrDiff { .. }
             | Self::ForgeListPrComments { .. }
             | Self::ForgeListChecks { .. }
-            | Self::ForgeListPrCommits { .. } => View,
+            | Self::ForgeListPrCommits { .. }
+            | Self::ListProjects { .. } => View,
             Self::CreateThread { .. }
             | Self::SendMessage { .. }
             | Self::Interrupt { .. }
@@ -919,7 +964,9 @@ impl ClientRequest {
             | Self::ForgeReply { .. }
             | Self::ForgeComment { .. }
             | Self::ForgeOpenPr { .. }
-            | Self::ForgeHandPrToAgent { .. } => Approve,
+            | Self::ForgeHandPrToAgent { .. }
+            | Self::RenameProject { .. }
+            | Self::RemoveProject { .. } => Approve,
             Self::TerminalOpen { .. }
             | Self::TerminalAttach { .. }
             | Self::TerminalList { .. }
@@ -937,7 +984,9 @@ impl ClientRequest {
             | Self::FsWatch { .. }
             | Self::FsUnwatch { .. }
             | Self::FsDiff { .. }
-            | Self::FsTurnChanges { .. } => Files,
+            | Self::FsTurnChanges { .. }
+            | Self::AddProject { .. }
+            | Self::BrowseDirectories { .. } => Files,
             Self::McpUpsert { .. }
             | Self::McpRemove { .. }
             | Self::SkillsAdd { .. }

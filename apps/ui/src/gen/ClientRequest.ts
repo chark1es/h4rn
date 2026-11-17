@@ -16,6 +16,7 @@ import type { HarnessKind } from "./HarnessKind";
 import type { HostId } from "./HostId";
 import type { McpRequest } from "./McpRequest";
 import type { McpServerInput } from "./McpServerInput";
+import type { ProjectSource } from "./ProjectSource";
 import type { ProxyFailoverPolicy } from "./ProxyFailoverPolicy";
 import type { ProxyProfileDraft } from "./ProxyProfileDraft";
 import type { ProxyProfileId } from "./ProxyProfileId";
@@ -925,4 +926,48 @@ request: SubagentRequest, } | { "type": "list_harness_versions" } | { "type": "u
 /**
  * Harness to update.
  */
-harness: HarnessKind, };
+harness: HarnessKind, } | { "type": "list_projects", 
+/**
+ * Host to list.
+ */
+host: HostId, } | { "type": "add_project", 
+/**
+ * Host that owns the folder.
+ */
+host: HostId, 
+/**
+ * Where the project comes from.
+ */
+source: ProjectSource, 
+/**
+ * Display name; defaults to the folder name.
+ */
+name: string | null, } | { "type": "rename_project", 
+/**
+ * Host that owns the project.
+ */
+host: HostId, 
+/**
+ * Project to rename.
+ */
+project_id: string, 
+/**
+ * New display name.
+ */
+name: string, } | { "type": "remove_project", 
+/**
+ * Host that owns the project.
+ */
+host: HostId, 
+/**
+ * Project to remove.
+ */
+project_id: string, } | { "type": "browse_directories", 
+/**
+ * Host to browse.
+ */
+host: HostId, 
+/**
+ * Directory to list; `None` or `~` lists the home directory.
+ */
+path: string | null, };

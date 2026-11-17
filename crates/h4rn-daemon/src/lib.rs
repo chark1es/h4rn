@@ -33,6 +33,7 @@ pub mod hosts;
 pub mod journal;
 pub mod mcp;
 pub mod mcp_peers;
+pub mod projects;
 pub mod remote;
 pub mod secrets;
 pub mod server;

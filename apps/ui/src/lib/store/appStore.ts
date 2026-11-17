@@ -63,6 +63,10 @@ export type UiState = {
   limitsOpen: boolean;
   /** Settings → Shortcuts is capturing a chord; global shortcuts stand down. */
   recordingShortcut: boolean;
+  /** Host and folder the next New thread dialog starts with. */
+  newThreadPreset: { host: string; workspace: string } | null;
+  /** The Add project dialog is open. */
+  addProjectOpen: boolean;
   focusSearchNonce: number;
   focusComposerNonce: number;
   focusFilesNonce: number;
@@ -206,6 +210,8 @@ function createInitialState(): AppState {
       moreOpen: false,
       limitsOpen: false,
       recordingShortcut: false,
+      newThreadPreset: null,
+      addProjectOpen: false,
       focusSearchNonce: 0,
       focusComposerNonce: 0,
       focusFilesNonce: 0,
@@ -391,8 +397,17 @@ export function closeShortcuts(): void {
   setUi({ shortcutsOpen: false });
 }
 
-export function openNewThread(): void {
-  setUi({ newThreadOpen: true, paletteOpen: false });
+/** Opens New thread, optionally starting in one project's folder. */
+export function openNewThread(preset?: { host: string; workspace: string }): void {
+  setUi({ newThreadOpen: true, paletteOpen: false, newThreadPreset: preset ?? null });
+}
+
+export function openAddProject(): void {
+  setUi({ addProjectOpen: true, paletteOpen: false });
+}
+
+export function closeAddProject(): void {
+  setUi({ addProjectOpen: false });
 }
 
 export function closeNewThread(): void {

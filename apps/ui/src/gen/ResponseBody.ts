@@ -2,6 +2,7 @@
 import type { BlobDownload } from "./BlobDownload";
 import type { BlobInfo } from "./BlobInfo";
 import type { DeviceId } from "./DeviceId";
+import type { DirectoryListing } from "./DirectoryListing";
 import type { FailoverOptions } from "./FailoverOptions";
 import type { FileEntry } from "./FileEntry";
 import type { ForgeAccount } from "./ForgeAccount";
@@ -34,6 +35,7 @@ import type { McpShareApproval } from "./McpShareApproval";
 import type { McpTestCallResult } from "./McpTestCallResult";
 import type { McpToolInfo } from "./McpToolInfo";
 import type { PairingConfirmation } from "./PairingConfirmation";
+import type { Project } from "./Project";
 import type { ProxyFailoverChoice } from "./ProxyFailoverChoice";
 import type { ProxyLimits } from "./ProxyLimits";
 import type { ProxyModelCatalog } from "./ProxyModelCatalog";
@@ -407,4 +409,16 @@ subagent: SubagentView, } | { "type": "harness_versions",
 /**
  * One row per harness, in stable order.
  */
-harnesses: Array<HarnessVersionInfo>, } | { "type": "ack" };
+harnesses: Array<HarnessVersionInfo>, } | { "type": "projects", 
+/**
+ * Projects.
+ */
+projects: Array<Project>, } | { "type": "project", 
+/**
+ * The project.
+ */
+project: Project, } | { "type": "directories", 
+/**
+ * The listing.
+ */
+listing: DirectoryListing, } | { "type": "ack" };
