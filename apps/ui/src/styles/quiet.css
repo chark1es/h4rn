@@ -867,15 +867,6 @@
   background: var(--fill);
   color: var(--fg);
 }
-.q-side-dest-n {
-  position: absolute;
-  top: 1px;
-  right: 1px;
-  font-size: 10px;
-  line-height: 12px;
-  color: var(--fg-3);
-  font-variant-numeric: tabular-nums;
-}
 .q-hostpop {
   position: absolute;
   left: 8px;
@@ -5021,22 +5012,6 @@
 }
 .q-disclosure[open] > summary::before {
   transform: rotate(90deg);
-}
-
-/* Footer pull-request badge sits inline after its icon. */
-.q-side-dest:has(.q-side-dest-n) {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: auto;
-  padding: 0 6px;
-  gap: 3px;
-}
-.q-side-dest .q-side-dest-n {
-  position: static;
-  font-size: 11px;
-  line-height: 14px;
-  color: var(--fg-2);
 }
 
 /* Harness CLI versions and app update notice (ADR-043). */
