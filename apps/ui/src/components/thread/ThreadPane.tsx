@@ -97,6 +97,11 @@ export function ThreadPane({ threadId }: { threadId: string }) {
   const [terminalMounted, setTerminalMounted] = useState(terminalOpen);
   const [phonePanel, setPhonePanel] = useState<"changes" | "subagents" | null>(null);
   const [approvalSheetOpen, setApprovalSheetOpen] = useState(false);
+  // The shortcut and the palette open the terminal through the store, not
+  // the header button, so mount on any open.
+  useEffect(() => {
+    if (terminalOpen) setTerminalMounted(true);
+  }, [terminalOpen]);
 
   useEffect(() => {
     ensureThread(threadId);
@@ -211,10 +216,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
         host={host}
         onBack={() => navigate({ kind: "inbox" })}
         terminalOpen={terminalOpen}
-        onToggleTerminal={() => {
-          setTerminalMounted(true);
-          toggleTerminal();
-        }}
+        onToggleTerminal={toggleTerminal}
         onOpenPanel={() => setPhonePanel("changes")}
         stale={stale}
       />

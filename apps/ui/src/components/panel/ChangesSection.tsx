@@ -3,7 +3,7 @@ import { useState } from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
-import { KeyCaps, MOD } from "@/components/common/Kbd";
+import { ShortcutCaps } from "@/components/common/Kbd";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -205,7 +205,7 @@ export function ChangesSection({
         <span className="grow" />
         {ide ? (
           <button type="button" className="q-btn secondary" onClick={() => setView("thread")}>
-            Back to thread <KeyCaps value={`${MOD} E`} />
+            Back to thread <ShortcutCaps command="view.toggle" />
           </button>
         ) : (
           <button
@@ -214,7 +214,7 @@ export function ChangesSection({
             onClick={onFooterAction ?? (() => setView("ide"))}
           >
             <Code2Icon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            Open in IDE <KeyCaps value={`${MOD} E`} />
+            Open in IDE <ShortcutCaps command="view.toggle" />
           </button>
         )}
       </div>

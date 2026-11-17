@@ -33,6 +33,7 @@ import { glyphForAgentState, glyphForThread } from "@/lib/agent";
 import { toProtoError } from "@/lib/client/errors";
 import { machineSeed } from "@/lib/entities";
 import { monogram } from "@/lib/grouping";
+import { titleWithShortcut } from "@/lib/keybindings";
 import {
   ensureThread,
   navigate,
@@ -377,7 +378,7 @@ export function IdePane() {
             <button
               type="button"
               className="q-tchip"
-              title={`Back to the thread  ${MOD}E`}
+              title={titleWithShortcut("Back to the thread", "view.toggle")}
               onClick={backToThread}
             >
               <AgentGlyph glyph={glyph} size={14} />

@@ -25,7 +25,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
-import { useAttachmentDrafts } from "@/features/attachments/use-attachments";
+import { useAttachmentDrafts, useAttachShortcut } from "@/features/attachments/use-attachments";
 import { IdePane } from "@/features/ide/IdePane";
 import { McpApprovalCard } from "@/features/mcp/McpApprovalCard";
 import { ensureMcpEvents } from "@/features/mcp/store";
@@ -41,6 +41,7 @@ import type { HarnessKind } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { useViewportWidth } from "@/hooks/use-viewport-width";
 import { HARNESS_LABELS, harnessLabel, harnessSeed, machineSeed } from "@/lib/entities";
+import { titleWithShortcut } from "@/lib/keybindings";
 import { createThread, navigate, panelFits, useApp } from "@/lib/store/appStore";
 import { defaultThreadHostId, localOnlyHostOptions } from "@/lib/thread-hosts";
 import { activeThread } from "@/lib/thread-selection";
@@ -94,6 +95,8 @@ function InboxDetailEmpty() {
     enabled: writable,
     disabledReason: offline ? "Reconnect to attach files." : "Pick an online host first.",
   });
+  const newThreadOpen = useApp((state) => state.ui.newThreadOpen);
+  useAttachShortcut(attachments.openPicker, writable && !newThreadOpen);
 
   const submit = async () => {
     if (!writable || starting || attachments.blockedReason) return;
@@ -322,7 +325,7 @@ function InboxDetailEmpty() {
                 disabled={!writable}
                 onClick={attachments.openPicker}
                 aria-label="Attach files"
-                title="Attach files (Ctrl/Cmd U)"
+                title={titleWithShortcut("Attach files", "composer.attach")}
                 className="q-ibtn"
               >
                 <PaperclipIcon className="q-icon" strokeWidth={1.5} aria-hidden />

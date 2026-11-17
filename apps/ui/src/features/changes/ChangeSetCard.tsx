@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { FileDiff } from "@/components/panel/FileDiff";
 import { againstFor, loadFileDiff, requestChangesTurn, totalLines } from "@/features/changes/store";
 import type { FsDiff, ThreadSummary } from "@/gen";
+import { titleWithShortcut } from "@/lib/keybindings";
 import { getClient, openInIde } from "@/lib/store/appStore";
 import type { StreamTurn } from "@/lib/store/projection";
 
@@ -64,7 +65,7 @@ export function ChangeSetCard({ turn, summary }: { turn: StreamTurn; summary: Th
           type="button"
           className="q-btn ghost"
           onClick={openChanges}
-          title="Open in the Changes panel  D"
+          title={titleWithShortcut("Open in the Changes panel", "panel.changes")}
         >
           Review
         </button>

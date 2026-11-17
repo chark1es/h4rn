@@ -27,7 +27,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
-import { ALT, BACKSPACE, ENTER, KeyGlyphs, MOD, SHIFT } from "@/components/common/Kbd";
+import { KeyGlyphs } from "@/components/common/Kbd";
 import {
   CommandDialog,
   CommandEmpty,
@@ -184,9 +184,7 @@ export function CommandPalette() {
                 >
                   <ShieldCheckIcon aria-hidden />
                   Approve pending action
-                  <CommandShortcut>
-                    {MOD} {ENTER}
-                  </CommandShortcut>
+                  <CommandShortcut command="approval.approve" />
                 </CommandItem>
                 <CommandItem
                   value="deny pending action refuse"
@@ -196,9 +194,7 @@ export function CommandPalette() {
                 >
                   <XIcon aria-hidden />
                   Deny pending action
-                  <CommandShortcut>
-                    {MOD} {BACKSPACE}
-                  </CommandShortcut>
+                  <CommandShortcut command="approval.deny" />
                 </CommandItem>
               </>
             ) : null}
@@ -208,7 +204,7 @@ export function CommandPalette() {
             >
               <FileDiffIcon aria-hidden />
               Open changes
-              <CommandShortcut>D</CommandShortcut>
+              <CommandShortcut command="panel.changes" />
             </CommandItem>
             <CommandItem
               value="subagents agents tree"
@@ -216,7 +212,7 @@ export function CommandPalette() {
             >
               <WorkflowIcon aria-hidden />
               Open subagents
-              <CommandShortcut>{MOD} J</CommandShortcut>
+              <CommandShortcut command="panel.subagents" />
             </CommandItem>
             <CommandItem
               value="pin keep working"
@@ -224,7 +220,7 @@ export function CommandPalette() {
             >
               <PinIcon aria-hidden />
               {current.pinned ? "Unpin from Working" : "Keep in Working"}
-              <CommandShortcut>P</CommandShortcut>
+              <CommandShortcut command="thread.pin" />
             </CommandItem>
             {current.tab === "done" ? (
               <CommandItem
@@ -233,7 +229,7 @@ export function CommandPalette() {
               >
                 <CheckIcon aria-hidden />
                 Acknowledge
-                <CommandShortcut>A</CommandShortcut>
+                <CommandShortcut command="thread.acknowledge" />
               </CommandItem>
             ) : null}
             {current.tab !== "settled" ? (
@@ -243,7 +239,7 @@ export function CommandPalette() {
               >
                 <InboxIcon aria-hidden />
                 Settle now
-                <CommandShortcut>{SHIFT} S</CommandShortcut>
+                <CommandShortcut command="thread.settle" />
               </CommandItem>
             ) : null}
             {current.tab === "working" ? (
@@ -253,7 +249,7 @@ export function CommandPalette() {
               >
                 <SquareIcon aria-hidden />
                 Interrupt turn
-                <CommandShortcut>{MOD} .</CommandShortcut>
+                <CommandShortcut command="turn.interrupt" />
               </CommandItem>
             ) : null}
           </CommandGroup>
@@ -281,9 +277,7 @@ export function CommandPalette() {
           <CommandItem value="new thread start" onSelect={() => close(openNewThread)}>
             <PlusIcon aria-hidden />
             New thread…
-            <CommandShortcut>
-              {MOD} {SHIFT} N
-            </CommandShortcut>
+            <CommandShortcut command="thread.new" />
           </CommandItem>
           {searching ? (
             <CommandItem
@@ -297,7 +291,6 @@ export function CommandPalette() {
             >
               <SearchIcon aria-hidden />
               Search threads…
-              <CommandShortcut>/</CommandShortcut>
             </CommandItem>
           ) : null}
         </CommandGroup>
@@ -306,17 +299,17 @@ export function CommandPalette() {
           <CommandItem value="working tab" onSelect={() => close(() => setTab("working"))}>
             <InboxIcon aria-hidden />
             Go to Working
-            <CommandShortcut>{ALT} 1</CommandShortcut>
+            <CommandShortcut command="tab.working" />
           </CommandItem>
           <CommandItem value="done tab" onSelect={() => close(() => setTab("done"))}>
             <CheckIcon aria-hidden />
             Go to Done
-            <CommandShortcut>{ALT} 2</CommandShortcut>
+            <CommandShortcut command="tab.done" />
           </CommandItem>
           <CommandItem value="settled tab" onSelect={() => close(() => setTab("settled"))}>
             <ArchiveIcon aria-hidden />
             Go to Settled
-            <CommandShortcut>{ALT} 3</CommandShortcut>
+            <CommandShortcut command="tab.settled" />
           </CommandItem>
           <CommandItem
             value="pair a device phone qr code"
@@ -337,7 +330,6 @@ export function CommandPalette() {
               >
                 <ServerIcon aria-hidden />
                 Hosts
-                <CommandShortcut>G H</CommandShortcut>
               </CommandItem>
               <CommandItem
                 value="library mcp skills"
@@ -348,8 +340,8 @@ export function CommandPalette() {
                 }
               >
                 <LibraryIcon aria-hidden />
-                Library
-                <CommandShortcut>G L</CommandShortcut>
+                MCP servers and skills
+                <CommandShortcut command="nav.tools" />
               </CommandItem>
               <CommandItem
                 value="usage limits"
@@ -359,7 +351,7 @@ export function CommandPalette() {
               >
                 <ChartNoAxesColumnIcon aria-hidden />
                 Usage &amp; limits
-                <CommandShortcut>G U</CommandShortcut>
+                <CommandShortcut command="nav.usage" />
               </CommandItem>
               <CommandItem
                 value="ide editor"
@@ -367,7 +359,6 @@ export function CommandPalette() {
               >
                 <Code2Icon aria-hidden />
                 IDE
-                <CommandShortcut>G E</CommandShortcut>
               </CommandItem>
               <CommandItem
                 value="pull requests prs"
@@ -377,7 +368,7 @@ export function CommandPalette() {
               >
                 <GitPullRequestIcon aria-hidden />
                 Pull requests
-                <CommandShortcut>G P</CommandShortcut>
+                <CommandShortcut command="nav.pulls" />
               </CommandItem>
               <CommandItem
                 value="settings"
@@ -389,7 +380,7 @@ export function CommandPalette() {
               >
                 <SettingsIcon aria-hidden />
                 Settings
-                <CommandShortcut>{MOD} ,</CommandShortcut>
+                <CommandShortcut command="settings.open" />
               </CommandItem>
             </>
           ) : null}
@@ -400,39 +391,35 @@ export function CommandPalette() {
             <CommandItem value="open ide editor project" onSelect={() => close(toggleView)}>
               <Code2Icon aria-hidden />
               Open {projectName(current.workspace_path)} in the IDE
-              <CommandShortcut>{MOD} E</CommandShortcut>
+              <CommandShortcut command="view.toggle" />
             </CommandItem>
           ) : null}
           <CommandItem value="toggle right panel" onSelect={() => close(togglePanel)}>
             <PanelRightIcon aria-hidden />
             {panelOpen ? "Hide right panel" : "Show right panel"}
-            <CommandShortcut>
-              {MOD} {ALT} B
-            </CommandShortcut>
+            <CommandShortcut command="panel.toggle" />
           </CommandItem>
           <CommandItem value="toggle terminal shell" onSelect={() => close(toggleTerminal)}>
             <TerminalIcon aria-hidden />
             {terminalOpen ? "Hide terminal" : "Show terminal"}
-            <CommandShortcut>T</CommandShortcut>
+            <CommandShortcut command="terminal.toggle" />
           </CommandItem>
           <CommandItem value="toggle sidebar" onSelect={() => close(toggleSidebar)}>
             <PanelLeftIcon aria-hidden />
             {sidebarOpen ? "Hide sidebar" : "Show sidebar"}
-            <CommandShortcut>{MOD} B</CommandShortcut>
+            <CommandShortcut command="sidebar.toggle" />
           </CommandItem>
           {searching ? (
             <>
               <CommandItem value="toggle theme dark light" onSelect={() => close(toggleTheme)}>
                 <SunMoonIcon aria-hidden />
                 Toggle theme
-                <CommandShortcut>
-                  {MOD} {SHIFT} L
-                </CommandShortcut>
+                <CommandShortcut command="theme.toggle" />
               </CommandItem>
               <CommandItem value="keyboard shortcuts help" onSelect={() => close(openShortcuts)}>
                 <KeyboardIcon aria-hidden />
                 Keyboard shortcuts
-                <CommandShortcut>?</CommandShortcut>
+                <CommandShortcut command="shortcuts.open" />
               </CommandItem>
               <CommandItem
                 value="copy thread link"

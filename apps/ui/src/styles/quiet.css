@@ -192,6 +192,35 @@
 .q-btn .q-kbd {
   margin-left: 2px;
 }
+/* Settings → Shortcuts: a binding you can click to re-record. */
+.q-keybind {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-width: 112px;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: 6px;
+  box-shadow: inset 0 0 0 1px transparent;
+  transition:
+    background var(--dur-1),
+    box-shadow var(--dur-1);
+}
+.q-keybind:hover {
+  background: var(--hover);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.q-keybind.on {
+  justify-content: center;
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--focus);
+  font-size: 12px;
+}
+.q-keybind:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
 .q-kbd + .q-kbd {
   margin-left: 2px;
 }
