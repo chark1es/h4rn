@@ -333,15 +333,11 @@ export function NewThreadDialog() {
             onChange={(event) => attachments.onInputChange(event.target.files)}
           />
 
-          {attachments.tasks.length > 0 ? (
-            <div className="rounded-md border border-line">
-              <AttachmentTray
-                tasks={attachments.tasks}
-                onRemove={attachments.remove}
-                onRetry={attachments.retry}
-              />
-            </div>
-          ) : null}
+          <AttachmentTray
+            tasks={attachments.tasks}
+            onRemove={attachments.remove}
+            onRetry={attachments.retry}
+          />
 
           <Textarea
             id="new-thread-task"
