@@ -5,7 +5,7 @@ import { ShortcutCaps } from "@/components/common/Kbd";
 import { ForgeSettings } from "@/features/forge/ForgeSettings";
 import { HarnessSettings } from "@/features/harnesses/HarnessSettings";
 import { ProxySettings } from "@/features/proxy/ProxySettings";
-import { LiveAccountForm, LiveDevicesForm, LiveHostsForm } from "@/features/remote/SettingsRemote";
+import { LiveAccountForm, LiveHostsForm } from "@/features/remote/SettingsRemote";
 import { AboutSettings } from "@/features/updates/AboutSettings";
 import { AutoResumeSettings } from "@/features/usage/AutoResumeSettings";
 import {
@@ -316,8 +316,8 @@ function ShortcutsForm() {
 }
 
 const FORMS: Record<string, () => React.ReactNode> = {
-  hosts: LiveHostsForm,
-  devices: LiveDevicesForm,
+  hosts: () => <LiveHostsForm />,
+  devices: () => <LiveHostsForm pairing />,
   providers: ProxySettings,
   harnesses: HarnessSettings,
   resume: AutoResumeSettings,
@@ -332,7 +332,7 @@ const FORMS: Record<string, () => React.ReactNode> = {
 /** Static settings surfaces, ported from the approved prototype. */
 export function SettingsPage({ section }: { section: string }) {
   const key = FORMS[section] ? section : "hosts";
-  const Form = FORMS[key] ?? LiveHostsForm;
+  const Form = FORMS[key] ?? (() => <LiveHostsForm />);
 
   return (
     <main className="q-main" aria-label="Settings">
