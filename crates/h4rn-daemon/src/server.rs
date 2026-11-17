@@ -94,6 +94,8 @@ pub struct AppState {
     pub meter: Arc<h4rn_meter::MeterHub>,
     /// Harness CLI versions and updates (ADR-043).
     pub harness_versions: Arc<crate::harness_versions::HarnessVersionService>,
+    /// Registered sidebar projects.
+    pub projects: Arc<crate::projects::ProjectService>,
     /// Server boot time, for `/healthz`.
     pub started: Instant,
 }

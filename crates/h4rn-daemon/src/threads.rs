@@ -778,7 +778,11 @@ impl ThreadManager {
     ///
     /// Returns as soon as the thread row and the turn start are durable; harness
     /// output follows as events.
-    pub async fn create_thread(&self, request: NewThread) -> Result<CreatedThread, ManagerError> {
+    pub async fn create_thread(
+        &self,
+        mut request: NewThread,
+    ) -> Result<CreatedThread, ManagerError> {
+        request.workspace_path = expand_home(&request.workspace_path);
         if !self.inner.harnesses.get(request.harness).is_some() {
             return Err(ManagerError::Unsupported(format!(
                 "no {:?} adapter is available in this daemon build",
@@ -3064,6 +3068,22 @@ pub fn detected_harness(
 
 /// An adapter's normalized event stream type, re-exported for tests.
 pub type HarnessEventStream = futures::stream::BoxStream<'static, HarnessEvent>;
+
+/// Expands a leading `~` to the daemon user's home, so `~/code/api` from a
+/// client means the same folder it does in a shell on the host.
+fn expand_home(path: &str) -> String {
+    let trimmed = path.trim();
+    let Some(home) = dirs::home_dir() else {
+        return trimmed.to_owned();
+    };
+    if trimmed == "~" {
+        home.display().to_string()
+    } else if let Some(rest) = trimmed.strip_prefix("~/") {
+        home.join(rest).display().to_string()
+    } else {
+        trimmed.to_owned()
+    }
+}
 
 #[cfg(test)]
 mod tests {

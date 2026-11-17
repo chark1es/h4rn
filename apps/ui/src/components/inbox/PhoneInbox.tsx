@@ -48,7 +48,12 @@ export function PhoneInbox() {
       <PhoneLargeTitle
         title="Inbox"
         actions={
-          <button type="button" className="navbtn" aria-label="New thread" onClick={openNewThread}>
+          <button
+            type="button"
+            className="navbtn"
+            aria-label="New thread"
+            onClick={() => openNewThread()}
+          >
             <SquarePenIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
           </button>
         }
@@ -89,7 +94,7 @@ export function PhoneInbox() {
           <div className="q-empty q-side-empty" style={{ paddingTop: 24 }}>
             <h3>No projects yet</h3>
             <p>A project is a folder on one of your hosts. Start a thread to add one.</p>
-            <button type="button" className="q-btn secondary" onClick={openNewThread}>
+            <button type="button" className="q-btn secondary" onClick={() => openNewThread()}>
               <FolderPlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               Add a project…
             </button>

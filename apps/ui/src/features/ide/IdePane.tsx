@@ -459,7 +459,7 @@ export function IdePane() {
               type="button"
               className="q-btn ghost"
               style={{ height: 24 }}
-              onClick={openNewThread}
+              onClick={() => openNewThread()}
               title="Start a thread with this file in context"
             >
               <HandIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />

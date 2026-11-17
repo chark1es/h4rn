@@ -470,6 +470,21 @@ pub enum ResponseBody {
         /// One row per harness, in stable order.
         harnesses: Vec<crate::HarnessVersionInfo>,
     },
+    /// Registered projects on one host, oldest first.
+    Projects {
+        /// Projects.
+        projects: Vec<crate::projects::Project>,
+    },
+    /// One project after it was added or renamed.
+    Project {
+        /// The project.
+        project: crate::projects::Project,
+    },
+    /// Folders inside one directory.
+    Directories {
+        /// The listing.
+        listing: crate::projects::DirectoryListing,
+    },
     /// A request with no payload completed successfully.
     Ack,
 }

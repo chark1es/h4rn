@@ -107,6 +107,14 @@ export function NewThreadDialog() {
     setStarting(false);
   }, [open, onlineHosts, localHostId, installed]);
 
+  // "New thread in <project>" starts in that project's folder.
+  const preset = useApp((state) => state.ui.newThreadPreset);
+  useEffect(() => {
+    if (!open || !preset) return;
+    if (hosts[preset.host]?.online) setHost(preset.host);
+    setWorkspace(preset.workspace);
+  }, [open, preset, hosts]);
+
   // The catalogue can arrive after the dialog opens; adopt its default only
   // while the user has not chosen a model of their own.
   const proxyActive = proxyOverrideFor(harness);

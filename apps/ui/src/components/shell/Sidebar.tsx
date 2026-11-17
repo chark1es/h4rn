@@ -27,7 +27,6 @@ import { useEffect, useMemo, useState } from "react";
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { ShortcutCaps } from "@/components/common/Kbd";
-import { ThreadRow } from "@/components/inbox/ThreadRow";
 import {
   harnessUpdateCount,
   useHarnesses,
@@ -35,13 +34,20 @@ import {
 } from "@/features/harnesses/harnessStore";
 import { serverStatus } from "@/features/mcp/labels";
 import { loadMcpServers, pendingMcpApprovals, useMcp } from "@/features/mcp/store";
+import {
+  ProjectGroupSection,
+  ProjectsHeader,
+  ProjectsTail,
+  useProjectDrag,
+} from "@/features/projects/SidebarProjects";
+import { loadProjects, sidebarProjects, useProjects } from "@/features/projects/store";
 import { activateMachine, forgetMachine, useRemote } from "@/features/remote/remoteStore";
 import { loadSkills, useSkills } from "@/features/skills/store";
 import type { ThreadSummary, ThreadTab } from "@/gen";
 import { useNow } from "@/hooks/use-now";
 import { harnessLabel, machineSeed } from "@/lib/entities";
 import { absoluteTime, relativeAge } from "@/lib/format";
-import { groupThreads, monogram } from "@/lib/grouping";
+
 import {
   isSnoozed,
   needsAttention,
@@ -54,19 +60,15 @@ import {
 import { type CommandId, titleWithShortcut } from "@/lib/keybindings";
 import { SETTINGS_SECTIONS, settingsPath } from "@/lib/settings";
 import {
-  acknowledgeThread,
   loadThreads,
   navigate,
+  openAddProject,
   openNewThread,
   openThread,
   setLibrarySelected,
   setSidebarWidth,
   setTab,
-  setThreadTab,
   setUi,
-  snoozeThread,
-  togglePin,
-  toggleProject,
   toggleSidebar,
   useApp,
 } from "@/lib/store/appStore";
@@ -552,8 +554,19 @@ function ThreadsSidebar() {
   const counts = useMemo(() => tabCounts(state, now), [state, now]);
   const visible = useMemo(() => threadsForTab(state, tab, now), [state, tab, now]);
   const snoozed = useMemo(() => snoozedThreads(state, now), [state, now]);
-  const groups = useMemo(() => groupThreads(visible), [visible]);
-  const allEmpty = Object.keys(threads).length === 0 && !loading;
+  const projects = useProjects((value) => value.projects);
+  const prefs = useProjects((value) => value.prefs);
+  const localHostId = useApp((value) => value.localHostId);
+  const [dragging, setDragging] = useProjectDrag();
+  useEffect(() => {
+    if (localHostId) void loadProjects();
+  }, [localHostId]);
+  const groups = useMemo(
+    () => sidebarProjects({ visible, all: Object.values(threads), projects, prefs }),
+    [visible, threads, projects, prefs],
+  );
+  const groupKeys = useMemo(() => groups.map((group) => group.key), [groups]);
+  const allEmpty = Object.keys(threads).length === 0 && projects.length === 0 && !loading;
   const destination: Destination | null =
     route.kind === "placeholder"
       ? route.surface === "pulls"
@@ -587,7 +600,7 @@ function ThreadsSidebar() {
             className="q-ibtn"
             aria-label="New thread"
             title={titleWithShortcut("New thread", "thread.new")}
-            onClick={openNewThread}
+            onClick={() => openNewThread()}
           >
             <SquarePenIcon className="q-icon" strokeWidth={1.5} aria-hidden />
           </button>
@@ -670,7 +683,7 @@ function ThreadsSidebar() {
               A project is a folder on one of your hosts. Every thread you start there is listed
               under it.
             </p>
-            <button type="button" className="q-btn secondary" onClick={openNewThread}>
+            <button type="button" className="q-btn secondary" onClick={openAddProject}>
               <FolderPlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               Add a project…
             </button>
@@ -700,81 +713,29 @@ function ThreadsSidebar() {
                 Clear search
               </button>
             ) : tab === "working" ? (
-              <button type="button" className="q-btn secondary" onClick={openNewThread}>
+              <button type="button" className="q-btn secondary" onClick={() => openNewThread()}>
                 New thread
               </button>
             ) : null}
           </div>
         ) : (
-          groups.map((group) => {
-            const closed = layout.closedProjects[group.key] === true;
-            const you = group.threads.some((thread) => needsAttention(thread, now));
-            const active = group.threads.some((thread) => thread.thread_id === selectedId);
-            return (
-              <section
-                className="q-pg"
+          <>
+            <ProjectsHeader />
+            {groups.map((group) => (
+              <ProjectGroupSection
                 key={group.key}
-                aria-label={`${group.name} on ${group.host}`}
-              >
-                <div className={cn("q-pg-h", active && "act")}>
-                  <button
-                    type="button"
-                    className="q-pg-tog"
-                    aria-expanded={!closed}
-                    onClick={() => toggleProject(group.key)}
-                  >
-                    <span className="q-pmono" aria-hidden="true">
-                      {monogram(group.name)}
-                    </span>
-                    <span className="nm">{group.name}</span>
-                    <span className="hn">{hosts[group.host]?.name ?? group.host}</span>
-                    <span className="grow" />
-                    {closed ? (
-                      <>
-                        {you ? (
-                          <span className="q-dot you" role="img" aria-label="needs you" />
-                        ) : null}
-                        <span className="ct q-num">{group.threads.length}</span>
-                      </>
-                    ) : null}
-                    <ChevronDownIcon className="q-icon s12 chev" strokeWidth={1.5} aria-hidden />
-                  </button>
-                  <button
-                    type="button"
-                    className="q-ibtn q-pg-add"
-                    aria-label={`New thread in ${group.name} on ${group.host}`}
-                    title={`New thread in ${group.name}`}
-                    onClick={openNewThread}
-                  >
-                    <SquarePenIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                  </button>
-                </div>
-                {closed ? null : (
-                  <div className="q-rows">
-                    {group.threads.map((thread) => (
-                      <ThreadRow
-                        key={thread.thread_id}
-                        thread={thread}
-                        host={hosts[thread.host]}
-                        index={0}
-                        compact
-                        selected={selectedId === thread.thread_id}
-                        tabStop={selectedId === thread.thread_id}
-                        resumeAt={thread.resume_at ?? thread.limit?.reset_at ?? null}
-                        now={now}
-                        onOpen={() => openThread(thread.thread_id)}
-                        onAcknowledge={() => void acknowledgeThread(thread.thread_id)}
-                        onSettle={() => void setThreadTab(thread.thread_id, "settled")}
-                        onReopen={() => void setThreadTab(thread.thread_id, "done")}
-                        onPin={() => void togglePin(thread.thread_id)}
-                        onSnooze={(until) => void snoozeThread(thread.thread_id, until)}
-                      />
-                    ))}
-                  </div>
-                )}
-              </section>
-            );
-          })
+                group={group}
+                order={groupKeys}
+                dragging={dragging}
+                onDragging={setDragging}
+                hosts={hosts}
+                selectedId={selectedId}
+                closed={layout.closedProjects[group.key] === true}
+                now={now}
+              />
+            ))}
+            <ProjectsTail order={groupKeys} dragging={dragging} onDragging={setDragging} />
+          </>
         )}
 
         {tab === "working" && snoozed.length > 0 ? (
@@ -1115,7 +1076,7 @@ export function SidebarReveal() {
         className="q-ibtn"
         aria-label="New thread"
         title={titleWithShortcut("New thread", "thread.new")}
-        onClick={openNewThread}
+        onClick={() => openNewThread()}
       >
         <SquarePenIcon className="q-icon" strokeWidth={1.5} aria-hidden />
       </button>

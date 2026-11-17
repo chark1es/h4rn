@@ -38,6 +38,7 @@ mod fs;
 mod harness;
 mod ids;
 pub mod mcp;
+pub mod projects;
 mod proxy;
 mod server;
 pub mod skills;
@@ -75,6 +76,7 @@ pub use mcp::{
     McpServerInput, McpServerStatusKind, McpServerView, McpShareApproval, McpSharePolicy,
     McpShareView, McpTestCallResult, McpToolInfo, McpTransportInput, McpTransportView,
 };
+pub use projects::{DirectoryEntry, DirectoryListing, Project, ProjectSource};
 pub use proxy::*;
 pub use server::{Event, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame};
 pub use skills::{
