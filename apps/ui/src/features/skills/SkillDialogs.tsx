@@ -1,4 +1,4 @@
-import { FolderIcon, GitBranchIcon, Trash2Icon, TriangleAlertIcon } from "lucide-react";
+import { CheckIcon, FolderIcon, GitBranchIcon, Trash2Icon, TriangleAlertIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { ChipSelect } from "@/components/common/ChipSelect";
 
@@ -12,7 +12,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import type { HarnessKind, SkillDiff, SkillImportPreview, SkillSource, SkillSummary } from "@/gen";
+import type {
+  HarnessKind,
+  SkillDiff,
+  SkillImportCandidate,
+  SkillImportPreview,
+  SkillSource,
+  SkillSummary,
+} from "@/gen";
 import { HARNESS_LABELS } from "@/lib/entities";
 import { absoluteDateTime, relativeAge } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -21,6 +28,7 @@ import {
   commitSkillImport,
   diffSkill,
   getSkillsState,
+  isUnmanagedCandidate,
   previewSkillImport,
   removeSkill,
   useSkills,
@@ -299,9 +307,30 @@ export function SkillAddDialog({ open, onClose }: { open: boolean; onClose: () =
 // Import
 // ---------------------------------------------------------------------------
 
+type CandidateKind = "new" | "unmanaged" | "managed" | "conflict";
+
+function candidateKind(candidate: SkillImportCandidate): CandidateKind {
+  if (candidate.conflict) return "conflict";
+  if (candidate.managed) return "managed";
+  return candidate.duplicate ? "unmanaged" : "new";
+}
+
+const KIND_BADGE: Record<CandidateKind, { label: string; tone?: "warn" | "ok" }> = {
+  new: { label: "New" },
+  unmanaged: { label: "In h4rn, not managed" },
+  managed: { label: "Managed", tone: "ok" },
+  conflict: { label: "Conflict", tone: "warn" },
+};
+
+/**
+ * Brings skills a harness already has into h4rn. New skills join the
+ * registry (and so the h4rn-connect sync); with "Manage" on, h4rn also takes
+ * over each folder so a newer version from another machine replaces it.
+ */
 export function SkillImportDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [preview, setPreview] = useState<SkillImportPreview | null>(null);
   const [selected, setSelected] = useState<Record<string, boolean>>({});
+  const [manage, setManage] = useState(true);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
 
@@ -310,7 +339,7 @@ export function SkillImportDialog({ open, onClose }: { open: boolean; onClose: (
     setPreview(null);
     setSelected({});
     setProblem(null);
-    setBusy(false);
+    setManage(true);
     let cancelled = false;
     setBusy(true);
     void previewSkillImport().then((result) => {
@@ -323,9 +352,7 @@ export function SkillImportDialog({ open, onClose }: { open: boolean; onClose: (
       }
       setSelected(
         Object.fromEntries(
-          result.candidates
-            .filter((candidate) => !candidate.duplicate && !candidate.conflict)
-            .map((candidate) => [candidate.id, true]),
+          result.candidates.filter(isUnmanagedCandidate).map((candidate) => [candidate.id, true]),
         ),
       );
     });
@@ -335,88 +362,130 @@ export function SkillImportDialog({ open, onClose }: { open: boolean; onClose: (
   }, [open]);
 
   const candidates = preview?.candidates ?? [];
-  const chosen = candidates.filter((candidate) => selected[candidate.id]).length;
+  const selectable = (candidate: SkillImportCandidate) => {
+    const kind = candidateKind(candidate);
+    return kind === "new" || (kind === "unmanaged" && manage);
+  };
+  const chosen = candidates.filter((candidate) => selected[candidate.id] && selectable(candidate));
+  const adding = chosen.filter((candidate) => !candidate.duplicate).length;
+  const managing = manage ? chosen.length : 0;
+  const pending = candidates.filter(isUnmanagedCandidate).length;
 
   const importNow = async () => {
-    const ids = candidates.filter((candidate) => selected[candidate.id]).map((c) => c.id);
     setBusy(true);
-    const ok = await commitSkillImport(ids);
+    const ok = await commitSkillImport(
+      chosen.map((candidate) => candidate.id),
+      { manage },
+    );
     setBusy(false);
     if (ok) onClose();
-    else setProblem("Some candidates were not imported. Rescan and try the remaining ones.");
+    else setProblem("Some skills were not brought in. Rescan and try the remaining ones.");
   };
+
+  const actionLabel = busy
+    ? "Working…"
+    : managing > 0 && adding === 0
+      ? `Manage ${managing} ${managing === 1 ? "skill" : "skills"}`
+      : `Add ${chosen.length} ${chosen.length === 1 ? "skill" : "skills"}`;
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : onClose())}>
-      <DialogContent className="gap-3 sm:max-w-[640px]">
+      <DialogContent className="gap-3 sm:max-w-[680px]">
         <DialogHeader>
-          <DialogTitle>Import from harness directories</DialogTitle>
+          <DialogTitle>Skills already on this machine</DialogTitle>
           <DialogDescription>
-            h4rn scans the skill folders of each harness on this machine. Duplicates are skipped; a
-            name with different content needs a conflict resolution first.
+            h4rn scanned each harness's skill folder. Adding a skill puts it in your registry, which
+            syncs to your other machines through h4rn-connect.
           </DialogDescription>
         </DialogHeader>
 
+        <label className="q-skill-manage">
+          <input
+            type="checkbox"
+            className="sr-only"
+            checked={manage}
+            onChange={(event) => setManage(event.target.checked)}
+          />
+          <span className={cn("q-check", manage && "on")} aria-hidden>
+            {manage ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
+          </span>
+          <span>
+            <span className="q-skill-manage-t">Let h4rn manage these folders</span>
+            <span className="q-skill-manage-s">
+              h4rn marks each folder as its own without changing the skill's files. A newer version
+              synced from another machine then replaces it, and removing the skill in h4rn deletes
+              the folder. Off, the folders stay yours and only the registry copy syncs.
+            </span>
+          </span>
+        </label>
+
         <div className="q-sec-h">
-          <h2>Candidates</h2>
+          <h2>Found</h2>
           <span className="aside">
-            {chosen} selected · {preview?.conflicts ?? 0} conflicts · {preview?.duplicates ?? 0}{" "}
-            duplicates
+            {busy && !preview
+              ? "Scanning…"
+              : `${pending} to bring in · ${candidates.length - pending} already handled`}
           </span>
         </div>
 
         <div className="q-list" style={{ maxHeight: 320, overflow: "auto" }}>
           {busy && !preview ? (
             <div className="q-li">
-              <span className="q-faint">Scanning…</span>
+              <span className="q-faint">Scanning the harness folders…</span>
             </div>
           ) : candidates.length === 0 ? (
             <div className="q-li">
-              <span className="q-faint">
-                No importable skills found in the harness directories.
-              </span>
+              <span className="q-faint">No skills found in the harness folders.</span>
             </div>
           ) : (
             candidates.map((candidate) => {
-              const disabled = candidate.duplicate || Boolean(candidate.conflict);
+              const kind = candidateKind(candidate);
+              const enabled = selectable(candidate);
+              const badge = KIND_BADGE[kind];
+              const on = enabled && Boolean(selected[candidate.id]);
               return (
                 <label
                   key={candidate.id}
-                  className="q-li"
-                  style={{ cursor: disabled ? "default" : "pointer" }}
+                  className={cn("q-li", !enabled && "q-li-off")}
+                  style={{ cursor: enabled ? "pointer" : "default" }}
                 >
-                  <span className="q-check" aria-hidden>
-                    <input
-                      type="checkbox"
-                      checked={Boolean(selected[candidate.id])}
-                      disabled={disabled}
-                      onChange={(event) =>
-                        setSelected((current) => ({
-                          ...current,
-                          [candidate.id]: event.target.checked,
-                        }))
-                      }
-                      aria-label={`Import ${candidate.name}`}
-                    />
+                  <input
+                    type="checkbox"
+                    className="sr-only"
+                    checked={on}
+                    disabled={!enabled}
+                    onChange={(event) =>
+                      setSelected((current) => ({
+                        ...current,
+                        [candidate.id]: event.target.checked,
+                      }))
+                    }
+                    aria-label={`Bring in ${candidate.name}`}
+                  />
+                  <span className={cn("q-check", on && "on")} aria-hidden>
+                    {on ? <CheckIcon className="q-icon s12" strokeWidth={2} /> : null}
                   </span>
-                  <div className="grow">
+                  <div className="grow" style={{ minWidth: 0 }}>
                     <div className="t">{candidate.name}</div>
-                    <div className="s">
+                    <div className="s truncate">
                       {HARNESS_LABELS[candidate.harness]} ·{" "}
                       <span className="q-mono">{candidate.source_path}</span>
                     </div>
                     {candidate.conflict ? (
-                      <div className="q-warn" style={{ fontSize: 12, marginTop: 3 }}>
-                        <TriangleAlertIcon className="q-icon s12" aria-hidden />{" "}
-                        {candidate.conflict}
+                      <div
+                        className="q-warn"
+                        style={{ display: "flex", gap: 4, fontSize: 12, marginTop: 3 }}
+                      >
+                        <TriangleAlertIcon
+                          className="q-icon s12"
+                          style={{ flex: "none", marginTop: 2 }}
+                          aria-hidden
+                        />
+                        <span>{candidate.conflict}. Settle it under Conflicts first.</span>
                       </div>
                     ) : null}
                   </div>
-                  {candidate.duplicate ? (
-                    <span className="q-badge">Already present</span>
-                  ) : candidate.conflict ? (
-                    <span className="q-badge warn">Conflict</span>
-                  ) : null}
+                  <span className={cn("q-badge", badge.tone)}>{badge.label}</span>
                 </label>
               );
             })
@@ -429,8 +498,8 @@ export function SkillImportDialog({ open, onClose }: { open: boolean; onClose: (
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button onClick={() => void importNow()} disabled={busy || chosen === 0}>
-            {busy ? "Importing…" : `Import ${chosen} ${chosen === 1 ? "skill" : "skills"}`}
+          <Button onClick={() => void importNow()} disabled={busy || chosen.length === 0}>
+            {actionLabel}
           </Button>
         </DialogFooter>
       </DialogContent>

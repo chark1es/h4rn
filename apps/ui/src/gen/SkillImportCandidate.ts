@@ -36,4 +36,10 @@ conflict: string | null,
 /**
  * Whether an identical version is already in the registry.
  */
-duplicate: boolean, };
+duplicate: boolean, 
+/**
+ * Whether h4rn already manages this folder (it carries the
+ * `.h4rn-managed` marker). Unmanaged folders can be adopted on import so
+ * sync keeps them current.
+ */
+managed: boolean, };

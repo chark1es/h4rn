@@ -17,6 +17,7 @@ import type {
   SkillConflict,
   SkillConflictResolution,
   SkillDiff,
+  SkillImportCandidate,
   SkillImportPreview,
   SkillInventory,
   SkillSource,
@@ -316,8 +317,10 @@ export async function setSkillEnabled(
   }
 }
 
-/** Scans every harness directory; writes nothing. */
-export async function previewSkillImport(): Promise<SkillImportPreview | null> {
+/** Scans every harness directory; writes nothing. `quiet` skips the error toast. */
+export async function previewSkillImport(
+  options: { quiet?: boolean } = {},
+): Promise<SkillImportPreview | null> {
   const host = skillsHost();
   if (!host) return null;
   set({ previewing: true });
@@ -334,6 +337,7 @@ export async function previewSkillImport(): Promise<SkillImportPreview | null> {
   } catch (error) {
     const proto = toProtoError(error);
     set({ previewing: false });
+    if (options.quiet) return null;
     pushToast({
       title: "Couldn't scan the harness skill directories.",
       description: `${proto.message} ${proto.hint ?? "Check that the harness directories are readable."}`,
@@ -343,14 +347,26 @@ export async function previewSkillImport(): Promise<SkillImportPreview | null> {
   }
 }
 
-/** Imports the selected candidates from the last preview. */
-export async function commitSkillImport(candidateIds: string[]): Promise<boolean> {
+/**
+ * Imports the selected candidates from the last preview. With `manage`, h4rn
+ * also takes over each matching harness folder so sync keeps it current.
+ */
+export async function commitSkillImport(
+  candidateIds: string[],
+  options: { manage?: boolean } = {},
+): Promise<boolean> {
   const host = skillsHost();
   if (!host || candidateIds.length === 0) return false;
   try {
-    await send({ type: "skills_import_commit", host, candidate_ids: candidateIds });
+    await send({
+      type: "skills_import_commit",
+      host,
+      candidate_ids: candidateIds,
+      manage: options.manage ?? false,
+    });
     set({ preview: null });
     await loadSkills({ force: true });
+    await previewSkillImport({ quiet: true });
     return true;
   } catch (error) {
     const proto = toProtoError(error);
@@ -484,4 +500,9 @@ function harnessLabel(harness: HarnessKind): string {
     case "antigravity":
       return "Antigravity";
   }
+}
+
+/** A scanned folder h4rn could bring in or take over: not managed, no conflict. */
+export function isUnmanagedCandidate(candidate: SkillImportCandidate): boolean {
+  return !candidate.managed && !candidate.conflict;
 }
