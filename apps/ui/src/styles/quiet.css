@@ -3269,8 +3269,8 @@
   border-top: 1px solid var(--line);
 }
 .q-field .lab {
-  width: 200px;
-  flex: none;
+  flex: 0 1 320px;
+  min-width: 200px;
 }
 .q-ph-sheet-head .t {
   font-size: 17px;
@@ -3316,10 +3316,12 @@
   color: var(--fg-2);
   margin-top: 2px;
 }
+/* Controls sit at the trailing edge of the row; inputs still fill it. */
 .q-field .ctl {
   flex: 1;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 10px;
   min-width: 0;
 }
@@ -4906,9 +4908,23 @@
   }
   .q-field .lab {
     width: auto;
+    flex: none;
+    min-width: 0;
   }
   .q-field .ctl {
     flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+  /* A lone switch stays on the label's row, at its trailing edge. */
+  .q-field:has(> .ctl > .q-switch:only-child) {
+    flex-direction: row;
+    align-items: center;
+  }
+  .q-field:has(> .ctl > .q-switch:only-child) .lab {
+    flex: 1;
+  }
+  .q-field:has(> .ctl > .q-switch:only-child) .ctl {
+    flex: none;
   }
   .q-field .ctl > .q-input,
   .q-field .ctl > input {
