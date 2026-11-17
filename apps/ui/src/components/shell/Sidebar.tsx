@@ -952,7 +952,11 @@ function SettingsSidebar() {
               <button
                 type="button"
                 className="q-nav"
-                aria-current={!library && section === item.key ? "page" : undefined}
+                aria-current={
+                  !library && (section === "devices" ? "hosts" : section) === item.key
+                    ? "page"
+                    : undefined
+                }
                 onClick={() => go(settingsPath(item.key))}
               >
                 <item.icon className="q-icon" strokeWidth={1.5} aria-hidden />
@@ -962,9 +966,9 @@ function SettingsSidebar() {
                     {harnessUpdates}
                   </span>
                 ) : null}
-                {item.key === "hosts" || item.key === "devices" ? (
-                  <span className="ct q-num">
-                    {item.key === "hosts" ? rows.length : deviceCount}
+                {item.key === "hosts" ? (
+                  <span className="ct q-num" title={`${rows.length} hosts, ${deviceCount} devices`}>
+                    {rows.length}
                   </span>
                 ) : null}
               </button>

@@ -584,7 +584,7 @@ async function main() {
     const footer = page.locator('[title="Hosts and connection"]');
     await footer.click();
     await page.getByRole("menuitem", { name: /Sign in to h4rn-connect/ }).click();
-    await page.getByRole("heading", { name: "Devices", exact: true }).waitFor();
+    await page.getByRole("heading", { name: "Hosts & devices", exact: true }).waitFor();
     const relayInput = page.getByLabel("h4rn-connect URL");
     await relayInput.fill(relayUrl);
     await page.getByRole("button", { name: "Use", exact: true }).click();
@@ -680,7 +680,7 @@ async function main() {
     // Revoke this browser's device; the daemon drops the allowlisted key and
     // the live relay session ends.
     await hostsMenu.getByRole("menuitem", { name: /Pair a device/ }).click();
-    await page.getByRole("heading", { name: "Devices", exact: true }).waitFor();
+    await page.getByRole("heading", { name: "Hosts & devices", exact: true }).waitFor();
     const deviceRow = page.getByRole("row").filter({ hasText: "this device" });
     await deviceRow.waitFor({ timeout: 20_000 });
     const logMark = logs.length;
