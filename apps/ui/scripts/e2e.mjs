@@ -479,7 +479,7 @@ async function main() {
 
     // Settings → Tools: add a real stdio server, turn it off for one harness,
     // then install a local skill from a folder. Both must survive a reload.
-    await page.getByRole("button", { name: "MCP & skills" }).click();
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
     await page
       .getByRole("button", { name: /^MCP servers/ })
       .first()
@@ -515,7 +515,7 @@ async function main() {
 
     await page.reload();
 
-    await page.getByRole("button", { name: "MCP & skills" }).click();
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
     await page
       .getByRole("button", { name: /^MCP servers/ })
       .first()

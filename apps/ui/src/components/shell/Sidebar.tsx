@@ -417,7 +417,8 @@ function HostsPopover({
 
 const NO_SKILLS: never[] = [];
 
-type Destination = "pr" | "library" | "usage" | "settings";
+/** MCP servers and skills live under Settings, so the library has no button of its own. */
+type Destination = "pr" | "usage" | "settings";
 
 const DESTINATIONS: Array<{
   key: Destination;
@@ -432,13 +433,6 @@ const DESTINATIONS: Array<{
     icon: GitPullRequestIcon,
     path: "/pulls",
     shortcut: "G P",
-  },
-  {
-    key: "library",
-    label: "MCP & skills",
-    icon: PlugIcon,
-    path: "/library",
-    shortcut: "G M",
   },
   {
     key: "usage",
@@ -460,15 +454,12 @@ function SidebarFooter({
   destination,
   loading,
   offline,
-  noThreads,
   rows,
   connection,
 }: {
   destination: Destination | null;
   loading: boolean;
   offline: boolean;
-  /** No projects yet: nothing for the pull-request badge to count. */
-  noThreads: boolean;
   rows: HostRow[];
   connection: { status: string; latencyMs: number | null; transport: string };
 }) {
@@ -512,20 +503,12 @@ function SidebarFooter({
             onClick={() =>
               navigate({
                 kind: "placeholder",
-                surface:
-                  item.key === "pr"
-                    ? "pulls"
-                    : item.key === "library"
-                      ? "library"
-                      : item.key === "usage"
-                        ? "usage"
-                        : "settings",
+                surface: item.key === "pr" ? "pulls" : item.key === "usage" ? "usage" : "settings",
                 path: item.path,
               })
             }
           >
             <item.icon className="q-icon" strokeWidth={1.5} aria-hidden />
-            {item.key === "pr" && !noThreads ? <span className="q-side-dest-n">3</span> : null}
           </button>
         ))}
       </div>
@@ -574,13 +557,11 @@ function ThreadsSidebar() {
     route.kind === "placeholder"
       ? route.surface === "pulls"
         ? "pr"
-        : route.surface === "library"
-          ? "library"
-          : route.surface === "usage"
-            ? "usage"
-            : route.surface === "settings"
-              ? "settings"
-              : null
+        : route.surface === "usage"
+          ? "usage"
+          : route.surface === "settings"
+            ? "settings"
+            : null
       : null;
 
   const activate = (value: ThreadTab) => setTab(value);
@@ -804,7 +785,6 @@ function ThreadsSidebar() {
         destination={destination}
         loading={loading}
         offline={connection.status === "offline"}
-        noThreads={allEmpty}
         rows={rows}
         connection={connection}
       />
@@ -916,7 +896,7 @@ function SettingsSidebar() {
   const skillsActive =
     route.kind === "placeholder" && route.path.replace(/\/+$/, "").endsWith("/skills");
   const section = route.kind === "placeholder" ? (route.path.split("/")[2] ?? "hosts") : "hosts";
-  const destination: Destination | null = library ? "library" : "settings";
+  const destination: Destination = "settings";
   let group: string | undefined;
 
   const go = (path: string) => navigate({ kind: "placeholder", surface: "settings", path });
@@ -1062,7 +1042,6 @@ function SettingsSidebar() {
         destination={destination}
         loading={loading}
         offline={connection.status === "offline"}
-        noThreads={false}
         rows={rows}
         connection={connection}
       />
