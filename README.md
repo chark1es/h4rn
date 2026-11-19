@@ -6,7 +6,7 @@ h4rn is one instrument for every agent you run: Claude Code, Codex, OpenCode, An
 whatever comes next, on this machine or another one. The desktop, mobile and browser clients are
 pure views over a single Rust daemon and one typed WebSocket protocol.
 
-> **Status: v1.0.0.** The daemon, the typed protocol, the Noise transport,
+> **Status: v1.0.1.** The daemon, the typed protocol, the Noise transport,
 > the relay, MCP sharing, skills, metering, forges and packaging are implemented and tested; the
 > desktop, mobile and browser clients are pure views over the daemon. Two paths are deliberately
 > not implemented yet — see [Known limits](#known-limits). The detailed history is in

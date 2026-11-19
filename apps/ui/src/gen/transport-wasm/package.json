@@ -2,7 +2,7 @@
   "name": "h4rn-transport-wasm",
   "type": "module",
   "description": "wasm-bindgen wrapper around the h4rn encrypted multipath transport",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "license": "MIT",
   "repository": {
     "type": "git",
