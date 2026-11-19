@@ -3,6 +3,49 @@
 All notable changes to h4rn are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses semantic versioning.
 
+## 1.0.1 — 2026-11-19
+
+A patch release for the clients and the relay: the post-1.0 UI fixes, project folders in the
+sidebar, skill adoption, and the new relay defaults. The daemon protocol and the transport are
+unchanged apart from additive project requests and the skill candidate's `managed` field.
+
+### Fixed
+
+- **Appearance settings take effect and persist.** The color scheme now applies at start and on
+  change, and the terminal's "match app" choice is stored (`h4rn.terminalMatchesApp`) and applied
+  to the terminal palette; turning it off pins the terminal to its dark palette.
+- **Dialogs and the command palette stay inside the window and centred.** The entrance animation
+  no longer stacks a second `-50%` offset on the placement translate, which threw dialogs up and
+  left while they opened; tall dialogs now scroll instead of overflowing short windows.
+- **Settings rows line up.** Controls sit at the trailing edge, and a lone switch stays on the
+  label row on phones.
+- **Every shortcut is a `⌘`/`Ctrl` chord from one rebindable registry.** The single-key and
+  `G`-sequence shortcuts are gone, so typing never runs a command; a command that does not apply
+  now leaves the key alone, and a new binding must include `⌘`/`Ctrl` and may not collide with
+  another command. `⌘/` (Ctrl+/) opens the shortcut sheet.
+- **The sidebar footer no longer duplicates Settings.** The MCP & skills button is gone, and so is
+  the hardcoded PR badge.
+- **Attachment chips are cards** that show the file type and size, and the start-a-thread box is
+  wider.
+- **The model picker follows the selected harness,** hides harnesses that are not detected and
+  shows the thinking modes each harness supports.
+- **The Coolify compose file does not trust forwarded-for by default.**
+
+### Added
+
+- **Projects in the sidebar.** A project is a folder on a host that the sidebar lists before it
+  has a thread. Add one by opening an existing folder, creating a new folder (optionally running
+  `git init`) or cloning a repository; projects sort and reorder, and New thread can start in a
+  project's folder. The protocol gains `Project`, `ProjectSource` and directory listing frames.
+- **Skills already installed in harness folders are detected and can be adopted.** The scan
+  reports whether a copy is h4rn-managed, and a matching folder can be taken over without
+  touching its files (h4rn writes its marker) or synced through the registry.
+- **Settings → Hosts and Devices are one page.**
+
+### Changed
+
+- **The default relay is `h4rn.spwnd.dev`.**
+
 ## 1.0.0 — 2026-11-15
 
 The first stable release. h4rn is a single Rust daemon (`h4rnd`) behind one typed WebSocket

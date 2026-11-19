@@ -30,7 +30,7 @@ services:
   connect:
     # Pinned to the published multi-arch image. For a local build add
     # `-f deploy/docker-compose.build.yml` (see packaging/docker/README.md).
-    image: ${H4RN_CONNECT_IMAGE:-ghcr.io/chark1es/h4rn-connect:1.0.0}
+    image: ${H4RN_CONNECT_IMAGE:-ghcr.io/chark1es/h4rn-connect:1.0.1}
     restart: unless-stopped
     depends_on:
       postgres:

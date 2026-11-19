@@ -241,7 +241,7 @@ const DEFAULT_DEVICE: DeviceInfo = {
   device_id: "web",
   name: "h4rn web",
   platform: "web",
-  app_version: "1.0.0",
+  app_version: "1.0.1",
 };
 
 const FATAL_CLOSE_CODES = new Map<number, { message: string; hint: string }>([
