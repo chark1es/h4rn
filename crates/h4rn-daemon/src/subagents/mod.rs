@@ -384,6 +384,16 @@ impl SubagentManager {
         Some(view)
     }
 
+    /// The repository stored for every subagent that runs in a worktree,
+    /// keyed by subagent id.
+    pub async fn worktree_repos(&self) -> HashMap<String, PathBuf> {
+        let records = self.inner.records.lock().await;
+        records
+            .iter()
+            .filter_map(|(id, record)| record.repo.clone().map(|repo| (id.clone(), repo)))
+            .collect()
+    }
+
     /// Waits up to `wait` for a terminal state, then returns the current view.
     ///
     /// The caller (the MCP tool) clamps this well below its own timeout.
@@ -655,16 +665,23 @@ impl Inner {
         let (workspace_path, branch, repo, worktree_dir) = match request.isolation {
             SubagentIsolation::Shared => (parent.workspace_path.clone(), None, None, None),
             SubagentIsolation::Worktree => {
-                let repo = PathBuf::from(&parent.workspace_path);
-                if !worktree::is_git_repo(&repo) {
+                let workspace = PathBuf::from(&parent.workspace_path);
+                if !worktree::is_git_repo(&workspace) {
                     return Err(SubagentError::Invalid(format!(
                         "worktree isolation needs a git repository; {} is not one",
                         parent.workspace_path
                     )));
                 }
+                // A nested child's parent workspace may itself be a subagent
+                // worktree (a linked worktree). Record the repository's main
+                // worktree so the branch can be found after that directory is
+                // removed. The worktree is still created from the parent's
+                // workspace so the child branches from the parent's HEAD.
+                let repo =
+                    crate::worktrees::git::repo_of(&workspace).unwrap_or_else(|| workspace.clone());
                 let branch = format!("h4rn/sa-{}", short_id(subagent_id.as_str()));
                 let dest = worktree::worktree_path(&self.data_dir, subagent_id.as_str());
-                worktree::create(&repo, &dest, &branch).map_err(SubagentError::Internal)?;
+                worktree::create(&workspace, &dest, &branch).map_err(SubagentError::Internal)?;
                 (
                     dest.display().to_string(),
                     Some(branch),

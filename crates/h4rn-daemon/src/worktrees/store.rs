@@ -46,9 +46,13 @@ pub struct WorktreeStore {
 }
 
 fn parse_time(text: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(text)
-        .map(|time| time.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
+    match DateTime::parse_from_rfc3339(text) {
+        Ok(time) => time.with_timezone(&Utc),
+        Err(error) => {
+            tracing::warn!(%error, timestamp = text, "could not parse a stored worktree timestamp");
+            Utc::now()
+        }
+    }
 }
 
 impl WorktreeStore {

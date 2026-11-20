@@ -19,7 +19,7 @@
 //! stored. Clearing removes checkouts from disk and, for owned entries, the
 //! `h4rn/` branch h4rn created.
 
-mod git;
+pub(crate) mod git;
 mod store;
 #[cfg(test)]
 mod tests;
@@ -32,8 +32,9 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use h4rn_protocol::{
-    Event, Item, SkippedWorktree, SubagentId, SubagentIsolation, SubagentView, ThreadFilter,
-    ThreadId, ThreadTab, TrackedWorktree, WorktreeAccess, WorktreeOrigin, WorktreeStatus,
+    AgentState, Event, Item, SkippedWorktree, SubagentId, SubagentIsolation, SubagentView,
+    ThreadFilter, ThreadId, ThreadTab, TrackedWorktree, WorktreeAccess, WorktreeOrigin,
+    WorktreeStatus,
 };
 use store::{StoredWorktree, WorktreeStore};
 use tokio::sync::{Mutex, broadcast};
@@ -49,8 +50,24 @@ const CACHE_REFRESH: Duration = Duration::from_secs(2);
 /// Minimum gap between persisted writes for one (worktree, thread) pair.
 const RECORD_THROTTLE: Duration = Duration::from_secs(15);
 
-/// Longest a listing or clear may spend in git before giving up.
+/// Entries the throttle map may hold before stale ones are dropped.
+const RECENT_LIMIT: usize = 1024;
+
+/// How long an unfinished turn's snapshot can make overlapping turns shared.
+const SNAPSHOT_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+
+/// Longest a listing may spend in git before giving up. Clearing is bounded by
+/// the removal itself, so it has no budget.
 const GIT_BUDGET: Duration = Duration::from_secs(60);
+
+/// How many nested subagent worktrees a repository lookup may follow.
+const MAX_REPO_HOPS: usize = 8;
+
+/// How often the first turn's thread row may still be missing.
+const META_RETRIES: usize = 20;
+
+/// Wait between those retries.
+const META_RETRY_GAP: Duration = Duration::from_millis(25);
 
 /// Failures opening the tracker.
 #[derive(Debug, thiserror::Error)]
@@ -108,7 +125,15 @@ struct ThreadRepo {
 }
 
 struct Snapshot {
+    /// The repository the snapshot belongs to.
+    repo: PathBuf,
     worktrees: Vec<git::GitWorktree>,
+    /// Another turn on the same repository overlapped this one, so a new
+    /// worktree cannot be attributed to this thread alone.
+    shared: bool,
+    /// When the turn started; a snapshot whose turn never reported completion
+    /// stops counting as an overlapping turn after [`SNAPSHOT_TTL`].
+    opened: Instant,
 }
 
 struct RepoCache {
@@ -193,6 +218,8 @@ pub(crate) struct ListInput {
     pub subagents: Vec<SubagentView>,
     /// Parent thread id to its workspace path.
     pub parent_workspaces: HashMap<String, String>,
+    /// Subagent id to the repository stored when it was spawned.
+    pub subagent_repos: HashMap<String, PathBuf>,
     pub threads: Vec<ThreadInfo>,
     pub stored: Vec<StoredWorktree>,
     pub subagents_root: PathBuf,
@@ -342,25 +369,39 @@ impl WorktreeTracker {
     pub async fn clear(&self, paths: Option<Vec<String>>, force: bool) -> ClearOutcome {
         let _guard = self.inner.clear_lock.lock().await;
         let entries = self.list().await;
+        let selection = select_entries(&entries, paths.as_deref());
         let data_dir = self.inner.data_dir.clone();
-        let raw = tokio::time::timeout(
-            GIT_BUDGET,
-            tokio::task::spawn_blocking(move || {
-                clear_entries(&entries, paths.as_deref(), force, &data_dir)
-            }),
-        )
-        .await;
-        let (removed, skipped) = match raw {
-            Ok(Ok(result)) => result,
-            Ok(Err(error)) => {
-                tracing::warn!(%error, "worktree clear task failed");
-                (Vec::new(), Vec::new())
+        let mut removed = Vec::new();
+        let mut skipped = selection.skipped;
+        // One entry at a time: the listing is a snapshot, so each removal asks
+        // the live thread and subagent state again right before it touches the
+        // disk, and the spawn_blocking is awaited rather than timed out.
+        for entry in selection.targets {
+            let entry = entry.clone();
+            if let Some(active) = self.inner.still_active(&entry).await {
+                skipped.push(SkippedWorktree {
+                    path: active.path.clone(),
+                    reason: in_use_reason(&active),
+                });
+                continue;
             }
-            Err(_) => {
-                tracing::warn!("worktree clear timed out");
-                (Vec::new(), Vec::new())
+            let path = entry.path.clone();
+            let data_dir = data_dir.clone();
+            match tokio::task::spawn_blocking(move || clear_one(&entry, force, &data_dir)).await {
+                Ok(Ok(ClearOne::Removed)) => removed.push(path),
+                Ok(Ok(ClearOne::RemovedWithBranchFailure(reason))) => {
+                    skipped.push(SkippedWorktree { path, reason });
+                }
+                Ok(Err(reason)) => skipped.push(SkippedWorktree { path, reason }),
+                Err(error) => {
+                    tracing::warn!(%error, %path, "worktree clear task failed");
+                    skipped.push(SkippedWorktree {
+                        path,
+                        reason: "the clear task failed".into(),
+                    });
+                }
             }
-        };
+        }
         for path in &removed {
             if let Err(error) = self.inner.store.delete(path).await {
                 tracing::warn!(%error, %path, "could not forget a cleared worktree");
@@ -385,6 +426,44 @@ fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 // ---------------------------------------------------------------------------
 // Observation
 // ---------------------------------------------------------------------------
+
+/// Opens a turn-start snapshot for `thread`, returning whether another turn on
+/// `repo` is already running.
+///
+/// Both overlapping snapshots become `shared`: neither turn can claim a
+/// worktree that appears while the other is running.
+fn open_snapshot(
+    snapshots: &mut HashMap<String, Snapshot>,
+    thread: &str,
+    repo: &Path,
+    worktrees: Vec<git::GitWorktree>,
+) -> bool {
+    // A turn that never reported completion (a crashed harness, a deleted
+    // thread) must not mark every later turn on its repository as shared.
+    snapshots.retain(|_, snapshot| snapshot.opened.elapsed() < SNAPSHOT_TTL);
+    let mut shared = false;
+    for snapshot in snapshots.values_mut() {
+        if snapshot.repo == repo {
+            snapshot.shared = true;
+            shared = true;
+        }
+    }
+    snapshots.insert(
+        thread.to_owned(),
+        Snapshot {
+            repo: repo.to_path_buf(),
+            worktrees,
+            shared,
+            opened: Instant::now(),
+        },
+    );
+    shared
+}
+
+/// Whether a turn's new worktrees can be attributed to its own thread.
+fn diff_attributable(snapshot: &Snapshot) -> bool {
+    !snapshot.shared
+}
 
 impl Inner {
     async fn handle_wire(self: &Arc<Self>, wire: WireEvent) {
@@ -423,7 +502,16 @@ impl Inner {
             return Some(found.clone());
         }
         let meta = self.threads.thread_meta(thread_id).await?;
-        let workspace = PathBuf::from(meta.workspace_path);
+        self.thread_repo_at(thread_id, &meta.workspace_path).await
+    }
+
+    /// The repository and checkout top for a thread working at `workspace`.
+    async fn thread_repo_at(
+        self: &Arc<Self>,
+        thread_id: &ThreadId,
+        workspace: &str,
+    ) -> Option<ThreadRepo> {
+        let workspace = PathBuf::from(workspace);
         let found = tokio::task::spawn_blocking(move || {
             let repo = git::repo_of(&workspace)?;
             let own = git::toplevel(&workspace).unwrap_or_else(|| git::norm(&workspace));
@@ -434,6 +522,20 @@ impl Inner {
         .flatten()?;
         lock(&self.thread_repos).insert(thread_id.as_str().to_owned(), found.clone());
         Some(found)
+    }
+
+    /// [`Self::thread_repo`], but waits out the window where a brand-new
+    /// thread has broadcast `TurnStarted` before its row exists.
+    async fn thread_repo_when_known(self: &Arc<Self>, thread_id: &ThreadId) -> Option<ThreadRepo> {
+        for attempt in 0..META_RETRIES {
+            if let Some(meta) = self.threads.thread_meta(thread_id).await {
+                return self.thread_repo_at(thread_id, &meta.workspace_path).await;
+            }
+            if attempt + 1 < META_RETRIES {
+                tokio::time::sleep(META_RETRY_GAP).await;
+            }
+        }
+        None
     }
 
     async fn list_repo(self: &Arc<Self>, repo: &Path) -> Option<Vec<git::GitWorktree>> {
@@ -457,19 +559,29 @@ impl Inner {
     }
 
     async fn turn_started(self: &Arc<Self>, thread_id: &ThreadId) {
-        let Some(repo) = self.repo_for_thread(thread_id).await else {
+        // `create_thread` broadcasts `TurnStarted` before it inserts the thread,
+        // so the very first turn can arrive before `thread_meta` knows it.
+        let Some(found) = self.thread_repo_when_known(thread_id).await else {
             return;
         };
+        let repo = found.repo;
         let Some(worktrees) = self.list_repo(&repo).await else {
             return;
         };
-        lock(&self.snapshots).insert(thread_id.as_str().to_owned(), Snapshot { worktrees });
+        let mut snapshots = lock(&self.snapshots);
+        open_snapshot(&mut snapshots, thread_id.as_str(), &repo, worktrees);
     }
 
     async fn turn_completed(self: &Arc<Self>, thread_id: &ThreadId) {
         let Some(snapshot) = lock(&self.snapshots).remove(thread_id.as_str()) else {
             return;
         };
+        // Another turn on the same repository overlapped this one, so a
+        // worktree that appeared belongs to neither thread alone. Tool calls
+        // still record the accesses they can prove.
+        if !diff_attributable(&snapshot) {
+            return;
+        }
         let Some(repo) = self.repo_for_thread(thread_id).await else {
             return;
         };
@@ -531,6 +643,9 @@ impl Inner {
                 return;
             }
             recent.insert(key.clone(), Instant::now());
+            if recent.len() > RECENT_LIMIT {
+                recent.retain(|_, at| at.elapsed() < RECORD_THROTTLE);
+            }
         }
         let subagent_id = self
             .threads
@@ -571,6 +686,7 @@ impl Inner {
                 parent_workspaces.insert(parent.to_owned(), meta.workspace_path);
             }
         }
+        let subagent_repos = self.subagents.worktree_repos().await;
         let filter = ThreadFilter {
             include_snoozed: true,
             include_children: true,
@@ -585,7 +701,7 @@ impl Inner {
                 thread_id: summary.thread_id,
                 title: summary.title,
                 workspace: summary.workspace_path,
-                working: summary.tab == ThreadTab::Working,
+                working: is_busy(summary.tab, summary.agent_state),
                 last_activity: summary.last_activity,
             })
             .collect();
@@ -599,16 +715,118 @@ impl Inner {
         ListInput {
             subagents,
             parent_workspaces,
+            subagent_repos,
             threads,
             stored,
             subagents_root: self.subagents_root.clone(),
         }
+    }
+
+    /// Re-reads an entry's activity from the live thread and subagent state.
+    ///
+    /// Returns the entry with fresh `working` flags when something still uses
+    /// it, `None` when nothing does. The listing is only a snapshot; a turn may
+    /// have started since it was taken.
+    async fn still_active(self: &Arc<Self>, entry: &TrackedWorktree) -> Option<TrackedWorktree> {
+        let mut fresh = entry.clone();
+        let mut active = false;
+        if entry.owned
+            && let Some(id) = &entry.subagent_id
+            && self
+                .subagents
+                .get(id)
+                .await
+                .is_some_and(|view| !view.is_terminal())
+        {
+            active = true;
+        }
+        for access in &mut fresh.accessed_by {
+            let Some(summary) = self.threads.thread_summary(&access.thread_id).await else {
+                access.working = false;
+                continue;
+            };
+            access.working = is_busy(summary.tab, summary.agent_state);
+            if !summary.title.is_empty() {
+                access.title = summary.title;
+            }
+            active |= access.working;
+        }
+        active.then_some(fresh)
     }
 }
 
 // ---------------------------------------------------------------------------
 // Listing
 // ---------------------------------------------------------------------------
+
+/// Whether a thread is actually busy, not merely sitting in a Working tab.
+///
+/// A pinned or queued thread keeps the Working tab while it is Idle, and an
+/// auto-resume armed for a rate limit is not running yet. Only these states
+/// mean the thread could write to a worktree at any moment.
+fn is_busy(tab: ThreadTab, agent_state: AgentState) -> bool {
+    tab == ThreadTab::Working
+        || matches!(
+            agent_state,
+            AgentState::Queued
+                | AgentState::Scheduled
+                | AgentState::Thinking
+                | AgentState::Searching
+                | AgentState::Reading
+                | AgentState::Editing
+                | AgentState::RunningTool
+                | AgentState::AwaitingApproval
+                | AgentState::RateLimited
+        )
+}
+
+/// The main worktree of the repository an isolated subagent's worktree is in.
+///
+/// The stored repository comes first, because an entry outlives its directory:
+/// a child whose parent workspace is a removed subagent worktree only knows its
+/// repository from the record written at spawn. Then the parent thread's
+/// workspace, then git itself.
+fn subagent_repo(input: &ListInput, view: &SubagentView, path: &Path) -> Option<PathBuf> {
+    if let Some(stored) = input.subagent_repos.get(view.subagent_id.as_str())
+        && let Some(repo) = repo_through_subagents(input, stored)
+    {
+        return Some(repo);
+    }
+    if let Some(workspace) = input.parent_workspaces.get(view.parent_thread_id.as_str())
+        && let Some(repo) = repo_through_subagents(input, Path::new(workspace))
+    {
+        return Some(repo);
+    }
+    git::repo_of(path)
+}
+
+/// The repository at `path`, following h4rn's own subagent worktrees.
+///
+/// A nested child's parent workspace is `<data_dir>/subagents/<id>/worktree`,
+/// which is deleted when that subagent settles. Its recorded repository is the
+/// only reliable answer then, so follow it, bounded against a stale loop.
+fn repo_through_subagents(input: &ListInput, path: &Path) -> Option<PathBuf> {
+    let mut path = git::norm(path);
+    for _ in 0..MAX_REPO_HOPS {
+        match subagent_worktree_owner(&path, &input.subagents_root) {
+            Some(id) => match input.subagent_repos.get(&id) {
+                Some(stored) => path = git::norm(stored),
+                None => return git::repo_of(&path),
+            },
+            None => return git::repo_of(&path),
+        }
+    }
+    None
+}
+
+/// The subagent whose worktree is at `path`, when it is one of h4rn's.
+///
+/// h4rn puts them at `<data_dir>/subagents/<id>/worktree`.
+fn subagent_worktree_owner(path: &Path, subagents_root: &Path) -> Option<String> {
+    let mut parts = path.strip_prefix(subagents_root).ok()?.components();
+    let id = parts.next()?.as_os_str().to_str()?.to_owned();
+    (parts.next()?.as_os_str() == "worktree").then_some(id)
+}
 
 fn status_rank(status: WorktreeStatus) -> u8 {
     match status {
@@ -657,21 +875,19 @@ pub(crate) fn compute(input: &ListInput) -> (Vec<TrackedWorktree>, Vec<String>) 
     let mut entries: Vec<TrackedWorktree> = Vec::new();
     let mut index: HashMap<PathBuf, usize> = HashMap::new();
     let mut repo_lists: HashMap<PathBuf, Vec<git::GitWorktree>> = HashMap::new();
+    // One `for-each-ref` per repository answers every owned branch lookup.
+    let mut branch_lists: HashMap<PathBuf, HashSet<String>> = HashMap::new();
 
     // 1. Worktrees h4rn made for isolated subagents.
     for view in &input.subagents {
         let path = git::norm(Path::new(&view.workspace_path));
-        let repo = input
-            .parent_workspaces
-            .get(view.parent_thread_id.as_str())
-            .map(|workspace| {
-                let workspace = git::norm(Path::new(workspace));
-                git::repo_of(&workspace).unwrap_or(workspace)
-            })
-            .or_else(|| git::repo_of(&path));
+        let repo = subagent_repo(input, view, &path);
         let exists = path.is_dir();
         let branch_exists = match (&repo, &view.branch) {
-            (Some(repo), Some(branch)) => git::branch_exists(repo, branch),
+            (Some(repo), Some(branch)) => branch_lists
+                .entry(repo.clone())
+                .or_insert_with(|| git::h4rn_branches(repo))
+                .contains(branch),
             _ => false,
         };
         // Nothing left to clear.
@@ -894,8 +1110,16 @@ fn in_use_reason(entry: &TrackedWorktree) -> String {
     }
 }
 
+/// What clearing one entry did.
+enum ClearOne {
+    /// The checkout is gone (and its branch, when h4rn owned one).
+    Removed,
+    /// The checkout is gone but the owned branch could not be deleted.
+    RemovedWithBranchFailure(String),
+}
+
 /// Removes one entry from disk. Blocking.
-fn clear_one(entry: &TrackedWorktree, force: bool, data_dir: &Path) -> Result<(), String> {
+fn clear_one(entry: &TrackedWorktree, force: bool, data_dir: &Path) -> Result<ClearOne, String> {
     let path = PathBuf::from(&entry.path);
     if entry.repo.is_empty() {
         return Err("its repository could not be found".into());
@@ -905,8 +1129,14 @@ fn clear_one(entry: &TrackedWorktree, force: bool, data_dir: &Path) -> Result<()
         return Err("is the repository's main worktree".into());
     }
     if !force {
-        if entry.dirty == Some(true) {
-            return Err("has uncommitted changes".into());
+        // The listing is only a snapshot: a turn may have written since. Ask
+        // git at the last moment, and never read "could not ask" as clean.
+        match git::is_dirty(&path) {
+            Some(true) => return Err("has uncommitted changes".into()),
+            None if path.is_dir() => {
+                return Err("could not check for uncommitted changes".into());
+            }
+            _ => {}
         }
         if entry.owned
             && let Some(branch) = &entry.branch
@@ -929,6 +1159,7 @@ fn clear_one(entry: &TrackedWorktree, force: bool, data_dir: &Path) -> Result<()
     if let Err(error) = git::run(&repo, ["worktree", "prune"]) {
         tracing::warn!(%error, repo = %repo.display(), "git worktree prune failed");
     }
+    let mut branch_failure = None;
     if entry.owned
         && let Some(branch) = &entry.branch
         && branch.starts_with("h4rn/")
@@ -936,26 +1167,32 @@ fn clear_one(entry: &TrackedWorktree, force: bool, data_dir: &Path) -> Result<()
         && let Err(error) = git::run(&repo, ["branch", "-D", branch])
     {
         tracing::warn!(%error, %branch, "could not delete the subagent branch");
+        // The checkout is already gone, so this is not a plain skip: say what
+        // was removed and what is left behind.
+        branch_failure = Some(format!(
+            "checkout removed, but branch {branch} could not be deleted: {error}"
+        ));
     }
     if let Some(subagent_id) = &entry.subagent_id {
         // `remove_dir` only succeeds on an empty directory, which is the point.
         let _ = std::fs::remove_dir(data_dir.join("subagents").join(subagent_id.as_str()));
     }
-    Ok(())
+    match branch_failure {
+        Some(reason) => Ok(ClearOne::RemovedWithBranchFailure(reason)),
+        None => Ok(ClearOne::Removed),
+    }
 }
 
-/// Selects and clears entries. Blocking.
-///
-/// Returns the removed paths and the skipped entries with reasons.
-pub(crate) fn clear_entries(
-    entries: &[TrackedWorktree],
-    paths: Option<&[String]>,
-    force: bool,
-    data_dir: &Path,
-) -> (Vec<String>, Vec<SkippedWorktree>) {
-    let mut removed = Vec::new();
-    let mut skipped = Vec::new();
+/// The entries a clear request targets, plus requested paths it cannot act on.
+struct Selection<'a> {
+    targets: Vec<&'a TrackedWorktree>,
+    skipped: Vec<SkippedWorktree>,
+}
+
+/// Picks the entries a clear request names.
+fn select_entries<'a>(entries: &'a [TrackedWorktree], paths: Option<&[String]>) -> Selection<'a> {
     let mut targets: Vec<&TrackedWorktree> = Vec::new();
+    let mut skipped = Vec::new();
     match paths {
         // A thread workspace belongs to whoever made it (another tool, the
         // user) and the thread may still be resumed in it, so clearing
@@ -983,21 +1220,5 @@ pub(crate) fn clear_entries(
             }
         }
     }
-    for entry in targets {
-        if entry.status == WorktreeStatus::Active {
-            skipped.push(SkippedWorktree {
-                path: entry.path.clone(),
-                reason: in_use_reason(entry),
-            });
-            continue;
-        }
-        match clear_one(entry, force, data_dir) {
-            Ok(()) => removed.push(entry.path.clone()),
-            Err(reason) => skipped.push(SkippedWorktree {
-                path: entry.path.clone(),
-                reason,
-            }),
-        }
-    }
-    (removed, skipped)
+    Selection { targets, skipped }
 }

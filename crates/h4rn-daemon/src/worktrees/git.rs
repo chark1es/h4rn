@@ -3,6 +3,7 @@
 //! Every function here shells out to `git` and blocks. Callers on the async
 //! runtime must run them inside `tokio::task::spawn_blocking`.
 
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -131,7 +132,7 @@ fn strip_verbatim(path: PathBuf) -> PathBuf {
 /// The main worktree of the repository containing `workspace`.
 ///
 /// `None` for a non-repository, a bare repository or a submodule.
-pub fn repo_of(workspace: &Path) -> Option<PathBuf> {
+pub(crate) fn repo_of(workspace: &Path) -> Option<PathBuf> {
     let common = run(workspace, ["rev-parse", "--git-common-dir"]).ok()?;
     let common = norm(&workspace.join(common));
     if common.file_name()? == ".git" {
@@ -210,6 +211,29 @@ pub fn branch_exists(repo: &Path, branch: &str) -> bool {
     )
 }
 
+/// Every branch under `refs/heads/h4rn/` in `repo`.
+///
+/// One `for-each-ref` answers for all of a repository's owned branches, which
+/// beats a `rev-parse --verify` per subagent.
+pub fn h4rn_branches(repo: &Path) -> HashSet<String> {
+    match run(
+        repo,
+        [
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads/h4rn/",
+        ],
+    ) {
+        Ok(out) => out
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        Err(_) => HashSet::new(),
+    }
+}
+
 /// Whether `branch` is fully merged into the repository's `HEAD`.
 pub fn is_merged(repo: &Path, branch: &str) -> bool {
     succeeds(
@@ -224,10 +248,23 @@ pub fn is_merged(repo: &Path, branch: &str) -> bool {
 }
 
 /// Whether the worktree has uncommitted changes; `None` when git failed.
+///
+/// Untracked files always count, whatever the user's `status.showUntrackedFiles`
+/// config says, and submodules are inspected rather than skipped: a file the
+/// user asked git to hide from `status` is still work that removing the
+/// checkout would lose.
 pub fn is_dirty(worktree: &Path) -> Option<bool> {
-    run(worktree, ["status", "--porcelain"])
-        .ok()
-        .map(|out| !out.is_empty())
+    run(
+        worktree,
+        [
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ],
+    )
+    .ok()
+    .map(|out| !out.is_empty())
 }
 
 /// Whether `token` starts like an absolute path on Unix or Windows.

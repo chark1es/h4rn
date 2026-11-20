@@ -15,6 +15,7 @@ import {
   settledWorktrees,
   useWorktreeList,
   useWorktrees,
+  worktreePage,
 } from "./worktreeStore";
 
 const ORIGIN_TEXT: Record<WorktreeOrigin, string> = {
@@ -116,12 +117,23 @@ export function WorktreeSettings() {
   const inUse = inUseWorktrees(rows);
   const settled = settledWorktrees(rows);
   const clearable = clearableWorktrees(rows);
+  const page = worktreePage(loaded, rows, error);
   const keptThreads = settled.length - clearable.length;
   const busy = clearing || !online;
   const skipped = outcome?.skipped ?? [];
   // Force only helps with dirty or unmerged work; an in-use or untracked
   // worktree is skipped either way, so it is not offered again.
   const forceable = skipped.filter((item) => settled.some((row) => row.path === item.path));
+  // A thread workspace belongs to whoever made it, so a forced removal says so.
+  const forceableThreads = forceable.filter((item) =>
+    settled.some((row) => row.path === item.path && row.origin === "thread"),
+  );
+  const threadNote =
+    forceableThreads.length === 0
+      ? ""
+      : forceableThreads.length === 1
+        ? " One of these is a thread workspace another tool or you created."
+        : ` ${forceableThreads.length} of these are thread workspaces another tool or you created.`;
 
   return (
     <div className="q-form">
@@ -131,19 +143,12 @@ export function WorktreeSettings() {
         worked in. Clearing removes the checkout from disk.
       </p>
 
-      {!loaded ? (
+      {page.kind === "loading" ? (
         <div className="q-skel" style={{ height: 120 }} />
-      ) : error ? (
-        <div className="q-group">
-          <p className="q-muted">{error.message}</p>
-        </div>
-      ) : rows.length === 0 && !outcome ? (
-        <p className="q-muted">
-          No worktrees yet. Subagents that run with worktree isolation, and threads working in a
-          worktree, show up here.
-        </p>
       ) : (
         <>
+          {rows.length > 0 && page.notice ? <p className="q-muted">{page.notice}</p> : null}
+
           {inUse.length > 0 ? (
             <div className="q-group">
               <div className="q-group-head">
@@ -179,6 +184,8 @@ export function WorktreeSettings() {
               </div>
             </div>
 
+            {rows.length === 0 && page.notice ? <p className="q-muted">{page.notice}</p> : null}
+
             {outcome || clearError ? (
               <div className="q-harness-out" role="status" aria-live="polite">
                 {outcome ? <p className="res">Removed {outcome.removed}.</p> : null}
@@ -206,7 +213,14 @@ export function WorktreeSettings() {
             ) : null}
 
             {settled.length === 0 ? (
-              <p className="q-muted">Nothing has settled.</p>
+              page.empty ? (
+                <p className="q-muted">
+                  No worktrees yet. Subagents that run with worktree isolation, and threads working
+                  in a worktree, show up here.
+                </p>
+              ) : rows.length > 0 ? (
+                <p className="q-muted">Nothing has settled.</p>
+              ) : null
             ) : (
               settled.map((row) => (
                 <WorktreeRow
@@ -258,7 +272,7 @@ export function WorktreeSettings() {
       <ConfirmDialog
         open={forcing}
         title={`Remove ${forceable.length} ${forceable.length === 1 ? "worktree" : "worktrees"} anyway?`}
-        description="Uncommitted changes and unmerged commits in these worktrees are lost. This can't be undone."
+        description={`Uncommitted changes and unmerged commits in these worktrees are lost. This can't be undone.${threadNote}`}
         confirmLabel="Remove anyway"
         onOpenChange={setForcing}
         onConfirm={() =>

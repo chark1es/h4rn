@@ -71,10 +71,33 @@ export function clearableWorktrees(rows: TrackedWorktree[]): TrackedWorktree[] {
   return settledWorktrees(rows).filter((row) => row.origin !== "thread");
 }
 
+/** The loaded page's layout: a notice above the groups, or the empty copy. */
+export type WorktreePage =
+  | { kind: "loading" }
+  | { kind: "groups"; notice: string | null; empty: boolean };
+
+/**
+ * A failed read keeps whatever rows are already loaded and shows the error as
+ * a notice above them, never in their place. The empty copy only shows after a
+ * successful read, so an error is not mistaken for "nothing here".
+ */
+export function worktreePage(
+  loaded: boolean,
+  rows: TrackedWorktree[],
+  error: ProtoError | null,
+): WorktreePage {
+  if (!loaded) return { kind: "loading" };
+  return {
+    kind: "groups",
+    notice: error?.message ?? null,
+    empty: rows.length === 0 && error === null,
+  };
+}
+
 export async function loadWorktrees(): Promise<void> {
   patch({ loading: true, error: null });
   try {
-    const response = await getClient().request({ type: "list_worktrees" });
+    const response = await getClient().request({ type: "list_worktrees" }, { timeoutMs: 60_000 });
     if (response.type !== "worktrees") {
       patch({ loaded: true, loading: false });
       return;
@@ -93,7 +116,10 @@ export async function clearWorktrees(paths: string[] | null, force = false): Pro
   if (state.clearing) return;
   patch({ clearing: true, clearError: null });
   try {
-    const response = await getClient().request({ type: "clear_worktrees", paths, force });
+    const response = await getClient().request(
+      { type: "clear_worktrees", paths, force },
+      { timeoutMs: 60_000 },
+    );
     if (response.type !== "worktrees_cleared") {
       patch({ clearing: false });
       return;

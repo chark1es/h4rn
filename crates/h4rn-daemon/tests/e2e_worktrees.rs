@@ -16,7 +16,7 @@ use h4rn_daemon::threads::NewThread;
 use h4rn_harness::FakeHarness;
 use h4rn_protocol::{
     ClientFrame, ClientRequest, DeviceId, DeviceInfo, HarnessKind, ProtoError, ResponseBody,
-    RuntimeMode, ServerFrame, SpawnSubagentRequest, SubagentIsolation, SubagentState,
+    RuntimeMode, ServerFrame, SpawnSubagentRequest, SubagentIsolation, SubagentState, ThreadTab,
     TrackedWorktree, WorktreeOrigin, WorktreeStatus,
 };
 use tokio::net::TcpStream;
@@ -177,6 +177,20 @@ async fn a_settled_subagent_worktree_is_listed_and_cleared_over_the_wire() {
         .await
         .expect("wait for the child");
     assert_eq!(finished.state, SubagentState::Completed);
+
+    // A just-finished turn keeps its thread in the Working tab for a short exit
+    // grace. Clearing re-checks live activity, so wait that out first.
+    let child_thread = finished.child_thread_id.clone().expect("child thread");
+    for _ in 0..100 {
+        if manager
+            .thread_summary(&child_thread)
+            .await
+            .is_none_or(|summary| summary.tab != ThreadTab::Working)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     // Settled: the supervisor removed the directory and kept the branch.
     let listed = client.list().await;

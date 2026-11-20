@@ -175,10 +175,14 @@ A tracked worktree has one of three origins:
   `.claude/worktrees/agent-*`, or a plain `git worktree add`).
 
 Its status is `active` while a subagent is not finished or a thread that used
-it is working, `settled` once nothing running uses it, and `orphaned` when an
-owned worktree's subagent is finished but its directory is still on disk
-(cleanup failed, or the daemon restarted mid-run). An entry with nothing left to
-clear (directory gone and, for owned entries, branch gone) is not listed.
+it is working: its tab is Working, or its agent state is queued, scheduled,
+thinking, searching, reading, editing, running a tool, awaiting approval or
+rate-limited. A thread that is idle, done, failed or unreachable (and not in the
+Working tab) does not keep a worktree in use. `settled` means nothing running
+uses it, and `orphaned` means an owned worktree's subagent is finished but its
+directory is still on disk (cleanup failed, or the daemon restarted mid-run). An
+entry with nothing left to clear (directory gone and, for owned entries, branch
+gone) is not listed.
 
 **What is stored.** Only observations that cannot be derived live go to
 `<data_dir>/worktrees.db`: `harness` worktrees and which threads used them.
@@ -188,33 +192,54 @@ thread list, and the list is recomputed on every request.
 **How harness worktrees are observed.** The daemon snapshots `git worktree list`
 for a thread's repository when a turn starts and again when it completes; any
 linked worktree that appeared in between is recorded against that thread (and its
-subagent id, for a child). Tool-call inputs are also scanned for absolute paths
-(`cwd`, `file_path`, shell commands and so on); a path inside a linked worktree
-of the thread's repository records an access. The per-repository worktree list is
-cached and refreshed at most every two seconds, so tool calls do not shell out to
-git one by one. h4rn's own `<data_dir>/subagents/*/worktree` paths and the main
-worktree are never recorded as `harness`. Write failures are logged and never
-interrupt the watcher.
+subagent id, for a child). Two turns on the same repository can overlap, though
+(for example a parent and its child), and then a worktree that appeared belongs
+to neither turn alone: both snapshots are marked shared and the newcomer is not
+attributed. Tool-call inputs are also scanned for absolute paths (`cwd`,
+`file_path`, shell commands and so on); a path inside a linked worktree of the
+thread's repository records an access, which is evidence a turn diff cannot
+fake. The per-repository worktree list is cached and refreshed at most every two
+seconds, so tool calls do not shell out to git one by one. h4rn's own
+`<data_dir>/subagents/*/worktree` paths and the main worktree are never recorded
+as `harness`. Write failures are logged and never interrupt the watcher.
+
+A worktree-isolated child records the parent repository's main worktree at
+spawn, not the workspace it happened to start in. That matters for nested
+children: a grandchild's parent workspace is the child's own worktree, which is
+deleted when the child settles, so the branch would otherwise become unfindable.
+If only an old record remains (one written before this), listing follows the
+recorded repositories through nested subagent worktrees, several hops deep.
 
 **Requests.** `list_worktrees` (scope `view`) returns the list, active first,
 then orphaned, then settled, newest first within each. `clear_worktrees` (scope
 `admin`, because it deletes from disk) takes optional `paths` (default: every
 non-active entry except thread workspaces) and `force`, and returns the removed
-paths, the skipped ones with reasons, and the fresh list.
+paths, the skipped ones with reasons, and the fresh list. Removals run one at a
+time and are awaited: the response never reports completion while a delete is
+still running, and the fresh list always reflects what actually happened.
 
 **Clearing rules.**
 
-- Active worktrees are never removed, even with `force`.
+- Active worktrees are never removed, even with `force`. Because the listing is
+  only a snapshot, each target is checked again against the live thread and
+  subagent state right before it is removed, and an entry that became active in
+  between is skipped.
 - A `thread` workspace is only removed when its path is named. It belongs to
   whoever created it, and its thread may be resumed there, so clearing
   everything leaves it alone.
 - Without `force`, a worktree with uncommitted changes, or an owned branch not
-  merged into the repository's `HEAD`, is skipped.
+  merged into the repository's `HEAD`, is skipped. Dirtiness is asked of git
+  again at the last moment rather than trusted from the listing, and untracked
+  files always count, even when `status.showUntrackedFiles` says otherwise; a
+  failed check on an existing directory is a skip, not a removal.
 - Removal is `git worktree remove` (with `--force` only when `force` is set or
   h4rn owns the worktree), then `git worktree prune`.
 - For owned entries the branch is deleted, but only when it starts with `h4rn/`,
   and the empty `<data_dir>/subagents/<id>` directory is removed. A branch h4rn
-  did not create is never deleted.
+  did not create is never deleted. If the checkout was removed but the branch
+  could not be deleted, the path is reported as skipped with
+  `checkout removed, but branch <b> could not be deleted: <git's message>` so
+  the leftover branch is not mistaken for a clean removal.
 - The repository's main worktree is never touched.
 - If git refuses, the entry is skipped with git's message as the reason.
 

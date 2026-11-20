@@ -19,6 +19,7 @@ import {
   loadWorktrees,
   resetWorktreeStoreForTests,
   settledWorktrees,
+  worktreePage,
 } from "./worktreeStore";
 
 function row(overrides: Partial<TrackedWorktree> = {}): TrackedWorktree {
@@ -60,6 +61,7 @@ describe("worktree store", () => {
     expect(loaded).toBe(true);
     expect(inUseWorktrees(rows).map((r) => r.path)).toEqual(["/a"]);
     expect(settledWorktrees(rows).map((r) => r.path)).toEqual(["/b", "/c"]);
+    expect(request).toHaveBeenCalledWith({ type: "list_worktrees" }, { timeoutMs: 60_000 });
   });
 
   it("reports a failed read as an error, not a rejection", async () => {
@@ -77,11 +79,14 @@ describe("worktree store", () => {
       worktrees: [row({ path: "/c", dirty: true })],
     });
     await clearWorktrees(["/b", "/c"]);
-    expect(request).toHaveBeenCalledWith({
-      type: "clear_worktrees",
-      paths: ["/b", "/c"],
-      force: false,
-    });
+    expect(request).toHaveBeenCalledWith(
+      {
+        type: "clear_worktrees",
+        paths: ["/b", "/c"],
+        force: false,
+      },
+      { timeoutMs: 60_000 },
+    );
     const { rows, outcome, clearing } = getWorktreeState();
     expect(clearing).toBe(false);
     expect(rows.map((r) => r.path)).toEqual(["/c"]);
@@ -99,17 +104,23 @@ describe("worktree store", () => {
       worktrees: [],
     });
     await clearWorktrees(null);
-    expect(request).toHaveBeenLastCalledWith({
-      type: "clear_worktrees",
-      paths: null,
-      force: false,
-    });
+    expect(request).toHaveBeenLastCalledWith(
+      {
+        type: "clear_worktrees",
+        paths: null,
+        force: false,
+      },
+      { timeoutMs: 60_000 },
+    );
     await clearWorktrees(["/c"], true);
-    expect(request).toHaveBeenLastCalledWith({
-      type: "clear_worktrees",
-      paths: ["/c"],
-      force: true,
-    });
+    expect(request).toHaveBeenLastCalledWith(
+      {
+        type: "clear_worktrees",
+        paths: ["/c"],
+        force: true,
+      },
+      { timeoutMs: 60_000 },
+    );
   });
 
   it("surfaces a refused clear with its hint and leaves the list alone", async () => {
@@ -142,5 +153,36 @@ describe("clearableWorktrees", () => {
       row({ path: "/e", origin: "harness", owned: false }),
     ];
     expect(clearableWorktrees(rows).map((r) => r.path)).toEqual(["/a", "/b", "/e"]);
+  });
+});
+
+describe("worktreePage", () => {
+  const failure = {
+    code: "internal" as const,
+    message: "The daemon did not answer.",
+    hint: null,
+  };
+
+  it("keeps loaded rows and shows a failed refetch above them", () => {
+    const page = worktreePage(true, [row({ path: "/a" })], failure);
+    expect(page).toEqual({
+      kind: "groups",
+      notice: "The daemon did not answer.",
+      empty: false,
+    });
+  });
+
+  it("does not claim the list is empty when the read failed", () => {
+    const page = worktreePage(true, [], failure);
+    expect(page).toEqual({
+      kind: "groups",
+      notice: "The daemon did not answer.",
+      empty: false,
+    });
+  });
+
+  it("shows the empty copy only after a successful empty read", () => {
+    expect(worktreePage(true, [], null)).toEqual({ kind: "groups", notice: null, empty: true });
+    expect(worktreePage(false, [], null)).toEqual({ kind: "loading" });
   });
 });
