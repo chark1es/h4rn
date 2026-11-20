@@ -16,13 +16,11 @@ import {
   navigate,
   requestComposerFocus,
   retryThread,
-  sendMessage,
   setPanelTab,
   toggleTerminal,
   useApp,
 } from "@/lib/store/appStore";
-import type { ApprovalItem, StreamTurn } from "@/lib/store/projection";
-import { turnPrompt } from "@/lib/turn";
+import type { ApprovalItem } from "@/lib/store/projection";
 import { cn } from "@/lib/utils";
 import { ApprovalCard } from "./ApprovalCard";
 import { Composer } from "./Composer";
@@ -110,16 +108,9 @@ export function ThreadPane({ threadId }: { threadId: string }) {
     setApprovalSheetOpen(false);
   }, [threadId]);
 
-  // A stopped turn resent its own prompt; a failure or interruption has no
-  // single prompt to repeat, so Retry puts the cursor back in the composer.
-  const retryTurn = (turn: StreamTurn) => {
-    if (turn.status === "token_limit" || turn.status === "turn_limit") {
-      const prompt = turnPrompt(turn);
-      if (prompt) {
-        void sendMessage(threadId, prompt.text, prompt.attachments);
-        return;
-      }
-    }
+  // A stopped or failed turn has no single prompt to repeat safely: a queued
+  // follow-up would be sent twice. Put the cursor back in the composer.
+  const retryTurn = () => {
     requestComposerFocus();
   };
 

@@ -1,4 +1,10 @@
-import { CircleAlertIcon, ClockIcon, PauseIcon, RotateCcwIcon } from "lucide-react";
+import {
+  CircleAlertIcon,
+  ClockIcon,
+  CornerDownLeftIcon,
+  PauseIcon,
+  RotateCcwIcon,
+} from "lucide-react";
 import type { ReactNode } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
@@ -123,8 +129,8 @@ export function TurnBlock({
   turn: StreamTurn;
   threadId: string;
   summary: ThreadSummary;
-  /** Resend a stopped turn's prompt, or focus the composer for a failure. */
-  onRetry: (turn: StreamTurn) => void;
+  /** Focus the composer so the person can reply to a stopped or failed turn. */
+  onRetry: () => void;
   staleAt?: number | null;
 }) {
   const userItems = turn.items.filter(
@@ -150,14 +156,9 @@ export function TurnBlock({
           <div className={cn("q-live-line", "q-warn")}>
             <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             <span>{stopped}</span>
-            <button
-              type="button"
-              className="q-btn ghost"
-              style={{ height: 24 }}
-              onClick={() => onRetry(turn)}
-            >
-              <RotateCcwIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-              Retry
+            <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onRetry}>
+              <CornerDownLeftIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+              Reply
             </button>
           </div>
         ) : null}
@@ -235,14 +236,9 @@ export function TurnBlock({
         <div className={cn("q-live-line", "q-warn")}>
           <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           <span>{stopped}</span>
-          <button
-            type="button"
-            className="q-btn ghost"
-            style={{ height: 24 }}
-            onClick={() => onRetry(turn)}
-          >
-            <RotateCcwIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-            Retry
+          <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onRetry}>
+            <CornerDownLeftIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+            Reply
           </button>
         </div>
       ) : failed ? (
@@ -252,12 +248,7 @@ export function TurnBlock({
             {turn.status === "failed" ? "The turn failed" : "The turn was interrupted"}. Nothing
             after this ran.
           </span>
-          <button
-            type="button"
-            className="q-btn ghost"
-            style={{ height: 24 }}
-            onClick={() => onRetry(turn)}
-          >
+          <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onRetry}>
             <RotateCcwIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
             Retry
           </button>

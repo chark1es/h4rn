@@ -72,6 +72,12 @@ describe("TurnBlock", () => {
     expect(markup).not.toContain("Nothing after this ran.");
   });
 
+  it("offers Reply, not a resend, for a stopped turn", () => {
+    const markup = render(userOnlyTurn("token_limit"));
+    expect(markup).toContain("Reply");
+    expect(markup).not.toContain("Retry");
+  });
+
   it("shows the stopped notice when a turn limit ends the turn before any output", () => {
     expect(render(userOnlyTurn("turn_limit"))).toContain(
       "Stopped: the agent hit its turn-request limit.",
