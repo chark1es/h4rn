@@ -159,6 +159,69 @@ parent's own turns.
 creates anything. A worktree spawn on a non-repository workspace fails with a
 hint instead of silently running shared.
 
+## Tracking and clearing worktrees
+
+h4rn keeps track of the git worktrees it makes and the ones its threads use, so
+Settings → Worktrees can show what is in use and clear the leftovers.
+
+A tracked worktree has one of three origins:
+
+- `subagent`: h4rn created it for a worktree-isolated child. h4rn owns the
+  directory and its `h4rn/sa-*` branch.
+- `thread`: a thread's (or subagent child's) workspace is a linked worktree h4rn
+  did not create, for example one made by an editor.
+- `harness`: a linked worktree of a thread's repository that the agent or its
+  harness-native subagents created or touched during a turn (Claude Code's
+  `.claude/worktrees/agent-*`, or a plain `git worktree add`).
+
+Its status is `active` while a subagent is not finished or a thread that used
+it is working, `settled` once nothing running uses it, and `orphaned` when an
+owned worktree's subagent is finished but its directory is still on disk
+(cleanup failed, or the daemon restarted mid-run). An entry with nothing left to
+clear (directory gone and, for owned entries, branch gone) is not listed.
+
+**What is stored.** Only observations that cannot be derived live go to
+`<data_dir>/worktrees.db`: `harness` worktrees and which threads used them.
+Subagent worktrees come from the supervisor and thread workspaces from the
+thread list, and the list is recomputed on every request.
+
+**How harness worktrees are observed.** The daemon snapshots `git worktree list`
+for a thread's repository when a turn starts and again when it completes; any
+linked worktree that appeared in between is recorded against that thread (and its
+subagent id, for a child). Tool-call inputs are also scanned for absolute paths
+(`cwd`, `file_path`, shell commands and so on); a path inside a linked worktree
+of the thread's repository records an access. The per-repository worktree list is
+cached and refreshed at most every two seconds, so tool calls do not shell out to
+git one by one. h4rn's own `<data_dir>/subagents/*/worktree` paths and the main
+worktree are never recorded as `harness`. Write failures are logged and never
+interrupt the watcher.
+
+**Requests.** `list_worktrees` (scope `view`) returns the list, active first,
+then orphaned, then settled, newest first within each. `clear_worktrees` (scope
+`admin`, because it deletes from disk) takes optional `paths` (default: every
+non-active entry except thread workspaces) and `force`, and returns the removed
+paths, the skipped ones with reasons, and the fresh list.
+
+**Clearing rules.**
+
+- Active worktrees are never removed, even with `force`.
+- A `thread` workspace is only removed when its path is named. It belongs to
+  whoever created it, and its thread may be resumed there, so clearing
+  everything leaves it alone.
+- Without `force`, a worktree with uncommitted changes, or an owned branch not
+  merged into the repository's `HEAD`, is skipped.
+- Removal is `git worktree remove` (with `--force` only when `force` is set or
+  h4rn owns the worktree), then `git worktree prune`.
+- For owned entries the branch is deleted, but only when it starts with `h4rn/`,
+  and the empty `<data_dir>/subagents/<id>` directory is removed. A branch h4rn
+  did not create is never deleted.
+- The repository's main worktree is never touched.
+- If git refuses, the entry is skipped with git's message as the reason.
+
+An orphaned directory left by a restart shows up as `orphaned` and can be
+cleared; `restore` itself still folds a running child into `Failed` and does not
+touch the directory.
+
 ## Tests
 
 `crates/h4rn-daemon/tests/e2e_subagents.rs` drives the real `/mcp` endpoint with
@@ -168,7 +231,12 @@ using `FakeHarness`. The ignored
 `real_claude_delegates_to_codex` test runs a real Claude Code parent delegating
 "Reply with exactly: pong" to a real Codex child.
 
+`crates/h4rn-daemon/tests/e2e_worktrees.rs` lists and clears a settled subagent
+worktree over the wire, and the unit tests in `crates/h4rn-daemon/src/worktrees/`
+use real temporary git repositories.
+
 ```text
 cargo test -p h4rn-daemon --test e2e_subagents
+cargo test -p h4rn-daemon --test e2e_worktrees
 cargo test -p h4rn-daemon --test e2e_subagents -- --ignored --nocapture
 ```

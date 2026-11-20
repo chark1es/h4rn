@@ -45,6 +45,7 @@ mod subagents;
 mod terminal;
 mod transport;
 mod usage;
+mod worktrees;
 
 pub use binary::{
     BINARY_HEADER_LEN, BINARY_MAGIC, BINARY_VERSION, BinaryFrame, BinaryFrameError, BinaryKind,
@@ -98,6 +99,9 @@ pub use transport::{
     TransportStatus,
 };
 pub use usage::*;
+pub use worktrees::{
+    SkippedWorktree, TrackedWorktree, WorktreeAccess, WorktreeOrigin, WorktreeStatus,
+};
 
 /// Version of the wire protocol implemented by this crate.
 ///

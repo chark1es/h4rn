@@ -7,6 +7,7 @@ import { ProxySettings } from "@/features/proxy/ProxySettings";
 import { LiveAccountForm, LiveDevicesForm, LiveHostsForm } from "@/features/remote/SettingsRemote";
 import { AboutSettings } from "@/features/updates/AboutSettings";
 import { AutoResumeSettings } from "@/features/usage/AutoResumeSettings";
+import { WorktreeSettings } from "@/features/worktrees/WorktreeSettings";
 
 function Toggle({ checked, label }: { checked: boolean; label: string }) {
   return (
@@ -184,6 +185,7 @@ const FORMS: Record<string, () => React.ReactNode> = {
   devices: LiveDevicesForm,
   providers: ProxySettings,
   harnesses: HarnessSettings,
+  worktrees: WorktreeSettings,
   resume: AutoResumeSettings,
   forges: ForgeSettings,
   general: GeneralForm,

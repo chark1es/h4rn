@@ -860,6 +860,28 @@ pub enum ClientRequest {
         /// Harness to update.
         harness: HarnessKind,
     },
+    // ------------------------------------------------------------------
+    // Worktrees.
+    // ------------------------------------------------------------------
+    /// List the git worktrees h4rn tracks: ones it made for subagents and ones
+    /// threads and their subagents worked in.
+    ///
+    /// Answered with [`crate::ResponseBody::Worktrees`].
+    ListWorktrees,
+    /// Remove tracked worktrees from disk.
+    ///
+    /// Active worktrees are never removed. Without `force`, worktrees with
+    /// uncommitted changes or unmerged owned branches are skipped. Deletes from
+    /// disk, so it needs the `admin` scope.
+    ClearWorktrees {
+        /// Worktree paths to clear; `None` clears every non-active entry
+        /// except thread workspaces, which are only removed when named.
+        #[serde(default)]
+        paths: Option<Vec<String>>,
+        /// Remove even with uncommitted changes or unmerged commits.
+        #[serde(default)]
+        force: bool,
+    },
 }
 
 impl ClientRequest {
@@ -889,6 +911,7 @@ impl ClientRequest {
             | Self::ListResets
             | Self::ListFailoverOptions { .. }
             | Self::ListHarnessVersions
+            | Self::ListWorktrees
             | Self::ForgeListAccounts
             | Self::ForgeDetectRepo { .. }
             | Self::ForgeListPrs { .. }
@@ -958,7 +981,8 @@ impl ClientRequest {
             | Self::PairingConfirmations
             | Self::ConfirmPairing { .. }
             | Self::ForgeImportCli { .. }
-            | Self::UpdateHarness { .. } => Admin,
+            | Self::UpdateHarness { .. }
+            | Self::ClearWorktrees { .. } => Admin,
             Self::Mcp { request } => match request {
                 crate::mcp::McpRequest::ListServers
                 | crate::mcp::McpRequest::ListTools { .. }
@@ -1122,6 +1146,15 @@ mod tests {
             (
                 ClientRequest::UpdateHarness {
                     harness: crate::common::HarnessKind::ClaudeCode,
+                },
+                Admin,
+            ),
+            // Clearing deletes checkouts from disk.
+            (ClientRequest::ListWorktrees, View),
+            (
+                ClientRequest::ClearWorktrees {
+                    paths: None,
+                    force: false,
                 },
                 Admin,
             ),
