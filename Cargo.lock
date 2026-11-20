@@ -1846,6 +1846,7 @@ dependencies = [
  "chrono",
  "h4rn-protocol",
  "hex",
+ "libc",
  "serde",
  "serde_json",
  "sqlx",

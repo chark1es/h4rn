@@ -706,6 +706,11 @@ export function startConnection(): void {
     media.addEventListener("change", () => {
       if (getState().ui.theme === "system") applyTheme("system");
     });
+    // A warm direct-pairing deep link stored its URI in the secret store; the
+    // transport is chosen at client construction, so rebuild it.
+    window.addEventListener("h4rn-direct-pair", () => {
+      restartConnection();
+    });
   }
 
   applyTheme(getState().ui.theme);

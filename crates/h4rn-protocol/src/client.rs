@@ -608,6 +608,45 @@ pub enum ClientRequest {
         /// `true` admits the device, `false` revokes it.
         confirm: bool,
     },
+    /// Read the daemon's network-access setting and its dial addresses.
+    ///
+    /// Addresses are what another device on the same LAN or tailnet dials,
+    /// for example `192.168.1.20:47810`; they are empty while the listener is
+    /// off or failed to bind.
+    GetNetworkAccess,
+    /// Turn the dedicated network listener on or off.
+    ///
+    /// Enabling binds `<wildcard>:<network port>` (default `47810`) and serves
+    /// only `/healthz` and the Noise routes `/secure` and `/secure-mcp`;
+    /// plaintext `/ws` stays loopback-only. The setting is persisted in the
+    /// daemon data directory and applies without a restart.
+    SetNetworkAccess {
+        /// Whether the listener should be running.
+        enabled: bool,
+    },
+    /// Open a one-time direct (LAN/tailnet) pairing QR.
+    ///
+    /// Needs network access on and at least one non-loopback address. A new
+    /// offer replaces any pairing that is already open, so the CLI and the UI
+    /// never arm two secrets at once.
+    CreateDirectPairing {
+        /// Scopes the new device is granted; `view` and `approve` when empty.
+        #[serde(default)]
+        scopes: Vec<crate::connect::PairScope>,
+        /// Label shown next to the QR; the host name when absent.
+        #[serde(default)]
+        label: Option<String>,
+    },
+    /// Close the open direct pairing and disarm its one-time secret.
+    CancelDirectPairing,
+    /// List devices paired directly with this computer (LAN/tailnet QR or
+    /// `h4rnd pair --direct`). Devices paired through connect are not here.
+    ListDirectDevices,
+    /// Remove a directly paired device and drop its live sessions.
+    RevokeDirectDevice {
+        /// The device's Noise static key, hex, from [`Self::ListDirectDevices`].
+        key: String,
+    },
     /// Read known usage limits and the auto-resume policy.
     GetLimits,
     /// List persisted auto-resume schedules and limit history.
@@ -946,7 +985,9 @@ impl ClientRequest {
             | Self::ForgeListPrComments { .. }
             | Self::ForgeListChecks { .. }
             | Self::ForgeListPrCommits { .. }
-            | Self::ListProjects { .. } => View,
+            | Self::ListProjects { .. }
+            | Self::GetNetworkAccess
+            | Self::ListDirectDevices => View,
             Self::CreateThread { .. }
             | Self::SendMessage { .. }
             | Self::Interrupt { .. }
@@ -1011,6 +1052,10 @@ impl ClientRequest {
             | Self::ForgeDeviceFlowPoll { .. }
             | Self::PairingConfirmations
             | Self::ConfirmPairing { .. }
+            | Self::SetNetworkAccess { .. }
+            | Self::CreateDirectPairing { .. }
+            | Self::CancelDirectPairing
+            | Self::RevokeDirectDevice { .. }
             | Self::ForgeImportCli { .. }
             | Self::UpdateHarness { .. } => Admin,
             Self::Mcp { request } => match request {
@@ -1184,6 +1229,25 @@ mod tests {
                 ClientRequest::ConfirmPairing {
                     device_id: DeviceId::new("dev_1"),
                     confirm: true,
+                },
+                Admin,
+            ),
+            // Reading the listener state is harmless; changing it, or opening
+            // a pairing window that admits a device, is administrative.
+            (ClientRequest::GetNetworkAccess, View),
+            (ClientRequest::SetNetworkAccess { enabled: true }, Admin),
+            (
+                ClientRequest::CreateDirectPairing {
+                    scopes: Vec::new(),
+                    label: None,
+                },
+                Admin,
+            ),
+            (ClientRequest::CancelDirectPairing, Admin),
+            (ClientRequest::ListDirectDevices, View),
+            (
+                ClientRequest::RevokeDirectDevice {
+                    key: "00".repeat(32),
                 },
                 Admin,
             ),

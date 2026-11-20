@@ -86,6 +86,8 @@ pub struct AppState {
     pub remote: Option<Arc<RemoteAudit>>,
     /// Persisted device registry: the only source of remote authorisation.
     pub devices: Arc<crate::remote::DeviceRegistry>,
+    /// Daemon-owned network listener and its persisted setting.
+    pub network: Arc<crate::network_access::NetworkAccess>,
     /// CLIProxyAPI profiles and routing (ADR-015).
     pub proxy: Arc<h4rn_proxy::ProxyService>,
     /// The daemon-owned MCP hub (ADR-006).
@@ -117,6 +119,19 @@ pub fn router(state: AppState) -> Router {
                 .post(mcp_http_post)
                 .delete(mcp_http_delete),
         )
+        .with_state(state)
+}
+
+/// Router for the network listener: liveness plus the encrypted routes only.
+///
+/// Plaintext `/ws` is deliberately absent, so a device on the LAN cannot open
+/// an unencrypted session even if it learns the access token. `/mcp` is absent
+/// too: the hub endpoint carries a bearer token and stays loopback-only.
+pub fn network_router(state: AppState) -> Router {
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/secure", get(secure_handler))
+        .route("/secure-mcp", get(secure_mcp_handler))
         .with_state(state)
 }
 
@@ -1648,6 +1663,10 @@ fn request_name(request: &ClientRequest) -> &'static str {
         ClientRequest::ForgeComment { .. } => "forge_comment",
         ClientRequest::ForgeOpenPr { .. } => "forge_open_pr",
         ClientRequest::ForgeHandPrToAgent { .. } => "forge_hand_pr_to_agent",
+        ClientRequest::GetNetworkAccess => "get_network_access",
+        ClientRequest::SetNetworkAccess { .. } => "set_network_access",
+        ClientRequest::CreateDirectPairing { .. } => "create_direct_pairing",
+        ClientRequest::CancelDirectPairing => "cancel_direct_pairing",
         _ => "request",
     }
 }

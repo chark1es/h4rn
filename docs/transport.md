@@ -301,14 +301,21 @@ Configuration:
 
 | Variable | Meaning |
 | --- | --- |
-| `H4RN_SECURE=1` | Enable the Noise service and `/secure`. |
+| `H4RN_SECURE=1` | Accepted for compatibility; every daemon now runs the Noise service. |
 | `H4RN_PAIRING_PSK=<64 hex chars>` | Enable one-time `IKpsk2` pairing with this PSK. |
 | `H4RN_TAILSCALE=auto\|off` | Detect Tailscale and bind/advertise the tailnet address (default `auto`). |
+| `H4RN_NETWORK_ACCESS=on\|off` | Persist and apply the direct network listener at startup (`--network-access`). |
+| `H4RN_NETWORK_PORT=<port>` | Dedicated wildcard port for the network listener (default `47810`). |
 
 The daemon's identity is persisted as `transport-identity` in its data
 directory. A non-loopback bind rejects plaintext `/ws` with `403`; loopback
 keeps `/ws` for local development and the desktop sidecar. An explicit
 `DaemonBuilder::with_secure(...)` overrides the environment path.
+
+`/secure` is always registered, and every daemon runs the Noise service so the
+UI can enable network access later without a restart. Until network access is
+on it is reachable on loopback only, and an unpaired device still fails the
+handshake (fail closed); nothing is ever served in plaintext.
 
 Detached sessions are kept for a grace period of four path timeouts (8 s with
 the default 2 s) so a client that reconnects, or fails over from LAN to relay,
@@ -319,6 +326,58 @@ rejected and the client starts a fresh session.
 
 `h4rnd` owns the host side of remote access. Connect supplies identity,
 pairing and a relay; it never terminates Noise.
+
+### Network access and direct pairing
+
+By default the daemon listens only on loopback, so another device reaches it
+through the connect relay (internet plus a signed-in session). Network access is
+the offline alternative, and the daemon owns the setting:
+
+```sh
+h4rnd serve --network-access on     # or Settings → Remote → Network access
+h4rnd pair --direct                 # a QR a phone on the same LAN can scan
+```
+
+The setting persists as `<data_dir>/network-access.json`
+(`{ "enabled": bool }`, default `false`). `--network-access on|off` and
+`H4RN_NETWORK_ACCESS` are one-shot startup overrides; an override is written
+through so a headless `h4rnd serve` and the desktop UI read the same value.
+`--network-port`/`H4RN_NETWORK_PORT` picks the port (default `47810`).
+
+Enabling binds a **dedicated wildcard listener** (`0.0.0.0:47810`, plus
+`[::]:47810` when the host has working IPv6) without restarting and without
+touching the loopback listener. That listener serves a restricted router:
+`GET /healthz`, `/secure` and `/secure-mcp`. Plaintext `/ws` is not routed
+there, so a LAN peer cannot open an unencrypted session even with the local
+access token, and the bearer-token `/mcp` hub is not exposed either. Disabling
+closes the listener (existing remote sessions on it are dropped) and closes any
+open direct pairing. A port that cannot be bound is reported in
+`NetworkAccess.error`: the daemon keeps serving on loopback and the relay, and
+enabling again retries the bind.
+
+Address discovery enumerates the host's interfaces rather than asking the
+routing table for a source address, so an isolated LAN with no default route
+still yields dialable candidates. Non-loopback, non-link-local IPv4 and IPv6
+addresses are included, tailnet interfaces are kept, and obvious container or
+bridge interfaces (`docker*`, `veth*`, `br-*`, `virbr*`, `cni*`, `podman*`,
+`lxc*`, `vmnet*`) are skipped. The `8.8.8.8` route probe survives only to
+**order** the list (the routing table's preferred address first).
+`advertised_addresses` publishes these candidates on the network port, and only
+while network access is on; the relay entry is unchanged.
+
+The wire contract is `GetNetworkAccess` and `SetNetworkAccess { enabled }`
+(both answer `NetworkAccess { enabled, listening, port, addresses, error }`),
+plus `CreateDirectPairing { scopes, label }` (answers `DirectPairingOffer { uri,
+expires_at, addresses, scopes }`) and `CancelDirectPairing`. Reading the state
+needs `view`; changing it or opening a pairing window needs `admin`. Creating an
+offer writes `direct-pairing.json`, arms the scopes and the one-time secret
+in-process, and replaces any pairing already open: the CLI and the UI take
+turns rather than arming two secrets, and a newer file replaces an earlier one
+the watcher applied. An operator `H4RN_PAIRING_PSK` still takes precedence over
+a file. `h4rnd pair --direct` refuses with a hint when network access is off.
+
+The client tries these candidates in order and falls back to the relay, which is
+always advertised while the daemon is signed in.
 
 ### Login and credentials
 
@@ -400,8 +459,9 @@ is ignored), and a relay snapshot on reconnect removes connect-paired devices it
 no longer lists and ends their sessions, and a pending device stays pending
 through every snapshot until the host decides. `h4rnd pair --direct --scope …`
 writes the scopes into `direct-pairing.json`; the device that pairs holds
-exactly those (no `--scope`: `view` and `approve`). Binary PTY input needs
-`Hello`, `terminal`, and a viewer this connection attached.
+exactly those (no `--scope`: `view` and `approve`). Network access must be on
+first, because the QR carries the network listener's address. Binary PTY input
+needs `Hello`, `terminal`, and a viewer this connection attached.
 
 The short code is 8 Crockford base32 characters (40 bits), shown as `ABCD-EFGH`,
 single use, expiring with the QR. A phone without a camera claims it with

@@ -29,6 +29,7 @@ export type * from "./DeviceInfo";
 export type * from "./DeviceRegistration";
 export type * from "./DeviceRenameRequest";
 export type * from "./DiffAgainst";
+export type * from "./DirectDevice";
 export type * from "./DirectoryEntry";
 export type * from "./DirectoryListing";
 export type * from "./Event";

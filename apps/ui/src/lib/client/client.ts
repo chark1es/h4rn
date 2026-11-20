@@ -198,12 +198,37 @@ export type ResponseOf<T extends ClientRequest["type"]> = T extends "hello"
                                                                                                 type: "proxy_failover";
                                                                                               }
                                                                                             >
-                                                                                          : Extract<
-                                                                                              ResponseBody,
-                                                                                              {
-                                                                                                type: "ack";
-                                                                                              }
-                                                                                            >;
+                                                                                          : T extends
+                                                                                                | "get_network_access"
+                                                                                                | "set_network_access"
+                                                                                            ? Extract<
+                                                                                                ResponseBody,
+                                                                                                {
+                                                                                                  type: "network_access";
+                                                                                                }
+                                                                                              >
+                                                                                            : T extends
+                                                                                                  | "list_direct_devices"
+                                                                                                  | "revoke_direct_device"
+                                                                                              ? Extract<
+                                                                                                  ResponseBody,
+                                                                                                  {
+                                                                                                    type: "direct_devices";
+                                                                                                  }
+                                                                                                >
+                                                                                              : T extends "create_direct_pairing"
+                                                                                                ? Extract<
+                                                                                                    ResponseBody,
+                                                                                                    {
+                                                                                                      type: "direct_pairing_offer";
+                                                                                                    }
+                                                                                                  >
+                                                                                                : Extract<
+                                                                                                    ResponseBody,
+                                                                                                    {
+                                                                                                      type: "ack";
+                                                                                                    }
+                                                                                                  >;
 
 /**
  * Events that carry no durable position: `seq` is the daemon's current

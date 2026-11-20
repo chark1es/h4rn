@@ -13,19 +13,20 @@
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Instant;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use h4rn_harness::HarnessInstall;
 use h4rn_harness::versions::{
-    CACHE_TTL, RegistryClient, UNKNOWN_TTL, UpdateLine, UpdateRunner, detect_update_method,
-    is_newer, npm_package, update_command,
+    CACHE_TTL, REGISTRY_TIMEOUT, RegistryClient, UNKNOWN_TTL, UpdateLine, UpdateRunner,
+    detect_update_method, is_newer, npm_package, update_command,
 };
 use h4rn_protocol::{
     HarnessKind, HarnessUpdateEvent, HarnessUpdateMethod, HarnessVersionInfo, ProtoError,
     ProtoErrorCode,
 };
 use tokio::sync::{Mutex, broadcast};
+use tokio::time::Instant;
 
 use crate::harnesses::HarnessCatalog;
 use crate::threads::ThreadManager;
@@ -59,6 +60,10 @@ pub struct HarnessVersionService {
     runner: Arc<dyn UpdateRunner>,
     busy: Arc<dyn TurnBusy>,
     cache: Mutex<Option<CachedListing>>,
+    /// Bumped whenever the cache is cleared so a refresh that started before
+    /// the invalidation cannot write its pre-invalidation snapshot back.
+    generation: AtomicU64,
+    refresh: Mutex<()>,
     updates: broadcast::Sender<HarnessUpdateEvent>,
     running: Mutex<HashSet<HarnessKind>>,
 }
@@ -78,6 +83,8 @@ impl HarnessVersionService {
             runner,
             busy,
             cache: Mutex::new(None),
+            generation: AtomicU64::new(0),
+            refresh: Mutex::new(()),
             updates,
             running: Mutex::new(HashSet::new()),
         }
@@ -89,51 +96,114 @@ impl HarnessVersionService {
     }
 
     /// Reports every harness, using the cache while it is fresh.
+    ///
+    /// A cache miss refreshes at most once at a time and never holds the cache
+    /// lock across a network await, so a black-holed registry costs one bounded
+    /// wait ([`REGISTRY_TIMEOUT`]) instead of stalling every other request on
+    /// the connection. Offline rows are `latest: None`, never an error.
     pub async fn list(&self) -> Vec<HarnessVersionInfo> {
-        let mut cache = self.cache.lock().await;
-        if let Some(cached) = cache.as_ref()
-            && Instant::now() < cached.valid_until
-        {
-            return cached.harnesses.clone();
+        if let Some(cached) = self.cached().await {
+            return cached;
         }
 
+        // A single in-flight refresh serves concurrent callers; anyone who
+        // waited finds the fresh cache instead of probing again.
+        let _refreshing = self.refresh.lock().await;
+        if let Some(cached) = self.cached().await {
+            return cached;
+        }
+
+        let generation = self.generation.load(Ordering::SeqCst);
         let harnesses = self.refresh().await;
         let known = harnesses.iter().any(|row| row.latest.is_some());
         let ttl = if known { CACHE_TTL } else { UNKNOWN_TTL };
-        *cache = Some(CachedListing {
-            harnesses: harnesses.clone(),
-            valid_until: Instant::now() + ttl,
-        });
+        {
+            let mut cache = self.cache.lock().await;
+            // An update that finished while this refresh was probing cleared
+            // the cache on purpose; storing the pre-update snapshot here would
+            // show the old version (and a phantom update) until the TTL ends.
+            if self.generation.load(Ordering::SeqCst) == generation {
+                *cache = Some(CachedListing {
+                    harnesses: harnesses.clone(),
+                    valid_until: Instant::now() + ttl,
+                });
+            }
+        }
         harnesses
     }
 
+    /// Clears the cached listing for the next caller.
+    async fn invalidate(&self) {
+        let mut cache = self.cache.lock().await;
+        *cache = None;
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn cached(&self) -> Option<Vec<HarnessVersionInfo>> {
+        let cache = self.cache.lock().await;
+        cache
+            .as_ref()
+            .filter(|cached| Instant::now() < cached.valid_until)
+            .map(|cached| cached.harnesses.clone())
+    }
+
     async fn refresh(&self) -> Vec<HarnessVersionInfo> {
-        let mut rows = Vec::new();
+        // Detect the local installations first: this part is filesystem-only and
+        // must still produce a full listing when the registry is unreachable.
+        let mut entries = Vec::with_capacity(4);
         for kind in crate::harnesses::all_harness_kinds() {
             let install = self.catalog.detect(kind);
             let method = match &install {
                 Some(install) => detect_update_method(kind, &install.path),
                 None => HarnessUpdateMethod::Unavailable,
             };
-            let latest = match npm_package(kind) {
-                // One registry failure is one unknown row, never a failed list.
-                Some(package) => self.registry.latest(package).await,
-                None => None,
-            };
-            let update_available = match (&install, &latest) {
-                (Some(install), Some(latest)) => is_newer(latest, &install.version),
-                _ => false,
-            };
-            rows.push(HarnessVersionInfo {
-                harness: kind,
-                installed: install.as_ref().map(|install| install.version.clone()),
-                latest,
-                update_available,
-                method,
-                path: install.map(|install| install.path.display().to_string()),
-            });
+            entries.push((kind, install, method, npm_package(kind)));
         }
-        rows
+
+        // Probe every npm-distributed harness concurrently, each behind its own
+        // deadline. One stalled lookup must not discard the answers that did
+        // arrive: an unreachable package is one unknown row.
+        let packages: Vec<&'static str> = entries
+            .iter()
+            .filter_map(|(_, _, _, package)| *package)
+            .collect();
+        let latest = futures::future::join_all(packages.into_iter().map(|package| async move {
+            match tokio::time::timeout(REGISTRY_TIMEOUT, self.registry.latest(package)).await {
+                Ok(latest) => latest,
+                Err(_) => {
+                    tracing::debug!(
+                        package,
+                        "harness registry lookup timed out; reporting an unknown version"
+                    );
+                    None
+                }
+            }
+        }))
+        .await;
+
+        let mut latest = latest.into_iter();
+        entries
+            .into_iter()
+            .map(|(kind, install, method, package)| {
+                let latest = if package.is_some() {
+                    latest.next().flatten()
+                } else {
+                    None
+                };
+                let update_available = match (&install, &latest) {
+                    (Some(install), Some(latest)) => is_newer(latest, &install.version),
+                    _ => false,
+                };
+                HarnessVersionInfo {
+                    harness: kind,
+                    installed: install.as_ref().map(|install| install.version.clone()),
+                    latest,
+                    update_available,
+                    method,
+                    path: install.map(|install| install.path.display().to_string()),
+                }
+            })
+            .collect()
     }
 
     /// Starts one harness update, refusing when it is unsafe.
@@ -224,7 +294,7 @@ impl HarnessVersionService {
                 ),
             };
 
-            *service.cache.lock().await = None;
+            service.invalidate().await;
             service.running.lock().await.remove(&kind);
             let _ = service.updates.send(HarnessUpdateEvent::Finished {
                 harness: kind,
@@ -289,6 +359,7 @@ fn manual_or_unknown(kind: HarnessKind, method: &HarnessUpdateMethod) -> ProtoEr
 mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Mutex as StdMutex;
+    use std::time::Duration;
 
     use crate::harnesses::StaticHarnessCatalog;
     use async_trait::async_trait;
@@ -465,6 +536,263 @@ mod tests {
         // One registry read per npm-distributed harness, and none on the
         // second listing.
         assert_eq!(registry.calls(), 3);
+    }
+
+    #[tokio::test]
+    async fn an_in_flight_refresh_cannot_write_back_after_an_update() {
+        struct GatedRegistry {
+            started: tokio::sync::mpsc::UnboundedSender<()>,
+            release: tokio::sync::Semaphore,
+            calls: std::sync::atomic::AtomicUsize,
+        }
+
+        #[async_trait]
+        impl RegistryClient for GatedRegistry {
+            async fn latest(&self, _package: &str) -> Option<String> {
+                let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if call < 3 {
+                    let _ = self.started.send(());
+                    // Block until the update has invalidated the cache.
+                    let _permit = self.release.acquire().await.expect("release");
+                    return Some("1.0.0".to_owned());
+                }
+                Some("2.0.0".to_owned())
+            }
+        }
+
+        let (started, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+        let registry = Arc::new(GatedRegistry {
+            started,
+            release: tokio::sync::Semaphore::new(0),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let service = Arc::new(HarnessVersionService::new(
+            catalog_with(HarnessKind::Codex, Some(install("0.168.0"))),
+            registry.clone(),
+            Arc::new(ScriptedRunner {
+                code: 0,
+                calls: StdMutex::new(Vec::new()),
+            }),
+            Arc::new(Busy(false)),
+        ));
+
+        // A refresh starts and all three lookups block inside the registry.
+        let listing = tokio::spawn({
+            let service = Arc::clone(&service);
+            async move { service.list().await }
+        });
+        for _ in 0..3 {
+            started_rx.recv().await.expect("a lookup started");
+        }
+
+        // An update finishes while the refresh is still in flight.
+        service.invalidate().await;
+
+        registry.release.add_permits(3);
+        let stale = listing.await.expect("listing");
+        // The in-flight caller still receives the rows it asked for...
+        assert!(
+            stale
+                .iter()
+                .any(|row| row.latest.as_deref() == Some("1.0.0")),
+            "the in-flight listing lost its rows"
+        );
+
+        // ...but they were not cached: the next list re-probes and sees the
+        // version published after the update.
+        let rows = service.list().await;
+        assert!(
+            rows.iter()
+                .any(|row| row.latest.as_deref() == Some("2.0.0")),
+            "the stale refresh was written back over the invalidation"
+        );
+        assert_eq!(registry.calls.load(std::sync::atomic::Ordering::SeqCst), 6);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_all_unknown_listing_is_retried_soon() {
+        #[derive(Default)]
+        struct CountingMissingRegistry {
+            calls: StdMutex<u32>,
+        }
+
+        #[async_trait]
+        impl RegistryClient for CountingMissingRegistry {
+            async fn latest(&self, _package: &str) -> Option<String> {
+                *self.calls.lock().expect("calls") += 1;
+                None
+            }
+        }
+
+        let registry = Arc::new(CountingMissingRegistry::default());
+        let service = Arc::new(HarnessVersionService::new(
+            catalog_with(HarnessKind::Codex, Some(install("0.168.0"))),
+            registry.clone(),
+            Arc::new(ScriptedRunner {
+                code: 0,
+                calls: StdMutex::new(Vec::new()),
+            }),
+            Arc::new(Busy(false)),
+        ));
+
+        service.list().await;
+        service.list().await;
+        // The unknown answer is cached, so opening Settings twice is cheap.
+        assert_eq!(*registry.calls.lock().expect("calls"), 3);
+
+        // But a person who reconnects and presses "Check again" does not wait
+        // minutes for the stale answer to expire.
+        tokio::time::advance(UNKNOWN_TTL + Duration::from_secs(1)).await;
+        service.list().await;
+        assert_eq!(*registry.calls.lock().expect("calls"), 6);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stalled_lookup_keeps_the_completed_answers() {
+        struct PartlyHangingRegistry;
+
+        #[async_trait]
+        impl RegistryClient for PartlyHangingRegistry {
+            async fn latest(&self, package: &str) -> Option<String> {
+                match package {
+                    "@openai/codex" => {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        None
+                    }
+                    "@anthropic-ai/claude-code" => Some("2.1.0".into()),
+                    "opencode-ai" => Some("2.2.0".into()),
+                    _ => None,
+                }
+            }
+        }
+
+        let service = Arc::new(HarnessVersionService::new(
+            catalog_with(HarnessKind::Codex, Some(install("0.168.0"))),
+            Arc::new(PartlyHangingRegistry),
+            Arc::new(ScriptedRunner {
+                code: 0,
+                calls: StdMutex::new(Vec::new()),
+            }),
+            Arc::new(Busy(false)),
+        ));
+
+        let rows = service.list().await;
+        let known: Vec<_> = rows
+            .iter()
+            .filter(|row| row.latest.is_some())
+            .map(|row| (row.harness, row.latest.clone()))
+            .collect();
+        assert_eq!(
+            known,
+            vec![
+                (HarnessKind::ClaudeCode, Some("2.1.0".to_owned())),
+                (HarnessKind::Opencode, Some("2.2.0".to_owned())),
+            ],
+            "a stalled lookup discarded the completed answers"
+        );
+        let codex = rows
+            .iter()
+            .find(|row| row.harness == HarnessKind::Codex)
+            .expect("codex row");
+        assert_eq!(codex.latest, None);
+    }
+
+    #[tokio::test]
+    async fn a_black_holed_registry_cannot_stall_the_listing() {
+        struct HangingRegistry;
+
+        #[async_trait]
+        impl RegistryClient for HangingRegistry {
+            async fn latest(&self, _package: &str) -> Option<String> {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                None
+            }
+        }
+
+        let service = Arc::new(HarnessVersionService::new(
+            catalog_with(HarnessKind::Codex, Some(install("0.168.0"))),
+            Arc::new(HangingRegistry),
+            Arc::new(ScriptedRunner {
+                code: 0,
+                calls: StdMutex::new(Vec::new()),
+            }),
+            Arc::new(Busy(false)),
+        ));
+
+        let started = std::time::Instant::now();
+        let rows = service.list().await;
+        assert!(
+            started.elapsed() <= REGISTRY_TIMEOUT + std::time::Duration::from_secs(2),
+            "list waited {:?}",
+            started.elapsed()
+        );
+
+        let codex = rows
+            .iter()
+            .find(|row| row.harness == HarnessKind::Codex)
+            .expect("codex row");
+        assert_eq!(codex.installed.as_deref(), Some("0.168.0"));
+        assert_eq!(codex.latest, None);
+        assert!(!codex.update_available);
+    }
+
+    #[tokio::test]
+    async fn registry_lookups_run_concurrently() {
+        #[derive(Default)]
+        struct SlowRegistry {
+            starts: StdMutex<Vec<std::time::Instant>>,
+        }
+
+        #[async_trait]
+        impl RegistryClient for SlowRegistry {
+            async fn latest(&self, _package: &str) -> Option<String> {
+                self.starts
+                    .lock()
+                    .expect("starts")
+                    .push(std::time::Instant::now());
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                Some("0.169.0".into())
+            }
+        }
+
+        let registry = Arc::new(SlowRegistry::default());
+        let service = Arc::new(HarnessVersionService::new(
+            catalog_with(HarnessKind::Codex, Some(install("0.168.0"))),
+            registry.clone(),
+            Arc::new(ScriptedRunner {
+                code: 0,
+                calls: StdMutex::new(Vec::new()),
+            }),
+            Arc::new(Busy(false)),
+        ));
+
+        let started = std::time::Instant::now();
+        let rows = service.list().await;
+        // Three serial 300ms probes would take 900ms; concurrent ones ~300ms.
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(700),
+            "list took {:?}",
+            started.elapsed()
+        );
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row.latest.as_deref() == Some("0.169.0"))
+                .count(),
+            3
+        );
+
+        let starts = registry.starts.lock().expect("starts");
+        assert_eq!(starts.len(), 3);
+        let first = *starts.iter().min().expect("a start");
+        let spread = starts
+            .iter()
+            .map(|start| start.duration_since(first))
+            .max()
+            .expect("a spread");
+        assert!(
+            spread < std::time::Duration::from_millis(100),
+            "lookups started {spread:?} apart"
+        );
     }
 
     #[derive(Default)]

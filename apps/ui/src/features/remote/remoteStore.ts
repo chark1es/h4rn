@@ -33,6 +33,7 @@ import {
   base64UrlToHex,
   ConnectClient,
   type ConnectError,
+  clearCredentials,
   completeLogin,
   deviceRegistration,
   normalizeTokens,
@@ -45,7 +46,12 @@ import {
 } from "./connect";
 import { mockOffer, offerFromCreate, type PairingOffer } from "./pairingOffer";
 import { DEFAULT_PAIR_SCOPES, isPairScope, orderedScopes } from "./pairingScopes";
-import { loadConnectClient, resetConnectSession, setConnectClient } from "./session";
+import {
+  currentConnectClient,
+  loadConnectClient,
+  resetConnectSession,
+  setConnectClient,
+} from "./session";
 
 export type RemotePhase = "loading" | "signed_out" | "signing_in" | "signed_in" | "error";
 
@@ -100,7 +106,8 @@ const PENDING_LOGIN_KEY = "h4rn.remote.pending-login";
 const LOOPBACK_PORT = 47812;
 export const DEFAULT_CONNECT_URL = "https://h4rn.spwnd.dev";
 
-function shellKind(): "desktop" | "mobile" | "web" {
+/** Which app shell is hosting this page; mobile has no local daemon. */
+export function shellKind(): "desktop" | "mobile" | "web" {
   if (typeof window === "undefined") return "web";
   const tauri = (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
   if (!tauri) return "web";
@@ -694,14 +701,13 @@ export function cancelLogin(): void {
   patch({ login: null, busy: null, phase: "signed_out" });
 }
 
+const SIGN_OUT_REVOKE_TIMEOUT_MS = 3_000;
+
 /** Signs out, forgets the active machine and returns to a local session. */
 export async function signOut(): Promise<void> {
-  const client = await loadConnectClient();
-  try {
-    await client?.logout();
-  } catch {
-    // Local cleanup is what the person asked for.
-  }
+  // Local cleanup happens first and synchronously: a relay that hangs must
+  // never keep the person signed in or stuck on a spinning button.
+  const client = currentConnectClient();
   resetConnectSession();
   clearActiveRemote();
   remoteStore.setState({
@@ -710,6 +716,12 @@ export async function signOut(): Promise<void> {
     connectUrl: remoteStore.getState().connectUrl,
   });
   restartConnection();
+  if (client) {
+    // Best effort: revoke the session on the relay with a short deadline, but
+    // never await it. Rejections are irrelevant since the local session is gone.
+    void client.revokeSession(SIGN_OUT_REVOKE_TIMEOUT_MS).catch(() => undefined);
+  }
+  await clearCredentials();
 }
 
 // ---------------------------------------------------------------------------

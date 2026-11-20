@@ -21,11 +21,13 @@
  * shell, build pipeline and native integrations. A later UI pass replaces it.
  */
 
+import { parsePairingUrl as classifyPairingUrl, isDirectPairingUrl } from "./pairingUrl";
 import { rememberConnectPair, rememberOidcCallback } from "./pending";
-import { getSecret, peekSecret, prepareSecrets, setSecret } from "./secrets";
+import { getSecret, peekSecret, prepareSecrets, rememberSecret, setSecret } from "./secrets";
 
 const PAIRING_KEY = "h4rn.pairing";
 const TOKEN_KEY = "h4rn.token";
+const DIRECT_PAIRING_KEY = "h4rn.secure.pairing-uri";
 
 type TauriInternals = {
   invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
@@ -72,39 +74,37 @@ export function normaliseDaemon(raw: string): string {
   return url.toString();
 }
 
-/** Parses `h4rn://connect|pair?daemon=…&token=…`, returning null for other URLs. */
+/** Parses `h4rn://connect|pair?...`, returning null for links the app consumes. */
 export function parsePairingUrl(raw: string): Pairing | null {
-  const url = new URL(raw);
-  if (url.protocol !== "h4rn:") return null;
-  const target = (url.hostname || url.pathname.replace(/^\/+/, "")).toLowerCase();
-  if (!["connect", "pair", "oidc", "callback"].includes(target)) return null;
+  const parsed = classifyPairingUrl(raw);
+  if (!parsed) return null;
 
-  if (target === "oidc" || target === "callback") {
-    // The platform has no auth screen of its own; hand the callback to the UI
-    // (or to a future auth flow) without touching the daemon connection. A
-    // cold-start link arrives before React mounts, so keep it in memory for
+  if (parsed.kind === "oidc") {
+    // A cold-start link arrives before React mounts, so keep it in memory for
     // the remote store; an authorization code is never written to storage.
-    const detail = Object.fromEntries(url.searchParams.entries());
-    rememberOidcCallback(detail);
-    window.dispatchEvent(new CustomEvent("h4rn-oidc-callback", { detail }));
+    rememberOidcCallback(parsed.detail);
+    window.dispatchEvent(new CustomEvent("h4rn-oidc-callback", { detail: parsed.detail }));
     return null;
   }
 
   // A connect pairing QR names the relay, machine and daemon Noise key; the
-  // remote feature claims it. It carries no daemon token, so handle it before
-  // the local pairing shape below.
-  if (target === "pair" && url.searchParams.get("c") && url.searchParams.get("m")) {
-    rememberConnectPair(raw);
-    window.dispatchEvent(new CustomEvent("h4rn-connect-pair", { detail: raw }));
+  // remote feature claims it. It carries no daemon token.
+  if (parsed.kind === "connect") {
+    rememberConnectPair(parsed.raw);
+    window.dispatchEvent(new CustomEvent("h4rn-connect-pair", { detail: parsed.raw }));
     return null;
   }
 
-  const daemon = url.searchParams.get("daemon");
-  const token = url.searchParams.get("token");
-  if (!daemon || !token) {
-    throw new Error("The pairing link is missing daemon or token.");
+  // A direct QR carries a one-time PSK and a LAN/tailnet endpoint instead of a
+  // token. The client bootstrap reads this key and selects Noise, exactly as
+  // `?pair=` does in a browser; the daemon burns the secret on first use.
+  if (parsed.kind === "direct") {
+    rememberSecret(DIRECT_PAIRING_KEY, parsed.raw);
+    window.dispatchEvent(new CustomEvent("h4rn-direct-pair", { detail: parsed.raw }));
+    return null;
   }
-  return { daemon: normaliseDaemon(daemon), token };
+
+  return { daemon: normaliseDaemon(parsed.daemon), token: parsed.token };
 }
 
 function currentQueryPairing(): Pairing | null {
@@ -355,7 +355,7 @@ function renderConnect(initialMessage?: string): void {
 
   const hint = el(
     "p",
-    "Emulator build: run `scripts/mobile-android.sh run`, which starts the daemon, wires `adb reverse tcp:47800 tcp:47800` and passes this URL and token. Or open `h4rn://connect?daemon=…&token=…`.",
+    "Emulator build: run `scripts/mobile-android.sh run`, which starts the daemon, wires `adb reverse tcp:47800 tcp:47800` and passes this URL and token. Or paste the pairing link / direct QR shown on the host.",
     "margin:0;color:var(--h4rn-pair-faint);font-size:12px;max-width:34rem",
   );
 
@@ -381,9 +381,26 @@ function renderConnect(initialMessage?: string): void {
     if (busy) return;
     busy = true;
     void (async () => {
+      const raw = daemonInput.value.trim();
+      // The same field accepts a pasted pairing link. A direct QR is stored for
+      // the client bootstrap; a connect link is handed to the app behind this
+      // overlay, which is then unnecessary.
       try {
+        if (/^h4rn:\/\//i.test(raw)) {
+          if (isDirectPairingUrl(raw)) {
+            setStatus("Saving the pairing…");
+            // Await the backend write: the reload starts a new page whose
+            // synchronous boot read would not see this page's memory cache.
+            await setSecret(DIRECT_PAIRING_KEY, raw);
+            window.location.reload();
+            return;
+          }
+          parsePairingUrl(raw);
+          overlay.remove();
+          return;
+        }
         await apply({
-          daemon: normaliseDaemon(daemonInput.value),
+          daemon: normaliseDaemon(raw),
           token: tokenInput.value.trim(),
         });
       } catch (error) {
@@ -407,9 +424,26 @@ function renderConnect(initialMessage?: string): void {
           windowed: true,
           formats: ["QR_CODE"],
         });
-        const pairing = parsePairingUrl(result.content);
-        if (!pairing) throw new Error("That QR code is not an h4rn pairing link.");
-        await apply(pairing);
+        const scanned = result.content.trim();
+        // A direct QR carries a one-time PSK and an endpoint, not a token, so
+        // it goes to the same secret store `?pair=` uses and the page reloads.
+        if (isDirectPairingUrl(scanned)) {
+          setStatus("Saving the pairing…");
+          await setSecret(DIRECT_PAIRING_KEY, scanned);
+          window.location.reload();
+          return;
+        }
+        const pairing = parsePairingUrl(scanned);
+        if (pairing) {
+          await apply(pairing);
+          return;
+        }
+        // A connect/OIDC link was handed to the app behind this overlay.
+        if (/^h4rn:\/\//i.test(scanned)) {
+          overlay.remove();
+          return;
+        }
+        throw new Error("That QR code is not an h4rn pairing link.");
       } catch (error) {
         setStatus(`${describeError(error)} You can still type the URL and token.`, true);
       } finally {
@@ -430,14 +464,19 @@ async function boot(): Promise<void> {
     return;
   }
 
-  // 2. Nothing in the URL: reuse the Keystore pairing without a UI detour.
+  // 2. A direct QR has no daemon token: `parsePairingUrl` stored the pairing
+  //    URI, and the client bootstrap consumes it. Keep the connect form out of
+  //    the way while the Noise transport pairs.
+  if (peekSecret(DIRECT_PAIRING_KEY)) return;
+
+  // 3. Nothing in the URL: reuse the Keystore pairing without a UI detour.
   const stored = await readStoredPairing();
   if (stored) {
     await commitPairing(stored);
     return;
   }
 
-  // 3. First launch on this device.
+  // 4. First launch on this device.
   renderConnect();
 }
 
@@ -467,6 +506,12 @@ function watchDeepLinks(): void {
           void commitPairing(pairing).catch((error: unknown) => {
             renderConnect(error instanceof Error ? error.message : String(error));
           });
+          return;
+        }
+        // A direct pairing URI is already stored; the app behind the first-run
+        // form can connect without it.
+        if (peekSecret(DIRECT_PAIRING_KEY)) {
+          document.getElementById("h4rn-connect")?.remove();
           return;
         }
       } catch (error) {

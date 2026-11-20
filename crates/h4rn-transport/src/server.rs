@@ -585,6 +585,21 @@ impl SecureService {
         }
     }
 
+    /// Device keys that own a live logical session right now.
+    pub fn connected_devices(&self) -> Vec<[u8; KEY_LEN]> {
+        let sessions = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut keys: Vec<[u8; KEY_LEN]> = sessions
+            .values()
+            .filter_map(|endpoint| lock(&endpoint.session).device)
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        keys
+    }
+
     /// Number of live logical sessions.
     pub fn session_count(&self) -> usize {
         self.sessions

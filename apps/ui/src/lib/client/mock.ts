@@ -16,6 +16,7 @@ import type {
   BlobInfo,
   ClientFrame,
   ClientRequest,
+  DirectDevice,
   DirectoryListing,
   Event,
   FsTurnChanges,
@@ -33,6 +34,7 @@ import type {
   McpTestCallResult,
   McpToolInfo,
   McpTransportView,
+  PairScope,
   Project,
   ProjectSource,
   ProtoError,
@@ -117,6 +119,11 @@ type SkillsBody = Extract<ClientRequest, { type: `skills_${string}` }>;
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
+
+/** Every direct pairing starts from view + approve unless scopes are asked for. */
+const DEFAULT_DIRECT_SCOPES: PairScope[] = ["view", "approve"];
+const PAIR_SCOPE_ORDER: readonly PairScope[] = ["view", "approve", "terminal", "files", "admin"];
+const NETWORK_PORT = 47810;
 
 const iso = (offsetMs = 0) => new Date(Date.now() + offsetMs).toISOString();
 
@@ -1924,6 +1931,16 @@ class MockDaemon {
   private harnessVersions: HarnessVersionInfo[] = mockHarnessVersions();
   private harnessUpdating = new Set<HarnessKind>();
   private proxyCatalogs = new Map<string, ProxyModelCatalog>();
+  private networkAccess = { enabled: false };
+  /** Devices paired directly; seeded so Settings shows a realistic list. */
+  private directDevices: DirectDevice[] = [
+    {
+      key: "3f9a1c0e".padEnd(64, "0"),
+      scopes: ["view", "approve"],
+      paired_at: new Date(Date.now() - 3 * 86_400_000).toISOString(),
+      connected: false,
+    },
+  ];
 
   constructor(
     private readonly handlers: TransportHandlers,
@@ -2710,6 +2727,64 @@ class MockDaemon {
       case "confirm_pairing":
         this.ok(frame.id, { type: "ack" });
         return;
+      case "get_network_access":
+        this.ok(frame.id, this.networkSnapshot());
+        return;
+      case "set_network_access": {
+        this.networkAccess.enabled = body.enabled;
+        this.ok(frame.id, this.networkSnapshot());
+        return;
+      }
+      case "create_direct_pairing": {
+        if (!this.networkAccess.enabled) {
+          this.err(
+            frame.id,
+            "conflict",
+            "Turn on network access first",
+            "Enable it above, then try again.",
+          );
+          return;
+        }
+        const requested = body.scopes.length > 0 ? body.scopes : DEFAULT_DIRECT_SCOPES;
+        const held = new Set<PairScope>(["view", ...requested]);
+        const scopes = PAIR_SCOPE_ORDER.filter((scope) => held.has(scope));
+        const expiresAt = Math.floor((Date.now() + 10 * 60_000) / 1_000);
+        const addresses = this.networkAddresses();
+        const primary = addresses[0] ?? "192.168.1.24:47810";
+        const secondary = addresses[1] ?? "100.101.7.42:47810";
+        this.ok(frame.id, {
+          type: "direct_pairing_offer",
+          uri:
+            `h4rn://pair?e=${encodeURIComponent(primary)}` +
+            `&d=${"ab".repeat(32)}&p=${"cd".repeat(32)}` +
+            `&a=${encodeURIComponent(secondary)}&l=This%20computer`,
+          expires_at: expiresAt,
+          addresses,
+          scopes,
+        });
+        return;
+      }
+      case "cancel_direct_pairing":
+        this.ok(frame.id, { type: "ack" });
+        return;
+      case "list_direct_devices":
+        this.ok(frame.id, { type: "direct_devices", devices: this.directDevices });
+        return;
+      case "revoke_direct_device": {
+        const before = this.directDevices.length;
+        this.directDevices = this.directDevices.filter((device) => device.key !== body.key);
+        if (this.directDevices.length === before) {
+          this.err(
+            frame.id,
+            "not_found",
+            "no device paired directly with that key",
+            "Refresh the paired devices list; it may already be removed",
+          );
+          return;
+        }
+        this.ok(frame.id, { type: "direct_devices", devices: this.directDevices });
+        return;
+      }
       case "list_resets":
         this.ok(frame.id, {
           type: "resets",
@@ -3037,6 +3112,26 @@ class MockDaemon {
 
   private sortedMcp(): McpServerView[] {
     return [...this.mcpServers].sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  // -------------------------------------------------------------------------
+  // Network access
+  // -------------------------------------------------------------------------
+
+  private networkAddresses(): string[] {
+    if (!this.networkAccess.enabled) return [];
+    return ["192.168.1.24:47810", "100.101.7.42:47810"];
+  }
+
+  private networkSnapshot(): ResponseBody {
+    return {
+      type: "network_access",
+      enabled: this.networkAccess.enabled,
+      listening: this.networkAccess.enabled,
+      port: NETWORK_PORT,
+      addresses: this.networkAddresses(),
+      error: null,
+    };
   }
 
   private handleMcp(id: number, request: McpRequest): void {
