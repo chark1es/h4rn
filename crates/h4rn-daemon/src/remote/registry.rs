@@ -66,6 +66,9 @@ pub struct Entry {
     /// scopes and are kept off the transport allowlist.
     #[serde(default)]
     pub pending: bool,
+    /// When a direct pairing completed. Older files lack it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paired_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Confirmed by this run's authoritative source: a connect snapshot for a
     /// connect client, a peer report for a peer daemon, or the pairing itself
     /// for a direct one. Never serialised: every connect entry starts a restart
@@ -379,6 +382,7 @@ impl DeviceRegistry {
             provenance: Provenance::Connect,
             machine: None,
             pending: pending.unwrap_or(true),
+            paired_at: None,
             verified: true,
         };
         let ((), persisted) = self.mutate(true, |entries| {
@@ -435,6 +439,7 @@ impl DeviceRegistry {
             provenance: Provenance::Direct,
             machine: None,
             pending: false,
+            paired_at: Some(chrono::Utc::now()),
             verified: true,
         };
         let ((), persisted) = self.mutate(true, |entries| {
@@ -459,6 +464,7 @@ impl DeviceRegistry {
             provenance: Provenance::Connect,
             machine: Some(machine.to_string()),
             pending: false,
+            paired_at: None,
             verified: true,
         };
         let ((), persisted) = self.mutate(true, |entries| {
@@ -723,6 +729,41 @@ impl DeviceRegistry {
             {
                 persisted = Err(error);
             }
+        }
+        (removed, persisted)
+    }
+
+    /// Client devices paired directly (LAN/tailnet), most recent first.
+    pub fn direct_devices(&self) -> Vec<Entry> {
+        let mut devices: Vec<Entry> = self
+            .read()
+            .values()
+            .filter(|entry| entry.provenance == Provenance::Direct && entry.role == Role::Client)
+            .cloned()
+            .collect();
+        devices.sort_by(|a, b| {
+            b.paired_at
+                .cmp(&a.paired_at)
+                .then_with(|| a.key.cmp(&b.key))
+        });
+        devices
+    }
+
+    /// Removes a directly paired client. Connect devices and peer daemons are
+    /// left alone: they are managed by their own source. Returns whether a
+    /// direct device was removed.
+    pub fn remove_direct(&self, key: &[u8; KEY_LEN]) -> (bool, Result<(), PersistError>) {
+        let (removed, persisted) = self.mutate(false, |entries| {
+            let direct = entries.get(key).is_some_and(|entry| {
+                entry.provenance == Provenance::Direct && entry.role == Role::Client
+            });
+            direct && entries.remove(key).is_some()
+        });
+        if let Err(error) = &persisted
+            && removed
+        {
+            self.remember_revocations(&[*key]);
+            tracing::warn!(%error, "a direct device removal could not be saved");
         }
         (removed, persisted)
     }

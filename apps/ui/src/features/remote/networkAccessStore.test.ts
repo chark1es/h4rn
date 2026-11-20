@@ -12,7 +12,9 @@ import {
   cancelDirectPairing,
   createDirectPairing,
   getNetworkAccessState,
+  loadDirectDevices,
   resetNetworkAccessStoreForTests,
+  revokeDirectDevice,
   setNetworkAccess,
 } from "./networkAccessStore";
 
@@ -96,5 +98,40 @@ describe("network access store", () => {
     expect(await setNetworkAccess(true)).toBe(false);
     expect(getNetworkAccessState().error).toBe("daemon is offline");
     expect(getNetworkAccessState().saving).toBe(false);
+  });
+
+  it("lists directly paired devices and revokes one", async () => {
+    const phone = {
+      key: "aa".repeat(32),
+      scopes: ["view", "approve"] as PairScope[],
+      paired_at: "2026-11-18T10:00:00Z",
+      connected: true,
+    };
+    const laptop = { ...phone, key: "bb".repeat(32), connected: false };
+    request.mockResolvedValueOnce({ type: "direct_devices", devices: [phone, laptop] });
+    await loadDirectDevices();
+    expect(request).toHaveBeenCalledWith({ type: "list_direct_devices" });
+    expect(getNetworkAccessState().devices).toEqual([phone, laptop]);
+
+    request.mockResolvedValueOnce({ type: "direct_devices", devices: [laptop] });
+    expect(await revokeDirectDevice(phone.key)).toBe(true);
+    expect(request).toHaveBeenLastCalledWith({ type: "revoke_direct_device", key: phone.key });
+    expect(getNetworkAccessState().devices).toEqual([laptop]);
+    expect(getNetworkAccessState().revoking).toBeNull();
+  });
+
+  it("keeps the device and shows why when a revoke fails", async () => {
+    const phone = {
+      key: "aa".repeat(32),
+      scopes: ["view"] as PairScope[],
+      paired_at: null,
+      connected: false,
+    };
+    request.mockResolvedValueOnce({ type: "direct_devices", devices: [phone] });
+    await loadDirectDevices();
+    request.mockRejectedValueOnce(new Error("no device paired directly with that key"));
+    expect(await revokeDirectDevice(phone.key)).toBe(false);
+    expect(getNetworkAccessState().devices).toEqual([phone]);
+    expect(getNetworkAccessState().devicesError).toContain("no device paired directly");
   });
 });

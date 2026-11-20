@@ -73,6 +73,19 @@ pub enum ServerFrame {
     },
 }
 
+/// A device paired directly (LAN/tailnet) with this computer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct DirectDevice {
+    /// Noise static key, hex. Identifies the device for a revoke.
+    pub key: String,
+    /// Scopes the device holds.
+    pub scopes: Vec<crate::connect::PairScope>,
+    /// When it paired; absent for devices paired before this was recorded.
+    pub paired_at: Option<DateTime<Utc>>,
+    /// Whether it has a live secure session right now.
+    pub connected: bool,
+}
+
 /// One durable event with its daemon-global sequence number.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 pub struct SeqEvent {
@@ -465,6 +478,11 @@ pub enum ResponseBody {
         addresses: Vec<String>,
         /// Why the listener could not bind, when it could not.
         error: Option<String>,
+    },
+    /// Devices paired directly with this computer.
+    DirectDevices {
+        /// Most recently paired first.
+        devices: Vec<DirectDevice>,
     },
     /// A one-time direct pairing QR and its advertised candidates.
     DirectPairingOffer {

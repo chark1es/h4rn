@@ -207,19 +207,28 @@ export type ResponseOf<T extends ClientRequest["type"]> = T extends "hello"
                                                                                                   type: "network_access";
                                                                                                 }
                                                                                               >
-                                                                                            : T extends "create_direct_pairing"
+                                                                                            : T extends
+                                                                                                  | "list_direct_devices"
+                                                                                                  | "revoke_direct_device"
                                                                                               ? Extract<
                                                                                                   ResponseBody,
                                                                                                   {
-                                                                                                    type: "direct_pairing_offer";
+                                                                                                    type: "direct_devices";
                                                                                                   }
                                                                                                 >
-                                                                                              : Extract<
-                                                                                                  ResponseBody,
-                                                                                                  {
-                                                                                                    type: "ack";
-                                                                                                  }
-                                                                                                >;
+                                                                                              : T extends "create_direct_pairing"
+                                                                                                ? Extract<
+                                                                                                    ResponseBody,
+                                                                                                    {
+                                                                                                      type: "direct_pairing_offer";
+                                                                                                    }
+                                                                                                  >
+                                                                                                : Extract<
+                                                                                                    ResponseBody,
+                                                                                                    {
+                                                                                                      type: "ack";
+                                                                                                    }
+                                                                                                  >;
 
 /**
  * Events that carry no durable position: `seq` is the daemon's current

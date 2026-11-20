@@ -2,6 +2,7 @@
 import type { BlobDownload } from "./BlobDownload";
 import type { BlobInfo } from "./BlobInfo";
 import type { DeviceId } from "./DeviceId";
+import type { DirectDevice } from "./DirectDevice";
 import type { DirectoryListing } from "./DirectoryListing";
 import type { FailoverOptions } from "./FailoverOptions";
 import type { FileEntry } from "./FileEntry";
@@ -417,7 +418,11 @@ addresses: Array<string>,
 /**
  * Why the listener could not bind, when it could not.
  */
-error: string | null, } | { "type": "direct_pairing_offer", 
+error: string | null, } | { "type": "direct_devices", 
+/**
+ * Most recently paired first.
+ */
+devices: Array<DirectDevice>, } | { "type": "direct_pairing_offer", 
 /**
  * `h4rn://pair?...` payload to render as a QR.
  */

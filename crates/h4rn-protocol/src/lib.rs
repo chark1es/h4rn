@@ -78,7 +78,9 @@ pub use mcp::{
 };
 pub use projects::{DirectoryEntry, DirectoryListing, Project, ProjectSource};
 pub use proxy::*;
-pub use server::{Event, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame};
+pub use server::{
+    DirectDevice, Event, ProtoError, ProtoErrorCode, ResponseBody, SeqEvent, ServerFrame,
+};
 pub use skills::{
     SkillBundleFile, SkillConflict, SkillConflictResolution, SkillDetail, SkillDiff, SkillDiffFile,
     SkillFile, SkillFileChange, SkillHarnessAvailability, SkillImportCandidate, SkillImportPreview,

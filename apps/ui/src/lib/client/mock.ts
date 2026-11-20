@@ -16,6 +16,7 @@ import type {
   BlobInfo,
   ClientFrame,
   ClientRequest,
+  DirectDevice,
   DirectoryListing,
   Event,
   FsTurnChanges,
@@ -1931,6 +1932,15 @@ class MockDaemon {
   private harnessUpdating = new Set<HarnessKind>();
   private proxyCatalogs = new Map<string, ProxyModelCatalog>();
   private networkAccess = { enabled: false };
+  /** Devices paired directly; seeded so Settings shows a realistic list. */
+  private directDevices: DirectDevice[] = [
+    {
+      key: "3f9a1c0e".padEnd(64, "0"),
+      scopes: ["view", "approve"],
+      paired_at: new Date(Date.now() - 3 * 86_400_000).toISOString(),
+      connected: false,
+    },
+  ];
 
   constructor(
     private readonly handlers: TransportHandlers,
@@ -2757,6 +2767,24 @@ class MockDaemon {
       case "cancel_direct_pairing":
         this.ok(frame.id, { type: "ack" });
         return;
+      case "list_direct_devices":
+        this.ok(frame.id, { type: "direct_devices", devices: this.directDevices });
+        return;
+      case "revoke_direct_device": {
+        const before = this.directDevices.length;
+        this.directDevices = this.directDevices.filter((device) => device.key !== body.key);
+        if (this.directDevices.length === before) {
+          this.err(
+            frame.id,
+            "not_found",
+            "no device paired directly with that key",
+            "Refresh the paired devices list; it may already be removed",
+          );
+          return;
+        }
+        this.ok(frame.id, { type: "direct_devices", devices: this.directDevices });
+        return;
+      }
       case "list_resets":
         this.ok(frame.id, {
           type: "resets",

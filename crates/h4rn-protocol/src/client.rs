@@ -639,6 +639,14 @@ pub enum ClientRequest {
     },
     /// Close the open direct pairing and disarm its one-time secret.
     CancelDirectPairing,
+    /// List devices paired directly with this computer (LAN/tailnet QR or
+    /// `h4rnd pair --direct`). Devices paired through connect are not here.
+    ListDirectDevices,
+    /// Remove a directly paired device and drop its live sessions.
+    RevokeDirectDevice {
+        /// The device's Noise static key, hex, from [`Self::ListDirectDevices`].
+        key: String,
+    },
     /// Read known usage limits and the auto-resume policy.
     GetLimits,
     /// List persisted auto-resume schedules and limit history.
@@ -978,7 +986,8 @@ impl ClientRequest {
             | Self::ForgeListChecks { .. }
             | Self::ForgeListPrCommits { .. }
             | Self::ListProjects { .. }
-            | Self::GetNetworkAccess => View,
+            | Self::GetNetworkAccess
+            | Self::ListDirectDevices => View,
             Self::CreateThread { .. }
             | Self::SendMessage { .. }
             | Self::Interrupt { .. }
@@ -1046,6 +1055,7 @@ impl ClientRequest {
             | Self::SetNetworkAccess { .. }
             | Self::CreateDirectPairing { .. }
             | Self::CancelDirectPairing
+            | Self::RevokeDirectDevice { .. }
             | Self::ForgeImportCli { .. }
             | Self::UpdateHarness { .. } => Admin,
             Self::Mcp { request } => match request {
@@ -1234,6 +1244,13 @@ mod tests {
                 Admin,
             ),
             (ClientRequest::CancelDirectPairing, Admin),
+            (ClientRequest::ListDirectDevices, View),
+            (
+                ClientRequest::RevokeDirectDevice {
+                    key: "00".repeat(32),
+                },
+                Admin,
+            ),
         ];
         for (request, expected) in cases {
             assert_eq!(request.required_scope(), expected, "{request:?}");

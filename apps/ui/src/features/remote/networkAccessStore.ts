@@ -8,7 +8,7 @@
 
 import { useSyncExternalStore } from "react";
 
-import type { PairScope } from "@/gen";
+import type { DirectDevice, PairScope } from "@/gen";
 import { toProtoError } from "@/lib/client/errors";
 import { getClient } from "@/lib/store/appStore";
 
@@ -37,6 +37,11 @@ export type NetworkAccessState = {
   offer: DirectPairingView | null;
   creating: boolean;
   offerError: string | null;
+  /** Devices paired directly with this computer; `null` until loaded. */
+  devices: DirectDevice[] | null;
+  /** Key of the device whose revoke is in flight. */
+  revoking: string | null;
+  devicesError: string | null;
 };
 
 const initialState: NetworkAccessState = {
@@ -47,6 +52,9 @@ const initialState: NetworkAccessState = {
   offer: null,
   creating: false,
   offerError: null,
+  devices: null,
+  revoking: null,
+  devicesError: null,
 };
 
 let state: NetworkAccessState = initialState;
@@ -173,6 +181,40 @@ export async function createDirectPairing(scopes: PairScope[]): Promise<DirectPa
   } catch (error) {
     update({ creating: false, offerError: describe(error) });
     return null;
+  }
+}
+
+/** Reads the devices paired directly with this computer. */
+export async function loadDirectDevices(): Promise<void> {
+  try {
+    const response = await getClient().request({ type: "list_direct_devices" });
+    if (response.type === "direct_devices") {
+      update({ devices: response.devices, devicesError: null });
+    }
+  } catch (error) {
+    update({ devicesError: describe(error) });
+  }
+}
+
+/**
+ * Removes a directly paired device. The daemon drops its key and ends its
+ * live sessions, so it has to pair again to come back.
+ */
+export async function revokeDirectDevice(key: string): Promise<boolean> {
+  update({ revoking: key, devicesError: null });
+  try {
+    const response = await getClient().request({ type: "revoke_direct_device", key });
+    update({
+      revoking: null,
+      devices:
+        response.type === "direct_devices"
+          ? response.devices
+          : (state.devices ?? []).filter((device) => device.key !== key),
+    });
+    return true;
+  } catch (error) {
+    update({ revoking: null, devicesError: describe(error) });
+    return false;
   }
 }
 

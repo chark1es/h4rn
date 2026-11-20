@@ -5,7 +5,8 @@
 //! without a restart; the persisted setting is what a headless `h4rnd serve`
 //! and the desktop both read.
 
-use h4rn_protocol::{ClientRequest, ProtoError, ResponseBody};
+use h4rn_protocol::{ClientRequest, DirectDevice, ProtoError, ProtoErrorCode, ResponseBody};
+use h4rn_transport::keys::KEY_LEN;
 use tokio::task::JoinHandle;
 
 use crate::network_access::NetworkAccessSnapshot;
@@ -19,6 +20,8 @@ pub(super) fn matches(request: &ClientRequest) -> bool {
             | ClientRequest::SetNetworkAccess { .. }
             | ClientRequest::CreateDirectPairing { .. }
             | ClientRequest::CancelDirectPairing
+            | ClientRequest::ListDirectDevices
+            | ClientRequest::RevokeDirectDevice { .. }
     )
 }
 
@@ -73,6 +76,46 @@ pub(super) async fn handle(
             );
             Ok(ResponseBody::Ack)
         }
+        ClientRequest::ListDirectDevices => Ok(direct_devices(conn)),
+        ClientRequest::RevokeDirectDevice { key } => {
+            let bytes: [u8; KEY_LEN] = hex::decode(key.trim())
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or_else(|| {
+                    ProtoError::new(
+                        ProtoErrorCode::InvalidRequest,
+                        "the device key is not a 32-byte hex key",
+                        "Refresh the paired devices list and try again",
+                    )
+                })?;
+            let (removed, persisted) = conn.state.devices.remove_direct(&bytes);
+            if !removed {
+                return Err(ProtoError::new(
+                    ProtoErrorCode::NotFound,
+                    "no device paired directly with that key",
+                    "Refresh the paired devices list; it may already be removed",
+                ));
+            }
+            // Drop it from the transport allowlist and end its live sessions
+            // even when the registry write failed: the removal is in memory.
+            if let Some(service) = &conn.state.secure {
+                service.revoke(bytes);
+            }
+            conn.audit(
+                "pairing.direct_revoked",
+                Some("device"),
+                None,
+                serde_json::json!({"key": hex::encode(bytes)}),
+            );
+            persisted.map_err(|error| {
+                ProtoError::new(
+                    ProtoErrorCode::Internal,
+                    format!("the removal could not be saved: {error}"),
+                    "Free disk space or fix the data directory, then try again. The device stays blocked until the daemon restarts.",
+                )
+            })?;
+            Ok(direct_devices(conn))
+        }
         other => Err(crate::server::not_implemented(&other)),
     }
 }
@@ -83,6 +126,34 @@ pub(super) async fn handle(
 /// stream a client has to follow, so this connection has nothing to forward.
 pub(super) fn spawn(_conn: &Connection) -> JoinHandle<()> {
     tokio::spawn(async {})
+}
+
+/// The directly paired devices, with whether each is connected now.
+fn direct_devices(conn: &Connection) -> ResponseBody {
+    let connected = conn
+        .state
+        .secure
+        .as_ref()
+        .map(|service| service.connected_devices())
+        .unwrap_or_default();
+    let devices = conn
+        .state
+        .devices
+        .direct_devices()
+        .into_iter()
+        .map(|entry| {
+            let is_connected = hex::decode(&entry.key)
+                .ok()
+                .is_some_and(|bytes| connected.iter().any(|key| key.as_slice() == bytes));
+            DirectDevice {
+                key: entry.key,
+                scopes: entry.scopes,
+                paired_at: entry.paired_at,
+                connected: is_connected,
+            }
+        })
+        .collect();
+    ResponseBody::DirectDevices { devices }
 }
 
 fn snapshot(state: NetworkAccessSnapshot) -> ResponseBody {

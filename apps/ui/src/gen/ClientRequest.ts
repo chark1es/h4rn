@@ -683,7 +683,11 @@ scopes: Array<PairScope>,
 /**
  * Label shown next to the QR; the host name when absent.
  */
-label: string | null, } | { "type": "cancel_direct_pairing" } | { "type": "get_limits" } | { "type": "list_resets" } | { "type": "cancel_resume", 
+label: string | null, } | { "type": "cancel_direct_pairing" } | { "type": "list_direct_devices" } | { "type": "revoke_direct_device", 
+/**
+ * The device's Noise static key, hex, from [`Self::ListDirectDevices`].
+ */
+key: string, } | { "type": "get_limits" } | { "type": "list_resets" } | { "type": "cancel_resume", 
 /**
  * Thread whose schedule is cleared.
  */

@@ -10,21 +10,31 @@
  * be driving.
  */
 
-import { CheckIcon, CopyIcon, LoaderIcon, QrCodeIcon, RefreshCwIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import {
+  CheckIcon,
+  CopyIcon,
+  LoaderIcon,
+  QrCodeIcon,
+  RefreshCwIcon,
+  SmartphoneIcon,
+} from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
-import type { PairScope } from "@/gen";
+import type { DirectDevice, PairScope } from "@/gen";
 import { useNow } from "@/hooks/use-now";
+import { relativeAge } from "@/lib/format";
 import { useApp } from "@/lib/store/appStore";
 import {
   cancelDirectPairing,
   createDirectPairing,
   type DirectPairingView,
+  loadDirectDevices,
   loadNetworkAccess,
+  revokeDirectDevice,
   setNetworkAccess,
   useNetworkAccess,
 } from "./networkAccessStore";
-import { DEFAULT_PAIR_SCOPES, SCOPE_OPTIONS, toggleScope } from "./pairingScopes";
+import { DEFAULT_PAIR_SCOPES, SCOPE_OPTIONS, scopesLabel, toggleScope } from "./pairingScopes";
 import { QrCode } from "./QrCode";
 import { shellKind, useRemote } from "./remoteStore";
 
@@ -198,6 +208,146 @@ export function DirectPairingBlock({
   );
 }
 
+/** A short, stable name for a device that only has a key: its first 8 hex digits. */
+export function directDeviceName(key: string): string {
+  return `Device ${key.slice(0, 8).toUpperCase()}`;
+}
+
+function DirectDeviceRow({
+  device,
+  now,
+  busy,
+  onRevoke,
+}: {
+  device: DirectDevice;
+  now: number;
+  busy: boolean;
+  onRevoke: () => Promise<boolean>;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const name = directDeviceName(device.key);
+  return (
+    <tr className="hov">
+      <td>
+        <span className="q-cell-id">
+          <SmartphoneIcon className="q-icon" strokeWidth={1.5} aria-hidden />
+          <span style={{ fontWeight: 500 }} className="q-num" title={device.key}>
+            {name}
+          </span>
+        </span>
+      </td>
+      <td className="q-muted">{scopesLabel(device.scopes)}</td>
+      <td className="q-muted">
+        {device.paired_at
+          ? (() => {
+              const age = relativeAge(device.paired_at, now);
+              return age === "now" ? "Just now" : `${age} ago`;
+            })()
+          : "—"}
+      </td>
+      <td>
+        {device.connected ? (
+          <span className="q-health">
+            <span className="q-dot on" aria-hidden />
+            Connected
+          </span>
+        ) : (
+          <span className="q-muted">Not connected</span>
+        )}
+      </td>
+      <td className="r" style={{ paddingRight: 0 }}>
+        {confirming ? (
+          <span style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+            <span className="q-faint" style={{ fontSize: 12 }}>
+              Revoke?
+            </span>
+            <button
+              type="button"
+              className="q-btn ghost"
+              style={{ height: 24 }}
+              onClick={() => setConfirming(false)}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="q-btn danger"
+              style={{ height: 24 }}
+              disabled={busy}
+              aria-label={`Revoke ${name}`}
+              onClick={() => {
+                void onRevoke().then((ok) => {
+                  if (!ok) setConfirming(false);
+                });
+              }}
+            >
+              Revoke
+            </button>
+          </span>
+        ) : (
+          <button
+            type="button"
+            className="q-btn danger"
+            style={{ height: 24 }}
+            aria-label={`Revoke ${name}`}
+            onClick={() => setConfirming(true)}
+          >
+            Revoke
+          </button>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+/**
+ * Devices paired with this computer's own QR. They never went through the
+ * relay, so this is the only place they can be seen or removed.
+ */
+export function DirectDevicesTable({
+  devices,
+  now,
+  revoking,
+  onRevoke,
+}: {
+  devices: readonly DirectDevice[];
+  now: number;
+  revoking: string | null;
+  onRevoke: (key: string) => Promise<boolean>;
+}) {
+  return (
+    <table className="q-tbl" data-testid="direct-devices">
+      <thead>
+        <tr>
+          <th>Device</th>
+          <th>Scopes</th>
+          <th>Paired</th>
+          <th>Status</th>
+          <th />
+        </tr>
+      </thead>
+      <tbody>
+        {devices.length === 0 ? (
+          <tr>
+            <td colSpan={5} className="q-muted" style={{ padding: "16px 0" }}>
+              No devices paired on this network yet.
+            </td>
+          </tr>
+        ) : null}
+        {devices.map((device) => (
+          <DirectDeviceRow
+            key={device.key}
+            device={device}
+            now={now}
+            busy={revoking === device.key}
+            onRevoke={() => onRevoke(device.key)}
+          />
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
 /** The "This computer" group on Settings → Hosts. */
 export function NetworkAccessSettings() {
   const transport = useApp((state) => state.connection.transport);
@@ -223,7 +373,29 @@ export function NetworkAccessSettings() {
   useEffect(() => {
     if (!visible || status !== "online") return;
     void loadNetworkAccess();
+    void loadDirectDevices();
   }, [visible, status]);
+
+  // While a code is showing, watch for the device that scans it. A new key
+  // means the one-time secret was spent, so the QR closes on its own.
+  const devices = state.devices;
+  const knownAtOpen = useRef<number | null>(null);
+  useEffect(() => {
+    if (!open) {
+      knownAtOpen.current = null;
+      return;
+    }
+    knownAtOpen.current ??= devices?.length ?? 0;
+    const timer = window.setInterval(() => void loadDirectDevices(), 3_000);
+    return () => window.clearInterval(timer);
+  }, [open, devices?.length]);
+  useEffect(() => {
+    if (!open || knownAtOpen.current === null || !devices) return;
+    if (devices.length > knownAtOpen.current) {
+      setOpen(false);
+      void cancelDirectPairing();
+    }
+  }, [open, devices]);
 
   // Turning the listener off closes the daemon's pairing window too.
   useEffect(() => {
@@ -328,7 +500,7 @@ export function NetworkAccessSettings() {
               ) : (
                 <QrCodeIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               )}
-              Pair a device
+              Pair on this network
             </button>
           )}
         </div>
@@ -369,6 +541,22 @@ export function NetworkAccessSettings() {
             </button>
           </div>
         </div>
+      ) : null}
+
+      {devices && (devices.length > 0 || enabled) ? (
+        <>
+          <DirectDevicesTable
+            devices={devices}
+            now={now}
+            revoking={state.revoking}
+            onRevoke={revokeDirectDevice}
+          />
+          {state.devicesError ? (
+            <div className="q-danger" role="status" style={{ fontSize: 12, marginTop: 8 }}>
+              {state.devicesError}
+            </div>
+          ) : null}
+        </>
       ) : null}
     </div>
   );

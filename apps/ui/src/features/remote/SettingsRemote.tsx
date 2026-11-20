@@ -286,7 +286,7 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
           }}
         >
           <QrCodeIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-          Pair a device
+          Pair through relay
         </button>
       </div>
 
@@ -780,7 +780,7 @@ function PairDeviceGroup({ onClose }: { onClose: () => void }) {
   return (
     <div className="q-group" id="pair-device">
       <h2>
-        Pair a device <span className="grow" />
+        Pair through relay <span className="grow" />
         {pairing ? (
           <span className="q-faint q-num" style={{ fontSize: 12, fontWeight: 400 }}>
             Expires in <span data-countdown="pair">{remainingText}</span>

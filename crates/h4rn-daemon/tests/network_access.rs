@@ -49,7 +49,11 @@ impl TestDaemon {
 /// `network_enabled` resolves the persisted setting at build time; `port` is
 /// the network listener's configured port (`0` picks an ephemeral one).
 async fn boot(network_enabled: bool, port: u16) -> TestDaemon {
-    let dir = tempfile::tempdir().expect("tempdir");
+    boot_in(tempfile::tempdir().expect("tempdir"), network_enabled, port).await
+}
+
+/// [`boot`] in a data directory the caller may have seeded.
+async fn boot_in(dir: tempfile::TempDir, network_enabled: bool, port: u16) -> TestDaemon {
     let config = Config {
         data_dir: dir.path().to_path_buf(),
         bind: "127.0.0.1:0".parse().expect("bind"),
@@ -338,6 +342,74 @@ async fn a_bind_failure_is_reported_and_retried() {
     assert!(listening, "a retry must bind: {error:?}");
     assert!(error.is_none());
     assert!(http_status(bound, "/healthz").await.contains("200"));
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn directly_paired_devices_are_listed_and_revocable() {
+    use h4rn_daemon::remote::DeviceRegistry;
+    use h4rn_protocol::PairScope;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let devices_path = dir.path().join("devices.json");
+    let phone = [7u8; 32];
+    let connect_phone = [9u8; 32];
+    {
+        let registry = DeviceRegistry::open(&devices_path);
+        registry
+            .insert_direct(phone, vec![PairScope::View, PairScope::Approve])
+            .expect("seed a direct device");
+        registry
+            .insert_scoped("dev_connect", connect_phone, vec![PairScope::View])
+            .expect("seed a connect device");
+    }
+    let daemon = boot_in(dir, false, 0).await;
+    let mut client = Client::connect(&daemon).await;
+
+    // Only the direct pairing is listed: connect devices have their own page.
+    let listed = client
+        .request(ClientRequest::ListDirectDevices)
+        .await
+        .expect("list direct devices");
+    let ResponseBody::DirectDevices { devices } = listed else {
+        panic!("unexpected response: {listed:?}");
+    };
+    assert_eq!(devices.len(), 1, "{devices:?}");
+    assert_eq!(devices[0].key, hex::encode(phone));
+    assert!(devices[0].paired_at.is_some());
+    assert!(!devices[0].connected);
+
+    // A connect device cannot be revoked through the direct path.
+    let error = client
+        .request(ClientRequest::RevokeDirectDevice {
+            key: hex::encode(connect_phone),
+        })
+        .await
+        .expect_err("connect devices are not direct");
+    assert_eq!(error.code, h4rn_protocol::ProtoErrorCode::NotFound);
+
+    let error = client
+        .request(ClientRequest::RevokeDirectDevice {
+            key: "not hex".into(),
+        })
+        .await
+        .expect_err("a malformed key is rejected");
+    assert_eq!(error.code, h4rn_protocol::ProtoErrorCode::InvalidRequest);
+
+    let revoked = client
+        .request(ClientRequest::RevokeDirectDevice {
+            key: hex::encode(phone),
+        })
+        .await
+        .expect("revoke the direct device");
+    assert_eq!(revoked, ResponseBody::DirectDevices { devices: vec![] });
+
+    // The removal is durable, and the connect device is untouched.
+    let reopened = DeviceRegistry::open(daemon._dir.path().join("devices.json"));
+    assert!(reopened.direct_devices().is_empty());
+    assert!(reopened.keys().contains(&connect_phone));
+    assert!(!reopened.keys().contains(&phone));
 
     daemon.stop().await;
 }

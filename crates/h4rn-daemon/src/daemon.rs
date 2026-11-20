@@ -556,7 +556,7 @@ impl Daemon {
         // tailnet, so the extra listener shares the primary port. A bind
         // failure is not fatal: the relay and any LAN address still work.
         if self.config.tailscale == TailscaleMode::Auto
-            && let Some(ip) = crate::remote::tailscale::tailnet_ip()
+            && let Some(ip) = crate::remote::tailscale::tailnet_ip_async().await
         {
             let addr = SocketAddr::new(ip, addrs[0].port());
             if !addrs.contains(&addr) {
@@ -992,7 +992,13 @@ async fn publish_presence(state: AppState, client: Arc<ConnectClient>, config: C
         let relay = client
             .credentials()
             .map(|credentials| credentials.connect_url);
-        let addresses = advertised_addresses(&config, relay.as_deref());
+        // Address discovery may run the tailscale CLI, which blocks.
+        let addresses = {
+            let config = config.clone();
+            tokio::task::spawn_blocking(move || advertised_addresses(&config, relay.as_deref()))
+                .await
+                .unwrap_or_default()
+        };
         if let Err(error) = client.update_addresses(addresses).await {
             tracing::debug!(%error, "could not publish addresses to connect");
         }
