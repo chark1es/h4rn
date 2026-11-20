@@ -563,6 +563,9 @@ impl HarnessSession for AcpSession {
                 message: "session is shut down".into(),
             });
         }
+        // A Stop that arrived after the previous turn's prompt had already
+        // completed must not colour this turn; the flag belongs to one prompt.
+        self.interrupt_requested.store(false, Ordering::SeqCst);
         if self.prompt_running.swap(true, Ordering::SeqCst) {
             return Err(HarnessError::Transport {
                 harness: HarnessKind::Antigravity,
@@ -611,14 +614,17 @@ impl HarnessSession for AcpSession {
         self.prompt_task = Some(tokio::spawn(async move {
             let result = pending.wait().await;
             let duration_ms = millis(started.elapsed());
+            // Read the stop flag before releasing the prompt slot: a new send
+            // clears the flag for its own turn, so this turn must classify
+            // first.
+            let interrupted = interrupt_requested.swap(false, Ordering::SeqCst)
+                || result.as_ref().is_ok_and(|prompt| prompt.cancelled());
             prompt_running.store(false, Ordering::SeqCst);
             match result {
                 Ok(prompt) => {
                     let usage = usage_from_acp(&prompt.usage, duration_ms);
                     let turn_text = lock(&shared).turn_text.clone();
                     let limit = detect_limit(&turn_text, Utc::now());
-                    let interrupted =
-                        interrupt_requested.swap(false, Ordering::SeqCst) || prompt.cancelled();
                     let status = if interrupted {
                         TurnStatus::Interrupted
                     } else if prompt.completed() {
@@ -740,10 +746,10 @@ impl HarnessSession for AcpSession {
                 message: "session is shut down".into(),
             });
         }
-        self.interrupt_requested.store(true, Ordering::SeqCst);
         // `send` only returns once `session/prompt` was flushed, so a running
         // prompt is always on the wire by the time a cancel can reach here.
         if self.prompt_running.load(Ordering::SeqCst) {
+            self.interrupt_requested.store(true, Ordering::SeqCst);
             self.client
                 .cancel(&self.session_id)
                 .await
@@ -795,6 +801,10 @@ impl HarnessSession for AcpSession {
 
     fn session_id(&self) -> Option<String> {
         Some(self.session_id.clone())
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed || self.client.is_closed()
     }
 
     fn agent_state(&self) -> AgentState {
@@ -1182,7 +1192,6 @@ fn remember_turn_text(shared: &Arc<Mutex<AcpShared>>, text: &str) {
 
 fn tool_event(call: &AcpToolCall, shared: &Arc<Mutex<AcpShared>>) -> HarnessEvent {
     let tool_call_id = call.tool_call_id.clone();
-    let input = call.raw_input.clone();
     let output = call.output_preview();
     let status = tool_status(&call.status);
     let finished = matches!(
@@ -1192,7 +1201,7 @@ fn tool_event(call: &AcpToolCall, shared: &Arc<Mutex<AcpShared>>) -> HarnessEven
     let mut shared = lock(shared);
     // `tool_call_update` often carries only a status or output; merge it into
     // the fields the agent already sent so the name and summary stay stable.
-    let (name, summary, kind, locations) = {
+    let (name, summary, kind, locations, input) = {
         let label = shared.tool_labels.entry(tool_call_id.clone()).or_default();
         label.merge(call);
         (
@@ -1200,6 +1209,7 @@ fn tool_event(call: &AcpToolCall, shared: &Arc<Mutex<AcpShared>>) -> HarnessEven
             label.summary(),
             label.kind(),
             label.locations.clone(),
+            label.raw_input.clone(),
         )
     };
     let started_at = shared
@@ -1496,6 +1506,15 @@ mod tests {
         writer.flush().await.expect("flush");
     }
 
+    async fn next_turn_status(events: &mut BoxStream<'static, HarnessEvent>) -> TurnStatus {
+        while let Some(event) = events.next().await {
+            if let HarnessEvent::TurnCompleted { status, .. } = event {
+                return status;
+            }
+        }
+        panic!("the event stream ended before the turn completed");
+    }
+
     #[test]
     fn approval_decisions_choose_the_matching_option() {
         let options = vec![
@@ -1641,6 +1660,64 @@ mod tests {
         assert_eq!(lock(&shared).state, AgentState::Editing);
     }
 
+    #[test]
+    fn a_status_only_completion_keeps_the_tool_input() {
+        let shared = Arc::new(Mutex::new(AcpShared::new()));
+        let started = AcpToolCall::from_value(&json!({
+            "toolCallId": "call-3",
+            "name": "read_file",
+            "kind": "read",
+            "status": "in_progress",
+            "title": "Read package.json",
+            "rawInput": {"path": "/w/package.json"},
+            "locations": [{"path": "/w/package.json"}]
+        }));
+        let HarnessEvent::ToolCall { tool_call } = tool_event(&started, &shared) else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(tool_call.input, Some(json!({"path": "/w/package.json"})));
+
+        let update = AcpToolCall::from_value(&json!({
+            "toolCallId": "call-3",
+            "status": "completed"
+        }));
+        let HarnessEvent::ToolCall { tool_call } = tool_event(&update, &shared) else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(
+            tool_call.input,
+            Some(json!({"path": "/w/package.json"})),
+            "a status-only update must not drop the input the row expands into"
+        );
+    }
+
+    #[test]
+    fn a_title_only_call_takes_a_later_title_as_its_name() {
+        let shared = Arc::new(Mutex::new(AcpShared::new()));
+        let started = AcpToolCall::from_value(&json!({
+            "toolCallId": "call-4",
+            "status": "in_progress",
+            "title": "Read package.json"
+        }));
+        let HarnessEvent::ToolCall { tool_call } = tool_event(&started, &shared) else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(tool_call.name, "Read package.json");
+
+        let update = AcpToolCall::from_value(&json!({
+            "toolCallId": "call-4",
+            "status": "in_progress",
+            "title": "Read apps/ui/package.json"
+        }));
+        let HarnessEvent::ToolCall { tool_call } = tool_event(&update, &shared) else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(
+            tool_call.name, "Read apps/ui/package.json",
+            "a title-only call has no other name, so the newer title becomes it"
+        );
+    }
+
     async fn handshake(
         reader: &mut BufReader<tokio::io::DuplexStream>,
         writer: &mut tokio::io::DuplexStream,
@@ -1691,6 +1768,58 @@ mod tests {
             .await
             .expect("send");
         session.interrupt().await.expect("interrupt");
+
+        agent.await.expect("agent");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stop_after_end_turn_does_not_interrupt_the_next_turn() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            handshake(&mut reader, &mut writer).await;
+            for _ in 0..2 {
+                let prompt = next_frame(&mut reader).await;
+                assert_eq!(prompt["method"], "session/prompt");
+                send_frame(
+                    &mut writer,
+                    json!({"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "end_turn"}}),
+                )
+                .await;
+            }
+        });
+
+        let mut session = AcpSession::start_with(&client, &acp_spec(workspace.path()))
+            .await
+            .expect("start session");
+        let mut events = session.events();
+        session
+            .send(UserInput {
+                text: "first".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect("send");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        // The agent ended its turn; the daemon has not consumed the completion
+        // yet, so a Stop still arrives while the thread looks busy.
+        session.interrupt().await.expect("stop");
+
+        session
+            .send(UserInput {
+                text: "second".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect("send");
+        assert_eq!(
+            next_turn_status(&mut events).await,
+            TurnStatus::Completed,
+            "a late Stop must not mark the next turn interrupted"
+        );
 
         agent.await.expect("agent");
         session.shutdown().await.expect("shutdown");
