@@ -1,7 +1,7 @@
 # h4rn-connect on Coolify (autodeploy from git).
 #
-# Build context is the repo root; Coolify rebuilds on every push to the
-# tracked branch. The proxy domains (h4rn.spwnd.dev and h4rn-connect.spwnd.dev,
+# Coolify redeploys on every push to the tracked branch, pulling the image
+# below. The proxy domains (h4rn.spwnd.dev and h4rn-connect.spwnd.dev,
 # both routed to the `connect` service on 8787) and the secrets are set in
 # Coolify, not here. Required variables: H4RN_PG_PASSWORD, H4RN_CONNECT_KEK,
 # H4RN_CONNECT_SIGNING_KEY, H4RN_CONNECT_PUBLIC_BASE_URL.
@@ -22,9 +22,9 @@ services:
       retries: 20
 
   connect:
-    build:
-      context: .
-      dockerfile: deploy/Dockerfile
+    # The published multi-arch image: Coolify pulls it instead of compiling
+    # the workspace (~17 min) on every deploy. Bump the tag for a new release.
+    image: ghcr.io/chark1es/h4rn-connect:1.0.0
     restart: unless-stopped
     depends_on:
       postgres:
