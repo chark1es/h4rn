@@ -5,9 +5,10 @@
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
-use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -94,29 +95,20 @@ where
         .spawn()
         .map_err(|error| format!("could not run git: {error}"))?;
     // Drain both pipes while the child runs: a command whose output fills the
-    // pipe buffer would otherwise never exit and look like a timeout.
-    let stdout = child.stdout.take().map(|mut pipe| {
-        std::thread::spawn(move || {
-            let mut buffer = Vec::new();
-            let _ = pipe.read_to_end(&mut buffer);
-            buffer
-        })
-    });
-    let stderr = child.stderr.take().map(|mut pipe| {
-        std::thread::spawn(move || {
-            let mut buffer = Vec::new();
-            let _ = pipe.read_to_end(&mut buffer);
-            buffer
-        })
-    });
+    // pipe buffer would otherwise never exit and look like a timeout. Each
+    // reader sends its bytes back when the pipe closes.
+    let stdout = child.stdout.take().map(spawn_reader);
+    let stderr = child.stderr.take().map(spawn_reader);
     let deadline = Instant::now() + limit;
+    let mut timed_out = false;
     let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break status,
+            Ok(Some(status)) => break Some(status),
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(timeout_message(limit));
+                timed_out = true;
+                break None;
             }
             Ok(None) => std::thread::sleep(POLL_INTERVAL),
             Err(error) => {
@@ -126,12 +118,22 @@ where
             }
         }
     };
-    let stdout = stdout
-        .map(|handle| handle.join().unwrap_or_default())
-        .unwrap_or_default();
-    let stderr = stderr
-        .map(|handle| handle.join().unwrap_or_default())
-        .unwrap_or_default();
+    // Collecting output is bounded too: a descendant (a background process a
+    // git alias left running) can keep the pipes open long after git exited.
+    // Wait for each reader with the deadline left plus a short grace, then
+    // detach it and report the timeout instead of hanging.
+    let output_deadline =
+        Instant::now() + deadline.saturating_duration_since(Instant::now()) + OUTPUT_GRACE;
+    let stdout = read_output(stdout, output_deadline);
+    let stderr = read_output(stderr, output_deadline);
+    if timed_out || stdout.is_err() || stderr.is_err() {
+        return Err(timeout_message(limit));
+    }
+    let stdout = stdout.unwrap_or_default();
+    let stderr = stderr.unwrap_or_default();
+    let Some(status) = status else {
+        return Err(timeout_message(limit));
+    };
     if status.success() {
         Ok(String::from_utf8_lossy(&stdout).trim().to_owned())
     } else {
@@ -143,6 +145,48 @@ where
             stderr.to_owned()
         })
     }
+}
+
+/// How long output may still be arriving after the child is gone.
+const OUTPUT_GRACE: Duration = Duration::from_secs(1);
+
+/// Reads one pipe to the end on its own thread and sends the bytes back.
+///
+/// The sender drops when the pipe closes, so the receiver can tell "no more
+/// output" from "a descendant still holds the pipe".
+fn spawn_reader(
+    mut pipe: impl std::io::Read + Send + 'static,
+) -> (JoinHandle<()>, Receiver<Vec<u8>>) {
+    let (sender, receiver) = channel();
+    let handle = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = pipe.read_to_end(&mut buffer);
+        let _ = sender.send(buffer);
+    });
+    (handle, receiver)
+}
+
+/// Waits for one reader's output until `deadline`; then detaches the thread.
+///
+/// `Err(())` means the bound passed with the pipe still open, which is a
+/// timeout for the whole call rather than empty output.
+fn read_output(
+    reader: Option<(JoinHandle<()>, Receiver<Vec<u8>>)>,
+    deadline: Instant,
+) -> Result<Vec<u8>, ()> {
+    let Some((handle, receiver)) = reader else {
+        return Ok(Vec::new());
+    };
+    let wait = deadline.saturating_duration_since(Instant::now());
+    let output = match receiver.recv_timeout(wait) {
+        Ok(buffer) => Ok(buffer),
+        Err(RecvTimeoutError::Timeout) => Err(()),
+        // The reader thread panicked; treat it as no output.
+        Err(RecvTimeoutError::Disconnected) => Ok(Vec::new()),
+    };
+    // Dropping the handle detaches a stuck reader instead of joining it.
+    drop(handle);
+    output
 }
 
 fn timeout_message(limit: Duration) -> String {
@@ -296,13 +340,12 @@ pub fn branch_exists(repo: &Path, branch: &str) -> bool {
     )
 }
 
-/// Every branch under `refs/heads/h4rn/` in `repo`.
+/// Every branch under `refs/heads/h4rn/` in `repo`, by short name.
 ///
 /// One `for-each-ref` answers for all of a repository's owned branches, which
-/// beats a `rev-parse --verify` per subagent. Full ref names are asked for and
-/// the `refs/heads/` prefix stripped: `%(refname:short)` disambiguates a branch
-/// that shares its name with a tag as `heads/h4rn/sa-x`, which would hide the
-/// branch from an exact-name lookup.
+/// beats a `rev-parse --verify` per subagent. Full ref names are requested so a
+/// same-named tag cannot hide a branch; the `refs/heads/` prefix is then
+/// stripped.
 pub fn h4rn_branches(repo: &Path) -> HashSet<String> {
     match run(
         repo,

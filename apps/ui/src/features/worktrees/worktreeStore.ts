@@ -1,4 +1,4 @@
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 
 import type { ProtoError, SkippedWorktree, TrackedWorktree } from "@/gen";
 import type { H4rnClient } from "@/lib/client/client";
@@ -7,6 +7,9 @@ import { getClient } from "@/lib/store/appStore";
 
 /** What the last clear did; the page words it under the Settled group. */
 export type ClearOutcome = { removed: number; skipped: SkippedWorktree[] };
+
+/** The machine and the exact paths a destructive confirmation was opened for. */
+export type ClearConfirmation = { client: H4rnClient; paths: string[] };
 
 export type WorktreeState = {
   rows: TrackedWorktree[];
@@ -17,6 +20,8 @@ export type WorktreeState = {
   clearing: boolean;
   error: ProtoError | null;
   outcome: ClearOutcome | null;
+  /** The client whose request produced `outcome`; never offer it on another. */
+  outcomeSource: H4rnClient | null;
   /** Set when a clear request itself failed, as opposed to skipping entries. */
   clearError: string | null;
 };
@@ -29,6 +34,7 @@ const initialState: WorktreeState = {
   clearing: false,
   error: null,
   outcome: null,
+  outcomeSource: null,
   clearError: null,
 };
 
@@ -55,6 +61,21 @@ export function useWorktrees<T>(selector: (value: WorktreeState) => T): T {
     () => selector(state),
     () => selector(state),
   );
+}
+
+/**
+ * Captures the machine and the paths a confirmation will act on.
+ *
+ * Taken when the dialog opens, so a refresh behind it cannot change what
+ * Confirm removes, and a machine switch makes Confirm refuse instead.
+ */
+export function captureClear(paths: string[]): ClearConfirmation {
+  return { client: getClient(), paths: [...paths] };
+}
+
+/** The last clear's result, only while it came from the client in use now. */
+export function worktreeOutcomeForClient(state: WorktreeState): ClearOutcome | null {
+  return state.outcomeSource !== null && state.outcomeSource === getClient() ? state.outcome : null;
 }
 
 /**
@@ -191,19 +212,33 @@ export async function loadWorktrees(): Promise<void> {
 /**
  * Clears the given explicit paths. Entries the daemon leaves in place come back
  * in `outcome.skipped` so the page can offer a forced retry.
+ *
+ * `expectedClient` comes from a confirmation captured when its dialog opened:
+ * if the machine changed since, the paths describe another host and the clear
+ * is refused rather than sent.
  */
-export async function clearWorktrees(paths: string[], force = false): Promise<void> {
+export async function clearWorktrees(
+  paths: string[],
+  force = false,
+  expectedClient?: H4rnClient,
+): Promise<void> {
   if (state.clearing) return;
   const client = getClient();
-  if (state.source === null || state.source !== client) {
+  if (
+    state.source === null ||
+    state.source !== client ||
+    (expectedClient !== undefined && client !== expectedClient)
+  ) {
     patch({ clearError: "This list belongs to another connection. Refresh it first." });
     return;
   }
-  patch({ clearing: true, clearError: null, outcome: null });
+  patch({ clearing: true, clearError: null, outcome: null, outcomeSource: null });
   try {
     const response = await client.request(
+      // Per-git-call bound is 30 s; a clear of several entries can take longer
+      // than the 60 s listing timeout, so it gets a 10x budget.
       { type: "clear_worktrees", paths, force },
-      { timeoutMs: 60_000 },
+      { timeoutMs: 600_000 },
     );
     if (getClient() !== client) {
       patch({ clearing: false });
@@ -219,6 +254,7 @@ export async function clearWorktrees(paths: string[], force = false): Promise<vo
       clearing: false,
       error: null,
       outcome: { removed: response.removed.length, skipped: response.skipped },
+      outcomeSource: client,
     });
   } catch (error) {
     if (getClient() !== client) {
@@ -234,7 +270,19 @@ export async function clearWorktrees(paths: string[], force = false): Promise<vo
 }
 
 export function dismissWorktreeOutcome(): void {
-  patch({ outcome: null, clearError: null });
+  patch({ outcome: null, outcomeSource: null, clearError: null });
+}
+
+/**
+ * Whether this effect run should refetch: the connection just came back (its
+ * rows may be hours old) or the stored rows came from a replaced client.
+ */
+export function shouldReloadWorktrees(
+  online: boolean,
+  wasOnline: boolean,
+  current: boolean,
+): boolean {
+  return online && (!wasOnline || !current);
 }
 
 /**
@@ -243,8 +291,11 @@ export function dismissWorktreeOutcome(): void {
  */
 export function useWorktreeList(online: boolean): void {
   const current = useWorktrees((value) => worktreeClientCurrent(value.source));
+  const wasOnline = useRef(online);
   useEffect(() => {
-    if (online && !current) void loadWorktrees();
+    const reconnect = shouldReloadWorktrees(online, wasOnline.current, current);
+    wasOnline.current = online;
+    if (reconnect) void loadWorktrees();
   }, [online, current]);
 }
 

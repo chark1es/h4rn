@@ -7,6 +7,8 @@ import { tildePath } from "@/lib/format";
 import { useApp } from "@/lib/store/appStore";
 
 import {
+  type ClearConfirmation,
+  captureClear,
   clearableWorktrees,
   clearWorktrees,
   dismissWorktreeOutcome,
@@ -17,6 +19,7 @@ import {
   useWorktreeList,
   useWorktrees,
   worktreeClientCurrent,
+  worktreeOutcomeForClient,
   worktreePage,
 } from "./worktreeStore";
 
@@ -42,6 +45,20 @@ function subline(row: TrackedWorktree): string {
   else if (!row.exists) parts.push("Directory removed, branch kept");
   if (row.dirty) parts.push("Uncommitted changes");
   return parts.join(" · ");
+}
+
+/** What removing one row does, worded for a checkout that is there or gone. */
+function removeDescription(row: TrackedWorktree): string {
+  const base = row.exists
+    ? `The checkout at ${row.path} is deleted from disk.${
+        row.owned && row.branch ? ` The ${row.branch} branch h4rn created is deleted too.` : ""
+      }`
+    : row.branch
+      ? `No checkout remains on disk. Its ${row.branch} branch is deleted.`
+      : "No checkout remains on disk.";
+  return `${base} Uncommitted changes or unmerged work are skipped.${
+    row.origin === "thread" ? " Its thread may still be resumed there." : ""
+  }`;
 }
 
 /** A path that keeps its last two folders when the row is narrow. */
@@ -112,18 +129,35 @@ export function WorktreeSettings() {
   const loading = useWorktrees((state) => state.loading);
   const clearing = useWorktrees((state) => state.clearing);
   const error = useWorktrees((state) => state.error);
-  const outcome = useWorktrees((state) => state.outcome);
+  const outcome = useWorktrees(worktreeOutcomeForClient);
   const clearError = useWorktrees((state) => state.clearError);
 
-  const [confirmAll, setConfirmAll] = useState(false);
-  const [removing, setRemoving] = useState<TrackedWorktree | null>(null);
-  const [forcing, setForcing] = useState(false);
+  // Each confirmation keeps the machine and paths it was opened for, so a
+  // refresh behind the dialog cannot change its targets.
+  const [confirmAll, setConfirmAll] = useState<ClearConfirmation | null>(null);
+  const [removing, setRemoving] = useState<{
+    row: TrackedWorktree;
+    confirmation: ClearConfirmation;
+  } | null>(null);
+  const [forcing, setForcing] = useState<ClearConfirmation | null>(null);
+
+  // A rebuilt client means the open dialogs and their outcome describe
+  // another machine: close them rather than let a confirm act there.
+  useEffect(() => {
+    if (current) return;
+    setConfirmAll(null);
+    setRemoving(null);
+    setForcing(null);
+    dismissWorktreeOutcome();
+  }, [current]);
 
   const inUse = inUseWorktrees(rows);
   const settled = settledWorktrees(rows);
   const clearable = clearableWorktrees(rows);
   const page = worktreePage(loaded, rows, current ? error : null);
   const keptThreads = settled.length - clearable.length;
+  const clearAllCount = confirmAll?.paths.length ?? 0;
+  const forceCount = forcing?.paths.length ?? 0;
   const busy = clearing || !online || !current;
   const skipped = outcome?.skipped ?? [];
   // Only the skips a forced removal can actually fix are offered again: an
@@ -178,7 +212,7 @@ export function WorktreeSettings() {
               type="button"
               className="q-btn secondary"
               disabled={busy || clearable.length === 0}
-              onClick={() => setConfirmAll(true)}
+              onClick={() => setConfirmAll(captureClear(clearable.map((row) => row.path)))}
             >
               Clear all
             </button>
@@ -193,7 +227,7 @@ export function WorktreeSettings() {
           )
         ) : (
           <>
-            {rows.length > 0 && page.notice ? <p className="q-muted">{page.notice}</p> : null}
+            {page.notice ? <p className="q-muted">{page.notice}</p> : null}
 
             {outcome || clearError ? (
               <div className="q-harness-out" role="status" aria-live="polite">
@@ -213,7 +247,7 @@ export function WorktreeSettings() {
                     className="q-btn secondary"
                     style={{ marginTop: 8 }}
                     disabled={busy}
-                    onClick={() => setForcing(true)}
+                    onClick={() => setForcing(captureClear(forceable.map((item) => item.path)))}
                   >
                     Remove anyway
                   </button>
@@ -235,7 +269,10 @@ export function WorktreeSettings() {
                 <WorktreeRow
                   key={row.path}
                   row={row}
-                  action={{ disabled: busy, onClick: () => setRemoving(row) }}
+                  action={{
+                    disabled: busy,
+                    onClick: () => setRemoving({ row, confirmation: captureClear([row.path]) }),
+                  }}
                 />
               ))
             )}
@@ -244,59 +281,55 @@ export function WorktreeSettings() {
       </div>
 
       <ConfirmDialog
-        open={confirmAll}
-        title={`Remove ${clearable.length} ${clearable.length === 1 ? "worktree" : "worktrees"}?`}
+        open={confirmAll !== null}
+        title={`Remove ${clearAllCount} ${clearAllCount === 1 ? "worktree" : "worktrees"}?`}
         description={`Checkouts are deleted from disk and h4rn/sa-* branches h4rn created are deleted. Worktrees with uncommitted changes or unmerged work are skipped. Ignored files such as build output are deleted with each checkout.${
           keptThreads > 0
             ? ` ${keptThreads === 1 ? "One thread workspace is" : `${keptThreads} thread workspaces are`} kept; remove ${keptThreads === 1 ? "it" : "them"} one at a time.`
             : ""
         }`}
         confirmLabel="Clear all"
-        onOpenChange={setConfirmAll}
-        onConfirm={() =>
-          void clearWorktrees(
-            clearable.map((row) => row.path),
-            false,
-          )
-        }
+        onOpenChange={(open) => {
+          if (!open) setConfirmAll(null);
+        }}
+        onConfirm={() => {
+          if (confirmAll) {
+            void clearWorktrees(confirmAll.paths, false, confirmAll.client);
+          }
+          setConfirmAll(null);
+        }}
       />
 
       <ConfirmDialog
         open={removing !== null}
         title="Remove this worktree?"
-        description={
-          removing
-            ? `The checkout at ${removing.path} is deleted from disk.${
-                removing.owned && removing.branch
-                  ? ` The ${removing.branch} branch h4rn created is deleted too.`
-                  : ""
-              } Uncommitted changes or unmerged work are skipped.${
-                removing.origin === "thread" ? " Its thread may still be resumed there." : ""
-              }`
-            : ""
-        }
+        description={removing ? removeDescription(removing.row) : ""}
         confirmLabel="Remove"
         onOpenChange={(open) => {
           if (!open) setRemoving(null);
         }}
         onConfirm={() => {
-          if (removing) void clearWorktrees([removing.path]);
+          if (removing) {
+            void clearWorktrees(removing.confirmation.paths, false, removing.confirmation.client);
+          }
           setRemoving(null);
         }}
       />
 
       <ConfirmDialog
-        open={forcing}
-        title={`Remove ${forceable.length} ${forceable.length === 1 ? "worktree" : "worktrees"} anyway?`}
+        open={forcing !== null}
+        title={`Remove ${forceCount} ${forceCount === 1 ? "worktree" : "worktrees"} anyway?`}
         description={`Uncommitted changes and unmerged commits in these worktrees are lost. This can't be undone.${threadNote}`}
         confirmLabel="Remove anyway"
-        onOpenChange={setForcing}
-        onConfirm={() =>
-          void clearWorktrees(
-            forceable.map((item) => item.path),
-            true,
-          )
-        }
+        onOpenChange={(open) => {
+          if (!open) setForcing(null);
+        }}
+        onConfirm={() => {
+          if (forcing) {
+            void clearWorktrees(forcing.paths, true, forcing.client);
+          }
+          setForcing(null);
+        }}
       />
     </div>
   );

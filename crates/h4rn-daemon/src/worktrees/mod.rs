@@ -379,36 +379,21 @@ impl WorktreeTracker {
         let _guard = self.inner.clear_lock.lock().await;
         let entries = self.list_with(false).await;
         let selection = select_entries(&entries, paths.as_deref());
-        let data_dir = self.inner.data_dir.clone();
         let mut removed = Vec::new();
         let mut skipped = selection.skipped;
-        // One entry at a time: the listing is a snapshot, so each removal asks
-        // the live thread and subagent state again right before it touches the
-        // disk, and the spawn_blocking is awaited rather than timed out.
+        // One entry at a time: the listing is a snapshot, so each removal runs
+        // a blocking preflight, then asks the live thread and subagent state
+        // again, and only then touches the disk. Both spawn_blocking calls are
+        // awaited rather than timed out.
         for entry in selection.targets {
             let entry = entry.clone();
-            if let Some(active) = self.inner.still_active(&entry).await {
-                skipped.push(SkippedWorktree {
-                    path: active.path.clone(),
-                    reason: in_use_reason(&active),
-                });
-                continue;
-            }
             let path = entry.path.clone();
-            let data_dir = data_dir.clone();
-            match tokio::task::spawn_blocking(move || clear_one(&entry, force, &data_dir)).await {
-                Ok(Ok(ClearOne::Removed)) => removed.push(path),
-                Ok(Ok(ClearOne::RemovedWithBranchFailure(reason))) => {
+            match run_clear_entry(&self.inner, entry, force, |_| std::future::ready(())).await {
+                Ok(ClearOne::Removed) => removed.push(path),
+                Ok(ClearOne::RemovedWithBranchFailure(reason)) => {
                     skipped.push(SkippedWorktree { path, reason });
                 }
-                Ok(Err(reason)) => skipped.push(SkippedWorktree { path, reason }),
-                Err(error) => {
-                    tracing::warn!(%error, %path, "worktree clear task failed");
-                    skipped.push(SkippedWorktree {
-                        path,
-                        reason: "the clear task failed".into(),
-                    });
-                }
+                Err(reason) => skipped.push(SkippedWorktree { path, reason }),
             }
         }
         for path in &removed {
@@ -705,19 +690,17 @@ impl Inner {
             }
         }
         let subagent_repos = self.subagents.worktree_repos().await;
-        let threads = self
-            .threads
-            .list_threads(&thread_filter())
-            .await
-            .into_iter()
-            .map(|summary| ThreadInfo {
+        let mut threads = Vec::new();
+        for summary in self.threads.list_threads(&thread_filter()).await {
+            let turn_in_flight = self.threads.turn_in_flight(&summary.thread_id).await;
+            threads.push(ThreadInfo {
                 thread_id: summary.thread_id,
                 title: summary.title,
                 workspace: summary.workspace_path,
-                working: is_busy(summary.tab, summary.agent_state),
+                working: is_busy(summary.tab, summary.agent_state, turn_in_flight),
                 last_activity: summary.last_activity,
-            })
-            .collect();
+            });
+        }
         let stored = match self.store.load().await {
             Ok(stored) => stored,
             Err(error) => {
@@ -757,6 +740,11 @@ impl Inner {
         {
             active = true;
         }
+        // Normalising touches the filesystem, so it stays off the async runtime.
+        let entry_path = entry.path.clone();
+        let target = tokio::task::spawn_blocking(move || git::norm(Path::new(&entry_path)))
+            .await
+            .unwrap_or_else(|_| PathBuf::from(&entry.path));
         // The accessors the listing named.
         for access in &mut fresh.accessed_by {
             self.refresh_access(access).await;
@@ -765,11 +753,15 @@ impl Inner {
         // Accesses persisted since the listing was taken.
         match self.store.load().await {
             Ok(stored) => {
-                let path = git::norm(Path::new(&entry.path));
-                for observation in stored
-                    .iter()
-                    .filter(|observation| git::norm(Path::new(&observation.path)) == path)
-                {
+                let normalised = tokio::task::spawn_blocking(move || {
+                    stored
+                        .into_iter()
+                        .map(|observation| (git::norm(Path::new(&observation.path)), observation))
+                        .collect::<Vec<_>>()
+                })
+                .await
+                .unwrap_or_default();
+                for (_, observation) in normalised.iter().filter(|(path, _)| path == &target) {
                     for access in &observation.accesses {
                         if fresh
                             .accessed_by
@@ -797,22 +789,20 @@ impl Inner {
                 tracing::warn!(%error, "could not reload worktree observations");
             }
         }
-        // Any busy thread working in the entry, listed or not.
-        let busy: Vec<_> = self
-            .threads
-            .list_threads(&thread_filter())
-            .await
-            .into_iter()
-            .filter(|summary| is_busy(summary.tab, summary.agent_state))
-            .map(|summary| {
-                (
+        // Any busy thread working in the entry, listed or not. A turn in
+        // flight counts even when the agent state already says `Error`.
+        let mut busy = Vec::new();
+        for summary in self.threads.list_threads(&thread_filter()).await {
+            let turn_in_flight = self.threads.turn_in_flight(&summary.thread_id).await;
+            if is_busy(summary.tab, summary.agent_state, turn_in_flight) {
+                busy.push((
                     summary.thread_id.clone(),
                     summary.title,
                     summary.workspace_path,
                     summary.last_activity,
-                )
-            })
-            .collect();
+                ));
+            }
+        }
         if !busy.is_empty() {
             let normalised = tokio::task::spawn_blocking(move || {
                 busy.into_iter()
@@ -828,7 +818,6 @@ impl Inner {
             })
             .await
             .unwrap_or_default();
-            let target = git::norm(Path::new(&entry.path));
             for (thread_id, title, workspace, last_activity) in normalised {
                 if workspace != target && !workspace.starts_with(&target) {
                     continue;
@@ -871,7 +860,8 @@ impl Inner {
             access.working = false;
             return;
         };
-        access.working = is_busy(summary.tab, summary.agent_state);
+        let turn_in_flight = self.threads.turn_in_flight(&access.thread_id).await;
+        access.working = is_busy(summary.tab, summary.agent_state, turn_in_flight);
         if !summary.title.is_empty() {
             access.title = summary.title;
         }
@@ -884,14 +874,17 @@ impl Inner {
 
 /// Whether a thread is actually busy, not merely sitting in a Working tab.
 ///
-/// A pinned or never-run thread keeps the Working tab while it is Idle, and an
-/// auto-resume armed for a rate limit is not running yet. Only those states
-/// mean the thread could write to a worktree at any moment: `Idle` in the
-/// Working tab (a pinned or never-run thread), or an agent state that is
-/// running, queued, scheduled or waiting on the user. `Done`, `Error` and
-/// `Unreachable` are never busy, even inside the Working-tab exit grace.
-fn is_busy(tab: ThreadTab, agent_state: AgentState) -> bool {
-    (tab == ThreadTab::Working && agent_state == AgentState::Idle)
+/// A turn in flight means the thread can still write, whatever the agent state
+/// says: a failed or denied tool call sets `Error` while the turn keeps going.
+/// Beyond that, a pinned or never-run thread keeps the Working tab while it is
+/// Idle, and an auto-resume armed for a rate limit is not running yet. So the
+/// thread is busy when a turn is in flight, when it is `Idle` in the Working
+/// tab (pinned or never run), or when its agent state is running, queued,
+/// scheduled or waiting on the user. `Done`, `Error` and `Unreachable` are
+/// never busy on their own, even inside the Working-tab exit grace.
+fn is_busy(tab: ThreadTab, agent_state: AgentState, turn_in_flight: bool) -> bool {
+    turn_in_flight
+        || (tab == ThreadTab::Working && agent_state == AgentState::Idle)
         || matches!(
             agent_state,
             AgentState::Queued
@@ -1284,11 +1277,50 @@ fn branch_is_merged(repo: &Path, branch: &str) -> Result<bool, String> {
     }
 }
 
-/// Removes one entry from disk. Blocking.
+/// Runs one entry's clear: blocking preflight, live re-check, blocking removal.
+///
+/// `after_preflight` runs between the two blocking phases; a test uses it to
+/// make the entry busy in that window and prove the re-check still runs.
+async fn run_clear_entry<F, Fut>(
+    inner: &Arc<Inner>,
+    entry: TrackedWorktree,
+    force: bool,
+    after_preflight: F,
+) -> Result<ClearOne, String>
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let path = entry.path.clone();
+    let preflight_entry = entry.clone();
+    match tokio::task::spawn_blocking(move || preflight(&preflight_entry, force)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(reason)) => return Err(reason),
+        Err(error) => {
+            tracing::warn!(%error, %path, "worktree preflight task failed");
+            return Err("the clear task failed".into());
+        }
+    }
+    after_preflight(path.clone()).await;
+    if let Some(active) = inner.still_active(&entry).await {
+        return Err(in_use_reason(&active));
+    }
+    let data_dir = inner.data_dir.clone();
+    match tokio::task::spawn_blocking(move || remove(&entry, force, &data_dir)).await {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::warn!(%error, %path, "worktree clear task failed");
+            Err("the clear task failed".into())
+        }
+    }
+}
+
+/// Whether an entry may be removed, without touching the disk. Blocking.
 ///
 /// Every git call is bounded by [`CLEAR_GIT_TIMEOUT`]; a timeout is a skip with
-/// that reason, or a branch failure once the checkout is already gone.
-fn clear_one(entry: &TrackedWorktree, force: bool, data_dir: &Path) -> Result<ClearOne, String> {
+/// that reason. A directory that vanished between the listing and now still
+/// passes (a removed harness checkout leaves only the branch).
+fn preflight(entry: &TrackedWorktree, force: bool) -> Result<(), String> {
     let path = PathBuf::from(&entry.path);
     if entry.repo.is_empty() {
         return Err("its repository could not be found".into());
@@ -1356,6 +1388,18 @@ fn clear_one(entry: &TrackedWorktree, force: bool, data_dir: &Path) -> Result<Cl
             return Err(format!("branch {branch} has unmerged commits"));
         }
     }
+    Ok(())
+}
+
+/// Removes one entry from disk. Blocking.
+///
+/// Runs only after [`preflight`] passed and the live re-check found nothing
+/// using the entry. Every git call is bounded by [`CLEAR_GIT_TIMEOUT`]; a
+/// timeout is a skip with that reason, or a branch failure once the checkout is
+/// already gone.
+fn remove(entry: &TrackedWorktree, force: bool, data_dir: &Path) -> Result<ClearOne, String> {
+    let path = PathBuf::from(&entry.path);
+    let repo = PathBuf::from(&entry.repo);
     if path.is_dir() {
         // Git's own remove semantics: without `--force` it refuses a checkout
         // with modifications, which is what we want. Ignored files go with the
@@ -1366,7 +1410,15 @@ fn clear_one(entry: &TrackedWorktree, force: bool, data_dir: &Path) -> Result<Cl
             args.push("--force");
         }
         args.push(path_text.as_ref());
-        git::run_with_timeout(&repo, args, CLEAR_GIT_TIMEOUT)?;
+        if let Err(error) = git::run_with_timeout(&repo, args, CLEAR_GIT_TIMEOUT) {
+            // Git can find work our own checks did not (a fresh write, a
+            // submodule). Report it as the forceable dirty reason so the UI
+            // offers the same retry as any other uncommitted work.
+            if !force && error.contains("contains modified or untracked files") {
+                return Err("has uncommitted changes".into());
+            }
+            return Err(error);
+        }
     }
     // A directory that vanished still leaves git metadata behind.
     if let Err(error) = git::run_with_timeout(&repo, ["worktree", "prune"], CLEAR_GIT_TIMEOUT) {

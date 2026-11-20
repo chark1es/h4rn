@@ -6,18 +6,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
-use h4rn_harness::{FakeHarness, Harness};
+use h4rn_harness::{FakeHarness, Harness, HarnessEvent};
 use h4rn_protocol::{
     AgentState, HarnessKind, HostId, RuntimeMode, SubagentBudget, SubagentContext,
     SubagentCredential, SubagentId, SubagentIsolation, SubagentState, SubagentView, ThreadId,
-    ThreadTab, TrackedWorktree, WorktreeOrigin, WorktreeStatus,
+    ThreadTab, ToolCall, ToolCallStatus, TrackedWorktree, WorktreeOrigin, WorktreeStatus,
 };
 use serde_json::json;
 
 use super::store::{StoredAccess, StoredWorktree};
 use super::{
-    ClearOne, ListInput, RepoCaches, ThreadInfo, WorktreeTracker, clear_one, compute, git, is_busy,
-    open_snapshot, select_entries,
+    ClearOne, ListInput, RepoCaches, ThreadInfo, WorktreeTracker, compute, git, is_busy,
+    open_snapshot, preflight, remove, run_clear_entry, select_entries,
 };
 use crate::harnesses::StaticHarnessCatalog;
 use crate::journal::SqliteJournal;
@@ -99,6 +99,12 @@ fn entry(path: &Path, repo: &Path, branch: Option<&str>, owned: bool) -> Tracked
         first_seen: Utc::now(),
         last_seen: Utc::now(),
     }
+}
+
+/// The two blocking phases of a clear, for the unit tests below.
+fn clear_one(entry: &TrackedWorktree, force: bool, data_dir: &Path) -> Result<ClearOne, String> {
+    preflight(entry, force)?;
+    remove(entry, force, data_dir)
 }
 
 fn subagent_view(
@@ -217,7 +223,11 @@ async fn start_thread(threads: &ThreadManager, workspace: &Path, prompt: &str) -
 async fn wait_busy(threads: &ThreadManager, thread: &ThreadId) -> String {
     for _ in 0..250 {
         if let Some(summary) = threads.thread_summary(thread).await
-            && is_busy(summary.tab, summary.agent_state)
+            && is_busy(
+                summary.tab,
+                summary.agent_state,
+                threads.turn_in_flight(thread).await,
+            )
         {
             return summary.title;
         }
@@ -824,7 +834,7 @@ fn overlapping_turns_do_not_attribute_each_other_s_worktrees() {
 #[test]
 fn a_thread_is_busy_only_when_it_can_write() {
     assert!(
-        is_busy(ThreadTab::Working, AgentState::Idle),
+        is_busy(ThreadTab::Working, AgentState::Idle, false),
         "a pinned or never-run thread in the Working tab can still write"
     );
     for state in [
@@ -838,17 +848,21 @@ fn a_thread_is_busy_only_when_it_can_write() {
         AgentState::AwaitingApproval,
         AgentState::RateLimited,
     ] {
-        assert!(is_busy(ThreadTab::Settled, state), "{state:?}");
+        assert!(is_busy(ThreadTab::Settled, state, false), "{state:?}");
     }
     for state in [AgentState::Done, AgentState::Error, AgentState::Unreachable] {
-        assert!(!is_busy(ThreadTab::Settled, state), "{state:?}");
+        assert!(!is_busy(ThreadTab::Settled, state, false), "{state:?}");
         assert!(
-            !is_busy(ThreadTab::Working, state),
+            !is_busy(ThreadTab::Working, state, false),
             "the Working-tab exit grace is not busy: {state:?}"
+        );
+        assert!(
+            is_busy(ThreadTab::Settled, state, true),
+            "an in-flight turn is busy whatever the agent state says: {state:?}"
         );
     }
     assert!(
-        !is_busy(ThreadTab::Settled, AgentState::Idle),
+        !is_busy(ThreadTab::Settled, AgentState::Idle, false),
         "an idle thread outside the Working tab is not busy"
     );
 }
@@ -945,4 +959,153 @@ async fn clear_through_the_tracker_sees_a_thread_the_listing_missed() {
 
     let _ = threads.interrupt(&busy).await;
     let _ = threads.interrupt(&parent).await;
+}
+
+/// A harness whose first tool call fails and whose turn never completes, so
+/// the thread sits at `AgentState::Error` with its turn still in flight.
+fn failing_tool_call() -> FakeHarness {
+    FakeHarness::with_events(vec![HarnessEvent::ToolCall {
+        tool_call: ToolCall {
+            tool_call_id: "tool-error".into(),
+            name: "Bash".into(),
+            status: ToolCallStatus::Failed,
+            summary: "exit 1".into(),
+            input: None,
+            output: None,
+            started_at: Utc::now(),
+            completed_at: Some(Utc::now()),
+            stats: None,
+        },
+    }])
+}
+
+#[tokio::test]
+async fn a_failed_tool_call_during_a_turn_keeps_the_worktree_busy() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-error", "error-branch");
+    let (tracker, threads, _subagents) =
+        managers(&fixture, vec![Arc::new(failing_tool_call())]).await;
+    let thread = start_thread(&threads, &linked, "hit the error").await;
+
+    let mut title = None;
+    for _ in 0..250 {
+        if let Some(summary) = threads.thread_summary(&thread).await
+            && summary.agent_state == AgentState::Error
+        {
+            // A failed tool call does not end the turn: the state is Error but
+            // the thread is still able to write.
+            assert!(
+                threads.turn_in_flight(&thread).await,
+                "the turn is still in flight"
+            );
+            title = Some(summary.title);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let title = title.expect("the thread reached Error while its turn ran");
+
+    let listed = tracker.list().await;
+    let entry = listed
+        .iter()
+        .find(|entry| Path::new(&entry.path) == git::norm(&linked))
+        .unwrap_or_else(|| panic!("the thread workspace is listed: {listed:?}"));
+    assert_eq!(
+        entry.status,
+        WorktreeStatus::Active,
+        "a turn in flight keeps the entry active even at agent state Error"
+    );
+
+    let outcome = tracker.clear(Some(vec![entry.path.clone()]), false).await;
+    assert!(outcome.removed.is_empty(), "{:?}", outcome.skipped);
+    assert_eq!(outcome.skipped[0].reason, format!("in use by {title}"));
+    assert!(linked.is_dir(), "the checkout is kept");
+
+    let _ = threads.interrupt(&thread).await;
+}
+
+#[tokio::test]
+async fn a_clear_rechecks_between_preflight_and_removal_and_keeps_the_checkout() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-late", "late-branch");
+    let (tracker, threads, _subagents) = managers(
+        &fixture,
+        vec![Arc::new(FakeHarness::with_events(Vec::new()))],
+    )
+    .await;
+
+    let entry = entry(&linked, &fixture.repo, Some("late-branch"), false);
+    assert_eq!(entry.status, WorktreeStatus::Settled, "nothing uses it yet");
+
+    // Once preflight has passed, a thread starts working in the checkout. The
+    // live re-check, which runs before removal, must still catch it.
+    let started: Arc<std::sync::Mutex<Option<(ThreadId, String)>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let hook = {
+        let started = Arc::clone(&started);
+        let threads = Arc::clone(&threads);
+        let path = linked.clone();
+        move |_path: String| {
+            let started = Arc::clone(&started);
+            let threads = Arc::clone(&threads);
+            let path = path.clone();
+            async move {
+                let thread = start_thread(&threads, &path, "late user").await;
+                let title = wait_busy(&threads, &thread).await;
+                *started.lock().expect("lock") = Some((thread, title));
+            }
+        }
+    };
+    let outcome = run_clear_entry(&tracker.inner, entry, false, hook).await;
+
+    let Err(reason) = outcome else {
+        panic!("the entry became busy before removal");
+    };
+    let (thread, title) = started
+        .lock()
+        .expect("lock")
+        .clone()
+        .expect("the hook started a thread");
+    assert_eq!(reason, format!("in use by {title}"));
+    assert!(linked.is_dir(), "the checkout is kept");
+
+    let _ = threads.interrupt(&thread).await;
+}
+
+#[test]
+fn output_collection_is_bounded_when_a_descendant_holds_the_pipes() {
+    let fixture = Fixture::new();
+    // git exits at once, but the background sleep it started inherits stdout
+    // and stderr, so the readers would block for as long as it lives.
+    let started = std::time::Instant::now();
+    let error = git::run_with_timeout(
+        &fixture.repo,
+        ["-c", "alias.bg=!sh -c \"sleep 5 &\"", "bg"],
+        Duration::from_secs(1),
+    )
+    .expect_err("the output deadline must expire");
+    assert_eq!(error, "git timed out after 1s");
+    assert!(git::timed_out(&error));
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "bounded by the deadline plus the one-second grace: {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn git_refusing_a_dirty_checkout_reads_as_uncommitted_changes() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-refuse", "refuse-branch");
+    std::fs::write(linked.join("scratch.txt"), "wip").expect("dirty file");
+    let entries = [entry(&linked, &fixture.repo, Some("refuse-branch"), false)];
+    // Preflight would catch this first; removal is called directly to prove
+    // git's own refusal is reported in our words, not git's.
+    assert_eq!(
+        remove(&entries[0], false, &fixture.data_dir())
+            .err()
+            .as_deref(),
+        Some("has uncommitted changes")
+    );
+    assert!(linked.is_dir(), "git's refusal keeps the checkout");
 }

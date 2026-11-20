@@ -21,6 +21,7 @@ vi.mock("@/lib/store/appStore", () => ({
 }));
 
 import {
+  captureClear,
   clearableWorktrees,
   clearWorktrees,
   dismissWorktreeOutcome,
@@ -30,7 +31,9 @@ import {
   loadWorktrees,
   resetWorktreeStoreForTests,
   settledWorktrees,
+  shouldReloadWorktrees,
   worktreeClientCurrent,
+  worktreeOutcomeForClient,
   worktreePage,
 } from "./worktreeStore";
 
@@ -109,7 +112,7 @@ describe("worktree store", () => {
         paths: ["/b", "/c"],
         force: false,
       },
-      { timeoutMs: 60_000 },
+      { timeoutMs: 600_000 },
     );
     const { rows, outcome, clearing } = getWorktreeState();
     expect(clearing).toBe(false);
@@ -136,7 +139,7 @@ describe("worktree store", () => {
         paths: ["/a"],
         force: false,
       },
-      { timeoutMs: 60_000 },
+      { timeoutMs: 600_000 },
     );
     await clearWorktrees(["/c"], true);
     expect(request).toHaveBeenLastCalledWith(
@@ -145,7 +148,7 @@ describe("worktree store", () => {
         paths: ["/c"],
         force: true,
       },
-      { timeoutMs: 60_000 },
+      { timeoutMs: 600_000 },
     );
   });
 
@@ -246,6 +249,43 @@ describe("worktree store", () => {
     expect(getWorktreeState().rows.map((r) => r.path)).toEqual(["/a"]);
   });
 
+  it("refuses a captured confirmation after the client changes", async () => {
+    request.mockResolvedValueOnce({
+      type: "worktrees",
+      worktrees: [row({ path: "/a" }), row({ path: "/b" })],
+    });
+    await loadWorktrees();
+    const confirmation = captureClear(["/a", "/b"]);
+    expect(confirmation.client).toBe(clientA);
+
+    // The machine switch rebuilds the client while the dialog is open.
+    harness.current.value = harness.clientB;
+    await clearWorktrees(confirmation.paths, false, confirmation.client);
+
+    expect(harness.clientB.request).not.toHaveBeenCalled();
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(getWorktreeState().clearError).not.toBeNull();
+  });
+
+  it("does not offer one machine's outcome for a retry on another", async () => {
+    request.mockResolvedValueOnce({
+      type: "worktrees",
+      worktrees: [row({ path: "/a" }), row({ path: "/b", dirty: true })],
+    });
+    await loadWorktrees();
+    request.mockResolvedValueOnce({
+      type: "worktrees_cleared",
+      removed: ["/a"],
+      skipped: [{ path: "/b", reason: "has uncommitted changes" }],
+      worktrees: [row({ path: "/b", dirty: true })],
+    });
+    await clearWorktrees(["/a", "/b"]);
+
+    expect(worktreeOutcomeForClient(getWorktreeState())).not.toBeNull();
+    harness.current.value = harness.clientB;
+    expect(worktreeOutcomeForClient(getWorktreeState())).toBeNull();
+  });
+
   it("surfaces a refused clear with its hint and leaves the list alone", async () => {
     request.mockResolvedValueOnce({ type: "worktrees", worktrees: [row()] });
     await loadWorktrees();
@@ -337,5 +377,18 @@ describe("worktreePage", () => {
   it("shows the empty copy only after a successful empty read", () => {
     expect(worktreePage(true, [], null)).toEqual({ kind: "groups", notice: null, empty: true });
     expect(worktreePage(false, [], null)).toEqual({ kind: "loading" });
+  });
+});
+
+describe("shouldReloadWorktrees", () => {
+  it("refetches when the connection comes back even if rows are loaded", () => {
+    expect(shouldReloadWorktrees(true, false, true)).toBe(true);
+    expect(shouldReloadWorktrees(true, true, true)).toBe(false);
+    expect(shouldReloadWorktrees(false, true, true)).toBe(false);
+  });
+
+  it("refetches when the stored rows belong to a replaced client", () => {
+    expect(shouldReloadWorktrees(true, true, false)).toBe(true);
+    expect(shouldReloadWorktrees(false, true, false)).toBe(false);
   });
 });
