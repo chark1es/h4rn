@@ -317,12 +317,22 @@ export async function setSkillEnabled(
   }
 }
 
-/** Scans every harness directory; writes nothing. `quiet` skips the error toast. */
+/**
+ * Scans every harness directory; writes nothing. `quiet` skips the error
+ * toast; `onError` receives the reason instead, so a caller can show it inline.
+ */
 export async function previewSkillImport(
-  options: { quiet?: boolean } = {},
+  options: { quiet?: boolean; onError?: (error: ProtoError) => void } = {},
 ): Promise<SkillImportPreview | null> {
   const host = skillsHost();
-  if (!host) return null;
+  if (!host) {
+    options.onError?.({
+      code: "unsupported",
+      message: "The daemon has not reported its host yet.",
+      hint: "Wait for the status bar to say online, then try again.",
+    });
+    return null;
+  }
   set({ previewing: true });
   try {
     const response = await send({ type: "skills_import_preview", host });
@@ -337,6 +347,7 @@ export async function previewSkillImport(
   } catch (error) {
     const proto = toProtoError(error);
     set({ previewing: false });
+    options.onError?.(proto);
     if (options.quiet) return null;
     pushToast({
       title: "Couldn't scan the harness skill directories.",

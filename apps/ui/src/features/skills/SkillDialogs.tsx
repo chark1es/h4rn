@@ -14,6 +14,7 @@ import {
 import { Input } from "@/components/ui/input";
 import type {
   HarnessKind,
+  ProtoError,
   SkillDiff,
   SkillImportCandidate,
   SkillImportPreview,
@@ -342,12 +343,22 @@ export function SkillImportDialog({ open, onClose }: { open: boolean; onClose: (
     setManage(true);
     let cancelled = false;
     setBusy(true);
-    void previewSkillImport().then((result) => {
+    let reason: ProtoError | null = null;
+    void previewSkillImport({
+      quiet: true,
+      onError: (error) => {
+        reason = error;
+      },
+    }).then((result) => {
       if (cancelled) return;
       setBusy(false);
       setPreview(result);
       if (!result) {
-        setProblem("h4rn could not read the harness skill directories.");
+        setProblem(
+          reason
+            ? `The scan did not finish: ${reason.message}${reason.hint ? ` ${reason.hint}` : ""}`
+            : "The scan did not finish. Try again.",
+        );
         return;
       }
       setSelected(
@@ -424,7 +435,9 @@ export function SkillImportDialog({ open, onClose }: { open: boolean; onClose: (
           <span className="aside">
             {busy && !preview
               ? "Scanning…"
-              : `${pending} to bring in · ${candidates.length - pending} already handled`}
+              : preview
+                ? `${pending} to bring in · ${candidates.length - pending} already handled`
+                : null}
           </span>
         </div>
 
@@ -432,6 +445,10 @@ export function SkillImportDialog({ open, onClose }: { open: boolean; onClose: (
           {busy && !preview ? (
             <div className="q-li">
               <span className="q-faint">Scanning the harness folders…</span>
+            </div>
+          ) : !preview ? (
+            <div className="q-li">
+              <span className="q-faint">No results. The reason is below.</span>
             </div>
           ) : candidates.length === 0 ? (
             <div className="q-li">

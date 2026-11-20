@@ -400,7 +400,10 @@ pub fn scan_root(root: &Path, harness: HarnessKind) -> Result<Vec<InstalledSkill
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
         let path = entry.path();
-        if !entry.file_type()?.is_dir() {
+        // `Path::is_dir` follows symlinks, unlike `DirEntry::file_type`: tools
+        // such as `npx skills` link each skill folder in from `~/.agents/skills`,
+        // and the harness reads the link like a folder. A broken link is skipped.
+        if !path.is_dir() {
             continue;
         }
         let name = entry.file_name();
@@ -541,5 +544,22 @@ mod tests {
             marker.harnesses,
             vec![HarnessKind::Codex, HarnessKind::Antigravity]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_finds_symlinked_skill_folders_and_skips_broken_links() {
+        let shared = tempfile::tempdir().unwrap();
+        let linked = shared.path().join("linked");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::fs::write(linked.join(SKILL_FILE), "---\nname: linked\n---\n").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(&linked, root.path().join("linked")).unwrap();
+        std::os::unix::fs::symlink(shared.path().join("gone"), root.path().join("gone")).unwrap();
+
+        let found = scan_root(root.path(), HarnessKind::ClaudeCode).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, root.path().join("linked"));
+        assert!(found[0].version.is_some());
     }
 }
