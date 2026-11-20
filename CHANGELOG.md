@@ -27,11 +27,23 @@ All notable changes to h4rn are recorded here. The format follows
   follow-up is then delivered on the same newly started session instead of starting a second agent.
   A Stop that arrives for a turn that already ended no longer cancels the turn that replaced it, and
   a Stop with a full writer queue returns instead of waiting for the queue to drain.
-- **Every ended turn advances the queue.** A completed turn, a stopped one, a failed prompt write and
-  a dead session all deliver the next queued message in order, so a follow-up no longer waits behind
-  a turn that can never finish. A writer I/O error marks the ACP client closed so the daemon detaches
-  it, and an agent the client killed itself (after a write deadline or a shutdown) no longer adds a
-  second exit-error row to the one failure the turn already shows.
+- **Every ended turn advances the queue, exactly once.** A completed turn, a stopped one, a failed
+  prompt write, a failed startup and a dead session all end through one settlement: it checks the
+  turn is still the active one, publishes exactly one `TurnCompleted` (and at most one error row, so
+  a Stop racing a failure or a bridge error racing a write failure cannot double-report), and
+  promotes the next queued message under the same lock, so a Send that arrives during the failure
+  queues behind that message instead of jumping ahead of it. A failed startup now reports a failed
+  turn instead of leaving the thread Working. Each session startup carries a generation: one that
+  returns after a restart or a shutdown shuts its session down instead of attaching it, and a
+  detach only clears the generation it inspected, so a late path never drops a session it never
+  saw. A delivery whose session was detached starts a fresh one instead of leaving its turn
+  Working. A transport that died mid-turn (a writer I/O error, a cancel that timed out, an agent
+  that exited) is detached before the next turn is promoted, so it starts a fresh agent rather than
+  being written to a closed client, and a Stop that races that death is treated as delivered. A
+  writer I/O error also marks the ACP client closed, and an agent the client killed itself after a
+  write deadline or a shutdown no longer adds a second exit-error row. Replies the ACP reader sends
+  while answering the agent queue under the same deadline as every other frame, so a full writer
+  queue cannot park the reader.
 - **A turn stopped by `max_tokens` or `max_turn_requests` is no longer shown as completed.** The
   turn footer says "Stopped: the agent hit its token limit" (or its turn-request limit) even when
   the agent produced no output, and its Reply button puts the cursor back in the composer instead of

@@ -40,8 +40,17 @@ pub struct FakeHarness {
     interrupt_count: Option<InterruptCount>,
     /// A test-only latch before a session is returned from `start_session`.
     start_gate: Option<Gate>,
+    /// A test-only message: after the start gate, `start_session` fails.
+    start_failure: Option<String>,
+    /// A test-only latch between a `send`'s prompt and its completion.
+    completion_gate: Option<Gate>,
+    /// Whether the completion gate also holds the session's first send. Off
+    /// means only later turns are gated, so thread creation still completes.
+    completion_gate_first_send: bool,
     /// A test-only count of sessions this harness has started.
     session_count: Option<SessionCount>,
+    /// A test-only count of sessions this harness shut down.
+    shutdown_count: Option<ShutdownCount>,
     /// A test-only switch: prompts after the first `n` fail as a dead transport.
     dead_sends_after: Option<usize>,
 }
@@ -68,6 +77,20 @@ pub struct SessionCount(Arc<AtomicUsize>);
 
 impl SessionCount {
     /// How many sessions the fake harness has started so far.
+    pub fn get(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// A shared count of sessions a fake harness shut down.
+///
+/// A test reads it to prove a startup that lost its slot discarded the session
+/// it made instead of attaching it.
+#[derive(Clone, Debug, Default)]
+pub struct ShutdownCount(Arc<AtomicUsize>);
+
+impl ShutdownCount {
+    /// How many sessions the fake harness has shut down so far.
     pub fn get(&self) -> usize {
         self.0.load(Ordering::SeqCst)
     }
@@ -166,7 +189,11 @@ impl Default for FakeHarness {
             send_count: None,
             interrupt_count: None,
             start_gate: None,
+            start_failure: None,
+            completion_gate: None,
+            completion_gate_first_send: true,
             session_count: None,
+            shutdown_count: None,
             dead_sends_after: None,
         }
     }
@@ -276,6 +303,43 @@ impl FakeHarness {
         (self, count)
     }
 
+    /// Counts every session shutdown in the returned [`ShutdownCount`].
+    pub fn with_shutdown_count(mut self) -> (Self, ShutdownCount) {
+        let count = ShutdownCount::default();
+        self.shutdown_count = Some(count.clone());
+        (self, count)
+    }
+
+    /// Fails `start_session` with `message` after the start gate opens.
+    ///
+    /// The gate comes first so a test can order a Stop, a restart or a
+    /// shutdown before the failure, which is the race this models.
+    pub fn with_start_failure(mut self, message: impl Into<String>) -> Self {
+        self.start_failure = Some(message.into());
+        self
+    }
+
+    /// Holds a turn's completion until the returned [`Gate`] is released.
+    ///
+    /// `send` still returns and its prompt still counts, but the synthetic
+    /// `TurnCompleted` waits, so a Stop can be ordered after the prompt reached
+    /// the harness without racing the completion.
+    pub fn with_completion_gate(mut self) -> (Self, Gate) {
+        let gate = Gate::new();
+        self.completion_gate = Some(gate.clone());
+        self.completion_gate_first_send = true;
+        (self, gate)
+    }
+
+    /// Like [`Self::with_completion_gate`], but the first send of a session is
+    /// not gated, so creating the thread still completes.
+    pub fn with_later_completion_gate(mut self) -> (Self, Gate) {
+        let gate = Gate::new();
+        self.completion_gate = Some(gate.clone());
+        self.completion_gate_first_send = false;
+        (self, gate)
+    }
+
     /// Counts every interrupt the daemon sends in the returned [`InterruptCount`].
     pub fn with_interrupt_count(mut self) -> (Self, InterruptCount) {
         let count = InterruptCount::default();
@@ -317,6 +381,12 @@ impl Harness for FakeHarness {
         }
         if let Some(gate) = &self.start_gate {
             gate.wait().await;
+        }
+        if let Some(message) = &self.start_failure {
+            return Err(HarnessError::Transport {
+                harness: self.kind,
+                message: message.clone(),
+            });
         }
 
         let (sender, receiver) = unbounded();
@@ -364,6 +434,10 @@ impl Harness for FakeHarness {
             sends: 0,
             has_answered: false,
             write_gate: self.write_gate.clone(),
+            completion_gate: self.completion_gate.clone(),
+            completion_gate_first_send: self.completion_gate_first_send,
+            interrupted: Arc::new(AtomicBool::new(false)),
+            shutdown_count: self.shutdown_count.clone(),
             closed: false,
         }))
     }
@@ -396,6 +470,15 @@ pub struct FakeSession {
     has_answered: bool,
     /// A test-controlled latch on a write directive's file write.
     write_gate: Option<Gate>,
+    /// A test-controlled latch between the prompt and its completion.
+    completion_gate: Option<Gate>,
+    /// Whether that gate also holds the session's first send.
+    completion_gate_first_send: bool,
+    /// Whether a Stop already ended the current turn, so a gated completion
+    /// must not publish a second one.
+    interrupted: Arc<AtomicBool>,
+    /// A shared count of shutdowns this session reported.
+    shutdown_count: Option<ShutdownCount>,
     closed: bool,
 }
 
@@ -419,6 +502,8 @@ impl HarnessSession for FakeSession {
         // follow-up behind a write that then fails.
         let first_send = !self.has_answered;
         self.has_answered = true;
+        let gate_completion =
+            self.completion_gate.is_some() && (self.completion_gate_first_send || !first_send);
         if let Some(gate) = &self.send_gate
             && !first_send
         {
@@ -429,8 +514,16 @@ impl HarnessSession for FakeSession {
             && self.sends > limit
         {
             // A write that failed mid-frame kills the transport; report it as
-            // closed so the daemon detaches this session.
+            // closed so the daemon detaches this session. A real adapter reports
+            // the transport failure on its own stream, so the fake does too.
             self.closed = true;
+            send(
+                &self.sender,
+                HarnessEvent::Error {
+                    message: "the harness transport closed".into(),
+                    retryable: false,
+                },
+            );
             return Err(HarnessError::Transport {
                 harness: self.kind,
                 message: "the harness transport closed".into(),
@@ -579,12 +672,12 @@ impl HarnessSession for FakeSession {
                 },
             );
         }
-        send(
-            &self.sender,
+        self.complete(
             HarnessEvent::TurnCompleted {
                 status: TurnStatus::Completed,
                 usage,
             },
+            gate_completion,
         );
         Ok(())
     }
@@ -593,6 +686,7 @@ impl HarnessSession for FakeSession {
         if let Some(count) = &self.interrupt_count {
             count.0.fetch_add(1, Ordering::SeqCst);
         }
+        self.interrupted.store(true, Ordering::SeqCst);
         send(
             &self.sender,
             HarnessEvent::TurnCompleted {
@@ -636,9 +730,35 @@ impl HarnessSession for FakeSession {
 
     async fn shutdown(&mut self) -> Result<(), HarnessError> {
         self.closed = true;
+        if let Some(count) = &self.shutdown_count {
+            count.0.fetch_add(1, Ordering::SeqCst);
+        }
         // Dropping the sender would end the stream; keep it alive until the
         // session is dropped so an in-flight event is not lost.
         Ok(())
+    }
+}
+
+impl FakeSession {
+    /// Sends a turn's completion, optionally behind the completion gate.
+    ///
+    /// A gated completion waits until the test releases it, and is dropped when
+    /// a Stop already ended the turn, so the fake never reports a second end.
+    fn complete(&self, event: HarnessEvent, gated: bool) {
+        match &self.completion_gate {
+            Some(gate) if gated => {
+                let gate = gate.clone();
+                let sender = self.sender.clone();
+                let interrupted = Arc::clone(&self.interrupted);
+                tokio::spawn(async move {
+                    gate.wait().await;
+                    if !interrupted.load(Ordering::SeqCst) {
+                        send(&sender, event);
+                    }
+                });
+            }
+            _ => send(&self.sender, event),
+        }
     }
 }
 

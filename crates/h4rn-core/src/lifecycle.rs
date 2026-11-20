@@ -841,6 +841,27 @@ mod tests {
     }
 
     #[test]
+    fn limit_completed_turns_need_attention_then_settle() {
+        for status in [TurnStatus::TokenLimit, TurnStatus::TurnLimit] {
+            let state = state_after(&[
+                ThreadEvent::TurnQueued { at: at(1) },
+                ThreadEvent::TurnStarted { at: at(2) },
+                ThreadEvent::TurnCompleted { status, at: at(10) },
+            ]);
+            assert_eq!(state.phase, Phase::Completed { status }, "{status:?}");
+            assert_eq!(state.agent_state, AgentState::Error, "{status:?}");
+            assert!(state.pending_failure, "{status:?} raises a hand");
+            assert!(
+                needs_attention(&state, at(20), &settings()),
+                "{status:?} is something the person must act on"
+            );
+            assert_eq!(tab(&state, at(11)), ThreadTab::Working, "{status:?}");
+            assert_eq!(tab(&state, at(400)), ThreadTab::Done, "{status:?}");
+            assert_eq!(state.last_turn_status, Some(status), "{status:?}");
+        }
+    }
+
+    #[test]
     fn stale_bypass_disables_a_long_grace() {
         let tuned = LifecycleSettings::default()
             .with_working_exit_grace(Duration::seconds(30))

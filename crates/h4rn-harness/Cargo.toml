@@ -29,3 +29,8 @@ libc.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+
+[[bin]]
+name = "agy-fixture"
+path = "src/bin/agy_fixture.rs"
+test = false

@@ -273,6 +273,10 @@ struct Shared {
     stderr: StderrRing,
     pid: Option<u32>,
     shutting_down: AtomicBool,
+    /// Set as soon as the agent's stdout can no longer be read, so a pending
+    /// prompt that fails because of it can see the transport is dead even
+    /// before the process is reaped.
+    transport_closed: AtomicBool,
     writer: Mutex<Option<tokio::task::JoinHandle<()>>>,
     reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
     supervisor: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -402,6 +406,7 @@ impl AcpClient {
             stderr,
             pid,
             shutting_down: AtomicBool::new(false),
+            transport_closed: AtomicBool::new(false),
             writer: Mutex::new(None),
             reader: Mutex::new(None),
             supervisor: Mutex::new(None),
@@ -612,6 +617,7 @@ impl AcpClient {
     /// Whether the transport has closed.
     pub fn is_closed(&self) -> bool {
         self.shared.shutting_down.load(Ordering::SeqCst)
+            || self.shared.transport_closed.load(Ordering::SeqCst)
     }
 
     /// Kills the process group immediately. Safe to call from `Drop`.
@@ -619,14 +625,6 @@ impl AcpClient {
         self.shared.shutting_down.store(true, Ordering::SeqCst);
         if let Some(pid) = self.shared.pid {
             signal_group(pid, GroupSignal::Kill);
-        }
-    }
-
-    /// Stops the writer task so a frame it is currently blocked on is never
-    /// written to the agent's stdin.
-    fn abandon_writer(&self) {
-        if let Some(writer) = lock(&self.shared.writer).take() {
-            writer.abort();
         }
     }
 
@@ -752,8 +750,10 @@ impl AcpClient {
                     lock(&self.shared.pending).remove(&key);
                     // The frame never reached the writer; tear the transport
                     // down so a later send cannot slip it out.
-                    self.abandon_writer();
-                    self.kill();
+                    teardown_transport(
+                        &self.shared,
+                        "the ACP agent stopped accepting frames".into(),
+                    );
                     return Err(AcpError::Timeout {
                         method: method.to_string(),
                         seconds: PROMPT_WRITE_TIMEOUT.as_secs(),
@@ -779,11 +779,10 @@ impl AcpClient {
                 }
                 Err(_) => {
                     lock(&self.shared.pending).remove(&key);
-                    // The agent stopped reading stdin mid-frame. Abort the
-                    // writer so the blocked frame can never be written later,
-                    // and kill the process the transport was talking to.
-                    self.abandon_writer();
-                    self.kill();
+                    // The agent stopped reading stdin mid-frame. Tear the
+                    // transport down so the blocked frame can never be written
+                    // later, and kill the process it was talking to.
+                    teardown_transport(&self.shared, "the ACP agent stopped reading frames".into());
                     return Err(AcpError::Timeout {
                         method: method.to_string(),
                         seconds: PROMPT_WRITE_TIMEOUT.as_secs(),
@@ -846,8 +845,7 @@ impl AcpClient {
                 message: "the ACP writer task has exited".into(),
             }),
             Err(_) => {
-                self.abandon_writer();
-                self.kill();
+                teardown_transport(&self.shared, "the ACP agent stopped reading frames".into());
                 Err(AcpError::Timeout {
                     method: method.to_string(),
                     seconds: PROMPT_WRITE_TIMEOUT.as_secs(),
@@ -1022,6 +1020,10 @@ where
             }
         }
 
+        // The agent's stdout is gone: no reply can ever come back. Mark the
+        // transport dead before failing the pending calls, so a prompt that
+        // fails because of this can see why.
+        shared.transport_closed.store(true, Ordering::SeqCst);
         fail_pending(
             &shared,
             AcpError::Closed {
@@ -1129,6 +1131,12 @@ async fn send_rpc_error(shared: &Arc<Shared>, id: Value, code: i64, message: &st
     .await;
 }
 
+/// Enqueues a frame the reader produced (`fs/*` replies, permission answers).
+///
+/// The reply goes through the same bounded frame queue as every other frame:
+/// a full writer queue must not park the reader forever, because the reader is
+/// also what notices the agent's stdout closing. On expiry the transport is
+/// torn down like a timed-out prompt, so a half-written reply is never sent.
 async fn send_from_reader(shared: &Arc<Shared>, frame: Value) -> Result<(), AcpError> {
     let sender = lock(&shared.stdin_tx).clone();
     let Some(sender) = sender else {
@@ -1136,15 +1144,61 @@ async fn send_from_reader(shared: &Arc<Shared>, frame: Value) -> Result<(), AcpE
             message: "the ACP agent stdin is closed".into(),
         });
     };
-    sender
-        .send(OutgoingFrame {
+    match tokio::time::timeout(
+        PROMPT_WRITE_TIMEOUT,
+        sender.send(OutgoingFrame {
             frame,
             written: None,
-        })
-        .await
-        .map_err(|_| AcpError::Closed {
+        }),
+    )
+    .await
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(AcpError::Closed {
             message: "the ACP writer task has exited".into(),
-        })
+        }),
+        Err(_) => {
+            teardown_transport(
+                shared,
+                "the ACP agent stopped accepting frames from the client".into(),
+            );
+            Err(AcpError::Timeout {
+                method: "client reply".into(),
+                seconds: PROMPT_WRITE_TIMEOUT.as_secs(),
+            })
+        }
+    }
+}
+
+/// Tears a stuck transport down: no later frame may reach the agent, and the
+/// process is killed so nothing keeps talking to a pipe nobody drains.
+fn teardown_transport(shared: &Arc<Shared>, message: String) {
+    shared.shutting_down.store(true, Ordering::SeqCst);
+    *lock(&shared.stdin_tx) = None;
+    if let Some(writer) = lock(&shared.writer).take() {
+        writer.abort();
+    }
+    if let Some(pid) = shared.pid {
+        signal_group(pid, GroupSignal::Kill);
+    }
+    fail_pending(
+        shared,
+        AcpError::Closed {
+            message: message.clone(),
+        },
+    );
+    if let Err(error) = shared.events_tx.try_send(AcpEvent::Error {
+        message,
+        retryable: false,
+    }) {
+        // A full event queue already has plenty for the daemon to act on; the
+        // closed transport is visible through `is_closed` either way.
+        tracing::debug!(
+            target: "h4rn_harness::acp",
+            %error,
+            "could not report the torn-down transport"
+        );
+    }
 }
 
 fn resolve_response(shared: &Arc<Shared>, id: Value, frame: &Value) {
@@ -1695,6 +1749,88 @@ mod tests {
         );
         assert!(client.is_closed(), "the wedged transport is torn down");
         filling.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reader_reply_under_a_full_writer_queue_times_out_instead_of_blocking() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        std::fs::write(workspace.path().join("hello.txt"), "hi there").expect("write");
+        // A tiny stdin that nobody drains: the writer blocks on its first frame
+        // and the queue behind it fills.
+        let (client_write, agent_read) = tokio::io::duplex(64);
+        let (agent_write, client_read) = tokio::io::duplex(4_096);
+        let client = Arc::new(AcpClient::start(
+            config(workspace.path()),
+            std::env::temp_dir(),
+            client_read,
+            client_write,
+            None,
+            StderrRing::new(),
+        ));
+        let mut agent = FakeAgent {
+            reader: BufReader::new(agent_read),
+            writer: agent_write,
+        };
+
+        let sender = lock(&client.shared.stdin_tx).clone().expect("writer");
+        sender
+            .try_send(OutgoingFrame {
+                frame: json!({
+                    "jsonrpc": "2.0",
+                    "method": "test/noop",
+                    "params": {"pad": "x".repeat(4_096)},
+                }),
+                written: None,
+            })
+            .expect("the first frame fits");
+        for _ in 0..1_000 {
+            if sender.capacity() == FRAME_CHANNEL_CAPACITY {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            sender.capacity(),
+            FRAME_CHANNEL_CAPACITY,
+            "the writer took the frame and is blocked writing it"
+        );
+        while sender
+            .try_send(OutgoingFrame {
+                frame: json!({"jsonrpc": "2.0", "method": "test/noop"}),
+                written: None,
+            })
+            .is_ok()
+        {}
+        assert_eq!(sender.capacity(), 0, "the writer queue is full");
+
+        // The agent asks for a file. The reader must answer through the same
+        // bounded queue, so a full queue tears the transport down instead of
+        // parking the reader forever.
+        agent
+            .request(
+                json!("fs-1"),
+                "fs/read_text_file",
+                json!({"sessionId": "s", "path": workspace.path().join("hello.txt")}),
+            )
+            .await;
+        for _ in 0..(PROMPT_WRITE_TIMEOUT.as_secs() as usize + 2) {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            if client.is_closed() {
+                break;
+            }
+        }
+        assert!(
+            client.is_closed(),
+            "a reader reply that cannot be queued must not block the reader forever"
+        );
+        assert!(
+            lock(&client.shared.writer).is_none(),
+            "the blocked writer is aborted so the reply cannot slip out later"
+        );
+        assert!(
+            lock(&client.shared.stdin_tx).is_none(),
+            "later frames are refused instead of queued for a dead pipe"
+        );
     }
 
     /// A writer whose stdin refuses every frame, like a pipe whose reader died.

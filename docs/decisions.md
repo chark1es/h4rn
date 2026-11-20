@@ -492,16 +492,21 @@ sends `session/cancel` after the prompt it cancels. Waiting for writer-queue spa
 the flush share one ten-second deadline, and every other frame (cancel, model and mode changes,
 approvals, notifications, `session/close`) waits under the same deadline; on expiry the writer task
 is stopped and the agent killed, so a blocked frame cannot reach it later and a full queue never
-stalls Stop. Such a timeout ends the turn with exactly one failure row and detaches the dead
+stalls Stop. Replies the reader sends while answering the agent (`fs/*` responses,
+permission answers) go through that same bounded queue, so a full writer queue cannot park the
+reader either. Such a timeout ends the turn with exactly one failure row and detaches the dead
 session, so the next message starts a fresh one; an agent the client killed itself does not publish
 a second exit-error row, and a writer task that fails on an I/O error marks the client closed so the
 daemon detaches it. A Stop belongs to one turn: a Stop that arrives before that turn's prompt is
 dispatched, including while the session is still starting, ends the turn as interrupted without
 writing anything, and a Stop for a turn that already ended does not cancel the turn that replaced
-it. A thread starts at most one agent at a time: a message or a queued turn that arrives while a
-session is starting waits for that startup, which delivers whichever turn is current when it
-finishes, and every ended turn (completed, stopped, failed write, dead session) advances the queue
-in order. Stop reasons are not flattened: only `end_turn` is a normal completion, `max_tokens` and
+it. A thread starts at most one agent at a time: every startup carries a generation, so a startup
+that returns after a restart or shutdown discards the session it made instead of attaching it, and
+every detach names the generation it inspected so it cannot drop a session it never saw. Each turn
+ends through one settlement, which publishes exactly one `TurnCompleted` (and at most one error row
+for the losing side of a Stop-versus-failure race), promotes the next queued message to the active
+turn under the same record lock so a later Send queues behind it, and leaves a late failure report
+from an already-detached session out. Stop reasons are not flattened: only `end_turn` is a normal completion, `max_tokens` and
 `max_turn_requests` end the turn as a visible early stop, `cancelled` is an interrupt, and a refusal
 or an unknown reason is a failure. The interrupt flag belongs to one prompt: it is cleared when that
 prompt takes the running slot and set only while it is running, so a late Stop (or a rejected second

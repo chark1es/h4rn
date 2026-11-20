@@ -31,10 +31,10 @@ use h4rn_harness::{
 use h4rn_meter::{LimitHit, MeterHub, TurnContext, TurnMeter};
 use h4rn_protocol::{
     AgentState, ApprovalDecision, ApprovalKind, Attachment, AttachmentId, DeviceId, Event,
-    HarnessKind, HostId, Item, LimitBrief, LimitSource, MessageRole, ProtoError, ProtoErrorCode,
-    ResumeFailover, ResumeSchedule, ResumeState, RuntimeMode, SubagentId, ThreadFilter, ThreadId,
-    ThreadSummary, ThreadTab, ToolCallStatus, TurnId, TurnStatus, Usage, UsageReport,
-    WorktreeRequest,
+    FsTurnChanges, HarnessKind, HostId, Item, LimitBrief, LimitSource, MessageRole, ProtoError,
+    ProtoErrorCode, ResumeFailover, ResumeSchedule, ResumeState, RuntimeMode, SubagentId,
+    ThreadFilter, ThreadId, ThreadSummary, ThreadTab, ToolCallStatus, TurnId, TurnStatus, Usage,
+    UsageReport, WorktreeRequest,
 };
 use tokio::sync::{Mutex, broadcast};
 use tokio::task::JoinHandle;
@@ -289,10 +289,17 @@ struct ThreadRecord {
     /// queued turn that finds it `Starting` leaves its prompt pending, and the
     /// startup that is already running delivers it once the session is live.
     session: SessionSlot,
+    /// The last generation handed to a session startup. Every startup gets a
+    /// fresh, larger number so a startup that returns late can prove the slot
+    /// is still the one it claimed.
+    session_gen: u64,
     pump: Option<JoinHandle<()>>,
     pending_approvals: BTreeMap<String, PendingApproval>,
     queued: VecDeque<UserInput>,
     last_signature: Option<SummarySignature>,
+    /// The most recent turn whose failure was already published as one error
+    /// row, so a second report of the same failure is a duplicate.
+    turn_error_reported: Option<TurnId>,
     /// A limit hit whose auto-resume schedule is armed for this thread.
     scheduled_limit: Option<ScheduledLimit>,
     /// Scheduled auto-resume target shown on the thread summary (ADR-024).
@@ -323,25 +330,48 @@ struct ActiveTurn {
 }
 
 /// The thread's harness session, or the fact that one is being started.
+///
+/// Every startup gets its own generation ([`ThreadRecord::session_gen`]). A
+/// startup that returns after the slot moved on (a restart, a shutdown, a
+/// newer startup) must discard the session it made instead of attaching it,
+/// and every path that clears a live session must name the generation it
+/// inspected so it cannot detach a session it never saw.
 enum SessionSlot {
     /// No session, and no startup in flight.
     None,
-    /// A startup is in flight. Prompts stay pending; it delivers them.
-    Starting,
+    /// A startup with this generation is in flight. Prompts stay pending; it
+    /// delivers them.
+    Starting(u64),
     /// A live session a prompt may be written to.
-    Live(SharedSession),
+    Live {
+        generation: u64,
+        session: SharedSession,
+    },
 }
 
 impl SessionSlot {
     fn live(&self) -> Option<&SharedSession> {
         match self {
-            Self::Live(session) => Some(session),
-            Self::None | Self::Starting => None,
+            Self::Live { session, .. } => Some(session),
+            Self::None | Self::Starting(_) => None,
         }
     }
 
+    /// The generation this slot belongs to, when it has one.
+    fn generation(&self) -> Option<u64> {
+        match self {
+            Self::None => None,
+            Self::Starting(generation) | Self::Live { generation, .. } => Some(*generation),
+        }
+    }
+
+    /// Whether this slot is still the startup for `generation`.
+    fn is_starting(&self, generation: u64) -> bool {
+        matches!(self, Self::Starting(current) if *current == generation)
+    }
+
     fn is_live(&self, session: &SharedSession) -> bool {
-        matches!(self, Self::Live(current) if Arc::ptr_eq(current, session))
+        matches!(self, Self::Live { session: current, .. } if Arc::ptr_eq(current, session))
     }
 }
 
@@ -370,6 +400,9 @@ enum DispatchState {
     Claimed,
     /// Stop arrived before any writer claimed it. The prompt is dead.
     Stopped,
+    /// The turn ended: whichever path settled it won, every later end is a
+    /// no-op. Stop and failure therefore race to one winner, never two.
+    Settled,
 }
 
 /// What a Stop did to a turn.
@@ -381,6 +414,61 @@ enum StopOutcome {
     AlreadySent,
     /// An earlier Stop already ended this dispatch.
     AlreadyStopped,
+}
+
+/// The facts a turn-end path hands to [`Inner::settle_turn`].
+///
+/// The settler owns everything a turn end publishes, so every path reaches
+/// exactly one `TurnCompleted` and at most one error row.
+struct TurnEnd {
+    /// How the turn finished.
+    status: TurnStatus,
+    /// Usage for this turn.
+    usage: Usage,
+    /// Files this turn changed, when snapshots were recorded.
+    changes: Option<FsTurnChanges>,
+    /// Rows published just before the turn's `TurnCompleted` (an assistant
+    /// message, or nothing).
+    wire: Vec<Event>,
+    /// Lifecycle events applied just after the turn's `TurnCompleted` (for
+    /// example a preserved usage limit).
+    domain: Vec<ThreadEvent>,
+    /// The failure row this settlement wants to publish. It is emitted only
+    /// when no other path already reported this turn's failure.
+    error: Option<TurnError>,
+}
+
+impl TurnEnd {
+    /// A turn that ended without an error row.
+    fn new(status: TurnStatus, usage: Usage) -> Self {
+        Self {
+            status,
+            usage,
+            changes: None,
+            wire: Vec::new(),
+            domain: Vec::new(),
+            error: None,
+        }
+    }
+
+    /// A turn that ended because something failed.
+    fn failed(message: String, hint: Option<String>, retryable: bool) -> Self {
+        Self {
+            error: Some(TurnError {
+                message,
+                hint,
+                retryable,
+            }),
+            ..Self::new(TurnStatus::Failed, Usage::default())
+        }
+    }
+}
+
+/// One error row, the only one a turn may publish.
+struct TurnError {
+    message: String,
+    hint: Option<String>,
+    retryable: bool,
 }
 
 impl TurnDispatch {
@@ -426,7 +514,25 @@ impl TurnDispatch {
                 StopOutcome::StoppedBeforeSend
             }
             DispatchState::Claimed => StopOutcome::AlreadySent,
-            DispatchState::Stopped => StopOutcome::AlreadyStopped,
+            DispatchState::Stopped | DispatchState::Settled => StopOutcome::AlreadyStopped,
+        }
+    }
+
+    /// Ends this dispatch exactly once.
+    ///
+    /// `false` when another path already settled it; the caller must then
+    /// publish nothing. This is the Stop-versus-failure race: whichever
+    /// settles first wins, and the loser is a no-op.
+    fn settle(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *state == DispatchState::Settled {
+            false
+        } else {
+            *state = DispatchState::Settled;
+            true
         }
     }
 
@@ -536,11 +642,12 @@ impl ThreadRecord {
     ///
     /// The dispatch carries the prompt, so the same object a Stop may stop is
     /// the one the eventual writer must claim.
-    fn begin_turn(&mut self, _at: DateTime<Utc>, input: UserInput) -> Arc<TurnDispatch> {
+    fn begin_turn(&mut self, at: DateTime<Utc>, input: UserInput) -> Arc<TurnDispatch> {
         // A new turn is a fresh attempt: the previous limit and any resume
         // target no longer describe the thread.
         self.resume_at = None;
         self.limit = None;
+        self.turn_error_reported = None;
         self.branch = crate::fs::git::branch(std::path::Path::new(&self.meta.workspace_path));
         let turn_id = TurnId::new_uuid_v7();
         let item_id = assistant_item_id(&turn_id);
@@ -550,13 +657,51 @@ impl ThreadRecord {
             item_id: item_id.clone(),
             text: String::new(),
             usage: Usage::default(),
-            meter: TurnMeter::new(_at),
+            meter: TurnMeter::new(at),
             tools: HashMap::new(),
             last_tick: None,
             dispatch: Arc::clone(&dispatch),
         });
         self.last_turn_id = Some(turn_id);
         dispatch
+    }
+
+    /// Allocates the next session generation for a startup.
+    fn next_session_gen(&mut self) -> u64 {
+        self.session_gen = self.session_gen.saturating_add(1);
+        self.session_gen
+    }
+
+    /// Removes the live session when the slot still holds `generation`.
+    ///
+    /// The caller holds the record lock, so the check and the clear are one
+    /// step: a session started in the meantime (a newer generation) is never
+    /// detached by an older path.
+    fn detach_session(&mut self, generation: u64) -> Option<SharedSession> {
+        match &self.session {
+            SessionSlot::Live {
+                generation: current,
+                ..
+            } if *current == generation => {}
+            SessionSlot::None | SessionSlot::Starting(_) | SessionSlot::Live { .. } => {
+                return None;
+            }
+        }
+        match std::mem::replace(&mut self.session, SessionSlot::None) {
+            SessionSlot::Live { session, .. } => Some(session),
+            SessionSlot::None | SessionSlot::Starting(_) => None,
+        }
+    }
+
+    /// Marks `turn_id` as the turn whose one failure row was already published.
+    ///
+    /// `false` means that row exists, so this report is a duplicate.
+    fn note_error(&mut self, turn_id: &TurnId) -> bool {
+        if self.turn_error_reported.as_ref() == Some(turn_id) {
+            return false;
+        }
+        self.turn_error_reported = Some(turn_id.clone());
+        true
     }
 
     /// The live session, when there is one.
@@ -987,10 +1132,12 @@ impl ThreadManager {
             active: None,
             last_turn_id: None,
             session: SessionSlot::None,
+            session_gen: 0,
             pump: None,
             pending_approvals: BTreeMap::new(),
             queued: VecDeque::new(),
             last_signature: None,
+            turn_error_reported: None,
             scheduled_limit: None,
             resume_at: None,
             limit: None,
@@ -1205,12 +1352,24 @@ impl ThreadManager {
         };
         let mut result = RestartedSessions::default();
         for handle in handles {
-            let (thread_id, was_running) = {
+            let (thread_id, was_running, generation) = {
                 let record = handle.lock().await;
-                if !harnesses.contains(&record.meta.harness) || record.session.live().is_none() {
+                if !harnesses.contains(&record.meta.harness) {
                     continue;
                 }
-                (record.meta.thread_id.clone(), record.active.is_some())
+                // Only a live session is this restart's to drop: a startup in
+                // flight is already building a new one.
+                let Some(generation) = record.session.generation() else {
+                    continue;
+                };
+                if record.session.live().is_none() {
+                    continue;
+                }
+                (
+                    record.meta.thread_id.clone(),
+                    record.active.is_some(),
+                    generation,
+                )
             };
             if was_running {
                 if self.interrupt(&thread_id).await.is_err() {
@@ -1228,17 +1387,19 @@ impl ThreadManager {
                     continue;
                 }
             }
-            let (session, pump) = {
+            let detached = {
                 let mut record = handle.lock().await;
-                let session = match std::mem::replace(&mut record.session, SessionSlot::None) {
-                    SessionSlot::Live(session) => Some(session),
-                    SessionSlot::None | SessionSlot::Starting => None,
-                };
-                (session, record.pump.take())
+                // Clear the session this restart inspected, and only that one:
+                // a turn that ended while we waited may already have started a
+                // fresh session, which belongs to its own startup.
+                record
+                    .detach_session(generation)
+                    .map(|session| (session, record.pump.take()))
             };
-            if let Some(session) = session
-                && let Err(error) = session.lock().await.shutdown().await
-            {
+            let Some((session, pump)) = detached else {
+                continue;
+            };
+            if let Err(error) = session.lock().await.shutdown().await {
                 tracing::warn!(%thread_id, %error, "harness shutdown before a proxy restart failed");
             }
             if let Some(pump) = pump {
@@ -1315,36 +1476,35 @@ impl ThreadManager {
                 return Ok(());
             }
         }
-        session
-            .interrupt()
-            .await
-            .map_err(|error| ManagerError::Internal(error.to_string()))
+        match session.interrupt().await {
+            Ok(()) => Ok(()),
+            // A Stop that races the prompt write's timeout: the transport is
+            // already dead, so there is no cancel to deliver and nothing the
+            // person needs to be told.
+            Err(error) if session.is_closed() => {
+                tracing::debug!(%error, "the session died before the stop reached it");
+                Ok(())
+            }
+            Err(error) => Err(ManagerError::Internal(error.to_string())),
+        }
     }
 
     /// Ends a turn whose prompt was stopped before it reached the harness.
     async fn finish_stopped_turn(&self, handle: ThreadHandle, turn_id: TurnId) {
-        let mut record = handle.lock().await;
-        if record.active.as_ref().map(|active| &active.turn_id) != Some(&turn_id) {
-            return;
-        }
-        let now = self.now();
-        record.active = None;
-        let domain = vec![ThreadEvent::TurnCompleted {
-            status: TurnStatus::Interrupted,
-            at: now,
-        }];
-        let wire = vec![Event::TurnCompleted {
-            thread_id: record.meta.thread_id.clone(),
-            turn_id,
-            usage: Usage::default(),
-            status: TurnStatus::Interrupted,
-            changes: None,
-        }];
-        if let Err(error) = self.inner.emit(&mut record, domain, wire).await {
-            tracing::error!(%error, "failed to record a stopped turn");
-        }
-        drop(record);
-        self.inner.advance_queue(handle).await;
+        self.inner
+            .settle_turn(
+                &handle,
+                &turn_id,
+                TurnEnd {
+                    status: TurnStatus::Interrupted,
+                    usage: Usage::default(),
+                    changes: None,
+                    wire: Vec::new(),
+                    domain: Vec::new(),
+                    error: None,
+                },
+            )
+            .await;
     }
 
     /// Answers a pending approval or question.
@@ -1892,31 +2052,31 @@ impl ThreadManager {
         };
 
         for handle in handles {
-            let mut record = handle.lock().await;
-            record.closed = true;
-            if record.active.is_some() {
-                let now = self.now();
-                record.active = None;
-                let domain = vec![ThreadEvent::TurnCompleted {
-                    status: TurnStatus::Interrupted,
-                    at: now,
-                }];
-                let wire = vec![Event::TurnCompleted {
-                    thread_id: record.meta.thread_id.clone(),
-                    turn_id: record.turn_id_for_event(),
-                    usage: Usage::default(),
-                    status: TurnStatus::Interrupted,
-                    changes: None,
-                }];
-                let _ = self.inner.emit(&mut record, domain, wire).await;
-            }
-            let thread_id = record.meta.thread_id.clone();
-            let session = match std::mem::replace(&mut record.session, SessionSlot::None) {
-                SessionSlot::Live(session) => Some(session),
-                SessionSlot::None | SessionSlot::Starting => None,
+            let (thread_id, session, pump) = {
+                let mut record = handle.lock().await;
+                record.closed = true;
+                if let Some(turn_id) = record.active.as_ref().map(|active| active.turn_id.clone()) {
+                    let _ = self
+                        .inner
+                        .settle_turn_locked(
+                            &mut record,
+                            &turn_id,
+                            TurnEnd::new(TurnStatus::Interrupted, Usage::default()),
+                        )
+                        .await;
+                }
+                let thread_id = record.meta.thread_id.clone();
+                let session = record
+                    .session
+                    .generation()
+                    .and_then(|generation| record.detach_session(generation));
+                let pump = if session.is_some() {
+                    record.pump.take()
+                } else {
+                    None
+                };
+                (thread_id, session, pump)
             };
-            let pump = record.pump.take();
-            drop(record);
             if let Some(session) = session {
                 // The record lock is released first: a lock order of
                 // record-then-session would deadlock with a Stop.
@@ -2075,10 +2235,12 @@ impl Inner {
                 active: None,
                 last_turn_id: None,
                 session: SessionSlot::None,
+                session_gen: 0,
                 pump: None,
                 pending_approvals: BTreeMap::new(),
                 queued: VecDeque::new(),
                 last_signature: None,
+                turn_error_reported: None,
                 scheduled_limit: None,
                 resume_at: None,
                 limit: None,
@@ -2114,6 +2276,107 @@ impl Inner {
         Ok(())
     }
 
+    /// Ends `turn_id` exactly once.
+    ///
+    /// Every path that can end a turn comes here: the pump's completion, Stop
+    /// before a prompt was written, a failed prompt write, a failed startup and
+    /// a dead session. Under the record lock it checks the turn is still the
+    /// active one, closes its dispatch, publishes exactly one `TurnCompleted`
+    /// (and at most one error row) and promotes the next queued message before
+    /// releasing the lock, so a Send that arrives meanwhile queues behind that
+    /// message instead of jumping ahead of it. The promoted turn's delivery or
+    /// startup is spawned after the lock is released.
+    async fn settle_turn(
+        self: &Arc<Self>,
+        handle: &ThreadHandle,
+        turn_id: &TurnId,
+        end: TurnEnd,
+    ) -> bool {
+        let mut record = handle.lock().await;
+        let settled = self.settle_turn_locked(&mut record, turn_id, end).await;
+        drop(record);
+        if settled {
+            self.spawn_advance(handle.clone());
+        }
+        settled
+    }
+
+    /// [`Self::settle_turn`] for a caller that already holds the record lock.
+    async fn settle_turn_locked(
+        &self,
+        record: &mut ThreadRecord,
+        turn_id: &TurnId,
+        end: TurnEnd,
+    ) -> bool {
+        let Some(active) = record.active.as_ref() else {
+            return false;
+        };
+        if &active.turn_id != turn_id {
+            // Someone else settled this turn (or a later one is running).
+            return false;
+        }
+        if !active.dispatch.settle() {
+            return false;
+        }
+
+        let now = self.now();
+        let TurnEnd {
+            status,
+            usage,
+            changes,
+            mut wire,
+            domain: mut extra_domain,
+            error,
+        } = end;
+        let mut domain = Vec::new();
+        if let Some(error) = error
+            && record.note_error(turn_id)
+        {
+            domain.push(ThreadEvent::FailureRaised { at: now });
+            wire.push(Event::Error {
+                thread_id: Some(record.meta.thread_id.clone()),
+                message: error.message,
+                hint: error.hint,
+                retryable: error.retryable,
+            });
+        }
+        record.active = None;
+        domain.push(ThreadEvent::TurnCompleted { status, at: now });
+        // Events that must survive the completion (a usage limit that keeps the
+        // thread scheduled) are applied after it, exactly as the lifecycle
+        // projection orders them.
+        domain.append(&mut extra_domain);
+        wire.push(Event::TurnCompleted {
+            thread_id: record.meta.thread_id.clone(),
+            turn_id: turn_id.clone(),
+            usage,
+            status,
+            changes,
+        });
+
+        // Promote the next queued message under this same lock: a Send that
+        // arrives now must queue behind it, not become the active turn first.
+        if !record.closed
+            && record.scheduled_limit.is_none()
+            && let Some(input) = record.queued.pop_front()
+        {
+            let next = record.begin_turn(now, input);
+            let next_id = next.turn_id.clone();
+            domain.push(ThreadEvent::TurnQueued { at: now });
+            domain.push(ThreadEvent::TurnStarted { at: now });
+            wire.push(Event::TurnStarted {
+                thread_id: record.meta.thread_id.clone(),
+                turn_id: next_id,
+                started_at: now,
+            });
+        }
+
+        if let Err(error) = self.emit(record, domain, wire).await {
+            tracing::error!(%error, "failed to record a settled turn");
+        }
+        true
+    }
+
     /// Starts a session for the thread unless it already has one.
     ///
     /// The startup is the only path that may create a session: when the slot is
@@ -2128,8 +2391,13 @@ impl Inner {
     }
 
     async fn start_session(self: &Arc<Self>, handle: ThreadHandle) {
-        let harness_kind = {
-            let record = handle.lock().await;
+        // Build the spec, mark the slot and capture the turn this startup
+        // carries under one lock. The generation is what lets this startup
+        // prove, after the slow `start_session` call, that the slot is still
+        // the one it claimed; the turn is used as captured, never re-read from
+        // "whatever is active then".
+        let (harness, mut spec, generation, turn) = {
+            let mut record = handle.lock().await;
             if record.closed || self.closed.load(Ordering::Relaxed) {
                 return;
             }
@@ -2138,14 +2406,12 @@ impl Inner {
                 // deliver this turn's prompt when it is.
                 return;
             }
-            record.meta.harness
-        };
-        let (harness, spec) = {
-            let record = handle.lock().await;
+            let harness_kind = record.meta.harness;
             let Some(harness) = self.harnesses.get(harness_kind) else {
                 drop(record);
                 self.fail_session(
                     handle,
+                    None,
                     None,
                     format!("no {harness_kind:?} adapter is available in this daemon build"),
                 )
@@ -2170,35 +2436,24 @@ impl Inner {
                 env_overrides,
                 attachments: Vec::new(),
             };
-            (harness, spec)
-        };
-
-        // Mark the slot before the slow `start_session` call so a Send that
-        // arrives meanwhile leaves its prompt for this startup, and capture the
-        // turn this startup carries: the object is used after startup returns,
-        // never re-read from "whatever is active then".
-        let turn = {
-            let mut record = handle.lock().await;
-            if record.closed || !matches!(record.session, SessionSlot::None) {
-                return;
-            }
-            record.session = SessionSlot::Starting;
-            record
+            let turn = record
                 .active
                 .as_ref()
-                .map(|active| Arc::clone(&active.dispatch))
+                .map(|active| Arc::clone(&active.dispatch));
+            let generation = record.next_session_gen();
+            record.session = SessionSlot::Starting(generation);
+            (harness, spec, generation, turn)
         };
 
         // CLIProxyAPI routing is applied only when the harness's toggle is on.
         // This is synchronous and offline: a probe never delays a session start.
-        let mut spec = spec;
         let mut context_window = None;
         if let Some(proxy) = self.proxy.get()
-            && let Some(applied) = proxy.override_for(harness_kind, &spec.model)
+            && let Some(applied) = proxy.override_for(harness.kind(), &spec.model)
         {
             tracing::debug!(
                 profile = %applied.profile_id,
-                harness = ?harness_kind,
+                harness = ?harness.kind(),
                 model = %applied.model,
                 verified = applied.verified,
                 "routing a harness session through CLIProxyAPI"
@@ -2221,35 +2476,43 @@ impl Inner {
         let mut session = match harness.start_session(spec).await {
             Ok(session) => session,
             Err(error) => {
-                self.fail_session(handle, turn, error.to_string()).await;
+                self.fail_session(handle, Some(generation), turn, error.to_string())
+                    .await;
                 return;
             }
         };
 
         let stream = session.events();
         let session: SharedSession = Arc::new(Mutex::new(session));
-        let mut record = handle.lock().await;
-        if record.closed
-            || self.closed.load(Ordering::Relaxed)
-            || !matches!(record.session, SessionSlot::Starting)
         {
-            // The thread was restarted or shut down while the harness was
-            // booting: this session belongs to nobody.
-            drop(record);
-            let _ = session.lock().await.shutdown().await;
-            return;
+            let mut record = handle.lock().await;
+            if record.closed
+                || self.closed.load(Ordering::Relaxed)
+                || !record.session.is_starting(generation)
+            {
+                // The thread was restarted or shut down while the harness was
+                // booting: this session belongs to nobody, and no turn is
+                // touched on its behalf.
+                drop(record);
+                let _ = session.lock().await.shutdown().await;
+                return;
+            }
+            record.session = SessionSlot::Live {
+                generation,
+                session: Arc::clone(&session),
+            };
+            if context_window.is_some() {
+                record.context_window = context_window;
+            }
+            let inner = Arc::clone(self);
+            let pump_handle = handle.clone();
+            let pump_session = Arc::clone(&session);
+            record.pump = Some(tokio::spawn(async move {
+                inner
+                    .run_pump(pump_handle, generation, pump_session, stream)
+                    .await;
+            }));
         }
-        record.session = SessionSlot::Live(Arc::clone(&session));
-        if context_window.is_some() {
-            record.context_window = context_window;
-        }
-        let inner = Arc::clone(self);
-        let pump_handle = handle.clone();
-        let pump_session = Arc::clone(&session);
-        record.pump = Some(tokio::spawn(async move {
-            inner.run_pump(pump_handle, pump_session, stream).await;
-        }));
-        drop(record);
 
         // Claim the turn this startup carried: a Stop that won during startup
         // left its dispatch stopped, so its prompt is dropped and the queue
@@ -2269,54 +2532,53 @@ impl Inner {
         self.advance_queue(handle).await;
     }
 
+    /// Ends the active turn when a startup for `generation` failed.
+    ///
+    /// A failure from a startup that no longer owns the slot (a restart, a
+    /// shutdown) changes nothing: that startup's turn belongs to another path.
     async fn fail_session(
         self: &Arc<Self>,
         handle: ThreadHandle,
+        generation: Option<u64>,
         turn: Option<Arc<TurnDispatch>>,
         message: String,
     ) {
-        let mut record = handle.lock().await;
-        if matches!(record.session, SessionSlot::Starting) {
-            record.session = SessionSlot::None;
-        }
-        let failed = match &turn {
-            Some(turn) => record.dispatch_for(&turn.turn_id).is_some(),
-            None => record.active.is_some(),
+        let turn_id = {
+            let mut record = handle.lock().await;
+            if let Some(generation) = generation {
+                if !record.session.is_starting(generation) {
+                    return;
+                }
+                record.session = SessionSlot::None;
+            }
+            match &turn {
+                Some(turn) => record
+                    .dispatch_for(&turn.turn_id)
+                    .map(|_| turn.turn_id.clone()),
+                None => record.active.as_ref().map(|active| active.turn_id.clone()),
+            }
         };
-        if failed {
-            let now = self.now();
-            record.active = None;
-            let wire = vec![Event::Error {
-                thread_id: Some(record.meta.thread_id.clone()),
-                message: message.clone(),
-                hint: Some("Install the harness or pick a different one, then retry".into()),
-                retryable: false,
-            }];
-            let _ = self
-                .emit(
-                    &mut record,
-                    vec![
-                        ThreadEvent::FailureRaised { at: now },
-                        ThreadEvent::TurnCompleted {
-                            status: TurnStatus::Failed,
-                            at: now,
-                        },
-                    ],
-                    wire,
-                )
-                .await;
+        if let Some(turn_id) = turn_id {
+            self.settle_turn(
+                &handle,
+                &turn_id,
+                TurnEnd::failed(
+                    message,
+                    Some("Install the harness or pick a different one, then retry".into()),
+                    false,
+                ),
+            )
+            .await;
         }
-        drop(record);
-        self.advance_queue(handle).await;
     }
 
     /// Ends `turn_id` after its prompt could not be written, at most once.
     ///
     /// The pump can notice the same dead session, and Stop or a queued turn can
-    /// end this one first, so the turn is only failed while it is still the
-    /// active one. A write error that killed the transport detaches the session:
-    /// the next message then starts a fresh one instead of writing into a
-    /// closed pipe.
+    /// end this one first, so the settlement itself decides whether this path
+    /// still owns the turn. A write error that killed the transport detaches
+    /// the session (by generation) and shuts it down: the next message then
+    /// starts a fresh one instead of writing into a closed pipe.
     async fn fail_prompt_write(
         self: &Arc<Self>,
         handle: ThreadHandle,
@@ -2325,60 +2587,29 @@ impl Inner {
         message: String,
     ) {
         let dead = session.lock().await.is_closed();
-        let mut record = handle.lock().await;
-        if record.active.as_ref().map(|active| &active.turn_id) != Some(turn_id) {
-            return;
-        }
-        record.active = None;
-        if dead
-            && record
-                .session
-                .live()
-                .is_some_and(|current| Arc::ptr_eq(current, session))
-        {
-            record.session = SessionSlot::None;
-            if let Some(pump) = record.pump.take() {
-                pump.abort();
+        let mut detached = None;
+        if dead {
+            let mut record = handle.lock().await;
+            if record.session.is_live(session)
+                && let Some(generation) = record.session.generation()
+            {
+                detached = record.detach_session(generation);
+                record.pump = None;
             }
         }
-        let now = self.now();
-        let wire = vec![
-            Event::Error {
-                thread_id: Some(record.meta.thread_id.clone()),
-                message: format!("the harness rejected the message: {message}"),
-                hint: Some("Check the harness installation with `h4rnd doctor`".into()),
-                retryable: false,
-            },
-            Event::TurnCompleted {
-                thread_id: record.meta.thread_id.clone(),
-                turn_id: turn_id.clone(),
-                usage: Usage::default(),
-                status: TurnStatus::Failed,
-                changes: None,
-            },
-        ];
-        if let Err(error) = self
-            .emit(
-                &mut record,
-                vec![
-                    ThreadEvent::FailureRaised { at: now },
-                    ThreadEvent::TurnCompleted {
-                        status: TurnStatus::Failed,
-                        at: now,
-                    },
-                ],
-                wire,
-            )
-            .await
-        {
-            tracing::error!(%error, "failed to record a rejected prompt");
+        // A dead transport also reports its own failure on the harness stream;
+        // the settlement's row is deduplicated against it. If that report
+        // arrives late, this is the one row, and it lands before the turn's
+        // completion either way.
+        let end = TurnEnd::failed(
+            format!("the harness rejected the message: {message}"),
+            Some("Check the harness installation with `h4rnd doctor`".into()),
+            false,
+        );
+        self.settle_turn(&handle, turn_id, end).await;
+        if let Some(detached) = detached {
+            let _ = detached.lock().await.shutdown().await;
         }
-        drop(record);
-        // The turn is over, so a follow-up queued behind the failed write must
-        // run in order: on a fresh session when this one died, on the live one
-        // otherwise. It runs on its own task, which also keeps this write's
-        // future out of the queue's dispatch loop.
-        self.spawn_advance(handle);
     }
 
     /// Runs [`Self::advance_queue`] on its own task.
@@ -2407,15 +2638,23 @@ impl Inner {
         dispatch: Arc<TurnDispatch>,
         session: SharedSession,
     ) {
-        let mut guard = session.lock().await;
+        if !self
+            .owns_attached_session(&handle, &dispatch, &session)
+            .await
         {
-            // The turn may have ended, been stopped, or had its session
-            // replaced while this waited for the lock.
-            let record = handle.lock().await;
-            if record.dispatch_for(&dispatch.turn_id).is_none() || !record.session.is_live(&session)
-            {
-                return;
-            }
+            self.recover_delivery(&handle, &dispatch).await;
+            return;
+        }
+        let mut guard = session.lock().await;
+        if !self
+            .owns_attached_session(&handle, &dispatch, &session)
+            .await
+        {
+            // The turn ended, or its session was replaced, while this waited
+            // for the session lock.
+            drop(guard);
+            self.recover_delivery(&handle, &dispatch).await;
+            return;
         }
         if !dispatch.claim() {
             return;
@@ -2426,6 +2665,40 @@ impl Inner {
         if let Err(error) = sent {
             self.fail_prompt_write(handle, &turn_id, &session, error.to_string())
                 .await;
+        }
+    }
+
+    /// Whether `dispatch` is still the active turn on `session`'s slot.
+    async fn owns_attached_session(
+        &self,
+        handle: &ThreadHandle,
+        dispatch: &Arc<TurnDispatch>,
+        session: &SharedSession,
+    ) -> bool {
+        let record = handle.lock().await;
+        record.dispatch_for(&dispatch.turn_id).is_some() && record.session.is_live(session)
+    }
+
+    /// Gets a still-pending turn onto a session after its delivery found the
+    /// session detached.
+    ///
+    /// Returning here would leave the active turn Working forever: the startup
+    /// that detached the slot never delivered it, and no turn end will come.
+    /// A startup that is already in flight owns the turn instead.
+    async fn recover_delivery(
+        self: &Arc<Self>,
+        handle: &ThreadHandle,
+        dispatch: &Arc<TurnDispatch>,
+    ) {
+        let start = {
+            let record = handle.lock().await;
+            !record.closed
+                && record.dispatch_for(&dispatch.turn_id).is_some()
+                && dispatch.state() == DispatchState::Pending
+                && matches!(record.session, SessionSlot::None)
+        };
+        if start {
+            self.spawn_session(handle.clone());
         }
     }
 
@@ -2458,6 +2731,7 @@ impl Inner {
     async fn run_pump(
         self: Arc<Self>,
         handle: ThreadHandle,
+        generation: u64,
         session: SharedSession,
         mut stream: futures::stream::BoxStream<'static, HarnessEvent>,
     ) {
@@ -2465,12 +2739,20 @@ impl Inner {
             if self.closed.load(Ordering::Relaxed) {
                 break;
             }
+            // Sampling the transport's health needs the session lock, so do it
+            // before the record lock (the same order Stop and delivery use).
+            let session_closed = if matches!(&event, HarnessEvent::TurnCompleted { .. }) {
+                session.lock().await.is_closed()
+            } else {
+                false
+            };
             let mut record = handle.lock().await;
             let now = self.now();
             let thread_id = record.meta.thread_id.clone();
             let mut domain = Vec::new();
             let mut wire = Vec::new();
-            let mut completed = false;
+            let mut detached: Option<SharedSession> = None;
+            let mut settled = false;
             let mut forward_approval: Option<ForwardedRequest> = None;
 
             // `SessionStarted` normally carries the native id, but keep the
@@ -2705,171 +2987,205 @@ impl Inner {
                     });
                 }
                 HarnessEvent::TurnCompleted { status, usage } => {
-                    completed = true;
-                    // A completed turn clears a stale limit unless this turn
-                    // armed an auto-resume: that schedule still explains why
-                    // the thread is paused, so the row keeps its reset time.
-                    if status == TurnStatus::Completed && record.scheduled_limit.is_none() {
-                        record.limit = None;
-                    }
-                    // The summary footer shows TTFT after the turn ends, so
-                    // read it from the live meter before the turn is taken.
-                    if let Some(active) = record.active.as_ref()
-                        && let Some(ttft) = active.meter.live(now).ttft_ms
-                    {
-                        record.ttft_ms = Some(ttft);
-                    }
-                    let mut active = record.active.take();
-                    let (turn_id, item_id, text, turn_usage) = match &active {
-                        Some(active) => (
-                            active.turn_id.clone(),
-                            active.item_id.clone(),
-                            active.text.clone(),
-                            active.usage.clone(),
-                        ),
-                        None => (
-                            record.turn_id_for_event(),
-                            fresh_item_id("assistant"),
-                            String::new(),
-                            Usage::default(),
-                        ),
-                    };
-                    let usage = if usage.total_tokens() == 0
-                        && usage.cost_micros == 0
-                        && usage.duration_ms == 0
-                    {
-                        turn_usage.clone()
-                    } else {
-                        usage
-                    };
-                    // Fill gaps from the adapter's own turn report when the
-                    // event carried no accounting (Claude reports it once).
-                    let usage = if usage.total_tokens() == 0
-                        && usage.cost_micros == 0
-                        && usage.duration_ms == 0
-                    {
-                        record
-                            .live_session()
-                            .and_then(|session| session.try_lock().ok())
-                            .and_then(|session| session.last_turn())
-                            .map(|report| Usage {
-                                cost_micros: report.cost_micros,
-                                duration_ms: report.duration_ms,
-                                ..Usage::default()
-                            })
-                            .unwrap_or(usage)
-                    } else {
-                        usage
-                    };
-                    record.meta.usage.merge(&usage);
-
-                    // The ledger row is written before the turn completion is
-                    // projected, so a client that reacts to `TurnCompleted`
-                    // already sees the cost in `GetUsage`.
-                    if let Some(meter) = self.meter.get() {
-                        let context = TurnContext {
-                            thread_id: Some(record.meta.thread_id.as_str().to_owned()),
-                            parent_thread_id: record
-                                .meta
-                                .parent_thread_id
-                                .as_ref()
-                                .map(|parent| parent.as_str().to_owned()),
-                            run_id: Some(turn_id.as_str().to_owned()),
-                            workspace: Some(record.meta.workspace_path.clone()),
-                            machine: Some(self.local_host.as_str().to_owned()),
-                            account: None,
-                            harness: Some(record.meta.harness.slug().to_owned()),
-                            model: Some(record.meta.model.clone()),
-                            provider: provider_for_model(&record.meta.model),
-                            credential: None,
-                        };
-                        let metered = if let Some(active) = &mut active {
-                            active.meter.set_final_usage(&usage);
-                            Some(active.meter.finish(
-                                now,
-                                status,
-                                meter.prices(),
-                                &record.meta.model,
-                            ))
-                        } else {
-                            let mut turn = TurnMeter::new(now);
-                            turn.set_final_usage(&usage);
-                            Some(turn.finish(now, status, meter.prices(), &record.meta.model))
-                        };
-                        if let Some(metered) = &metered {
-                            // The meter owns the generation time (wall minus
-                            // tool time); the thread's TPS derives from it.
-                            record.meta.usage.generation_ms = record
-                                .meta
-                                .usage
-                                .generation_ms
-                                .saturating_add(metered.generation_ms);
-                            record.meta.usage.refresh_tps();
-                        }
-                        if let Some(metered) = metered
-                            && let Err(error) = meter.record_turn(context, &metered).await
-                        {
-                            tracing::warn!(%error, "could not write the usage ledger row");
-                        }
-                    }
-
-                    domain.push(ThreadEvent::TurnCompleted { status, at: now });
-                    // A limit hit earlier in this turn must survive the
-                    // completion event: the thread stays Working/Scheduled
-                    // until the scheduled resume starts.
-                    if let Some(limit) = record.scheduled_limit.clone()
-                        && limit.auto_resume
-                    {
-                        domain.push(ThreadEvent::UsageLimitHit {
-                            reset_at: limit.reset_at,
-                            auto_resume: true,
-                            at: now,
-                        });
-                    }
-                    if !text.is_empty() {
-                        wire.push(Event::ItemCompleted {
-                            thread_id: thread_id.clone(),
-                            turn_id: turn_id.clone(),
-                            item: Item::Message {
-                                item_id,
-                                role: MessageRole::Assistant,
-                                text,
-                                attachments: Vec::new(),
-                            },
-                        });
-                    }
-                    let changes = self.snapshots.get().map(|snapshots| {
-                        let computed = snapshots.turn_changes(
-                            std::path::Path::new(&record.meta.workspace_path),
-                            &thread_id,
-                            &turn_id,
-                        );
-                        tracing::info!(
+                    if record.active.is_none() {
+                        // Another path already settled this turn (a Stop, a
+                        // failed write, a dead session). A late harness
+                        // completion must not publish a second one.
+                        tracing::debug!(
                             thread_id = %thread_id,
-                            %turn_id,
-                            files = computed.files.len(),
-                            "computed turn change set"
+                            "ignoring a completion for an already-settled turn"
                         );
-                        computed
-                    });
-                    wire.push(Event::TurnCompleted {
-                        thread_id: thread_id.clone(),
-                        turn_id,
-                        usage,
-                        status,
-                        changes,
-                    });
+                    } else {
+                        // A transport that is already dead (a cancel that timed
+                        // out, a writer I/O error) is detached before this turn
+                        // ends, so promotion starts the next turn on a fresh
+                        // session instead of writing into a closed client.
+                        let closed = session_closed;
+                        if closed
+                            && record.session.is_live(&session)
+                            && let Some(generation) = record.session.generation()
+                        {
+                            detached = record.detach_session(generation);
+                            record.pump = None;
+                        }
+
+                        // A completed turn clears a stale limit unless this
+                        // turn armed an auto-resume: that schedule still
+                        // explains why the thread is paused, so the row keeps
+                        // its reset time.
+                        if status == TurnStatus::Completed && record.scheduled_limit.is_none() {
+                            record.limit = None;
+                        }
+                        // The summary footer shows TTFT after the turn ends, so
+                        // read it from the live meter before the turn is taken.
+                        if let Some(active) = record.active.as_ref()
+                            && let Some(ttft) = active.meter.live(now).ttft_ms
+                        {
+                            record.ttft_ms = Some(ttft);
+                        }
+                        let (turn_id, item_id, text, turn_usage) = {
+                            let active = record.active.as_ref().expect("checked above");
+                            (
+                                active.turn_id.clone(),
+                                active.item_id.clone(),
+                                active.text.clone(),
+                                active.usage.clone(),
+                            )
+                        };
+                        let usage = if usage.total_tokens() == 0
+                            && usage.cost_micros == 0
+                            && usage.duration_ms == 0
+                        {
+                            turn_usage.clone()
+                        } else {
+                            usage
+                        };
+                        // Fill gaps from the adapter's own turn report when the
+                        // event carried no accounting (Claude reports it once).
+                        let usage = if usage.total_tokens() == 0
+                            && usage.cost_micros == 0
+                            && usage.duration_ms == 0
+                        {
+                            record
+                                .live_session()
+                                .and_then(|session| session.try_lock().ok())
+                                .and_then(|session| session.last_turn())
+                                .map(|report| Usage {
+                                    cost_micros: report.cost_micros,
+                                    duration_ms: report.duration_ms,
+                                    ..Usage::default()
+                                })
+                                .unwrap_or(usage)
+                        } else {
+                            usage
+                        };
+                        record.meta.usage.merge(&usage);
+
+                        // The ledger row is written before the turn completion
+                        // is projected, so a client that reacts to
+                        // `TurnCompleted` already sees the cost in `GetUsage`.
+                        if let Some(meter) = self.meter.get() {
+                            let context = TurnContext {
+                                thread_id: Some(record.meta.thread_id.as_str().to_owned()),
+                                parent_thread_id: record
+                                    .meta
+                                    .parent_thread_id
+                                    .as_ref()
+                                    .map(|parent| parent.as_str().to_owned()),
+                                run_id: Some(turn_id.as_str().to_owned()),
+                                workspace: Some(record.meta.workspace_path.clone()),
+                                machine: Some(self.local_host.as_str().to_owned()),
+                                account: None,
+                                harness: Some(record.meta.harness.slug().to_owned()),
+                                model: Some(record.meta.model.clone()),
+                                provider: provider_for_model(&record.meta.model),
+                                credential: None,
+                            };
+                            let model = record.meta.model.clone();
+                            let metered = record.active.as_mut().map(|active| {
+                                active.meter.set_final_usage(&usage);
+                                active.meter.finish(now, status, meter.prices(), &model)
+                            });
+                            if let Some(metered) = &metered {
+                                // The meter owns the generation time (wall minus
+                                // tool time); the thread's TPS derives from it.
+                                record.meta.usage.generation_ms = record
+                                    .meta
+                                    .usage
+                                    .generation_ms
+                                    .saturating_add(metered.generation_ms);
+                                record.meta.usage.refresh_tps();
+                            }
+                            if let Some(metered) = metered
+                                && let Err(error) = meter.record_turn(context, &metered).await
+                            {
+                                tracing::warn!(%error, "could not write the usage ledger row");
+                            }
+                        }
+
+                        let mut end = TurnEnd::new(status, usage);
+                        if closed && status == TurnStatus::Failed {
+                            // The transport died under the turn. If the bridge
+                            // already reported it, the settlement's row is
+                            // deduplicated; if it arrives late, this is the one
+                            // row.
+                            end.error = Some(TurnError {
+                                message: "the harness transport closed mid-turn".into(),
+                                hint: Some("Send the message again to resume".into()),
+                                retryable: true,
+                            });
+                        }
+                        // A limit hit earlier in this turn must survive the
+                        // completion event: the thread stays Working/Scheduled
+                        // until the scheduled resume starts.
+                        if let Some(limit) = record.scheduled_limit.clone()
+                            && limit.auto_resume
+                        {
+                            end.domain.push(ThreadEvent::UsageLimitHit {
+                                reset_at: limit.reset_at,
+                                auto_resume: true,
+                                at: now,
+                            });
+                        }
+                        if !text.is_empty() {
+                            end.wire.push(Event::ItemCompleted {
+                                thread_id: thread_id.clone(),
+                                turn_id: turn_id.clone(),
+                                item: Item::Message {
+                                    item_id,
+                                    role: MessageRole::Assistant,
+                                    text,
+                                    attachments: Vec::new(),
+                                },
+                            });
+                        }
+                        end.changes = self.snapshots.get().map(|snapshots| {
+                            let computed = snapshots.turn_changes(
+                                std::path::Path::new(&record.meta.workspace_path),
+                                &thread_id,
+                                &turn_id,
+                            );
+                            tracing::info!(
+                                thread_id = %thread_id,
+                                %turn_id,
+                                files = computed.files.len(),
+                                "computed turn change set"
+                            );
+                            computed
+                        });
+                        settled = self.settle_turn_locked(&mut record, &turn_id, end).await;
+                    }
                 }
                 HarnessEvent::Error { message, retryable } => {
-                    if record.active.is_some() {
-                        domain.push(ThreadEvent::FailureRaised { at: now });
+                    // One turn may publish at most one error row: a transport
+                    // failure forwarded by the bridge and a write failure
+                    // noticed by the daemon are the same failure.
+                    let turn_id = record.turn_id_for_event();
+                    if !record.session.is_live(&session) {
+                        // This pump's session was already detached, so whoever
+                        // detached it reported the failure. A late error from a
+                        // session nobody attaches to any more is a duplicate and
+                        // must not be blamed on the turn that replaced it.
+                        tracing::debug!(
+                            thread_id = %thread_id,
+                            "dropped a late error from a detached session"
+                        );
+                    } else if record.note_error(&turn_id) {
+                        if record.active.is_some() {
+                            domain.push(ThreadEvent::FailureRaised { at: now });
+                        }
+                        wire.push(Event::Error {
+                            thread_id: Some(thread_id.clone()),
+                            message,
+                            hint: Some("Inspect the thread and retry when ready".into()),
+                            retryable,
+                        });
+                    } else {
+                        tracing::debug!(
+                            thread_id = %thread_id,
+                            "dropped a duplicate failure report for the same turn"
+                        );
                     }
-                    wire.push(Event::Error {
-                        thread_id: Some(thread_id.clone()),
-                        message,
-                        hint: Some("Inspect the thread and retry when ready".into()),
-                        retryable,
-                    });
                 }
             }
 
@@ -2881,104 +3197,65 @@ impl Inner {
             if let Some(forwarded) = forward_approval {
                 self.forward_approval(forwarded).await;
             }
-
-            if completed {
-                self.advance_queue(handle.clone()).await;
+            if let Some(session) = detached {
+                // The record is unlocked: shutting a session down while holding
+                // it would deadlock with a Stop or a delivery.
+                let _ = session.lock().await.shutdown().await;
+            }
+            if settled {
+                // A settled turn may have promoted the next queued message
+                // under the same lock; get it onto a session now.
+                self.spawn_advance(handle.clone());
             }
         }
 
-        let mut record = handle.lock().await;
-        // A failed write may already have detached this session and started a
-        // new one; only the pump that owns the attached session may clear it.
-        if !record.session.is_live(&session) {
-            return;
+        // The stream ended. Only the pump that still owns the attached session
+        // may clear it: a failed write or a restart may already have detached
+        // it and started another one.
+        let turn = {
+            let mut record = handle.lock().await;
+            if !record.session.is_live(&session) || record.session.generation() != Some(generation)
+            {
+                return;
+            }
+            let stderr_tail = record
+                .live_session()
+                .and_then(|session| session.try_lock().ok())
+                .map(|session| session.stderr_tail())
+                .unwrap_or_default();
+            record.detach_session(generation);
+            record.pump = None;
+            record.active.as_ref().map(|active| {
+                let hint = if stderr_tail.trim().is_empty() {
+                    "Send the message again to resume".to_owned()
+                } else {
+                    format!("Send the message again to resume. Harness stderr: {stderr_tail}")
+                };
+                (active.turn_id.clone(), hint)
+            })
+        };
+        if let Some((turn_id, hint)) = turn {
+            self.settle_turn(
+                &handle,
+                &turn_id,
+                TurnEnd::failed(
+                    "the harness session ended before the turn completed".into(),
+                    Some(hint),
+                    true,
+                ),
+            )
+            .await;
         }
-        let stderr_tail = record
-            .live_session()
-            .and_then(|session| session.try_lock().ok())
-            .map(|session| session.stderr_tail())
-            .unwrap_or_default();
-        record.session = SessionSlot::None;
-        record.pump = None;
-        if let Some(active) = record.active.as_ref() {
-            let turn_id = active.turn_id.clone();
-            let now = self.now();
-            record.active = None;
-            let hint = if stderr_tail.trim().is_empty() {
-                "Send the message again to resume".to_owned()
-            } else {
-                format!("Send the message again to resume. Harness stderr: {stderr_tail}")
-            };
-            let wire = vec![
-                Event::Error {
-                    thread_id: Some(record.meta.thread_id.clone()),
-                    message: "the harness session ended before the turn completed".into(),
-                    hint: Some(hint),
-                    retryable: true,
-                },
-                Event::TurnCompleted {
-                    thread_id: record.meta.thread_id.clone(),
-                    turn_id,
-                    usage: Usage::default(),
-                    status: TurnStatus::Failed,
-                    changes: None,
-                },
-            ];
-            let _ = self
-                .emit(
-                    &mut record,
-                    vec![
-                        ThreadEvent::FailureRaised { at: now },
-                        ThreadEvent::TurnCompleted {
-                            status: TurnStatus::Failed,
-                            at: now,
-                        },
-                    ],
-                    wire,
-                )
-                .await;
-        }
-        drop(record);
-        self.advance_queue(handle).await;
     }
 
-    /// Starts the next queued turn and gets the active turn onto a session.
+    /// Gets the active turn onto a session, starting one when needed.
     ///
-    /// Every turn-end path calls this: a completed turn, a stopped one, a
-    /// failed prompt write, a failed startup and a dead session. It is also
-    /// what a finished startup calls to deliver the turn it carried.
+    /// A settled turn already promoted the next queued message under its own
+    /// lock, so this only ensures the active turn's prompt reaches the harness:
+    /// on the live session, or by starting one. A session that is still
+    /// starting delivers it when it is ready, and this returns without starting
+    /// a second one.
     async fn advance_queue(self: &Arc<Self>, handle: ThreadHandle) {
-        {
-            let mut record = handle.lock().await;
-            if !record.closed
-                && record.active.is_none()
-                // A rate-limited thread keeps its queue until the scheduled
-                // resume starts; otherwise the queued turn would hit the same
-                // limit now.
-                && record.scheduled_limit.is_none()
-                && let Some(input) = record.queued.pop_front()
-            {
-                let now = self.now();
-                let dispatch = record.begin_turn(now, input);
-                let turn_id = dispatch.turn_id.clone();
-                let domain = vec![
-                    ThreadEvent::TurnQueued { at: now },
-                    ThreadEvent::TurnStarted { at: now },
-                ];
-                let wire = vec![Event::TurnStarted {
-                    thread_id: record.meta.thread_id.clone(),
-                    turn_id,
-                    started_at: now,
-                }];
-                if let Err(error) = self.emit(&mut record, domain, wire).await {
-                    tracing::error!(%error, "failed to start queued turn");
-                }
-            }
-        }
-
-        // Get the active turn's prompt to the harness: on the live session, or
-        // by starting one. A session that is still starting delivers it when
-        // it is ready, and this returns without starting a second one.
         let needs_session = {
             let record = handle.lock().await;
             if record.closed || record.active.is_none() {
@@ -3171,11 +3448,18 @@ impl Inner {
                     Apply::Go(None, None)
                 } else {
                     record.meta.model = failover.model.clone();
-                    let session = match std::mem::replace(&mut record.session, SessionSlot::None) {
-                        SessionSlot::Live(session) => Some(session),
-                        SessionSlot::None | SessionSlot::Starting => None,
+                    // The limited model's session is the one inspected under
+                    // this lock; a newer generation is never this schedule's
+                    // to drop.
+                    let session = record
+                        .session
+                        .generation()
+                        .and_then(|generation| record.detach_session(generation));
+                    let pump = if session.is_some() {
+                        record.pump.take()
+                    } else {
+                        None
                     };
-                    let pump = record.pump.take();
                     Apply::Go(session, pump)
                 }
             } else {
@@ -3686,11 +3970,10 @@ mod tests {
         );
     }
 
-    /// A Stop that races the attachment of the session either drops the prompt
-    /// or cancels one that is already on the wire; it can never report the turn
-    /// as interrupted while its prompt still runs.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_stop_racing_session_attachment_is_dropped_or_cancelled() {
+    /// A Stop that lands before the prompt is written drops it: no cancel, no
+    /// prompt, one interrupted turn.
+    #[tokio::test]
+    async fn a_stop_before_attachment_drops_the_prompt() {
         let workspace = tempfile::tempdir().expect("tempdir");
         let (harness, gate) = FakeHarness::new().with_start_gate();
         let (harness, sends) = harness.with_send_count();
@@ -3709,7 +3992,7 @@ mod tests {
             .expect("thread handle");
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if matches!(handle.lock().await.session, SessionSlot::Starting) {
+                if matches!(handle.lock().await.session, SessionSlot::Starting(_)) {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -3718,30 +4001,77 @@ mod tests {
         .await
         .expect("the startup is in flight, holding the start gate");
 
-        // The Stop and the end of startup race for the slot and the session.
-        let stopper = manager.clone();
-        let thread_id = created.thread_id.clone();
-        let stop = tokio::spawn(async move { stopper.interrupt(&thread_id).await });
-        gate.release();
-        let (_, status) = next_turn_completion(&mut events).await;
-        stop.await
-            .expect("stop task")
+        // The Stop lands while the session is still starting, so the prompt can
+        // never be claimed.
+        manager
+            .interrupt(&created.thread_id)
+            .await
             .expect("a stop during startup is accepted");
+        let (turn, status) = next_turn_completion(&mut events).await;
+        assert_eq!(turn, created.turn_id);
+        assert_eq!(status, TurnStatus::Interrupted);
+        assert_eq!(sends.get(), 0, "the stopped prompt was never written");
+        assert_eq!(cancels.get(), 0, "nothing was on the wire to cancel");
 
-        if sends.get() == 0 {
-            assert_eq!(status, TurnStatus::Interrupted);
-            assert_eq!(
-                cancels.get(),
-                0,
-                "nothing to cancel when the prompt was never written"
-            );
-        } else {
-            assert_eq!(
-                cancels.get(),
-                1,
-                "a prompt on the wire is cancelled, so the turn cannot look stopped while it runs"
-            );
+        // Let the startup finish: it must not resurrect the stopped turn.
+        gate.release();
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
         }
+        assert_eq!(
+            sends.get(),
+            0,
+            "the startup did not write the stopped prompt"
+        );
+        assert_eq!(cancels.get(), 0);
+    }
+
+    /// A Stop that lands after the prompt reached the harness cancels the turn
+    /// that is on the wire, and the withheld completion cannot arrive as a
+    /// second turn end.
+    #[tokio::test]
+    async fn a_stop_after_the_prompt_is_written_cancels_it_once() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, gate) = FakeHarness::new().with_completion_gate();
+        let (harness, sends) = harness.with_send_count();
+        let (harness, cancels) = harness.with_interrupt_count();
+        let (harness, sessions) = harness.with_session_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert!(
+            wait_until(|| sends.get() == 1).await,
+            "the prompt reached the harness"
+        );
+        assert_eq!(sessions.get(), 1);
+
+        manager
+            .interrupt(&created.thread_id)
+            .await
+            .expect("a stop after the prompt is on the wire is accepted");
+        let (turn, status) = next_turn_completion(&mut events).await;
+        assert_eq!(turn, created.turn_id);
+        assert_eq!(status, TurnStatus::Interrupted);
+        assert_eq!(cancels.get(), 1, "the prompt on the wire was cancelled");
+
+        // Releasing the withheld completion must not publish a second end.
+        gate.release();
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                next_turn_completion(&mut events)
+            )
+            .await
+            .is_err(),
+            "the turn ended exactly once"
+        );
     }
 
     #[tokio::test]
@@ -3915,6 +4245,338 @@ mod tests {
             tokio::task::yield_now().await;
         }
         assert_eq!(sends.get(), 1, "the stopped prompt was never written");
+    }
+
+    /// A startup that fails still ends its turn: one `TurnCompleted(Failed)`
+    /// with one error row, and the next Send starts a fresh attempt.
+    #[tokio::test]
+    async fn a_startup_failure_emits_one_completion_and_advances() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let harness = FakeHarness::new().with_start_failure("the harness binary is missing");
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+
+        let mut errors = 0;
+        loop {
+            let wire = next_event(&mut events).await;
+            match wire.event {
+                Event::Error { .. } => errors += 1,
+                Event::TurnCompleted {
+                    turn_id, status, ..
+                } => {
+                    assert_eq!(turn_id, created.turn_id);
+                    assert_eq!(status, TurnStatus::Failed);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(errors, 1, "a failed startup reports one error row");
+
+        // The turn ended, so a fresh Send runs its own turn (and fails again)
+        // instead of leaving the previous one Working.
+        manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        let (turn, status) = next_turn_completion(&mut events).await;
+        assert_ne!(turn, created.turn_id);
+        assert_eq!(status, TurnStatus::Failed);
+    }
+
+    /// A Stop and a startup failure race for the same turn: whichever settles
+    /// first wins, and the turn still ends exactly once.
+    #[tokio::test]
+    async fn a_stop_racing_a_startup_failure_settles_the_turn_once() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, gate) = FakeHarness::new().with_start_gate();
+        let harness = harness.with_start_failure("the harness failed after the gate");
+        let (harness, sessions) = harness.with_session_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert!(
+            wait_until(|| sessions.get() == 1).await,
+            "the startup is in flight"
+        );
+
+        manager
+            .interrupt(&created.thread_id)
+            .await
+            .expect("a stop during startup is accepted");
+        let (turn, status) = next_turn_completion(&mut events).await;
+        assert_eq!(turn, created.turn_id);
+        assert_eq!(status, TurnStatus::Interrupted);
+
+        // The startup now fails. The turn is already settled, so this must be a
+        // no-op rather than a second completion or a second error row.
+        gate.release();
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+        let mut extra = Vec::new();
+        while let Ok(wire) = tokio::time::timeout(Duration::from_millis(100), events.recv()).await {
+            if let Ok(wire) = wire
+                && matches!(wire.event, Event::TurnCompleted { .. })
+            {
+                extra.push(wire.event);
+            }
+        }
+        assert!(extra.is_empty(), "the turn ended exactly once: {extra:?}");
+    }
+
+    /// A startup that returns after the slot moved on must shut the session it
+    /// made down instead of attaching it or touching the turn.
+    #[tokio::test]
+    async fn a_stale_startup_shuts_its_session_down_and_does_not_attach() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, gate) = FakeHarness::new().with_start_gate();
+        let (harness, sessions) = harness.with_session_count();
+        let (harness, shutdowns) = harness.with_shutdown_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        assert!(
+            wait_until(|| sessions.get() == 1).await,
+            "the startup is in flight"
+        );
+
+        // The slot moves on while the harness is still booting, as a restart
+        // that cleared the startup would.
+        {
+            let mut record = handle.lock().await;
+            record.session = SessionSlot::None;
+        }
+        gate.release();
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+
+        assert_eq!(shutdowns.get(), 1, "the stale session was shut down");
+        let record = handle.lock().await;
+        assert!(
+            matches!(record.session, SessionSlot::None),
+            "the stale startup did not attach"
+        );
+        assert_eq!(
+            record.active.as_ref().map(|active| &active.turn_id),
+            Some(&created.turn_id),
+            "the stale startup did not touch the turn"
+        );
+    }
+
+    /// A delivery that finds its captured session detached gets the still
+    /// pending turn onto a fresh session instead of leaving it Working forever.
+    #[tokio::test]
+    async fn a_delivery_whose_session_was_detached_starts_a_fresh_one() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, sessions) = FakeHarness::new().with_session_count();
+        let (harness, sends) = harness.with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(sessions.get(), 1);
+        assert_eq!(sends.get(), 1);
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        let (dispatch, detached) = {
+            let mut record = handle.lock().await;
+            let generation = record.session.generation().expect("a live session");
+            let detached = record.detach_session(generation).expect("the session");
+            let dispatch = record.begin_turn(
+                manager.now(),
+                UserInput {
+                    text: "second".into(),
+                    attachments: Vec::new(),
+                },
+            );
+            (dispatch, detached)
+        };
+
+        // The delivery was spawned for the old session; it arrives after the
+        // detach.
+        manager
+            .inner
+            .deliver(handle.clone(), dispatch, detached)
+            .await;
+
+        assert_eq!(
+            next_turn_status(&mut events).await,
+            TurnStatus::Completed,
+            "the turn runs on a fresh session"
+        );
+        assert_eq!(sessions.get(), 2, "the delivery started a fresh session");
+        assert_eq!(sends.get(), 2);
+    }
+
+    /// A Send that arrives while a turn is failing is promoted behind the
+    /// message that was already queued, never ahead of it.
+    #[tokio::test]
+    async fn a_send_during_a_failure_queues_behind_the_queued_turn() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let harness = FakeHarness::new();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+
+        // A is active (never delivered), B is queued behind it.
+        {
+            let mut record = handle.lock().await;
+            record.begin_turn(
+                manager.now(),
+                UserInput {
+                    text: "A".into(),
+                    attachments: Vec::new(),
+                },
+            );
+        }
+        let b = manager
+            .send_message(&created.thread_id, "B".into(), Vec::new())
+            .await
+            .expect("send B");
+        let a_turn = b.turn_id.clone();
+
+        // Hold the record so C's Send is waiting on it when A settles.
+        {
+            let mut record = handle.lock().await;
+            let sender = manager.clone();
+            let thread_id = created.thread_id.clone();
+            let sending = tokio::spawn(async move {
+                sender
+                    .send_message(&thread_id, "C".into(), Vec::new())
+                    .await
+            });
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
+            manager
+                .inner
+                .settle_turn_locked(
+                    &mut record,
+                    &a_turn,
+                    TurnEnd::new(TurnStatus::Interrupted, Usage::default()),
+                )
+                .await;
+            let promoted = record
+                .active
+                .as_ref()
+                .map(|active| active.turn_id.clone())
+                .expect("B was promoted under the lock");
+            drop(record);
+            let c = sending.await.expect("send task").expect("send C");
+            assert_eq!(
+                c.turn_id, promoted,
+                "C queued behind the promoted B, not in front of it"
+            );
+            assert_ne!(c.turn_id, a_turn);
+        }
+        // Let B (promoted) and C run in order.
+        manager.inner.spawn_advance(handle.clone());
+
+        let mut started = Vec::new();
+        loop {
+            let wire = next_event(&mut events).await;
+            match wire.event {
+                Event::TurnStarted { turn_id, .. } => started.push(turn_id),
+                Event::TurnCompleted { status, .. } if started.len() >= 2 => {
+                    assert_eq!(status, TurnStatus::Completed);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(started.len(), 2, "B and C each started exactly once");
+        assert_ne!(started[0], started[1], "B and C are different turns");
+    }
+
+    /// A restart while a Send is in flight never leaves its turn Working with
+    /// no session to run it.
+    #[tokio::test]
+    async fn restart_sessions_during_a_send_does_not_strand_the_turn() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, gate) = FakeHarness::new().with_later_completion_gate();
+        let (harness, sessions) = harness.with_session_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        let (first, status) = next_turn_completion(&mut events).await;
+        assert_eq!(status, TurnStatus::Completed);
+        assert_eq!(first, created.turn_id);
+
+        // The send's write and the session restart race; whichever wins, the
+        // turn must still end.
+        let sender = manager.clone();
+        let thread_id = created.thread_id.clone();
+        let sending = tokio::spawn(async move {
+            sender
+                .send_message(&thread_id, "second".into(), Vec::new())
+                .await
+        });
+        let restarted = manager.restart_sessions(&[HarnessKind::ClaudeCode]).await;
+        sending.await.expect("send task").expect("send");
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        gate.release();
+        let (_, status) = next_turn_completion(&mut events).await;
+        assert!(
+            matches!(status, TurnStatus::Interrupted | TurnStatus::Completed),
+            "the turn ended instead of staying Working: {status:?}"
+        );
+        assert!(
+            manager
+                .inner
+                .handle(&created.thread_id)
+                .await
+                .expect("handle")
+                .lock()
+                .await
+                .active
+                .is_none(),
+            "no turn is stranded as active"
+        );
+        let _ = restarted;
+        assert!(sessions.get() >= 1);
     }
 
     #[test]
