@@ -488,11 +488,19 @@ this harness than for Claude/Codex, which is preferable to buttons that silently
 
 **Addendum: ACP normalization that the UI can trust.** `session/prompt` is only reported as
 written once the client has flushed the frame to the agent's stdin; an interrupt therefore always
-sends `session/cancel` after the prompt it cancels. Stop reasons are not flattened: only
+sends `session/cancel` after the prompt it cancels. Waiting for writer-queue space and waiting for
+the flush share one ten-second deadline; on expiry the writer task is stopped and the agent killed,
+so a blocked frame cannot reach it later. Such a timeout ends the turn with exactly one failure row
+and detaches the dead session, so the next message starts a fresh one. A Stop that arrives before
+the prompt is dispatched, including while the session is still starting, ends the turn as
+interrupted without writing anything. Stop reasons are not flattened: only
 `end_turn` is a normal completion, `max_tokens` and `max_turn_requests` end the turn as a visible
-early stop, `cancelled` is an interrupt, and a refusal or an unknown reason is a failure.
-`tool_call_update` is merged into the tool row's last non-empty title and summary, so a status-only
-update never renames a tool, and the id is forgotten once the call finishes.
+early stop, `cancelled` is an interrupt, and a refusal or an unknown reason is a failure. The
+interrupt flag belongs to one prompt: it is cleared when a prompt is sent and set only while that
+prompt is running, so a late Stop cannot colour the next turn.
+`tool_call_update` is merged into the tool row's last non-empty title, kind, input and locations, so
+a status-only update never renames a tool or empties its expanded input, and the id is forgotten
+once the call finishes.
 
 ## ADR-027: Push notifications are metadata-only wake signals
 
