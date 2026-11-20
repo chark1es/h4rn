@@ -36,6 +36,12 @@ pub struct FakeHarness {
     write_gate: Option<Gate>,
     /// A test-only count of prompts the session was asked to write.
     send_count: Option<SendCount>,
+    /// A test-only latch before a session is returned from `start_session`.
+    start_gate: Option<Gate>,
+    /// A test-only count of sessions this harness has started.
+    session_count: Option<SessionCount>,
+    /// A test-only switch: prompts after the first `n` fail as a dead transport.
+    dead_sends_after: Option<usize>,
 }
 
 /// A shared count of prompts a fake session was asked to write.
@@ -47,6 +53,19 @@ pub struct SendCount(Arc<AtomicUsize>);
 
 impl SendCount {
     /// How many prompts have reached the fake session so far.
+    pub fn get(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// A shared count of sessions a fake harness has started.
+///
+/// A test reads it to prove a dead session was replaced by a fresh one.
+#[derive(Clone, Debug, Default)]
+pub struct SessionCount(Arc<AtomicUsize>);
+
+impl SessionCount {
+    /// How many sessions the fake harness has started so far.
     pub fn get(&self) -> usize {
         self.0.load(Ordering::SeqCst)
     }
@@ -129,6 +148,9 @@ impl Default for FakeHarness {
             send_gate: None,
             write_gate: None,
             send_count: None,
+            start_gate: None,
+            session_count: None,
+            dead_sends_after: None,
         }
     }
 }
@@ -219,6 +241,34 @@ impl FakeHarness {
         self.write_gate = Some(gate.clone());
         (self, gate)
     }
+
+    /// Holds every `start_session` until the returned [`Gate`] is released.
+    ///
+    /// A test uses this to model a harness that is slow to start, so Stop
+    /// arrives while the thread has a turn but no session yet.
+    pub fn with_start_gate(mut self) -> (Self, Gate) {
+        let gate = Gate::new();
+        self.start_gate = Some(gate.clone());
+        (self, gate)
+    }
+
+    /// Counts every session the daemon starts in the returned [`SessionCount`].
+    pub fn with_session_count(mut self) -> (Self, SessionCount) {
+        let count = SessionCount::default();
+        self.session_count = Some(count.clone());
+        (self, count)
+    }
+
+    /// Lets the first `ok_sends` prompts succeed, then makes every later send
+    /// fail as a dead transport whose session reports itself closed.
+    ///
+    /// A test uses this to model a prompt write that timed out and killed the
+    /// transport: the daemon must detach the session and start a fresh one on
+    /// the next message.
+    pub fn with_dead_transport_after(mut self, ok_sends: usize) -> Self {
+        self.dead_sends_after = Some(ok_sends);
+        self
+    }
 }
 
 #[async_trait]
@@ -237,6 +287,12 @@ impl Harness for FakeHarness {
     ) -> Result<Box<dyn HarnessSession>, HarnessError> {
         if self.install.is_none() {
             return Err(HarnessError::NotDetected { kind: self.kind });
+        }
+        if let Some(count) = &self.session_count {
+            count.0.fetch_add(1, Ordering::SeqCst);
+        }
+        if let Some(gate) = &self.start_gate {
+            gate.wait().await;
         }
 
         let (sender, receiver) = unbounded();
@@ -279,6 +335,8 @@ impl Harness for FakeHarness {
             delay,
             send_gate: self.send_gate.clone(),
             send_count: self.send_count.clone(),
+            dead_sends_after: self.dead_sends_after,
+            sends: 0,
             has_answered: false,
             write_gate: self.write_gate.clone(),
             closed: false,
@@ -302,6 +360,10 @@ pub struct FakeSession {
     send_gate: Option<Gate>,
     /// A shared count of prompts this session was asked to write.
     send_count: Option<SendCount>,
+    /// Sends after this many fail as a dead transport and close the session.
+    dead_sends_after: Option<usize>,
+    /// Prompts this session has been asked to write.
+    sends: usize,
     /// Whether this session has already answered one send, so the gate only
     /// holds later turns and not the one that creates the thread.
     has_answered: bool,
@@ -319,9 +381,20 @@ impl HarnessSession for FakeSession {
                 message: "session is shut down".into(),
             });
         }
-
+        self.sends += 1;
         if let Some(count) = &self.send_count {
             count.0.fetch_add(1, Ordering::SeqCst);
+        }
+        if let Some(limit) = self.dead_sends_after
+            && self.sends > limit
+        {
+            // A write that failed mid-frame kills the transport; report it as
+            // closed so the daemon detaches this session.
+            self.closed = true;
+            return Err(HarnessError::Transport {
+                harness: self.kind,
+                message: "the harness transport closed".into(),
+            });
         }
 
         // The first send starts the thread; a test gates later turns so a
@@ -522,6 +595,10 @@ impl HarnessSession for FakeSession {
             Some(receiver) => receiver.boxed(),
             None => futures::stream::empty().boxed(),
         }
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed
     }
 
     async fn shutdown(&mut self) -> Result<(), HarnessError> {

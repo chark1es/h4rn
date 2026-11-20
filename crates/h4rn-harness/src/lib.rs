@@ -253,6 +253,15 @@ pub trait HarnessSession: Send {
     /// Stops the harness process and releases its resources.
     async fn shutdown(&mut self) -> Result<(), HarnessError>;
 
+    /// Whether the transport behind this session is already gone.
+    ///
+    /// A failed write can kill the transport without the event stream ending,
+    /// so the daemon asks this before it detaches the session: the next
+    /// message then starts a fresh one instead of writing to a dead pipe.
+    fn is_closed(&self) -> bool {
+        false
+    }
+
     /// The harness-native session id, once the harness reported it.
     ///
     /// Adapters that cannot report one keep the default (`None`); the daemon

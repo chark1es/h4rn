@@ -1144,8 +1144,10 @@ impl ThreadManager {
     ///
     /// A Stop that arrives before the prompt reached the harness ends the turn
     /// without writing or cancelling anything: the background delivery then
-    /// finds the turn stopped and drops the prompt. Once the prompt is on the
-    /// wire, Stop waits for that write and cancels as usual.
+    /// finds the turn stopped and drops the prompt. That includes a Stop while
+    /// the session is still starting, before it has been attached to the
+    /// thread. Once the prompt is on the wire, Stop waits for that write and
+    /// cancels as usual.
     pub async fn interrupt(&self, thread_id: &ThreadId) -> Result<(), ManagerError> {
         let handle = self.inner.handle(thread_id).await?;
         let (session, turn_id, dispatch) = {
@@ -1162,6 +1164,13 @@ impl ThreadManager {
             )
         };
         let Some(session) = session else {
+            // The session is still starting. The first prompt has not been
+            // claimed yet, so Stop wins here and the claim check in
+            // `start_session` drops it instead of writing it.
+            if dispatch.stop() {
+                self.finish_stopped_turn(handle, turn_id).await;
+                return Ok(());
+            }
             return Err(ManagerError::Conflict(format!(
                 "thread {thread_id} has no live harness session"
             )));
@@ -2064,10 +2073,12 @@ impl Inner {
             .active
             .as_ref()
             .map(|active| Arc::clone(&active.dispatch));
+        let turn_id = record.active.as_ref().map(|active| active.turn_id.clone());
         let inner = Arc::clone(self);
         let pump_handle = handle.clone();
+        let pump_session = Arc::clone(&session);
         record.pump = Some(tokio::spawn(async move {
-            inner.run_pump(pump_handle, stream).await;
+            inner.run_pump(pump_handle, pump_session, stream).await;
         }));
         drop(record);
 
@@ -2075,34 +2086,21 @@ impl Inner {
             // The first prompt is written outside the record lock: a harness
             // that takes a while to accept it must not stall the thread. The
             // session lock still gates a Stop against this write.
-            let mut session = session.lock().await;
-            if dispatch.as_ref().is_some_and(|dispatch| !dispatch.claim()) {
+            let mut guard = session.lock().await;
+            let Some(dispatch) = dispatch.as_ref() else {
+                // The turn ended while the session was starting; its prompt
+                // must not be written after the person stopped it.
+                return;
+            };
+            if !dispatch.claim() {
                 return;
             }
-            let sent = session.send(input).await;
-            drop(session);
-            if let Err(error) = sent {
-                let mut record = handle.lock().await;
-                let now = self.now();
-                record.active = None;
-                let wire = vec![Event::Error {
-                    thread_id: Some(record.meta.thread_id.clone()),
-                    message: format!("the harness rejected the message: {error}"),
-                    hint: Some("Check the harness installation with `h4rnd doctor`".into()),
-                    retryable: false,
-                }];
-                let _ = self
-                    .emit(
-                        &mut record,
-                        vec![
-                            ThreadEvent::FailureRaised { at: now },
-                            ThreadEvent::TurnCompleted {
-                                status: TurnStatus::Failed,
-                                at: now,
-                            },
-                        ],
-                        wire,
-                    )
+            let sent = guard.send(input).await;
+            drop(guard);
+            if let Err(error) = sent
+                && let Some(turn_id) = turn_id
+            {
+                self.fail_prompt_write(handle, &turn_id, &session, error.to_string())
                     .await;
             }
         }
@@ -2133,6 +2131,72 @@ impl Inner {
             .await;
     }
 
+    /// Ends `turn_id` after its prompt could not be written, at most once.
+    ///
+    /// The pump can notice the same dead session, and Stop or a queued turn can
+    /// end this one first, so the turn is only failed while it is still the
+    /// active one. A write error that killed the transport detaches the session:
+    /// the next message then starts a fresh one instead of writing into a
+    /// closed pipe.
+    async fn fail_prompt_write(
+        self: &Arc<Self>,
+        handle: ThreadHandle,
+        turn_id: &TurnId,
+        session: &SharedSession,
+        message: String,
+    ) {
+        let dead = session.lock().await.is_closed();
+        let mut record = handle.lock().await;
+        if record.active.as_ref().map(|active| &active.turn_id) != Some(turn_id) {
+            return;
+        }
+        record.active = None;
+        if dead
+            && record
+                .session
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, session))
+        {
+            record.session = None;
+            if let Some(pump) = record.pump.take() {
+                pump.abort();
+            }
+        }
+        let now = self.now();
+        let wire = vec![
+            Event::Error {
+                thread_id: Some(record.meta.thread_id.clone()),
+                message: format!("the harness rejected the message: {message}"),
+                hint: Some("Check the harness installation with `h4rnd doctor`".into()),
+                retryable: false,
+            },
+            Event::TurnCompleted {
+                thread_id: record.meta.thread_id.clone(),
+                turn_id: turn_id.clone(),
+                usage: Usage::default(),
+                status: TurnStatus::Failed,
+                changes: None,
+            },
+        ];
+        if let Err(error) = self
+            .emit(
+                &mut record,
+                vec![
+                    ThreadEvent::FailureRaised { at: now },
+                    ThreadEvent::TurnCompleted {
+                        status: TurnStatus::Failed,
+                        at: now,
+                    },
+                ],
+                wire,
+            )
+            .await
+        {
+            tracing::error!(%error, "failed to record a rejected prompt");
+        }
+        drop(record);
+    }
+
     async fn deliver(self: &Arc<Self>, handle: ThreadHandle, turn_id: TurnId, input: UserInput) {
         let (session, dispatch) = {
             let record = handle.lock().await;
@@ -2156,34 +2220,14 @@ impl Inner {
         // queued on the same connection. The session lock is held across the
         // claim and the write so a Stop is ordered either before the prompt
         // (and drops it) or after it is on the wire (where a cancel works).
-        let mut session = session.lock().await;
+        let mut guard = session.lock().await;
         if !dispatch.claim() {
             return;
         }
-        let sent = session.send(input).await;
-        drop(session);
+        let sent = guard.send(input).await;
+        drop(guard);
         if let Err(error) = sent {
-            let mut record = handle.lock().await;
-            let now = self.now();
-            record.active = None;
-            let wire = vec![Event::Error {
-                thread_id: Some(record.meta.thread_id.clone()),
-                message: format!("the harness rejected the message: {error}"),
-                hint: Some("Check the harness installation with `h4rnd doctor`".into()),
-                retryable: false,
-            }];
-            let _ = self
-                .emit(
-                    &mut record,
-                    vec![
-                        ThreadEvent::FailureRaised { at: now },
-                        ThreadEvent::TurnCompleted {
-                            status: TurnStatus::Failed,
-                            at: now,
-                        },
-                    ],
-                    wire,
-                )
+            self.fail_prompt_write(handle, &turn_id, &session, error.to_string())
                 .await;
         }
     }
@@ -2191,6 +2235,7 @@ impl Inner {
     async fn run_pump(
         self: Arc<Self>,
         handle: ThreadHandle,
+        session: SharedSession,
         mut stream: futures::stream::BoxStream<'static, HarnessEvent>,
     ) {
         while let Some(event) = stream.next().await {
@@ -2623,6 +2668,15 @@ impl Inner {
         }
 
         let mut record = handle.lock().await;
+        // A failed write may already have detached this session and started a
+        // new one; only the pump that owns the attached session may clear it.
+        if !record
+            .session
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &session))
+        {
+            return;
+        }
         let stderr_tail = record
             .session
             .as_ref()
@@ -2631,10 +2685,10 @@ impl Inner {
             .unwrap_or_default();
         record.session = None;
         record.pump = None;
-        if record.active.is_some() {
+        if let Some(active) = record.active.as_ref() {
+            let turn_id = active.turn_id.clone();
             let now = self.now();
             record.active = None;
-            let turn_id = record.turn_id_for_event();
             let hint = if stderr_tail.trim().is_empty() {
                 "Send the message again to resume".to_owned()
             } else {
@@ -3211,6 +3265,222 @@ mod tests {
                 return status;
             }
         }
+    }
+
+    async fn open_test_manager(harness: FakeHarness, host: HostId) -> ThreadManager {
+        ThreadManager::open(
+            Arc::new(SqliteJournal::in_memory().await.expect("journal")),
+            Arc::new(StaticHarnessCatalog::with(Arc::new(harness))),
+            host,
+            ThreadManagerOptions {
+                // The manager only reacts to this test's own calls.
+                tick_interval: Duration::from_secs(3600),
+                ..ThreadManagerOptions::default()
+            },
+            None,
+        )
+        .await
+        .expect("manager")
+    }
+
+    fn new_thread(host: HostId, workspace: &std::path::Path, prompt: &str) -> NewThread {
+        NewThread {
+            thread_id: None,
+            parent_thread_id: None,
+            subagent_id: None,
+            host,
+            harness: HarnessKind::ClaudeCode,
+            workspace_path: workspace.display().to_string(),
+            model: "fake-model".into(),
+            prompt: prompt.into(),
+            attachments: Vec::new(),
+            runtime_mode: RuntimeMode::ApprovalRequired,
+            worktree: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_prompt_fails_once_and_the_next_message_starts_a_new_session() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, sessions) = FakeHarness::new().with_session_count();
+        let (harness, sends) = harness.with_send_count();
+        let harness = harness.with_dead_transport_after(1);
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(sessions.get(), 1);
+        assert_eq!(sends.get(), 1);
+
+        // The prompt write fails, as it does when the ACP deadline kills the
+        // transport: one failure row, the turn is over.
+        manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        let mut errors = 0;
+        loop {
+            let wire = events.recv().await.expect("event");
+            match wire.event {
+                Event::Error { .. } => errors += 1,
+                Event::TurnCompleted { status, .. } => {
+                    assert_eq!(status, TurnStatus::Failed);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(errors, 1, "one failure row for one prompt write");
+        assert!(
+            manager
+                .inner
+                .handle(&created.thread_id)
+                .await
+                .expect("handle")
+                .lock()
+                .await
+                .active
+                .is_none(),
+            "the turn is no longer running"
+        );
+
+        manager
+            .send_message(&created.thread_id, "third".into(), Vec::new())
+            .await
+            .expect("send");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(sessions.get(), 2, "the next message starts a fresh session");
+        assert_eq!(sends.get(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_stop_while_the_session_is_starting_never_writes_the_prompt() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, gate) = FakeHarness::new().with_start_gate();
+        let (harness, sessions) = harness.with_session_count();
+        let (harness, sends) = harness.with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        for _ in 0..1_000 {
+            if sessions.get() == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(sessions.get(), 1, "the session is only starting");
+
+        manager
+            .interrupt(&created.thread_id)
+            .await
+            .expect("a stop during startup is accepted");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Interrupted);
+
+        // Let the session finish starting: the claim the Stop left behind
+        // drops the first prompt instead of writing it.
+        gate.release();
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(sends.get(), 0, "the stopped prompt was never written");
+        assert!(
+            manager
+                .inner
+                .handle(&created.thread_id)
+                .await
+                .expect("handle")
+                .lock()
+                .await
+                .active
+                .is_none(),
+            "the stopped turn is over"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stop_after_delivery_has_the_dispatch_never_writes_the_prompt() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, sends) = FakeHarness::new().with_send_count();
+        let host = HostId::new("host_test");
+        let manager = Arc::new(open_test_manager(harness, host.clone()).await);
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        // Hold the session so Stop and delivery both have to wait for it.
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        let session = handle
+            .lock()
+            .await
+            .session
+            .clone()
+            .expect("the first turn started a session");
+        let guard = session.lock().await;
+
+        // Record the next turn, as a message would, but leave delivery to
+        // this test so it can be started after Stop is already waiting.
+        let turn_id = {
+            let mut record = handle.lock().await;
+            let (turn_id, _) = record.begin_turn(manager.inner.now());
+            turn_id
+        };
+
+        let stopper = Arc::clone(&manager);
+        let thread_id = created.thread_id.clone();
+        let stop = tokio::spawn(async move { stopper.interrupt(&thread_id).await });
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+
+        // Delivery reads the turn's dispatch now, then queues behind Stop on
+        // the session lock: it has the gate, but cannot claim it.
+        let deliverer = Arc::clone(&manager.inner);
+        let delivery_handle = handle.clone();
+        let delivery_turn = turn_id.clone();
+        let delivery = tokio::spawn(async move {
+            deliverer
+                .deliver(
+                    delivery_handle,
+                    delivery_turn,
+                    UserInput {
+                        text: "second".into(),
+                        attachments: Vec::new(),
+                    },
+                )
+                .await;
+        });
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+
+        drop(guard);
+        stop.await.expect("stop task").expect("stop");
+        delivery.await.expect("delivery task");
+
+        assert_eq!(
+            sends.get(),
+            1,
+            "delivery found the claim the Stop left behind and dropped the prompt"
+        );
+        assert!(
+            handle.lock().await.active.is_none(),
+            "the stopped turn is over"
+        );
     }
 
     #[tokio::test]

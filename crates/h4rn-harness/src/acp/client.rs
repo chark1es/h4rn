@@ -608,6 +608,14 @@ impl AcpClient {
         }
     }
 
+    /// Stops the writer task so a frame it is currently blocked on is never
+    /// written to the agent's stdin.
+    fn abandon_writer(&self) {
+        if let Some(writer) = lock(&self.shared.writer).take() {
+            writer.abort();
+        }
+    }
+
     /// Stops the agent: close stdin, ask it to exit, then kill the group.
     pub async fn shutdown(&self) -> Result<(), AcpError> {
         if self.shared.shutting_down.swap(true, Ordering::SeqCst) {
@@ -706,11 +714,31 @@ impl AcpClient {
             "method": method,
             "params": params,
         });
+        let deadline = tokio::time::Instant::now() + PROMPT_WRITE_TIMEOUT;
         let written = if track_write {
             let (written_tx, written_rx) = oneshot::channel();
-            if let Err(error) = self.send_frame_tracked(frame, written_tx).await {
-                lock(&self.shared.pending).remove(&key);
-                return Err(error);
+            // Enqueueing and flushing share one deadline. A full writer queue
+            // must not postpone the clock, or an agent that stopped reading
+            // stdin could hold the daemon for as long as the queue drains.
+            match tokio::time::timeout_at(deadline, self.send_frame_tracked(frame, written_tx))
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    lock(&self.shared.pending).remove(&key);
+                    return Err(error);
+                }
+                Err(_) => {
+                    lock(&self.shared.pending).remove(&key);
+                    // The frame never reached the writer; tear the transport
+                    // down so a later send cannot slip it out.
+                    self.abandon_writer();
+                    self.kill();
+                    return Err(AcpError::Timeout {
+                        method: method.to_string(),
+                        seconds: PROMPT_WRITE_TIMEOUT.as_secs(),
+                    });
+                }
             }
             Some(written_rx)
         } else {
@@ -721,7 +749,7 @@ impl AcpClient {
             None
         };
         if let Some(written) = written {
-            match tokio::time::timeout(PROMPT_WRITE_TIMEOUT, written).await {
+            match tokio::time::timeout_at(deadline, written).await {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => {
                     lock(&self.shared.pending).remove(&key);
@@ -731,9 +759,10 @@ impl AcpClient {
                 }
                 Err(_) => {
                     lock(&self.shared.pending).remove(&key);
-                    // The agent stopped reading stdin mid-frame. Kill the
-                    // process so the half-written request can never reach it
-                    // later, and let the caller report a failed turn.
+                    // The agent stopped reading stdin mid-frame. Abort the
+                    // writer so the blocked frame can never be written later,
+                    // and kill the process the transport was talking to.
+                    self.abandon_writer();
                     self.kill();
                     return Err(AcpError::Timeout {
                         method: method.to_string(),
@@ -1536,6 +1565,74 @@ mod tests {
             client.is_closed(),
             "the wedged transport is torn down so the half-written frame is never delivered"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_full_writer_queue_times_out_and_aborts_the_blocked_writer() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client_write, _agent_read) = tokio::io::duplex(64);
+        let (agent_write, client_read) = tokio::io::duplex(64);
+        let client = Arc::new(AcpClient::start(
+            config(workspace.path()),
+            std::env::temp_dir(),
+            client_read,
+            client_write,
+            None,
+            StderrRing::new(),
+        ));
+        let _agent_write = agent_write;
+
+        // The writer blocks on the first frame (nobody drains the pipe) and
+        // the next 256 frames fill its queue, so the following enqueue has to
+        // wait. Before the fix its timer had not started yet.
+        let filler = client.clone();
+        let filling = tokio::spawn(async move {
+            for _ in 0..(FRAME_CHANNEL_CAPACITY + 2) {
+                let _ = filler.cancel("s-1").await;
+            }
+        });
+        for _ in 0..1_000 {
+            let full = lock(&client.shared.stdin_tx)
+                .as_ref()
+                .is_some_and(|sender| sender.capacity() == 0);
+            if full {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            lock(&client.shared.stdin_tx)
+                .as_ref()
+                .map(mpsc::Sender::capacity),
+            Some(0),
+            "the writer queue is full"
+        );
+
+        let prompt_client = client.clone();
+        let prompt = tokio::spawn(async move {
+            prompt_client
+                .start_prompt("s-1", &[PromptContent::text("x".repeat(1024))])
+                .await
+                .map(|_| ())
+        });
+        let outcome = tokio::time::timeout(Duration::from_secs(30), prompt)
+            .await
+            .expect("the enqueue must share the write deadline")
+            .expect("prompt task");
+        match outcome {
+            Err(AcpError::Timeout { method, seconds }) => {
+                assert_eq!(method, "session/prompt");
+                assert_eq!(seconds, PROMPT_WRITE_TIMEOUT.as_secs());
+            }
+            Err(other) => panic!("expected a prompt write timeout, got {other}"),
+            Ok(()) => panic!("a prompt that never reached the writer must not claim success"),
+        }
+        assert!(
+            lock(&client.shared.writer).is_none(),
+            "the writer blocked on the full queue is aborted so it cannot write the frame later"
+        );
+        assert!(client.is_closed(), "the wedged transport is torn down");
+        filling.abort();
     }
 
     #[tokio::test]
