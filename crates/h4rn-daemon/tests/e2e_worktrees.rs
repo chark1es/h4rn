@@ -16,7 +16,7 @@ use h4rn_daemon::threads::NewThread;
 use h4rn_harness::FakeHarness;
 use h4rn_protocol::{
     ClientFrame, ClientRequest, DeviceId, DeviceInfo, HarnessKind, ProtoError, ResponseBody,
-    RuntimeMode, ServerFrame, SpawnSubagentRequest, SubagentIsolation, SubagentState, ThreadTab,
+    RuntimeMode, ServerFrame, SpawnSubagentRequest, SubagentIsolation, SubagentState,
     TrackedWorktree, WorktreeOrigin, WorktreeStatus,
 };
 use tokio::net::TcpStream;
@@ -178,28 +178,26 @@ async fn a_settled_subagent_worktree_is_listed_and_cleared_over_the_wire() {
         .expect("wait for the child");
     assert_eq!(finished.state, SubagentState::Completed);
 
-    // A just-finished turn keeps its thread in the Working tab for a short exit
-    // grace. Clearing re-checks live activity, so wait that out first.
-    let child_thread = finished.child_thread_id.clone().expect("child thread");
-    for _ in 0..100 {
-        if manager
-            .thread_summary(&child_thread)
-            .await
-            .is_none_or(|summary| summary.tab != ThreadTab::Working)
+    // The supervisor removes the directory and keeps the branch when the
+    // child settles. The listing is computed fresh each time, so poll it
+    // instead of guessing how long the exit grace lasts.
+    let mut settled = None;
+    for _ in 0..600 {
+        let listed = client.list().await;
+        if let Some(found) = listed
+            .iter()
+            .find(|entry| entry.subagent_id.as_ref() == Some(&view.subagent_id))
+            .filter(|entry| entry.status == WorktreeStatus::Settled)
         {
+            settled = Some(found.clone());
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    let entry = settled.unwrap_or_else(|| panic!("the subagent worktree must settle"));
 
     // Settled: the supervisor removed the directory and kept the branch.
-    let listed = client.list().await;
-    let entry = listed
-        .iter()
-        .find(|entry| entry.subagent_id.as_ref() == Some(&view.subagent_id))
-        .unwrap_or_else(|| panic!("the subagent worktree must be listed: {listed:?}"));
     assert_eq!(entry.origin, WorktreeOrigin::Subagent);
-    assert_eq!(entry.status, WorktreeStatus::Settled);
     assert!(entry.owned);
     assert!(!entry.exists, "the settled directory is gone");
     assert!(
@@ -238,6 +236,144 @@ async fn a_settled_subagent_worktree_is_listed_and_cleared_over_the_wire() {
         "clearing deletes the h4rn branch"
     );
 
+    let _ = shutdown.send(());
+    let _ = task.await;
+}
+
+#[tokio::test]
+async fn clearing_a_worktree_while_its_child_still_works_skips_it() {
+    let repo = git_repo();
+    let data = tempfile::tempdir().expect("data dir");
+    let mut catalog = StaticHarnessCatalog::new();
+    catalog.register(Arc::new(FakeHarness::new()));
+    // A child that keeps its first turn open, so it is still busy when the
+    // clear request arrives.
+    catalog.register(Arc::new(
+        FakeHarness::with_events(Vec::new()).with_kind(HarnessKind::Codex),
+    ));
+    let config = Config {
+        data_dir: data.path().to_path_buf(),
+        bind: "127.0.0.1:0".parse().expect("bind"),
+        extra_bind: None,
+        log_level: "off".to_owned(),
+        tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
+    };
+    let daemon = DaemonBuilder::new(config)
+        .with_catalog(Arc::new(catalog))
+        .build()
+        .await
+        .expect("build daemon");
+    let token = TokenStore::new(data.path())
+        .load()
+        .expect("read token")
+        .expect("token exists");
+    let manager = daemon.manager();
+    let subagents = daemon.subagents();
+    let bound = daemon.bind().await.expect("bind daemon");
+    let addr = bound.local_addr();
+    let (shutdown, rx) = oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        bound
+            .serve(async move {
+                let _ = rx.await;
+            })
+            .await
+    });
+
+    let (ws, _) = connect_async(format!("ws://{addr}/ws?token={token}"))
+        .await
+        .expect("connect");
+    let mut client = Client { ws, next_id: 1 };
+    client
+        .request(ClientRequest::Hello {
+            protocol_version: h4rn_protocol::PROTOCOL_VERSION,
+            device: DeviceInfo {
+                device_id: DeviceId::new("dev_worktrees_busy"),
+                name: "test".into(),
+                platform: "linux".into(),
+                app_version: "0.0.0".into(),
+            },
+        })
+        .await
+        .expect("hello");
+
+    let host =
+        h4rn_daemon::hosts::HostInventory::detect(Arc::new(StaticHarnessCatalog::new())).local_id();
+    let parent = manager
+        .create_thread(NewThread {
+            thread_id: None,
+            parent_thread_id: None,
+            subagent_id: None,
+            host,
+            harness: HarnessKind::ClaudeCode,
+            workspace_path: repo.path().display().to_string(),
+            model: "default".into(),
+            prompt: "parent thread".into(),
+            attachments: Vec::new(),
+            runtime_mode: RuntimeMode::ApprovalRequired,
+            worktree: None,
+        })
+        .await
+        .expect("create parent")
+        .thread_id;
+    let view = subagents
+        .spawn(SpawnSubagentRequest {
+            parent_thread: parent,
+            task: "keep working".into(),
+            harness: Some(HarnessKind::Codex),
+            host: None,
+            model: None,
+            isolation: SubagentIsolation::Worktree,
+            context: Default::default(),
+            budget: Default::default(),
+        })
+        .await
+        .expect("spawn subagent");
+
+    // The child's checkout exists and is active while its turn runs.
+    let mut busy = None;
+    for _ in 0..600 {
+        let listed = client.list().await;
+        if let Some(found) = listed
+            .iter()
+            .find(|entry| entry.subagent_id.as_ref() == Some(&view.subagent_id))
+            .filter(|entry| entry.status == WorktreeStatus::Active)
+        {
+            busy = Some(found.clone());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let entry = busy.unwrap_or_else(|| panic!("the running child's worktree is active"));
+    assert!(entry.exists);
+
+    let response = client
+        .request(ClientRequest::ClearWorktrees {
+            paths: Some(vec![entry.path.clone()]),
+            force: false,
+        })
+        .await
+        .expect("clear worktrees");
+    let ResponseBody::WorktreesCleared {
+        removed,
+        skipped,
+        worktrees,
+    } = response
+    else {
+        panic!("unexpected response: {response:?}");
+    };
+    assert!(removed.is_empty(), "a busy worktree is never removed");
+    assert!(skipped[0].reason.starts_with("in use by "), "{skipped:?}");
+    assert!(
+        std::path::Path::new(&entry.path).is_dir(),
+        "the checkout stays on disk"
+    );
+    assert!(
+        worktrees.iter().any(|worktree| worktree.path == entry.path),
+        "the busy worktree is still listed: {worktrees:?}"
+    );
+
+    let _ = subagents.cancel(&view.subagent_id).await;
     let _ = shutdown.send(());
     let _ = task.await;
 }

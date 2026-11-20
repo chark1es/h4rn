@@ -5,10 +5,15 @@
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
+use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
+
+/// How often a bounded git call checks whether its child has exited.
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 /// Keys whose string values are whole paths (they may contain spaces).
 const PATH_KEYS: &[&str] = &[
@@ -71,7 +76,86 @@ where
     }
 }
 
+/// Runs git in `dir`, killing it once `limit` has passed.
+///
+/// Clearing must not hang on a wedged checkout (an unresponsive filesystem, a
+/// stale index lock): each command gets its own deadline and a timed-out child
+/// is killed, so the rest of the clear can go on and report a skip. The error
+/// for a deadline is `git timed out after Ns`; [`timed_out`] recognises it.
+pub fn run_with_timeout<I, S>(dir: &Path, args: I, limit: Duration) -> Result<String, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut child = command(dir)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("could not run git: {error}"))?;
+    // Drain both pipes while the child runs: a command whose output fills the
+    // pipe buffer would otherwise never exit and look like a timeout.
+    let stdout = child.stdout.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = pipe.read_to_end(&mut buffer);
+            buffer
+        })
+    });
+    let stderr = child.stderr.take().map(|mut pipe| {
+        std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let _ = pipe.read_to_end(&mut buffer);
+            buffer
+        })
+    });
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(timeout_message(limit));
+            }
+            Ok(None) => std::thread::sleep(POLL_INTERVAL),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("could not run git: {error}"));
+            }
+        }
+    };
+    let stdout = stdout
+        .map(|handle| handle.join().unwrap_or_default())
+        .unwrap_or_default();
+    let stderr = stderr
+        .map(|handle| handle.join().unwrap_or_default())
+        .unwrap_or_default();
+    if status.success() {
+        Ok(String::from_utf8_lossy(&stdout).trim().to_owned())
+    } else {
+        let stderr = String::from_utf8_lossy(&stderr);
+        let stderr = stderr.trim();
+        Err(if stderr.is_empty() {
+            format!("git exited with {status}")
+        } else {
+            stderr.to_owned()
+        })
+    }
+}
+
+fn timeout_message(limit: Duration) -> String {
+    format!("git timed out after {}s", limit.as_secs())
+}
+
+/// Whether an error from [`run_with_timeout`] means the child was killed.
+pub fn timed_out(error: &str) -> bool {
+    error.starts_with("git timed out after ")
+}
+
 /// Whether a git command exits successfully.
+#[cfg(test)]
 pub fn succeeds<I, S>(dir: &Path, args: I) -> bool
 where
     I: IntoIterator<Item = S>,
@@ -199,6 +283,7 @@ pub fn new_worktrees(before: &[GitWorktree], after: &[GitWorktree]) -> Vec<GitWo
 }
 
 /// Whether `refs/heads/<branch>` exists in `repo`.
+#[cfg(test)]
 pub fn branch_exists(repo: &Path, branch: &str) -> bool {
     succeeds(
         repo,
@@ -214,37 +299,24 @@ pub fn branch_exists(repo: &Path, branch: &str) -> bool {
 /// Every branch under `refs/heads/h4rn/` in `repo`.
 ///
 /// One `for-each-ref` answers for all of a repository's owned branches, which
-/// beats a `rev-parse --verify` per subagent.
+/// beats a `rev-parse --verify` per subagent. Full ref names are asked for and
+/// the `refs/heads/` prefix stripped: `%(refname:short)` disambiguates a branch
+/// that shares its name with a tag as `heads/h4rn/sa-x`, which would hide the
+/// branch from an exact-name lookup.
 pub fn h4rn_branches(repo: &Path) -> HashSet<String> {
     match run(
         repo,
-        [
-            "for-each-ref",
-            "--format=%(refname:short)",
-            "refs/heads/h4rn/",
-        ],
+        ["for-each-ref", "--format=%(refname)", "refs/heads/h4rn/"],
     ) {
         Ok(out) => out
             .lines()
             .map(str::trim)
             .filter(|line| !line.is_empty())
+            .filter_map(|line| line.strip_prefix("refs/heads/"))
             .map(str::to_owned)
             .collect(),
         Err(_) => HashSet::new(),
     }
-}
-
-/// Whether `branch` is fully merged into the repository's `HEAD`.
-pub fn is_merged(repo: &Path, branch: &str) -> bool {
-    succeeds(
-        repo,
-        [
-            "merge-base",
-            "--is-ancestor",
-            &format!("refs/heads/{branch}"),
-            "HEAD",
-        ],
-    )
 }
 
 /// Whether the worktree has uncommitted changes; `None` when git failed.

@@ -333,11 +333,20 @@ impl WorktreeTracker {
     /// Active first, then orphaned, then settled; newest `last_seen` first
     /// within each group.
     pub async fn list(&self) -> Vec<TrackedWorktree> {
+        self.list_with(true).await
+    }
+
+    /// [`Self::list`], optionally without the dirty check.
+    ///
+    /// Clearing first lists without `git status` for every entry because the
+    /// per-entry removal checks dirtiness again anyway; the final response
+    /// listing asks git for it.
+    async fn list_with(&self, with_dirty: bool) -> Vec<TrackedWorktree> {
         let input = self.inner.list_input().await;
         let inner = Arc::clone(&self.inner);
         let computed = tokio::time::timeout(
             GIT_BUDGET,
-            tokio::task::spawn_blocking(move || compute(&input)),
+            tokio::task::spawn_blocking(move || compute(&input, with_dirty)),
         )
         .await;
         let (entries, gone) = match computed {
@@ -368,7 +377,7 @@ impl WorktreeTracker {
     /// unmerged commits are skipped.
     pub async fn clear(&self, paths: Option<Vec<String>>, force: bool) -> ClearOutcome {
         let _guard = self.inner.clear_lock.lock().await;
-        let entries = self.list().await;
+        let entries = self.list_with(false).await;
         let selection = select_entries(&entries, paths.as_deref());
         let data_dir = self.inner.data_dir.clone();
         let mut removed = Vec::new();
@@ -421,6 +430,15 @@ fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Every thread the listing considers, children and snoozed included.
+fn thread_filter() -> ThreadFilter {
+    ThreadFilter {
+        include_snoozed: true,
+        include_children: true,
+        ..ThreadFilter::default()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -687,14 +705,9 @@ impl Inner {
             }
         }
         let subagent_repos = self.subagents.worktree_repos().await;
-        let filter = ThreadFilter {
-            include_snoozed: true,
-            include_children: true,
-            ..ThreadFilter::default()
-        };
         let threads = self
             .threads
-            .list_threads(&filter)
+            .list_threads(&thread_filter())
             .await
             .into_iter()
             .map(|summary| ThreadInfo {
@@ -725,8 +738,12 @@ impl Inner {
     /// Re-reads an entry's activity from the live thread and subagent state.
     ///
     /// Returns the entry with fresh `working` flags when something still uses
-    /// it, `None` when nothing does. The listing is only a snapshot; a turn may
-    /// have started since it was taken.
+    /// it, `None` when nothing does. The listing is only a snapshot, so this
+    /// also looks for users the listing did not know: every busy thread whose
+    /// workspace is the entry or inside it, and every access recorded in the
+    /// store since the listing was taken. A new thread that started in the
+    /// checkout between the two reads is exactly the case a stale snapshot
+    /// would miss.
     async fn still_active(self: &Arc<Self>, entry: &TrackedWorktree) -> Option<TrackedWorktree> {
         let mut fresh = entry.clone();
         let mut active = false;
@@ -740,18 +757,124 @@ impl Inner {
         {
             active = true;
         }
+        // The accessors the listing named.
         for access in &mut fresh.accessed_by {
-            let Some(summary) = self.threads.thread_summary(&access.thread_id).await else {
-                access.working = false;
-                continue;
-            };
-            access.working = is_busy(summary.tab, summary.agent_state);
-            if !summary.title.is_empty() {
-                access.title = summary.title;
-            }
+            self.refresh_access(access).await;
             active |= access.working;
         }
+        // Accesses persisted since the listing was taken.
+        match self.store.load().await {
+            Ok(stored) => {
+                let path = git::norm(Path::new(&entry.path));
+                for observation in stored
+                    .iter()
+                    .filter(|observation| git::norm(Path::new(&observation.path)) == path)
+                {
+                    for access in &observation.accesses {
+                        if fresh
+                            .accessed_by
+                            .iter()
+                            .any(|seen| seen.thread_id.as_str() == access.thread_id)
+                        {
+                            continue;
+                        }
+                        let mut fresh_access = WorktreeAccess {
+                            thread_id: ThreadId::new(access.thread_id.clone()),
+                            title: String::new(),
+                            subagent_id: access.subagent_id.clone().map(SubagentId::new),
+                            working: false,
+                            last_seen: access.last_seen,
+                        };
+                        self.refresh_access(&mut fresh_access).await;
+                        if fresh_access.working {
+                            active = true;
+                        }
+                        fresh.accessed_by.push(fresh_access);
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not reload worktree observations");
+            }
+        }
+        // Any busy thread working in the entry, listed or not.
+        let busy: Vec<_> = self
+            .threads
+            .list_threads(&thread_filter())
+            .await
+            .into_iter()
+            .filter(|summary| is_busy(summary.tab, summary.agent_state))
+            .map(|summary| {
+                (
+                    summary.thread_id.clone(),
+                    summary.title,
+                    summary.workspace_path,
+                    summary.last_activity,
+                )
+            })
+            .collect();
+        if !busy.is_empty() {
+            let normalised = tokio::task::spawn_blocking(move || {
+                busy.into_iter()
+                    .map(|(thread_id, title, workspace, last_activity)| {
+                        (
+                            thread_id,
+                            title,
+                            git::norm(Path::new(&workspace)),
+                            last_activity,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .unwrap_or_default();
+            let target = git::norm(Path::new(&entry.path));
+            for (thread_id, title, workspace, last_activity) in normalised {
+                if workspace != target && !workspace.starts_with(&target) {
+                    continue;
+                }
+                active = true;
+                match fresh
+                    .accessed_by
+                    .iter_mut()
+                    .find(|access| access.thread_id == thread_id)
+                {
+                    Some(access) => {
+                        access.working = true;
+                        if !title.is_empty() {
+                            access.title = title;
+                        }
+                    }
+                    None => {
+                        let subagent_id = self
+                            .threads
+                            .thread_meta(&thread_id)
+                            .await
+                            .and_then(|meta| meta.subagent_id);
+                        fresh.accessed_by.push(WorktreeAccess {
+                            thread_id,
+                            title,
+                            subagent_id,
+                            working: true,
+                            last_seen: last_activity,
+                        });
+                    }
+                }
+            }
+        }
         active.then_some(fresh)
+    }
+
+    /// Refreshes one accessor's busy flag and title from the live thread.
+    async fn refresh_access(&self, access: &mut WorktreeAccess) {
+        let Some(summary) = self.threads.thread_summary(&access.thread_id).await else {
+            access.working = false;
+            return;
+        };
+        access.working = is_busy(summary.tab, summary.agent_state);
+        if !summary.title.is_empty() {
+            access.title = summary.title;
+        }
     }
 }
 
@@ -761,11 +884,14 @@ impl Inner {
 
 /// Whether a thread is actually busy, not merely sitting in a Working tab.
 ///
-/// A pinned or queued thread keeps the Working tab while it is Idle, and an
-/// auto-resume armed for a rate limit is not running yet. Only these states
-/// mean the thread could write to a worktree at any moment.
+/// A pinned or never-run thread keeps the Working tab while it is Idle, and an
+/// auto-resume armed for a rate limit is not running yet. Only those states
+/// mean the thread could write to a worktree at any moment: `Idle` in the
+/// Working tab (a pinned or never-run thread), or an agent state that is
+/// running, queued, scheduled or waiting on the user. `Done`, `Error` and
+/// `Unreachable` are never busy, even inside the Working-tab exit grace.
 fn is_busy(tab: ThreadTab, agent_state: AgentState) -> bool {
-    tab == ThreadTab::Working
+    (tab == ThreadTab::Working && agent_state == AgentState::Idle)
         || matches!(
             agent_state,
             AgentState::Queued
@@ -854,8 +980,9 @@ fn access_of(
 /// Computes the tracked list from plain data. Blocking (shells out to git).
 ///
 /// Returns the entries, sorted, and the stored harness paths whose directory is
-/// gone and can be forgotten.
-pub(crate) fn compute(input: &ListInput) -> (Vec<TrackedWorktree>, Vec<String>) {
+/// gone and can be forgotten. `with_dirty` asks git for uncommitted changes;
+/// clearing's selection listing skips it because `clear_one` checks again.
+pub(crate) fn compute(input: &ListInput, with_dirty: bool) -> (Vec<TrackedWorktree>, Vec<String>) {
     let now = Utc::now();
     let infos: HashMap<&str, &ThreadInfo> = input
         .threads
@@ -1073,7 +1200,7 @@ pub(crate) fn compute(input: &ListInput) -> (Vec<TrackedWorktree>, Vec<String>) 
 
     for entry in &mut entries {
         entry.exists = Path::new(&entry.path).is_dir();
-        entry.dirty = if entry.exists {
+        entry.dirty = if with_dirty && entry.exists {
             git::is_dirty(Path::new(&entry.path))
         } else {
             None
@@ -1118,7 +1245,49 @@ enum ClearOne {
     RemovedWithBranchFailure(String),
 }
 
+/// Deadline for each git command run while clearing one entry.
+const CLEAR_GIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Whether `refs/heads/<branch>` exists, within the clearing deadline.
+fn branch_exists(repo: &Path, branch: &str) -> Result<bool, String> {
+    match git::run_with_timeout(
+        repo,
+        [
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+        CLEAR_GIT_TIMEOUT,
+    ) {
+        Ok(_) => Ok(true),
+        Err(error) if git::timed_out(&error) => Err(error),
+        Err(_) => Ok(false),
+    }
+}
+
+/// Whether `branch` is fully merged into `HEAD`, within the clearing deadline.
+fn branch_is_merged(repo: &Path, branch: &str) -> Result<bool, String> {
+    match git::run_with_timeout(
+        repo,
+        [
+            "merge-base",
+            "--is-ancestor",
+            &format!("refs/heads/{branch}"),
+            "HEAD",
+        ],
+        CLEAR_GIT_TIMEOUT,
+    ) {
+        Ok(_) => Ok(true),
+        Err(error) if git::timed_out(&error) => Err(error),
+        Err(_) => Ok(false),
+    }
+}
+
 /// Removes one entry from disk. Blocking.
+///
+/// Every git call is bounded by [`CLEAR_GIT_TIMEOUT`]; a timeout is a skip with
+/// that reason, or a branch failure once the checkout is already gone.
 fn clear_one(entry: &TrackedWorktree, force: bool, data_dir: &Path) -> Result<ClearOne, String> {
     let path = PathBuf::from(&entry.path);
     if entry.repo.is_empty() {
@@ -1131,47 +1300,104 @@ fn clear_one(entry: &TrackedWorktree, force: bool, data_dir: &Path) -> Result<Cl
     if !force {
         // The listing is only a snapshot: a turn may have written since. Ask
         // git at the last moment, and never read "could not ask" as clean.
-        match git::is_dirty(&path) {
-            Some(true) => return Err("has uncommitted changes".into()),
-            None if path.is_dir() => {
+        // `status --porcelain` with untracked files always counted, whatever
+        // the user's config says.
+        match git::run_with_timeout(
+            &path,
+            [
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+                "--ignore-submodules=none",
+            ],
+            CLEAR_GIT_TIMEOUT,
+        ) {
+            Ok(out) if !out.is_empty() => return Err("has uncommitted changes".into()),
+            Ok(_) => {}
+            Err(error) if git::timed_out(&error) => return Err(error),
+            Err(_) if path.is_dir() => {
                 return Err("could not check for uncommitted changes".into());
             }
-            _ => {}
+            Err(_) => {}
+        }
+        // A detached HEAD can hold commits no branch reaches; removing the
+        // checkout would leave them unreachable.
+        if path.is_dir() {
+            match git::run_with_timeout(&path, ["symbolic-ref", "-q", "HEAD"], CLEAR_GIT_TIMEOUT) {
+                Ok(_) => {}
+                Err(error) if git::timed_out(&error) => return Err(error),
+                Err(_) => {
+                    let sha =
+                        git::run_with_timeout(&path, ["rev-parse", "HEAD"], CLEAR_GIT_TIMEOUT)?;
+                    let refs = git::run_with_timeout(
+                        &repo,
+                        [
+                            "for-each-ref",
+                            "--contains",
+                            &sha,
+                            "--format=%(refname)",
+                            "refs/heads",
+                            "refs/remotes",
+                            "refs/tags",
+                        ],
+                        CLEAR_GIT_TIMEOUT,
+                    )?;
+                    if refs.trim().is_empty() {
+                        return Err("detached HEAD has commits on no branch".into());
+                    }
+                }
+            }
         }
         if entry.owned
             && let Some(branch) = &entry.branch
-            && git::branch_exists(&repo, branch)
-            && !git::is_merged(&repo, branch)
+            && branch_exists(&repo, branch)?
+            && !branch_is_merged(&repo, branch)?
         {
             return Err(format!("branch {branch} has unmerged commits"));
         }
     }
     if path.is_dir() {
+        // Git's own remove semantics: without `--force` it refuses a checkout
+        // with modifications, which is what we want. Ignored files go with the
+        // checkout either way; that is git's contract.
+        let path_text = path.to_string_lossy();
         let mut args = vec!["worktree", "remove"];
-        if force || entry.owned {
+        if force {
             args.push("--force");
         }
-        let path_text = path.to_string_lossy();
-        args.push(&path_text);
-        git::run(&repo, args)?;
+        args.push(path_text.as_ref());
+        git::run_with_timeout(&repo, args, CLEAR_GIT_TIMEOUT)?;
     }
     // A directory that vanished still leaves git metadata behind.
-    if let Err(error) = git::run(&repo, ["worktree", "prune"]) {
+    if let Err(error) = git::run_with_timeout(&repo, ["worktree", "prune"], CLEAR_GIT_TIMEOUT) {
         tracing::warn!(%error, repo = %repo.display(), "git worktree prune failed");
     }
     let mut branch_failure = None;
     if entry.owned
         && let Some(branch) = &entry.branch
         && branch.starts_with("h4rn/")
-        && git::branch_exists(&repo, branch)
-        && let Err(error) = git::run(&repo, ["branch", "-D", branch])
     {
-        tracing::warn!(%error, %branch, "could not delete the subagent branch");
-        // The checkout is already gone, so this is not a plain skip: say what
-        // was removed and what is left behind.
-        branch_failure = Some(format!(
-            "checkout removed, but branch {branch} could not be deleted: {error}"
-        ));
+        // The checkout is gone (or was never there), so every failure from
+        // here on is a left-behind branch, timeouts included.
+        let exists = match branch_exists(&repo, branch) {
+            Ok(exists) => exists,
+            Err(error) => {
+                return Ok(ClearOne::RemovedWithBranchFailure(format!(
+                    "checkout removed, but branch {branch} could not be deleted: {error}"
+                )));
+            }
+        };
+        if exists
+            && let Err(error) =
+                git::run_with_timeout(&repo, ["branch", "-D", branch], CLEAR_GIT_TIMEOUT)
+        {
+            tracing::warn!(%error, %branch, "could not delete the subagent branch");
+            // The checkout is already gone, so this is not a plain skip: say
+            // what was removed and what is left behind.
+            branch_failure = Some(format!(
+                "checkout removed, but branch {branch} could not be deleted: {error}"
+            ));
+        }
     }
     if let Some(subagent_id) = &entry.subagent_id {
         // `remove_dir` only succeeds on an empty directory, which is the point.

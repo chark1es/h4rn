@@ -1,12 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { TrackedWorktree } from "@/gen";
+import type { H4rnClient } from "@/lib/client/client";
 import { H4rnRequestError } from "@/lib/client/errors";
 
-const { request } = vi.hoisted(() => ({ request: vi.fn() }));
+/**
+ * Two clients, so a test can prove that rows read through one are never used
+ * to clear through the other (a machine switch rebuilds the client).
+ */
+const harness = vi.hoisted(() => {
+  const clientA = { request: vi.fn() };
+  const clientB = { request: vi.fn() };
+  const current = { value: clientA };
+  return { clientA, clientB, current };
+});
 
 vi.mock("@/lib/store/appStore", () => ({
-  getClient: () => ({ request }),
+  getClient: () => harness.current.value,
   useApp: () => undefined,
 }));
 
@@ -14,13 +24,19 @@ import {
   clearableWorktrees,
   clearWorktrees,
   dismissWorktreeOutcome,
+  forceCanFix,
   getWorktreeState,
   inUseWorktrees,
   loadWorktrees,
   resetWorktreeStoreForTests,
   settledWorktrees,
+  worktreeClientCurrent,
   worktreePage,
 } from "./worktreeStore";
+
+const request = harness.clientA.request;
+const clientA = harness.clientA as unknown as H4rnClient;
+const clientB = harness.clientB as unknown as H4rnClient;
 
 function row(overrides: Partial<TrackedWorktree> = {}): TrackedWorktree {
   return {
@@ -44,7 +60,9 @@ function row(overrides: Partial<TrackedWorktree> = {}): TrackedWorktree {
 describe("worktree store", () => {
   beforeEach(() => {
     resetWorktreeStoreForTests();
+    harness.current.value = harness.clientA;
     request.mockReset();
+    harness.clientB.request.mockReset();
   });
 
   it("loads the list and splits it into in use and settled", async () => {
@@ -57,8 +75,9 @@ describe("worktree store", () => {
       ],
     });
     await loadWorktrees();
-    const { rows, loaded } = getWorktreeState();
+    const { rows, loaded, source } = getWorktreeState();
     expect(loaded).toBe(true);
+    expect(source).toBe(clientA);
     expect(inUseWorktrees(rows).map((r) => r.path)).toEqual(["/a"]);
     expect(settledWorktrees(rows).map((r) => r.path)).toEqual(["/b", "/c"]);
     expect(request).toHaveBeenCalledWith({ type: "list_worktrees" }, { timeoutMs: 60_000 });
@@ -73,13 +92,18 @@ describe("worktree store", () => {
 
   it("clears with the given paths and keeps the skipped list", async () => {
     request.mockResolvedValueOnce({
+      type: "worktrees",
+      worktrees: [row({ path: "/b" }), row({ path: "/c", dirty: true })],
+    });
+    await loadWorktrees();
+    request.mockResolvedValueOnce({
       type: "worktrees_cleared",
       removed: ["/b"],
       skipped: [{ path: "/c", reason: "has uncommitted changes" }],
       worktrees: [row({ path: "/c", dirty: true })],
     });
     await clearWorktrees(["/b", "/c"]);
-    expect(request).toHaveBeenCalledWith(
+    expect(request).toHaveBeenLastCalledWith(
       {
         type: "clear_worktrees",
         paths: ["/b", "/c"],
@@ -96,18 +120,20 @@ describe("worktree store", () => {
     });
   });
 
-  it("sends null paths for clear all and force for a retry", async () => {
+  it("sends the explicit paths it is given, and force for a retry", async () => {
+    request.mockResolvedValueOnce({ type: "worktrees", worktrees: [row({ path: "/a" })] });
+    await loadWorktrees();
     request.mockResolvedValue({
       type: "worktrees_cleared",
       removed: [],
       skipped: [],
       worktrees: [],
     });
-    await clearWorktrees(null);
+    await clearWorktrees(["/a"]);
     expect(request).toHaveBeenLastCalledWith(
       {
         type: "clear_worktrees",
-        paths: null,
+        paths: ["/a"],
         force: false,
       },
       { timeoutMs: 60_000 },
@@ -123,6 +149,103 @@ describe("worktree store", () => {
     );
   });
 
+  it("resets the outcome when a clear starts and clears a previous read error", async () => {
+    request.mockRejectedValueOnce(new Error("socket closed"));
+    await loadWorktrees();
+    expect(getWorktreeState().error).not.toBeNull();
+
+    request.mockResolvedValueOnce({
+      type: "worktrees_cleared",
+      removed: ["/b"],
+      skipped: [{ path: "/c", reason: "in use by Fix it" }],
+      worktrees: [row({ path: "/c" })],
+    });
+    await clearWorktrees(["/b", "/c"]);
+    expect(getWorktreeState().error).toBeNull();
+    expect(getWorktreeState().outcome?.removed).toBe(1);
+
+    let resolve!: (value: unknown) => void;
+    request.mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done;
+      }),
+    );
+    const running = clearWorktrees(["/c"]);
+    expect(getWorktreeState().outcome).toBeNull();
+    expect(getWorktreeState().clearError).toBeNull();
+    resolve({ type: "worktrees_cleared", removed: [], skipped: [], worktrees: [] });
+    await running;
+  });
+
+  it("discards a list response from a client that was replaced", async () => {
+    let resolve!: (value: unknown) => void;
+    request.mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done;
+      }),
+    );
+    const loading = loadWorktrees();
+    harness.current.value = harness.clientB;
+    resolve({ type: "worktrees", worktrees: [row({ path: "/a" })] });
+    await loading;
+
+    const state = getWorktreeState();
+    expect(state.rows).toEqual([]);
+    expect(state.loaded).toBe(false);
+    expect(state.source).toBeNull();
+    expect(state.loading).toBe(false);
+  });
+
+  it("drops the old machine's rows when the new machine's first read fails", async () => {
+    harness.clientA.request.mockResolvedValueOnce({
+      type: "worktrees",
+      worktrees: [row({ path: "/a" })],
+    });
+    await loadWorktrees();
+    expect(getWorktreeState().rows).toHaveLength(1);
+
+    harness.current.value = harness.clientB;
+    harness.clientB.request.mockRejectedValueOnce(new Error("offline"));
+    await loadWorktrees();
+
+    const state = getWorktreeState();
+    expect(state.rows).toEqual([]);
+    expect(state.error).not.toBeNull();
+    expect(state.source).toBe(harness.clientB as unknown as H4rnClient);
+  });
+
+  it("discards a clear response from a client that was replaced", async () => {
+    request.mockResolvedValueOnce({ type: "worktrees", worktrees: [row({ path: "/a" })] });
+    await loadWorktrees();
+
+    let resolve!: (value: unknown) => void;
+    request.mockReturnValueOnce(
+      new Promise((done) => {
+        resolve = done;
+      }),
+    );
+    const clearing = clearWorktrees(["/a"]);
+    harness.current.value = harness.clientB;
+    resolve({ type: "worktrees_cleared", removed: ["/a"], skipped: [], worktrees: [] });
+    await clearing;
+
+    const state = getWorktreeState();
+    expect(state.clearing).toBe(false);
+    expect(state.rows.map((r) => r.path)).toEqual(["/a"]);
+    expect(state.outcome).toBeNull();
+  });
+
+  it("will not clear with rows read through a replaced client", async () => {
+    request.mockResolvedValueOnce({ type: "worktrees", worktrees: [row({ path: "/a" })] });
+    await loadWorktrees();
+    harness.current.value = harness.clientB;
+
+    await clearWorktrees(["/a"]);
+    expect(harness.clientB.request).not.toHaveBeenCalled();
+    expect(getWorktreeState().clearError).not.toBeNull();
+    expect(getWorktreeState().rows.map((r) => r.path)).toEqual(["/a"]);
+  });
+
   it("surfaces a refused clear with its hint and leaves the list alone", async () => {
     request.mockResolvedValueOnce({ type: "worktrees", worktrees: [row()] });
     await loadWorktrees();
@@ -133,7 +256,7 @@ describe("worktree store", () => {
         hint: "Ask the host owner.",
       }),
     );
-    await clearWorktrees(null);
+    await clearWorktrees([row().path]);
     const state = getWorktreeState();
     expect(state.clearing).toBe(false);
     expect(state.clearError).toContain("needs admin access");
@@ -153,6 +276,36 @@ describe("clearableWorktrees", () => {
       row({ path: "/e", origin: "harness", owned: false }),
     ];
     expect(clearableWorktrees(rows).map((r) => r.path)).toEqual(["/a", "/b", "/e"]);
+  });
+});
+
+describe("worktreeClientCurrent", () => {
+  it("only trusts rows whose client is still the one in use", () => {
+    expect(worktreeClientCurrent(null)).toBe(false);
+    expect(worktreeClientCurrent(clientA)).toBe(true);
+    expect(worktreeClientCurrent(clientB)).toBe(false);
+    harness.current.value = harness.clientB;
+    expect(worktreeClientCurrent(clientB)).toBe(true);
+    expect(worktreeClientCurrent(clientA)).toBe(false);
+  });
+});
+
+describe("forceCanFix", () => {
+  it("offers a forced retry only for work force can discard", () => {
+    expect(forceCanFix("has uncommitted changes")).toBe(true);
+    expect(forceCanFix("could not check for uncommitted changes")).toBe(true);
+    expect(forceCanFix("branch h4rn/sa-x has unmerged commits")).toBe(true);
+    expect(forceCanFix("detached HEAD has commits on no branch")).toBe(true);
+    for (const blocked of [
+      "in use by Fix it",
+      "not tracked",
+      "checkout removed, but branch h4rn/sa-x could not be deleted: busy",
+      "is the repository's main worktree",
+      "its repository could not be found",
+      "git timed out after 30s",
+    ]) {
+      expect(forceCanFix(blocked), blocked).toBe(false);
+    }
   });
 });
 

@@ -10,11 +10,13 @@ import {
   clearableWorktrees,
   clearWorktrees,
   dismissWorktreeOutcome,
+  forceCanFix,
   inUseWorktrees,
   loadWorktrees,
   settledWorktrees,
   useWorktreeList,
   useWorktrees,
+  worktreeClientCurrent,
   worktreePage,
 } from "./worktreeStore";
 
@@ -102,8 +104,11 @@ export function WorktreeSettings() {
   useWorktreeList(online);
   useEffect(() => dismissWorktreeOutcome, []);
 
-  const rows = useWorktrees((state) => state.rows);
-  const loaded = useWorktrees((state) => state.loaded);
+  const source = useWorktrees((state) => state.source);
+  const current = worktreeClientCurrent(source);
+  const storedRows = useWorktrees((state) => state.rows);
+  const rows = current ? storedRows : [];
+  const loaded = useWorktrees((state) => state.loaded) && current;
   const loading = useWorktrees((state) => state.loading);
   const clearing = useWorktrees((state) => state.clearing);
   const error = useWorktrees((state) => state.error);
@@ -117,13 +122,15 @@ export function WorktreeSettings() {
   const inUse = inUseWorktrees(rows);
   const settled = settledWorktrees(rows);
   const clearable = clearableWorktrees(rows);
-  const page = worktreePage(loaded, rows, error);
+  const page = worktreePage(loaded, rows, current ? error : null);
   const keptThreads = settled.length - clearable.length;
-  const busy = clearing || !online;
+  const busy = clearing || !online || !current;
   const skipped = outcome?.skipped ?? [];
-  // Force only helps with dirty or unmerged work; an in-use or untracked
-  // worktree is skipped either way, so it is not offered again.
-  const forceable = skipped.filter((item) => settled.some((row) => row.path === item.path));
+  // Only the skips a forced removal can actually fix are offered again: an
+  // in-use, untracked or vanished entry is skipped either way.
+  const forceable = skipped.filter(
+    (item) => forceCanFix(item.reason) && settled.some((row) => row.path === item.path),
+  );
   // A thread workspace belongs to whoever made it, so a forced removal says so.
   const forceableThreads = forceable.filter((item) =>
     settled.some((row) => row.path === item.path && row.origin === "thread"),
@@ -143,48 +150,50 @@ export function WorktreeSettings() {
         worked in. Clearing removes the checkout from disk.
       </p>
 
-      {page.kind === "loading" ? (
-        <div className="q-skel" style={{ height: 120 }} />
-      ) : (
-        <>
-          {rows.length > 0 && page.notice ? <p className="q-muted">{page.notice}</p> : null}
+      {page.kind === "groups" && inUse.length > 0 ? (
+        <div className="q-group">
+          <div className="q-group-head">
+            <h2>In use</h2>
+          </div>
+          {inUse.map((row) => (
+            <WorktreeRow key={row.path} row={row} />
+          ))}
+        </div>
+      ) : null}
 
-          {inUse.length > 0 ? (
-            <div className="q-group">
-              <div className="q-group-head">
-                <h2>In use</h2>
-              </div>
-              {inUse.map((row) => (
-                <WorktreeRow key={row.path} row={row} />
-              ))}
-            </div>
-          ) : null}
+      <div className="q-group">
+        <div className="q-group-head">
+          <h2>Settled</h2>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              type="button"
+              className="q-btn ghost"
+              disabled={loading || !online || !current}
+              onClick={() => void loadWorktrees()}
+            >
+              <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+              Refresh
+            </button>
+            <button
+              type="button"
+              className="q-btn secondary"
+              disabled={busy || clearable.length === 0}
+              onClick={() => setConfirmAll(true)}
+            >
+              Clear all
+            </button>
+          </div>
+        </div>
 
-          <div className="q-group">
-            <div className="q-group-head">
-              <h2>Settled</h2>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button
-                  type="button"
-                  className="q-btn ghost"
-                  disabled={loading || !online}
-                  onClick={() => void loadWorktrees()}
-                >
-                  <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                  Refresh
-                </button>
-                <button
-                  type="button"
-                  className="q-btn secondary"
-                  disabled={busy || clearable.length === 0}
-                  onClick={() => setConfirmAll(true)}
-                >
-                  Clear all
-                </button>
-              </div>
-            </div>
-
-            {rows.length === 0 && page.notice ? <p className="q-muted">{page.notice}</p> : null}
+        {page.kind === "loading" ? (
+          online ? (
+            <div className="q-skel" style={{ height: 120 }} />
+          ) : (
+            <p className="q-muted">Offline</p>
+          )
+        ) : (
+          <>
+            {rows.length > 0 && page.notice ? <p className="q-muted">{page.notice}</p> : null}
 
             {outcome || clearError ? (
               <div className="q-harness-out" role="status" aria-live="polite">
@@ -230,21 +239,26 @@ export function WorktreeSettings() {
                 />
               ))
             )}
-          </div>
-        </>
-      )}
+          </>
+        )}
+      </div>
 
       <ConfirmDialog
         open={confirmAll}
         title={`Remove ${clearable.length} ${clearable.length === 1 ? "worktree" : "worktrees"}?`}
-        description={`Checkouts are deleted from disk and h4rn/sa-* branches h4rn created are deleted. Worktrees with uncommitted changes or unmerged work are skipped.${
+        description={`Checkouts are deleted from disk and h4rn/sa-* branches h4rn created are deleted. Worktrees with uncommitted changes or unmerged work are skipped. Ignored files such as build output are deleted with each checkout.${
           keptThreads > 0
             ? ` ${keptThreads === 1 ? "One thread workspace is" : `${keptThreads} thread workspaces are`} kept; remove ${keptThreads === 1 ? "it" : "them"} one at a time.`
             : ""
         }`}
         confirmLabel="Clear all"
         onOpenChange={setConfirmAll}
-        onConfirm={() => void clearWorktrees(null)}
+        onConfirm={() =>
+          void clearWorktrees(
+            clearable.map((row) => row.path),
+            false,
+          )
+        }
       />
 
       <ConfirmDialog
@@ -256,7 +270,9 @@ export function WorktreeSettings() {
                 removing.owned && removing.branch
                   ? ` The ${removing.branch} branch h4rn created is deleted too.`
                   : ""
-              } Uncommitted changes or unmerged work are skipped.`
+              } Uncommitted changes or unmerged work are skipped.${
+                removing.origin === "thread" ? " Its thread may still be resumed there." : ""
+              }`
             : ""
         }
         confirmLabel="Remove"

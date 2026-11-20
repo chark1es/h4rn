@@ -19,7 +19,8 @@ title: string,
  */
 subagent_id: SubagentId | null, 
 /**
- * Whether the thread's tab is Working right now.
+ * Whether the thread is busy (running, queued, scheduled, awaiting
+ * approval, or pinned in Working).
  */
 working: boolean, 
 /**

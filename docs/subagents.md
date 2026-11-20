@@ -175,14 +175,14 @@ A tracked worktree has one of three origins:
   `.claude/worktrees/agent-*`, or a plain `git worktree add`).
 
 Its status is `active` while a subagent is not finished or a thread that used
-it is working: its tab is Working, or its agent state is queued, scheduled,
-thinking, searching, reading, editing, running a tool, awaiting approval or
-rate-limited. A thread that is idle, done, failed or unreachable (and not in the
-Working tab) does not keep a worktree in use. `settled` means nothing running
-uses it, and `orphaned` means an owned worktree's subagent is finished but its
-directory is still on disk (cleanup failed, or the daemon restarted mid-run). An
-entry with nothing left to clear (directory gone and, for owned entries, branch
-gone) is not listed.
+it is busy: pinned or never-run (the Working tab with an idle agent), or its
+agent state is queued, scheduled, thinking, searching, reading, editing, running
+a tool, awaiting approval or rate-limited. Done, failed and unreachable threads
+are never busy, even inside the Working tab's exit grace. `settled` means
+nothing running uses it, and `orphaned` means an owned worktree's subagent is
+finished but its directory is still on disk (cleanup failed, or the daemon
+restarted mid-run). An entry with nothing left to clear (directory gone and, for
+owned entries, branch gone) is not listed.
 
 **What is stored.** Only observations that cannot be derived live go to
 `<data_dir>/worktrees.db`: `harness` worktrees and which threads used them.
@@ -214,16 +214,27 @@ recorded repositories through nested subagent worktrees, several hops deep.
 then orphaned, then settled, newest first within each. `clear_worktrees` (scope
 `admin`, because it deletes from disk) takes optional `paths` (default: every
 non-active entry except thread workspaces) and `force`, and returns the removed
-paths, the skipped ones with reasons, and the fresh list. Removals run one at a
+paths, the skipped ones with reasons, and the fresh list. Settings always sends
+the explicit paths of the rows the user saw, for Clear all as well as for one
+row, so a clear can only ever touch what was on screen. Removals run one at a
 time and are awaited: the response never reports completion while a delete is
 still running, and the fresh list always reflects what actually happened.
+
+A clear lists twice: once to pick its targets, and once at the end for the
+response. The selection listing skips `git status` for every entry because each
+removal checks dirtiness itself at the last moment; the response listing asks
+for it.
 
 **Clearing rules.**
 
 - Active worktrees are never removed, even with `force`. Because the listing is
-  only a snapshot, each target is checked again against the live thread and
-  subagent state right before it is removed, and an entry that became active in
-  between is skipped.
+  only a snapshot, each target is checked again against live state right before
+  it is removed. That re-check is wider than the listing: it asks every current
+  thread (children and snoozed included) and any busy one whose workspace is the
+  entry or inside it keeps the entry, naming that thread in the reason, and it
+  reloads the recorded accesses for the path from the store. A thread that
+  started in the checkout after the listing was taken is exactly what this
+  catches.
 - A `thread` workspace is only removed when its path is named. It belongs to
   whoever created it, and its thread may be resumed there, so clearing
   everything leaves it alone.
@@ -232,8 +243,18 @@ still running, and the fresh list always reflects what actually happened.
   again at the last moment rather than trusted from the listing, and untracked
   files always count, even when `status.showUntrackedFiles` says otherwise; a
   failed check on an existing directory is a skip, not a removal.
-- Removal is `git worktree remove` (with `--force` only when `force` is set or
-  h4rn owns the worktree), then `git worktree prune`.
+- A detached HEAD is skipped as `detached HEAD has commits on no branch` unless
+  its commit is reachable from some branch, remote-tracking branch or tag;
+  otherwise removing the checkout would leave that work unreachable.
+- Removal is plain `git worktree remove`, then `git worktree prune`. `--force`
+  is passed only when the request asked for it, never merely because h4rn owns
+  the checkout. Git's own contract applies: a removable checkout takes ignored
+  files (build output, caches) with it, which the confirmation dialog says.
+- Every git command in a clear is bounded to 30 seconds; a command that outlives
+  its deadline is killed. A timeout while checking or removing the checkout
+  skips the entry as `git timed out after 30s`. After the checkout is gone, a
+  timeout deleting the branch is reported as the branch failure, and a prune
+  timeout is only logged because the checkout itself is already removed.
 - For owned entries the branch is deleted, but only when it starts with `h4rn/`,
   and the empty `<data_dir>/subagents/<id>` directory is removed. A branch h4rn
   did not create is never deleted. If the checkout was removed but the branch

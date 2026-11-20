@@ -1,6 +1,7 @@
 import { useEffect, useSyncExternalStore } from "react";
 
 import type { ProtoError, SkippedWorktree, TrackedWorktree } from "@/gen";
+import type { H4rnClient } from "@/lib/client/client";
 import { toProtoError } from "@/lib/client/errors";
 import { getClient } from "@/lib/store/appStore";
 
@@ -9,6 +10,8 @@ export type ClearOutcome = { removed: number; skipped: SkippedWorktree[] };
 
 export type WorktreeState = {
   rows: TrackedWorktree[];
+  /** The client that produced `rows`; a rebuilt client makes them stale. */
+  source: H4rnClient | null;
   loaded: boolean;
   loading: boolean;
   clearing: boolean;
@@ -20,6 +23,7 @@ export type WorktreeState = {
 
 const initialState: WorktreeState = {
   rows: [],
+  source: null,
   loaded: false,
   loading: false,
   clearing: false,
@@ -53,6 +57,17 @@ export function useWorktrees<T>(selector: (value: WorktreeState) => T): T {
   );
 }
 
+/**
+ * Whether the loaded rows came from the client this session is talking to now.
+ *
+ * `restartConnection` throws the old client away (a machine switch, sign-in or
+ * pairing), so rows loaded through it describe another host. Clearing through
+ * them would remove checkouts on the wrong machine.
+ */
+export function worktreeClientCurrent(source: H4rnClient | null): boolean {
+  return source !== null && source === getClient();
+}
+
 /** Worktrees something is using right now. */
 export function inUseWorktrees(rows: TrackedWorktree[]): TrackedWorktree[] {
   return rows.filter((row) => row.status === "active");
@@ -69,6 +84,41 @@ export function settledWorktrees(rows: TrackedWorktree[]): TrackedWorktree[] {
  */
 export function clearableWorktrees(rows: TrackedWorktree[]): TrackedWorktree[] {
   return settledWorktrees(rows).filter((row) => row.origin !== "thread");
+}
+
+/**
+ * The daemon's skip reasons, grouped by whether "Remove anyway" can act on
+ * them. Keep this in step with `crates/h4rn-daemon/src/worktrees/mod.rs`.
+ */
+export const WORKTREE_SKIP_REASONS = {
+  /** Force removes the checkout despite the work it holds. */
+  forceable: [
+    "has uncommitted changes",
+    "could not check for uncommitted changes",
+    "detached HEAD has commits on no branch",
+  ],
+  /** `branch <name> has unmerged commits` — the only branch skip force fixes. */
+  forceableBranchSuffix: " has unmerged commits",
+  /** Force changes nothing here: the entry is in use, gone, or not ours. */
+  blockedPrefixes: [
+    "in use",
+    "not tracked",
+    "checkout removed, but branch",
+    "is the repository's main worktree",
+    "its repository could not be found",
+    "git timed out",
+  ],
+} as const;
+
+/** Whether a forced clear could remove an entry the daemon skipped. */
+export function forceCanFix(reason: string): boolean {
+  if (WORKTREE_SKIP_REASONS.blockedPrefixes.some((prefix) => reason.startsWith(prefix))) {
+    return false;
+  }
+  if ((WORKTREE_SKIP_REASONS.forceable as readonly string[]).includes(reason)) return true;
+  return (
+    reason.startsWith("branch ") && reason.endsWith(WORKTREE_SKIP_REASONS.forceableBranchSuffix)
+  );
 }
 
 /** The loaded page's layout: a notice above the groups, or the empty copy. */
@@ -95,31 +145,70 @@ export function worktreePage(
 }
 
 export async function loadWorktrees(): Promise<void> {
+  const client = getClient();
   patch({ loading: true, error: null });
   try {
-    const response = await getClient().request({ type: "list_worktrees" }, { timeoutMs: 60_000 });
-    if (response.type !== "worktrees") {
-      patch({ loaded: true, loading: false });
+    const response = await client.request({ type: "list_worktrees" }, { timeoutMs: 60_000 });
+    // A machine switch rebuilt the client while the request was in flight.
+    // These rows are another host's.
+    if (getClient() !== client) {
+      patch({ loading: false });
       return;
     }
-    patch({ rows: response.worktrees, loaded: true, loading: false, error: null });
+    if (response.type !== "worktrees") {
+      // Rows loaded from another machine must never be shown as this one's.
+      patch({
+        loaded: true,
+        loading: false,
+        source: client,
+        ...(state.source === client ? {} : { rows: [] }),
+      });
+      return;
+    }
+    patch({
+      rows: response.worktrees,
+      loaded: true,
+      loading: false,
+      error: null,
+      source: client,
+    });
   } catch (error) {
-    patch({ loaded: true, loading: false, error: toProtoError(error) });
+    if (getClient() !== client) {
+      patch({ loading: false });
+      return;
+    }
+    // A failed first read on a new machine keeps no rows from the old one.
+    patch({
+      loaded: true,
+      loading: false,
+      error: toProtoError(error),
+      source: client,
+      ...(state.source === client ? {} : { rows: [] }),
+    });
   }
 }
 
 /**
- * Clears `paths` (every settled entry when null). Entries the daemon leaves in
- * place come back in `outcome.skipped` so the page can offer a forced retry.
+ * Clears the given explicit paths. Entries the daemon leaves in place come back
+ * in `outcome.skipped` so the page can offer a forced retry.
  */
-export async function clearWorktrees(paths: string[] | null, force = false): Promise<void> {
+export async function clearWorktrees(paths: string[], force = false): Promise<void> {
   if (state.clearing) return;
-  patch({ clearing: true, clearError: null });
+  const client = getClient();
+  if (state.source === null || state.source !== client) {
+    patch({ clearError: "This list belongs to another connection. Refresh it first." });
+    return;
+  }
+  patch({ clearing: true, clearError: null, outcome: null });
   try {
-    const response = await getClient().request(
+    const response = await client.request(
       { type: "clear_worktrees", paths, force },
       { timeoutMs: 60_000 },
     );
+    if (getClient() !== client) {
+      patch({ clearing: false });
+      return;
+    }
     if (response.type !== "worktrees_cleared") {
       patch({ clearing: false });
       return;
@@ -128,9 +217,14 @@ export async function clearWorktrees(paths: string[] | null, force = false): Pro
       rows: response.worktrees,
       loaded: true,
       clearing: false,
+      error: null,
       outcome: { removed: response.removed.length, skipped: response.skipped },
     });
   } catch (error) {
+    if (getClient() !== client) {
+      patch({ clearing: false });
+      return;
+    }
     const proto = toProtoError(error);
     patch({
       clearing: false,
@@ -143,11 +237,15 @@ export function dismissWorktreeOutcome(): void {
   patch({ outcome: null, clearError: null });
 }
 
-/** Reads the list on mount and again each time the connection returns. */
+/**
+ * Reads the list on mount, again each time the connection returns, and again
+ * when the stored rows came from a client that has since been replaced.
+ */
 export function useWorktreeList(online: boolean): void {
+  const current = useWorktrees((value) => worktreeClientCurrent(value.source));
   useEffect(() => {
-    if (online) void loadWorktrees();
-  }, [online]);
+    if (online && !current) void loadWorktrees();
+  }, [online, current]);
 }
 
 export function resetWorktreeStoreForTests(): void {

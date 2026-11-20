@@ -50,7 +50,8 @@ pub struct WorktreeAccess {
     pub title: String,
     /// Set when the thread is a subagent child.
     pub subagent_id: Option<SubagentId>,
-    /// Whether the thread's tab is Working right now.
+    /// Whether the thread is busy (running, queued, scheduled, awaiting
+    /// approval, or pinned in Working).
     pub working: bool,
     /// When the daemon last saw this thread use the worktree.
     pub last_seen: DateTime<Utc>,

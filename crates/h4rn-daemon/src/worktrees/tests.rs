@@ -2,10 +2,13 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
+use h4rn_harness::{FakeHarness, Harness};
 use h4rn_protocol::{
-    AgentState, HarnessKind, HostId, SkippedWorktree, SubagentBudget, SubagentContext,
+    AgentState, HarnessKind, HostId, RuntimeMode, SubagentBudget, SubagentContext,
     SubagentCredential, SubagentId, SubagentIsolation, SubagentState, SubagentView, ThreadId,
     ThreadTab, TrackedWorktree, WorktreeOrigin, WorktreeStatus,
 };
@@ -13,9 +16,13 @@ use serde_json::json;
 
 use super::store::{StoredAccess, StoredWorktree};
 use super::{
-    ClearOne, ListInput, RepoCaches, ThreadInfo, clear_one, compute, git, is_busy, open_snapshot,
-    select_entries,
+    ClearOne, ListInput, RepoCaches, ThreadInfo, WorktreeTracker, clear_one, compute, git, is_busy,
+    open_snapshot, select_entries,
 };
+use crate::harnesses::StaticHarnessCatalog;
+use crate::journal::SqliteJournal;
+use crate::subagents::{SubagentManager, SubagentOptions};
+use crate::threads::{NewThread, ThreadManager, ThreadManagerOptions};
 
 fn run(dir: &Path, args: &[&str]) {
     let output = std::process::Command::new("git")
@@ -65,6 +72,10 @@ impl Fixture {
             ],
         );
         path
+    }
+
+    fn data_dir(&self) -> PathBuf {
+        self.root.path().join("data")
     }
 }
 
@@ -141,38 +152,94 @@ fn input(fixture: &Fixture, views: Vec<SubagentView>) -> ListInput {
     }
 }
 
-/// The synchronous half of a clear: selection, then each entry, once the
-/// daemon's live-state re-check has said none is active.
-fn clear(
-    entries: &[TrackedWorktree],
-    paths: Option<&[String]>,
-    force: bool,
-    data_dir: &Path,
-) -> (Vec<String>, Vec<SkippedWorktree>) {
-    let selection = select_entries(entries, paths);
-    let mut removed = Vec::new();
-    let mut skipped = selection.skipped;
-    for entry in selection.targets {
-        if entry.status == WorktreeStatus::Active {
-            skipped.push(SkippedWorktree {
-                path: entry.path.clone(),
-                reason: super::in_use_reason(entry),
-            });
-            continue;
-        }
-        match clear_one(entry, force, data_dir) {
-            Ok(ClearOne::Removed) => removed.push(entry.path.clone()),
-            Ok(ClearOne::RemovedWithBranchFailure(reason)) => skipped.push(SkippedWorktree {
-                path: entry.path.clone(),
-                reason,
-            }),
-            Err(reason) => skipped.push(SkippedWorktree {
-                path: entry.path.clone(),
-                reason,
-            }),
-        }
+/// The daemon's real managers over a test repository, with a tracker in front.
+async fn managers(
+    fixture: &Fixture,
+    harnesses: Vec<Arc<dyn Harness>>,
+) -> (WorktreeTracker, Arc<ThreadManager>, Arc<SubagentManager>) {
+    let mut catalog = StaticHarnessCatalog::new();
+    for harness in harnesses {
+        catalog.register(harness);
     }
-    (removed, skipped)
+    let catalog: Arc<dyn crate::harnesses::HarnessCatalog> = Arc::new(catalog);
+    let data = fixture.data_dir();
+    std::fs::create_dir_all(&data).expect("data dir");
+    let journal = Arc::new(SqliteJournal::in_memory().await.expect("journal"));
+    let threads = Arc::new(
+        ThreadManager::open(
+            journal,
+            Arc::clone(&catalog),
+            HostId::new("host_local"),
+            ThreadManagerOptions::default(),
+            None,
+        )
+        .await
+        .expect("thread manager"),
+    );
+    let subagents = Arc::new(
+        SubagentManager::in_memory(
+            Arc::clone(&threads),
+            catalog,
+            data.clone(),
+            SubagentOptions::default(),
+        )
+        .await
+        .expect("subagent manager"),
+    );
+    subagents.start();
+    let tracker = WorktreeTracker::in_memory(Arc::clone(&threads), Arc::clone(&subagents), data)
+        .await
+        .expect("tracker");
+    (tracker, threads, subagents)
+}
+
+async fn start_thread(threads: &ThreadManager, workspace: &Path, prompt: &str) -> ThreadId {
+    threads
+        .create_thread(NewThread {
+            thread_id: None,
+            parent_thread_id: None,
+            subagent_id: None,
+            host: HostId::new("host_local"),
+            harness: HarnessKind::ClaudeCode,
+            workspace_path: workspace.to_string_lossy().into_owned(),
+            model: "default".into(),
+            prompt: prompt.to_owned(),
+            attachments: Vec::new(),
+            runtime_mode: RuntimeMode::ApprovalRequired,
+            worktree: None,
+        })
+        .await
+        .expect("create thread")
+        .thread_id
+}
+
+/// Waits until the thread reports busy and returns its title.
+async fn wait_busy(threads: &ThreadManager, thread: &ThreadId) -> String {
+    for _ in 0..250 {
+        if let Some(summary) = threads.thread_summary(thread).await
+            && is_busy(summary.tab, summary.agent_state)
+        {
+            return summary.title;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("thread {thread:?} never became busy");
+}
+
+/// Waits until the subagent's worktree reports settled.
+async fn wait_settled(tracker: &WorktreeTracker, subagent: &SubagentId) -> TrackedWorktree {
+    for _ in 0..500 {
+        let listed = tracker.list().await;
+        if let Some(entry) = listed
+            .iter()
+            .find(|entry| entry.subagent_id.as_ref() == Some(subagent))
+            && entry.status == WorktreeStatus::Settled
+        {
+            return entry.clone();
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("subagent {subagent:?} never settled");
 }
 
 #[test]
@@ -301,7 +368,7 @@ fn subagent_worktrees_are_listed_with_their_status() {
             SubagentState::Completed,
         ),
     ];
-    let (entries, gone) = compute(&input(&fixture, views));
+    let (entries, gone) = compute(&input(&fixture, views), true);
     assert!(gone.is_empty());
     let status = |branch: &str| {
         entries
@@ -363,13 +430,18 @@ fn harness_observations_merge_and_vanish_with_their_directory() {
         last_activity: Utc::now(),
     }];
     list_input.stored = vec![stored(&linked), stored(&missing)];
-    let (entries, gone) = compute(&list_input);
+    let (entries, gone) = compute(&list_input, true);
     assert_eq!(gone, vec![missing.to_string_lossy().into_owned()]);
     assert_eq!(entries.len(), 1, "{entries:?}");
     assert_eq!(entries[0].origin, WorktreeOrigin::Harness);
     assert_eq!(entries[0].status, WorktreeStatus::Active);
     assert_eq!(entries[0].accessed_by[0].title, "Fix it");
     assert_eq!(entries[0].dirty, Some(false));
+
+    // The selection listing skips `git status` for every entry: clearing does
+    // its own last-moment check.
+    let (entries, _) = compute(&list_input, false);
+    assert_eq!(entries[0].dirty, None);
 }
 
 #[test]
@@ -392,7 +464,7 @@ fn thread_workspaces_that_are_linked_worktrees_are_tracked() {
         thread("th_linked2", &linked, false),
         thread("th_nested", &nested, false),
     ];
-    let (entries, _) = compute(&list_input);
+    let (entries, _) = compute(&list_input, true);
     assert_eq!(
         entries.len(),
         1,
@@ -406,14 +478,42 @@ fn thread_workspaces_that_are_linked_worktrees_are_tracked() {
     assert!(!entries[0].owned);
 
     // Clearing everything never removes a thread's workspace; naming it does.
-    let data = fixture.root.path().join("data");
-    let (removed, skipped) = clear(&entries, None, false, &data);
-    assert!(removed.is_empty() && skipped.is_empty());
+    let data = fixture.data_dir();
+    let selection = select_entries(&entries, None);
+    assert!(selection.targets.is_empty() && selection.skipped.is_empty());
     assert!(linked.is_dir());
     let path = entries[0].path.clone();
-    let (removed, skipped) = clear(&entries, Some(std::slice::from_ref(&path)), false, &data);
-    assert_eq!(removed, vec![path], "{skipped:?}");
+    let selection = select_entries(&entries, Some(std::slice::from_ref(&path)));
+    assert_eq!(selection.targets.len(), 1);
+    assert!(
+        matches!(
+            clear_one(selection.targets[0], false, &data),
+            Ok(ClearOne::Removed)
+        ),
+        "the named thread workspace is removed"
+    );
     assert!(!linked.exists());
+}
+
+#[test]
+fn selecting_entries_keeps_unknown_and_active_paths_apart() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-select", "select-branch");
+    let mut active = entry(&linked, &fixture.repo, Some("select-branch"), false);
+    active.status = WorktreeStatus::Active;
+    let entries = vec![active];
+
+    // Clearing everything leaves active entries alone without reporting them.
+    let selection = select_entries(&entries, None);
+    assert!(selection.targets.is_empty() && selection.skipped.is_empty());
+
+    // An explicit path is selected; whether it can go is the re-check's call.
+    let selection = select_entries(&entries, Some(std::slice::from_ref(&entries[0].path)));
+    assert_eq!(selection.targets.len(), 1);
+
+    let selection = select_entries(&entries, Some(&["/nowhere".into()]));
+    assert_eq!(selection.skipped[0].reason, "not tracked");
+    assert_eq!(selection.skipped[0].path, "/nowhere");
 }
 
 #[test]
@@ -421,19 +521,20 @@ fn clear_skips_dirty_worktrees_without_force_and_removes_them_with_it() {
     let fixture = Fixture::new();
     let linked = fixture.add_worktree("wt-dirty", "dirty-branch");
     std::fs::write(linked.join("scratch.txt"), "wip").expect("dirty file");
-    let entries = vec![entry(&linked, &fixture.repo, Some("dirty-branch"), false)];
+    let entries = [entry(&linked, &fixture.repo, Some("dirty-branch"), false)];
     assert_eq!(entries[0].dirty, Some(true));
-    let data = fixture.root.path().join("data");
-    let path = entries[0].path.clone();
+    let data = fixture.data_dir();
 
-    let (removed, skipped) = clear(&entries, Some(std::slice::from_ref(&path)), false, &data);
-    assert!(removed.is_empty());
-    assert_eq!(skipped[0].reason, "has uncommitted changes");
+    assert_eq!(
+        clear_one(&entries[0], false, &data).err().as_deref(),
+        Some("has uncommitted changes")
+    );
     assert!(linked.is_dir());
 
-    let (removed, skipped) = clear(&entries, Some(std::slice::from_ref(&path)), true, &data);
-    assert_eq!(removed, vec![path]);
-    assert!(skipped.is_empty());
+    assert!(matches!(
+        clear_one(&entries[0], true, &data),
+        Ok(ClearOne::Removed)
+    ));
     assert!(!linked.exists());
     assert!(
         git::branch_exists(&fixture.repo, "dirty-branch"),
@@ -442,50 +543,26 @@ fn clear_skips_dirty_worktrees_without_force_and_removes_them_with_it() {
 }
 
 #[test]
-fn clear_refuses_active_worktrees_even_with_force() {
-    let fixture = Fixture::new();
-    let linked = fixture.add_worktree("wt-active", "active-branch");
-    let mut active = entry(&linked, &fixture.repo, Some("active-branch"), false);
-    active.status = WorktreeStatus::Active;
-    active.accessed_by.push(h4rn_protocol::WorktreeAccess {
-        thread_id: ThreadId::new("th_busy"),
-        title: "Busy thread".into(),
-        subagent_id: None,
-        working: true,
-        last_seen: Utc::now(),
-    });
-    let entries = vec![active];
-    let data = fixture.root.path().join("data");
-    let path = entries[0].path.clone();
-
-    let (removed, skipped) = clear(&entries, Some(&[path]), true, &data);
-    assert!(removed.is_empty());
-    assert_eq!(skipped[0].reason, "in use by Busy thread");
-    assert!(linked.is_dir());
-
-    // Clearing everything leaves active entries alone without reporting them.
-    let (removed, skipped) = clear(&entries, None, true, &data);
-    assert!(removed.is_empty() && skipped.is_empty());
-    assert!(linked.is_dir());
-
-    let (_, skipped) = clear(&entries, Some(&["/nowhere".into()]), false, &data);
-    assert_eq!(skipped[0].reason, "not tracked");
-}
-
-#[test]
 fn clear_deletes_only_h4rn_branches_for_owned_entries() {
     let fixture = Fixture::new();
-    let data = fixture.root.path().join("data");
+    let data = fixture.data_dir();
     let h4rn = fixture.add_worktree("sa-own", "h4rn/sa-own");
     let other = fixture.add_worktree("sa-foreign", "feature/foreign");
     let mut own = entry(&h4rn, &fixture.repo, Some("h4rn/sa-own"), true);
     own.subagent_id = Some(SubagentId::new("sa_own"));
     let mut foreign = entry(&other, &fixture.repo, Some("feature/foreign"), true);
     foreign.subagent_id = Some(SubagentId::new("sa_foreign"));
-    let entries = vec![own, foreign];
 
-    let (removed, skipped) = clear(&entries, None, false, &data);
-    assert_eq!(removed.len(), 2, "{skipped:?}");
+    // Clean owned checkouts are removed without `--force` too: master is not
+    // needed to delete them.
+    assert!(matches!(
+        clear_one(&own, false, &data),
+        Ok(ClearOne::Removed)
+    ));
+    assert!(matches!(
+        clear_one(&foreign, false, &data),
+        Ok(ClearOne::Removed)
+    ));
     assert!(!h4rn.exists() && !other.exists());
     assert!(!git::branch_exists(&fixture.repo, "h4rn/sa-own"));
     assert!(
@@ -497,12 +574,12 @@ fn clear_deletes_only_h4rn_branches_for_owned_entries() {
 #[test]
 fn clear_skips_unmerged_owned_branches_without_force() {
     let fixture = Fixture::new();
-    let data = fixture.root.path().join("data");
+    let data = fixture.data_dir();
     let linked = fixture.add_worktree("sa-unmerged", "h4rn/sa-unmerged");
     std::fs::write(linked.join("work.txt"), "work").expect("work file");
     run(&linked, &["add", "work.txt"]);
     run(&linked, &["commit", "-q", "-m", "child work"]);
-    let entries = vec![entry(
+    let entries = [entry(
         &linked,
         &fixture.repo,
         Some("h4rn/sa-unmerged"),
@@ -510,17 +587,17 @@ fn clear_skips_unmerged_owned_branches_without_force() {
     )];
     assert_eq!(entries[0].dirty, Some(false));
 
-    let (removed, skipped) = clear(&entries, None, false, &data);
-    assert!(removed.is_empty());
     assert_eq!(
-        skipped[0].reason,
-        "branch h4rn/sa-unmerged has unmerged commits"
+        clear_one(&entries[0], false, &data).err().as_deref(),
+        Some("branch h4rn/sa-unmerged has unmerged commits")
     );
     assert!(linked.is_dir());
     assert!(git::branch_exists(&fixture.repo, "h4rn/sa-unmerged"));
 
-    let (removed, _) = clear(&entries, None, true, &data);
-    assert_eq!(removed.len(), 1);
+    assert!(matches!(
+        clear_one(&entries[0], true, &data),
+        Ok(ClearOne::Removed)
+    ));
     assert!(!linked.exists());
     assert!(!git::branch_exists(&fixture.repo, "h4rn/sa-unmerged"));
 }
@@ -528,11 +605,12 @@ fn clear_skips_unmerged_owned_branches_without_force() {
 #[test]
 fn clear_never_touches_the_main_worktree() {
     let fixture = Fixture::new();
-    let data = fixture.root.path().join("data");
-    let entries = vec![entry(&fixture.repo, &fixture.repo, Some("main"), false)];
-    let (removed, skipped) = clear(&entries, None, true, &data);
-    assert!(removed.is_empty());
-    assert_eq!(skipped[0].reason, "is the repository's main worktree");
+    let data = fixture.data_dir();
+    let entries = [entry(&fixture.repo, &fixture.repo, Some("main"), false)];
+    assert_eq!(
+        clear_one(&entries[0], true, &data).err().as_deref(),
+        Some("is the repository's main worktree")
+    );
     assert!(fixture.repo.join("README.md").exists());
 }
 
@@ -557,16 +635,45 @@ fn a_dirty_worktree_is_skipped_even_when_status_hides_untracked_files() {
     // re-check must catch it anyway.
     let mut stale = entry(&linked, &fixture.repo, Some("h4rn/sa-untracked"), true);
     stale.dirty = Some(false);
-    let entries = vec![stale];
-    let data = fixture.root.path().join("data");
-    let (removed, skipped) = clear(&entries, None, false, &data);
-    assert!(removed.is_empty(), "{skipped:?}");
-    assert_eq!(skipped[0].reason, "has uncommitted changes");
+    let data = fixture.data_dir();
+    assert_eq!(
+        clear_one(&stale, false, &data).err().as_deref(),
+        Some("has uncommitted changes")
+    );
     assert!(linked.is_dir());
 
-    let (removed, skipped) = clear(&entries, None, true, &data);
-    assert_eq!(removed.len(), 1, "{skipped:?}");
+    assert!(matches!(
+        clear_one(&stale, true, &data),
+        Ok(ClearOne::Removed)
+    ));
     assert!(!linked.exists());
+}
+
+#[test]
+fn a_detached_commit_on_no_branch_is_kept_without_force() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-detached", "detached-base");
+    run(&linked, &["checkout", "-q", "--detach"]);
+    std::fs::write(linked.join("work.txt"), "work").expect("work file");
+    run(&linked, &["add", "work.txt"]);
+    run(&linked, &["commit", "-q", "-m", "detached work"]);
+    let data = fixture.data_dir();
+    let detached = entry(&linked, &fixture.repo, None, false);
+    assert_eq!(
+        clear_one(&detached, false, &data).err().as_deref(),
+        Some("detached HEAD has commits on no branch")
+    );
+    assert!(linked.is_dir(), "the checkout is kept");
+
+    // The same commit is now reachable from a branch, so the checkout can go.
+    let sha = git::run(&linked, ["rev-parse", "HEAD"]).expect("head");
+    run(&fixture.repo, &["branch", "keep-detached", &sha]);
+    assert!(matches!(
+        clear_one(&detached, false, &data),
+        Ok(ClearOne::Removed)
+    ));
+    assert!(!linked.exists());
+    assert!(git::branch_exists(&fixture.repo, "keep-detached"));
 }
 
 #[test]
@@ -589,21 +696,56 @@ fn a_branch_that_cannot_be_deleted_is_reported_after_removing_the_checkout() {
     );
     let mut own = entry(&linked, &fixture.repo, Some("h4rn/sa-branchfail"), true);
     own.dirty = Some(false);
-    let entries = vec![own];
-    let data = fixture.root.path().join("data");
-    let (removed, skipped) = clear(&entries, None, false, &data);
+    let data = fixture.data_dir();
+    let outcome = clear_one(&own, false, &data);
     assert!(
-        removed.is_empty(),
+        !matches!(outcome, Ok(ClearOne::Removed)),
         "a branch failure is not a clean removal"
     );
     assert!(!linked.exists(), "the checkout itself was removed");
+    let Ok(ClearOne::RemovedWithBranchFailure(reason)) = outcome else {
+        panic!("unexpected outcome");
+    };
     assert!(
-        skipped[0]
-            .reason
-            .starts_with("checkout removed, but branch h4rn/sa-branchfail could not be deleted:"),
-        "{skipped:?}"
+        reason.starts_with("checkout removed, but branch h4rn/sa-branchfail could not be deleted:"),
+        "{reason}"
     );
     assert!(git::branch_exists(&fixture.repo, "h4rn/sa-branchfail"));
+}
+
+#[test]
+fn a_git_call_that_outlives_its_deadline_is_killed() {
+    let fixture = Fixture::new();
+    // A git alias runs a shell command; this one sleeps past the deadline.
+    let started = std::time::Instant::now();
+    let error = git::run_with_timeout(
+        &fixture.repo,
+        ["-c", "alias.hang=!sleep 5", "hang"],
+        Duration::from_secs(1),
+    )
+    .expect_err("the call must time out");
+    assert!(git::timed_out(&error), "{error}");
+    assert_eq!(error, "git timed out after 1s");
+    assert!(
+        started.elapsed() < Duration::from_secs(4),
+        "the child is killed at the deadline, not when the command finishes"
+    );
+}
+
+#[test]
+fn a_tag_does_not_hide_a_branch_with_the_same_name() {
+    let fixture = Fixture::new();
+    run(&fixture.repo, &["branch", "h4rn/sa-x"]);
+    run(&fixture.repo, &["tag", "h4rn/sa-x"]);
+    let branches = git::h4rn_branches(&fixture.repo);
+    assert!(
+        branches.contains("h4rn/sa-x"),
+        "the branch is found alongside its tag: {branches:?}"
+    );
+    assert_eq!(
+        branches.iter().filter(|name| *name == "h4rn/sa-x").count(),
+        1
+    );
 }
 
 #[test]
@@ -639,7 +781,7 @@ fn a_child_of_a_removed_subagent_worktree_keeps_its_repo() {
     let branches = git::h4rn_branches(&fixture.repo);
     assert!(branches.contains("h4rn/sa-parent") && branches.contains("h4rn/sa-child"));
 
-    let (entries, _) = compute(&list_input);
+    let (entries, _) = compute(&list_input, true);
     assert_eq!(entries.len(), 1, "{entries:?}");
     assert_eq!(entries[0].branch.as_deref(), Some("h4rn/sa-child"));
     assert_eq!(Path::new(&entries[0].repo), fixture.repo.as_path());
@@ -681,7 +823,10 @@ fn overlapping_turns_do_not_attribute_each_other_s_worktrees() {
 
 #[test]
 fn a_thread_is_busy_only_when_it_can_write() {
-    assert!(is_busy(ThreadTab::Working, AgentState::Idle));
+    assert!(
+        is_busy(ThreadTab::Working, AgentState::Idle),
+        "a pinned or never-run thread in the Working tab can still write"
+    );
     for state in [
         AgentState::Queued,
         AgentState::Scheduled,
@@ -695,12 +840,109 @@ fn a_thread_is_busy_only_when_it_can_write() {
     ] {
         assert!(is_busy(ThreadTab::Settled, state), "{state:?}");
     }
-    for state in [
-        AgentState::Idle,
-        AgentState::Done,
-        AgentState::Error,
-        AgentState::Unreachable,
-    ] {
+    for state in [AgentState::Done, AgentState::Error, AgentState::Unreachable] {
         assert!(!is_busy(ThreadTab::Settled, state), "{state:?}");
+        assert!(
+            !is_busy(ThreadTab::Working, state),
+            "the Working-tab exit grace is not busy: {state:?}"
+        );
     }
+    assert!(
+        !is_busy(ThreadTab::Settled, AgentState::Idle),
+        "an idle thread outside the Working tab is not busy"
+    );
+}
+
+#[tokio::test]
+async fn clear_through_the_tracker_skips_a_busy_thread_and_keeps_the_checkout() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-busy", "busy-branch");
+    // A script that never completes its turn keeps the thread busy while the
+    // clear runs, without a wall-clock sleep.
+    let (tracker, threads, _subagents) = managers(
+        &fixture,
+        vec![Arc::new(FakeHarness::with_events(Vec::new()))],
+    )
+    .await;
+    let thread = start_thread(&threads, &linked, "work in the checkout").await;
+    let title = wait_busy(&threads, &thread).await;
+
+    let listed = tracker.list().await;
+    let entry = listed
+        .iter()
+        .find(|entry| Path::new(&entry.path) == git::norm(&linked))
+        .unwrap_or_else(|| panic!("the thread workspace is listed: {listed:?}"));
+    assert_eq!(entry.status, WorktreeStatus::Active);
+
+    let outcome = tracker.clear(Some(vec![entry.path.clone()]), false).await;
+    assert!(outcome.removed.is_empty(), "{:?}", outcome.skipped);
+    assert_eq!(outcome.skipped[0].reason, format!("in use by {title}"));
+    assert!(linked.is_dir(), "the checkout is kept");
+
+    let _ = threads.interrupt(&thread).await;
+}
+
+#[tokio::test]
+async fn clear_through_the_tracker_sees_a_thread_the_listing_missed() {
+    let fixture = Fixture::new();
+    let (tracker, threads, subagents) = managers(
+        &fixture,
+        vec![
+            Arc::new(FakeHarness::with_events(Vec::new())),
+            Arc::new(FakeHarness::new().with_kind(HarnessKind::Codex)),
+        ],
+    )
+    .await;
+    let parent = start_thread(&threads, &fixture.repo, "parent").await;
+    let view = subagents
+        .spawn(h4rn_protocol::SpawnSubagentRequest {
+            parent_thread: parent.clone(),
+            task: "finish the thing".into(),
+            harness: Some(HarnessKind::Codex),
+            host: None,
+            model: None,
+            isolation: SubagentIsolation::Worktree,
+            context: Default::default(),
+            budget: Default::default(),
+        })
+        .await
+        .expect("spawn subagent");
+    let settled = wait_settled(&tracker, &view.subagent_id).await;
+    assert!(!settled.exists, "the settled directory was removed");
+
+    // Put the checkout back, the way a daemon restart leaves an orphan behind.
+    let path = PathBuf::from(&settled.path);
+    let branch = settled.branch.clone().expect("kept branch");
+    run(
+        &fixture.repo,
+        &["worktree", "add", "-q", &path.to_string_lossy(), &branch],
+    );
+    assert!(path.is_dir());
+
+    // A thread that works inside it was not part of the listing's accessors
+    // (and thread workspaces under h4rn's data dir are never listed on their
+    // own), so only the live re-check can see it.
+    let nested = path.join("src");
+    std::fs::create_dir_all(&nested).expect("nested workspace");
+    let busy = start_thread(&threads, &nested, "keep working in here").await;
+    let title = wait_busy(&threads, &busy).await;
+
+    let listed = tracker.list().await;
+    let entry = listed
+        .iter()
+        .find(|entry| Path::new(&entry.path) == path)
+        .unwrap_or_else(|| panic!("the orphaned worktree is listed: {listed:?}"));
+    assert_ne!(
+        entry.status,
+        WorktreeStatus::Active,
+        "the listing only knows the finished subagent"
+    );
+
+    let outcome = tracker.clear(Some(vec![entry.path.clone()]), false).await;
+    assert!(outcome.removed.is_empty(), "{:?}", outcome.skipped);
+    assert_eq!(outcome.skipped[0].reason, format!("in use by {title}"));
+    assert!(path.is_dir(), "the checkout is kept");
+
+    let _ = threads.interrupt(&busy).await;
+    let _ = threads.interrupt(&parent).await;
 }

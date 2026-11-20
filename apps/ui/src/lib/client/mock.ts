@@ -2740,6 +2740,8 @@ class MockDaemon {
         this.ok(frame.id, { type: "worktrees", worktrees: this.worktrees });
         return;
       case "clear_worktrees": {
+        // Settings sends the explicit paths of the rows the user saw (for
+        // Clear all too); the fallback keeps other callers working.
         const targets =
           body.paths ??
           this.worktrees
