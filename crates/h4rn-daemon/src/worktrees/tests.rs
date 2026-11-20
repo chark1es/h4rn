@@ -103,8 +103,8 @@ fn entry(path: &Path, repo: &Path, branch: Option<&str>, owned: bool) -> Tracked
 
 /// The two blocking phases of a clear, for the unit tests below.
 fn clear_one(entry: &TrackedWorktree, force: bool, data_dir: &Path) -> Result<ClearOne, String> {
-    preflight(entry, force)?;
-    remove(entry, force, data_dir)
+    let verified = preflight(entry, force)?;
+    remove(entry, force, data_dir, verified.as_deref())
 }
 
 fn subagent_view(
@@ -297,6 +297,27 @@ fn linked_worktrees_are_told_apart_from_main_checkouts() {
     assert_eq!(listed.len(), 1, "the main worktree is excluded: {listed:?}");
     assert_eq!(listed[0].path, linked);
     assert_eq!(listed[0].branch.as_deref(), Some("feature"));
+}
+
+#[cfg(unix)]
+#[test]
+fn normalisation_resolves_symlinks_before_folding_parent_components() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-link", "link-branch");
+    let subdir = linked.join("subdir");
+    std::fs::create_dir_all(&subdir).expect("subdir");
+    let link = fixture.root.path().join("link");
+    std::os::unix::fs::symlink(&subdir, &link).expect("symlink");
+
+    // The filesystem resolves `link` first and `..` then takes the checkout's
+    // parent: `link/..` is the checkout, not the symlink's own directory.
+    assert_eq!(git::norm(&link.join("..")), linked);
+    assert_eq!(git::norm(&fixture.root.path().join("link/..")), linked);
+    // A missing suffix still folds lexically below the existing ancestor.
+    assert_eq!(
+        git::norm(&linked.join("missing/../next")),
+        linked.join("next")
+    );
 }
 
 #[test]
@@ -612,6 +633,36 @@ fn clear_skips_unmerged_owned_branches_without_force() {
     assert!(!git::branch_exists(&fixture.repo, "h4rn/sa-unmerged"));
 }
 
+#[tokio::test]
+async fn a_branch_that_moves_after_preflight_is_not_deleted() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("sa-moved", "h4rn/sa-moved");
+    let (tracker, _threads, _subagents) = managers(&fixture, Vec::new()).await;
+    let target = entry(&linked, &fixture.repo, Some("h4rn/sa-moved"), true);
+
+    // The branch advances between the merge check and removal, so the tip the
+    // preflight verified is no longer the tip that would be deleted.
+    let hook = {
+        let linked = linked.clone();
+        move |_path: String| {
+            let linked = linked.clone();
+            async move {
+                run(&linked, &["commit", "-q", "--allow-empty", "-m", "moved"]);
+            }
+        }
+    };
+    let outcome = run_clear_entry(&tracker.inner, target, false, hook).await;
+    let Err(reason) = outcome else {
+        panic!("a branch that moved is never deleted");
+    };
+    assert_eq!(reason, "branch h4rn/sa-moved moved during the clear");
+    assert!(!linked.exists(), "the checkout itself is removed");
+    assert!(
+        git::branch_exists(&fixture.repo, "h4rn/sa-moved"),
+        "the moved branch is kept"
+    );
+}
+
 #[test]
 fn clear_never_touches_the_main_worktree() {
     let fixture = Fixture::new();
@@ -622,6 +673,115 @@ fn clear_never_touches_the_main_worktree() {
         Some("is the repository's main worktree")
     );
     assert!(fixture.repo.join("README.md").exists());
+}
+
+#[test]
+fn clearing_one_worktree_keeps_another_missing_worktree_registered() {
+    let fixture = Fixture::new();
+    let data = fixture.data_dir();
+    let clearing = fixture.add_worktree("wt-clearing", "clearing-branch");
+    let away = fixture.add_worktree("wt-away", "away-branch");
+    let moved = git::norm(&fixture.root.path().join("wt-away-moved"));
+    std::fs::rename(&away, &moved).expect("move the unrelated checkout away");
+    // Git now marks the unrelated registration prunable, which is exactly the
+    // state a repository-wide prune would silently forget.
+    let registrations = git::registrations(&fixture.repo).expect("list");
+    assert!(
+        registrations
+            .iter()
+            .any(|registration| registration.path == away && registration.prunable),
+        "{registrations:?}"
+    );
+
+    let target = entry(&clearing, &fixture.repo, Some("clearing-branch"), false);
+    assert!(matches!(
+        clear_one(&target, false, &data),
+        Ok(ClearOne::Removed)
+    ));
+    assert!(!clearing.exists());
+
+    // Clearing A dropped only A's registration; B is untouched.
+    let registrations = git::registrations(&fixture.repo).expect("list");
+    assert!(
+        registrations
+            .iter()
+            .any(|registration| registration.path == away),
+        "{registrations:?}"
+    );
+
+    // Restoring B's directory makes it usable again.
+    std::fs::rename(&moved, &away).expect("restore the unrelated checkout");
+    assert!(git::is_linked_worktree(&away));
+    assert_eq!(
+        git::run(&away, ["status", "--porcelain"]).expect("git works there"),
+        ""
+    );
+}
+
+#[test]
+fn a_missing_checkouts_own_registration_is_dropped_without_pruning_others() {
+    let fixture = Fixture::new();
+    let gone = fixture.add_worktree("wt-gone", "gone-branch");
+    let kept = fixture.add_worktree("wt-kept", "kept-branch");
+    // Removing the directory by hand leaves the registration behind, marked
+    // prunable. That is the state a restart or a failed cleanup can leave.
+    std::fs::remove_dir_all(&gone).expect("remove the checkout");
+    let registrations = git::registrations(&fixture.repo).expect("list");
+    assert!(
+        registrations
+            .iter()
+            .any(|registration| registration.path == gone && registration.prunable),
+        "{registrations:?}"
+    );
+
+    let target = entry(&gone, &fixture.repo, Some("gone-branch"), false);
+    assert!(matches!(
+        clear_one(&target, false, &fixture.data_dir()),
+        Ok(ClearOne::Removed)
+    ));
+    let registrations = git::registrations(&fixture.repo).expect("list");
+    assert!(
+        registrations
+            .iter()
+            .all(|registration| registration.path != gone),
+        "only the selected registration is dropped: {registrations:?}"
+    );
+    assert!(
+        registrations
+            .iter()
+            .any(|registration| registration.path == kept)
+    );
+}
+
+#[test]
+fn a_replacement_checkout_on_another_branch_is_kept() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-replaced", "listed-branch");
+    // Someone removes the listed checkout and recreates another one at the
+    // same path on a different branch.
+    run(
+        &fixture.repo,
+        &["worktree", "remove", &linked.to_string_lossy()],
+    );
+    run(&fixture.repo, &["branch", "replacement-branch"]);
+    run(
+        &fixture.repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            &linked.to_string_lossy(),
+            "replacement-branch",
+        ],
+    );
+    let entries = [entry(&linked, &fixture.repo, Some("listed-branch"), false)];
+    assert_eq!(
+        clear_one(&entries[0], false, &fixture.data_dir())
+            .err()
+            .as_deref(),
+        Some("checkout is no longer on listed-branch")
+    );
+    assert!(linked.is_dir(), "the replacement checkout is kept");
 }
 
 #[test]
@@ -961,6 +1121,74 @@ async fn clear_through_the_tracker_sees_a_thread_the_listing_missed() {
     let _ = threads.interrupt(&parent).await;
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn a_busy_thread_whose_workspace_goes_through_a_symlink_keeps_the_checkout() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-linkbusy", "link-busy-branch");
+    let subdir = linked.join("subdir");
+    std::fs::create_dir_all(&subdir).expect("subdir");
+    let link = fixture.root.path().join("inside-link");
+    std::os::unix::fs::symlink(&subdir, &link).expect("symlink");
+    let (tracker, threads, _subagents) = managers(
+        &fixture,
+        vec![Arc::new(FakeHarness::with_events(Vec::new()))],
+    )
+    .await;
+
+    // The workspace is spelled through the symlink; only resolving it the way
+    // the filesystem does lands on the checkout.
+    let workspace = link.join("..");
+    assert_eq!(git::norm(&workspace), linked);
+    let thread = start_thread(&threads, &workspace, "work through the link").await;
+    let title = wait_busy(&threads, &thread).await;
+
+    let target = entry(&linked, &fixture.repo, Some("link-busy-branch"), false);
+    let outcome = tracker.clear(Some(vec![target.path.clone()]), false).await;
+    assert!(outcome.removed.is_empty(), "{:?}", outcome.skipped);
+    assert_eq!(outcome.skipped[0].reason, format!("in use by {title}"));
+    assert!(linked.is_dir(), "the checkout is kept");
+
+    let _ = threads.interrupt(&thread).await;
+}
+
+#[tokio::test]
+async fn a_busy_accessor_found_only_in_the_store_keeps_the_checkout() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-store", "store-branch");
+    let elsewhere = fixture.add_worktree("wt-elsewhere", "elsewhere-branch");
+    let (tracker, threads, _subagents) = managers(
+        &fixture,
+        vec![Arc::new(FakeHarness::with_events(Vec::new()))],
+    )
+    .await;
+    // The busiest thread works somewhere else entirely; only its recorded
+    // access ties it to this checkout.
+    let thread = start_thread(&threads, &elsewhere, "busy elsewhere").await;
+    let title = wait_busy(&threads, &thread).await;
+    tracker
+        .inner
+        .store
+        .record(
+            &linked.to_string_lossy(),
+            &fixture.repo.to_string_lossy(),
+            Some("store-branch"),
+            thread.as_str(),
+            None,
+            Utc::now(),
+        )
+        .await
+        .expect("record the access");
+
+    let target = entry(&linked, &fixture.repo, Some("store-branch"), false);
+    let outcome = tracker.clear(Some(vec![target.path.clone()]), false).await;
+    assert!(outcome.removed.is_empty(), "{:?}", outcome.skipped);
+    assert_eq!(outcome.skipped[0].reason, format!("in use by {title}"));
+    assert!(linked.is_dir(), "the checkout is kept");
+
+    let _ = threads.interrupt(&thread).await;
+}
+
 /// A harness whose first tool call fails and whose turn never completes, so
 /// the thread sits at `AgentState::Error` with its turn still in flight.
 fn failing_tool_call() -> FakeHarness {
@@ -1102,7 +1330,7 @@ fn git_refusing_a_dirty_checkout_reads_as_uncommitted_changes() {
     // Preflight would catch this first; removal is called directly to prove
     // git's own refusal is reported in our words, not git's.
     assert_eq!(
-        remove(&entries[0], false, &fixture.data_dir())
+        remove(&entries[0], false, &fixture.data_dir(), None)
             .err()
             .as_deref(),
         Some("has uncommitted changes")

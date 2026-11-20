@@ -120,11 +120,14 @@ export const WORKTREE_SKIP_REASONS = {
   ],
   /** `branch <name> has unmerged commits` — the only branch skip force fixes. */
   forceableBranchSuffix: " has unmerged commits",
+  /** `branch <name> moved during the clear` — the verified tip is gone. */
+  forceableMovedSuffix: " moved during the clear",
   /** Force changes nothing here: the entry is in use, gone, or not ours. */
   blockedPrefixes: [
     "in use",
     "not tracked",
     "checkout removed, but branch",
+    "checkout is no longer on",
     "is the repository's main worktree",
     "its repository could not be found",
     "git timed out",
@@ -138,7 +141,9 @@ export function forceCanFix(reason: string): boolean {
   }
   if ((WORKTREE_SKIP_REASONS.forceable as readonly string[]).includes(reason)) return true;
   return (
-    reason.startsWith("branch ") && reason.endsWith(WORKTREE_SKIP_REASONS.forceableBranchSuffix)
+    reason.startsWith("branch ") &&
+    (reason.endsWith(WORKTREE_SKIP_REASONS.forceableBranchSuffix) ||
+      reason.endsWith(WORKTREE_SKIP_REASONS.forceableMovedSuffix))
   );
 }
 
@@ -291,7 +296,9 @@ export function shouldReloadWorktrees(
  */
 export function useWorktreeList(online: boolean): void {
   const current = useWorktrees((value) => worktreeClientCurrent(value.source));
-  const wasOnline = useRef(online);
+  // Starts as `false`, so mounting while online is treated as a transition and
+  // always reloads; cached rows keep rendering until the fresh list lands.
+  const wasOnline = useRef(false);
   useEffect(() => {
     const reconnect = shouldReloadWorktrees(online, wasOnline.current, current);
     wasOnline.current = online;

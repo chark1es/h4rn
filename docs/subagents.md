@@ -181,11 +181,18 @@ whatever the agent state says, because a failed or denied tool call reports
 with an idle agent), or its agent state is queued, scheduled, thinking,
 searching, reading, editing, running a tool, awaiting approval or rate-limited.
 Done, failed and unreachable threads are not busy on their own, even inside the
-Working tab's exit grace. `settled` means
-nothing running uses it, and `orphaned` means an owned worktree's subagent is
-finished but its directory is still on disk (cleanup failed, or the daemon
-restarted mid-run). An entry with nothing left to clear (directory gone and, for
-owned entries, branch gone) is not listed.
+Working tab's exit grace.
+
+`settled` means nothing running uses it, and `orphaned` means an owned
+worktree's subagent is finished but its directory is still on disk (cleanup
+failed, or the daemon restarted mid-run). An entry with nothing left to clear
+(directory gone and, for owned entries, branch gone) is not listed.
+
+Paths are compared after normalisation: the path is canonicalised exactly as
+written before any `..` is folded, so a workspace spelled through a symlink
+still resolves to the checkout the filesystem says it is. Only a missing path
+canonicalises its longest existing ancestor and folds the unresolved suffix
+lexically.
 
 **What is stored.** Only observations that cannot be derived live go to
 `<data_dir>/worktrees.db`: `harness` worktrees and which threads used them.
@@ -232,13 +239,17 @@ for it.
 
 - Active worktrees are never removed, even with `force`. Each target is handled
   in two blocking phases: a preflight (repository and main-worktree checks,
-  dirtiness, detached HEAD, unmerged owned branch) and the removal itself. The
-  live re-check runs after preflight and immediately before removal, so a
-  thread that becomes busy in that window still keeps the entry and its
-  checkout stays on disk. That re-check is wider than the listing: it asks
-  every current thread (children and snoozed included) and any busy one whose
-  workspace is the entry or inside it keeps the entry, naming that thread in
-  the reason, and it reloads the recorded accesses for the path from the store.
+  dirtiness, whether the checkout is still on its listed branch, detached HEAD,
+  unmerged owned branch) and the removal itself. The live re-check runs after
+  preflight and immediately before removal, so a thread that becomes busy in
+  that window still keeps the entry and its checkout stays on disk. That
+  re-check first collects every candidate — the accessors the listing named, the
+  accesses recorded for the path in the store, and every current thread
+  (children and snoozed included) whose workspace is the entry or inside it —
+  and then checks activity once, at the end, over the whole set. A thread found
+  by one source while it was idle is therefore not dropped before another source
+  would have seen it busy, and a busy thread keeps the entry and is named in the
+  reason.
 - A `thread` workspace is only removed when its path is named. It belongs to
   whoever created it, and its thread may be resumed there, so clearing
   everything leaves it alone.
@@ -247,13 +258,24 @@ for it.
   again at the last moment rather than trusted from the listing, and untracked
   files always count, even when `status.showUntrackedFiles` says otherwise; a
   failed check on an existing directory is a skip, not a removal.
+- Without `force`, an existing checkout must still be on the branch the listing
+  gave it. If the current branch differs, the entry is skipped as
+  `checkout is no longer on <branch>` (not forceable): a replacement checkout
+  recreated at the same path is not the entry that was listed.
 - A detached HEAD is skipped as `detached HEAD has commits on no branch` unless
   its commit is reachable from some branch, remote-tracking branch or tag;
   otherwise removing the checkout would leave that work unreachable.
-- Removal is plain `git worktree remove`, then `git worktree prune`. `--force`
-  is passed only when the request asked for it, never merely because h4rn owns
-  the checkout. Git's own contract applies: a removable checkout takes ignored
-  files (build output, caches) with it, which the confirmation dialog says.
+- Removal is plain `git worktree remove`, with `--force` only when the request
+  asked for it, never merely because h4rn owns the checkout. Git's own contract
+  applies: a removable checkout takes ignored files (build output, caches) with
+  it, which the confirmation dialog says. There is no repository-wide
+  `git worktree prune`: `git worktree remove` drops the selected worktree's own
+  registration, and a repository-wide prune would also forget an unrelated
+  worktree whose directory is only temporarily away. When the selected
+  checkout's directory is already gone, only its own registration is looked up
+  by path in `git worktree list --porcelain` and removed (with `--force`, or
+  plainly, whichever this git accepts); if neither works the registration is
+  left in place rather than deleting another worktree's metadata.
 - Every git command in a clear is bounded to 30 seconds; a command that outlives
   its deadline is killed. Collecting a command's output is bounded too: if a
   descendant process left behind by a git alias keeps stdout or stderr open,
@@ -261,12 +283,22 @@ for it.
   detached, and the call reports `git timed out after Ns` instead of hanging.
   A timeout while checking or removing the checkout skips the entry as
   `git timed out after 30s`. After the checkout is gone, a timeout deleting the
-  branch is reported as the branch failure, and a prune timeout is only logged
-  because the checkout itself is already removed.
+  branch is reported as the branch failure.
 - For owned entries the branch is deleted, but only when it starts with `h4rn/`,
   and the empty `<data_dir>/subagents/<id>` directory is removed. A branch h4rn
-  did not create is never deleted. If the checkout was removed but the branch
-  could not be deleted, the path is reported as skipped with
+  did not create is never deleted. Without `force`, the preflight records the
+  branch's commit when it verifies the merge, and removal re-reads it right
+  before deleting: if it moved, the branch is kept and the path is skipped as
+  `branch <b> moved during the clear` (forceable), because the tip that was
+  verified is no longer the tip that would go. Deletion itself is
+  `git update-ref -d refs/heads/<b> <verified commit>`, an atomic
+  compare-and-delete. Git's checked-out-branch protection still applies first:
+  if `git worktree list --porcelain` shows the branch checked out anywhere, the
+  path is reported as
+  `checkout removed, but branch <b> could not be deleted: it is checked out in <path>`.
+  With `force`, plain `git branch -D` is used. If the checkout was removed but
+  the branch could not be deleted for any reason, the path is reported as
+  skipped with
   `checkout removed, but branch <b> could not be deleted: <git's message>` so
   the leftover branch is not mistaken for a clean removal.
 - The repository's main worktree is never touched.

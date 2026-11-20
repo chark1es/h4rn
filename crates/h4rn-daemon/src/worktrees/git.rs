@@ -43,6 +43,17 @@ pub struct GitWorktree {
     pub branch: Option<String>,
 }
 
+/// One worktree registration as `git worktree list --porcelain` reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Registration {
+    /// Normalised absolute path.
+    pub path: PathBuf,
+    /// Checked-out branch by short name; `None` for a detached HEAD.
+    pub branch: Option<String>,
+    /// Git considers the registration stale because the directory is gone.
+    pub prunable: bool,
+}
+
 fn command(dir: &Path) -> Command {
     let mut command = Command::new("git");
     // Read-only inspection must never wait on the index lock or a prompt.
@@ -214,38 +225,47 @@ where
 
 /// Normalises a path for comparison.
 ///
-/// Trailing separators and `.`/`..` components are folded, and the longest
-/// existing ancestor is canonicalised so symlinked parents (`/tmp`, macOS
-/// `/var`) compare equal to what git prints.
+/// The path is canonicalised exactly as written first, so a `..` after a
+/// symlink means what the filesystem says it means: `link -> checkout/subdir`
+/// makes `link/..` the checkout, not the symlink's parent directory. Only when
+/// the path does not exist is the longest existing ancestor canonicalised (as
+/// written, again without interpreting `..` first) and `.`/`..` folded lexically
+/// in the unresolved suffix.
 pub fn norm(path: &Path) -> PathBuf {
-    let mut lexical = PathBuf::new();
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return strip_verbatim(canonical);
+    }
+    let components: Vec<Component<'_>> = path.components().collect();
+    for split in (0..components.len()).rev() {
+        let mut prefix = PathBuf::new();
+        for component in &components[..split] {
+            prefix.push(component.as_os_str());
+        }
+        let Ok(canonical) = std::fs::canonicalize(&prefix) else {
+            continue;
+        };
+        let mut out = canonical;
+        for component in &components[split..] {
+            out.push(component.as_os_str());
+        }
+        return strip_verbatim(fold(out));
+    }
+    fold(path.to_path_buf())
+}
+
+/// Folds `.` and `..` lexically, without consulting the filesystem.
+fn fold(path: PathBuf) -> PathBuf {
+    let mut out = PathBuf::new();
     for component in path.components() {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
-                lexical.pop();
+                out.pop();
             }
-            other => lexical.push(other.as_os_str()),
+            other => out.push(other.as_os_str()),
         }
     }
-    let mut existing = lexical.clone();
-    let mut tail = Vec::new();
-    loop {
-        if let Ok(canonical) = std::fs::canonicalize(&existing) {
-            let mut out = canonical;
-            for part in tail.iter().rev() {
-                out.push(part);
-            }
-            return strip_verbatim(out);
-        }
-        let Some(name) = existing.file_name().map(OsStr::to_owned) else {
-            return lexical;
-        };
-        tail.push(name);
-        if !existing.pop() {
-            return lexical;
-        }
-    }
+    out
 }
 
 /// Drops the Windows `\\?\` verbatim prefix canonicalisation adds.
@@ -290,12 +310,30 @@ pub fn is_linked_worktree(workspace: &Path) -> bool {
 
 /// Linked worktrees of `repo`, excluding its main worktree.
 pub fn list_worktrees(repo: &Path) -> Result<Vec<GitWorktree>, String> {
-    let out = run(repo, ["worktree", "list", "--porcelain"])?;
     let main = norm(repo);
-    let mut worktrees = Vec::new();
+    Ok(registrations(repo)?
+        .into_iter()
+        .filter(|registration| registration.path != main)
+        .map(|registration| GitWorktree {
+            path: registration.path,
+            branch: registration.branch,
+        })
+        .collect())
+}
+
+/// Every worktree registration of `repo`, main checkout included.
+pub fn registrations(repo: &Path) -> Result<Vec<Registration>, String> {
+    let out = run(repo, ["worktree", "list", "--porcelain"])?;
+    Ok(parse_registrations(&out))
+}
+
+/// Parses `git worktree list --porcelain` output.
+pub fn parse_registrations(out: &str) -> Vec<Registration> {
+    let mut registrations = Vec::new();
     for block in out.split("\n\n") {
         let mut path = None;
         let mut branch = None;
+        let mut prunable = false;
         for line in block.lines() {
             if let Some(value) = line.strip_prefix("worktree ") {
                 path = Some(norm(Path::new(value)));
@@ -306,15 +344,19 @@ pub fn list_worktrees(repo: &Path) -> Result<Vec<GitWorktree>, String> {
                         .unwrap_or(value)
                         .to_owned(),
                 );
+            } else if line.starts_with("prunable") {
+                prunable = true;
             }
         }
-        if let Some(path) = path
-            && path != main
-        {
-            worktrees.push(GitWorktree { path, branch });
+        if let Some(path) = path {
+            registrations.push(Registration {
+                path,
+                branch,
+                prunable,
+            });
         }
     }
-    Ok(worktrees)
+    registrations
 }
 
 /// Worktrees present in `after` but not in `before`.

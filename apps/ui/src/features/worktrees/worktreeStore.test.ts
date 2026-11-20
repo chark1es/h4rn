@@ -335,11 +335,13 @@ describe("forceCanFix", () => {
     expect(forceCanFix("has uncommitted changes")).toBe(true);
     expect(forceCanFix("could not check for uncommitted changes")).toBe(true);
     expect(forceCanFix("branch h4rn/sa-x has unmerged commits")).toBe(true);
+    expect(forceCanFix("branch h4rn/sa-x moved during the clear")).toBe(true);
     expect(forceCanFix("detached HEAD has commits on no branch")).toBe(true);
     for (const blocked of [
       "in use by Fix it",
       "not tracked",
       "checkout removed, but branch h4rn/sa-x could not be deleted: busy",
+      "checkout is no longer on h4rn/sa-x",
       "is the repository's main worktree",
       "its repository could not be found",
       "git timed out after 30s",
@@ -381,8 +383,13 @@ describe("worktreePage", () => {
 });
 
 describe("shouldReloadWorktrees", () => {
-  it("refetches when the connection comes back even if rows are loaded", () => {
+  it("reloads on mount while online, with or without cached rows", () => {
+    // The reconnect-tracking ref starts at `false`, so mounting is a change.
     expect(shouldReloadWorktrees(true, false, true)).toBe(true);
+    expect(shouldReloadWorktrees(true, false, false)).toBe(true);
+  });
+
+  it("refetches when the connection comes back even if rows are loaded", () => {
     expect(shouldReloadWorktrees(true, true, true)).toBe(false);
     expect(shouldReloadWorktrees(false, true, true)).toBe(false);
   });

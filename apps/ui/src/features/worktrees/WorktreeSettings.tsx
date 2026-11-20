@@ -53,7 +53,7 @@ function removeDescription(row: TrackedWorktree): string {
     ? `The checkout at ${row.path} is deleted from disk.${
         row.owned && row.branch ? ` The ${row.branch} branch h4rn created is deleted too.` : ""
       }`
-    : row.branch
+    : row.owned && row.branch
       ? `No checkout remains on disk. Its ${row.branch} branch is deleted.`
       : "No checkout remains on disk.";
   return `${base} Uncommitted changes or unmerged work are skipped.${
@@ -119,6 +119,7 @@ function WorktreeRow({
 export function WorktreeSettings() {
   const online = useApp((state) => state.connection.status) === "online";
   useWorktreeList(online);
+  // Intentionally discard the last clear's result when the page is left.
   useEffect(() => dismissWorktreeOutcome, []);
 
   const source = useWorktrees((state) => state.source);

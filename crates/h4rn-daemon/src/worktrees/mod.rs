@@ -235,6 +235,15 @@ pub(crate) struct ThreadInfo {
     pub last_activity: DateTime<Utc>,
 }
 
+/// A thread that might still use an entry, gathered from one of the sources a
+/// live re-check consults. Its activity is read only once all are collected.
+struct Candidate {
+    thread_id: ThreadId,
+    title: String,
+    subagent_id: Option<SubagentId>,
+    last_seen: DateTime<Utc>,
+}
+
 impl WorktreeTracker {
     /// Opens the tracker over `<data_dir>/worktrees.db`.
     ///
@@ -722,14 +731,118 @@ impl Inner {
     ///
     /// Returns the entry with fresh `working` flags when something still uses
     /// it, `None` when nothing does. The listing is only a snapshot, so this
-    /// also looks for users the listing did not know: every busy thread whose
+    /// also looks for users the listing did not know: every thread whose
     /// workspace is the entry or inside it, and every access recorded in the
-    /// store since the listing was taken. A new thread that started in the
-    /// checkout between the two reads is exactly the case a stale snapshot
-    /// would miss.
+    /// store since the listing was taken. Those sources only *collect*
+    /// candidates; activity is checked once, at the end, over the whole set, so
+    /// a thread found by one source while it was idle cannot be dropped before
+    /// a later source would have seen it busy.
     async fn still_active(self: &Arc<Self>, entry: &TrackedWorktree) -> Option<TrackedWorktree> {
         let mut fresh = entry.clone();
+        // Normalising touches the filesystem, so it stays off the async runtime.
+        let entry_path = entry.path.clone();
+        let target = tokio::task::spawn_blocking(move || git::norm(Path::new(&entry_path)))
+            .await
+            .unwrap_or_else(|_| PathBuf::from(&entry.path));
+        let mut candidates: Vec<Candidate> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for access in &entry.accessed_by {
+            if seen.insert(access.thread_id.as_str().to_owned()) {
+                candidates.push(Candidate {
+                    thread_id: access.thread_id.clone(),
+                    title: access.title.clone(),
+                    subagent_id: access.subagent_id.clone(),
+                    last_seen: access.last_seen,
+                });
+            }
+        }
+        // Accesses persisted since the listing was taken.
+        match self.store.load().await {
+            Ok(stored) => {
+                let wanted = target.clone();
+                let matching = tokio::task::spawn_blocking(move || {
+                    stored
+                        .into_iter()
+                        .filter(|observation| git::norm(Path::new(&observation.path)) == wanted)
+                        .collect::<Vec<_>>()
+                })
+                .await
+                .unwrap_or_default();
+                for observation in matching {
+                    for access in observation.accesses {
+                        if seen.insert(access.thread_id.clone()) {
+                            candidates.push(Candidate {
+                                thread_id: ThreadId::new(access.thread_id),
+                                title: String::new(),
+                                subagent_id: access.subagent_id.map(SubagentId::new),
+                                last_seen: access.last_seen,
+                            });
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not reload worktree observations");
+            }
+        }
+        // Any thread working in the entry, listed or not.
+        let threads = self.threads.list_threads(&thread_filter()).await;
+        let normalised = tokio::task::spawn_blocking(move || {
+            threads
+                .into_iter()
+                .map(|summary| {
+                    let workspace = git::norm(Path::new(&summary.workspace_path));
+                    (summary, workspace)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default();
+        for (summary, workspace) in normalised {
+            if workspace != target && !workspace.starts_with(&target) {
+                continue;
+            }
+            if seen.insert(summary.thread_id.as_str().to_owned()) {
+                let subagent_id = self
+                    .threads
+                    .thread_meta(&summary.thread_id)
+                    .await
+                    .and_then(|meta| meta.subagent_id);
+                candidates.push(Candidate {
+                    thread_id: summary.thread_id,
+                    title: summary.title,
+                    subagent_id,
+                    last_seen: summary.last_activity,
+                });
+            }
+        }
+        // The one activity check, with every candidate known.
         let mut active = false;
+        for candidate in candidates {
+            let mut access = WorktreeAccess {
+                thread_id: candidate.thread_id,
+                title: candidate.title,
+                subagent_id: candidate.subagent_id,
+                working: false,
+                last_seen: candidate.last_seen,
+            };
+            self.refresh_access(&mut access).await;
+            active |= access.working;
+            match fresh
+                .accessed_by
+                .iter_mut()
+                .find(|seen| seen.thread_id == access.thread_id)
+            {
+                Some(existing) => {
+                    existing.working = access.working;
+                    if !access.title.is_empty() {
+                        existing.title = access.title;
+                    }
+                }
+                None if access.working => fresh.accessed_by.push(access),
+                None => {}
+            }
+        }
         if entry.owned
             && let Some(id) = &entry.subagent_id
             && self
@@ -739,117 +852,6 @@ impl Inner {
                 .is_some_and(|view| !view.is_terminal())
         {
             active = true;
-        }
-        // Normalising touches the filesystem, so it stays off the async runtime.
-        let entry_path = entry.path.clone();
-        let target = tokio::task::spawn_blocking(move || git::norm(Path::new(&entry_path)))
-            .await
-            .unwrap_or_else(|_| PathBuf::from(&entry.path));
-        // The accessors the listing named.
-        for access in &mut fresh.accessed_by {
-            self.refresh_access(access).await;
-            active |= access.working;
-        }
-        // Accesses persisted since the listing was taken.
-        match self.store.load().await {
-            Ok(stored) => {
-                let normalised = tokio::task::spawn_blocking(move || {
-                    stored
-                        .into_iter()
-                        .map(|observation| (git::norm(Path::new(&observation.path)), observation))
-                        .collect::<Vec<_>>()
-                })
-                .await
-                .unwrap_or_default();
-                for (_, observation) in normalised.iter().filter(|(path, _)| path == &target) {
-                    for access in &observation.accesses {
-                        if fresh
-                            .accessed_by
-                            .iter()
-                            .any(|seen| seen.thread_id.as_str() == access.thread_id)
-                        {
-                            continue;
-                        }
-                        let mut fresh_access = WorktreeAccess {
-                            thread_id: ThreadId::new(access.thread_id.clone()),
-                            title: String::new(),
-                            subagent_id: access.subagent_id.clone().map(SubagentId::new),
-                            working: false,
-                            last_seen: access.last_seen,
-                        };
-                        self.refresh_access(&mut fresh_access).await;
-                        if fresh_access.working {
-                            active = true;
-                        }
-                        fresh.accessed_by.push(fresh_access);
-                    }
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%error, "could not reload worktree observations");
-            }
-        }
-        // Any busy thread working in the entry, listed or not. A turn in
-        // flight counts even when the agent state already says `Error`.
-        let mut busy = Vec::new();
-        for summary in self.threads.list_threads(&thread_filter()).await {
-            let turn_in_flight = self.threads.turn_in_flight(&summary.thread_id).await;
-            if is_busy(summary.tab, summary.agent_state, turn_in_flight) {
-                busy.push((
-                    summary.thread_id.clone(),
-                    summary.title,
-                    summary.workspace_path,
-                    summary.last_activity,
-                ));
-            }
-        }
-        if !busy.is_empty() {
-            let normalised = tokio::task::spawn_blocking(move || {
-                busy.into_iter()
-                    .map(|(thread_id, title, workspace, last_activity)| {
-                        (
-                            thread_id,
-                            title,
-                            git::norm(Path::new(&workspace)),
-                            last_activity,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .await
-            .unwrap_or_default();
-            for (thread_id, title, workspace, last_activity) in normalised {
-                if workspace != target && !workspace.starts_with(&target) {
-                    continue;
-                }
-                active = true;
-                match fresh
-                    .accessed_by
-                    .iter_mut()
-                    .find(|access| access.thread_id == thread_id)
-                {
-                    Some(access) => {
-                        access.working = true;
-                        if !title.is_empty() {
-                            access.title = title;
-                        }
-                    }
-                    None => {
-                        let subagent_id = self
-                            .threads
-                            .thread_meta(&thread_id)
-                            .await
-                            .and_then(|meta| meta.subagent_id);
-                        fresh.accessed_by.push(WorktreeAccess {
-                            thread_id,
-                            title,
-                            subagent_id,
-                            working: true,
-                            last_seen: last_activity,
-                        });
-                    }
-                }
-            }
         }
         active.then_some(fresh)
     }
@@ -1259,6 +1261,29 @@ fn branch_exists(repo: &Path, branch: &str) -> Result<bool, String> {
     }
 }
 
+/// The commit `refs/heads/<branch>` points at, within the clearing deadline.
+fn branch_sha(repo: &Path, branch: &str) -> Result<String, String> {
+    git::run_with_timeout(
+        repo,
+        [
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+        CLEAR_GIT_TIMEOUT,
+    )
+}
+
+/// The checkout that has `branch` checked out, if any.
+fn checked_out_in(repo: &Path, branch: &str) -> Result<Option<PathBuf>, String> {
+    let out = git::run_with_timeout(repo, ["worktree", "list", "--porcelain"], CLEAR_GIT_TIMEOUT)?;
+    Ok(git::parse_registrations(&out)
+        .into_iter()
+        .find(|registration| registration.branch.as_deref() == Some(branch))
+        .map(|registration| registration.path))
+}
+
 /// Whether `branch` is fully merged into `HEAD`, within the clearing deadline.
 fn branch_is_merged(repo: &Path, branch: &str) -> Result<bool, String> {
     match git::run_with_timeout(
@@ -1293,20 +1318,23 @@ where
 {
     let path = entry.path.clone();
     let preflight_entry = entry.clone();
-    match tokio::task::spawn_blocking(move || preflight(&preflight_entry, force)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(reason)) => return Err(reason),
-        Err(error) => {
-            tracing::warn!(%error, %path, "worktree preflight task failed");
-            return Err("the clear task failed".into());
-        }
-    }
+    let verified =
+        match tokio::task::spawn_blocking(move || preflight(&preflight_entry, force)).await {
+            Ok(Ok(verified)) => verified,
+            Ok(Err(reason)) => return Err(reason),
+            Err(error) => {
+                tracing::warn!(%error, %path, "worktree preflight task failed");
+                return Err("the clear task failed".into());
+            }
+        };
     after_preflight(path.clone()).await;
     if let Some(active) = inner.still_active(&entry).await {
         return Err(in_use_reason(&active));
     }
     let data_dir = inner.data_dir.clone();
-    match tokio::task::spawn_blocking(move || remove(&entry, force, &data_dir)).await {
+    match tokio::task::spawn_blocking(move || remove(&entry, force, &data_dir, verified.as_deref()))
+        .await
+    {
         Ok(result) => result,
         Err(error) => {
             tracing::warn!(%error, %path, "worktree clear task failed");
@@ -1317,10 +1345,12 @@ where
 
 /// Whether an entry may be removed, without touching the disk. Blocking.
 ///
-/// Every git call is bounded by [`CLEAR_GIT_TIMEOUT`]; a timeout is a skip with
-/// that reason. A directory that vanished between the listing and now still
-/// passes (a removed harness checkout leaves only the branch).
-fn preflight(entry: &TrackedWorktree, force: bool) -> Result<(), String> {
+/// Returns the commit `refs/heads/<b>` pointed at when the owned branch was
+/// checked, so removal can delete it only at that verified tip. Every git call
+/// is bounded by [`CLEAR_GIT_TIMEOUT`]; a timeout is a skip with that reason. A
+/// directory that vanished between the listing and now still passes (a removed
+/// harness checkout leaves only the branch).
+fn preflight(entry: &TrackedWorktree, force: bool) -> Result<Option<String>, String> {
     let path = PathBuf::from(&entry.path);
     if entry.repo.is_empty() {
         return Err("its repository could not be found".into());
@@ -1352,12 +1382,25 @@ fn preflight(entry: &TrackedWorktree, force: bool) -> Result<(), String> {
             }
             Err(_) => {}
         }
-        // A detached HEAD can hold commits no branch reaches; removing the
-        // checkout would leave them unreachable.
         if path.is_dir() {
-            match git::run_with_timeout(&path, ["symbolic-ref", "-q", "HEAD"], CLEAR_GIT_TIMEOUT) {
-                Ok(_) => {}
+            // The checkout at this path must still be the one the listing
+            // described. A replacement checkout recreated here on another
+            // branch would otherwise be removed as if it were that entry.
+            match git::run_with_timeout(
+                &path,
+                ["symbolic-ref", "--short", "-q", "HEAD"],
+                CLEAR_GIT_TIMEOUT,
+            ) {
+                Ok(current) => {
+                    if let Some(branch) = &entry.branch
+                        && current != *branch
+                    {
+                        return Err(format!("checkout is no longer on {branch}"));
+                    }
+                }
                 Err(error) if git::timed_out(&error) => return Err(error),
+                // A detached HEAD can hold commits no branch reaches; removing
+                // the checkout would leave them unreachable.
                 Err(_) => {
                     let sha =
                         git::run_with_timeout(&path, ["rev-parse", "HEAD"], CLEAR_GIT_TIMEOUT)?;
@@ -1383,21 +1426,30 @@ fn preflight(entry: &TrackedWorktree, force: bool) -> Result<(), String> {
         if entry.owned
             && let Some(branch) = &entry.branch
             && branch_exists(&repo, branch)?
-            && !branch_is_merged(&repo, branch)?
         {
-            return Err(format!("branch {branch} has unmerged commits"));
+            if !branch_is_merged(&repo, branch)? {
+                return Err(format!("branch {branch} has unmerged commits"));
+            }
+            // Bound the later deletion to the tip that was verified merged.
+            return branch_sha(&repo, branch).map(Some);
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 /// Removes one entry from disk. Blocking.
 ///
 /// Runs only after [`preflight`] passed and the live re-check found nothing
-/// using the entry. Every git call is bounded by [`CLEAR_GIT_TIMEOUT`]; a
-/// timeout is a skip with that reason, or a branch failure once the checkout is
-/// already gone.
-fn remove(entry: &TrackedWorktree, force: bool, data_dir: &Path) -> Result<ClearOne, String> {
+/// using the entry. `verified` is the owned branch's tip recorded by the
+/// preflight; without `force` the branch is deleted only while it still points
+/// there. Every git call is bounded by [`CLEAR_GIT_TIMEOUT`]; a timeout is a
+/// skip with that reason, or a branch failure once the checkout is already gone.
+fn remove(
+    entry: &TrackedWorktree,
+    force: bool,
+    data_dir: &Path,
+    verified: Option<&str>,
+) -> Result<ClearOne, String> {
     let path = PathBuf::from(&entry.path);
     let repo = PathBuf::from(&entry.repo);
     if path.is_dir() {
@@ -1419,10 +1471,43 @@ fn remove(entry: &TrackedWorktree, force: bool, data_dir: &Path) -> Result<Clear
             }
             return Err(error);
         }
-    }
-    // A directory that vanished still leaves git metadata behind.
-    if let Err(error) = git::run_with_timeout(&repo, ["worktree", "prune"], CLEAR_GIT_TIMEOUT) {
-        tracing::warn!(%error, repo = %repo.display(), "git worktree prune failed");
+    } else {
+        // The directory is already gone (the supervisor removed it, or the user
+        // did) but its own registration may still be there. Drop exactly that
+        // registration; never prune the repository, which would also forget a
+        // worktree whose directory is only temporarily away.
+        let listed = git::run_with_timeout(
+            &repo,
+            ["worktree", "list", "--porcelain"],
+            CLEAR_GIT_TIMEOUT,
+        )?;
+        if git::parse_registrations(&listed)
+            .iter()
+            .any(|registration| registration.path == path)
+        {
+            // Some git versions accept a missing path with `--force`, others
+            // only without it. Try both, and leave the registration alone when
+            // neither works rather than delete another worktree's metadata.
+            let path_text = path.to_string_lossy();
+            let forced = git::run_with_timeout(
+                &repo,
+                ["worktree", "remove", "--force", path_text.as_ref()],
+                CLEAR_GIT_TIMEOUT,
+            );
+            if forced.is_err()
+                && let Err(error) = git::run_with_timeout(
+                    &repo,
+                    ["worktree", "remove", path_text.as_ref()],
+                    CLEAR_GIT_TIMEOUT,
+                )
+            {
+                tracing::debug!(
+                    %error,
+                    path = %path.display(),
+                    "leaving a missing worktree's registration in place"
+                );
+            }
+        }
     }
     let mut branch_failure = None;
     if entry.owned
@@ -1439,16 +1524,53 @@ fn remove(entry: &TrackedWorktree, force: bool, data_dir: &Path) -> Result<Clear
                 )));
             }
         };
-        if exists
-            && let Err(error) =
-                git::run_with_timeout(&repo, ["branch", "-D", branch], CLEAR_GIT_TIMEOUT)
-        {
-            tracing::warn!(%error, %branch, "could not delete the subagent branch");
-            // The checkout is already gone, so this is not a plain skip: say
-            // what was removed and what is left behind.
-            branch_failure = Some(format!(
-                "checkout removed, but branch {branch} could not be deleted: {error}"
-            ));
+        if exists {
+            let failure = if force {
+                // Git keeps its own checked-out protection here.
+                git::run_with_timeout(&repo, ["branch", "-D", branch], CLEAR_GIT_TIMEOUT).err()
+            } else {
+                match checked_out_in(&repo, branch) {
+                    Ok(Some(owner)) => Some(format!("it is checked out in {}", owner.display())),
+                    Ok(None) => {
+                        // The branch may only be deleted at the tip the
+                        // preflight saw merged: if it moved since, that work
+                        // is not verified and is kept.
+                        let current = match branch_sha(&repo, branch) {
+                            Ok(sha) => sha,
+                            Err(error) => {
+                                return Ok(ClearOne::RemovedWithBranchFailure(format!(
+                                    "checkout removed, but branch {branch} could not be deleted: {error}"
+                                )));
+                            }
+                        };
+                        if verified != Some(current.as_str()) {
+                            return Err(format!("branch {branch} moved during the clear"));
+                        }
+                        // Compare-and-delete: the old value makes the update
+                        // fail if the branch moves again right before it lands.
+                        git::run_with_timeout(
+                            &repo,
+                            [
+                                "update-ref",
+                                "-d",
+                                &format!("refs/heads/{branch}"),
+                                current.as_str(),
+                            ],
+                            CLEAR_GIT_TIMEOUT,
+                        )
+                        .err()
+                    }
+                    Err(error) => Some(error),
+                }
+            };
+            if let Some(error) = failure {
+                tracing::warn!(%error, %branch, "could not delete the subagent branch");
+                // The checkout is already gone, so this is not a plain skip: say
+                // what was removed and what is left behind.
+                branch_failure = Some(format!(
+                    "checkout removed, but branch {branch} could not be deleted: {error}"
+                ));
+            }
         }
     }
     if let Some(subagent_id) = &entry.subagent_id {
