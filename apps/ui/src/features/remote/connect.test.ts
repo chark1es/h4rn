@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { base64UrlToHex, normalizeTokens } from "./connect";
+import { base64UrlToHex, listProviders, normalizeTokens, requestTimeoutSignal } from "./connect";
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("normalizeTokens", () => {
   it("narrows the wire i64 to a number", () => {
@@ -30,5 +34,32 @@ describe("base64UrlToHex", () => {
   it("accepts url-safe characters and padding", () => {
     expect(base64UrlToHex("-_8")).toBe("fbff");
     expect(base64UrlToHex("-_8=")).toBe("fbff");
+  });
+});
+
+describe("connect request deadlines", () => {
+  it("aborts a request signal after its deadline", async () => {
+    const signal = requestTimeoutSignal(5);
+    expect(signal.aborted).toBe(false);
+    await new Promise<void>((resolve) => {
+      signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+    expect(signal.aborted).toBe(true);
+  });
+
+  it("passes a deadline signal on every public request", async () => {
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        expect(init?.signal).toBeInstanceOf(AbortSignal);
+        return new Response("[]", {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(listProviders("http://relay.test")).resolves.toEqual([]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

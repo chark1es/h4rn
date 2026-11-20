@@ -228,7 +228,7 @@ impl SkillsService {
         harnesses: &[HarnessKind],
         name_override: Option<&str>,
     ) -> Result<SkillSummary, SkillError> {
-        let mut loaded = source::load_source(source)?;
+        let mut loaded = source::load_source_async(source).await?;
         if let Some(name) = name_override.filter(|name| !name.trim().is_empty()) {
             model::rename_bundle(&mut loaded.bundle, name)?;
         }
@@ -294,7 +294,7 @@ impl SkillsService {
         source: &SkillSource,
     ) -> Result<SkillSummary, SkillError> {
         let existing = self.registry.get(skill_id).await?;
-        let loaded = source::load_source(source)?;
+        let loaded = source::load_source_async(source).await?;
         if loaded.bundle.version() == existing.version {
             return self.summary_now(&existing).await;
         }

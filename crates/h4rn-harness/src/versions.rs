@@ -24,12 +24,26 @@ pub const CACHE_TTL: Duration = Duration::from_secs(3 * 60 * 60);
 
 /// How long an offline or failed registry answer is remembered before retrying.
 ///
-/// Shorter than [`CACHE_TTL`] so a laptop that wakes up does not spend the rest
-/// of the afternoon claiming every harness is unknown.
-pub const UNKNOWN_TTL: Duration = Duration::from_secs(5 * 60);
+/// Short on purpose: an all-unknown listing is what a person sees right after
+/// reconnecting, and "Check again" should probe again soon instead of serving
+/// the stale answers for minutes. Long enough that opening Settings repeatedly
+/// does not hammer the registry.
+pub const UNKNOWN_TTL: Duration = Duration::from_secs(30);
 
 /// The public npm registry.
 pub const NPM_REGISTRY: &str = "https://registry.npmjs.org";
+
+/// How long a registry connection may take to open.
+///
+/// A black-holed network usually shows up as a connect that never completes, so
+/// this is the socket-level guard that keeps a lookup from hanging.
+pub const REGISTRY_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The total budget for one registry lookup, headers and body included.
+///
+/// Version checks are a convenience: when the network is missing or black-holed
+/// the listing reports "unknown" rather than holding the daemon's request loop.
+pub const REGISTRY_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// The npm package that ships one harness CLI, when one exists.
 ///
@@ -263,7 +277,8 @@ impl NpmRegistry {
     pub fn new() -> Self {
         Self {
             http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
+                .connect_timeout(REGISTRY_CONNECT_TIMEOUT)
+                .timeout(REGISTRY_TIMEOUT)
                 .build()
                 .unwrap_or_default(),
             base: NPM_REGISTRY.to_string(),

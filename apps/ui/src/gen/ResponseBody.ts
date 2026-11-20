@@ -34,6 +34,7 @@ import type { McpServerView } from "./McpServerView";
 import type { McpShareApproval } from "./McpShareApproval";
 import type { McpTestCallResult } from "./McpTestCallResult";
 import type { McpToolInfo } from "./McpToolInfo";
+import type { PairScope } from "./PairScope";
 import type { PairingConfirmation } from "./PairingConfirmation";
 import type { Project } from "./Project";
 import type { ProxyFailoverChoice } from "./ProxyFailoverChoice";
@@ -393,7 +394,46 @@ options: FailoverOptions, } | { "type": "pairing_confirmations",
 /**
  * Newest first. An entry stays until the host confirms or rejects it.
  */
-confirmations: Array<PairingConfirmation>, } | { "type": "resume_changed", 
+confirmations: Array<PairingConfirmation>, } | { "type": "network_access", 
+/**
+ * Whether the persisted setting is on. A bind failure leaves this
+ * true and reports `error`.
+ */
+enabled: boolean, 
+/**
+ * Whether a socket is bound and serving right now.
+ */
+listening: boolean, 
+/**
+ * Port the listener uses: the bound port, or the configured one while
+ * it is off.
+ */
+port: number, 
+/**
+ * `host:port` candidates, most preferred first. Empty while the
+ * listener is off.
+ */
+addresses: Array<string>, 
+/**
+ * Why the listener could not bind, when it could not.
+ */
+error: string | null, } | { "type": "direct_pairing_offer", 
+/**
+ * `h4rn://pair?...` payload to render as a QR.
+ */
+uri: string, 
+/**
+ * Expiry, Unix seconds.
+ */
+expires_at: number, 
+/**
+ * `host:port` candidates the payload carries.
+ */
+addresses: Array<string>, 
+/**
+ * Scopes the paired device will hold.
+ */
+scopes: Array<PairScope>, } | { "type": "resume_changed", 
 /**
  * The current schedule, or `None` when none remains.
  */

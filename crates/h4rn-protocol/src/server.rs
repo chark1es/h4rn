@@ -450,6 +450,34 @@ pub enum ResponseBody {
         /// Newest first. An entry stays until the host confirms or rejects it.
         confirmations: Vec<crate::connect::PairingConfirmation>,
     },
+    /// The daemon's dedicated network listener and what a device would dial.
+    NetworkAccess {
+        /// Whether the persisted setting is on. A bind failure leaves this
+        /// true and reports `error`.
+        enabled: bool,
+        /// Whether a socket is bound and serving right now.
+        listening: bool,
+        /// Port the listener uses: the bound port, or the configured one while
+        /// it is off.
+        port: u16,
+        /// `host:port` candidates, most preferred first. Empty while the
+        /// listener is off.
+        addresses: Vec<String>,
+        /// Why the listener could not bind, when it could not.
+        error: Option<String>,
+    },
+    /// A one-time direct pairing QR and its advertised candidates.
+    DirectPairingOffer {
+        /// `h4rn://pair?...` payload to render as a QR.
+        uri: String,
+        /// Expiry, Unix seconds.
+        #[ts(type = "number")]
+        expires_at: i64,
+        /// `host:port` candidates the payload carries.
+        addresses: Vec<String>,
+        /// Scopes the paired device will hold.
+        scopes: Vec<crate::connect::PairScope>,
+    },
     /// A schedule was armed, moved or cleared.
     ResumeChanged {
         /// The current schedule, or `None` when none remains.

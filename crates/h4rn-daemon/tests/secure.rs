@@ -12,6 +12,7 @@ use std::time::Duration;
 use h4rn_core::LifecycleSettings;
 use h4rn_daemon::config::Config;
 use h4rn_daemon::daemon::DaemonBuilder;
+use h4rn_daemon::network_access::NetworkAccess;
 use h4rn_daemon::remote::DeviceRegistry;
 use h4rn_daemon::threads::ThreadManagerOptions;
 use h4rn_harness::FakeHarness;
@@ -33,6 +34,8 @@ struct TestDaemon {
     addr: std::net::SocketAddr,
     service: Arc<SecureService>,
     devices: Arc<DeviceRegistry>,
+    /// The network listener, off unless a test turns it on.
+    network: Arc<NetworkAccess>,
     dir: Option<tempfile::TempDir>,
     shutdown: Option<oneshot::Sender<()>>,
     task: JoinHandle<anyhow::Result<()>>,
@@ -78,6 +81,8 @@ async fn boot_at(
         extra_bind: None,
         log_level: "off".to_owned(),
         tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
+        network_access: None,
+        network_port: 0,
     };
     let options = ThreadManagerOptions {
         settings: LifecycleSettings::default()
@@ -96,6 +101,7 @@ async fn boot_at(
         .expect("build daemon");
     let bound = daemon.bind().await.expect("bind daemon");
     let addr = bound.local_addr();
+    let network = bound.network();
     let (shutdown, rx) = oneshot::channel();
     let task = tokio::spawn(async move {
         bound
@@ -108,6 +114,7 @@ async fn boot_at(
         addr,
         service,
         devices,
+        network,
         dir: owned,
         shutdown: Some(shutdown),
         task,
@@ -1808,5 +1815,191 @@ async fn a_forged_open_record_over_the_websocket_is_refused_and_touches_nothing(
     );
     assert!(!service.is_allowed(&attacker.public().noise_public));
     assert_eq!(service.psk(), Some(secret), "the secret must stay armed");
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_direct_pairing_from_the_ui_pairs_a_device_over_the_network_listener() {
+    // The UI creates the pairing through the protocol; the QR's PSK must be
+    // enough for a fresh device to pair over the dedicated network port, with
+    // exactly the requested scopes, without h4rn-connect.
+    let admin_identity = device_identity();
+    let admin_key = admin_identity.public().noise_public;
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([admin_key])),
+    ));
+    let devices = Arc::new(DeviceRegistry::in_memory());
+    devices
+        .insert_scoped("dev_admin", admin_key, PairScope::ALL.to_vec())
+        .expect("persist");
+    let daemon = boot_with(Arc::clone(&service), Arc::clone(&devices)).await;
+    let mut admin = SecureClient::connect(&daemon, admin_identity, None).await;
+    admin.hello().await;
+
+    let ResponseBody::NetworkAccess {
+        listening, port, ..
+    } = admin
+        .request(ClientRequest::SetNetworkAccess { enabled: true })
+        .await
+        .expect("enable network access")
+    else {
+        panic!("unexpected network access response");
+    };
+    assert!(listening, "the network listener must bind");
+    assert_eq!(
+        daemon.network.snapshot().port,
+        port,
+        "the daemon handle and the protocol must report the same listener"
+    );
+
+    let offer = admin
+        .request(ClientRequest::CreateDirectPairing {
+            scopes: vec![PairScope::View],
+            label: Some("lan test".into()),
+        })
+        .await
+        .expect("create a direct pairing");
+    let (uri, addresses, scopes, expires_at) = match offer {
+        ResponseBody::DirectPairingOffer {
+            uri,
+            addresses,
+            scopes,
+            expires_at,
+        } => (uri, addresses, scopes, expires_at),
+        other => panic!("unexpected pairing response: {other:?}"),
+    };
+    assert_eq!(scopes, vec![PairScope::View]);
+    assert!(
+        !addresses.is_empty(),
+        "the offer must carry a dialable candidate"
+    );
+    assert!(expires_at > chrono::Utc::now().timestamp());
+
+    let payload = h4rn_transport::pairing::PairingPayload::decode(&uri).expect("decode payload");
+    assert_eq!(
+        payload.daemon_public,
+        service.public_identity().noise_public
+    );
+    assert_eq!(
+        service.psk(),
+        Some(payload.psk),
+        "the offer must arm exactly its own secret"
+    );
+
+    // Dial the network listener (loopback reaches the wildcard bind in tests).
+    let phone = device_identity();
+    let mut engine = EngineConfig::new(
+        [0x41u8; SESSION_ID_LEN],
+        phone.clone(),
+        payload.daemon_public,
+    );
+    engine.psk = Some(payload.psk);
+    let paths = vec![ClientPath::websocket(
+        TransportPathKind::Direct,
+        format!("ws://127.0.0.1:{port}/secure"),
+    )];
+    let mut client = Client::connect(ClientConfig::new(engine, paths)).expect("start client");
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            match client.recv().await {
+                Some(ClientEvent::Established(_)) => return,
+                Some(ClientEvent::Closed { reason }) => {
+                    panic!("the phone was refused on the network listener: {reason}")
+                }
+                Some(_) => {}
+                None => panic!("the phone stopped before pairing"),
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for the direct pairing");
+
+    let phone_key = phone.public().noise_public;
+    assert!(service.is_allowed(&phone_key));
+    assert_eq!(
+        devices.scopes_for_key(&phone_key),
+        Some(vec![PairScope::View])
+    );
+    assert_eq!(service.psk(), None, "pairing consumes the one-time secret");
+    client.close().await;
+    admin.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn network_settings_are_admin_only() {
+    let viewer_identity = device_identity();
+    let viewer_key = viewer_identity.public().noise_public;
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_policy(PairingPolicy::new([viewer_key])),
+    ));
+    let devices = Arc::new(DeviceRegistry::in_memory());
+    devices
+        .insert_scoped("dev_viewer", viewer_key, vec![PairScope::View])
+        .expect("persist");
+    let daemon = boot_with(Arc::clone(&service), devices).await;
+    let mut viewer = SecureClient::connect(&daemon, viewer_identity, None).await;
+    viewer.hello().await;
+
+    assert!(
+        matches!(
+            viewer
+                .request(ClientRequest::GetNetworkAccess)
+                .await
+                .expect("reading the state needs only view"),
+            ResponseBody::NetworkAccess { .. }
+        ),
+        "a view device may see the listener state"
+    );
+    for request in [
+        ClientRequest::SetNetworkAccess { enabled: true },
+        ClientRequest::CreateDirectPairing {
+            scopes: Vec::new(),
+            label: None,
+        },
+        ClientRequest::CancelDirectPairing,
+    ] {
+        let denied = viewer
+            .request(request.clone())
+            .await
+            .expect_err("network settings are administrative");
+        assert_eq!(
+            denied.code,
+            h4rn_protocol::ProtoErrorCode::Forbidden,
+            "{request:?}"
+        );
+    }
+    viewer.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_newer_direct_pairing_file_replaces_the_previous_offer() {
+    // The CLI and the UI both drive `<data_dir>/direct-pairing.json`. A second
+    // offer must replace the first one the watcher applied; only an operator
+    // secret (`H4RN_PAIRING_PSK`) keeps precedence.
+    let service = Arc::new(SecureService::new(SecureOptions::new(device_identity())));
+    let devices = Arc::new(DeviceRegistry::in_memory());
+    let daemon = boot_with(Arc::clone(&service), Arc::clone(&devices)).await;
+    let dir = daemon.dir.as_ref().unwrap().path();
+
+    let first = [0x71u8; TOKEN_LEN];
+    write_pairing(dir, first, 120, vec![PairScope::View]);
+    wait_for_secret(&service, first).await;
+
+    let second = [0x72u8; TOKEN_LEN];
+    write_pairing(dir, second, 120, vec![PairScope::View, PairScope::Files]);
+    wait_for_secret(&service, second).await;
+
+    let phone = device_identity();
+    let mut client = SecureClient::connect(&daemon, phone.clone(), Some(second)).await;
+    client.hello().await;
+    assert_eq!(
+        devices.scopes_for_key(&phone.public().noise_public),
+        Some(vec![PairScope::View, PairScope::Files]),
+        "the second offer's scopes must be the ones armed"
+    );
+    assert_eq!(service.psk(), None);
+    client.close().await;
     daemon.stop().await;
 }

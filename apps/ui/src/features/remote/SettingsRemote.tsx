@@ -29,6 +29,8 @@ import { getClient, navigate, pushToast, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 
 import { ConnectSignIn, SignOutButton } from "./ConnectSignIn";
+import { UseThisMachineButton } from "./LocalMachineAction";
+import { NetworkAccessSettings } from "./NetworkAccess";
 import {
   DEFAULT_PAIR_SCOPES,
   formatShortCode,
@@ -46,6 +48,7 @@ import {
   refresh,
   renameDevice,
   revokeDevice,
+  shellKind,
   useRemote,
 } from "./remoteStore";
 
@@ -81,6 +84,18 @@ function relativeSeen(iso: string | null | undefined, now: number): string {
 
 function signedIn(user: unknown): boolean {
   return user !== null;
+}
+
+/**
+ * A quiet line instead of an unexplained empty list: signed in, but the relay
+ * is unreachable, so the machine count says nothing about the world.
+ */
+function RelayUnreachable({ connectUrl }: { connectUrl: string }) {
+  return (
+    <p className="q-muted" style={{ fontSize: 12, margin: "0 0 10px" }} role="status">
+      Can’t reach {connectUrl}.
+    </p>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -206,7 +221,10 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
   const activeId = useRemote((state) => state.activeMachineId);
   const busy = useRemote((state) => state.busy);
   const user = useRemote((state) => state.user);
+  const active = useRemote((state) => state.active);
   const connectUrl = useRemote((state) => state.connectUrl);
+  const error = useRemote((state) => state.error);
+  const mobile = shellKind() === "mobile";
   const now = useNow();
   const rows = useMemo(
     () =>
@@ -272,6 +290,38 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
         </button>
       </div>
 
+      <NetworkAccessSettings />
+
+      {active ? (
+        <div className="q-group">
+          <h2>Connected machine</h2>
+          <div className="q-field">
+            <div className="lab">
+              <div className="t">
+                {connection.status === "online"
+                  ? `Connected to ${active.machineName} through h4rn-connect`
+                  : connection.status === "connecting"
+                    ? `Connecting to ${active.machineName}…`
+                    : `Can’t reach ${active.machineName}`}
+              </div>
+              <div className="s">
+                {connection.status === "online"
+                  ? mobile
+                    ? "This app can disconnect and keep working offline."
+                    : "The local daemon is always available as well."
+                  : mobile
+                    ? "The remote path is down. Pick another machine, or disconnect."
+                    : "The remote path is down. This machine can still run agents."}
+              </div>
+            </div>
+            <div className="ctl">
+              <span style={{ flex: 1 }} />
+              <UseThisMachineButton verb={connection.status === "online" ? "disconnect" : "use"} />
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       {!isSignedIn ? (
         <div className="q-group">
           <h2>Remote access</h2>
@@ -288,20 +338,27 @@ export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolea
 
       {isSignedIn ? (
         machines.length > 0 ? (
-          <MachineRows
-            machines={machines}
-            activeId={activeId}
-            connection={connection}
-            busy={busy}
-            now={now}
-          />
+          <>
+            {error ? <RelayUnreachable connectUrl={connectUrl} /> : null}
+            <MachineRows
+              machines={machines}
+              activeId={activeId}
+              connection={connection}
+              busy={busy}
+              now={now}
+            />
+          </>
         ) : (
           <div className="q-group">
             <h2>Machines</h2>
-            <p className="desc">
-              No machine has logged in to this relay yet. Run{" "}
-              <span className="q-mono">h4rnd login --connect {connectUrl}</span> on a host.
-            </p>
+            {error ? (
+              <RelayUnreachable connectUrl={connectUrl} />
+            ) : (
+              <p className="desc">
+                No machine has logged in to this relay yet. Run{" "}
+                <span className="q-mono">h4rnd login --connect {connectUrl}</span> on a host.
+              </p>
+            )}
           </div>
         )
       ) : null}
@@ -930,6 +987,8 @@ export function LiveAccountForm() {
     state.localHostId ? (state.hosts[state.localHostId]?.name ?? null) : null,
   );
   const machines = useRemote((state) => state.machines);
+  const active = useRemote((state) => state.active);
+  const error = useRemote((state) => state.error);
 
   return (
     <div className="q-form">
@@ -956,7 +1015,15 @@ export function LiveAccountForm() {
                 ) : connection.status === "connecting" ? (
                   <span className="q-muted">Connecting…</span>
                 ) : (
-                  <Health tone="danger">Offline</Health>
+                  <>
+                    <Health tone="danger">Offline</Health>
+                    {active ? (
+                      <>
+                        <span style={{ flex: 1 }} />
+                        <UseThisMachineButton />
+                      </>
+                    ) : null}
+                  </>
                 )}
               </div>
             </div>
@@ -976,9 +1043,16 @@ export function LiveAccountForm() {
                 <div className="s">Reached through h4rn-connect</div>
               </div>
               <div className="ctl">
-                <span className="q-muted q-num">
-                  {machines.filter((machine) => machine.online).length} online of {machines.length}
-                </span>
+                {error ? (
+                  <span className="q-muted" style={{ fontSize: 12 }} role="status">
+                    Can’t reach {connectUrl}.
+                  </span>
+                ) : (
+                  <span className="q-muted q-num">
+                    {machines.filter((machine) => machine.online).length} online of{" "}
+                    {machines.length}
+                  </span>
+                )}
                 <span style={{ flex: 1 }} />
                 <button
                   type="button"

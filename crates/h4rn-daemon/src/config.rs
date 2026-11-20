@@ -30,6 +30,17 @@ pub struct Config {
     pub extra_bind: Option<SocketAddr>,
     /// Whether to detect and bind/advertise Tailscale automatically.
     pub tailscale: TailscaleMode,
+    /// One-shot network access override from the CLI or environment.
+    ///
+    /// `None` uses the setting persisted in the data directory. A value is
+    /// written through at startup, so a headless `h4rnd serve
+    /// --network-access on` and the UI agree on what is stored.
+    pub network_access: Option<bool>,
+    /// Port for the dedicated network listener.
+    ///
+    /// A separate wildcard port avoids a conflict with the loopback bind and
+    /// keeps plaintext `/ws` off the LAN.
+    pub network_port: u16,
     /// `tracing` filter directive.
     pub log_level: String,
 }
@@ -43,6 +54,8 @@ impl Default for Config {
                 .expect("the default bind address is valid"),
             extra_bind: None,
             tailscale: TailscaleMode::Auto,
+            network_access: None,
+            network_port: crate::network_access::DEFAULT_NETWORK_PORT,
             log_level: "h4rn_daemon=info".to_owned(),
         }
     }
@@ -184,6 +197,32 @@ impl Config {
             .unwrap_or(std::time::Duration::from_secs(60 * 60))
     }
 
+    /// Path of the persisted network-access setting.
+    pub fn network_access_path(&self) -> PathBuf {
+        crate::network_access::network_access_path(&self.data_dir)
+    }
+
+    /// The effective network access setting, writing an override through.
+    ///
+    /// The CLI flag and environment variable are one-shot inputs for a start;
+    /// persisting them keeps `h4rnd pair --direct` and the UI reading the same
+    /// value, whether or not this process is still the one serving.
+    pub fn network_access_enabled(&self) -> bool {
+        let stored = crate::network_access::read_enabled(&self.data_dir);
+        match self.network_access {
+            Some(enabled) => {
+                if enabled != stored
+                    && let Err(error) =
+                        crate::network_access::write_enabled(&self.data_dir, enabled)
+                {
+                    tracing::warn!(%error, "could not persist the network access setting");
+                }
+                enabled
+            }
+            None => stored,
+        }
+    }
+
     /// Creates the data directory if it does not exist.
     ///
     /// On Unix the directory is created with `0700`; it holds the access token
@@ -277,5 +316,27 @@ mod tests {
         let config = Config::default();
         assert!(config.bind.ip().is_loopback());
         assert_eq!(config.bind.port(), 47800);
+    }
+
+    #[test]
+    fn network_access_defaults_off_on_a_separate_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = Config::with_data_dir(dir.path());
+        assert!(!config.network_access_enabled());
+        assert_eq!(
+            config.network_port,
+            crate::network_access::DEFAULT_NETWORK_PORT
+        );
+        assert_ne!(config.network_port, config.bind.port());
+
+        let config = Config {
+            network_access: Some(true),
+            ..Config::with_data_dir(dir.path())
+        };
+        assert!(config.network_access_enabled());
+        assert!(
+            crate::network_access::read_enabled(dir.path()),
+            "a CLI/env override is written through for other processes"
+        );
     }
 }

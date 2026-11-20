@@ -41,7 +41,13 @@ import {
   useProjectDrag,
 } from "@/features/projects/SidebarProjects";
 import { loadProjects, sidebarProjects, useProjects } from "@/features/projects/store";
-import { activateMachine, forgetMachine, useRemote } from "@/features/remote/remoteStore";
+import { UseThisMachineButton } from "@/features/remote/LocalMachineAction";
+import {
+  activateMachine,
+  forgetMachine,
+  shellKind,
+  useRemote,
+} from "@/features/remote/remoteStore";
 import { loadSkills, useSkills } from "@/features/skills/store";
 import type { ThreadSummary, ThreadTab } from "@/gen";
 import { useNow } from "@/hooks/use-now";
@@ -260,6 +266,8 @@ function HostsPopover({
 }) {
   const user = useRemote((state) => state.user);
   const busy = useRemote((state) => state.busy);
+  const stored = useRemote((state) => state.active);
+  const mobile = shellKind() === "mobile";
   const online = rows.filter((row) => row.online).length;
   const active = rows.find((row) => row.active) ?? rows.find((row) => row.online);
   // The daemon answers but this host does not: that is an unreachable host,
@@ -293,7 +301,24 @@ function HostsPopover({
       </div>
       {rows.length === 0 ? (
         <div className="q-hp-empty">
-          No hosts yet. Run <span className="q-mono">h4rn host</span> on a machine.
+          {stored && connection.status === "online" ? (
+            <>
+              Connected to <b>{stored.machineName}</b>. Its host list isn’t available right now.
+            </>
+          ) : stored && connection.status === "connecting" ? (
+            <>
+              Connecting to <b>{stored.machineName}</b>…
+            </>
+          ) : stored ? (
+            <>
+              <b>{stored.machineName}</b> is unreachable.{" "}
+              {mobile ? "Disconnect to stop using it." : "Use this machine to keep working."}
+            </>
+          ) : (
+            <>
+              No hosts yet. Run <span className="q-mono">h4rn host</span> on a machine.
+            </>
+          )}
         </div>
       ) : (
         rows.map((row) => (
@@ -357,7 +382,7 @@ function HostsPopover({
         ))
       )}
       <div className="q-hp-conn">{connectionLine}</div>
-      {active?.active && active.machineId ? (
+      {stored ? (
         <button
           type="button"
           className="q-nav"
@@ -368,7 +393,7 @@ function HostsPopover({
           }}
         >
           <WifiOffIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-          <span className="lbl">Disconnect from {active.name}</span>
+          <span className="lbl">Disconnect from {stored.machineName}</span>
         </button>
       ) : null}
       <div className="q-hp-sep" />
@@ -522,6 +547,43 @@ function SidebarFooter({
   );
 }
 
+function OfflineNotice({
+  connection,
+  remoteName,
+  onReconnect,
+}: {
+  connection: { lastConnectedAt: number | null };
+  remoteName: string | null;
+  onReconnect: () => void;
+}) {
+  return (
+    <div className="q-banner q-side-banner">
+      <span className="ic">
+        <WifiOffIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+      </span>
+      <span className="grow">
+        {remoteName ? (
+          <b>Can’t reach {remoteName}.</b>
+        ) : (
+          <>
+            <b>Offline</b>
+            {connection.lastConnectedAt
+              ? ` · as of ${absoluteTime(new Date(connection.lastConnectedAt).toISOString())}`
+              : null}
+          </>
+        )}
+      </span>
+      {remoteName ? (
+        <UseThisMachineButton compact />
+      ) : (
+        <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onReconnect}>
+          Reconnect
+        </button>
+      )}
+    </div>
+  );
+}
+
 function useNeedsYouCount(): number {
   const threads = useApp((state) => state.threads);
   const approvals = useMcp((state) => state.approvals);
@@ -550,6 +612,7 @@ function ThreadsSidebar() {
   const state = useApp((s) => s);
   const now = useNow();
   const rows = useHostRows();
+  const stored = useRemote((state) => state.active);
 
   const counts = useMemo(() => tabCounts(state, now), [state, now]);
   const visible = useMemo(() => threadsForTab(state, tab, now), [state, tab, now]);
@@ -632,25 +695,11 @@ function ThreadsSidebar() {
       </div>
 
       {connection.status === "offline" && !error ? (
-        <div className="q-banner q-side-banner">
-          <span className="ic">
-            <WifiOffIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-          </span>
-          <span className="grow">
-            <b>Offline</b>
-            {connection.lastConnectedAt
-              ? ` · as of ${absoluteTime(new Date(connection.lastConnectedAt).toISOString())}`
-              : null}
-          </span>
-          <button
-            type="button"
-            className="q-btn ghost"
-            style={{ height: 24 }}
-            onClick={() => void loadThreads()}
-          >
-            Reconnect
-          </button>
-        </div>
+        <OfflineNotice
+          connection={connection}
+          remoteName={stored?.machineName ?? null}
+          onReconnect={() => void loadThreads()}
+        />
       ) : null}
 
       {error ? (
@@ -662,14 +711,18 @@ function ThreadsSidebar() {
             <b>Couldn’t reach {unreachableHostLabel(hosts)}.</b>{" "}
             {error.hint ?? "Showing cached threads."}
           </span>
-          <button
-            type="button"
-            className="q-btn ghost"
-            style={{ height: 24 }}
-            onClick={() => void loadThreads()}
-          >
-            Retry
-          </button>
+          {connection.status === "offline" && stored ? (
+            <UseThisMachineButton compact />
+          ) : (
+            <button
+              type="button"
+              className="q-btn ghost"
+              style={{ height: 24 }}
+              onClick={() => void loadThreads()}
+            >
+              Retry
+            </button>
+          )}
         </div>
       ) : null}
 

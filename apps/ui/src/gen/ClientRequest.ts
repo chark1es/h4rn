@@ -16,6 +16,7 @@ import type { HarnessKind } from "./HarnessKind";
 import type { HostId } from "./HostId";
 import type { McpRequest } from "./McpRequest";
 import type { McpServerInput } from "./McpServerInput";
+import type { PairScope } from "./PairScope";
 import type { ProjectSource } from "./ProjectSource";
 import type { ProxyFailoverPolicy } from "./ProxyFailoverPolicy";
 import type { ProxyProfileDraft } from "./ProxyProfileDraft";
@@ -670,7 +671,19 @@ device_id: DeviceId,
 /**
  * `true` admits the device, `false` revokes it.
  */
-confirm: boolean, } | { "type": "get_limits" } | { "type": "list_resets" } | { "type": "cancel_resume", 
+confirm: boolean, } | { "type": "get_network_access" } | { "type": "set_network_access", 
+/**
+ * Whether the listener should be running.
+ */
+enabled: boolean, } | { "type": "create_direct_pairing", 
+/**
+ * Scopes the new device is granted; `view` and `approve` when empty.
+ */
+scopes: Array<PairScope>, 
+/**
+ * Label shown next to the QR; the host name when absent.
+ */
+label: string | null, } | { "type": "cancel_direct_pairing" } | { "type": "get_limits" } | { "type": "list_resets" } | { "type": "cancel_resume", 
 /**
  * Thread whose schedule is cleared.
  */

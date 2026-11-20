@@ -61,5 +61,6 @@ libc.workspace = true
 [dev-dependencies]
 h4rn-connect.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite.workspace = true
 wiremock.workspace = true
