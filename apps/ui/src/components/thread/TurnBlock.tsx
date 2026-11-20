@@ -1,10 +1,4 @@
-import {
-  CircleAlertIcon,
-  ClockIcon,
-  CornerDownLeftIcon,
-  PauseIcon,
-  RotateCcwIcon,
-} from "lucide-react";
+import { CircleAlertIcon, ClockIcon, CornerDownLeftIcon, PauseIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
@@ -249,8 +243,8 @@ export function TurnBlock({
             after this ran.
           </span>
           <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onRetry}>
-            <RotateCcwIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-            Retry
+            <CornerDownLeftIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+            Reply
           </button>
         </div>
       ) : null}

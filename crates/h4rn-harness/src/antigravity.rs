@@ -565,13 +565,15 @@ impl HarnessSession for AcpSession {
         }
         // A Stop that arrived after the previous turn's prompt had already
         // completed must not colour this turn; the flag belongs to one prompt.
-        self.interrupt_requested.store(false, Ordering::SeqCst);
+        // It is cleared only once this send owns the prompt slot, so a rejected
+        // concurrent send cannot clear a running turn's stop flag.
         if self.prompt_running.swap(true, Ordering::SeqCst) {
             return Err(HarnessError::Transport {
                 harness: HarnessKind::Antigravity,
                 message: "a turn is already running".into(),
             });
         }
+        self.interrupt_requested.store(false, Ordering::SeqCst);
 
         let mut attachments = input.attachments;
         if self.first_send {
@@ -999,8 +1001,16 @@ fn spawn_event_bridge(
                         }]
                     }
                 }
-                AcpEvent::Exited { status, stderr } => {
-                    if shutting_down.load(Ordering::SeqCst) {
+                AcpEvent::Exited {
+                    status,
+                    stderr,
+                    deliberate,
+                } => {
+                    if deliberate || shutting_down.load(Ordering::SeqCst) {
+                        // The client ended the process on purpose (a write
+                        // deadline, a shutdown). The failure that caused it is
+                        // already on the stream; a second exit row would
+                        // duplicate it.
                         Vec::new()
                     } else if let Some(signal) = detect_limit(&stderr, Utc::now()) {
                         vec![HarnessEvent::LimitHit {
@@ -1716,6 +1726,109 @@ mod tests {
             tool_call.name, "Read apps/ui/package.json",
             "a title-only call has no other name, so the newer title becomes it"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_rejected_send_does_not_clear_a_running_turns_stop() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            handshake(&mut reader, &mut writer).await;
+            let prompt = next_frame(&mut reader).await;
+            assert_eq!(prompt["method"], "session/prompt");
+            let cancel = next_frame(&mut reader).await;
+            assert_eq!(cancel["method"], "session/cancel");
+            send_frame(
+                &mut writer,
+                json!({"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "end_turn"}}),
+            )
+            .await;
+        });
+
+        let mut session = AcpSession::start_with(&client, &acp_spec(workspace.path()))
+            .await
+            .expect("start session");
+        let mut events = session.events();
+        session
+            .send(UserInput {
+                text: "first".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect("send");
+        session.interrupt().await.expect("stop");
+
+        // A second prompt while one runs is rejected; that must not consume the
+        // stop the running turn is waiting for.
+        let rejected = session
+            .send(UserInput {
+                text: "second".into(),
+                attachments: Vec::new(),
+            })
+            .await;
+        assert!(rejected.is_err(), "a concurrent send is refused");
+
+        assert_eq!(
+            next_turn_status(&mut events).await,
+            TurnStatus::Interrupted,
+            "the running turn still honours the stop it was sent"
+        );
+        agent.await.expect("agent");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn a_deliberate_teardown_does_not_publish_a_second_exit_error() {
+        let (tx, rx) = mpsc::channel(8);
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let bridge = spawn_event_bridge(
+            rx,
+            out_tx,
+            Arc::new(Mutex::new(AcpShared::new())),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        // The client killed the agent itself after a write deadline; the failure
+        // that caused it is already on the stream.
+        tx.send(AcpEvent::Exited {
+            status: "exited: 9".into(),
+            stderr: String::new(),
+            deliberate: true,
+        })
+        .await
+        .expect("send");
+        tx.send(AcpEvent::Error {
+            message: "the prompt timed out".into(),
+            retryable: false,
+        })
+        .await
+        .expect("send");
+        match out_rx.recv().await.expect("event") {
+            HarnessEvent::Error { message, .. } => {
+                assert_eq!(message, "the prompt timed out");
+            }
+            other => panic!("unexpected event {other:?}"),
+        }
+
+        // A crash the client did not cause still reports the exit.
+        tx.send(AcpEvent::Exited {
+            status: "exited: 1".into(),
+            stderr: "boom".into(),
+            deliberate: false,
+        })
+        .await
+        .expect("send");
+        match out_rx.recv().await.expect("event") {
+            HarnessEvent::Error { message, .. } => {
+                assert!(
+                    message.contains("agy exited (exited: 1)"),
+                    "unexpected exit error: {message}"
+                );
+            }
+            other => panic!("unexpected event {other:?}"),
+        }
+        bridge.abort();
     }
 
     async fn handshake(

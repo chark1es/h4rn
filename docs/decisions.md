@@ -489,15 +489,23 @@ this harness than for Claude/Codex, which is preferable to buttons that silently
 **Addendum: ACP normalization that the UI can trust.** `session/prompt` is only reported as
 written once the client has flushed the frame to the agent's stdin; an interrupt therefore always
 sends `session/cancel` after the prompt it cancels. Waiting for writer-queue space and waiting for
-the flush share one ten-second deadline; on expiry the writer task is stopped and the agent killed,
-so a blocked frame cannot reach it later. Such a timeout ends the turn with exactly one failure row
-and detaches the dead session, so the next message starts a fresh one. A Stop that arrives before
-the prompt is dispatched, including while the session is still starting, ends the turn as
-interrupted without writing anything. Stop reasons are not flattened: only
-`end_turn` is a normal completion, `max_tokens` and `max_turn_requests` end the turn as a visible
-early stop, `cancelled` is an interrupt, and a refusal or an unknown reason is a failure. The
-interrupt flag belongs to one prompt: it is cleared when a prompt is sent and set only while that
-prompt is running, so a late Stop cannot colour the next turn.
+the flush share one ten-second deadline, and every other frame (cancel, model and mode changes,
+approvals, notifications, `session/close`) waits under the same deadline; on expiry the writer task
+is stopped and the agent killed, so a blocked frame cannot reach it later and a full queue never
+stalls Stop. Such a timeout ends the turn with exactly one failure row and detaches the dead
+session, so the next message starts a fresh one; an agent the client killed itself does not publish
+a second exit-error row, and a writer task that fails on an I/O error marks the client closed so the
+daemon detaches it. A Stop belongs to one turn: a Stop that arrives before that turn's prompt is
+dispatched, including while the session is still starting, ends the turn as interrupted without
+writing anything, and a Stop for a turn that already ended does not cancel the turn that replaced
+it. A thread starts at most one agent at a time: a message or a queued turn that arrives while a
+session is starting waits for that startup, which delivers whichever turn is current when it
+finishes, and every ended turn (completed, stopped, failed write, dead session) advances the queue
+in order. Stop reasons are not flattened: only `end_turn` is a normal completion, `max_tokens` and
+`max_turn_requests` end the turn as a visible early stop, `cancelled` is an interrupt, and a refusal
+or an unknown reason is a failure. The interrupt flag belongs to one prompt: it is cleared when that
+prompt takes the running slot and set only while it is running, so a late Stop (or a rejected second
+send) cannot colour the next turn.
 `tool_call_update` is merged into the tool row's last non-empty title, kind, input and locations, so
 a status-only update never renames a tool or empties its expanded input, and the id is forgotten
 once the call finishes.

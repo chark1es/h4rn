@@ -11,8 +11,8 @@ All notable changes to h4rn are recorded here. The format follows
   hub's SSE client now carry an incomplete trailing UTF-8 sequence into the next chunk instead of
   decoding each chunk alone, so an emoji or CJK character split between two chunks is no longer
   replaced by `�`. A chunk of invalid bytes is skipped with one replacement character per bad
-  sequence instead of quadratic copying, and a truncated final character is reported as `�` when
-  the stream ends rather than dropped.
+  sequence instead of quadratic copying. A character cut off by the end of the stream is dropped
+  with the unterminated last line or event it was part of, which neither reader ever dispatches.
 - **An ACP cancel can no longer overtake the prompt it cancels.** `send` reports the turn as
   running only after `session/prompt` has been flushed to the agent, so an immediate interrupt
   sends `session/cancel` after the prompt. Waiting for the writer queue and for the flush share one
@@ -21,11 +21,23 @@ All notable changes to h4rn are recorded here. The format follows
   the dead session, so the next message starts a fresh one. A Stop that arrives before the prompt is
   dispatched, including while the session is still starting, ends the turn as interrupted without
   writing anything.
+- **A Stop belongs to one turn, and a thread starts one agent at a time.** Each turn now carries its
+  own dispatch state, so Stop decides atomically whether the prompt can still be dropped or needs a
+  cancel: a Stop during startup drops that prompt even when a follow-up is already queued, and the
+  follow-up is then delivered on the same newly started session instead of starting a second agent.
+  A Stop that arrives for a turn that already ended no longer cancels the turn that replaced it, and
+  a Stop with a full writer queue returns instead of waiting for the queue to drain.
+- **Every ended turn advances the queue.** A completed turn, a stopped one, a failed prompt write and
+  a dead session all deliver the next queued message in order, so a follow-up no longer waits behind
+  a turn that can never finish. A writer I/O error marks the ACP client closed so the daemon detaches
+  it, and an agent the client killed itself (after a write deadline or a shutdown) no longer adds a
+  second exit-error row to the one failure the turn already shows.
 - **A turn stopped by `max_tokens` or `max_turn_requests` is no longer shown as completed.** The
   turn footer says "Stopped: the agent hit its token limit" (or its turn-request limit) even when
   the agent produced no output, and its Reply button puts the cursor back in the composer instead of
   resending the prompt (a message sent during the turn is already queued, so a resend would run it
-  twice); `end_turn` remains the only normal completion.
+  twice), as does a failed or interrupted turn, whose button no longer says "Retry" while only
+  focusing the composer; `end_turn` remains the only normal completion.
 - **A Stop after Antigravity's turn ended no longer interrupts the next turn.** The interrupt flag
   is cleared when a prompt is sent and only set while a prompt is running, so a late Stop cannot
   colour the following turn.

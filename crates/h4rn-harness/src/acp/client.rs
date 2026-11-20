@@ -32,7 +32,10 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 ///
 /// The daemon holds the session while `send` runs, so an agent that stops
 /// reading must not hold Stop and shutdown forever. On timeout the process is
-/// killed, which also guarantees a half-written frame is never delivered.
+/// killed, which also guarantees a half-written frame is never delivered. The
+/// same deadline bounds every other frame's enqueue (notifications, cancels,
+/// mode and model changes, `session/close`), so a full writer queue can never
+/// stall a Stop.
 const PROMPT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const KILL_GRACE: Duration = Duration::from_secs(2);
 const MAX_READ_BYTES: u64 = 8 * 1024 * 1024;
@@ -213,6 +216,10 @@ pub enum AcpEvent {
         status: String,
         /// The tail of stderr at exit.
         stderr: String,
+        /// Whether this client killed the agent itself (a timeout, a shutdown,
+        /// a crash the daemon caused). A deliberate teardown is not an error to
+        /// report on top of the failure that caused it.
+        deliberate: bool,
     },
     /// A transport or protocol error.
     Error {
@@ -334,13 +341,16 @@ impl AcpClient {
             let shared = client.shared.clone();
             let supervisor = tokio::spawn(async move {
                 let status = child.wait().await;
+                // A flag that was already set when the process was reaped means
+                // this client ended it on purpose (a write deadline, a
+                // shutdown): that exit is not a second failure to report.
+                let deliberate = shared.shutting_down.swap(true, Ordering::SeqCst);
                 fail_pending(
                     &shared,
                     AcpError::Closed {
                         message: "the ACP agent exited".into(),
                     },
                 );
-                shared.shutting_down.store(true, Ordering::SeqCst);
                 let (status_text, stderr_tail) = match status {
                     Ok(status) => (status.to_string(), shared.stderr.snapshot()),
                     Err(error) => (
@@ -353,6 +363,7 @@ impl AcpClient {
                     .send(AcpEvent::Exited {
                         status: status_text,
                         stderr: stderr_tail,
+                        deliberate,
                     })
                     .await;
             });
@@ -577,11 +588,14 @@ impl AcpClient {
             }),
             None => json!({"outcome": {"outcome": "cancelled"}}),
         };
-        self.send_frame(json!({
-            "jsonrpc": JSONRPC_VERSION,
-            "id": request_id,
-            "result": result,
-        }))
+        self.send_frame(
+            json!({
+                "jsonrpc": JSONRPC_VERSION,
+                "id": request_id,
+                "result": result,
+            }),
+            "session/request_permission",
+        )
         .await
     }
 
@@ -670,11 +684,14 @@ impl AcpClient {
                 message: "the ACP client is shut down".into(),
             });
         }
-        self.send_frame(json!({
-            "jsonrpc": JSONRPC_VERSION,
-            "method": method,
-            "params": params,
-        }))
+        self.send_frame(
+            json!({
+                "jsonrpc": JSONRPC_VERSION,
+                "method": method,
+                "params": params,
+            }),
+            method,
+        )
         .await
     }
 
@@ -720,8 +737,11 @@ impl AcpClient {
             // Enqueueing and flushing share one deadline. A full writer queue
             // must not postpone the clock, or an agent that stopped reading
             // stdin could hold the daemon for as long as the queue drains.
-            match tokio::time::timeout_at(deadline, self.send_frame_tracked(frame, written_tx))
-                .await
+            match tokio::time::timeout_at(
+                deadline,
+                self.send_frame_tracked(frame, written_tx, method),
+            )
+            .await
             {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
@@ -742,7 +762,7 @@ impl AcpClient {
             }
             Some(written_rx)
         } else {
-            if let Err(error) = self.send_frame(frame).await {
+            if let Err(error) = self.send_frame(frame, method).await {
                 lock(&self.shared.pending).remove(&key);
                 return Err(error);
             }
@@ -780,11 +800,20 @@ impl AcpClient {
         })
     }
 
-    async fn send_frame(&self, frame: Value) -> Result<(), AcpError> {
-        self.send_outgoing(OutgoingFrame {
-            frame,
-            written: None,
-        })
+    /// Enqueues one frame, bounded by the write deadline.
+    ///
+    /// Every frame goes through here, not only prompts: a full writer queue
+    /// must never hold a Stop (a cancel), a mode change or a shutdown forever.
+    /// On expiry the writer is aborted so the blocked frame cannot be written
+    /// later, and the agent is killed like a timed-out prompt.
+    async fn send_frame(&self, frame: Value, method: &str) -> Result<(), AcpError> {
+        self.send_outgoing(
+            OutgoingFrame {
+                frame,
+                written: None,
+            },
+            method,
+        )
         .await
     }
 
@@ -792,24 +821,39 @@ impl AcpClient {
         &self,
         frame: Value,
         written: oneshot::Sender<()>,
+        method: &str,
     ) -> Result<(), AcpError> {
-        self.send_outgoing(OutgoingFrame {
-            frame,
-            written: Some(written),
-        })
+        self.send_outgoing(
+            OutgoingFrame {
+                frame,
+                written: Some(written),
+            },
+            method,
+        )
         .await
     }
 
-    async fn send_outgoing(&self, outgoing: OutgoingFrame) -> Result<(), AcpError> {
+    async fn send_outgoing(&self, outgoing: OutgoingFrame, method: &str) -> Result<(), AcpError> {
         let sender = lock(&self.shared.stdin_tx).clone();
         let Some(sender) = sender else {
             return Err(AcpError::Closed {
                 message: "the ACP agent stdin is closed".into(),
             });
         };
-        sender.send(outgoing).await.map_err(|_| AcpError::Closed {
-            message: "the ACP writer task has exited".into(),
-        })
+        match tokio::time::timeout(PROMPT_WRITE_TIMEOUT, sender.send(outgoing)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err(AcpError::Closed {
+                message: "the ACP writer task has exited".into(),
+            }),
+            Err(_) => {
+                self.abandon_writer();
+                self.kill();
+                Err(AcpError::Timeout {
+                    method: method.to_string(),
+                    seconds: PROMPT_WRITE_TIMEOUT.as_secs(),
+                })
+            }
+        }
     }
 }
 
@@ -871,6 +915,16 @@ where
             };
             bytes.push(b'\n');
             if let Err(error) = stdin.write_all(&bytes).await {
+                fail_pending(
+                    &shared,
+                    AcpError::Closed {
+                        message: format!("the ACP agent stdin stopped accepting frames: {error}"),
+                    },
+                );
+                // A half-written transport is dead: report the client closed so
+                // the daemon detaches it instead of writing into a broken pipe.
+                shared.shutting_down.store(true, Ordering::SeqCst);
+                *lock(&shared.stdin_tx) = None;
                 let _ = shared
                     .events_tx
                     .send(AcpEvent::Error {
@@ -881,6 +935,14 @@ where
                 break;
             }
             if let Err(error) = stdin.flush().await {
+                fail_pending(
+                    &shared,
+                    AcpError::Closed {
+                        message: format!("the ACP agent stdin stopped accepting frames: {error}"),
+                    },
+                );
+                shared.shutting_down.store(true, Ordering::SeqCst);
+                *lock(&shared.stdin_tx) = None;
                 let _ = shared
                     .events_tx
                     .send(AcpEvent::Error {
@@ -1633,6 +1695,137 @@ mod tests {
         );
         assert!(client.is_closed(), "the wedged transport is torn down");
         filling.abort();
+    }
+
+    /// A writer whose stdin refuses every frame, like a pipe whose reader died.
+    struct BrokenWriter;
+
+    impl AsyncWrite for BrokenWriter {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "the agent's stdin is gone",
+            )))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_writer_io_error_reports_the_client_closed() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (agent_write, client_read) = tokio::io::duplex(64);
+        let client = AcpClient::start_for_test(config(workspace.path()), client_read, BrokenWriter);
+        let _agent_write = agent_write;
+        let mut events = client.take_events().expect("events");
+
+        // The frame is enqueued; the writer fails on it. The failure is a dead
+        // transport, not a session that merely had one bad prompt.
+        let _ = client.cancel("s-1").await;
+        let event = events.recv().await.expect("event");
+        assert!(
+            matches!(event, AcpEvent::Error { .. }),
+            "the write failure is reported: {event:?}"
+        );
+        assert!(
+            client.is_closed(),
+            "a half-written transport reports itself closed so the daemon detaches it"
+        );
+        assert!(
+            client.cancel("s-1").await.is_err(),
+            "later frames are refused instead of queued for a dead pipe"
+        );
+        client
+            .shutdown()
+            .await
+            .expect("shutting down a dead writer is not an error");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_stop_with_a_full_writer_queue_returns_within_the_deadline() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        // A tiny stdin buffer that nobody drains, so the writer blocks on its
+        // first frame and the queue behind it fills.
+        let (client_write, _agent_read) = tokio::io::duplex(64);
+        let (agent_write, client_read) = tokio::io::duplex(64);
+        let client = Arc::new(AcpClient::start(
+            config(workspace.path()),
+            std::env::temp_dir(),
+            client_read,
+            client_write,
+            None,
+            StderrRing::new(),
+        ));
+        let _agent_write = agent_write;
+
+        let sender = lock(&client.shared.stdin_tx).clone().expect("writer");
+        // One frame larger than the pipe: the writer takes it, blocks writing,
+        // and stops draining the queue behind it.
+        sender
+            .try_send(OutgoingFrame {
+                frame: json!({
+                    "jsonrpc": "2.0",
+                    "method": "test/noop",
+                    "params": {"pad": "x".repeat(4_096)},
+                }),
+                written: None,
+            })
+            .expect("the first frame fits");
+        for _ in 0..1_000 {
+            if sender.capacity() == FRAME_CHANNEL_CAPACITY {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            sender.capacity(),
+            FRAME_CHANNEL_CAPACITY,
+            "the writer took the frame and is blocked writing it"
+        );
+        while sender
+            .try_send(OutgoingFrame {
+                frame: json!({"jsonrpc": "2.0", "method": "test/noop"}),
+                written: None,
+            })
+            .is_ok()
+        {}
+        assert_eq!(sender.capacity(), 0, "the writer queue is full");
+
+        let stop_client = Arc::clone(&client);
+        let stop = tokio::spawn(async move { stop_client.cancel("s-1").await });
+        let outcome = tokio::time::timeout(Duration::from_secs(30), stop)
+            .await
+            .expect("a Stop must not wait for a full writer queue")
+            .expect("stop task");
+        match outcome {
+            Err(AcpError::Timeout { method, seconds }) => {
+                assert_eq!(method, "session/cancel");
+                assert_eq!(seconds, PROMPT_WRITE_TIMEOUT.as_secs());
+            }
+            Err(other) => panic!("expected a cancel write timeout, got {other}"),
+            Ok(()) => panic!("a cancel that never reached the writer must not claim success"),
+        }
+        assert!(
+            lock(&client.shared.writer).is_none(),
+            "the blocked writer is aborted so the cancel cannot slip out later"
+        );
+        assert!(client.is_closed(), "the wedged transport is torn down");
     }
 
     #[tokio::test]

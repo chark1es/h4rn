@@ -87,4 +87,25 @@ describe("TurnBlock", () => {
   it("leaves a running user turn without a stopped notice", () => {
     expect(render(userOnlyTurn("running"))).not.toContain("Stopped:");
   });
+
+  it("offers Reply, not a resend, after a failed or interrupted turn", () => {
+    for (const status of ["failed", "interrupted"] as const) {
+      const markup = render({
+        ...userOnlyTurn(status),
+        items: [
+          ...userOnlyTurn(status).items,
+          {
+            kind: "message",
+            itemId: "item_2",
+            role: "assistant",
+            text: "partial output",
+            attachments: [],
+            streaming: false,
+          },
+        ],
+      });
+      expect(markup).toContain("Reply");
+      expect(markup).not.toContain("Retry");
+    }
+  });
 });

@@ -36,6 +36,8 @@ pub struct FakeHarness {
     write_gate: Option<Gate>,
     /// A test-only count of prompts the session was asked to write.
     send_count: Option<SendCount>,
+    /// A test-only count of interrupts the session received.
+    interrupt_count: Option<InterruptCount>,
     /// A test-only latch before a session is returned from `start_session`.
     start_gate: Option<Gate>,
     /// A test-only count of sessions this harness has started.
@@ -66,6 +68,20 @@ pub struct SessionCount(Arc<AtomicUsize>);
 
 impl SessionCount {
     /// How many sessions the fake harness has started so far.
+    pub fn get(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// A shared count of cancels a fake session was asked to send.
+///
+/// A test reads it to prove a Stop either dropped the prompt or cancelled one
+/// that was already on the wire, never silently both or neither.
+#[derive(Clone, Debug, Default)]
+pub struct InterruptCount(Arc<AtomicUsize>);
+
+impl InterruptCount {
+    /// How many times the fake session's turn was interrupted so far.
     pub fn get(&self) -> usize {
         self.0.load(Ordering::SeqCst)
     }
@@ -148,6 +164,7 @@ impl Default for FakeHarness {
             send_gate: None,
             write_gate: None,
             send_count: None,
+            interrupt_count: None,
             start_gate: None,
             session_count: None,
             dead_sends_after: None,
@@ -259,6 +276,13 @@ impl FakeHarness {
         (self, count)
     }
 
+    /// Counts every interrupt the daemon sends in the returned [`InterruptCount`].
+    pub fn with_interrupt_count(mut self) -> (Self, InterruptCount) {
+        let count = InterruptCount::default();
+        self.interrupt_count = Some(count.clone());
+        (self, count)
+    }
+
     /// Lets the first `ok_sends` prompts succeed, then makes every later send
     /// fail as a dead transport whose session reports itself closed.
     ///
@@ -335,6 +359,7 @@ impl Harness for FakeHarness {
             delay,
             send_gate: self.send_gate.clone(),
             send_count: self.send_count.clone(),
+            interrupt_count: self.interrupt_count.clone(),
             dead_sends_after: self.dead_sends_after,
             sends: 0,
             has_answered: false,
@@ -360,6 +385,8 @@ pub struct FakeSession {
     send_gate: Option<Gate>,
     /// A shared count of prompts this session was asked to write.
     send_count: Option<SendCount>,
+    /// A shared count of cancels this session received.
+    interrupt_count: Option<InterruptCount>,
     /// Sends after this many fail as a dead transport and close the session.
     dead_sends_after: Option<usize>,
     /// Prompts this session has been asked to write.
@@ -385,6 +412,19 @@ impl HarnessSession for FakeSession {
         if let Some(count) = &self.send_count {
             count.0.fetch_add(1, Ordering::SeqCst);
         }
+
+        // The first send starts the thread; a test gates later turns so a
+        // request that must not wait for the adapter stays observable. The gate
+        // comes before the dead-transport switch, so a test can queue a
+        // follow-up behind a write that then fails.
+        let first_send = !self.has_answered;
+        self.has_answered = true;
+        if let Some(gate) = &self.send_gate
+            && !first_send
+        {
+            gate.wait().await;
+        }
+
         if let Some(limit) = self.dead_sends_after
             && self.sends > limit
         {
@@ -395,16 +435,6 @@ impl HarnessSession for FakeSession {
                 harness: self.kind,
                 message: "the harness transport closed".into(),
             });
-        }
-
-        // The first send starts the thread; a test gates later turns so a
-        // request that must not wait for the adapter stays observable.
-        let first_send = !self.has_answered;
-        self.has_answered = true;
-        if let Some(gate) = &self.send_gate
-            && !first_send
-        {
-            gate.wait().await;
         }
 
         // The priming send only announces the first script; it is not a turn
@@ -560,6 +590,9 @@ impl HarnessSession for FakeSession {
     }
 
     async fn interrupt(&mut self) -> Result<(), HarnessError> {
+        if let Some(count) = &self.interrupt_count {
+            count.0.fetch_add(1, Ordering::SeqCst);
+        }
         send(
             &self.sender,
             HarnessEvent::TurnCompleted {
