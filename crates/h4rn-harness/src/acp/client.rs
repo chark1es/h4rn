@@ -28,6 +28,12 @@ const FRAME_CHANNEL_CAPACITY: usize = 256;
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 const SESSION_TIMEOUT: Duration = Duration::from_secs(120);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+/// How long a prompt may wait for the agent's stdin to accept it.
+///
+/// The daemon holds the session while `send` runs, so an agent that stops
+/// reading must not hold Stop and shutdown forever. On timeout the process is
+/// killed, which also guarantees a half-written frame is never delivered.
+const PROMPT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const KILL_GRACE: Duration = Duration::from_secs(2);
 const MAX_READ_BYTES: u64 = 8 * 1024 * 1024;
 
@@ -714,13 +720,27 @@ impl AcpClient {
             }
             None
         };
-        if let Some(written) = written
-            && written.await.is_err()
-        {
-            lock(&self.shared.pending).remove(&key);
-            return Err(AcpError::Closed {
-                message: "the ACP writer exited before the request was written".into(),
-            });
+        if let Some(written) = written {
+            match tokio::time::timeout(PROMPT_WRITE_TIMEOUT, written).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => {
+                    lock(&self.shared.pending).remove(&key);
+                    return Err(AcpError::Closed {
+                        message: "the ACP writer exited before the request was written".into(),
+                    });
+                }
+                Err(_) => {
+                    lock(&self.shared.pending).remove(&key);
+                    // The agent stopped reading stdin mid-frame. Kill the
+                    // process so the half-written request can never reach it
+                    // later, and let the caller report a failed turn.
+                    self.kill();
+                    return Err(AcpError::Timeout {
+                        method: method.to_string(),
+                        seconds: PROMPT_WRITE_TIMEOUT.as_secs(),
+                    });
+                }
+            }
         }
 
         Ok(StartedCall {
@@ -1484,6 +1504,38 @@ mod tests {
         }
 
         client.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_prompt_the_agent_never_reads_times_out_and_kills_the_transport() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        // A tiny stdin buffer that nobody drains: the first frame fills it and
+        // the writer blocks mid-write.
+        let (client_write, _agent_read) = tokio::io::duplex(64);
+        let (agent_write, client_read) = tokio::io::duplex(64);
+        let client = AcpClient::start(
+            config(workspace.path()),
+            std::env::temp_dir(),
+            client_read,
+            client_write,
+            None,
+            StderrRing::new(),
+        );
+        let _agent_write = agent_write;
+
+        let prompt = PromptContent::text("x".repeat(1024 * 1024));
+        match client.start_prompt("s-1", &[prompt]).await {
+            Err(AcpError::Timeout { method, seconds }) => {
+                assert_eq!(method, "session/prompt");
+                assert_eq!(seconds, PROMPT_WRITE_TIMEOUT.as_secs());
+            }
+            Err(other) => panic!("expected a prompt write timeout, got {other}"),
+            Ok(_) => panic!("a stalled prompt write must not be reported as flushed"),
+        }
+        assert!(
+            client.is_closed(),
+            "the wedged transport is torn down so the half-written frame is never delivered"
+        );
     }
 
     #[tokio::test]

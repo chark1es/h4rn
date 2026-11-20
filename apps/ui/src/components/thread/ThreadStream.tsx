@@ -38,7 +38,7 @@ export function ThreadStream({
   summary: ThreadSummary;
   turns: StreamTurn[];
   pending: PendingMessage[];
-  onRetry: () => void;
+  onRetry: (turn: StreamTurn) => void;
   staleAt?: number | null;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);

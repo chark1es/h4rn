@@ -123,16 +123,25 @@ pub fn read_text(path: &Path) -> Option<String> {
 }
 
 fn decode_text(bytes: &[u8]) -> Option<String> {
-    if let Some(body) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
-        return std::str::from_utf8(body).ok().map(str::to_owned);
+    // UTF-32LE starts with the UTF-16LE BOM bytes followed by two NULs, and
+    // would otherwise decode as NUL-filled text. Neither UTF-32 order is
+    // inlineable, so the file stays a link.
+    if bytes.starts_with(&[0x00, 0x00, 0xFE, 0xFF]) || bytes.starts_with(&[0xFF, 0xFE, 0x00, 0x00])
+    {
+        return None;
     }
-    if let Some(body) = bytes.strip_prefix(&[0xFF, 0xFE]) {
-        return decode_utf16(body, u16::from_le_bytes);
-    }
-    if let Some(body) = bytes.strip_prefix(&[0xFE, 0xFF]) {
-        return decode_utf16(body, u16::from_be_bytes);
-    }
-    std::str::from_utf8(bytes).ok().map(str::to_owned)
+    let text = if let Some(body) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        std::str::from_utf8(body).ok().map(str::to_owned)
+    } else if let Some(body) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        decode_utf16(body, u16::from_le_bytes)
+    } else if let Some(body) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        decode_utf16(body, u16::from_be_bytes)
+    } else {
+        std::str::from_utf8(bytes).ok().map(str::to_owned)
+    }?;
+    // A NUL means the bytes were not the text they appeared to be (for
+    // example a binary file that happens to decode). Keep it a link.
+    (!text.contains('\0')).then_some(text)
 }
 
 fn decode_utf16(bytes: &[u8], decode: fn([u8; 2]) -> u16) -> Option<String> {
@@ -264,6 +273,29 @@ mod tests {
         assert_eq!(decode_text(&[0xFF, 0x00, 0xFE, 0x01]), None);
         assert_eq!(decode_text(&[0xFF, 0xFE, 0x41]), None);
         assert_eq!(decode_text(&[0x89, b'P', b'N', b'G']), None);
+    }
+
+    #[test]
+    fn utf32_files_are_links_not_nul_filled_text() {
+        // UTF-32LE starts with the UTF-16LE BOM followed by two NULs.
+        let mut utf32_le = vec![0xFF, 0xFE, 0x00, 0x00];
+        for ch in "notes\n".chars() {
+            utf32_le.extend_from_slice(&(ch as u32).to_le_bytes());
+        }
+        assert_eq!(decode_text(&utf32_le), None);
+
+        let mut utf32_be = vec![0x00, 0x00, 0xFE, 0xFF];
+        for ch in "notes\n".chars() {
+            utf32_be.extend_from_slice(&(ch as u32).to_be_bytes());
+        }
+        assert_eq!(decode_text(&utf32_be), None);
+    }
+
+    #[test]
+    fn decoded_text_with_a_nul_is_not_inlined() {
+        // UTF-16LE "A\0" decodes cleanly but is not text worth embedding.
+        assert_eq!(decode_text(&[0xFF, 0xFE, 0x41, 0x00, 0x00, 0x00]), None);
+        assert_eq!(decode_text(b"a\0b"), None);
     }
 
     #[test]

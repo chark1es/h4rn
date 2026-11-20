@@ -607,17 +607,30 @@ impl AcpToolCall {
 
     /// A one-line summary suitable for the collapsed tool row.
     pub fn summary(&self) -> String {
-        if let Some(title) = self.title.as_deref().filter(|title| !title.is_empty()) {
+        Self::summary_of(
+            self.title.as_deref(),
+            self.raw_input.as_ref(),
+            &self.locations,
+        )
+    }
+
+    /// The collapsed-row summary for fields that updates have been merged into.
+    pub fn summary_of(
+        title: Option<&str>,
+        raw_input: Option<&Value>,
+        locations: &[AcpLocation],
+    ) -> String {
+        if let Some(title) = title.filter(|title| !title.is_empty()) {
             return truncate(title, 140);
         }
-        if let Some(input) = self.raw_input.as_ref() {
+        if let Some(input) = raw_input {
             for key in ["command", "path", "file_path", "query", "url", "pattern"] {
                 if let Some(text) = input.get(key).and_then(Value::as_str) {
                     return truncate(text, 140);
                 }
             }
         }
-        if let Some(path) = self.locations.first() {
+        if let Some(path) = locations.first() {
             return truncate(&path.path, 140);
         }
         String::new()

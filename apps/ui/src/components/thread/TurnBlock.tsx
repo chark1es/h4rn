@@ -123,7 +123,8 @@ export function TurnBlock({
   turn: StreamTurn;
   threadId: string;
   summary: ThreadSummary;
-  onRetry: () => void;
+  /** Resend a stopped turn's prompt, or focus the composer for a failure. */
+  onRetry: (turn: StreamTurn) => void;
   staleAt?: number | null;
 }) {
   const userItems = turn.items.filter(
@@ -145,6 +146,21 @@ export function TurnBlock({
         {userItems.map((item) => (
           <UserMessage key={item.itemId} item={item} at={turn.startedAt} />
         ))}
+        {stopped !== null ? (
+          <div className={cn("q-live-line", "q-warn")}>
+            <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+            <span>{stopped}</span>
+            <button
+              type="button"
+              className="q-btn ghost"
+              style={{ height: 24 }}
+              onClick={() => onRetry(turn)}
+            >
+              <RotateCcwIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+              Retry
+            </button>
+          </div>
+        ) : null}
       </>
     );
   }
@@ -218,8 +234,13 @@ export function TurnBlock({
       {stopped !== null ? (
         <div className={cn("q-live-line", "q-warn")}>
           <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-          <span>{stopped} Nothing after this ran.</span>
-          <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onRetry}>
+          <span>{stopped}</span>
+          <button
+            type="button"
+            className="q-btn ghost"
+            style={{ height: 24 }}
+            onClick={() => onRetry(turn)}
+          >
             <RotateCcwIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
             Retry
           </button>
@@ -231,7 +252,12 @@ export function TurnBlock({
             {turn.status === "failed" ? "The turn failed" : "The turn was interrupted"}. Nothing
             after this ran.
           </span>
-          <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onRetry}>
+          <button
+            type="button"
+            className="q-btn ghost"
+            style={{ height: 24 }}
+            onClick={() => onRetry(turn)}
+          >
             <RotateCcwIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
             Retry
           </button>

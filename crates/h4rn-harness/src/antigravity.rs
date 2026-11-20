@@ -56,7 +56,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::acp::{
-    AcpClient, AcpClientConfig, AcpError, AcpEvent, AcpMcpServer, AcpPermissionOption,
+    AcpClient, AcpClientConfig, AcpError, AcpEvent, AcpLocation, AcpMcpServer, AcpPermissionOption,
     AcpPermissionRequest, AcpServerInfo, AcpSessionInfo, AcpToolCall, AcpToolKind, AcpToolStatus,
     AcpUpdate, AcpUsage, AgentCapabilities, ENV_MCP_STDIO_BRIDGE, PromptContent,
 };
@@ -870,10 +870,75 @@ struct AcpShared {
     last_turn: Option<TurnReport>,
 }
 
+/// The raw fields of a tool call, merged across its `tool_call` and
+/// `tool_call_update` frames.
+///
+/// Updates often carry only a status or output. Caching the raw fields instead
+/// of a derived name and summary lets a later title change reach the row while
+/// a status-only update cannot rename a kind-only call to "other".
 #[derive(Debug, Default)]
 struct ToolLabel {
-    name: String,
-    summary: String,
+    /// Last non-empty `name` the agent sent.
+    name: Option<String>,
+    /// Last non-empty title.
+    title: Option<String>,
+    /// Last kind the agent sent.
+    kind: Option<AcpToolKind>,
+    /// Last raw input the agent sent.
+    raw_input: Option<Value>,
+    /// Last locations the agent sent.
+    locations: Vec<AcpLocation>,
+}
+
+impl ToolLabel {
+    /// Merges the fields this frame carries; absent fields keep their value.
+    fn merge(&mut self, call: &AcpToolCall) {
+        if let Some(name) = call
+            .raw
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+        {
+            self.name = Some(name.to_owned());
+        }
+        if let Some(title) = call.title.as_deref().filter(|title| !title.is_empty()) {
+            self.title = Some(title.to_owned());
+        }
+        if call.raw.get("kind").is_some() {
+            self.kind = Some(call.kind.clone());
+        }
+        if let Some(input) = call
+            .raw
+            .get("rawInput")
+            .or_else(|| call.raw.get("raw_input"))
+        {
+            self.raw_input = Some(input.clone());
+        }
+        if call.raw.get("locations").is_some() {
+            self.locations = call.locations.clone();
+        }
+    }
+
+    fn kind(&self) -> AcpToolKind {
+        self.kind
+            .clone()
+            .unwrap_or(AcpToolKind::Other("other".into()))
+    }
+
+    fn name(&self) -> String {
+        self.name
+            .clone()
+            .or_else(|| self.title.clone())
+            .unwrap_or_else(|| self.kind().label().to_owned())
+    }
+
+    fn summary(&self) -> String {
+        AcpToolCall::summary_of(
+            self.title.as_deref(),
+            self.raw_input.as_ref(),
+            &self.locations,
+        )
+    }
 }
 
 impl AcpShared {
@@ -1117,7 +1182,6 @@ fn remember_turn_text(shared: &Arc<Mutex<AcpShared>>, text: &str) {
 
 fn tool_event(call: &AcpToolCall, shared: &Arc<Mutex<AcpShared>>) -> HarnessEvent {
     let tool_call_id = call.tool_call_id.clone();
-    let summary = call.summary();
     let input = call.raw_input.clone();
     let output = call.output_preview();
     let status = tool_status(&call.status);
@@ -1126,38 +1190,35 @@ fn tool_event(call: &AcpToolCall, shared: &Arc<Mutex<AcpShared>>) -> HarnessEven
         AcpToolStatus::Completed | AcpToolStatus::Failed | AcpToolStatus::Cancelled
     );
     let mut shared = lock(shared);
-    // `tool_call_update` often carries only a status or output; keep the last
-    // title and summary the agent sent so an update never empties the row.
-    let label = shared.tool_labels.entry(tool_call_id.clone()).or_default();
-    if let Some(name) = call
-        .raw
-        .get("name")
-        .and_then(Value::as_str)
-        .filter(|name| !name.is_empty())
-    {
-        label.name = name.to_string();
-    } else if label.name.is_empty() {
-        if let Some(title) = call.title.as_deref().filter(|title| !title.is_empty()) {
-            label.name = title.to_string();
-        }
-    }
-    if !summary.is_empty() {
-        label.summary = summary;
-    }
-    let name = if label.name.is_empty() {
-        call.kind.label().to_string()
-    } else {
-        label.name.clone()
+    // `tool_call_update` often carries only a status or output; merge it into
+    // the fields the agent already sent so the name and summary stay stable.
+    let (name, summary, kind, locations) = {
+        let label = shared.tool_labels.entry(tool_call_id.clone()).or_default();
+        label.merge(call);
+        (
+            label.name(),
+            label.summary(),
+            label.kind(),
+            label.locations.clone(),
+        )
     };
-    let summary = label.summary.clone();
     let started_at = shared
         .tool_started
         .entry(tool_call_id.clone())
         .or_insert_with(Utc::now)
         .to_owned();
     let completed_at = finished.then(Utc::now);
-    if is_mutating(call, &name) {
+    if is_mutating(&kind, &name) {
+        let mut paths: Vec<String> = locations
+            .iter()
+            .map(|location| location.path.clone())
+            .collect();
         for path in call.paths() {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        for path in paths {
             if shared.touched.len() < TOUCHED_PATH_LIMIT && !shared.touched.contains(&path) {
                 shared.touched.push(path);
             }
@@ -1166,7 +1227,7 @@ fn tool_event(call: &AcpToolCall, shared: &Arc<Mutex<AcpShared>>) -> HarnessEven
     if finished {
         shared.tool_labels.remove(&tool_call_id);
     }
-    shared.state = tool_state(&call.kind, &status);
+    shared.state = tool_state(&kind, &status);
     HarnessEvent::ToolCall {
         tool_call: ToolCall {
             tool_call_id,
@@ -1182,17 +1243,8 @@ fn tool_event(call: &AcpToolCall, shared: &Arc<Mutex<AcpShared>>) -> HarnessEven
     }
 }
 
-fn tool_name(call: &AcpToolCall) -> Option<String> {
-    call.raw
-        .get("name")
-        .and_then(Value::as_str)
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .or_else(|| call.title.clone().filter(|title| !title.is_empty()))
-}
-
-fn is_mutating(call: &AcpToolCall, name: &str) -> bool {
-    if matches!(call.kind, AcpToolKind::Edit) {
+fn is_mutating(kind: &AcpToolKind, name: &str) -> bool {
+    if matches!(kind, AcpToolKind::Edit) {
         return true;
     }
     let name = name.to_ascii_lowercase();
@@ -1207,6 +1259,15 @@ fn is_mutating(call: &AcpToolCall, name: &str) -> bool {
             | "edit"
             | "write"
     )
+}
+
+fn tool_name(call: &AcpToolCall) -> Option<String> {
+    call.raw
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .or_else(|| call.title.clone().filter(|title| !title.is_empty()))
 }
 
 fn tool_status(status: &AcpToolStatus) -> ToolCallStatus {
@@ -1685,6 +1746,64 @@ mod tests {
 
         agent.await.expect("agent");
         session.shutdown().await.expect("shutdown");
+    }
+
+    #[test]
+    fn a_later_title_updates_the_summary_but_keeps_the_tool_name() {
+        let shared = Arc::new(Mutex::new(AcpShared::new()));
+        let started = AcpToolCall::from_value(&json!({
+            "toolCallId": "call-1",
+            "name": "read_file",
+            "kind": "read",
+            "status": "in_progress",
+            "title": "Read package.json",
+            "locations": [{"path": "/w/package.json"}]
+        }));
+        let HarnessEvent::ToolCall { tool_call } = tool_event(&started, &shared) else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(tool_call.name, "read_file");
+
+        let update = AcpToolCall::from_value(&json!({
+            "toolCallId": "call-1",
+            "status": "in_progress",
+            "title": "Read apps/ui/package.json"
+        }));
+        let HarnessEvent::ToolCall { tool_call } = tool_event(&update, &shared) else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(
+            tool_call.name, "read_file",
+            "the title is not the tool name"
+        );
+        assert_eq!(tool_call.summary, "Read apps/ui/package.json");
+    }
+
+    #[test]
+    fn a_status_only_update_keeps_a_kind_only_tools_name() {
+        let shared = Arc::new(Mutex::new(AcpShared::new()));
+        let started = AcpToolCall::from_value(&json!({
+            "toolCallId": "call-2",
+            "kind": "read",
+            "status": "in_progress"
+        }));
+        let HarnessEvent::ToolCall { tool_call } = tool_event(&started, &shared) else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(tool_call.name, "Read");
+
+        let update = AcpToolCall::from_value(&json!({
+            "toolCallId": "call-2",
+            "status": "completed"
+        }));
+        let HarnessEvent::ToolCall { tool_call } = tool_event(&update, &shared) else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(
+            tool_call.name, "Read",
+            "a status-only update must not rename the call to other"
+        );
+        assert_eq!(tool_call.summary, "");
     }
 
     #[test]

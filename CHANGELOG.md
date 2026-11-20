@@ -10,18 +10,25 @@ All notable changes to h4rn are recorded here. The format follows
 - **Characters split across streamed chunks arrive intact.** OpenCode's event stream and the MCP
   hub's SSE client now carry an incomplete trailing UTF-8 sequence into the next chunk instead of
   decoding each chunk alone, so an emoji or CJK character split between two chunks is no longer
-  replaced by `�`.
+  replaced by `�`. A chunk of invalid bytes is skipped with one replacement character per bad
+  sequence instead of quadratic copying, and a truncated final character is reported as `�` when
+  the stream ends rather than dropped.
 - **An ACP cancel can no longer overtake the prompt it cancels.** `send` reports the turn as
   running only after `session/prompt` has been flushed to the agent, so an immediate interrupt
-  sends `session/cancel` after the prompt.
+  sends `session/cancel` after the prompt. A prompt the agent never accepts is abandoned after ten
+  seconds and the agent is killed, so Stop and shutdown cannot hang on its stdin. A Stop that
+  arrives before the prompt is dispatched ends the turn as interrupted without writing anything.
 - **A turn stopped by `max_tokens` or `max_turn_requests` is no longer shown as completed.** The
-  turn footer says "Stopped: the agent hit its token limit" (or its turn-request limit) and offers
-  Retry; `end_turn` remains the only normal completion.
+  turn footer says "Stopped: the agent hit its token limit" (or its turn-request limit) even when
+  the agent produced no output, and its Retry button resends the turn's prompt; `end_turn` remains
+  the only normal completion.
 - **A titleless `tool_call_update` keeps the tool's name and summary.** Updates are merged into the
-  call's last non-empty title, so a status-only update no longer empties the tool row.
-- **Text attachments in UTF-16 with a BOM are inlined.** The shared attachment reader decodes
-  UTF-8, UTF-16LE and UTF-16BE byte-order marks, so Antigravity and the other harnesses embed the
-  text instead of falling back to a link. Binary files still go as links.
+  call's last title, kind, input and locations, so a later title reaches the row while a status-only
+  update cannot rename a kind-only call to "other".
+- **Antigravity inlines UTF-16 text attachments with a BOM.** The shared attachment reader decodes
+  UTF-8, UTF-16LE and UTF-16BE byte-order marks, so the text is embedded instead of falling back to
+  a link. UTF-32 files and text containing NUL bytes stay links, and so do all text attachments on
+  Claude Code, Codex and OpenCode, which pass a path reference.
 
 ## 1.0.1 — 2026-11-19
 

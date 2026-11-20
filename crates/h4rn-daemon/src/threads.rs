@@ -312,6 +312,45 @@ struct ActiveTurn {
     /// Tool call id -> whether the call is currently counted as running.
     tools: HashMap<String, bool>,
     last_tick: Option<DateTime<Utc>>,
+    /// Hand-off between Stop and the background prompt delivery.
+    dispatch: Arc<DispatchGate>,
+}
+
+/// Orders a Stop against the delivery of the turn's prompt.
+///
+/// `send_message` records the turn and delivers the prompt on another task. A
+/// Stop that arrives first must win: the prompt is never written and the turn
+/// ends as interrupted. The gate's checks are only atomic while the caller
+/// holds the thread's harness-session lock, which is also what Stop needs, so
+/// the two orders cannot interleave.
+#[derive(Debug, Default)]
+struct DispatchGate {
+    /// The person pressed Stop before this turn's prompt reached the harness.
+    stopped: AtomicBool,
+    /// `session.send` has been entered for this turn.
+    sending: AtomicBool,
+}
+
+impl DispatchGate {
+    /// Claims the turn for delivery. Returns `false` when Stop already won, in
+    /// which case the caller must not send the prompt.
+    fn claim(&self) -> bool {
+        if self.stopped.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.sending.store(true, Ordering::SeqCst);
+        true
+    }
+
+    /// Applies a Stop. Returns `true` when the stop wins because the prompt was
+    /// never dispatched, so the caller ends the turn without a cancel.
+    fn stop(&self) -> bool {
+        if self.sending.load(Ordering::SeqCst) {
+            return false;
+        }
+        self.stopped.store(true, Ordering::SeqCst);
+        true
+    }
 }
 
 /// The limit observation that keeps a thread in `Scheduled`.
@@ -426,6 +465,7 @@ impl ThreadRecord {
             meter: TurnMeter::new(_at),
             tools: HashMap::new(),
             last_tick: None,
+            dispatch: Arc::new(DispatchGate::default()),
         });
         self.last_turn_id = Some(turn_id.clone());
         (turn_id, item_id)
@@ -1011,8 +1051,9 @@ impl ThreadManager {
             // accept the text in the background so the connection can answer
             // other requests (snapshots, listings, settings) meanwhile.
             let this = Arc::clone(&self.inner);
+            let delivery_turn = turn_id.clone();
             tokio::spawn(async move {
-                this.deliver(handle, input).await;
+                this.deliver(handle, delivery_turn, input).await;
             });
         } else {
             drop(record);
@@ -1100,28 +1141,72 @@ impl ThreadManager {
     }
 
     /// Interrupts the running turn.
+    ///
+    /// A Stop that arrives before the prompt reached the harness ends the turn
+    /// without writing or cancelling anything: the background delivery then
+    /// finds the turn stopped and drops the prompt. Once the prompt is on the
+    /// wire, Stop waits for that write and cancels as usual.
     pub async fn interrupt(&self, thread_id: &ThreadId) -> Result<(), ManagerError> {
         let handle = self.inner.handle(thread_id).await?;
-        let session = {
+        let (session, turn_id, dispatch) = {
             let record = handle.lock().await;
-            if record.active.is_none() {
+            let Some(active) = record.active.as_ref() else {
                 return Err(ManagerError::Conflict(format!(
                     "thread {thread_id} has no running turn"
                 )));
-            }
-            record.session.clone()
+            };
+            (
+                record.session.clone(),
+                active.turn_id.clone(),
+                Arc::clone(&active.dispatch),
+            )
         };
         let Some(session) = session else {
             return Err(ManagerError::Conflict(format!(
                 "thread {thread_id} has no live harness session"
             )));
         };
-        session
-            .lock()
-            .await
-            .interrupt()
-            .await
-            .map_err(|error| ManagerError::Internal(error.to_string()))
+        {
+            // Holding the session lock orders this stop against `deliver`:
+            // either it runs before delivery claims the prompt, or it runs
+            // after the prompt has been written and cancellation is safe.
+            let mut session = session.lock().await;
+            if dispatch.stop() {
+                drop(session);
+                self.finish_stopped_turn(handle, turn_id).await;
+                return Ok(());
+            }
+            session
+                .interrupt()
+                .await
+                .map_err(|error| ManagerError::Internal(error.to_string()))
+        }
+    }
+
+    /// Ends a turn whose prompt was stopped before it reached the harness.
+    async fn finish_stopped_turn(&self, handle: ThreadHandle, turn_id: TurnId) {
+        let mut record = handle.lock().await;
+        if record.active.as_ref().map(|active| &active.turn_id) != Some(&turn_id) {
+            return;
+        }
+        let now = self.now();
+        record.active = None;
+        let domain = vec![ThreadEvent::TurnCompleted {
+            status: TurnStatus::Interrupted,
+            at: now,
+        }];
+        let wire = vec![Event::TurnCompleted {
+            thread_id: record.meta.thread_id.clone(),
+            turn_id,
+            usage: Usage::default(),
+            status: TurnStatus::Interrupted,
+            changes: None,
+        }];
+        if let Err(error) = self.inner.emit(&mut record, domain, wire).await {
+            tracing::error!(%error, "failed to record a stopped turn");
+        }
+        drop(record);
+        self.inner.advance_queue(handle).await;
     }
 
     /// Answers a pending approval or question.
@@ -1975,6 +2060,10 @@ impl Inner {
         if context_window.is_some() {
             record.context_window = context_window;
         }
+        let dispatch = record
+            .active
+            .as_ref()
+            .map(|active| Arc::clone(&active.dispatch));
         let inner = Arc::clone(self);
         let pump_handle = handle.clone();
         record.pump = Some(tokio::spawn(async move {
@@ -1984,8 +2073,14 @@ impl Inner {
 
         if let Some(input) = first_input {
             // The first prompt is written outside the record lock: a harness
-            // that takes a while to accept it must not stall the thread.
-            let sent = session.lock().await.send(input).await;
+            // that takes a while to accept it must not stall the thread. The
+            // session lock still gates a Stop against this write.
+            let mut session = session.lock().await;
+            if dispatch.as_ref().is_some_and(|dispatch| !dispatch.claim()) {
+                return;
+            }
+            let sent = session.send(input).await;
+            drop(session);
             if let Err(error) = sent {
                 let mut record = handle.lock().await;
                 let now = self.now();
@@ -2038,10 +2133,19 @@ impl Inner {
             .await;
     }
 
-    async fn deliver(self: &Arc<Self>, handle: ThreadHandle, input: UserInput) {
-        let session = {
+    async fn deliver(self: &Arc<Self>, handle: ThreadHandle, turn_id: TurnId, input: UserInput) {
+        let (session, dispatch) = {
             let record = handle.lock().await;
-            record.session.clone()
+            let dispatch = record
+                .active
+                .as_ref()
+                .filter(|active| active.turn_id == turn_id)
+                .map(|active| Arc::clone(&active.dispatch));
+            (record.session.clone(), dispatch)
+        };
+        let Some(dispatch) = dispatch else {
+            // The turn ended before its prompt was delivered.
+            return;
         };
         let Some(session) = session else {
             self.spawn_session(handle, Some(input));
@@ -2049,8 +2153,15 @@ impl Inner {
         };
         // The record lock is released before the write: a harness that takes
         // seconds to accept input must not stall snapshots or settings calls
-        // queued on the same connection.
-        let sent = session.lock().await.send(input).await;
+        // queued on the same connection. The session lock is held across the
+        // claim and the write so a Stop is ordered either before the prompt
+        // (and drops it) or after it is on the wire (where a cancel works).
+        let mut session = session.lock().await;
+        if !dispatch.claim() {
+            return;
+        }
+        let sent = session.send(input).await;
+        drop(session);
         if let Err(error) = sent {
             let mut record = handle.lock().await;
             let now = self.now();
@@ -2563,7 +2674,7 @@ impl Inner {
     }
 
     async fn advance_queue(self: &Arc<Self>, handle: ThreadHandle) {
-        let (input, needs_session) = {
+        let (turn_id, input, needs_session) = {
             let mut record = handle.lock().await;
             if record.closed || record.active.is_some() {
                 return;
@@ -2584,13 +2695,13 @@ impl Inner {
             ];
             let wire = vec![Event::TurnStarted {
                 thread_id: record.meta.thread_id.clone(),
-                turn_id,
+                turn_id: turn_id.clone(),
                 started_at: now,
             }];
             if let Err(error) = self.emit(&mut record, domain, wire).await {
                 tracing::error!(%error, "failed to start queued turn");
             }
-            (input, record.session.is_none())
+            (turn_id, input, record.session.is_none())
         };
 
         if needs_session {
@@ -2600,7 +2711,7 @@ impl Inner {
             // already recorded and its progress arrives as events.
             let this = Arc::clone(self);
             tokio::spawn(async move {
-                this.deliver(handle, input).await;
+                this.deliver(handle, turn_id, input).await;
             });
         }
     }
@@ -2879,7 +2990,7 @@ impl Inner {
             },
             Event::TurnStarted {
                 thread_id: record.meta.thread_id.clone(),
-                turn_id,
+                turn_id: turn_id.clone(),
                 started_at: now,
             },
         ];
@@ -2910,7 +3021,7 @@ impl Inner {
             // send must not hold the `ResumeNow` request open (ADR-003).
             let this = Arc::clone(self);
             tokio::spawn(async move {
-                this.deliver(handle, input).await;
+                this.deliver(handle, turn_id, input).await;
             });
         }
         Ok(fired)
@@ -3087,7 +3198,75 @@ fn expand_home(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use h4rn_harness::FakeHarness;
+
     use super::*;
+    use crate::harnesses::StaticHarnessCatalog;
+    use crate::journal::SqliteJournal;
+
+    async fn next_turn_status(events: &mut broadcast::Receiver<WireEvent>) -> TurnStatus {
+        loop {
+            let wire = events.recv().await.expect("event");
+            if let Event::TurnCompleted { status, .. } = wire.event {
+                return status;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_stop_before_dispatch_never_writes_the_prompt() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, sends) = FakeHarness::new().with_send_count();
+        let host = HostId::new("host_test");
+        let manager = ThreadManager::open(
+            Arc::new(SqliteJournal::in_memory().await.expect("journal")),
+            Arc::new(StaticHarnessCatalog::with(Arc::new(harness))),
+            host.clone(),
+            ThreadManagerOptions {
+                // The manager only reacts to this test's own calls.
+                tick_interval: Duration::from_secs(3600),
+                ..ThreadManagerOptions::default()
+            },
+            None,
+        )
+        .await
+        .expect("manager");
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(NewThread {
+                thread_id: None,
+                parent_thread_id: None,
+                subagent_id: None,
+                host,
+                harness: HarnessKind::ClaudeCode,
+                workspace_path: workspace.path().display().to_string(),
+                model: "fake-model".into(),
+                prompt: "first".into(),
+                attachments: Vec::new(),
+                runtime_mode: RuntimeMode::ApprovalRequired,
+                worktree: None,
+            })
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(sends.get(), 1, "the first prompt reached the harness");
+
+        // Record the turn, then Stop before the background delivery task has
+        // had a chance to run. Nothing may be written, and the turn ends
+        // interrupted instead of reporting a cancel the agent never saw.
+        manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        manager.interrupt(&created.thread_id).await.expect("stop");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Interrupted);
+
+        // Now let the queued delivery run: it must find the turn stopped.
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(sends.get(), 1, "the stopped prompt was never written");
+    }
 
     #[test]
     fn titles_come_from_the_first_prompt_line_or_workspace() {

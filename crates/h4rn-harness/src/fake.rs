@@ -34,6 +34,22 @@ pub struct FakeHarness {
     send_gate: Option<Gate>,
     /// A test-only latch before a write directive's file appears.
     write_gate: Option<Gate>,
+    /// A test-only count of prompts the session was asked to write.
+    send_count: Option<SendCount>,
+}
+
+/// A shared count of prompts a fake session was asked to write.
+///
+/// A test reads it to prove the daemon did (or did not) dispatch a prompt to
+/// the harness, without depending on event timing.
+#[derive(Clone, Debug, Default)]
+pub struct SendCount(Arc<AtomicUsize>);
+
+impl SendCount {
+    /// How many prompts have reached the fake session so far.
+    pub fn get(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
 }
 
 /// A latch a test releases when the daemon should be allowed to proceed.
@@ -112,6 +128,7 @@ impl Default for FakeHarness {
             send_delay: None,
             send_gate: None,
             write_gate: None,
+            send_count: None,
         }
     }
 }
@@ -179,6 +196,16 @@ impl FakeHarness {
         let gate = Gate::new();
         self.send_gate = Some(gate.clone());
         (self, gate)
+    }
+
+    /// Counts every prompt the daemon sends to the returned [`SendCount`].
+    ///
+    /// A test uses this to prove a turn was stopped before its prompt reached
+    /// the harness, independently of event timing.
+    pub fn with_send_count(mut self) -> (Self, SendCount) {
+        let count = SendCount::default();
+        self.send_count = Some(count.clone());
+        (self, count)
     }
 
     /// Holds a write directive's file write until the returned [`Gate`] is
@@ -251,6 +278,7 @@ impl Harness for FakeHarness {
             primed,
             delay,
             send_gate: self.send_gate.clone(),
+            send_count: self.send_count.clone(),
             has_answered: false,
             write_gate: self.write_gate.clone(),
             closed: false,
@@ -272,6 +300,8 @@ pub struct FakeSession {
     delay: Duration,
     /// A test-controlled latch on a turn's input.
     send_gate: Option<Gate>,
+    /// A shared count of prompts this session was asked to write.
+    send_count: Option<SendCount>,
     /// Whether this session has already answered one send, so the gate only
     /// holds later turns and not the one that creates the thread.
     has_answered: bool,
@@ -288,6 +318,10 @@ impl HarnessSession for FakeSession {
                 harness: self.kind,
                 message: "session is shut down".into(),
             });
+        }
+
+        if let Some(count) = &self.send_count {
+            count.0.fetch_add(1, Ordering::SeqCst);
         }
 
         // The first send starts the thread; a test gates later turns so a

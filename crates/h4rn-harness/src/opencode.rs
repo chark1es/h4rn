@@ -998,36 +998,48 @@ struct Utf8Stream {
 
 impl Utf8Stream {
     fn push(&mut self, bytes: &[u8]) -> String {
-        let mut buffer = std::mem::take(&mut self.pending);
-        buffer.extend_from_slice(bytes);
-        let mut text = String::new();
+        // Only the incomplete suffix of the previous chunk is carried over, so
+        // walking a chunk of invalid bytes never shifts the whole buffer.
+        self.pending.extend_from_slice(bytes);
+        let mut text = String::with_capacity(self.pending.len());
+        let mut cursor = 0;
         loop {
-            match std::str::from_utf8(&buffer) {
+            match std::str::from_utf8(&self.pending[cursor..]) {
                 Ok(complete) => {
                     text.push_str(complete);
-                    buffer.clear();
+                    cursor = self.pending.len();
                     break;
                 }
                 Err(error) => {
                     let valid = error.valid_up_to();
-                    if let Ok(prefix) = std::str::from_utf8(&buffer[..valid]) {
+                    if let Ok(prefix) = std::str::from_utf8(&self.pending[cursor..cursor + valid]) {
                         text.push_str(prefix);
                     }
+                    cursor += valid;
                     match error.error_len() {
                         Some(len) => {
                             text.push(char::REPLACEMENT_CHARACTER);
-                            buffer.drain(..valid + len);
+                            cursor += len;
                         }
-                        None => {
-                            buffer.drain(..valid);
-                            break;
-                        }
+                        None => break,
                     }
                 }
             }
         }
-        self.pending = buffer;
+        // Keep only the bytes that could start a sequence continued by the
+        // next chunk.
+        self.pending.drain(..cursor);
         text
+    }
+
+    /// Flushes the end of a stream: leftover partial bytes become one U+FFFD
+    /// instead of being dropped silently.
+    fn finish(&mut self) -> String {
+        if self.pending.is_empty() {
+            return String::new();
+        }
+        self.pending.clear();
+        String::from(char::REPLACEMENT_CHARACTER)
     }
 }
 
@@ -1057,25 +1069,11 @@ fn spawn_sse(
                     let mut stream = response.bytes_stream();
                     let mut buffer = String::new();
                     let mut decoder = Utf8Stream::default();
-                    'stream: while let Some(chunk) = stream.next().await {
-                        match chunk {
-                            Ok(bytes) => {
-                                buffer.push_str(&decoder.push(&bytes));
-                                while let Some(position) = buffer.find('\n') {
-                                    let line = buffer[..position].to_string();
-                                    buffer.drain(..=position);
-                                    let events = {
-                                        let mut parser = lock(&parser);
-                                        parser.push_line(&line)
-                                    };
-                                    for event in events {
-                                        if events_tx.send(event).await.is_err() {
-                                            break 'stream;
-                                        }
-                                    }
-                                }
-                            }
-                            Err(error) => {
+                    let mut finished = false;
+                    'stream: loop {
+                        let text = match stream.next().await {
+                            Some(Ok(bytes)) => decoder.push(&bytes),
+                            Some(Err(error)) => {
                                 if !shutting_down.load(Ordering::SeqCst) {
                                     let _ = events_tx
                                         .send(HarnessEvent::Error {
@@ -1086,7 +1084,26 @@ fn spawn_sse(
                                         })
                                         .await;
                                 }
-                                break;
+                                break 'stream;
+                            }
+                            None if !finished => {
+                                finished = true;
+                                decoder.finish()
+                            }
+                            None => break 'stream,
+                        };
+                        buffer.push_str(&text);
+                        while let Some(position) = buffer.find('\n') {
+                            let line = buffer[..position].to_string();
+                            buffer.drain(..=position);
+                            let events = {
+                                let mut parser = lock(&parser);
+                                parser.push_line(&line)
+                            };
+                            for event in events {
+                                if events_tx.send(event).await.is_err() {
+                                    break 'stream;
+                                }
                             }
                         }
                     }
@@ -1476,6 +1493,24 @@ mod tests {
             decoded.push_str(&decoder.push(&bytes[split..]));
             assert_eq!(decoded, text, "split at byte {split}");
         }
+    }
+
+    #[test]
+    fn utf8_stream_stays_linear_on_a_chunk_of_invalid_bytes() {
+        let mut stream = Utf8Stream::default();
+        let garbage = vec![0xFFu8; 512 * 1024];
+        let text = stream.push(&garbage);
+        assert_eq!(text.chars().count(), garbage.len());
+        assert!(text.chars().all(|ch| ch == char::REPLACEMENT_CHARACTER));
+        assert_eq!(stream.finish(), "", "nothing was left incomplete");
+    }
+
+    #[test]
+    fn utf8_stream_finishes_a_truncated_character() {
+        let mut stream = Utf8Stream::default();
+        assert_eq!(stream.push(b"ok\xE2\x82"), "ok");
+        assert_eq!(stream.finish(), "\u{FFFD}");
+        assert_eq!(stream.finish(), "", "finish is idempotent");
     }
 
     #[test]

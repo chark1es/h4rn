@@ -16,11 +16,13 @@ import {
   navigate,
   requestComposerFocus,
   retryThread,
+  sendMessage,
   setPanelTab,
   toggleTerminal,
   useApp,
 } from "@/lib/store/appStore";
-import type { ApprovalItem } from "@/lib/store/projection";
+import type { ApprovalItem, StreamTurn } from "@/lib/store/projection";
+import { turnPrompt } from "@/lib/turn";
 import { cn } from "@/lib/utils";
 import { ApprovalCard } from "./ApprovalCard";
 import { Composer } from "./Composer";
@@ -107,6 +109,19 @@ export function ThreadPane({ threadId }: { threadId: string }) {
     ensureThread(threadId);
     setApprovalSheetOpen(false);
   }, [threadId]);
+
+  // A stopped turn resent its own prompt; a failure or interruption has no
+  // single prompt to repeat, so Retry puts the cursor back in the composer.
+  const retryTurn = (turn: StreamTurn) => {
+    if (turn.status === "token_limit" || turn.status === "turn_limit") {
+      const prompt = turnPrompt(turn);
+      if (prompt) {
+        void sendMessage(threadId, prompt.text, prompt.attachments);
+        return;
+      }
+    }
+    requestComposerFocus();
+  };
 
   // The delegated row in the stream opens the right panel's Subagents tab on
   // desktop, or the sheet's Subagents segment on a phone.
@@ -347,7 +362,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
           summary={summary}
           turns={turns}
           pending={pending}
-          onRetry={requestComposerFocus}
+          onRetry={retryTurn}
           staleAt={offline ? lastSyncAt : null}
         />
       )}
