@@ -3,6 +3,26 @@
 All notable changes to h4rn are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses semantic versioning.
 
+## Unreleased
+
+### Fixed
+
+- **Characters split across streamed chunks arrive intact.** OpenCode's event stream and the MCP
+  hub's SSE client now carry an incomplete trailing UTF-8 sequence into the next chunk instead of
+  decoding each chunk alone, so an emoji or CJK character split between two chunks is no longer
+  replaced by `�`.
+- **An ACP cancel can no longer overtake the prompt it cancels.** `send` reports the turn as
+  running only after `session/prompt` has been flushed to the agent, so an immediate interrupt
+  sends `session/cancel` after the prompt.
+- **A turn stopped by `max_tokens` or `max_turn_requests` is no longer shown as completed.** The
+  turn footer says "Stopped: the agent hit its token limit" (or its turn-request limit) and offers
+  Retry; `end_turn` remains the only normal completion.
+- **A titleless `tool_call_update` keeps the tool's name and summary.** Updates are merged into the
+  call's last non-empty title, so a status-only update no longer empties the tool row.
+- **Text attachments in UTF-16 with a BOM are inlined.** The shared attachment reader decodes
+  UTF-8, UTF-16LE and UTF-16BE byte-order marks, so Antigravity and the other harnesses embed the
+  text instead of falling back to a link. Binary files still go as links.
+
 ## 1.0.1 — 2026-11-19
 
 A patch release for the clients and the relay: the post-1.0 UI fixes, project folders in the

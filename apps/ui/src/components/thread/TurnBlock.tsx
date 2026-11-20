@@ -11,6 +11,7 @@ import { glyphForAgentState } from "@/lib/agent";
 import { harnessLabel, harnessSeed } from "@/lib/entities";
 import { absoluteTime, countdown } from "@/lib/format";
 import type { DelegatedItem, MessageItem, StreamTurn, TurnItem } from "@/lib/store/projection";
+import { stoppedNotice } from "@/lib/turn";
 import { cn } from "@/lib/utils";
 import { Markdown } from "./Markdown";
 import { ToolCard } from "./ToolCard";
@@ -135,6 +136,7 @@ export function TurnBlock({
   const toolName = runningTool?.kind === "tool" ? runningTool.toolCall.name : undefined;
   const glyph = glyphForAgentState(summary.agent_state, toolName);
   const live = turn.status === "running" && summary.agent_state !== "awaiting_approval";
+  const stopped = stoppedNotice(turn.status);
   const failed = turn.status === "failed" || turn.status === "interrupted";
 
   if (isUserTurn) {
@@ -213,7 +215,16 @@ export function TurnBlock({
         </div>
       ) : null}
 
-      {failed ? (
+      {stopped !== null ? (
+        <div className={cn("q-live-line", "q-warn")}>
+          <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+          <span>{stopped} Nothing after this ran.</span>
+          <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onRetry}>
+            <RotateCcwIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+            Retry
+          </button>
+        </div>
+      ) : failed ? (
         <div className={cn("q-live-line", "q-danger")}>
           <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           <span>

@@ -188,7 +188,10 @@ impl ThreadState {
             Phase::AwaitingApproval => AgentState::AwaitingApproval,
             Phase::Completed { status } => match status {
                 TurnStatus::Completed => AgentState::Done,
-                TurnStatus::Failed | TurnStatus::Interrupted => AgentState::Error,
+                TurnStatus::Failed
+                | TurnStatus::Interrupted
+                | TurnStatus::TokenLimit
+                | TurnStatus::TurnLimit => AgentState::Error,
             },
             Phase::RateLimited => {
                 if self
@@ -268,12 +271,18 @@ impl ThreadState {
                 self.phase = Phase::Completed { status: *status };
                 self.agent_state = match status {
                     TurnStatus::Completed => AgentState::Done,
-                    TurnStatus::Failed | TurnStatus::Interrupted => AgentState::Error,
+                    TurnStatus::Failed
+                    | TurnStatus::Interrupted
+                    | TurnStatus::TokenLimit
+                    | TurnStatus::TurnLimit => AgentState::Error,
                 };
                 self.acknowledged = false;
                 self.pending_approval = false;
                 self.pending_question = false;
-                self.pending_failure = *status == TurnStatus::Failed;
+                self.pending_failure = matches!(
+                    status,
+                    TurnStatus::Failed | TurnStatus::TokenLimit | TurnStatus::TurnLimit
+                );
                 self.last_turn_completed_at = Some(*at);
                 self.last_turn_status = Some(*status);
                 self.last_activity = *at;

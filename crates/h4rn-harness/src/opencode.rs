@@ -987,6 +987,50 @@ fn spawn_stderr_reader(
     })
 }
 
+/// Decodes streamed bytes without turning a split UTF-8 sequence into U+FFFD.
+///
+/// Chunks end at arbitrary byte boundaries; an incomplete trailing sequence is
+/// carried into the next chunk, while genuinely invalid bytes decode lossily.
+#[derive(Default)]
+struct Utf8Stream {
+    pending: Vec<u8>,
+}
+
+impl Utf8Stream {
+    fn push(&mut self, bytes: &[u8]) -> String {
+        let mut buffer = std::mem::take(&mut self.pending);
+        buffer.extend_from_slice(bytes);
+        let mut text = String::new();
+        loop {
+            match std::str::from_utf8(&buffer) {
+                Ok(complete) => {
+                    text.push_str(complete);
+                    buffer.clear();
+                    break;
+                }
+                Err(error) => {
+                    let valid = error.valid_up_to();
+                    if let Ok(prefix) = std::str::from_utf8(&buffer[..valid]) {
+                        text.push_str(prefix);
+                    }
+                    match error.error_len() {
+                        Some(len) => {
+                            text.push(char::REPLACEMENT_CHARACTER);
+                            buffer.drain(..valid + len);
+                        }
+                        None => {
+                            buffer.drain(..valid);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        self.pending = buffer;
+        text
+    }
+}
+
 fn spawn_sse(
     http: reqwest::Client,
     base_url: String,
@@ -1012,10 +1056,11 @@ fn spawn_sse(
                 Ok(response) if response.status().is_success() => {
                     let mut stream = response.bytes_stream();
                     let mut buffer = String::new();
+                    let mut decoder = Utf8Stream::default();
                     'stream: while let Some(chunk) = stream.next().await {
                         match chunk {
                             Ok(bytes) => {
-                                buffer.push_str(&String::from_utf8_lossy(&bytes));
+                                buffer.push_str(&decoder.push(&bytes));
                                 while let Some(position) = buffer.find('\n') {
                                     let line = buffer[..position].to_string();
                                     buffer.drain(..=position);
@@ -1419,6 +1464,18 @@ mod tests {
         assert_eq!(parse_version("\n\n"), None);
         assert_eq!(parse_semver("2.2.7"), Some((2, 2, 7)));
         assert!(parse_semver("2.1.0") < parse_semver("2.2.6"));
+    }
+
+    #[test]
+    fn streamed_utf8_survives_every_split_boundary() {
+        let text = "a🚀日本z";
+        let bytes = text.as_bytes();
+        for split in 0..=bytes.len() {
+            let mut decoder = Utf8Stream::default();
+            let mut decoded = decoder.push(&bytes[..split]);
+            decoded.push_str(&decoder.push(&bytes[split..]));
+            assert_eq!(decoded, text, "split at byte {split}");
+        }
     }
 
     #[test]

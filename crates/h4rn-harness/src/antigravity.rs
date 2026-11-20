@@ -586,6 +586,7 @@ impl HarnessSession for AcpSession {
         {
             let mut shared = lock(&self.shared);
             shared.turn_text.clear();
+            shared.tool_labels.clear();
             shared.state = AgentState::Thinking;
         }
 
@@ -597,8 +598,18 @@ impl HarnessSession for AcpSession {
         let interrupt_requested = self.interrupt_requested.clone();
         let started = Instant::now();
 
+        // Wait until `session/prompt` is on the agent's stdin before returning:
+        // an interrupt after this point can safely be sent as a cancel.
+        let pending = match client.start_prompt(&session_id, &content).await {
+            Ok(pending) => pending,
+            Err(error) => {
+                self.prompt_running.store(false, Ordering::SeqCst);
+                return Err(map_acp_error(error));
+            }
+        };
+
         self.prompt_task = Some(tokio::spawn(async move {
-            let result = client.prompt(&session_id, &content).await;
+            let result = pending.wait().await;
             let duration_ms = millis(started.elapsed());
             prompt_running.store(false, Ordering::SeqCst);
             match result {
@@ -612,6 +623,10 @@ impl HarnessSession for AcpSession {
                         TurnStatus::Interrupted
                     } else if prompt.completed() {
                         TurnStatus::Completed
+                    } else if prompt.token_limited() {
+                        TurnStatus::TokenLimit
+                    } else if prompt.turn_limited() {
+                        TurnStatus::TurnLimit
                     } else {
                         TurnStatus::Failed
                     };
@@ -726,6 +741,8 @@ impl HarnessSession for AcpSession {
             });
         }
         self.interrupt_requested.store(true, Ordering::SeqCst);
+        // `send` only returns once `session/prompt` was flushed, so a running
+        // prompt is always on the wire by the time a cancel can reach here.
         if self.prompt_running.load(Ordering::SeqCst) {
             self.client
                 .cancel(&self.session_id)
@@ -847,9 +864,16 @@ struct AcpShared {
     state: AgentState,
     touched: Vec<String>,
     tool_started: HashMap<String, DateTime<Utc>>,
+    tool_labels: HashMap<String, ToolLabel>,
     pending: HashMap<String, PendingApproval>,
     turn_text: String,
     last_turn: Option<TurnReport>,
+}
+
+#[derive(Debug, Default)]
+struct ToolLabel {
+    name: String,
+    summary: String,
 }
 
 impl AcpShared {
@@ -858,6 +882,7 @@ impl AcpShared {
             state: AgentState::Idle,
             touched: Vec::new(),
             tool_started: HashMap::new(),
+            tool_labels: HashMap::new(),
             pending: HashMap::new(),
             turn_text: String::new(),
             last_turn: None,
@@ -978,7 +1003,9 @@ fn approval_kind(request: &AcpPermissionRequest) -> ApprovalKind {
     let Some(call) = &request.tool_call else {
         return ApprovalKind::Permission;
     };
-    let name = tool_name(call).to_ascii_lowercase();
+    let name = tool_name(call)
+        .unwrap_or_else(|| call.kind.label().to_string())
+        .to_ascii_lowercase();
     if name.contains("ask_question") {
         return ApprovalKind::Question;
     }
@@ -993,7 +1020,7 @@ fn approval_prompt(request: &AcpPermissionRequest) -> String {
     let Some(call) = &request.tool_call else {
         return "Antigravity is requesting permission".into();
     };
-    let name = tool_name(call);
+    let name = tool_name(call).unwrap_or_else(|| call.kind.label().to_string());
     let summary = call.summary();
     if summary.is_empty() {
         format!("Allow `{name}`?")
@@ -1090,28 +1117,54 @@ fn remember_turn_text(shared: &Arc<Mutex<AcpShared>>, text: &str) {
 
 fn tool_event(call: &AcpToolCall, shared: &Arc<Mutex<AcpShared>>) -> HarnessEvent {
     let tool_call_id = call.tool_call_id.clone();
-    let name = tool_name(call);
     let summary = call.summary();
     let input = call.raw_input.clone();
     let output = call.output_preview();
     let status = tool_status(&call.status);
+    let finished = matches!(
+        call.status,
+        AcpToolStatus::Completed | AcpToolStatus::Failed | AcpToolStatus::Cancelled
+    );
     let mut shared = lock(shared);
+    // `tool_call_update` often carries only a status or output; keep the last
+    // title and summary the agent sent so an update never empties the row.
+    let label = shared.tool_labels.entry(tool_call_id.clone()).or_default();
+    if let Some(name) = call
+        .raw
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+    {
+        label.name = name.to_string();
+    } else if label.name.is_empty() {
+        if let Some(title) = call.title.as_deref().filter(|title| !title.is_empty()) {
+            label.name = title.to_string();
+        }
+    }
+    if !summary.is_empty() {
+        label.summary = summary;
+    }
+    let name = if label.name.is_empty() {
+        call.kind.label().to_string()
+    } else {
+        label.name.clone()
+    };
+    let summary = label.summary.clone();
     let started_at = shared
         .tool_started
         .entry(tool_call_id.clone())
         .or_insert_with(Utc::now)
         .to_owned();
-    let completed_at = matches!(
-        call.status,
-        AcpToolStatus::Completed | AcpToolStatus::Failed | AcpToolStatus::Cancelled
-    )
-    .then(Utc::now);
-    if is_mutating(call) {
+    let completed_at = finished.then(Utc::now);
+    if is_mutating(call, &name) {
         for path in call.paths() {
             if shared.touched.len() < TOUCHED_PATH_LIMIT && !shared.touched.contains(&path) {
                 shared.touched.push(path);
             }
         }
+    }
+    if finished {
+        shared.tool_labels.remove(&tool_call_id);
     }
     shared.state = tool_state(&call.kind, &status);
     HarnessEvent::ToolCall {
@@ -1129,21 +1182,20 @@ fn tool_event(call: &AcpToolCall, shared: &Arc<Mutex<AcpShared>>) -> HarnessEven
     }
 }
 
-fn tool_name(call: &AcpToolCall) -> String {
+fn tool_name(call: &AcpToolCall) -> Option<String> {
     call.raw
         .get("name")
         .and_then(Value::as_str)
         .filter(|name| !name.is_empty())
         .map(str::to_string)
         .or_else(|| call.title.clone().filter(|title| !title.is_empty()))
-        .unwrap_or_else(|| call.kind.label().to_string())
 }
 
-fn is_mutating(call: &AcpToolCall) -> bool {
+fn is_mutating(call: &AcpToolCall, name: &str) -> bool {
     if matches!(call.kind, AcpToolKind::Edit) {
         return true;
     }
-    let name = tool_name(call).to_ascii_lowercase();
+    let name = name.to_ascii_lowercase();
     matches!(
         name.as_str(),
         "write_to_file"
@@ -1187,7 +1239,7 @@ fn turn_state(status: TurnStatus, limited: bool) -> AgentState {
     }
     match status {
         TurnStatus::Completed => AgentState::Done,
-        TurnStatus::Failed => AgentState::Error,
+        TurnStatus::Failed | TurnStatus::TokenLimit | TurnStatus::TurnLimit => AgentState::Error,
         TurnStatus::Interrupted => AgentState::Idle,
     }
 }
@@ -1256,7 +1308,7 @@ fn build_prompt(
             && std::fs::metadata(&attachment.path)
                 .map(|metadata| metadata.len() <= MAX_TEXT_RESOURCE_BYTES)
                 .unwrap_or(false)
-            && let Ok(body) = std::fs::read_to_string(&attachment.path)
+            && let Some(body) = attachments::read_text(&attachment.path)
         {
             content.push(PromptContent::resource_text(
                 file_uri(&attachment.path),
@@ -1327,6 +1379,8 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
     use super::*;
     use h4rn_protocol::ApprovalDecision;
     use serde_json::json;
@@ -1337,6 +1391,48 @@ mod tests {
             path: path.to_path_buf(),
             media_type: media_type.to_string(),
         }
+    }
+
+    fn acp_pair(
+        workspace: &Path,
+    ) -> (
+        AcpClient,
+        BufReader<tokio::io::DuplexStream>,
+        tokio::io::DuplexStream,
+    ) {
+        let (client_write, agent_read) = tokio::io::duplex(64 * 1024);
+        let (agent_write, client_read) = tokio::io::duplex(64 * 1024);
+        let client = AcpClient::start_for_test(
+            AcpClientConfig::new("/usr/local/bin/fake-acp", workspace),
+            client_read,
+            client_write,
+        );
+        (client, BufReader::new(agent_read), agent_write)
+    }
+
+    fn acp_spec(workspace: &Path) -> SessionSpec {
+        SessionSpec {
+            workspace: workspace.to_path_buf(),
+            model: "default".into(),
+            runtime_mode: RuntimeMode::ApprovalRequired,
+            resume_id: None,
+            mcp_endpoint: None,
+            env_overrides: std::collections::BTreeMap::new(),
+            attachments: Vec::new(),
+        }
+    }
+
+    async fn next_frame(reader: &mut BufReader<tokio::io::DuplexStream>) -> Value {
+        let mut line = String::new();
+        reader.read_line(&mut line).await.expect("read a frame");
+        serde_json::from_str(line.trim()).expect("valid json")
+    }
+
+    async fn send_frame(writer: &mut tokio::io::DuplexStream, frame: Value) {
+        let mut bytes = serde_json::to_vec(&frame).expect("encode");
+        bytes.push(b'\n');
+        writer.write_all(&bytes).await.expect("write");
+        writer.flush().await.expect("flush");
     }
 
     #[test]
@@ -1387,6 +1483,30 @@ mod tests {
             &content[1],
             PromptContent::Resource { text: Some(body), .. } if body == "# Notes\n"
         ));
+    }
+
+    #[test]
+    fn prompt_building_embeds_utf16_text_attachments() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let path = workspace.path().join("notes.txt");
+        let mut encoded = vec![0xFF, 0xFE];
+        for unit in "Über notes\n".encode_utf16() {
+            encoded.extend_from_slice(&unit.to_le_bytes());
+        }
+        std::fs::write(&path, encoded).expect("write");
+        let capabilities = AgentCapabilities {
+            embedded_context: true,
+            ..AgentCapabilities::default()
+        };
+        let content =
+            build_prompt("", &[attachment(&path, "text/plain")], &capabilities).expect("prompt");
+        assert!(
+            matches!(
+                &content[0],
+                PromptContent::Resource { text: Some(body), .. } if body == "Über notes\n"
+            ),
+            "the UTF-16 body must be embedded, got {content:?}"
+        );
     }
 
     #[test]
@@ -1458,5 +1578,144 @@ mod tests {
         }
         assert_eq!(lock(&shared).touched, vec!["/w/src/lib.rs"]);
         assert_eq!(lock(&shared).state, AgentState::Editing);
+    }
+
+    async fn handshake(
+        reader: &mut BufReader<tokio::io::DuplexStream>,
+        writer: &mut tokio::io::DuplexStream,
+    ) {
+        let initialize = next_frame(reader).await;
+        assert_eq!(initialize["method"], "initialize");
+        send_frame(
+            writer,
+            json!({"jsonrpc": "2.0", "id": initialize["id"], "result": {"protocolVersion": 1}}),
+        )
+        .await;
+
+        let new_session = next_frame(reader).await;
+        assert_eq!(new_session["method"], "session/new");
+        send_frame(
+            writer,
+            json!({"jsonrpc": "2.0", "id": new_session["id"], "result": {"sessionId": "s-1"}}),
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn interrupt_cancels_only_after_the_prompt_is_on_the_wire() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            handshake(&mut reader, &mut writer).await;
+            let prompt = next_frame(&mut reader).await;
+            assert_eq!(prompt["method"], "session/prompt");
+            let cancel = next_frame(&mut reader).await;
+            assert_eq!(cancel["method"], "session/cancel");
+            send_frame(
+                &mut writer,
+                json!({"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "cancelled"}}),
+            )
+            .await;
+        });
+
+        let mut session = AcpSession::start_with(&client, &acp_spec(workspace.path()))
+            .await
+            .expect("start session");
+        session
+            .send(UserInput {
+                text: "hello".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect("send");
+        session.interrupt().await.expect("interrupt");
+
+        agent.await.expect("agent");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_token_limited_turn_is_not_reported_as_completed() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            handshake(&mut reader, &mut writer).await;
+            let prompt = next_frame(&mut reader).await;
+            assert_eq!(prompt["method"], "session/prompt");
+            send_frame(
+                &mut writer,
+                json!({"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "max_tokens"}}),
+            )
+            .await;
+        });
+
+        let mut session = AcpSession::start_with(&client, &acp_spec(workspace.path()))
+            .await
+            .expect("start session");
+        let mut events = session.events();
+        session
+            .send(UserInput {
+                text: "hello".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect("send");
+
+        let status = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = events.next().await {
+                if let HarnessEvent::TurnCompleted { status, .. } = event {
+                    return status;
+                }
+            }
+            panic!("the event stream ended before the turn completed");
+        })
+        .await
+        .expect("timed out waiting for the turn");
+        assert_eq!(status, TurnStatus::TokenLimit);
+        assert_eq!(
+            session
+                .last_turn()
+                .expect("a turn report")
+                .stop_reason
+                .as_deref(),
+            Some("max_tokens")
+        );
+
+        agent.await.expect("agent");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    #[test]
+    fn titleless_tool_updates_keep_the_earlier_name_and_summary() {
+        let shared = Arc::new(Mutex::new(AcpShared::new()));
+        let started = AcpToolCall::from_value(&json!({
+            "toolCallId": "call-1",
+            "name": "read_file",
+            "kind": "read",
+            "status": "in_progress",
+            "title": "Read package.json",
+            "locations": [{"path": "/w/package.json"}]
+        }));
+        let HarnessEvent::ToolCall { tool_call } = tool_event(&started, &shared) else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(tool_call.name, "read_file");
+        assert_eq!(tool_call.summary, "Read package.json");
+
+        let update = AcpToolCall::from_value(&json!({
+            "toolCallId": "call-1",
+            "kind": "read",
+            "status": "completed",
+            "rawOutput": "{\"name\":\"h4rn\"}"
+        }));
+        let HarnessEvent::ToolCall { tool_call } = tool_event(&update, &shared) else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(tool_call.name, "read_file");
+        assert_eq!(tool_call.summary, "Read package.json");
+        assert!(tool_call.output.is_some());
+        assert!(lock(&shared).tool_labels.is_empty(), "the id is forgotten");
     }
 }

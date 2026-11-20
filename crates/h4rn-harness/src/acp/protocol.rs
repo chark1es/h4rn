@@ -1016,16 +1016,27 @@ impl AcpPromptResult {
     }
 
     /// Whether the turn ended normally.
+    ///
+    /// Only `end_turn` is a normal completion. `max_tokens` and
+    /// `max_turn_requests` ended the turn early and are reported separately so
+    /// the UI never shows a truncated reply as a completed one.
     pub fn completed(&self) -> bool {
-        matches!(
-            self.stop_reason.as_str(),
-            "end_turn" | "max_tokens" | "max_turn_requests"
-        )
+        self.stop_reason == "end_turn"
     }
 
     /// Whether the user cancelled the turn.
     pub fn cancelled(&self) -> bool {
         self.stop_reason == "cancelled"
+    }
+
+    /// Whether the reply hit the output token limit.
+    pub fn token_limited(&self) -> bool {
+        self.stop_reason == "max_tokens"
+    }
+
+    /// Whether the turn hit its request limit.
+    pub fn turn_limited(&self) -> bool {
+        self.stop_reason == "max_turn_requests"
     }
 }
 
@@ -1311,6 +1322,27 @@ mod tests {
         let link = PromptContent::resource_link("file:///a.bin", "a.bin", None, Some(3)).to_json();
         assert_eq!(link["type"], "resource_link");
         assert_eq!(link["size"], 3);
+    }
+
+    #[test]
+    fn only_end_turn_is_a_normal_completion() {
+        let end = AcpPromptResult::from_value(&json!({"stopReason": "end_turn"}));
+        assert!(end.completed());
+        assert!(!end.token_limited());
+        assert!(!end.turn_limited());
+
+        let tokens = AcpPromptResult::from_value(&json!({"stopReason": "max_tokens"}));
+        assert!(!tokens.completed());
+        assert!(tokens.token_limited());
+
+        let requests = AcpPromptResult::from_value(&json!({"stopReason": "max_turn_requests"}));
+        assert!(!requests.completed());
+        assert!(requests.turn_limited());
+
+        let refused = AcpPromptResult::from_value(&json!({"stopReason": "refusal"}));
+        assert!(!refused.completed());
+        assert!(!refused.cancelled());
+        assert!(!refused.token_limited());
     }
 
     #[test]

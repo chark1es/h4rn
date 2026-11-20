@@ -173,7 +173,9 @@ each harness to the matrix T3 gets right:
 prompt path line is added for every attachment on every harness — `[Attached image "x.png" is
 saved at: /abs/path]` — so a model can always fall back to reading the file when a native block
 was not negotiated. Phase 2 keeps PDFs on that fallback; native document blocks land with the
-per-harness capability work.
+per-harness capability work. Text that is inlined is read through the same module: UTF-8,
+UTF-16LE and UTF-16BE byte-order marks are decoded (a UTF-8 BOM is stripped), and bytes that are
+not text in those encodings stay a path reference rather than becoming replacement characters.
 
 ## ADR-009: Multipath transport with a path-agnostic session layer
 
@@ -483,6 +485,14 @@ request). The UI does not offer rewind or in-session compaction, both of which `
 ACP, and any clean-tree or diff check allow-lists the empty `.gemini/skills` and `.agents/skills`
 directories it creates at session start. The tradeoff is a deliberately smaller feature set for
 this harness than for Claude/Codex, which is preferable to buttons that silently do nothing.
+
+**Addendum: ACP normalization that the UI can trust.** `session/prompt` is only reported as
+written once the client has flushed the frame to the agent's stdin; an interrupt therefore always
+sends `session/cancel` after the prompt it cancels. Stop reasons are not flattened: only
+`end_turn` is a normal completion, `max_tokens` and `max_turn_requests` end the turn as a visible
+early stop, `cancelled` is an interrupt, and a refusal or an unknown reason is a failure.
+`tool_call_update` is merged into the tool row's last non-empty title and summary, so a status-only
+update never renames a tool, and the id is forgotten once the call finishes.
 
 ## ADR-027: Push notifications are metadata-only wake signals
 

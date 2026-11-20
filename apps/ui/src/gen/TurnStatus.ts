@@ -3,4 +3,4 @@
 /**
  * How a turn finished.
  */
-export type TurnStatus = "completed" | "failed" | "interrupted";
+export type TurnStatus = "completed" | "failed" | "interrupted" | "token_limit" | "turn_limit";

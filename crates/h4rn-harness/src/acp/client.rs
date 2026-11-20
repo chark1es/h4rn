@@ -219,12 +219,41 @@ pub enum AcpEvent {
 
 type PendingMap = Mutex<HashMap<String, oneshot::Sender<Result<Value, AcpError>>>>;
 
+struct OutgoingFrame {
+    frame: Value,
+    /// Signalled once the writer has flushed the frame to the agent.
+    written: Option<oneshot::Sender<()>>,
+}
+
+struct StartedCall {
+    method: String,
+    key: String,
+    receiver: oneshot::Receiver<Result<Value, AcpError>>,
+    shared: Arc<Shared>,
+}
+
+/// A `session/prompt` request that is on the wire and awaiting the agent.
+///
+/// The reply only resolves when the writer has flushed the frame, so a caller
+/// that starts a cancel afterwards can never beat the prompt it cancels.
+pub struct PendingPrompt {
+    started: StartedCall,
+}
+
+impl PendingPrompt {
+    /// Waits for the turn result.
+    pub async fn wait(self) -> Result<AcpPromptResult, AcpError> {
+        let value = self.started.wait(None).await?;
+        Ok(AcpPromptResult::from_value(&value))
+    }
+}
+
 struct Shared {
     config: AcpClientConfig,
     workspace: PathBuf,
     next_id: AtomicU64,
     pending: PendingMap,
-    stdin_tx: Mutex<Option<mpsc::Sender<Value>>>,
+    stdin_tx: Mutex<Option<mpsc::Sender<OutgoingFrame>>>,
     events_tx: mpsc::Sender<AcpEvent>,
     events_rx: Mutex<Option<mpsc::Receiver<AcpEvent>>>,
     server: Mutex<Option<AcpServerInfo>>,
@@ -369,6 +398,17 @@ impl AcpClient {
         Self { shared }
     }
 
+    /// Builds a client over a test's pipe pair without spawning a process.
+    #[cfg(test)]
+    pub(crate) fn start_for_test<R, W>(config: AcpClientConfig, stdout: R, stdin: W) -> Self
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        let workspace = config.workspace.clone();
+        Self::start(config, workspace, stdout, stdin, None, StderrRing::new())
+    }
+
     /// Performs the `initialize` handshake and returns the agent's reply.
     pub async fn initialize(&self) -> Result<AcpServerInfo, AcpError> {
         let params = json!({
@@ -456,12 +496,25 @@ impl AcpClient {
         session_id: &str,
         content: &[PromptContent],
     ) -> Result<AcpPromptResult, AcpError> {
+        self.start_prompt(session_id, content).await?.wait().await
+    }
+
+    /// Writes one prompt and returns a handle that waits for the turn result.
+    ///
+    /// This function only resolves after the agent's stdin has flushed the
+    /// `session/prompt` frame, which is what makes a later
+    /// [`cancel`](Self::cancel) ordered after the prompt it cancels.
+    pub async fn start_prompt(
+        &self,
+        session_id: &str,
+        content: &[PromptContent],
+    ) -> Result<PendingPrompt, AcpError> {
         let params = json!({
             "sessionId": session_id,
             "prompt": content.iter().map(PromptContent::to_json).collect::<Vec<_>>(),
         });
-        let result = self.call("session/prompt", params, None).await?;
-        Ok(AcpPromptResult::from_value(&result))
+        let started = self.begin_call("session/prompt", params, true).await?;
+        Ok(PendingPrompt { started })
     }
 
     /// Asks the agent to cancel the running turn (`session/cancel`).
@@ -617,6 +670,20 @@ impl AcpClient {
         params: Value,
         timeout: Option<Duration>,
     ) -> Result<Value, AcpError> {
+        let started = self.begin_call(method, params, false).await?;
+        started.wait(timeout).await
+    }
+
+    /// Registers a request and hands it to the writer.
+    ///
+    /// When `track_write` is set, this does not return until the writer has
+    /// flushed the frame to the agent.
+    async fn begin_call(
+        &self,
+        method: &str,
+        params: Value,
+        track_write: bool,
+    ) -> Result<StartedCall, AcpError> {
         if self.is_closed() {
             return Err(AcpError::Closed {
                 message: "the ACP client is shut down".into(),
@@ -633,42 +700,91 @@ impl AcpClient {
             "method": method,
             "params": params,
         });
-        if let Err(error) = self.send_frame(frame).await {
+        let written = if track_write {
+            let (written_tx, written_rx) = oneshot::channel();
+            if let Err(error) = self.send_frame_tracked(frame, written_tx).await {
+                lock(&self.shared.pending).remove(&key);
+                return Err(error);
+            }
+            Some(written_rx)
+        } else {
+            if let Err(error) = self.send_frame(frame).await {
+                lock(&self.shared.pending).remove(&key);
+                return Err(error);
+            }
+            None
+        };
+        if let Some(written) = written
+            && written.await.is_err()
+        {
             lock(&self.shared.pending).remove(&key);
-            return Err(error);
+            return Err(AcpError::Closed {
+                message: "the ACP writer exited before the request was written".into(),
+            });
         }
 
-        let outcome = match timeout {
-            Some(timeout) => match tokio::time::timeout(timeout, receiver).await {
-                Ok(outcome) => outcome,
-                Err(_) => {
-                    lock(&self.shared.pending).remove(&key);
-                    return Err(AcpError::Timeout {
-                        method: method.to_string(),
-                        seconds: timeout.as_secs(),
-                    });
-                }
-            },
-            None => receiver.await,
-        };
-        match outcome {
-            Ok(result) => result,
-            Err(_) => Err(AcpError::Cancelled {
-                method: method.to_string(),
-            }),
-        }
+        Ok(StartedCall {
+            method: method.to_string(),
+            key,
+            receiver,
+            shared: self.shared.clone(),
+        })
     }
 
     async fn send_frame(&self, frame: Value) -> Result<(), AcpError> {
+        self.send_outgoing(OutgoingFrame {
+            frame,
+            written: None,
+        })
+        .await
+    }
+
+    async fn send_frame_tracked(
+        &self,
+        frame: Value,
+        written: oneshot::Sender<()>,
+    ) -> Result<(), AcpError> {
+        self.send_outgoing(OutgoingFrame {
+            frame,
+            written: Some(written),
+        })
+        .await
+    }
+
+    async fn send_outgoing(&self, outgoing: OutgoingFrame) -> Result<(), AcpError> {
         let sender = lock(&self.shared.stdin_tx).clone();
         let Some(sender) = sender else {
             return Err(AcpError::Closed {
                 message: "the ACP agent stdin is closed".into(),
             });
         };
-        sender.send(frame).await.map_err(|_| AcpError::Closed {
+        sender.send(outgoing).await.map_err(|_| AcpError::Closed {
             message: "the ACP writer task has exited".into(),
         })
+    }
+}
+
+impl StartedCall {
+    async fn wait(self, timeout: Option<Duration>) -> Result<Value, AcpError> {
+        let outcome = match timeout {
+            Some(timeout) => match tokio::time::timeout(timeout, self.receiver).await {
+                Ok(outcome) => outcome,
+                Err(_) => {
+                    lock(&self.shared.pending).remove(&self.key);
+                    return Err(AcpError::Timeout {
+                        method: self.method,
+                        seconds: timeout.as_secs(),
+                    });
+                }
+            },
+            None => self.receiver.await,
+        };
+        match outcome {
+            Ok(result) => result,
+            Err(_) => Err(AcpError::Cancelled {
+                method: self.method,
+            }),
+        }
     }
 }
 
@@ -682,14 +798,15 @@ impl Drop for AcpClient {
 
 fn spawn_writer<W>(
     mut stdin: W,
-    mut frames: mpsc::Receiver<Value>,
+    mut frames: mpsc::Receiver<OutgoingFrame>,
     shared: Arc<Shared>,
 ) -> tokio::task::JoinHandle<()>
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
-        while let Some(frame) = frames.recv().await {
+        while let Some(outgoing) = frames.recv().await {
+            let OutgoingFrame { frame, written } = outgoing;
             let mut bytes = match serde_json::to_vec(&frame) {
                 Ok(bytes) => bytes,
                 Err(error) => {
@@ -723,6 +840,9 @@ where
                     })
                     .await;
                 break;
+            }
+            if let Some(written) = written {
+                let _ = written.send(());
             }
         }
         // Dropping `stdin` sends EOF.
@@ -905,9 +1025,15 @@ async fn send_from_reader(shared: &Arc<Shared>, frame: Value) -> Result<(), AcpE
             message: "the ACP agent stdin is closed".into(),
         });
     };
-    sender.send(frame).await.map_err(|_| AcpError::Closed {
-        message: "the ACP writer task has exited".into(),
-    })
+    sender
+        .send(OutgoingFrame {
+            frame,
+            written: None,
+        })
+        .await
+        .map_err(|_| AcpError::Closed {
+            message: "the ACP writer task has exited".into(),
+        })
 }
 
 fn resolve_response(shared: &Arc<Shared>, id: Value, frame: &Value) {
@@ -1357,6 +1483,32 @@ mod tests {
             other => panic!("unexpected event {other:?}"),
         }
 
+        client.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn a_prompt_started_before_a_cancel_reaches_the_agent_first() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut agent) = fake_pair(config(workspace.path()));
+        let agent_task = tokio::spawn(async move {
+            let prompt = agent.next().await;
+            assert_eq!(prompt["method"], "session/prompt");
+            let cancel = agent.next().await;
+            assert_eq!(cancel["method"], "session/cancel");
+            agent
+                .reply(prompt["id"].clone(), json!({"stopReason": "cancelled"}))
+                .await;
+        });
+
+        let pending = client
+            .start_prompt("s-1", &[PromptContent::text("ping")])
+            .await
+            .expect("the prompt is flushed before this returns");
+        client.cancel("s-1").await.expect("cancel");
+        let result = pending.wait().await.expect("prompt result");
+        assert!(result.cancelled());
+
+        agent_task.await.expect("agent");
         client.shutdown().await.expect("shutdown");
     }
 

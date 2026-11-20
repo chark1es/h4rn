@@ -139,6 +139,10 @@ pub enum TurnStatus {
     Failed,
     /// The user or daemon interrupted the turn.
     Interrupted,
+    /// The agent stopped because its reply hit the output token limit.
+    TokenLimit,
+    /// The agent stopped because it hit its request limit for this turn.
+    TurnLimit,
 }
 
 /// Lifecycle state of one tool call.
