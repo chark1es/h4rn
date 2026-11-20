@@ -50,7 +50,7 @@ function subline(row: TrackedWorktree): string {
 /** What removing one row does, worded for a checkout that is there or gone. */
 function removeDescription(row: TrackedWorktree): string {
   const base = row.exists
-    ? `The checkout at ${row.path} is deleted from disk.${
+    ? `The checkout at ${row.path} is deleted from disk. Ignored files such as build output are deleted with it.${
         row.owned && row.branch ? ` The ${row.branch} branch h4rn created is deleted too.` : ""
       }`
     : row.owned && row.branch

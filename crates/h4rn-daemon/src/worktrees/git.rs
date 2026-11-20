@@ -16,6 +16,13 @@ use serde_json::Value;
 /// How often a bounded git call checks whether its child has exited.
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
+/// Deadline for every git call the observation watcher makes.
+///
+/// Observation runs on the same loop as every thread's events, so one wedged
+/// repository must not stall it: a call that outlives this is killed and that
+/// event's work dropped.
+pub const OBSERVATION_GIT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Keys whose string values are whole paths (they may contain spaces).
 const PATH_KEYS: &[&str] = &[
     "cwd",
@@ -50,6 +57,10 @@ pub struct Registration {
     pub path: PathBuf,
     /// Checked-out branch by short name; `None` for a detached HEAD.
     pub branch: Option<String>,
+    /// The commit the registration's `HEAD` names.
+    pub head: Option<String>,
+    /// The registration's `HEAD` is detached.
+    pub detached: bool,
     /// Git considers the registration stale because the directory is gone.
     pub prunable: bool,
 }
@@ -279,9 +290,26 @@ fn strip_verbatim(path: PathBuf) -> PathBuf {
 
 /// The main worktree of the repository containing `workspace`.
 ///
-/// `None` for a non-repository, a bare repository or a submodule.
+/// `None` for a non-repository, a bare repository or a submodule. Bounded by
+/// [`OBSERVATION_GIT_TIMEOUT`] because the observation watcher calls it.
 pub(crate) fn repo_of(workspace: &Path) -> Option<PathBuf> {
-    let common = run(workspace, ["rev-parse", "--git-common-dir"]).ok()?;
+    let common = match run_with_timeout(
+        workspace,
+        ["rev-parse", "--git-common-dir"],
+        OBSERVATION_GIT_TIMEOUT,
+    ) {
+        Ok(common) => common,
+        Err(error) => {
+            if timed_out(&error) {
+                tracing::debug!(
+                    %error,
+                    workspace = %workspace.display(),
+                    "repository lookup timed out"
+                );
+            }
+            return None;
+        }
+    };
     let common = norm(&workspace.join(common));
     if common.file_name()? == ".git" {
         common.parent().map(Path::to_path_buf)
@@ -291,9 +319,27 @@ pub(crate) fn repo_of(workspace: &Path) -> Option<PathBuf> {
 }
 
 /// The top level of the checkout containing `workspace`, normalised.
+///
+/// Bounded by [`OBSERVATION_GIT_TIMEOUT`] because the observation watcher
+/// calls it.
 pub fn toplevel(workspace: &Path) -> Option<PathBuf> {
-    let top = run(workspace, ["rev-parse", "--show-toplevel"]).ok()?;
-    (!top.is_empty()).then(|| norm(Path::new(&top)))
+    match run_with_timeout(
+        workspace,
+        ["rev-parse", "--show-toplevel"],
+        OBSERVATION_GIT_TIMEOUT,
+    ) {
+        Ok(top) => (!top.is_empty()).then(|| norm(Path::new(&top))),
+        Err(error) => {
+            if timed_out(&error) {
+                tracing::debug!(
+                    %error,
+                    workspace = %workspace.display(),
+                    "checkout top-level lookup timed out"
+                );
+            }
+            None
+        }
+    }
 }
 
 /// Whether `workspace` is a linked worktree rather than a main checkout.
@@ -322,8 +368,15 @@ pub fn list_worktrees(repo: &Path) -> Result<Vec<GitWorktree>, String> {
 }
 
 /// Every worktree registration of `repo`, main checkout included.
+///
+/// Bounded by [`OBSERVATION_GIT_TIMEOUT`] because the observation watcher
+/// calls it through [`list_worktrees`].
 pub fn registrations(repo: &Path) -> Result<Vec<Registration>, String> {
-    let out = run(repo, ["worktree", "list", "--porcelain"])?;
+    let out = run_with_timeout(
+        repo,
+        ["worktree", "list", "--porcelain"],
+        OBSERVATION_GIT_TIMEOUT,
+    )?;
     Ok(parse_registrations(&out))
 }
 
@@ -333,6 +386,8 @@ pub fn parse_registrations(out: &str) -> Vec<Registration> {
     for block in out.split("\n\n") {
         let mut path = None;
         let mut branch = None;
+        let mut head = None;
+        let mut detached = false;
         let mut prunable = false;
         for line in block.lines() {
             if let Some(value) = line.strip_prefix("worktree ") {
@@ -344,6 +399,10 @@ pub fn parse_registrations(out: &str) -> Vec<Registration> {
                         .unwrap_or(value)
                         .to_owned(),
                 );
+            } else if let Some(value) = line.strip_prefix("HEAD ") {
+                head = Some(value.trim().to_owned());
+            } else if line == "detached" {
+                detached = true;
             } else if line.starts_with("prunable") {
                 prunable = true;
             }
@@ -352,6 +411,8 @@ pub fn parse_registrations(out: &str) -> Vec<Registration> {
             registrations.push(Registration {
                 path,
                 branch,
+                head,
+                detached,
                 prunable,
             });
         }

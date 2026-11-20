@@ -103,8 +103,8 @@ fn entry(path: &Path, repo: &Path, branch: Option<&str>, owned: bool) -> Tracked
 
 /// The two blocking phases of a clear, for the unit tests below.
 fn clear_one(entry: &TrackedWorktree, force: bool, data_dir: &Path) -> Result<ClearOne, String> {
-    let verified = preflight(entry, force)?;
-    remove(entry, force, data_dir, verified.as_deref())
+    preflight(entry, force)?;
+    remove(entry, force, data_dir)
 }
 
 fn subagent_view(
@@ -603,6 +603,37 @@ fn clear_deletes_only_h4rn_branches_for_owned_entries() {
 }
 
 #[test]
+fn deleting_a_symbolic_owned_branch_keeps_its_target() {
+    let fixture = Fixture::new();
+    run(&fixture.repo, &["branch", "release"]);
+    run(
+        &fixture.repo,
+        &[
+            "symbolic-ref",
+            "refs/heads/h4rn/sa-sym",
+            "refs/heads/release",
+        ],
+    );
+    assert_eq!(
+        git::run(&fixture.repo, ["symbolic-ref", "refs/heads/h4rn/sa-sym"]).expect("symref"),
+        "refs/heads/release"
+    );
+    let missing = fixture.root.path().join("sa-sym-gone");
+    let mut own = entry(&missing, &fixture.repo, Some("h4rn/sa-sym"), true);
+    own.dirty = None;
+
+    assert!(matches!(
+        clear_one(&own, false, &fixture.data_dir()),
+        Ok(ClearOne::Removed)
+    ));
+    assert!(
+        git::branch_exists(&fixture.repo, "release"),
+        "git deletes the symbolic ref, never its target"
+    );
+    assert!(!git::branch_exists(&fixture.repo, "h4rn/sa-sym"));
+}
+
+#[test]
 fn clear_skips_unmerged_owned_branches_without_force() {
     let fixture = Fixture::new();
     let data = fixture.data_dir();
@@ -634,14 +665,14 @@ fn clear_skips_unmerged_owned_branches_without_force() {
 }
 
 #[tokio::test]
-async fn a_branch_that_moves_after_preflight_is_not_deleted() {
+async fn a_branch_that_gains_unmerged_work_after_preflight_is_kept_without_force() {
     let fixture = Fixture::new();
     let linked = fixture.add_worktree("sa-moved", "h4rn/sa-moved");
     let (tracker, _threads, _subagents) = managers(&fixture, Vec::new()).await;
     let target = entry(&linked, &fixture.repo, Some("h4rn/sa-moved"), true);
 
-    // The branch advances between the merge check and removal, so the tip the
-    // preflight verified is no longer the tip that would be deleted.
+    // The branch gains a commit between the merge check and removal, so the
+    // branch is no longer merged when git is asked to delete it.
     let hook = {
         let linked = linked.clone();
         move |_path: String| {
@@ -651,16 +682,23 @@ async fn a_branch_that_moves_after_preflight_is_not_deleted() {
             }
         }
     };
-    let outcome = run_clear_entry(&tracker.inner, target, false, hook).await;
+    let outcome = run_clear_entry(&tracker.inner, target.clone(), false, hook).await;
     let Err(reason) = outcome else {
-        panic!("a branch that moved is never deleted");
+        panic!("a branch that gained work is never deleted");
     };
-    assert_eq!(reason, "branch h4rn/sa-moved moved during the clear");
+    assert_eq!(reason, "branch h4rn/sa-moved has unmerged commits");
     assert!(!linked.exists(), "the checkout itself is removed");
     assert!(
         git::branch_exists(&fixture.repo, "h4rn/sa-moved"),
-        "the moved branch is kept"
+        "the unmerged branch is kept"
     );
+
+    // A forced clear still deletes it.
+    assert!(matches!(
+        run_clear_entry(&tracker.inner, target, true, |_| std::future::ready(())).await,
+        Ok(ClearOne::Removed)
+    ));
+    assert!(!git::branch_exists(&fixture.repo, "h4rn/sa-moved"));
 }
 
 #[test]
@@ -754,6 +792,111 @@ fn a_missing_checkouts_own_registration_is_dropped_without_pruning_others() {
 }
 
 #[test]
+fn a_checkout_that_contains_another_worktree_is_never_removed() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.repo.join(".gitignore"), ".claude/\n").expect("gitignore");
+    run(&fixture.repo, &["add", ".gitignore"]);
+    run(
+        &fixture.repo,
+        &["commit", "-q", "-m", "ignore nested checkouts"],
+    );
+    let parent = fixture.add_worktree("parent-wt", "parent-branch");
+    let child = parent.join(".claude/worktrees/child");
+    std::fs::create_dir_all(child.parent().expect("child parent")).expect("child dir");
+    run(
+        &parent,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "child-branch",
+            &child.to_string_lossy(),
+        ],
+    );
+    let registrations = git::registrations(&fixture.repo).expect("list");
+    assert!(
+        registrations
+            .iter()
+            .any(|registration| registration.path == child),
+        "{registrations:?}"
+    );
+    let target = entry(&parent, &fixture.repo, Some("parent-branch"), false);
+
+    for force in [false, true] {
+        assert_eq!(
+            clear_one(&target, force, &fixture.data_dir())
+                .err()
+                .as_deref(),
+            Some(format!("contains another worktree at {}", child.display()).as_str()),
+            "force={force}"
+        );
+        assert!(parent.is_dir() && child.is_dir(), "both checkouts are kept");
+    }
+    let registrations = git::registrations(&fixture.repo).expect("list");
+    assert!(
+        registrations
+            .iter()
+            .any(|registration| registration.path == parent)
+    );
+    assert!(
+        registrations
+            .iter()
+            .any(|registration| registration.path == child)
+    );
+}
+
+#[test]
+fn a_missing_detached_worktree_whose_commit_no_ref_reaches_keeps_its_registration() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-detached-gone", "detached-gone-base");
+    run(&linked, &["checkout", "-q", "--detach"]);
+    std::fs::write(linked.join("work.txt"), "work").expect("work file");
+    run(&linked, &["add", "work.txt"]);
+    run(&linked, &["commit", "-q", "-m", "detached work"]);
+    // Move the checkout away by hand: the registration stays, with its
+    // detached HEAD, which is the state a failed cleanup leaves behind.
+    let moved = git::norm(&fixture.root.path().join("wt-detached-gone-moved"));
+    std::fs::rename(&linked, &moved).expect("move the checkout away");
+    let registrations = git::registrations(&fixture.repo).expect("list");
+    let registration = registrations
+        .iter()
+        .find(|registration| registration.path == linked)
+        .unwrap_or_else(|| panic!("the registration is still listed: {registrations:?}"));
+    assert!(registration.detached && registration.prunable);
+    let sha = registration.head.clone().expect("HEAD");
+
+    let detached = entry(&linked, &fixture.repo, None, false);
+    assert_eq!(
+        clear_one(&detached, false, &fixture.data_dir())
+            .err()
+            .as_deref(),
+        Some("detached HEAD has commits on no branch")
+    );
+    let registrations = git::registrations(&fixture.repo).expect("list");
+    assert!(
+        registrations.iter().any(|registration| {
+            registration.path == linked && registration.head.as_deref() == Some(sha.as_str())
+        }),
+        "the registration and its commit stay: {registrations:?}"
+    );
+
+    // The same commit is now reachable from a branch, so the registration can
+    // go without force.
+    run(&fixture.repo, &["branch", "reached", &sha]);
+    assert!(matches!(
+        clear_one(&detached, false, &fixture.data_dir()),
+        Ok(ClearOne::Removed)
+    ));
+    let registrations = git::registrations(&fixture.repo).expect("list");
+    assert!(
+        registrations
+            .iter()
+            .all(|registration| registration.path != linked)
+    );
+}
+
+#[test]
 fn a_replacement_checkout_on_another_branch_is_kept() {
     let fixture = Fixture::new();
     let linked = fixture.add_worktree("wt-replaced", "listed-branch");
@@ -782,6 +925,15 @@ fn a_replacement_checkout_on_another_branch_is_kept() {
         Some("checkout is no longer on listed-branch")
     );
     assert!(linked.is_dir(), "the replacement checkout is kept");
+
+    // With force the replacement checkout goes, but only the owned h4rn/
+    // branch is ever deleted, and this entry owns none.
+    assert!(matches!(
+        clear_one(&entries[0], true, &fixture.data_dir()),
+        Ok(ClearOne::Removed)
+    ));
+    assert!(!linked.exists());
+    assert!(git::branch_exists(&fixture.repo, "replacement-branch"));
 }
 
 #[test]
@@ -1330,7 +1482,7 @@ fn git_refusing_a_dirty_checkout_reads_as_uncommitted_changes() {
     // Preflight would catch this first; removal is called directly to prove
     // git's own refusal is reported in our words, not git's.
     assert_eq!(
-        remove(&entries[0], false, &fixture.data_dir(), None)
+        remove(&entries[0], false, &fixture.data_dir())
             .err()
             .as_deref(),
         Some("has uncommitted changes")

@@ -335,13 +335,13 @@ describe("forceCanFix", () => {
     expect(forceCanFix("has uncommitted changes")).toBe(true);
     expect(forceCanFix("could not check for uncommitted changes")).toBe(true);
     expect(forceCanFix("branch h4rn/sa-x has unmerged commits")).toBe(true);
-    expect(forceCanFix("branch h4rn/sa-x moved during the clear")).toBe(true);
+    expect(forceCanFix("checkout is no longer on h4rn/sa-x")).toBe(true);
     expect(forceCanFix("detached HEAD has commits on no branch")).toBe(true);
     for (const blocked of [
       "in use by Fix it",
       "not tracked",
       "checkout removed, but branch h4rn/sa-x could not be deleted: busy",
-      "checkout is no longer on h4rn/sa-x",
+      "contains another worktree at /code/api/.claude/worktrees/child",
       "is the repository's main worktree",
       "its repository could not be found",
       "git timed out after 30s",

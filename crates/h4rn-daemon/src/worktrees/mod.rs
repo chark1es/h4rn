@@ -200,7 +200,19 @@ impl RepoCaches {
                 && self.stale(repo)
             {
                 refreshed = true;
-                self.put(repo, git::list_worktrees(repo).unwrap_or_default());
+                match git::list_worktrees(repo) {
+                    Ok(list) => self.put(repo, list),
+                    Err(error) => {
+                        tracing::debug!(
+                            %error,
+                            repo = %repo.display(),
+                            "could not refresh a worktree list for tool-call matching"
+                        );
+                        // A failed refresh still counts as an attempt, so a
+                        // missing repository is not retried on every event.
+                        self.put(repo, Vec::new());
+                    }
+                }
                 hit = self.matching(repo, &candidate);
             }
             if let Some(hit) = hit
@@ -1261,26 +1273,24 @@ fn branch_exists(repo: &Path, branch: &str) -> Result<bool, String> {
     }
 }
 
-/// The commit `refs/heads/<branch>` points at, within the clearing deadline.
-fn branch_sha(repo: &Path, branch: &str) -> Result<String, String> {
-    git::run_with_timeout(
-        repo,
-        [
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{branch}"),
-        ],
-        CLEAR_GIT_TIMEOUT,
-    )
-}
-
-/// The checkout that has `branch` checked out, if any.
-fn checked_out_in(repo: &Path, branch: &str) -> Result<Option<PathBuf>, String> {
+/// The registration for exactly `path`, within the clearing deadline.
+fn registration(repo: &Path, path: &Path) -> Result<Option<git::Registration>, String> {
     let out = git::run_with_timeout(repo, ["worktree", "list", "--porcelain"], CLEAR_GIT_TIMEOUT)?;
+    let selected = git::norm(path);
     Ok(git::parse_registrations(&out)
         .into_iter()
-        .find(|registration| registration.branch.as_deref() == Some(branch))
+        .find(|registration| registration.path == selected))
+}
+
+/// Another registered worktree nested inside the selected checkout, if any.
+fn contained_worktree(repo: &Path, path: &Path) -> Result<Option<PathBuf>, String> {
+    let out = git::run_with_timeout(repo, ["worktree", "list", "--porcelain"], CLEAR_GIT_TIMEOUT)?;
+    let selected = git::norm(path);
+    Ok(git::parse_registrations(&out)
+        .into_iter()
+        .find(|registration| {
+            registration.path != selected && registration.path.starts_with(&selected)
+        })
         .map(|registration| registration.path))
 }
 
@@ -1318,23 +1328,20 @@ where
 {
     let path = entry.path.clone();
     let preflight_entry = entry.clone();
-    let verified =
-        match tokio::task::spawn_blocking(move || preflight(&preflight_entry, force)).await {
-            Ok(Ok(verified)) => verified,
-            Ok(Err(reason)) => return Err(reason),
-            Err(error) => {
-                tracing::warn!(%error, %path, "worktree preflight task failed");
-                return Err("the clear task failed".into());
-            }
-        };
+    match tokio::task::spawn_blocking(move || preflight(&preflight_entry, force)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(reason)) => return Err(reason),
+        Err(error) => {
+            tracing::warn!(%error, %path, "worktree preflight task failed");
+            return Err("the clear task failed".into());
+        }
+    }
     after_preflight(path.clone()).await;
     if let Some(active) = inner.still_active(&entry).await {
         return Err(in_use_reason(&active));
     }
     let data_dir = inner.data_dir.clone();
-    match tokio::task::spawn_blocking(move || remove(&entry, force, &data_dir, verified.as_deref()))
-        .await
-    {
+    match tokio::task::spawn_blocking(move || remove(&entry, force, &data_dir)).await {
         Ok(result) => result,
         Err(error) => {
             tracing::warn!(%error, %path, "worktree clear task failed");
@@ -1345,12 +1352,11 @@ where
 
 /// Whether an entry may be removed, without touching the disk. Blocking.
 ///
-/// Returns the commit `refs/heads/<b>` pointed at when the owned branch was
-/// checked, so removal can delete it only at that verified tip. Every git call
-/// is bounded by [`CLEAR_GIT_TIMEOUT`]; a timeout is a skip with that reason. A
-/// directory that vanished between the listing and now still passes (a removed
-/// harness checkout leaves only the branch).
-fn preflight(entry: &TrackedWorktree, force: bool) -> Result<Option<String>, String> {
+/// Every git call is bounded by [`CLEAR_GIT_TIMEOUT`]; a timeout is a skip with
+/// that reason. A directory that vanished between the listing and now still
+/// passes (a removed harness checkout leaves only the branch), after its own
+/// registration has been checked for detached work no ref reaches.
+fn preflight(entry: &TrackedWorktree, force: bool) -> Result<(), String> {
     let path = PathBuf::from(&entry.path);
     if entry.repo.is_empty() {
         return Err("its repository could not be found".into());
@@ -1358,6 +1364,12 @@ fn preflight(entry: &TrackedWorktree, force: bool) -> Result<Option<String>, Str
     let repo = PathBuf::from(&entry.repo);
     if git::norm(&path) == git::norm(&repo) {
         return Err("is the repository's main worktree".into());
+    }
+    // Git would happily remove a checkout that holds another worktree, leaving
+    // the nested registration pointing into a directory that no longer exists.
+    // That checkout is never removed, with or without force.
+    if let Some(inner) = contained_worktree(&repo, &path)? {
+        return Err(format!("contains another worktree at {}", inner.display()));
     }
     if !force {
         // The listing is only a snapshot: a turn may have written since. Ask
@@ -1422,34 +1434,50 @@ fn preflight(entry: &TrackedWorktree, force: bool) -> Result<Option<String>, Str
                     }
                 }
             }
+        } else if let Some(registration) = registration(&repo, &path)?
+            && registration.detached
+        {
+            // Only the registration is left. Its HEAD may hold a commit that no
+            // branch, remote-tracking branch or tag reaches; deleting the
+            // registration would lose the only name for that work.
+            let Some(sha) = registration.head else {
+                return Err("detached HEAD has commits on no branch".into());
+            };
+            let refs = git::run_with_timeout(
+                &repo,
+                [
+                    "for-each-ref",
+                    "--contains",
+                    &sha,
+                    "--format=%(refname)",
+                    "refs/heads",
+                    "refs/remotes",
+                    "refs/tags",
+                ],
+                CLEAR_GIT_TIMEOUT,
+            )?;
+            if refs.trim().is_empty() {
+                return Err("detached HEAD has commits on no branch".into());
+            }
         }
         if entry.owned
             && let Some(branch) = &entry.branch
             && branch_exists(&repo, branch)?
+            && !branch_is_merged(&repo, branch)?
         {
-            if !branch_is_merged(&repo, branch)? {
-                return Err(format!("branch {branch} has unmerged commits"));
-            }
-            // Bound the later deletion to the tip that was verified merged.
-            return branch_sha(&repo, branch).map(Some);
+            return Err(format!("branch {branch} has unmerged commits"));
         }
     }
-    Ok(None)
+    Ok(())
 }
 
 /// Removes one entry from disk. Blocking.
 ///
 /// Runs only after [`preflight`] passed and the live re-check found nothing
-/// using the entry. `verified` is the owned branch's tip recorded by the
-/// preflight; without `force` the branch is deleted only while it still points
-/// there. Every git call is bounded by [`CLEAR_GIT_TIMEOUT`]; a timeout is a
-/// skip with that reason, or a branch failure once the checkout is already gone.
-fn remove(
-    entry: &TrackedWorktree,
-    force: bool,
-    data_dir: &Path,
-    verified: Option<&str>,
-) -> Result<ClearOne, String> {
+/// using the entry. Every git call is bounded by [`CLEAR_GIT_TIMEOUT`]; a
+/// timeout is a skip with that reason, or a branch failure once the checkout is
+/// already gone.
+fn remove(entry: &TrackedWorktree, force: bool, data_dir: &Path) -> Result<ClearOne, String> {
     let path = PathBuf::from(&entry.path);
     let repo = PathBuf::from(&entry.repo);
     if path.is_dir() {
@@ -1475,7 +1503,8 @@ fn remove(
         // The directory is already gone (the supervisor removed it, or the user
         // did) but its own registration may still be there. Drop exactly that
         // registration; never prune the repository, which would also forget a
-        // worktree whose directory is only temporarily away.
+        // worktree whose directory is only temporarily away. An ordinary clear
+        // tries the plain form only; `--force` is reserved for a forced clear.
         let listed = git::run_with_timeout(
             &repo,
             ["worktree", "list", "--porcelain"],
@@ -1485,22 +1514,13 @@ fn remove(
             .iter()
             .any(|registration| registration.path == path)
         {
-            // Some git versions accept a missing path with `--force`, others
-            // only without it. Try both, and leave the registration alone when
-            // neither works rather than delete another worktree's metadata.
             let path_text = path.to_string_lossy();
-            let forced = git::run_with_timeout(
-                &repo,
-                ["worktree", "remove", "--force", path_text.as_ref()],
-                CLEAR_GIT_TIMEOUT,
-            );
-            if forced.is_err()
-                && let Err(error) = git::run_with_timeout(
-                    &repo,
-                    ["worktree", "remove", path_text.as_ref()],
-                    CLEAR_GIT_TIMEOUT,
-                )
-            {
+            let mut args = vec!["worktree", "remove"];
+            if force {
+                args.push("--force");
+            }
+            args.push(path_text.as_ref());
+            if let Err(error) = git::run_with_timeout(&repo, args, CLEAR_GIT_TIMEOUT) {
                 tracing::debug!(
                     %error,
                     path = %path.display(),
@@ -1525,45 +1545,19 @@ fn remove(
             }
         };
         if exists {
-            let failure = if force {
-                // Git keeps its own checked-out protection here.
-                git::run_with_timeout(&repo, ["branch", "-D", branch], CLEAR_GIT_TIMEOUT).err()
-            } else {
-                match checked_out_in(&repo, branch) {
-                    Ok(Some(owner)) => Some(format!("it is checked out in {}", owner.display())),
-                    Ok(None) => {
-                        // The branch may only be deleted at the tip the
-                        // preflight saw merged: if it moved since, that work
-                        // is not verified and is kept.
-                        let current = match branch_sha(&repo, branch) {
-                            Ok(sha) => sha,
-                            Err(error) => {
-                                return Ok(ClearOne::RemovedWithBranchFailure(format!(
-                                    "checkout removed, but branch {branch} could not be deleted: {error}"
-                                )));
-                            }
-                        };
-                        if verified != Some(current.as_str()) {
-                            return Err(format!("branch {branch} moved during the clear"));
-                        }
-                        // Compare-and-delete: the old value makes the update
-                        // fail if the branch moves again right before it lands.
-                        git::run_with_timeout(
-                            &repo,
-                            [
-                                "update-ref",
-                                "-d",
-                                &format!("refs/heads/{branch}"),
-                                current.as_str(),
-                            ],
-                            CLEAR_GIT_TIMEOUT,
-                        )
-                        .err()
-                    }
-                    Err(error) => Some(error),
+            // Git's own command applies every protection: it refuses an
+            // unmerged branch (relative to its upstream or HEAD), a branch
+            // checked out in any worktree, and one in use by a rebase or
+            // bisect, and it deletes a symbolic ref itself, never its target.
+            let flag = if force { "-D" } else { "-d" };
+            if let Err(error) =
+                git::run_with_timeout(&repo, ["branch", flag, branch], CLEAR_GIT_TIMEOUT)
+            {
+                if !force && error.contains("not fully merged") {
+                    // Work arrived after the preflight's merge check; keep the
+                    // branch and offer the same forced retry as any skip.
+                    return Err(format!("branch {branch} has unmerged commits"));
                 }
-            };
-            if let Some(error) = failure {
                 tracing::warn!(%error, %branch, "could not delete the subagent branch");
                 // The checkout is already gone, so this is not a plain skip: say
                 // what was removed and what is left behind.

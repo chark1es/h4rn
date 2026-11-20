@@ -209,7 +209,11 @@ attributed. Tool-call inputs are also scanned for absolute paths (`cwd`,
 `file_path`, shell commands and so on); a path inside a linked worktree of the
 thread's repository records an access, which is evidence a turn diff cannot
 fake. The per-repository worktree list is cached and refreshed at most every two
-seconds, so tool calls do not shell out to git one by one. h4rn's own
+seconds, so tool calls do not shell out to git one by one. Every git call the
+watcher makes — resolving a thread's repository, its checkout top level, and
+listing a repository's worktrees — is bounded to ten seconds, so one wedged
+repository cannot stall observation for every thread; a timeout is logged and
+that event's work is dropped. h4rn's own
 `<data_dir>/subagents/*/worktree` paths and the main worktree are never recorded
 as `harness`. Write failures are logged and never interrupt the watcher.
 
@@ -238,9 +242,10 @@ for it.
 **Clearing rules.**
 
 - Active worktrees are never removed, even with `force`. Each target is handled
-  in two blocking phases: a preflight (repository and main-worktree checks,
-  dirtiness, whether the checkout is still on its listed branch, detached HEAD,
-  unmerged owned branch) and the removal itself. The live re-check runs after
+  in two blocking phases: a preflight (repository and main-worktree checks, a
+  nested worktree, dirtiness, whether the checkout is still on its listed
+  branch, detached HEAD, unmerged owned branch) and the removal itself. The
+  live re-check runs after
   preflight and immediately before removal, so a thread that becomes busy in
   that window still keeps the entry and its checkout stays on disk. That
   re-check first collects every candidate — the accessors the listing named, the
@@ -260,11 +265,17 @@ for it.
   failed check on an existing directory is a skip, not a removal.
 - Without `force`, an existing checkout must still be on the branch the listing
   gave it. If the current branch differs, the entry is skipped as
-  `checkout is no longer on <branch>` (not forceable): a replacement checkout
-  recreated at the same path is not the entry that was listed.
+  `checkout is no longer on <branch>`; force removes the replacement checkout
+  anyway (and branch deletion still applies only to an owned `h4rn/` branch).
 - A detached HEAD is skipped as `detached HEAD has commits on no branch` unless
   its commit is reachable from some branch, remote-tracking branch or tag;
-  otherwise removing the checkout would leave that work unreachable.
+  otherwise removing the checkout would leave that work unreachable. When the
+  checkout's directory is already gone, the same check uses the detached
+  registration's `HEAD` commit from `git worktree list --porcelain`.
+- A checkout that contains another registered worktree is never removed, with or
+  without force: it is skipped as `contains another worktree at <path>` (not
+  forceable). Git would otherwise remove the parent and leave the nested
+  registration pointing at a directory that no longer exists.
 - Removal is plain `git worktree remove`, with `--force` only when the request
   asked for it, never merely because h4rn owns the checkout. Git's own contract
   applies: a removable checkout takes ignored files (build output, caches) with
@@ -273,9 +284,10 @@ for it.
   registration, and a repository-wide prune would also forget an unrelated
   worktree whose directory is only temporarily away. When the selected
   checkout's directory is already gone, only its own registration is looked up
-  by path in `git worktree list --porcelain` and removed (with `--force`, or
-  plainly, whichever this git accepts); if neither works the registration is
-  left in place rather than deleting another worktree's metadata.
+  by path in `git worktree list --porcelain` and removed: an ordinary clear runs
+  the plain `git worktree remove <path>`, and only `force` may try `--force`. If
+  it fails the registration is left in place rather than deleting another
+  worktree's metadata.
 - Every git command in a clear is bounded to 30 seconds; a command that outlives
   its deadline is killed. Collecting a command's output is bounded too: if a
   descendant process left behind by a git alias keeps stdout or stderr open,
@@ -286,19 +298,16 @@ for it.
   branch is reported as the branch failure.
 - For owned entries the branch is deleted, but only when it starts with `h4rn/`,
   and the empty `<data_dir>/subagents/<id>` directory is removed. A branch h4rn
-  did not create is never deleted. Without `force`, the preflight records the
-  branch's commit when it verifies the merge, and removal re-reads it right
-  before deleting: if it moved, the branch is kept and the path is skipped as
-  `branch <b> moved during the clear` (forceable), because the tip that was
-  verified is no longer the tip that would go. Deletion itself is
-  `git update-ref -d refs/heads/<b> <verified commit>`, an atomic
-  compare-and-delete. Git's checked-out-branch protection still applies first:
-  if `git worktree list --porcelain` shows the branch checked out anywhere, the
-  path is reported as
-  `checkout removed, but branch <b> could not be deleted: it is checked out in <path>`.
-  With `force`, plain `git branch -D` is used. If the checkout was removed but
-  the branch could not be deleted for any reason, the path is reported as
-  skipped with
+  did not create is never deleted. Deletion uses git's own command in the main
+  repository: `git branch -d <b>` for an ordinary clear and `git branch -D <b>`
+  with `force`. Git refuses `-d` for a branch not merged into its upstream or
+  `HEAD`, for a branch checked out in any worktree, and for one in use by a
+  rebase or bisect; it also deletes a symbolic ref itself and never its target.
+  The preflight already checks the merge so the early skip reads
+  `branch <b> has unmerged commits` (forceable); if the branch gains work after
+  that check, `git branch -d` refuses with "not fully merged" and the path is
+  skipped with the same forceable reason. Any other refusal after the checkout
+  is gone is reported as
   `checkout removed, but branch <b> could not be deleted: <git's message>` so
   the leftover branch is not mistaken for a clean removal.
 - The repository's main worktree is never touched.
