@@ -247,6 +247,23 @@ pub enum HarnessError {
         /// Underlying failure.
         message: String,
     },
+    /// The harness refused a prompt because of a provider usage limit.
+    ///
+    /// Only an adapter that parsed the limit out of its own failure detail
+    /// raises this. The daemon arms an auto-resume from this typed signal and
+    /// never from an arbitrary error's text, so a transport failure that
+    /// merely mentions a limit (an HTTP 413 payload limit, say) stays an
+    /// ordinary failed turn.
+    #[error("{harness:?} is rate limited: {message}")]
+    RateLimited {
+        /// Harness involved.
+        harness: HarnessKind,
+        /// The failure detail, exactly as the harness reported it.
+        message: String,
+        /// The limit the adapter parsed, with its reset when the detail named
+        /// one.
+        limit: LimitSignal,
+    },
     /// The vendor protocol did not match what the adapter understands.
     #[error("{harness:?} protocol error: {message}")]
     Protocol {
@@ -263,6 +280,19 @@ pub enum HarnessError {
         /// Requested feature.
         feature: String,
     },
+}
+
+impl HarnessError {
+    /// The provider limit this failure carries, when its adapter parsed one.
+    ///
+    /// This is the daemon's only limit signal from a failed write: an error
+    /// that does not carry one is an ordinary failure, whatever its text says.
+    pub fn limit(&self) -> Option<&LimitSignal> {
+        match self {
+            Self::RateLimited { limit, .. } => Some(limit),
+            _ => None,
+        }
+    }
 }
 
 /// A lock-free view of a session's transport health.

@@ -18,7 +18,7 @@ use futures::{SinkExt, StreamExt};
 use h4rn_protocol::{ApprovalDecision, HarnessKind, ToolCall, ToolCallStatus, TurnStatus, Usage};
 
 use crate::{
-    Harness, HarnessError, HarnessEvent, HarnessInstall, HarnessSession, SessionSpec,
+    Harness, HarnessError, HarnessEvent, HarnessInstall, HarnessSession, LimitSignal, SessionSpec,
     TransportHealth, UserInput,
 };
 
@@ -64,6 +64,15 @@ impl EventSink {
     }
 }
 
+/// A test-only failure a fake session reports instead of answering a prompt.
+#[derive(Clone, Debug)]
+enum SendFailure {
+    /// An ordinary transport failure. Its text is never parsed for a limit.
+    Transport(String),
+    /// A provider limit the adapter parsed itself, with its reset when known.
+    RateLimited(LimitSignal),
+}
+
 /// A fake harness adapter.
 #[derive(Clone, Debug)]
 pub struct FakeHarness {
@@ -103,6 +112,9 @@ pub struct FakeHarness {
     shutdown_count: Option<ShutdownCount>,
     /// A test-only switch: prompts after the first `n` fail as a dead transport.
     dead_sends_after: Option<usize>,
+    /// A test-only switch: prompts after the first `n` fail with this
+    /// (possibly untyped) error instead of being answered.
+    send_failure_after: Option<(usize, SendFailure)>,
     /// A test-only latch before a session's event stream ends.
     stream_end_gate: Option<Gate>,
     /// A test-only latch before a dead send's trailing `TurnCompleted`.
@@ -285,6 +297,7 @@ impl Default for FakeHarness {
             session_count: None,
             shutdown_count: None,
             dead_sends_after: None,
+            send_failure_after: None,
             stream_end_gate: None,
             trailing_completion_gate: None,
             stderr: None,
@@ -502,6 +515,35 @@ impl FakeHarness {
         self
     }
 
+    /// Lets the first `ok_sends` prompts succeed, then fails every later send
+    /// with an ordinary transport error whose text is `message`.
+    ///
+    /// A test uses this to prove a write error is not treated as a rate limit
+    /// just because its text mentions one.
+    pub fn with_send_failure_after(mut self, ok_sends: usize, message: impl Into<String>) -> Self {
+        self.send_failure_after = Some((ok_sends, SendFailure::Transport(message.into())));
+        self
+    }
+
+    /// Lets the first `ok_sends` prompts succeed, then fails every later send
+    /// with the typed limit signal an adapter parses for itself.
+    ///
+    /// A test uses this to prove the daemon arms the resume only from the
+    /// adapter's parsed limit, under the same ownership check as any failure.
+    pub fn with_limit_failure_after(
+        mut self,
+        ok_sends: usize,
+        message: impl Into<String>,
+        reset_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Self {
+        let message = message.into();
+        self.send_failure_after = Some((
+            ok_sends,
+            SendFailure::RateLimited(LimitSignal { reset_at, message }),
+        ));
+        self
+    }
+
     /// Streams `count` text deltas and a completed turn from `send`, then holds
     /// the send until the returned [`Gate`] is released.
     ///
@@ -656,6 +698,7 @@ impl Harness for FakeHarness {
             send_count: self.send_count.clone(),
             interrupt_count: self.interrupt_count.clone(),
             dead_sends_after: self.dead_sends_after,
+            send_failure_after: self.send_failure_after.clone(),
             sends: 0,
             has_answered: false,
             write_gate: self.write_gate.clone(),
@@ -698,6 +741,8 @@ pub struct FakeSession {
     interrupt_count: Option<InterruptCount>,
     /// Sends after this many fail as a dead transport and close the session.
     dead_sends_after: Option<usize>,
+    /// Sends after this many fail with this test-only failure.
+    send_failure_after: Option<(usize, SendFailure)>,
     /// Prompts this session has been asked to write.
     sends: usize,
     /// Whether this session has already answered one send, so the gate only
@@ -784,6 +829,25 @@ impl HarnessSession for FakeSession {
             && !first_send
         {
             gate.wait().await;
+        }
+
+        if let Some((after, failure)) = self.send_failure_after.clone()
+            && self.sends > after
+        {
+            return Err(match failure {
+                SendFailure::Transport(message) => HarnessError::Transport {
+                    harness: self.kind,
+                    message,
+                },
+                SendFailure::RateLimited(limit) => {
+                    let message = limit.message.clone();
+                    HarnessError::RateLimited {
+                        harness: self.kind,
+                        message,
+                        limit,
+                    }
+                }
+            });
         }
 
         if let Some(limit) = self.dead_sends_after

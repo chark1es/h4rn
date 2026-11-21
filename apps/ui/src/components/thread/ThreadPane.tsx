@@ -350,7 +350,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
           // A stopped or failed turn has no single prompt to repeat safely: a
           // queued follow-up would be sent twice. Put the cursor back in the
           // composer instead.
-          onRetry={requestComposerFocus}
+          onReply={requestComposerFocus}
           staleAt={offline ? lastSyncAt : null}
         />
       )}

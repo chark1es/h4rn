@@ -645,12 +645,24 @@ impl HarnessSession for AcpSession {
                         subtype: Some("error".into()),
                     });
                 }
-                return Err(match map_acp_error(error) {
-                    HarnessError::Transport { harness, .. } => HarnessError::Transport {
-                        harness,
+                let mapped = map_acp_error(error);
+                // A parsed limit travels as its own typed error so the daemon
+                // can arm the resume without parsing the text of a failure
+                // that came from another adapter. Everything else keeps the
+                // merged detail and the error variant the ACP layer chose.
+                return Err(match limit {
+                    Some(limit) => HarnessError::RateLimited {
+                        harness: HarnessKind::Antigravity,
                         message: detail,
+                        limit,
                     },
-                    other => other,
+                    None => match mapped {
+                        HarnessError::Transport { harness, .. } => HarnessError::Transport {
+                            harness,
+                            message: detail,
+                        },
+                        other => other,
+                    },
                 });
             }
         };

@@ -31,14 +31,14 @@ export function ThreadStream({
   summary,
   turns,
   pending,
-  onRetry,
+  onReply,
   staleAt = null,
 }: {
   threadId: string;
   summary: ThreadSummary;
   turns: StreamTurn[];
   pending: PendingMessage[];
-  onRetry: () => void;
+  onReply: () => void;
   staleAt?: number | null;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -138,7 +138,7 @@ export function ThreadStream({
                   turn={row.turn}
                   threadId={threadId}
                   summary={summary}
-                  onReply={onRetry}
+                  onReply={onReply}
                   staleAt={item.index === rows.length - 1 ? staleAt : null}
                 />
               ) : (

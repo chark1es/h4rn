@@ -222,6 +222,7 @@ fn session_starts(workspace: &std::path::Path) -> usize {
 /// A closed ACP transport is detached before the next turn is promoted, so the
 /// queued message starts a fresh agent instead of being written into a closed
 /// client.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_closed_acp_transport_is_replaced_before_the_next_turn() {
     let workspace = tempfile::tempdir().expect("tempdir");

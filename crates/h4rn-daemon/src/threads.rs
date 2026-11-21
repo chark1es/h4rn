@@ -26,8 +26,8 @@ use h4rn_core::{
     LifecycleSettings, ThreadEvent, ThreadState, apply_all, is_snoozed, needs_attention, tab_for,
 };
 use h4rn_harness::{
-    AttachmentRef, HarnessEvent, HarnessInstall, HarnessSession, SessionSpec, UserInput,
-    detect_limit, most_specific_detail,
+    AttachmentRef, HarnessEvent, HarnessInstall, HarnessSession, LimitSignal, SessionSpec,
+    UserInput, most_specific_detail,
 };
 use h4rn_meter::{LimitHit, MeterHub, TurnContext, TurnMeter};
 use h4rn_protocol::{
@@ -2852,12 +2852,18 @@ impl Inner {
     /// still owns the turn. A write error that killed the transport detaches
     /// the session (by generation) and shuts it down: the next message then
     /// starts a fresh one instead of writing into a closed pipe.
+    ///
+    /// `limit` is the adapter's typed signal, never text parsed here. It is
+    /// honored only when this write still owns both the turn and its session:
+    /// a shutdown that interrupted the turn while the write was pending must
+    /// not leave a schedule behind to fire after restart.
     async fn fail_prompt_write(
         self: &Arc<Self>,
         handle: ThreadHandle,
         turn_id: &TurnId,
         session: &SharedSession,
         message: String,
+        limit: Option<LimitSignal>,
     ) {
         let (dead, stderr_tail) = {
             let session = session.lock().await;
@@ -2880,7 +2886,6 @@ impl Inner {
         // completion either way. A write that failed on a live transport is an
         // ordinary failure, never a death the bridge also reports.
         let hint = Some("Check the harness installation with `h4rnd doctor`".into());
-        let limit = detect_limit(&message, self.now());
         let mut end = if dead {
             TurnEnd::transport_failed(message, hint, false)
         } else {
@@ -2891,11 +2896,18 @@ impl Inner {
         // this prompt before the turn is marked failed.
         let (settled, detached) = {
             let mut record = handle.lock().await;
+            // Validate ownership before recording a limit: a late failure
+            // from a write that no longer owns the turn (shutdown settled and
+            // detached it) must not arm a schedule, and there is nothing left
+            // for it to settle.
+            if record.dispatch_for(turn_id).is_none() || !record.session.is_live(session) {
+                return;
+            }
             let now = self.now();
             // A prompt that never reached the agent's stdin still reports the
-            // limit the agent left in its stderr: the schedule is armed here,
-            // before settlement, so the queued turn behind this one cannot be
-            // promoted past a paused thread.
+            // limit the adapter parsed from its failure detail: the schedule
+            // is armed here, before settlement, so the queued turn behind this
+            // one cannot be promoted past a paused thread.
             let mut detached = None;
             if let Some(signal) = limit {
                 let auto_resume = signal.reset_at.is_some();
@@ -2989,7 +3001,11 @@ impl Inner {
         let sent = guard.send(dispatch.input()).await;
         drop(guard);
         if let Err(error) = sent {
-            self.fail_prompt_write(handle, &turn_id, &session, error.to_string())
+            // Only the adapter's typed limit may arm a resume: an arbitrary
+            // transport text that happens to mention a limit (an HTTP 413
+            // payload limit, say) is an ordinary failed turn.
+            let limit = error.limit().cloned();
+            self.fail_prompt_write(handle, &turn_id, &session, error.to_string(), limit)
                 .await;
         }
     }
@@ -6186,6 +6202,112 @@ mod tests {
         assert!(
             errors[0].contains("agy: the session died mid-turn"),
             "the row keeps the stderr the generic notice lacks: {errors:?}"
+        );
+    }
+
+    /// A failed write whose text merely mentions a limit is an ordinary failed
+    /// turn: the daemon arms a resume only for the adapter's typed signal, so
+    /// another harness's "payload size limit exceeded" cannot pause a thread.
+    #[tokio::test]
+    async fn an_untyped_limit_word_in_a_write_error_arms_no_schedule() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let harness =
+            FakeHarness::new().with_send_failure_after(1, "HTTP 413: payload size limit exceeded");
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        let mut errors = Vec::new();
+        loop {
+            let wire = next_event(&mut events).await;
+            match wire.event {
+                Event::Error { message, .. } => errors.push(message),
+                Event::TurnCompleted {
+                    turn_id, status, ..
+                } => {
+                    assert_eq!(turn_id, second.turn_id);
+                    assert_eq!(status, TurnStatus::Failed);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            errors.iter().any(|row| row.contains("payload size limit")),
+            "the write error is the turn's ordinary row: {errors:?}"
+        );
+        assert!(
+            meter.schedules().await.expect("read schedules").is_empty(),
+            "untyped limit text armed no schedule"
+        );
+        manager.shutdown().await;
+    }
+
+    /// A write that lost its turn while it was parked must not arm a schedule
+    /// when its typed limit arrives: shutdown already interrupted the turn, so
+    /// a schedule persisted here would fire after a restart.
+    #[tokio::test]
+    async fn a_write_that_lost_its_turn_does_not_arm_a_schedule() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, gate) = FakeHarness::new().with_send_gate();
+        let (harness, sends) = harness.with_send_count();
+        let harness = harness.with_limit_failure_after(
+            1,
+            "usage limit reached",
+            Some(chrono::Utc::now() + chrono::Duration::minutes(5)),
+        );
+        let host = HostId::new("host_test");
+        let manager = Arc::new(open_test_manager(harness, host.clone()).await);
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        assert!(
+            wait_until(|| sends.get() == 2).await,
+            "the write reached the gated send"
+        );
+
+        // Shutdown settles and detaches the turn while the write is parked.
+        let shutdown = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            async move { manager.shutdown().await }
+        });
+        loop {
+            let (turn, status) = next_turn_completion(&mut events).await;
+            if turn == second.turn_id {
+                assert_eq!(status, TurnStatus::Interrupted);
+                break;
+            }
+        }
+
+        // The parked write now fails with the adapter's typed limit. Its turn
+        // is no longer active, so the limit is dropped with no schedule.
+        gate.release();
+        shutdown.await.expect("shutdown task");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            meter.schedules().await.expect("read schedules").is_empty(),
+            "a write that lost its turn armed no schedule"
         );
     }
 }
