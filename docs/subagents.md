@@ -186,11 +186,17 @@ Working tab's exit grace.
 `settled` means nothing running uses it, and `orphaned` means an owned
 worktree's subagent is finished but its directory is still on disk (cleanup
 failed, or the daemon restarted mid-run). An entry with nothing left to clear
-(directory gone and, for owned entries, branch gone) is not listed. An owned
-entry whose directory and branch are both gone is still listed, with
-`exists: false`, while its exact registration remains in the repository's
+is not listed unless its own registration remains: its directory is gone, (for
+owned entries) its branch is gone, and no registration of its own is left. An
+owned entry whose directory and branch are both gone is still listed, with
+`exists: false` and no `branch` (so nothing promises a branch that is gone),
+while its exact registration remains in the repository's registration
 snapshot, so a clear can remove that registration instead of reporting the path
-as not tracked.
+as not tracked. A row is never hidden because git could not answer: an owned
+entry whose directory is missing is dropped only when a successful branch
+lookup shows its branch gone and a successful snapshot shows no registration.
+If either lookup fails (git errors, or `for-each-ref` warns on stderr about a
+ref it skipped), the row stays with its recorded branch.
 
 Paths are compared after normalisation: the path is canonicalised exactly as
 written before any `..` is folded, so a workspace spelled through a symlink
@@ -239,7 +245,8 @@ worktree's `.git` file (only its final newline is stripped; the worktree is its
 parent), `<admin>/HEAD` is `ref: refs/heads/<b>` or a detached sha,
 `<admin>/locked` marks a lock, a `gitdir` target that no longer exists makes the
 registration prunable, and the main worktree is the parent of `<common>` for a
-non-bare repository. Which form works is remembered for the rest of the
+non-bare repository; for a bare repository it is `<common>` itself with an
+unknown `HEAD`, exactly as `-z` lists it (`bare`, no branch). Which form works is remembered for the rest of the
 process, so the failed probe happens once. The NUL-delimited form is parsed as
 records, so a path containing a newline (or bytes that are not UTF-8 on Unix)
 stays one path; a path that is not valid UTF-8 is then skipped, because the
@@ -280,17 +287,29 @@ backstop); the response listing asks for it.
   in a fixed order: a blocking preflight (repository and main-worktree checks, a
   nested worktree, dirtiness, whether the checkout is still on its listed
   branch, detached HEAD, unmerged owned branch); then a blocking prepare that
-  takes the removal registration snapshot and re-runs the checks that can go
-  stale (the listed branch and detached reachability, containment against that
-  snapshot, the nested-checkout scan, and the detached registration's `HEAD`
-  when the directory is already gone); then the async live activity check; and
+  takes its own registration snapshot and re-runs the checks that can go stale
+  (the listed branch and detached reachability, containment against that
+  snapshot, the nested-checkout scan, files hidden from `git status`, and the
+  registration's `HEAD` when the directory is already gone); then the async live activity check; and
   finally, immediately before the destructive `git worktree remove`, one more
-  verification: for an existing checkout prepare also saw, the listed branch,
-  detached reachability and containment against prepare's snapshot; if the
-  directory appeared or vanished since prepare, a fresh snapshot and every check
-  for the state that exists now (the existing-checkout checks including the
-  nested scan, or the missing registration's detached reachability). A checkout
-  switched to another branch in that window is therefore kept. The live re-check collects every candidate —
+  verification against a registration snapshot taken right there (then the
+  directory is checked, so both readings postdate the activity check): for an
+  existing checkout prepare also saw, containment against that snapshot, the
+  listed branch and detached reachability; if the directory appeared or
+  vanished since prepare, every check for the state that exists now (the
+  existing-checkout checks including the nested scan and hidden files, or the
+  missing registration's `HEAD`). A checkout switched to another branch, or a
+  nested worktree registered, in that window is therefore caught and both
+  checkouts are kept. A missing checkout with no registration in that snapshot
+  is reported removed only because both readings show nothing remains (no
+  directory, no registration); anything that is there is handled as above.
+  Two things are deliberately not changed. The live activity check stays
+  between prepare and this final verification (preflight → prepare → live
+  activity check → re-verify and destroy), as settled in earlier rounds: moving
+  it after the verification would put an async wait in front of the destructive
+  call. And the nested-checkout scan is not re-run here for a checkout whose
+  state did not flip: a whole tree walk would widen the window between the
+  activity check and the removal; it runs in prepare and on a state flip only. The live re-check collects every candidate —
   the accessors the listing named, the accesses recorded for the path in the
   store, and every current thread (children and snoozed included) whose
   workspace is the entry or inside it — and then checks activity once, at the
@@ -317,10 +336,19 @@ backstop); the response listing asks for it.
   its commit is reachable from some branch, remote-tracking branch or tag;
   otherwise removing the checkout would leave that work unreachable. When the
   checkout's directory is already gone, the same check uses the detached
-  registration's `HEAD` commit from the NUL-delimited snapshot.
+  registration's `HEAD` commit from the registration snapshot (`-z` output, or
+  git's metadata on an older git).
+- The registration's `HEAD` is one of attached (a branch), detached (a sha) or
+  unknown. It is unknown when the metadata fallback cannot read or parse the
+  `HEAD` file, or when a `-z` record has neither `branch` nor `detached` (or a
+  `detached` record lacks its sha). Without `force`, a missing checkout whose
+  registration `HEAD` is unknown is skipped as
+  `could not read the registration's HEAD` (forceable): unknown is never read
+  as "nothing to protect".
 - The prepare step before the live activity check re-runs the detached-HEAD
   reachability check, the "still on its listed branch" check and containment,
-  against the snapshot the removal will act on. A checkout detached, replaced
+  against its own fresh snapshot (the removal itself re-checks containment
+  against the snapshot it takes immediately before `git worktree remove`). A checkout detached, replaced
   or given a new commit after preflight is therefore skipped with the same
   reason it would have been skipped at preflight, and its registration and
   commit stay. A nested worktree created after preflight is likewise still
@@ -341,10 +369,26 @@ backstop); the response listing asks for it.
   without following symlinks, for a nested `.git` file or directory other than
   the checkout's own top-level one, so an ignored clone of any repository (not
   only a registered worktree) is found. One is skipped as
-  `contains another git checkout at <path>` (never forceable). The scan is
-  bounded by the 30-second per-command deadline; running out of time, or a
-  directory that cannot be read, is skipped as
-  `could not check for nested checkouts` (forceable), never read as clean.
+  `contains another git checkout at <path>` (never forceable). A submodule of
+  this repository is not a foreign checkout: a nested `.git` *file* whose
+  `gitdir:` target (resolved against the file's directory when relative) lies
+  inside this repository's common dir (`<common>/modules/...` or
+  `<common>/worktrees/*/modules/...`) is let through. Git's own non-forced
+  `git worktree remove` then refuses a checkout holding submodules, reported as
+  `contains submodules` (forceable); with `force` git removes it. Any other
+  nested `.git`, including a gitfile pointing elsewhere or one that cannot be
+  read, is the never-forceable reason above. The scan is bounded by the
+  30-second per-command deadline, checked for every directory entry and once
+  more before answering "nothing found"; running out of time, or a directory
+  that cannot be read, is skipped as `could not check for nested checkouts`
+  (forceable), never read as clean.
+- Without `force`, prepare (and a state flip before removal) also runs
+  `git ls-files -v` in an existing checkout, bounded like every other call. An
+  entry git tags as assume-unchanged (a lowercase tag) or skip-worktree (`S`)
+  whose file exists on disk is skipped as `has files hidden from git status`
+  (forceable): an edit to such a file never shows in `git status`, so neither
+  the dirty check nor git's removal backstop would see it. Sparse-checkout
+  files that are absent on disk do not count.
 - Removal is plain `git worktree remove`, with `--force` only when the request
   asked for it, never merely because h4rn owns the checkout. Git's own contract
   applies: a removable checkout takes ignored files (build output, caches) with
@@ -353,7 +397,7 @@ backstop); the response listing asks for it.
   registration, and a repository-wide prune would also forget an unrelated
   worktree whose directory is only temporarily away. When the selected
   checkout's directory is already gone, only its own registration is looked up
-  by path in the NUL-delimited snapshot and removed: an ordinary clear runs the
+  by path in the registration snapshot and removed: an ordinary clear runs the
   plain `git worktree remove <path>`, and only `force` may try `--force`, then
   the plain form. If it fails the path is skipped as
   `registration left in place: <git's message>` (not forceable) rather than
@@ -386,8 +430,11 @@ backstop); the response listing asks for it.
   `checkout removed, but branch <b> could not be deleted: <git's message>`.
   Whether the branch exists is asked with
   `git for-each-ref --format='%(objectname) %(refname)' refs/heads/<b>`, where
-  no exact `refs/heads/<b>` line means absent and only a git failure is an
-  error; if that lookup fails after the checkout was removed, the path is
+  no exact `refs/heads/<b>` line means absent and a git failure is an error.
+  `for-each-ref` skips a broken ref with only a warning, so no matching line
+  plus anything on stderr is inconclusive and also an error, never "absent";
+  in preflight that is `branch <b> could not be checked: <error>` (not
+  forceable). If that lookup fails after the checkout was removed, the path is
   reported as `checkout removed, but branch <b> could not be checked: <error>`
   (not forceable), never as a silent removal. If
   the branch did not exist at preflight but exists now, it is left alone and

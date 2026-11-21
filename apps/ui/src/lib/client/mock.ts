@@ -4221,6 +4221,9 @@ class MockDaemon {
 /** The one sample branch with commits not yet merged into HEAD. */
 const MOCK_UNMERGED_BRANCH = "h4rn/sa-b71d04aa";
 
+/** The sample agent checkout that holds a submodule of the repository. */
+const MOCK_SUBMODULE_PATH = "/home/you/code/api/.claude/worktrees/agent-a41c9e0d";
+
 /** Why a clear leaves this worktree in place, or null when it can go. */
 function worktreeSkipReason(entry: TrackedWorktree, force: boolean): string | null {
   if (entry.status === "active") {
@@ -4231,6 +4234,7 @@ function worktreeSkipReason(entry: TrackedWorktree, force: boolean): string | nu
   if (entry.owned && entry.branch === MOCK_UNMERGED_BRANCH) {
     return `branch ${entry.branch} has unmerged commits`;
   }
+  if (entry.path === MOCK_SUBMODULE_PATH) return "contains submodules";
   return null;
 }
 

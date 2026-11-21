@@ -341,6 +341,9 @@ describe("forceCanFix", () => {
     expect(forceCanFix("detached HEAD has commits on no branch")).toBe(true);
     expect(forceCanFix("could not check for nested checkouts")).toBe(true);
     expect(forceCanFix("branch h4rn/sa-x changed during the clear")).toBe(true);
+    expect(forceCanFix("contains submodules")).toBe(true);
+    expect(forceCanFix("could not read the registration's HEAD")).toBe(true);
+    expect(forceCanFix("has files hidden from git status")).toBe(true);
     for (const blocked of [
       "in use by Fix it",
       "not tracked",
@@ -355,6 +358,7 @@ describe("forceCanFix", () => {
       "registration left in place: fatal: not a working tree",
       "branch h4rn/sa-sym is a symbolic ref",
       "checkout removed, but branch h4rn/sa-x was left in place",
+      "branch h4rn/sa-x could not be checked: warning: ignoring broken ref",
     ]) {
       expect(forceCanFix(blocked), blocked).toBe(false);
     }
@@ -366,6 +370,12 @@ describe("worktreeSubline", () => {
     const line = worktreeSubline(row({ exists: false }));
     expect(line).toContain("Directory removed, branch kept");
     expect(line).not.toContain("registration left");
+  });
+
+  it("never promises a branch the daemon reports gone", () => {
+    const line = worktreeSubline(row({ exists: false, branch: null }));
+    expect(line).toContain("Directory removed, registration left");
+    expect(line).not.toContain("branch kept");
   });
 
   it("says the registration is left for a removed non-subagent checkout", () => {
@@ -405,6 +415,12 @@ describe("removeDescription", () => {
 
     const owned = removeDescription(row({ owned: true, branch: "h4rn/sa-aa" }));
     expect(owned).toContain("Uncommitted changes or unmerged work are skipped.");
+  });
+
+  it("says only the registration goes when no branch is left", () => {
+    const text = removeDescription(row({ exists: false, branch: null }));
+    expect(text).toContain("No checkout remains on disk; its registration is removed.");
+    expect(text).not.toContain("branch");
   });
 
   it("says ignored files go with an existing checkout", () => {

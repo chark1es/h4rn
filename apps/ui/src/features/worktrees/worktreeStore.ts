@@ -111,7 +111,8 @@ const ORIGIN_TEXT: Record<WorktreeOrigin, string> = {
  *
  * A missing directory means different things by origin: an owned subagent
  * checkout keeps its `h4rn/sa-*` branch, while any other origin is left only
- * as a git registration.
+ * as a git registration. The daemon reports no branch when it knows the branch
+ * is gone and only the registration remains, so a branch is never promised.
  */
 export function worktreeSubline(row: TrackedWorktree): string {
   const users = [...new Set(row.accessed_by.map((access) => access.title).filter(Boolean))];
@@ -120,7 +121,7 @@ export function worktreeSubline(row: TrackedWorktree): string {
   if (row.status === "orphaned") parts.push("Left behind after a restart");
   else if (!row.exists)
     parts.push(
-      row.origin === "subagent"
+      row.origin === "subagent" && row.branch
         ? "Directory removed, branch kept"
         : "Directory removed, registration left",
     );
@@ -147,6 +148,9 @@ export const WORKTREE_SKIP_REASONS = {
     "could not check for uncommitted changes",
     "detached HEAD has commits on no branch",
     "could not check for nested checkouts",
+    "contains submodules",
+    "could not read the registration's HEAD",
+    "has files hidden from git status",
   ],
   /** `checkout is no longer on <branch>` — force removes the replacement. */
   forceablePrefixes: ["checkout is no longer on"],
@@ -203,7 +207,9 @@ export function removeDescription(row: TrackedWorktree): string {
       }`
     : row.owned && row.branch
       ? `No checkout remains on disk. Its ${row.branch} branch is deleted.`
-      : "No checkout remains on disk.";
+      : row.branch
+        ? "No checkout remains on disk."
+        : "No checkout remains on disk; its registration is removed.";
   const skipped = row.owned
     ? "Uncommitted changes or unmerged work are skipped."
     : "Uncommitted changes are skipped.";

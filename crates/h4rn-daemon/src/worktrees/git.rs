@@ -51,21 +51,39 @@ pub struct GitWorktree {
     pub branch: Option<String>,
 }
 
+/// What a registration's `HEAD` names.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Head {
+    /// A branch, by short name (`refs/heads/` stripped).
+    Branch(String),
+    /// A detached commit.
+    Detached(String),
+    /// `HEAD` could not be read or parsed (or the registration is a bare
+    /// repository's). Never read as "nothing to protect".
+    Unknown,
+}
+
 /// One worktree registration as `git worktree list --porcelain -z` reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Registration {
     /// Normalised absolute path.
     pub path: PathBuf,
-    /// Checked-out branch by short name; `None` for a detached HEAD.
-    pub branch: Option<String>,
-    /// The commit the registration's `HEAD` names.
-    pub head: Option<String>,
-    /// The registration's `HEAD` is detached.
-    pub detached: bool,
+    /// What the registration's `HEAD` names.
+    pub head: Head,
     /// Git considers the registration stale because the directory is gone.
     pub prunable: bool,
     /// The registration is locked (`git worktree lock`).
     pub locked: bool,
+}
+
+impl Registration {
+    /// The checked-out branch by short name; `None` when detached or unknown.
+    pub fn branch(&self) -> Option<&str> {
+        match &self.head {
+            Head::Branch(branch) => Some(branch),
+            Head::Detached(_) | Head::Unknown => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -460,8 +478,8 @@ pub fn list_worktrees(repo: &Path) -> Result<Vec<GitWorktree>, String> {
         .filter(|registration| registration.path != main)
         .filter(|registration| registration.path.to_str().is_some())
         .map(|registration| GitWorktree {
+            branch: registration.branch().map(str::to_owned),
             path: registration.path,
-            branch: registration.branch,
         })
         .collect())
 }
@@ -550,26 +568,32 @@ fn unsupported_porcelain_z(code: Option<i32>, stderr: &str) -> bool {
 /// its parent), `<id>/HEAD` is `ref: refs/heads/<b>` or a detached sha,
 /// `<id>/locked` marks a lock, and a `gitdir` target that no longer exists
 /// makes the registration prunable. The main worktree is the parent of
-/// `<common>` for a non-bare repository. A path that is not valid UTF-8 is
-/// skipped.
+/// `<common>` for a non-bare repository; for a bare one it is `<common>`
+/// itself with an unknown `HEAD`, as `-z` reports it (`bare`, no branch). A
+/// `HEAD` that cannot be read or parsed is [`Head::Unknown`]. A path that is
+/// not valid UTF-8 is skipped.
 pub(crate) fn registrations_from_metadata(
     repo: &Path,
     limit: Duration,
 ) -> Result<Vec<Registration>, String> {
     let common = common_dir(repo, limit)?;
     let mut registrations = Vec::new();
-    if common.file_name().is_some_and(|name| name == ".git")
-        && let Some(main) = common.parent()
-    {
-        let (branch, head, detached) = read_head(&common.join("HEAD"));
-        registrations.push(Registration {
-            path: norm(main),
-            branch,
-            head,
-            detached,
+    match common.parent() {
+        Some(main) if common.file_name().is_some_and(|name| name == ".git") => {
+            registrations.push(Registration {
+                path: norm(main),
+                head: read_head(&common.join("HEAD")),
+                prunable: false,
+                locked: false,
+            });
+        }
+        // A bare repository: `-z` lists the repository directory itself.
+        _ => registrations.push(Registration {
+            path: common.clone(),
+            head: Head::Unknown,
             prunable: false,
             locked: false,
-        });
+        }),
     }
     let admin_root = common.join("worktrees");
     let entries = match std::fs::read_dir(&admin_root) {
@@ -593,12 +617,9 @@ pub(crate) fn registrations_from_metadata(
         let Some(path) = gitdir.parent() else {
             continue;
         };
-        let (branch, head, detached) = read_head(&admin.join("HEAD"));
         registrations.push(Registration {
             path: norm(path),
-            branch,
-            head,
-            detached,
+            head: read_head(&admin.join("HEAD")),
             prunable: !gitdir.exists(),
             locked: admin.join("locked").exists(),
         });
@@ -606,25 +627,28 @@ pub(crate) fn registrations_from_metadata(
     Ok(registrations)
 }
 
-/// Reads a `HEAD` file: `(branch, detached sha, detached)`.
-fn read_head(path: &Path) -> (Option<String>, Option<String>, bool) {
+/// Reads a `HEAD` file. Unreadable or unparseable is [`Head::Unknown`].
+fn read_head(path: &Path) -> Head {
     let Ok(text) = std::fs::read_to_string(path) else {
-        return (None, None, false);
+        return Head::Unknown;
     };
     let text = text.trim();
     match text.strip_prefix("ref: ") {
-        Some(reference) => (
-            Some(
-                reference
-                    .strip_prefix("refs/heads/")
-                    .unwrap_or(reference)
-                    .to_owned(),
-            ),
-            None,
-            false,
+        Some(reference) if !reference.is_empty() => Head::Branch(
+            reference
+                .strip_prefix("refs/heads/")
+                .unwrap_or(reference)
+                .to_owned(),
         ),
-        None => (None, Some(text.to_owned()), true),
+        Some(_) => Head::Unknown,
+        None if is_object_id(text) => Head::Detached(text.to_owned()),
+        None => Head::Unknown,
     }
+}
+
+/// Whether `text` is a full SHA-1 or SHA-256 object id.
+fn is_object_id(text: &str) -> bool {
+    matches!(text.len(), 40 | 64) && text.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// Parses `git worktree list --porcelain -z` output.
@@ -632,57 +656,125 @@ fn read_head(path: &Path) -> (Option<String>, Option<String>, bool) {
 /// Fields are NUL-separated and an empty field ends a record. The path is taken
 /// as bytes, so a directory name holding a newline or invalid UTF-8 is still
 /// one path rather than two lines; only the non-Unix fallback decodes lossily.
+/// A record with neither `branch` nor `detached` (and a detached one without
+/// its `HEAD` sha) has an unknown `HEAD`.
 pub fn parse_registrations(out: &[u8]) -> Vec<Registration> {
+    /// One record while its fields are read.
+    struct Partial {
+        path: PathBuf,
+        branch: Option<String>,
+        sha: Option<String>,
+        detached: bool,
+        prunable: bool,
+        locked: bool,
+    }
+    impl Partial {
+        fn finish(self) -> Registration {
+            let head = match (self.branch, self.sha, self.detached) {
+                (Some(branch), _, _) => Head::Branch(branch),
+                (None, Some(sha), true) if !sha.is_empty() => Head::Detached(sha),
+                _ => Head::Unknown,
+            };
+            Registration {
+                path: self.path,
+                head,
+                prunable: self.prunable,
+                locked: self.locked,
+            }
+        }
+    }
+
     let mut registrations = Vec::new();
-    let mut current: Option<Registration> = None;
+    let mut current: Option<Partial> = None;
     for field in out.split(|byte| *byte == 0) {
         if field.is_empty() {
-            if let Some(registration) = current.take() {
-                registrations.push(registration);
+            if let Some(partial) = current.take() {
+                registrations.push(partial.finish());
             }
             continue;
         }
         if let Some(value) = field.strip_prefix(b"worktree ") {
             // A field may only start a record, but flushing here also keeps a
             // malformed stream from merging two worktrees into one.
-            if let Some(registration) = current.take() {
-                registrations.push(registration);
+            if let Some(partial) = current.take() {
+                registrations.push(partial.finish());
             }
-            current = Some(Registration {
+            current = Some(Partial {
                 path: norm(&path_from_bytes(value)),
                 branch: None,
-                head: None,
+                sha: None,
                 detached: false,
                 prunable: false,
                 locked: false,
             });
             continue;
         }
-        let Some(registration) = current.as_mut() else {
+        let Some(partial) = current.as_mut() else {
             continue;
         };
         if let Some(value) = field.strip_prefix(b"branch ") {
             let value = String::from_utf8_lossy(value);
-            registration.branch = Some(
+            partial.branch = Some(
                 value
                     .strip_prefix("refs/heads/")
                     .unwrap_or(&value)
                     .to_owned(),
             );
         } else if let Some(value) = field.strip_prefix(b"HEAD ") {
-            registration.head = Some(String::from_utf8_lossy(value).trim().to_owned());
+            partial.sha = Some(String::from_utf8_lossy(value).trim().to_owned());
         } else if field == b"detached" {
-            registration.detached = true;
+            partial.detached = true;
         } else if field.starts_with(b"prunable") {
-            registration.prunable = true;
+            partial.prunable = true;
         } else if field == b"locked" || field.starts_with(b"locked ") {
-            registration.locked = true;
+            partial.locked = true;
         }
     }
-    if let Some(registration) = current.take() {
-        registrations.push(registration);
+    if let Some(partial) = current.take() {
+        registrations.push(partial.finish());
     }
     registrations
+}
+
+/// Where a nested `.git` file points: its `gitdir:` target, resolved against
+/// the file's own directory when relative. `None` when the file cannot be read
+/// or is not a gitfile.
+pub fn gitfile_target(file: &Path) -> Option<PathBuf> {
+    let bytes = std::fs::read(file).ok()?;
+    let mut target = bytes.strip_prefix(b"gitdir: ")?;
+    while let Some(rest) = target
+        .strip_suffix(b"\n")
+        .or_else(|| target.strip_suffix(b"\r"))
+    {
+        target = rest;
+    }
+    if target.is_empty() {
+        return None;
+    }
+    Some(norm(&file.parent()?.join(path_from_bytes(target))))
+}
+
+/// The first file in the checkout at `worktree` that git hides from `status`.
+///
+/// `git ls-files -v` tags an assume-unchanged entry with a lowercase letter
+/// and a skip-worktree entry with `S`; an edit to either never shows up as
+/// uncommitted. Only entries whose file is actually on disk count, so a
+/// sparse checkout's absent files do not. Bounded by `limit`.
+pub fn hidden_file(worktree: &Path, limit: Duration) -> Result<Option<PathBuf>, String> {
+    let out = run_bytes_with_timeout(worktree, ["ls-files", "-v", "-z"], limit)?;
+    for record in out.split(|byte| *byte == 0) {
+        let [tag, b' ', name @ ..] = record else {
+            continue;
+        };
+        if !(tag.is_ascii_lowercase() || *tag == b'S') {
+            continue;
+        }
+        let file = worktree.join(path_from_bytes(name));
+        if file.symlink_metadata().is_ok() {
+            return Ok(Some(file));
+        }
+    }
+    Ok(None)
 }
 
 /// A path from the raw bytes git printed.
@@ -727,20 +819,50 @@ pub fn branch_exists(repo: &Path, branch: &str) -> bool {
 /// beats a `rev-parse --verify` per subagent. Full ref names are requested so a
 /// same-named tag cannot hide a branch; the `refs/heads/` prefix is then
 /// stripped.
-pub fn h4rn_branches(repo: &Path) -> HashSet<String> {
-    match run(
+///
+/// `Err` when git fails or warns on stderr (a broken ref is skipped with a
+/// warning, not reported as a failure): a partial answer must never make a
+/// listed branch look deleted. Bounded by [`OBSERVATION_GIT_TIMEOUT`].
+pub fn h4rn_branches(repo: &Path) -> Result<HashSet<String>, String> {
+    let (out, stderr) = run_capture_with_timeout(
         repo,
         ["for-each-ref", "--format=%(refname)", "refs/heads/h4rn/"],
-    ) {
-        Ok(out) => out
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .filter_map(|line| line.strip_prefix("refs/heads/"))
-            .map(str::to_owned)
-            .collect(),
-        Err(_) => HashSet::new(),
+        OBSERVATION_GIT_TIMEOUT,
+    )?;
+    if !stderr.is_empty() {
+        return Err(stderr);
     }
+    Ok(out
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .filter_map(|line| line.strip_prefix("refs/heads/"))
+        .map(str::to_owned)
+        .collect())
+}
+
+/// [`run_with_timeout`], also returning git's trimmed stderr on success.
+///
+/// Some commands (`for-each-ref` over a broken ref) succeed while warning
+/// that they skipped something; callers that must not read a skip as absence
+/// look at the stderr.
+pub fn run_capture_with_timeout<I, S>(
+    dir: &Path,
+    args: I,
+    limit: Duration,
+) -> Result<(String, String), String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let (status, stdout, stderr) = run_raw(dir, args, limit)?;
+    if !status.success() {
+        return Err(failure_message(status, &stderr));
+    }
+    Ok((
+        String::from_utf8_lossy(&stdout).trim().to_owned(),
+        String::from_utf8_lossy(&stderr).trim().to_owned(),
+    ))
 }
 
 /// Whether the worktree has uncommitted changes; `None` when git failed.
