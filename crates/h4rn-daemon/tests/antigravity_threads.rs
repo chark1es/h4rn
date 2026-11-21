@@ -429,8 +429,7 @@ async fn an_exit_report_after_the_stdout_eof_still_names_the_stderr() {
 
 /// A rate-limit reset that only the exit report carries still reaches the
 /// daemon's limit handling: the turn reports a limit with a reset time and
-/// auto-resume, exactly as it does when the report wins the race on its own.
-#[cfg(unix)]
+/// auto-resume, exactly as it does when the report wins the race on its own.#[cfg(unix)]
 #[tokio::test]
 async fn an_exit_report_after_the_stdout_eof_still_schedules_the_resume() {
     let workspace = tempfile::tempdir().expect("tempdir");
@@ -549,6 +548,183 @@ async fn a_pre_flush_write_failure_still_schedules_the_resume() {
     let schedules = meter.schedules().await.expect("read schedules");
     assert_eq!(schedules.len(), 1, "one persisted schedule: {schedules:?}");
     assert_eq!(schedules[0].thread_id, thread_id);
+
+    // The thread is paused by the limit, so the queued message must stay
+    // queued: promoting it would start a fresh agent at once.
+    assert_eq!(
+        session_starts(workspace.path()),
+        1,
+        "the queued turn did not start a new agent"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), next_turn(&mut events))
+            .await
+            .is_err(),
+        "the queued turn ({}) started past a usage limit",
+        queued.turn_id
+    );
+
+    manager.shutdown().await;
+}
+
+/// An agent that answers a turn and then exits is a death between turns. The
+/// adapter holds the session, and with it the event sender, so the daemon's
+/// stream never ends while it owns the session: the failure row must be
+/// published from the exit report itself, with no further Send, and the next
+/// message must start a fresh agent instead of writing into the dead one.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_agent_that_exits_between_turns_reports_without_another_send() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let Some(manager) = manager().await else {
+        return skip_without_fixture();
+    };
+    let mut events = manager.subscribe();
+    let host = HostId::new("host_test");
+
+    let created = manager
+        .create_thread(new_thread(&host, workspace.path(), "first"))
+        .await
+        .expect("create");
+    let first = next_turn(&mut events).await;
+    assert_eq!(first.status, TurnStatus::Completed, "{:?}", first.errors);
+    assert_eq!(session_starts(workspace.path()), 1);
+
+    // This turn is answered, then the fixture waits for the test before
+    // exiting, so its death really lands between turns.
+    let thread_id: ThreadId = created.thread_id.clone();
+    manager
+        .send_message(
+            &thread_id,
+            "please H4RN_FIXTURE_DIE_BETWEEN_TURNS".into(),
+            Vec::new(),
+        )
+        .await
+        .expect("send");
+    let answered = next_turn(&mut events).await;
+    assert_eq!(
+        answered.status,
+        TurnStatus::Completed,
+        "{:?}",
+        answered.errors
+    );
+
+    // The turn ended: let the agent exit. No Send follows, so the row can only
+    // come from the idle death itself.
+    std::fs::write(
+        workspace.path().join(".agy-fixture-between-turns-gate"),
+        b"",
+    )
+    .expect("release the fixture's exit gate");
+
+    let row = tokio::time::timeout(TURN_TIMEOUT, async {
+        loop {
+            let Ok(wire) = events.recv().await else {
+                panic!("the event stream closed before the idle death was reported");
+            };
+            if let Event::Error { message, .. } = wire.event {
+                return message;
+            }
+        }
+    })
+    .await
+    .expect("the idle death is published without another Send");
+    assert!(
+        row.contains("agy-fixture: the session ended between turns"),
+        "the row keeps the agent's stderr: {row}"
+    );
+
+    // The dead session was detached: the next message runs on a new agent.
+    manager
+        .send_message(&thread_id, "next".into(), Vec::new())
+        .await
+        .expect("send");
+    let next = next_turn(&mut events).await;
+    assert_eq!(next.status, TurnStatus::Completed, "{:?}", next.errors);
+    assert!(
+        next.text.contains("echo: next"),
+        "the next turn ran on a fresh agent: {:?}",
+        next.text
+    );
+    assert_eq!(
+        session_starts(workspace.path()),
+        2,
+        "the next message started a fresh agent process"
+    );
+
+    manager.shutdown().await;
+}
+
+/// An agent that stops reading stdin after a turn turns the next, larger prompt
+/// into a write-deadline failure. The reset it printed on stderr is the typed
+/// limit the daemon persists, and the message queued behind that write waits
+/// instead of starting a fresh agent and running into the limit again.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stalled_agent_turns_a_large_prompt_into_a_persisted_limit() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let Some(manager) = manager().await else {
+        return skip_without_fixture();
+    };
+    let mut events = manager.subscribe();
+    let host = HostId::new("host_test");
+
+    let created = manager
+        .create_thread(new_thread(&host, workspace.path(), "first"))
+        .await
+        .expect("create");
+    let first = next_turn(&mut events).await;
+    assert_eq!(first.status, TurnStatus::Completed, "{:?}", first.errors);
+
+    // This turn is answered, then the fixture prints a reset on stderr and
+    // stops reading stdin while staying alive.
+    let thread_id: ThreadId = created.thread_id.clone();
+    manager
+        .send_message(
+            &thread_id,
+            "please H4RN_FIXTURE_STALL_STDIN".into(),
+            Vec::new(),
+        )
+        .await
+        .expect("send");
+    let stalled = next_turn(&mut events).await;
+    assert_eq!(
+        stalled.status,
+        TurnStatus::Completed,
+        "{:?}",
+        stalled.errors
+    );
+
+    // Larger than any pipe buffer, so the agent that stopped reading leaves it
+    // unflushed until the adapter's write deadline tears the transport down.
+    let large = "x".repeat(512 * 1024);
+    let large_turn = manager
+        .send_message(&thread_id, format!("large {large}"), Vec::new())
+        .await
+        .expect("send");
+    let queued = manager
+        .send_message(&thread_id, "queued".into(), Vec::new())
+        .await
+        .expect("send");
+
+    let failed = next_turn(&mut events).await;
+    assert_eq!(failed.turn_id, large_turn.turn_id);
+    assert_eq!(failed.status, TurnStatus::Failed, "{:?}", failed.errors);
+    assert!(
+        failed.limits.iter().any(|(reset, auto)| *reset && *auto),
+        "the stalled write's stderr carried the rate limit: {:?}",
+        failed.limits
+    );
+
+    let meter = manager.meter().expect("the test manager has a meter");
+    let schedules = meter.schedules().await.expect("read schedules");
+    assert_eq!(schedules.len(), 1, "one persisted schedule: {schedules:?}");
+    assert_eq!(schedules[0].thread_id, thread_id);
+    assert_eq!(
+        schedules[0].state,
+        h4rn_protocol::ResumeState::Waiting,
+        "the reset beyond the policy's max wait is retried at the cap: {schedules:?}"
+    );
 
     // The thread is paused by the limit, so the queued message must stay
     // queued: promoting it would start a fresh agent at once.

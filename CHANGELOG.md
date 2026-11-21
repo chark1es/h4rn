@@ -88,8 +88,22 @@ All notable changes to h4rn are recorded here. The format follows
   as the close is not lost.
 - **An agent that closes between turns gets one failure row, not two.** The adapter reports that
   death twice (the generic stdout close, then the exit status with the stderr it drained). The
-  reports are now merged per session generation and published as one row when the session's stream
-  ends, so the generic notice can no longer take the row and hide the exit status and stderr.
+  reports are now merged per session generation and published as one row from the exit report
+  itself, so the generic notice can no longer take the row and hide the exit status and stderr.
+  The row never waits for the session's stream to end: a live adapter keeps its event sender alive
+  for as long as the daemon holds the session, so that stream may not end at all. A generic close
+  with no exit report behind it publishes after a bounded 500 ms wait, and the dead session is
+  detached with the row, so the next message starts a fresh agent.
+- **A pump ends with the session it detached.** When a turn settles on a closed transport, or an
+  idle death is published, the pump now detaches and shuts its session down, schedules any
+  successor and returns instead of waiting for a stream end that the session it still holds keeps
+  from happening. Every other detach (a Stop, a restart, a model change, a failed prompt write, a
+  shutdown) already aborts the session's pump, so one path ends each pump.
+- **The ACP test peer models a death between turns and a stalled reader.** `agy-fixture` can now
+  answer a turn and then exit, so an idle death can be tested end-to-end without another Send, and
+  it can answer, print a rate-limit reset on stderr and stop reading stdin, so a prompt larger than
+  the pipe buffer exercises the write deadline, the typed limit, the persisted schedule and the
+  held queue through the real adapter.
 - **A prompt that never reached the agent still reports its rate limit, but only when the adapter
   says so.** When the agent closed stdin before the next prompt could be flushed, the failure row
   still carries the agent's stderr and exit detail, and a reset time printed there reaches the

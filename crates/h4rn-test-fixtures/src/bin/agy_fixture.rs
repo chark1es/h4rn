@@ -6,6 +6,11 @@
 //! tests drive a dead transport without a real `agy` install. That death waits
 //! for a gate file in the session's workspace, so a test can queue a follow-up
 //! behind the turn before the transport dies.
+//!
+//! Other marker prompts model the deaths that happen outside a turn: an answer
+//! followed by an exit (`H4RN_FIXTURE_DIE_BETWEEN_TURNS`) and an answer followed
+//! by a stopped stdin reader and a rate-limit reset on stderr
+//! (`H4RN_FIXTURE_STALL_STDIN`).
 
 use std::io::{BufRead, Write};
 
@@ -161,6 +166,28 @@ fn main() {
                     // must describe with both the I/O error and stderr.
                     close_stdin_and_wait(None);
                 }
+                if text.contains("H4RN_FIXTURE_DIE_BETWEEN_TURNS") {
+                    // Answer this turn, then leave the session idle and only
+                    // then exit: the death happens between turns, and the
+                    // daemon's row for it must arrive without another prompt.
+                    // The test releases this gate after it has seen the turn
+                    // end, so the ordering is not a sleep's guess.
+                    wait_for_gate(
+                        ".agy-fixture-between-turns-waiting",
+                        ".agy-fixture-between-turns-gate",
+                    );
+                    eprintln!("agy-fixture: the session ended between turns");
+                    std::process::exit(7);
+                }
+                if text.contains("H4RN_FIXTURE_STALL_STDIN") {
+                    // Answer this turn, print the provider's reset, then stop
+                    // reading stdin without closing it. The next prompt is
+                    // larger than the pipe can buffer, so its write stalls
+                    // until the adapter's deadline kills this process; the
+                    // reset printed here is the only place the limit appears.
+                    eprintln!("agy-fixture: rate limit reached, resets at 2099-12-01T00:00:00Z");
+                    stall_forever();
+                }
             }
             "session/cancel" => {}
             other => {
@@ -184,15 +211,33 @@ fn main() {
 /// The marker is written first so the test can queue a follow-up behind the
 /// turn, and only then create the gate the process is waiting for.
 fn wait_for_exit_gate() {
+    wait_for_gate(".agy-fixture-exit-waiting", ".agy-fixture-exit-gate");
+}
+
+/// Writes `waiting` in the session workspace, then waits until `gate` appears.
+///
+/// Both names are relative to the workspace, which the daemon starts the agent
+/// in. The wait is bounded so a test that never creates the gate fails the turn
+/// instead of hanging the fixture forever.
+fn wait_for_gate(waiting: &str, gate: &str) {
     let Ok(cwd) = std::env::current_dir() else {
         return;
     };
-    let waiting = cwd.join(".agy-fixture-exit-waiting");
-    let gate = cwd.join(".agy-fixture-exit-gate");
-    let _ = std::fs::write(&waiting, b"");
+    let _ = std::fs::write(cwd.join(waiting), b"");
+    let gate = cwd.join(gate);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while !gate.exists() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Stops reading stdin while keeping the process, and its stdin, alive.
+///
+/// A prompt larger than the pipe can buffer then never flushes, which is the
+/// stall the adapter's write deadline exists for.
+fn stall_forever() -> ! {
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
     }
 }
 

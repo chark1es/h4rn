@@ -47,6 +47,17 @@ use crate::journal::{Journal, ThreadMeta, WireEvent};
 /// than this is dropped with a resume hint rather than slowing other clients.
 pub const BROADCAST_CAPACITY: usize = 512;
 
+/// How long a death between turns waits for the exit report that carries the
+/// agent's stderr and status.
+///
+/// A live adapter keeps its event sender alive for as long as the daemon holds
+/// its session, so the end of that session's stream is not an event the pump
+/// can wait for. The generic stdout-close notice therefore gets this bounded
+/// window for the exit report to arrive and sharpen the row; after it, the
+/// notice alone is published. The ACP adapter's exit report is the same
+/// 500 ms window a failed prompt waits for (`DEATH_DETAIL_WAIT`).
+const IDLE_DEATH_DETAIL_WAIT: Duration = Duration::from_millis(500);
+
 /// What a harness session needs to reach the daemon's MCP hub.
 #[derive(Clone, Debug)]
 pub struct McpSession {
@@ -319,8 +330,11 @@ struct ThreadRecord {
     ///
     /// The adapter reports that death twice: the generic stdout-close notice,
     /// then the exit status together with the stderr it drained. Holding both
-    /// until the session's own stream ends lets the one row for the death keep
-    /// the exit status and the stderr instead of taking the generic notice.
+    /// lets the one row for the death keep the exit status and the stderr
+    /// instead of taking the generic notice. The row is published from the
+    /// report (or a bounded wait for it), not from the end of the session's
+    /// stream: a live adapter holds the session, and with it its event sender,
+    /// so that stream may never end.
     idle_transport_report: Option<IdleTransportReport>,
     /// A limit hit whose auto-resume schedule is armed for this thread.
     scheduled_limit: Option<ScheduledLimit>,
@@ -555,8 +569,9 @@ impl TransportReport {
 
 /// A transport death reported while no turn was active.
 ///
-/// It is held until its session's stream ends, so the generic close and the
-/// exit report that follows it merge into one row for one session generation.
+/// It is held until the exit/status report arrives (or the bounded wait for it
+/// expires), so the generic close and the exit report that follows it merge
+/// into one row for one session generation.
 struct IdleTransportReport {
     generation: u64,
     message: String,
@@ -913,7 +928,7 @@ impl ThreadRecord {
         });
     }
 
-    /// Takes the held idle report once its session's stream ends.
+    /// Takes the held idle report for `generation`, if it is still that session's.
     fn take_idle_transport_report(&mut self, generation: u64) -> Option<IdleTransportReport> {
         self.idle_transport_report
             .take()
@@ -3149,7 +3164,41 @@ impl Inner {
         health: Option<h4rn_harness::TransportHealth>,
         mut stream: futures::stream::BoxStream<'static, HarnessEvent>,
     ) {
-        while let Some(event) = stream.next().await {
+        // A death between turns is published from its report, not from the end
+        // of the stream: a live adapter holds the session, and with it the
+        // event sender, so that stream may never end. This is the bounded
+        // window the generic stdout-close notice gets for the exit report to
+        // arrive and sharpen the row.
+        let mut idle_deadline: Option<tokio::time::Instant> = None;
+        loop {
+            // `stream.next()` is cancel-safe (the adapter's stream is a channel
+            // receiver), so arming the deadline cannot lose an event that is
+            // already queued: an event always wins the race.
+            let event = match idle_deadline {
+                Some(deadline) => tokio::select! {
+                    event = stream.next() => event,
+                    _ = tokio::time::sleep_until(deadline) => {
+                        // No exit report came in the window: publish what the
+                        // generic close left and end this pump instead of
+                        // waiting for the stream end the session it holds keeps
+                        // from happening.
+                        if self
+                            .publish_idle_death(&handle, generation, &session)
+                            .await
+                        {
+                            return;
+                        }
+                        // The report no longer describes this thread's idle
+                        // death (a turn started since); that turn owns it.
+                        idle_deadline = None;
+                        continue;
+                    }
+                },
+                None => stream.next().await,
+            };
+            let Some(event) = event else {
+                break;
+            };
             if self.closed.load(Ordering::Relaxed) {
                 break;
             }
@@ -3187,6 +3236,15 @@ impl Inner {
             let mut detached: Option<SharedSession> = None;
             let mut settled = false;
             let mut forward_approval: Option<ForwardedRequest> = None;
+            // Set when this pump has detached its own dead session and must
+            // end once the event is applied: the session it holds keeps its
+            // stream from ever ending.
+            let mut done = false;
+            // Set for an idle transport death: publish it now (the exit/status
+            // report) or give the exit report its bounded window (the generic
+            // close notice).
+            let mut idle_death = false;
+            let mut idle_fallback = false;
 
             // `SessionStarted` normally carries the native id, but keep the
             // defaulted accessor in sync too so an adapter that only reports
@@ -3394,6 +3452,11 @@ impl Inner {
                         if closed && record.session.is_live(&session) {
                             detached = record.clear_session(generation);
                             record.pump = None;
+                            // This pump's session died under its own turn and
+                            // is now detached. The session it holds keeps its
+                            // stream open, so the pump ends with this turn
+                            // instead of waiting for a stream end.
+                            done = true;
                         }
 
                         // A completed turn clears a stale limit unless this
@@ -3589,9 +3652,21 @@ impl Inner {
                         // its own row. The adapter reports that death twice,
                         // the generic stdout close first and then the exit
                         // status with the stderr it drained, so both are held
-                        // for this session generation and published as one row
-                        // when its stream ends.
+                        // for this session generation. The exit report
+                        // publishes the merged row as soon as it arrives; a
+                        // generic close alone gets a bounded window for it,
+                        // because a live session's stream does not end while
+                        // the daemon holds the session.
                         record.hold_idle_transport_report(generation, &turn_id, message, retryable);
+                        if retryable {
+                            // `AcpEvent::Closed`: the generic stdout-close
+                            // notice, which has no status or stderr yet.
+                            idle_fallback = true;
+                        } else {
+                            // The exit status, the stderr drain, or a writer
+                            // error: the most specific report there will be.
+                            idle_death = true;
+                        }
                     } else if !record.note_transport_report(&turn_id, message, retryable) {
                         tracing::debug!(
                             thread_id = %thread_id,
@@ -3620,6 +3695,21 @@ impl Inner {
                 // A settled turn may have promoted the next queued message
                 // under the same lock; get it onto a session now.
                 self.spawn_advance(handle.clone());
+            }
+            if done {
+                // The pump detached its own dead session: end here, with the
+                // successor (if any) already scheduled, rather than wait for a
+                // stream end the session it still holds keeps from happening.
+                return;
+            }
+            if idle_fallback {
+                idle_deadline = Some(tokio::time::Instant::now() + IDLE_DEATH_DETAIL_WAIT);
+            }
+            if idle_death && self.publish_idle_death(&handle, generation, &session).await {
+                // The row is published and the dead session detached, so the
+                // next Send starts fresh. Nothing else will arrive on this
+                // pump's stream that belongs to it.
+                return;
             }
         }
 
@@ -3727,6 +3817,70 @@ impl Inner {
             // needs a fresh startup; get either onto a session now.
             self.spawn_advance(handle);
         }
+    }
+
+    /// Publishes the one row for a transport death reported between turns, and
+    /// detaches the dead session.
+    ///
+    /// The pump calls this as soon as the exit/status report arrives, or after
+    /// [`IDLE_DEATH_DETAIL_WAIT`] when only a generic EOF came. It must not wait
+    /// for the session's stream to end instead: a live adapter keeps its event
+    /// sender alive for as long as the daemon holds the session, so that stream
+    /// only ends when this pump drops the session, and a row that waited for it
+    /// would never be published. The row and the detach share one lock, so a
+    /// Send that arrives after them starts a fresh agent.
+    ///
+    /// `false` when this session is no longer the thread's live one, a turn has
+    /// started since the report was held (that turn's own failure path owns the
+    /// death), or no report is held.
+    async fn publish_idle_death(
+        &self,
+        handle: &ThreadHandle,
+        generation: u64,
+        session: &SharedSession,
+    ) -> bool {
+        let detached = {
+            let mut record = handle.lock().await;
+            if !record.session.is_live(session) || record.session.generation() != Some(generation) {
+                return false;
+            }
+            if record.active.is_some() {
+                // A turn started after the report was held, and `begin_turn`
+                // cleared the held report with it. The turn's own failure path
+                // publishes the death as its row if it is still dead.
+                return false;
+            }
+            let Some(report) = record.take_idle_transport_report(generation) else {
+                return false;
+            };
+            let now = self.now();
+            let thread_id = record.meta.thread_id.clone();
+            // The pump is this task, so it must not abort itself.
+            let detached = record.clear_session(generation);
+            record.pump = None;
+            if let Err(error) = self
+                .emit(
+                    &mut record,
+                    vec![ThreadEvent::FailureRaised { at: now }],
+                    vec![Event::Error {
+                        thread_id: Some(thread_id),
+                        message: report.message,
+                        hint: Some("Inspect the thread and retry when ready".into()),
+                        retryable: report.retryable,
+                    }],
+                )
+                .await
+            {
+                tracing::error!(%error, "failed to record a transport failure");
+            }
+            detached
+        };
+        if let Some(detached) = detached {
+            // The record is unlocked: shutting a session down while holding it
+            // would deadlock with a Stop or a delivery.
+            let _ = detached.lock().await.shutdown().await;
+        }
+        true
     }
 
     /// Gets the active turn onto a session, starting one when needed.
@@ -4314,6 +4468,15 @@ mod tests {
             } = wire.event
             {
                 return (turn_id, status);
+            }
+        }
+    }
+
+    async fn next_error(events: &mut broadcast::Receiver<WireEvent>) -> String {
+        loop {
+            let wire = next_event(events).await;
+            if let Event::Error { message, .. } = wire.event {
+                return message;
             }
         }
     }
@@ -6301,62 +6464,42 @@ mod tests {
     /// An agent that closes its stdout between turns and then exits reports the
     /// same idle death twice: the generic close notice first, the exit status
     /// and its stderr second. They are one row, and it keeps the stderr.
+    ///
+    /// The session (and so its event sender) stays alive, exactly like a real
+    /// adapter's: the stream never ends, so the row must come from the exit
+    /// report itself.
     #[tokio::test]
     async fn an_idle_close_and_exit_merge_into_one_row_with_the_stderr() {
         let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, harness_events) = FakeHarness::new().with_event_injector();
         let host = HostId::new("host_test");
-        let manager = open_test_manager(FakeHarness::new(), host.clone()).await;
+        let manager = open_test_manager(harness, host.clone()).await;
         let mut events = manager.subscribe();
-        let created = manager
+        manager
             .create_thread(new_thread(host, workspace.path(), "first"))
             .await
             .expect("create");
         assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
 
-        let handle = manager
-            .inner
-            .handle(&created.thread_id)
-            .await
-            .expect("thread handle");
-        let (session, generation) = {
-            let record = handle.lock().await;
-            (
-                record.live_session().cloned().expect("a live session"),
-                record.session.generation().expect("a generation"),
-            )
-        };
         // Between turns: the agent's stdout closes, then its exit report lands
         // with the stderr the close notice could not carry.
-        let stream = futures::stream::iter(vec![
-            HarnessEvent::TransportClosed {
-                message: "the harness transport closed".into(),
-                retryable: false,
-            },
-            HarnessEvent::TransportClosed {
-                message: "agy exited (exited: 1): agy: the session ended".into(),
-                retryable: false,
-            },
-        ])
-        .boxed();
-        Arc::clone(&manager.inner)
-            .run_pump(handle.clone(), generation, session, None, stream)
-            .await;
+        harness_events.emit(HarnessEvent::TransportClosed {
+            message: "the harness transport closed".into(),
+            retryable: true,
+        });
+        harness_events.emit(HarnessEvent::TransportClosed {
+            message: "agy exited (exited: 1): agy: the session ended".into(),
+            retryable: false,
+        });
 
-        let mut errors = Vec::new();
-        loop {
-            let wire = next_event(&mut events).await;
-            if let Event::Error { message, .. } = wire.event {
-                errors.push(message);
-                break;
-            }
-        }
+        let row = next_error(&mut events).await;
         assert!(
-            errors[0].contains("agy exited (exited: 1): agy: the session ended"),
-            "the row is the exit report with the stderr: {errors:?}"
+            row.contains("agy exited (exited: 1): agy: the session ended"),
+            "the row is the exit report with the stderr: {row:?}"
         );
         assert!(
-            errors[0].contains("agy: the session ended"),
-            "the row keeps the stderr the generic close lacked: {errors:?}"
+            row.contains("agy: the session ended"),
+            "the row keeps the stderr the generic close lacked: {row:?}"
         );
         let duplicate = tokio::time::timeout(Duration::from_millis(250), async {
             loop {
@@ -6370,6 +6513,208 @@ mod tests {
         assert!(
             duplicate.is_err(),
             "one idle death is one row, not two: {duplicate:?}"
+        );
+    }
+
+    /// A death between turns is published from the exit report itself: a live
+    /// adapter holds its session, and with it the event sender, so the stream
+    /// does not end while the daemon owns it. The row must arrive on its own (no
+    /// Send) and the dead session must be detached, so the next Send starts
+    /// fresh.
+    #[tokio::test]
+    async fn a_between_turns_exit_report_publishes_without_a_stream_end() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, harness_events) = FakeHarness::new().with_event_injector();
+        let (harness, shutdowns) = harness.with_shutdown_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        let (session, weak) = {
+            let record = handle.lock().await;
+            let session = record.live_session().cloned().expect("a live session");
+            let weak = Arc::downgrade(&session);
+            (session, weak)
+        };
+        drop(session);
+
+        harness_events.emit(HarnessEvent::TransportClosed {
+            message: "the harness transport closed".into(),
+            retryable: true,
+        });
+        harness_events.emit(HarnessEvent::TransportClosed {
+            message: "agy exited (exited: 1): agy: the session ended".into(),
+            retryable: false,
+        });
+
+        let row = tokio::time::timeout(Duration::from_secs(3), next_error(&mut events))
+            .await
+            .expect("the exit report publishes the row by itself");
+        assert!(
+            row.contains("agy exited (exited: 1): agy: the session ended"),
+            "the row is the exit report with the stderr: {row:?}"
+        );
+        assert!(
+            wait_until(|| handle
+                .try_lock()
+                .is_ok_and(
+                    |record| matches!(record.session, SessionSlot::None) && record.pump.is_none()
+                ))
+            .await,
+            "the dead session is detached and its pump is gone"
+        );
+        assert!(
+            wait_until(|| shutdowns.get() == 1).await,
+            "the dead session was shut down"
+        );
+        assert!(
+            wait_until(|| weak.upgrade().is_none()).await,
+            "the pump dropped the dead session"
+        );
+    }
+
+    /// A generic stdout-close notice is all the adapter reports when it never
+    /// reaps the agent: the row waits for the bounded window the exit report
+    /// gets, then publishes the notice alone instead of waiting for a stream end
+    /// that never comes.
+    #[tokio::test]
+    async fn a_generic_between_turns_close_publishes_after_the_fallback() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, harness_events) = FakeHarness::new().with_event_injector();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        harness_events.emit(HarnessEvent::TransportClosed {
+            message: "the harness transport closed".into(),
+            retryable: true,
+        });
+        // The exit report still has its window: publishing the generic notice
+        // at once would take the row the exit status and stderr belong in.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), next_error(&mut events))
+                .await
+                .is_err(),
+            "the generic close waits for the exit report"
+        );
+        let row = tokio::time::timeout(Duration::from_secs(3), next_error(&mut events))
+            .await
+            .expect("the bounded window publishes the generic close");
+        assert_eq!(row, "the harness transport closed");
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        assert!(
+            wait_until(|| handle
+                .try_lock()
+                .is_ok_and(
+                    |record| matches!(record.session, SessionSlot::None) && record.pump.is_none()
+                ))
+            .await,
+            "the dead session is detached and its pump is gone"
+        );
+    }
+
+    /// A completion that ends a turn on a closed transport also ends the pump:
+    /// the session it holds keeps its stream open, so the pump settles the turn,
+    /// drops the session and returns instead of waiting for that stream to end.
+    #[tokio::test]
+    async fn a_closed_transport_completion_ends_the_pump_and_drops_its_session() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, harness_events) = FakeHarness::new().with_event_injector();
+        let (harness, completion) = harness.with_later_completion_gate();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        // The second turn is running on the live session; its completion is
+        // withheld until the gate opens.
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        let (session, pump) = {
+            let mut record = handle.lock().await;
+            assert!(
+                record.live_session().is_some(),
+                "the second turn is on the live session"
+            );
+            (
+                record.live_session().cloned().expect("a live session"),
+                record.pump.take().expect("this session's pump"),
+            )
+        };
+        let weak = Arc::downgrade(&session);
+
+        // The agent's transport closes under the turn (a write deadline killed
+        // it) and the adapter reports the turn's failed completion last.
+        session
+            .lock()
+            .await
+            .shutdown()
+            .await
+            .expect("close the fake session");
+        drop(session);
+        harness_events.emit(HarnessEvent::TurnCompleted {
+            status: TurnStatus::Failed,
+            usage: Usage::default(),
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), pump)
+            .await
+            .expect("the pump ends instead of waiting for a stream end")
+            .expect("the pump task did not panic");
+        let (turn, status) = next_turn_completion(&mut events).await;
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Failed);
+        assert!(
+            wait_until(|| weak.upgrade().is_none()).await,
+            "the pump dropped the dead session"
+        );
+        let record = handle.lock().await;
+        assert!(
+            record.session.live().is_none(),
+            "the dead session is detached"
+        );
+        assert!(record.pump.is_none(), "the record holds no pump");
+        // The withheld completion must not arrive as a second turn end.
+        completion.release();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(150),
+                next_turn_completion(&mut events)
+            )
+            .await
+            .is_err(),
+            "the turn ended exactly once"
         );
     }
 

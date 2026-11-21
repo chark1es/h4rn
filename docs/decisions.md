@@ -576,8 +576,22 @@ the typed limit, so the daemon persists the schedule and the message queued behi
 of running straight into the limit. A typed limit is rendered as the message alone under a
 `Rate limited:` prefix rather than as a rejected write. Between turns the bridge reports the same
 death twice as well (the generic close, then the exit status with the stderr it drained); those
-reports are held per session generation and published as one row when that session's stream ends,
-so the exit status and the stderr are never lost to the generic notice.
+reports are held per session generation and published as one row, so the exit status and the stderr
+are never lost to the generic notice.
+
+**Addendum: a death is published from its report, and the pump ends with its session.** A live
+adapter keeps its event sender alive for as long as the daemon holds its session, so a session's
+stream does not end when the agent dies: it only ends once the daemon drops the session. An idle
+death therefore publishes its row as soon as the exit/status report for that generation arrives
+(the generic stdout close alone gets a 500 ms window for that report, the same window a failed
+prompt waits for), and the dead session is detached under the same record lock, so the next message
+starts a fresh agent. A pump that settles a turn on a closed transport, or publishes an idle death,
+detaches and shuts its session down, schedules any successor and then returns: it never waits for a
+stream end the session it still holds keeps from happening. Every other detach (a Stop, a restart, a
+model change, a failed prompt write, a shutdown) aborts the session's pump, so exactly one path
+ends each pump. The `agy-fixture` peer gained the two deaths that happen outside a turn: an answer
+followed by an exit, and an answer followed by a stopped stdin reader and a reset on stderr, which
+the write deadline turns into a typed limit.
 
 ## ADR-027: Push notifications are metadata-only wake signals
 

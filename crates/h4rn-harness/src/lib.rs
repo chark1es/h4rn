@@ -55,7 +55,8 @@ pub use codex::{
     detect_codex,
 };
 pub use fake::{
-    FakeHarness, FakeSession, Gate, InterruptCount, SendCount, SessionModels, test_spec,
+    EventInjector, FakeHarness, FakeSession, Gate, InterruptCount, SendCount, SessionModels,
+    test_spec,
 };
 pub use opencode::{
     ENV_CLIPROXY_API_KEY, ENV_CLIPROXY_BASE_URL, ENV_OPENCODE_API_KEY, ENV_OPENCODE_BASE_URL,
@@ -192,6 +193,12 @@ pub enum HarnessEvent {
     /// rather than inferred from the session's health afterwards: only these
     /// two reports of one death are collapsed into one row, and any other
     /// diagnostic still gets its own.
+    ///
+    /// A report without an exit status or stderr yet (the bridge's generic
+    /// stdout-close notice) is `retryable: true`; the report that carries the
+    /// exit status and the drained stderr is `retryable: false`. A death
+    /// reported between turns is held for the first report and published from
+    /// the second, so the row is never the generic notice.
     TransportClosed {
         /// What happened.
         message: String,

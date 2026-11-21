@@ -73,6 +73,30 @@ enum SendFailure {
     RateLimited(LimitSignal),
 }
 
+/// A test's handle on the live fake session's event stream.
+///
+/// A real adapter keeps its event sender alive for as long as the daemon holds
+/// the session, so the stream does not end when the agent dies. A test that
+/// needs to report a death the way the adapter does (the generic stdout close,
+/// then the exit status with the stderr it drained) pushes it through this
+/// handle instead of ending the stream.
+#[derive(Clone, Debug, Default)]
+pub struct EventInjector(Arc<Mutex<Option<EventSink>>>);
+
+impl EventInjector {
+    /// Queues one event on the most recently started session's stream.
+    pub fn emit(&self, event: HarnessEvent) {
+        let sender = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(sender) = sender {
+            sender.try_send(event);
+        }
+    }
+}
+
 /// A fake harness adapter.
 #[derive(Clone, Debug)]
 pub struct FakeHarness {
@@ -135,6 +159,8 @@ pub struct FakeHarness {
     /// Holds a dead send's failure until the returned gate opens, after the
     /// session has reported the transport death on its stream.
     generic_death_gate: Option<Gate>,
+    /// A test's handle on the live session's event stream.
+    event_injector: Option<EventInjector>,
 }
 
 /// A shared count of prompts a fake session was asked to write.
@@ -306,6 +332,7 @@ impl Default for FakeHarness {
             event_queue_capacity: None,
             immediate_stream_end: false,
             generic_death_gate: None,
+            event_injector: None,
         }
     }
 }
@@ -599,6 +626,17 @@ impl FakeHarness {
         self.generic_death_gate = Some(gate.clone());
         (self, gate)
     }
+
+    /// Returns a handle that queues events on the live session's stream.
+    ///
+    /// A test uses this to report a transport death between turns the way a
+    /// real adapter does, while the session (and so its event sender) stays
+    /// alive: the stream never ends, so the daemon's row cannot wait for it.
+    pub fn with_event_injector(mut self) -> (Self, EventInjector) {
+        let injector = EventInjector::default();
+        self.event_injector = Some(injector.clone());
+        (self, injector)
+    }
 }
 
 #[async_trait]
@@ -662,6 +700,12 @@ impl Harness for FakeHarness {
         sender
             .send(HarnessEvent::SessionStarted { session_id })
             .await;
+        if let Some(injector) = &self.event_injector {
+            *injector
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sender.clone());
+        }
 
         let session_scripts = self.session_scripts.clone();
         let primed = session_scripts.is_some();
