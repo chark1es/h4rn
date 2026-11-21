@@ -50,7 +50,7 @@ pub struct GitWorktree {
     pub branch: Option<String>,
 }
 
-/// One worktree registration as `git worktree list --porcelain` reports it.
+/// One worktree registration as `git worktree list --porcelain -z` reports it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Registration {
     /// Normalised absolute path.
@@ -110,6 +110,20 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    let stdout = run_bytes_with_timeout(dir, args, limit)?;
+    Ok(String::from_utf8_lossy(&stdout).trim().to_owned())
+}
+
+/// [`run_with_timeout`], keeping stdout exactly as git wrote it.
+///
+/// Porcelain output with `-z` is NUL-delimited and may hold path bytes that are
+/// not valid UTF-8; trimming or lossily decoding it would merge or damage
+/// records, so those callers use this and parse the bytes.
+pub fn run_bytes_with_timeout<I, S>(dir: &Path, args: I, limit: Duration) -> Result<Vec<u8>, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     let mut child = command(dir)
         .args(args)
         .stdout(Stdio::piped())
@@ -157,7 +171,7 @@ where
         return Err(timeout_message(limit));
     };
     if status.success() {
-        Ok(String::from_utf8_lossy(&stdout).trim().to_owned())
+        Ok(stdout)
     } else {
         let stderr = String::from_utf8_lossy(&stderr);
         let stderr = stderr.trim();
@@ -318,6 +332,15 @@ pub(crate) fn repo_of(workspace: &Path) -> Option<PathBuf> {
     }
 }
 
+/// The common git directory of `repo`, normalised.
+///
+/// Bounded by the caller's deadline because clearing uses it to inspect the
+/// worktree admin directories for an in-progress rebase or bisect.
+pub fn common_dir(repo: &Path, limit: Duration) -> Result<PathBuf, String> {
+    let common = run_with_timeout(repo, ["rev-parse", "--git-common-dir"], limit)?;
+    Ok(norm(&repo.join(common)))
+}
+
 /// The top level of the checkout containing `workspace`, normalised.
 ///
 /// Bounded by [`OBSERVATION_GIT_TIMEOUT`] because the observation watcher
@@ -372,52 +395,84 @@ pub fn list_worktrees(repo: &Path) -> Result<Vec<GitWorktree>, String> {
 /// Bounded by [`OBSERVATION_GIT_TIMEOUT`] because the observation watcher
 /// calls it through [`list_worktrees`].
 pub fn registrations(repo: &Path) -> Result<Vec<Registration>, String> {
-    let out = run_with_timeout(
-        repo,
-        ["worktree", "list", "--porcelain"],
-        OBSERVATION_GIT_TIMEOUT,
-    )?;
+    registrations_with_timeout(repo, OBSERVATION_GIT_TIMEOUT)
+}
+
+/// [`registrations`], with an explicit deadline for clearing.
+pub fn registrations_with_timeout(
+    repo: &Path,
+    limit: Duration,
+) -> Result<Vec<Registration>, String> {
+    let out = run_bytes_with_timeout(repo, ["worktree", "list", "--porcelain", "-z"], limit)?;
     Ok(parse_registrations(&out))
 }
 
-/// Parses `git worktree list --porcelain` output.
-pub fn parse_registrations(out: &str) -> Vec<Registration> {
+/// Parses `git worktree list --porcelain -z` output.
+///
+/// Fields are NUL-separated and an empty field ends a record. The path is taken
+/// as bytes, so a directory name holding a newline or invalid UTF-8 is still
+/// one path rather than two lines; only the non-Unix fallback decodes lossily.
+pub fn parse_registrations(out: &[u8]) -> Vec<Registration> {
     let mut registrations = Vec::new();
-    for block in out.split("\n\n") {
-        let mut path = None;
-        let mut branch = None;
-        let mut head = None;
-        let mut detached = false;
-        let mut prunable = false;
-        for line in block.lines() {
-            if let Some(value) = line.strip_prefix("worktree ") {
-                path = Some(norm(Path::new(value)));
-            } else if let Some(value) = line.strip_prefix("branch ") {
-                branch = Some(
-                    value
-                        .strip_prefix("refs/heads/")
-                        .unwrap_or(value)
-                        .to_owned(),
-                );
-            } else if let Some(value) = line.strip_prefix("HEAD ") {
-                head = Some(value.trim().to_owned());
-            } else if line == "detached" {
-                detached = true;
-            } else if line.starts_with("prunable") {
-                prunable = true;
+    let mut current: Option<Registration> = None;
+    for field in out.split(|byte| *byte == 0) {
+        if field.is_empty() {
+            if let Some(registration) = current.take() {
+                registrations.push(registration);
             }
+            continue;
         }
-        if let Some(path) = path {
-            registrations.push(Registration {
-                path,
-                branch,
-                head,
-                detached,
-                prunable,
+        if let Some(value) = field.strip_prefix(b"worktree ") {
+            // A field may only start a record, but flushing here also keeps a
+            // malformed stream from merging two worktrees into one.
+            if let Some(registration) = current.take() {
+                registrations.push(registration);
+            }
+            current = Some(Registration {
+                path: norm(&path_from_bytes(value)),
+                branch: None,
+                head: None,
+                detached: false,
+                prunable: false,
             });
+            continue;
+        }
+        let Some(registration) = current.as_mut() else {
+            continue;
+        };
+        if let Some(value) = field.strip_prefix(b"branch ") {
+            let value = String::from_utf8_lossy(value);
+            registration.branch = Some(
+                value
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(&value)
+                    .to_owned(),
+            );
+        } else if let Some(value) = field.strip_prefix(b"HEAD ") {
+            registration.head = Some(String::from_utf8_lossy(value).trim().to_owned());
+        } else if field == b"detached" {
+            registration.detached = true;
+        } else if field.starts_with(b"prunable") {
+            registration.prunable = true;
         }
     }
+    if let Some(registration) = current.take() {
+        registrations.push(registration);
+    }
     registrations
+}
+
+/// A path from the raw bytes git printed.
+#[cfg(unix)]
+fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    PathBuf::from(std::ffi::OsString::from_vec(bytes.to_vec()))
+}
+
+/// A path from the raw bytes git printed; other platforms decode lossily.
+#[cfg(not(unix))]
+fn path_from_bytes(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
 }
 
 /// Worktrees present in `after` but not in `before`.

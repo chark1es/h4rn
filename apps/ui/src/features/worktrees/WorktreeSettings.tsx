@@ -15,6 +15,7 @@ import {
   forceCanFix,
   inUseWorktrees,
   loadWorktrees,
+  removeDescription,
   settledWorktrees,
   useWorktreeList,
   useWorktrees,
@@ -45,20 +46,6 @@ function subline(row: TrackedWorktree): string {
   else if (!row.exists) parts.push("Directory removed, branch kept");
   if (row.dirty) parts.push("Uncommitted changes");
   return parts.join(" · ");
-}
-
-/** What removing one row does, worded for a checkout that is there or gone. */
-function removeDescription(row: TrackedWorktree): string {
-  const base = row.exists
-    ? `The checkout at ${row.path} is deleted from disk. Ignored files such as build output are deleted with it.${
-        row.owned && row.branch ? ` The ${row.branch} branch h4rn created is deleted too.` : ""
-      }`
-    : row.owned && row.branch
-      ? `No checkout remains on disk. Its ${row.branch} branch is deleted.`
-      : "No checkout remains on disk.";
-  return `${base} Uncommitted changes or unmerged work are skipped.${
-    row.origin === "thread" ? " Its thread may still be resumed there." : ""
-  }`;
 }
 
 /** A path that keeps its last two folders when the row is narrow. */
@@ -320,7 +307,7 @@ export function WorktreeSettings() {
       <ConfirmDialog
         open={forcing !== null}
         title={`Remove ${forceCount} ${forceCount === 1 ? "worktree" : "worktrees"} anyway?`}
-        description={`Uncommitted changes and unmerged commits in these worktrees are lost. This can't be undone.${threadNote}`}
+        description={`Uncommitted changes and unmerged commits in these worktrees are lost. Any checkout now at these paths is deleted. This can't be undone.${threadNote}`}
         confirmLabel="Remove anyway"
         onOpenChange={(open) => {
           if (!open) setForcing(null);

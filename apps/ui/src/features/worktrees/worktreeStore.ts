@@ -131,12 +131,18 @@ export const WORKTREE_SKIP_REASONS = {
     "is the repository's main worktree",
     "its repository could not be found",
     "git timed out",
+    "registration left in place",
   ],
+  /** `branch <name> is a symbolic ref` — the ref is kept, target included. */
+  blockedSuffixes: ["is a symbolic ref"],
 } as const;
 
 /** Whether a forced clear could remove an entry the daemon skipped. */
 export function forceCanFix(reason: string): boolean {
   if (WORKTREE_SKIP_REASONS.blockedPrefixes.some((prefix) => reason.startsWith(prefix))) {
+    return false;
+  }
+  if (WORKTREE_SKIP_REASONS.blockedSuffixes.some((suffix) => reason.endsWith(suffix))) {
     return false;
   }
   if ((WORKTREE_SKIP_REASONS.forceable as readonly string[]).includes(reason)) return true;
@@ -146,6 +152,28 @@ export function forceCanFix(reason: string): boolean {
   return (
     reason.startsWith("branch ") && reason.endsWith(WORKTREE_SKIP_REASONS.forceableBranchSuffix)
   );
+}
+
+/**
+ * What removing one row does, worded for a checkout that is there or gone.
+ *
+ * "Unmerged work" applies only to owned branches, which are the only branches
+ * h4rn deletes; an unowned row can only lose uncommitted changes.
+ */
+export function removeDescription(row: TrackedWorktree): string {
+  const base = row.exists
+    ? `The checkout at ${row.path} is deleted from disk. Ignored files such as build output are deleted with it.${
+        row.owned && row.branch ? ` The ${row.branch} branch h4rn created is deleted too.` : ""
+      }`
+    : row.owned && row.branch
+      ? `No checkout remains on disk. Its ${row.branch} branch is deleted.`
+      : "No checkout remains on disk.";
+  const skipped = row.owned
+    ? "Uncommitted changes or unmerged work are skipped."
+    : "Uncommitted changes are skipped.";
+  return `${base} ${skipped}${
+    row.origin === "thread" ? " Its thread may still be resumed there." : ""
+  }`;
 }
 
 /** The loaded page's layout: a notice above the groups, or the empty copy. */

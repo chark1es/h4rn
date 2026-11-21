@@ -29,6 +29,7 @@ import {
   getWorktreeState,
   inUseWorktrees,
   loadWorktrees,
+  removeDescription,
   resetWorktreeStoreForTests,
   settledWorktrees,
   shouldReloadWorktrees,
@@ -345,9 +346,28 @@ describe("forceCanFix", () => {
       "is the repository's main worktree",
       "its repository could not be found",
       "git timed out after 30s",
+      "registration left in place: fatal: not a working tree",
+      "branch h4rn/sa-sym is a symbolic ref",
     ]) {
       expect(forceCanFix(blocked), blocked).toBe(false);
     }
+  });
+});
+
+describe("removeDescription", () => {
+  it("mentions unmerged work only for an owned branch", () => {
+    const unowned = removeDescription(row({ owned: false, branch: "feature/x" }));
+    expect(unowned).toContain("Uncommitted changes are skipped.");
+    expect(unowned).not.toContain("unmerged work");
+
+    const owned = removeDescription(row({ owned: true, branch: "h4rn/sa-aa" }));
+    expect(owned).toContain("Uncommitted changes or unmerged work are skipped.");
+  });
+
+  it("says ignored files go with an existing checkout", () => {
+    expect(removeDescription(row({ exists: true }))).toContain(
+      "Ignored files such as build output are deleted with it.",
+    );
   });
 });
 

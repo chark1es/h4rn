@@ -197,10 +197,15 @@ lexically.
 **What is stored.** Only observations that cannot be derived live go to
 `<data_dir>/worktrees.db`: `harness` worktrees and which threads used them.
 Subagent worktrees come from the supervisor and thread workspaces from the
-thread list, and the list is recomputed on every request.
+thread list, and the list is recomputed on every request. An observed worktree
+whose directory is missing is still listed, with `exists: false`, while its own
+registration remains in the repository's snapshot: its registration is exactly
+what a clear removes. It is forgotten only when neither the directory nor the
+registration exists.
 
-**How harness worktrees are observed.** The daemon snapshots `git worktree list`
-for a thread's repository when a turn starts and again when it completes; any
+**How harness worktrees are observed.** The daemon snapshots
+`git worktree list --porcelain -z` for a thread's repository when a turn starts
+and again when it completes; any
 linked worktree that appeared in between is recorded against that thread (and its
 subagent id, for a child). Two turns on the same repository can overlap, though
 (for example a parent and its child), and then a worktree that appeared belongs
@@ -213,7 +218,9 @@ seconds, so tool calls do not shell out to git one by one. Every git call the
 watcher makes — resolving a thread's repository, its checkout top level, and
 listing a repository's worktrees — is bounded to ten seconds, so one wedged
 repository cannot stall observation for every thread; a timeout is logged and
-that event's work is dropped. h4rn's own
+that event's work is dropped. The NUL-delimited form is parsed as records, so a
+path containing a newline (or bytes that are not UTF-8 on Unix) stays one path.
+h4rn's own
 `<data_dir>/subagents/*/worktree` paths and the main worktree are never recorded
 as `harness`. Write failures are logged and never interrupt the watcher.
 
@@ -244,8 +251,9 @@ for it.
 - Active worktrees are never removed, even with `force`. Each target is handled
   in two blocking phases: a preflight (repository and main-worktree checks, a
   nested worktree, dirtiness, whether the checkout is still on its listed
-  branch, detached HEAD, unmerged owned branch) and the removal itself. The
-  live re-check runs after
+  branch, detached HEAD, unmerged owned branch) and the removal itself. Each
+  phase takes one NUL-delimited registration snapshot and answers containment
+  and the exact-registration lookup from it. The live re-check runs after
   preflight and immediately before removal, so a thread that becomes busy in
   that window still keeps the entry and its checkout stays on disk. That
   re-check first collects every candidate — the accessors the listing named, the
@@ -271,11 +279,20 @@ for it.
   its commit is reachable from some branch, remote-tracking branch or tag;
   otherwise removing the checkout would leave that work unreachable. When the
   checkout's directory is already gone, the same check uses the detached
-  registration's `HEAD` commit from `git worktree list --porcelain`.
-- A checkout that contains another registered worktree is never removed, with or
-  without force: it is skipped as `contains another worktree at <path>` (not
-  forceable). Git would otherwise remove the parent and leave the nested
-  registration pointing at a directory that no longer exists.
+  registration's `HEAD` commit from the NUL-delimited snapshot.
+- Immediately before `git worktree remove` on an existing directory without
+  force, the detached-HEAD reachability check and the "still on its listed
+  branch" check run again. A checkout detached, replaced or given a new commit
+  after preflight is therefore skipped with the same reason it would have been
+  skipped at preflight, and its registration and commit stay.
+- An existing checkout that contains another registered worktree is never
+  removed, with or without force: it is skipped as
+  `contains another worktree at <path>` (not forceable). Git would otherwise
+  remove the parent and leave the nested registration pointing at a directory
+  that no longer exists. The check applies only while the selected directory
+  exists: a registration whose checkout is already gone has no nested working
+  tree to protect, and removing that registration must leave the nested
+  registration alone.
 - Removal is plain `git worktree remove`, with `--force` only when the request
   asked for it, never merely because h4rn owns the checkout. Git's own contract
   applies: a removable checkout takes ignored files (build output, caches) with
@@ -284,10 +301,12 @@ for it.
   registration, and a repository-wide prune would also forget an unrelated
   worktree whose directory is only temporarily away. When the selected
   checkout's directory is already gone, only its own registration is looked up
-  by path in `git worktree list --porcelain` and removed: an ordinary clear runs
-  the plain `git worktree remove <path>`, and only `force` may try `--force`. If
-  it fails the registration is left in place rather than deleting another
-  worktree's metadata.
+  by path in the NUL-delimited snapshot and removed: an ordinary clear runs the
+  plain `git worktree remove <path>`, and only `force` may try `--force`, then
+  the plain form. If it fails the path is skipped as
+  `registration left in place: <git's message>` (not forceable) rather than
+  reported as removed, and the owned branch is only touched when the
+  registration was removed.
 - Every git command in a clear is bounded to 30 seconds; a command that outlives
   its deadline is killed. Collecting a command's output is bounded too: if a
   descendant process left behind by a git alias keeps stdout or stderr open,
@@ -298,16 +317,25 @@ for it.
   branch is reported as the branch failure.
 - For owned entries the branch is deleted, but only when it starts with `h4rn/`,
   and the empty `<data_dir>/subagents/<id>` directory is removed. A branch h4rn
-  did not create is never deleted. Deletion uses git's own command in the main
-  repository: `git branch -d <b>` for an ordinary clear and `git branch -D <b>`
-  with `force`. Git refuses `-d` for a branch not merged into its upstream or
-  `HEAD`, for a branch checked out in any worktree, and for one in use by a
-  rebase or bisect; it also deletes a symbolic ref itself and never its target.
-  The preflight already checks the merge so the early skip reads
-  `branch <b> has unmerged commits` (forceable); if the branch gains work after
-  that check, `git branch -d` refuses with "not fully merged" and the path is
-  skipped with the same forceable reason. Any other refusal after the checkout
-  is gone is reported as
+  did not create is never deleted. Preflight resolves the branch to a sha first
+  (after checking it is not a symbolic ref) and refuses an unmerged tip, so the
+  early skip reads `branch <b> has unmerged commits` (forceable). An ordinary
+  clear then deletes exactly that verified tip with
+  `git update-ref --no-deref -d refs/heads/<b> <verified-sha>`, which git
+  refuses atomically if the ref moved in the meantime; that refusal is reported
+  as the same forceable `branch <b> has unmerged commits`. Before deleting, git's
+  protections are applied explicitly: the branch is not deleted when any
+  registered worktree has it checked out, when any worktree's git directory (the
+  main `<common>` or `<common>/worktrees/*`) has `rebase-merge/head-name`,
+  `rebase-apply/head-name` or `rebase-merge/update-refs` naming
+  `refs/heads/<b>`, or when `BISECT_START` names the branch. Those refusals are
+  reported as
+  `checkout removed, but branch <b> could not be deleted: <why>`. A symbolic
+  owned ref is never deleted: the checkout still goes, and the path is skipped
+  as `branch <b> is a symbolic ref` with the symref and its target intact. A
+  forced clear uses git's own `git branch -D <b>` (git still refuses a branch
+  checked out in any worktree). Any other refusal after the checkout is gone is
+  reported as
   `checkout removed, but branch <b> could not be deleted: <git's message>` so
   the leftover branch is not mistaken for a clean removal.
 - The repository's main worktree is never touched.
