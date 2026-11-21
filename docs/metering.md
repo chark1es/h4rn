@@ -83,8 +83,15 @@ assigned a default.
 A harness limit becomes a `LimitHit` with the harness, provider/account, model,
 `reset_at` (when the provider says), any consumption numbers and the provider's
 message. The daemon records it, keeps the thread in Working and sets
-`AgentState::Scheduled` when auto-resume is armed. `GetLimits` returns the
-history plus the current policy, and `ListResets` returns schedules and history.
+`AgentState::Scheduled` when auto-resume is armed. The adapter is the only
+judge of whether a failure is a limit: a write that fails before its prompt
+reaches the agent carries a typed limit signal when the adapter parsed one, and
+the daemon never infers a limit from another harness's error text (an HTTP 413
+"payload size limit exceeded", for example, is an ordinary failed turn). A
+limit is only recorded while the failed write still owns the turn and its
+session, so a shutdown that interrupts the turn while the write is pending
+leaves no schedule behind. `GetLimits` returns the history plus the current
+policy, and `ListResets` returns schedules and history.
 
 ### Scheduling
 

@@ -734,6 +734,8 @@ impl OpenCodeParser {
             TurnStatus::Completed => "completed",
             TurnStatus::Failed => "failed",
             TurnStatus::Interrupted => "interrupted",
+            TurnStatus::TokenLimit => "token_limit",
+            TurnStatus::TurnLimit => "turn_limit",
         };
         self.last_turn = Some(TurnReport {
             num_turns: self.turn_steps.max(1),

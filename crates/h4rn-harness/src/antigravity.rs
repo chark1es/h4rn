@@ -56,14 +56,15 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::acp::{
-    AcpClient, AcpClientConfig, AcpError, AcpEvent, AcpMcpServer, AcpPermissionOption,
+    AcpClient, AcpClientConfig, AcpError, AcpEvent, AcpLocation, AcpMcpServer, AcpPermissionOption,
     AcpPermissionRequest, AcpServerInfo, AcpSessionInfo, AcpToolCall, AcpToolKind, AcpToolStatus,
     AcpUpdate, AcpUsage, AgentCapabilities, ENV_MCP_STDIO_BRIDGE, PromptContent,
 };
 use crate::attachments::{self, AttachmentClass, AttachmentDelivery};
 use crate::{
     AttachmentRef, ENV_MCP_AUTH_TOKEN, ENV_MCP_BEARER_TOKEN, Harness, HarnessError, HarnessEvent,
-    HarnessInstall, HarnessSession, SessionSpec, TurnReport, UserInput, detect_limit,
+    HarnessInstall, HarnessSession, SessionSpec, TransportHealth, TurnReport, UserInput,
+    detect_limit, most_specific_detail,
 };
 
 mod stream;
@@ -76,6 +77,13 @@ const MAX_TOTAL_IMAGE_BYTES: usize = 80 * 1024 * 1024;
 const MAX_TEXT_RESOURCE_BYTES: u64 = 2 * 1024 * 1024;
 const TOUCHED_PATH_LIMIT: usize = 512;
 const TURN_TEXT_LIMIT: usize = 16 * 1024;
+/// How long a prompt that just lost its transport waits for the supervisor's
+/// exit report before it publishes the turn's one failure row.
+///
+/// stdout can close before the process is reaped and its stderr drained; the
+/// short bound lets that report (status, stderr, any rate-limit reset) reach
+/// the row without holding a dead turn open.
+const DEATH_DETAIL_WAIT: Duration = Duration::from_millis(500);
 
 /// Overrides the `agy` executable used by the adapter.
 pub const ENV_AGY_PATH: &str = "H4RN_AGY_PATH";
@@ -563,12 +571,17 @@ impl HarnessSession for AcpSession {
                 message: "session is shut down".into(),
             });
         }
+        // A Stop that arrived after the previous turn's prompt had already
+        // completed must not colour this turn; the flag belongs to one prompt.
+        // It is cleared only once this send owns the prompt slot, so a rejected
+        // concurrent send cannot clear a running turn's stop flag.
         if self.prompt_running.swap(true, Ordering::SeqCst) {
             return Err(HarnessError::Transport {
                 harness: HarnessKind::Antigravity,
                 message: "a turn is already running".into(),
             });
         }
+        self.interrupt_requested.store(false, Ordering::SeqCst);
 
         let mut attachments = input.attachments;
         if self.first_send {
@@ -586,6 +599,7 @@ impl HarnessSession for AcpSession {
         {
             let mut shared = lock(&self.shared);
             shared.turn_text.clear();
+            shared.tool_labels.clear();
             shared.state = AgentState::Thinking;
         }
 
@@ -597,21 +611,88 @@ impl HarnessSession for AcpSession {
         let interrupt_requested = self.interrupt_requested.clone();
         let started = Instant::now();
 
+        // Wait until `session/prompt` is on the agent's stdin before returning:
+        // an interrupt after this point can safely be sent as a cancel.
+        let pending = match client.start_prompt(&session_id, &content).await {
+            Ok(pending) => pending,
+            Err(error) => {
+                self.prompt_running.store(false, Ordering::SeqCst);
+                // A prompt that failed before its frame reached the agent is
+                // the same death the prompt task would report: name the I/O
+                // error, the agent's stderr and its exit, so the daemon's one
+                // failure row keeps the agent's last words and any rate-limit
+                // reset in them. A write timeout kills the agent just like a
+                // close, so it must also read the stderr the agent printed
+                // before it stopped reading: that is where a provider limit
+                // names its reset, and the daemon arms the resume from it.
+                let detail = if matches!(error, AcpError::Closed { .. } | AcpError::Timeout { .. })
+                {
+                    prompt_write_detail(&client, error.to_string()).await
+                } else {
+                    error.to_string()
+                };
+                let limit = detect_limit(&detail, Utc::now());
+                {
+                    let mut shared = lock(&self.shared);
+                    shared.state = if limit.is_some() {
+                        AgentState::RateLimited
+                    } else {
+                        AgentState::Error
+                    };
+                    shared.last_turn = Some(TurnReport {
+                        num_turns: 0,
+                        duration_ms: millis(started.elapsed()),
+                        duration_api_ms: 0,
+                        cost_micros: 0,
+                        is_error: true,
+                        stop_reason: None,
+                        subtype: Some("error".into()),
+                    });
+                }
+                let mapped = map_acp_error(error);
+                // A parsed limit travels as its own typed error so the daemon
+                // can arm the resume without parsing the text of a failure
+                // that came from another adapter. Everything else keeps the
+                // merged detail and the error variant the ACP layer chose.
+                return Err(match limit {
+                    Some(limit) => HarnessError::RateLimited {
+                        harness: HarnessKind::Antigravity,
+                        message: detail,
+                        limit,
+                    },
+                    None => match mapped {
+                        HarnessError::Transport { harness, .. } => HarnessError::Transport {
+                            harness,
+                            message: detail,
+                        },
+                        other => other,
+                    },
+                });
+            }
+        };
+
         self.prompt_task = Some(tokio::spawn(async move {
-            let result = client.prompt(&session_id, &content).await;
+            let result = pending.wait().await;
             let duration_ms = millis(started.elapsed());
+            // Read the stop flag before releasing the prompt slot: a new send
+            // clears the flag for its own turn, so this turn must classify
+            // first.
+            let interrupted = interrupt_requested.swap(false, Ordering::SeqCst)
+                || result.as_ref().is_ok_and(|prompt| prompt.cancelled());
             prompt_running.store(false, Ordering::SeqCst);
             match result {
                 Ok(prompt) => {
                     let usage = usage_from_acp(&prompt.usage, duration_ms);
                     let turn_text = lock(&shared).turn_text.clone();
                     let limit = detect_limit(&turn_text, Utc::now());
-                    let interrupted =
-                        interrupt_requested.swap(false, Ordering::SeqCst) || prompt.cancelled();
                     let status = if interrupted {
                         TurnStatus::Interrupted
                     } else if prompt.completed() {
                         TurnStatus::Completed
+                    } else if prompt.token_limited() {
+                        TurnStatus::TokenLimit
+                    } else if prompt.turn_limited() {
+                        TurnStatus::TurnLimit
                     } else {
                         TurnStatus::Failed
                     };
@@ -623,7 +704,8 @@ impl HarnessSession for AcpSession {
                             duration_api_ms: 0,
                             cost_micros: 0,
                             is_error: status == TurnStatus::Failed,
-                            stop_reason: Some(prompt.stop_reason.clone()),
+                            stop_reason: (!prompt.stop_reason.is_empty())
+                                .then(|| prompt.stop_reason.clone()),
                             subtype: None,
                         });
                         shared.state = turn_state(status, limit.is_some());
@@ -644,12 +726,14 @@ impl HarnessSession for AcpSession {
                             .await;
                     }
                     if status == TurnStatus::Failed {
+                        let message = if prompt.stop_reason.trim().is_empty() {
+                            "the agent ended the turn without a stop reason".to_owned()
+                        } else {
+                            format!("Antigravity stopped the turn: {}", prompt.stop_reason)
+                        };
                         let _ = events_tx
                             .send(HarnessEvent::Error {
-                                message: format!(
-                                    "Antigravity stopped the turn: {}",
-                                    prompt.stop_reason
-                                ),
+                                message,
                                 retryable: true,
                             })
                             .await;
@@ -659,11 +743,29 @@ impl HarnessSession for AcpSession {
                         .await;
                 }
                 Err(error) => {
+                    // A transport death reaches this task and the bridge
+                    // separately: the stdout close fails the prompt here, while
+                    // the supervisor reaps the process and builds its exit
+                    // report (status plus the stderr the reader drained). The
+                    // close can win that race, so wait briefly for the report:
+                    // the one row this turn publishes should name the exit and
+                    // the agent's last words - including any rate-limit reset -
+                    // rather than settle for the bare close notice.
+                    let exit = if client.is_supervised() && matches!(error, AcpError::Closed { .. })
+                    {
+                        client.wait_for_exit(DEATH_DETAIL_WAIT).await
+                    } else {
+                        None
+                    };
                     let mut detail = error.to_string();
-                    let stderr = client.stderr_tail();
-                    if !stderr.is_empty() {
-                        detail.push('\n');
-                        detail.push_str(&stderr);
+                    if let Some(report) = &exit {
+                        detail = merged_detail(detail, &report.stderr);
+                        detail = merged_detail(detail, &format!("agy exited ({})", report.status));
+                    } else {
+                        // No process to wait for (an in-process transport): the
+                        // ring's tail is all the adapter knows.
+                        let stderr = client.stderr_tail();
+                        detail = merged_detail(detail, &stderr);
                     }
                     let limit = detect_limit(&detail, Utc::now());
                     let usage = Usage {
@@ -695,15 +797,24 @@ impl HarnessSession for AcpSession {
                             })
                             .await;
                     } else {
-                        let _ = events_tx
-                            .send(HarnessEvent::Error {
-                                message: detail.trim().to_string(),
-                                retryable: !matches!(
-                                    error,
-                                    AcpError::Protocol { .. } | AcpError::OutsideWorkspace { .. }
-                                ),
-                            })
-                            .await;
+                        // A prompt that failed because the transport is gone is
+                        // the same death the bridge reports on its own stream:
+                        // tag it so the two are one row. Any other failure here
+                        // (a protocol or RPC error) stays an ordinary error and
+                        // is never collapsed with a transport death. `wait()`
+                        // takes no deadline, so `Closed` is the only transport
+                        // error this task can see.
+                        let message = detail.trim().to_string();
+                        let retryable = !matches!(
+                            error,
+                            AcpError::Protocol { .. } | AcpError::OutsideWorkspace { .. }
+                        );
+                        let event = if matches!(error, AcpError::Closed { .. }) {
+                            HarnessEvent::TransportClosed { message, retryable }
+                        } else {
+                            HarnessEvent::Error { message, retryable }
+                        };
+                        let _ = events_tx.send(event).await;
                     }
                     let _ = events_tx
                         .send(HarnessEvent::TurnCompleted {
@@ -725,8 +836,13 @@ impl HarnessSession for AcpSession {
                 message: "session is shut down".into(),
             });
         }
-        self.interrupt_requested.store(true, Ordering::SeqCst);
+        // `send` only returns once `session/prompt` was flushed, so a running
+        // prompt is always on the wire by the time a cancel can reach here.
+        // That holds because the daemon serializes `send` and `interrupt` on
+        // this session's lock: a cancel can only run after the send that took
+        // the prompt slot has returned.
         if self.prompt_running.load(Ordering::SeqCst) {
+            self.interrupt_requested.store(true, Ordering::SeqCst);
             self.client
                 .cancel(&self.session_id)
                 .await
@@ -778,6 +894,14 @@ impl HarnessSession for AcpSession {
 
     fn session_id(&self) -> Option<String> {
         Some(self.session_id.clone())
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed || self.client.is_closed()
+    }
+
+    fn transport_health(&self) -> Option<TransportHealth> {
+        Some(self.client.transport_health())
     }
 
     fn agent_state(&self) -> AgentState {
@@ -847,9 +971,81 @@ struct AcpShared {
     state: AgentState,
     touched: Vec<String>,
     tool_started: HashMap<String, DateTime<Utc>>,
+    tool_labels: HashMap<String, ToolLabel>,
     pending: HashMap<String, PendingApproval>,
     turn_text: String,
     last_turn: Option<TurnReport>,
+}
+
+/// The raw fields of a tool call, merged across its `tool_call` and
+/// `tool_call_update` frames.
+///
+/// Updates often carry only a status or output. Caching the raw fields instead
+/// of a derived name and summary lets a later title change reach the row while
+/// a status-only update cannot rename a kind-only call to "other".
+#[derive(Debug, Default)]
+struct ToolLabel {
+    /// Last non-empty `name` the agent sent.
+    name: Option<String>,
+    /// Last non-empty title.
+    title: Option<String>,
+    /// Last kind the agent sent.
+    kind: Option<AcpToolKind>,
+    /// Last raw input the agent sent.
+    raw_input: Option<Value>,
+    /// Last locations the agent sent.
+    locations: Vec<AcpLocation>,
+}
+
+impl ToolLabel {
+    /// Merges the fields this frame carries; absent fields keep their value.
+    fn merge(&mut self, call: &AcpToolCall) {
+        if let Some(name) = call
+            .raw
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
+        {
+            self.name = Some(name.to_owned());
+        }
+        if let Some(title) = call.title.as_deref().filter(|title| !title.is_empty()) {
+            self.title = Some(title.to_owned());
+        }
+        if call.raw.get("kind").is_some() {
+            self.kind = Some(call.kind.clone());
+        }
+        if let Some(input) = call
+            .raw
+            .get("rawInput")
+            .or_else(|| call.raw.get("raw_input"))
+        {
+            self.raw_input = Some(input.clone());
+        }
+        if call.raw.get("locations").is_some() {
+            self.locations = call.locations.clone();
+        }
+    }
+
+    fn kind(&self) -> AcpToolKind {
+        self.kind
+            .clone()
+            .unwrap_or(AcpToolKind::Other("other".into()))
+    }
+
+    fn name(&self) -> String {
+        self.name
+            .clone()
+            .or_else(|| self.title.clone())
+            .unwrap_or_else(|| self.kind().label().to_owned())
+    }
+
+    fn summary(&self) -> String {
+        AcpToolCall::summary_of(
+            self.title.as_deref(),
+            self.raw_input.as_ref(),
+            &self.locations,
+        )
+    }
 }
 
 impl AcpShared {
@@ -858,6 +1054,7 @@ impl AcpShared {
             state: AgentState::Idle,
             touched: Vec::new(),
             tool_started: HashMap::new(),
+            tool_labels: HashMap::new(),
             pending: HashMap::new(),
             turn_text: String::new(),
             last_turn: None,
@@ -893,14 +1090,22 @@ fn spawn_event_bridge(
                     if shutting_down.load(Ordering::SeqCst) {
                         Vec::new()
                     } else {
-                        vec![HarnessEvent::Error {
+                        vec![HarnessEvent::TransportClosed {
                             message,
                             retryable: true,
                         }]
                     }
                 }
-                AcpEvent::Exited { status, stderr } => {
-                    if shutting_down.load(Ordering::SeqCst) {
+                AcpEvent::Exited {
+                    status,
+                    stderr,
+                    deliberate,
+                } => {
+                    if deliberate || shutting_down.load(Ordering::SeqCst) {
+                        // The client ended the process on purpose (a write
+                        // deadline, a shutdown). The failure that caused it is
+                        // already on the stream; a second exit row would
+                        // duplicate it.
                         Vec::new()
                     } else if let Some(signal) = detect_limit(&stderr, Utc::now()) {
                         vec![HarnessEvent::LimitHit {
@@ -913,7 +1118,7 @@ fn spawn_event_bridge(
                         } else {
                             format!("agy exited ({status}): {}", stderr.trim())
                         };
-                        vec![HarnessEvent::Error {
+                        vec![HarnessEvent::TransportClosed {
                             message,
                             retryable: false,
                         }]
@@ -921,6 +1126,9 @@ fn spawn_event_bridge(
                 }
                 AcpEvent::Error { message, retryable } => {
                     vec![HarnessEvent::Error { message, retryable }]
+                }
+                AcpEvent::TransportClosed { message, retryable } => {
+                    vec![HarnessEvent::TransportClosed { message, retryable }]
                 }
             };
             for event in mapped {
@@ -930,6 +1138,36 @@ fn spawn_event_bridge(
             }
         }
     })
+}
+
+/// Names what a prompt that never reached the agent's stdin left behind.
+///
+/// The writer has already waited for the stderr reader to drain (a closed
+/// transport and a write deadline both kill the agent), so the ring's tail is
+/// available; a supervised client may also have reaped the process, and that
+/// exit report's stderr and status are the most specific detail the row can
+/// carry.
+async fn prompt_write_detail(client: &AcpClient, detail: String) -> String {
+    let mut detail = detail;
+    if client.is_supervised()
+        && let Some(report) = client.wait_for_exit(DEATH_DETAIL_WAIT).await
+    {
+        detail = merged_detail(detail, &report.stderr);
+        return merged_detail(detail, &format!("agy exited ({})", report.status));
+    }
+    merged_detail(detail, &client.stderr_tail())
+}
+
+/// Adds `extra` to a failure's detail when it says something new.
+///
+/// The agent's stderr and the exit status describe the same death as the
+/// transport error, so they are merged instead of published as extra rows.
+fn merged_detail(detail: String, extra: &str) -> String {
+    let extra = extra.trim();
+    if extra.is_empty() || detail.contains(extra) {
+        return detail;
+    }
+    most_specific_detail(detail.clone(), format!("{detail}\n{extra}"))
 }
 
 fn register_approval(
@@ -978,7 +1216,9 @@ fn approval_kind(request: &AcpPermissionRequest) -> ApprovalKind {
     let Some(call) = &request.tool_call else {
         return ApprovalKind::Permission;
     };
-    let name = tool_name(call).to_ascii_lowercase();
+    let name = tool_name(call)
+        .unwrap_or_else(|| call.kind.label().to_string())
+        .to_ascii_lowercase();
     if name.contains("ask_question") {
         return ApprovalKind::Question;
     }
@@ -993,7 +1233,7 @@ fn approval_prompt(request: &AcpPermissionRequest) -> String {
     let Some(call) = &request.tool_call else {
         return "Antigravity is requesting permission".into();
     };
-    let name = tool_name(call);
+    let name = tool_name(call).unwrap_or_else(|| call.kind.label().to_string());
     let summary = call.summary();
     if summary.is_empty() {
         format!("Allow `{name}`?")
@@ -1090,30 +1330,52 @@ fn remember_turn_text(shared: &Arc<Mutex<AcpShared>>, text: &str) {
 
 fn tool_event(call: &AcpToolCall, shared: &Arc<Mutex<AcpShared>>) -> HarnessEvent {
     let tool_call_id = call.tool_call_id.clone();
-    let name = tool_name(call);
-    let summary = call.summary();
-    let input = call.raw_input.clone();
     let output = call.output_preview();
     let status = tool_status(&call.status);
+    let finished = matches!(
+        call.status,
+        AcpToolStatus::Completed | AcpToolStatus::Failed | AcpToolStatus::Cancelled
+    );
     let mut shared = lock(shared);
+    // `tool_call_update` often carries only a status or output; merge it into
+    // the fields the agent already sent so the name and summary stay stable.
+    let (name, summary, kind, locations, input) = {
+        let label = shared.tool_labels.entry(tool_call_id.clone()).or_default();
+        label.merge(call);
+        (
+            label.name(),
+            label.summary(),
+            label.kind(),
+            label.locations.clone(),
+            label.raw_input.clone(),
+        )
+    };
     let started_at = shared
         .tool_started
         .entry(tool_call_id.clone())
         .or_insert_with(Utc::now)
         .to_owned();
-    let completed_at = matches!(
-        call.status,
-        AcpToolStatus::Completed | AcpToolStatus::Failed | AcpToolStatus::Cancelled
-    )
-    .then(Utc::now);
-    if is_mutating(call) {
+    let completed_at = finished.then(Utc::now);
+    if is_mutating(&kind, &name) {
+        let mut paths: Vec<String> = locations
+            .iter()
+            .map(|location| location.path.clone())
+            .collect();
         for path in call.paths() {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        for path in paths {
             if shared.touched.len() < TOUCHED_PATH_LIMIT && !shared.touched.contains(&path) {
                 shared.touched.push(path);
             }
         }
     }
-    shared.state = tool_state(&call.kind, &status);
+    if finished {
+        shared.tool_labels.remove(&tool_call_id);
+    }
+    shared.state = tool_state(&kind, &status);
     HarnessEvent::ToolCall {
         tool_call: ToolCall {
             tool_call_id,
@@ -1129,21 +1391,11 @@ fn tool_event(call: &AcpToolCall, shared: &Arc<Mutex<AcpShared>>) -> HarnessEven
     }
 }
 
-fn tool_name(call: &AcpToolCall) -> String {
-    call.raw
-        .get("name")
-        .and_then(Value::as_str)
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .or_else(|| call.title.clone().filter(|title| !title.is_empty()))
-        .unwrap_or_else(|| call.kind.label().to_string())
-}
-
-fn is_mutating(call: &AcpToolCall) -> bool {
-    if matches!(call.kind, AcpToolKind::Edit) {
+fn is_mutating(kind: &AcpToolKind, name: &str) -> bool {
+    if matches!(kind, AcpToolKind::Edit) {
         return true;
     }
-    let name = tool_name(call).to_ascii_lowercase();
+    let name = name.to_ascii_lowercase();
     matches!(
         name.as_str(),
         "write_to_file"
@@ -1155,6 +1407,15 @@ fn is_mutating(call: &AcpToolCall) -> bool {
             | "edit"
             | "write"
     )
+}
+
+fn tool_name(call: &AcpToolCall) -> Option<String> {
+    call.raw
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .or_else(|| call.title.clone().filter(|title| !title.is_empty()))
 }
 
 fn tool_status(status: &AcpToolStatus) -> ToolCallStatus {
@@ -1187,7 +1448,7 @@ fn turn_state(status: TurnStatus, limited: bool) -> AgentState {
     }
     match status {
         TurnStatus::Completed => AgentState::Done,
-        TurnStatus::Failed => AgentState::Error,
+        TurnStatus::Failed | TurnStatus::TokenLimit | TurnStatus::TurnLimit => AgentState::Error,
         TurnStatus::Interrupted => AgentState::Idle,
     }
 }
@@ -1256,7 +1517,7 @@ fn build_prompt(
             && std::fs::metadata(&attachment.path)
                 .map(|metadata| metadata.len() <= MAX_TEXT_RESOURCE_BYTES)
                 .unwrap_or(false)
-            && let Ok(body) = std::fs::read_to_string(&attachment.path)
+            && let Some(body) = attachments::read_text(&attachment.path)
         {
             content.push(PromptContent::resource_text(
                 file_uri(&attachment.path),
@@ -1327,6 +1588,8 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
     use super::*;
     use h4rn_protocol::ApprovalDecision;
     use serde_json::json;
@@ -1337,6 +1600,57 @@ mod tests {
             path: path.to_path_buf(),
             media_type: media_type.to_string(),
         }
+    }
+
+    fn acp_pair(
+        workspace: &Path,
+    ) -> (
+        AcpClient,
+        BufReader<tokio::io::DuplexStream>,
+        tokio::io::DuplexStream,
+    ) {
+        let (client_write, agent_read) = tokio::io::duplex(64 * 1024);
+        let (agent_write, client_read) = tokio::io::duplex(64 * 1024);
+        let client = AcpClient::start_for_test(
+            AcpClientConfig::new("/usr/local/bin/fake-acp", workspace),
+            client_read,
+            client_write,
+        );
+        (client, BufReader::new(agent_read), agent_write)
+    }
+
+    fn acp_spec(workspace: &Path) -> SessionSpec {
+        SessionSpec {
+            workspace: workspace.to_path_buf(),
+            model: "default".into(),
+            runtime_mode: RuntimeMode::ApprovalRequired,
+            resume_id: None,
+            mcp_endpoint: None,
+            env_overrides: std::collections::BTreeMap::new(),
+            attachments: Vec::new(),
+        }
+    }
+
+    async fn next_frame(reader: &mut BufReader<tokio::io::DuplexStream>) -> Value {
+        let mut line = String::new();
+        reader.read_line(&mut line).await.expect("read a frame");
+        serde_json::from_str(line.trim()).expect("valid json")
+    }
+
+    async fn send_frame(writer: &mut tokio::io::DuplexStream, frame: Value) {
+        let mut bytes = serde_json::to_vec(&frame).expect("encode");
+        bytes.push(b'\n');
+        writer.write_all(&bytes).await.expect("write");
+        writer.flush().await.expect("flush");
+    }
+
+    async fn next_turn_status(events: &mut BoxStream<'static, HarnessEvent>) -> TurnStatus {
+        while let Some(event) = events.next().await {
+            if let HarnessEvent::TurnCompleted { status, .. } = event {
+                return status;
+            }
+        }
+        panic!("the event stream ended before the turn completed");
     }
 
     #[test]
@@ -1387,6 +1701,30 @@ mod tests {
             &content[1],
             PromptContent::Resource { text: Some(body), .. } if body == "# Notes\n"
         ));
+    }
+
+    #[test]
+    fn prompt_building_embeds_utf16_text_attachments() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let path = workspace.path().join("notes.txt");
+        let mut encoded = vec![0xFF, 0xFE];
+        for unit in "Über notes\n".encode_utf16() {
+            encoded.extend_from_slice(&unit.to_le_bytes());
+        }
+        std::fs::write(&path, encoded).expect("write");
+        let capabilities = AgentCapabilities {
+            embedded_context: true,
+            ..AgentCapabilities::default()
+        };
+        let content =
+            build_prompt("", &[attachment(&path, "text/plain")], &capabilities).expect("prompt");
+        assert!(
+            matches!(
+                &content[0],
+                PromptContent::Resource { text: Some(body), .. } if body == "Über notes\n"
+            ),
+            "the UTF-16 body must be embedded, got {content:?}"
+        );
     }
 
     #[test]
@@ -1458,5 +1796,529 @@ mod tests {
         }
         assert_eq!(lock(&shared).touched, vec!["/w/src/lib.rs"]);
         assert_eq!(lock(&shared).state, AgentState::Editing);
+    }
+
+    #[test]
+    fn a_status_only_completion_keeps_the_tool_input() {
+        let shared = Arc::new(Mutex::new(AcpShared::new()));
+        let started = AcpToolCall::from_value(&json!({
+            "toolCallId": "call-3",
+            "name": "read_file",
+            "kind": "read",
+            "status": "in_progress",
+            "title": "Read package.json",
+            "rawInput": {"path": "/w/package.json"},
+            "locations": [{"path": "/w/package.json"}]
+        }));
+        let HarnessEvent::ToolCall { tool_call } = tool_event(&started, &shared) else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(tool_call.input, Some(json!({"path": "/w/package.json"})));
+
+        let update = AcpToolCall::from_value(&json!({
+            "toolCallId": "call-3",
+            "status": "completed"
+        }));
+        let HarnessEvent::ToolCall { tool_call } = tool_event(&update, &shared) else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(
+            tool_call.input,
+            Some(json!({"path": "/w/package.json"})),
+            "a status-only update must not drop the input the row expands into"
+        );
+    }
+
+    #[test]
+    fn a_title_only_call_takes_a_later_title_as_its_name() {
+        let shared = Arc::new(Mutex::new(AcpShared::new()));
+        let started = AcpToolCall::from_value(&json!({
+            "toolCallId": "call-4",
+            "status": "in_progress",
+            "title": "Read package.json"
+        }));
+        let HarnessEvent::ToolCall { tool_call } = tool_event(&started, &shared) else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(tool_call.name, "Read package.json");
+
+        let update = AcpToolCall::from_value(&json!({
+            "toolCallId": "call-4",
+            "status": "in_progress",
+            "title": "Read apps/ui/package.json"
+        }));
+        let HarnessEvent::ToolCall { tool_call } = tool_event(&update, &shared) else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(
+            tool_call.name, "Read apps/ui/package.json",
+            "a title-only call has no other name, so the newer title becomes it"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_rejected_send_does_not_clear_a_running_turns_stop() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            handshake(&mut reader, &mut writer).await;
+            let prompt = next_frame(&mut reader).await;
+            assert_eq!(prompt["method"], "session/prompt");
+            let cancel = next_frame(&mut reader).await;
+            assert_eq!(cancel["method"], "session/cancel");
+            send_frame(
+                &mut writer,
+                json!({"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "end_turn"}}),
+            )
+            .await;
+        });
+
+        let mut session = AcpSession::start_with(&client, &acp_spec(workspace.path()))
+            .await
+            .expect("start session");
+        let mut events = session.events();
+        session
+            .send(UserInput {
+                text: "first".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect("send");
+        session.interrupt().await.expect("stop");
+
+        // A second prompt while one runs is rejected; that must not consume the
+        // stop the running turn is waiting for.
+        let rejected = session
+            .send(UserInput {
+                text: "second".into(),
+                attachments: Vec::new(),
+            })
+            .await;
+        assert!(rejected.is_err(), "a concurrent send is refused");
+
+        assert_eq!(
+            next_turn_status(&mut events).await,
+            TurnStatus::Interrupted,
+            "the running turn still honours the stop it was sent"
+        );
+        agent.await.expect("agent");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn a_deliberate_teardown_does_not_publish_a_second_exit_error() {
+        let (tx, rx) = mpsc::channel(8);
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let bridge = spawn_event_bridge(
+            rx,
+            out_tx,
+            Arc::new(Mutex::new(AcpShared::new())),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        // The client killed the agent itself after a write deadline; the failure
+        // that caused it is already on the stream.
+        tx.send(AcpEvent::Exited {
+            status: "exited: 9".into(),
+            stderr: String::new(),
+            deliberate: true,
+        })
+        .await
+        .expect("send");
+        tx.send(AcpEvent::Error {
+            message: "the prompt timed out".into(),
+            retryable: false,
+        })
+        .await
+        .expect("send");
+        match out_rx.recv().await.expect("event") {
+            HarnessEvent::Error { message, .. } => {
+                assert_eq!(message, "the prompt timed out");
+            }
+            other => panic!("unexpected event {other:?}"),
+        }
+
+        // A crash the client did not cause still reports the exit.
+        tx.send(AcpEvent::Exited {
+            status: "exited: 1".into(),
+            stderr: "boom".into(),
+            deliberate: false,
+        })
+        .await
+        .expect("send");
+        match out_rx.recv().await.expect("event") {
+            HarnessEvent::TransportClosed { message, .. } => {
+                assert!(
+                    message.contains("agy exited (exited: 1)"),
+                    "unexpected exit error: {message}"
+                );
+            }
+            other => panic!("unexpected event {other:?}"),
+        }
+        bridge.abort();
+    }
+
+    async fn handshake(
+        reader: &mut BufReader<tokio::io::DuplexStream>,
+        writer: &mut tokio::io::DuplexStream,
+    ) {
+        let initialize = next_frame(reader).await;
+        assert_eq!(initialize["method"], "initialize");
+        send_frame(
+            writer,
+            json!({"jsonrpc": "2.0", "id": initialize["id"], "result": {"protocolVersion": 1}}),
+        )
+        .await;
+
+        let new_session = next_frame(reader).await;
+        assert_eq!(new_session["method"], "session/new");
+        send_frame(
+            writer,
+            json!({"jsonrpc": "2.0", "id": new_session["id"], "result": {"sessionId": "s-1"}}),
+        )
+        .await;
+    }
+
+    /// A prompt that never reaches an agent that stopped reading its stdin is a
+    /// write timeout, not a quiet turn: the agent's printed reset time is still
+    /// the most specific detail, so the failure is the typed limit the daemon
+    /// schedules a resume from.
+    #[tokio::test(start_paused = true)]
+    async fn a_prompt_write_timeout_keeps_the_stderr_reset_as_a_typed_limit() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        // A tiny stdin buffer that nobody drains: the prompt fills it and the
+        // writer blocks mid-frame until the write deadline.
+        let (client_write, agent_read) = tokio::io::duplex(64 * 1024);
+        let (mut agent_write, client_read) = tokio::io::duplex(64 * 1024);
+        let mut agent_read = BufReader::new(agent_read);
+        let stderr = crate::acp::StderrRing::new();
+        stderr.push("API usage limit reached; resets at 3:00 PM");
+        let client = AcpClient::start_for_test_with_stderr(
+            AcpClientConfig::new("/usr/local/bin/fake-acp", workspace.path()),
+            client_read,
+            client_write,
+            stderr,
+        );
+
+        // The agent answers the handshake, then stops reading stdin while it
+        // keeps the pipe open.
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let agent = tokio::spawn(async move {
+            handshake(&mut agent_read, &mut agent_write).await;
+            let _ = stop_rx.await;
+        });
+
+        let mut session = AcpSession::start_with(&client, &acp_spec(workspace.path()))
+            .await
+            .expect("start session");
+        let error = session
+            .send(UserInput {
+                text: "x".repeat(1024 * 1024),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect_err("a prompt the agent never reads must not claim to be on the wire");
+        match error {
+            HarnessError::RateLimited { message, limit, .. } => {
+                assert!(
+                    message.to_ascii_lowercase().contains("usage limit reached"),
+                    "the failure keeps the agent's last words: {message}"
+                );
+                assert!(
+                    limit.reset_at.is_some(),
+                    "the stderr named a reset time: {limit:?}"
+                );
+            }
+            other => panic!("expected the typed limit, got {other:?}"),
+        }
+        assert_eq!(session.agent_state(), AgentState::RateLimited);
+
+        let _ = stop_tx.send(());
+        agent.await.expect("agent");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn interrupt_cancels_only_after_the_prompt_is_on_the_wire() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            handshake(&mut reader, &mut writer).await;
+            let prompt = next_frame(&mut reader).await;
+            assert_eq!(prompt["method"], "session/prompt");
+            let cancel = next_frame(&mut reader).await;
+            assert_eq!(cancel["method"], "session/cancel");
+            send_frame(
+                &mut writer,
+                json!({"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "cancelled"}}),
+            )
+            .await;
+        });
+
+        let mut session = AcpSession::start_with(&client, &acp_spec(workspace.path()))
+            .await
+            .expect("start session");
+        session
+            .send(UserInput {
+                text: "hello".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect("send");
+        session.interrupt().await.expect("interrupt");
+
+        agent.await.expect("agent");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_stop_after_end_turn_does_not_interrupt_the_next_turn() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            handshake(&mut reader, &mut writer).await;
+            for _ in 0..2 {
+                let prompt = next_frame(&mut reader).await;
+                assert_eq!(prompt["method"], "session/prompt");
+                send_frame(
+                    &mut writer,
+                    json!({"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "end_turn"}}),
+                )
+                .await;
+            }
+        });
+
+        let mut session = AcpSession::start_with(&client, &acp_spec(workspace.path()))
+            .await
+            .expect("start session");
+        let mut events = session.events();
+        session
+            .send(UserInput {
+                text: "first".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect("send");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        // The agent ended its turn; the daemon has not consumed the completion
+        // yet, so a Stop still arrives while the thread looks busy.
+        session.interrupt().await.expect("stop");
+
+        session
+            .send(UserInput {
+                text: "second".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect("send");
+        assert_eq!(
+            next_turn_status(&mut events).await,
+            TurnStatus::Completed,
+            "a late Stop must not mark the next turn interrupted"
+        );
+
+        agent.await.expect("agent");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_missing_stop_reason_fails_the_turn() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            handshake(&mut reader, &mut writer).await;
+            let prompt = next_frame(&mut reader).await;
+            assert_eq!(prompt["method"], "session/prompt");
+            send_frame(
+                &mut writer,
+                json!({"jsonrpc": "2.0", "id": prompt["id"], "result": {}}),
+            )
+            .await;
+        });
+
+        let mut session = AcpSession::start_with(&client, &acp_spec(workspace.path()))
+            .await
+            .expect("start session");
+        let mut events = session.events();
+        session
+            .send(UserInput {
+                text: "hello".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect("send");
+
+        let (status, errors) = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut errors = Vec::new();
+            loop {
+                match events.next().await.expect("event") {
+                    HarnessEvent::Error { message, .. } => errors.push(message),
+                    HarnessEvent::TurnCompleted { status, .. } => return (status, errors),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for the turn");
+        assert_eq!(status, TurnStatus::Failed);
+        assert!(
+            errors
+                .iter()
+                .any(|message| message == "the agent ended the turn without a stop reason"),
+            "the failure names the missing stop reason: {errors:?}"
+        );
+        assert_eq!(
+            session.last_turn().expect("a turn report").stop_reason,
+            None
+        );
+
+        agent.await.expect("agent");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_token_limited_turn_is_not_reported_as_completed() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            handshake(&mut reader, &mut writer).await;
+            let prompt = next_frame(&mut reader).await;
+            assert_eq!(prompt["method"], "session/prompt");
+            send_frame(
+                &mut writer,
+                json!({"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "max_tokens"}}),
+            )
+            .await;
+        });
+
+        let mut session = AcpSession::start_with(&client, &acp_spec(workspace.path()))
+            .await
+            .expect("start session");
+        let mut events = session.events();
+        session
+            .send(UserInput {
+                text: "hello".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect("send");
+
+        let status = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(event) = events.next().await {
+                if let HarnessEvent::TurnCompleted { status, .. } = event {
+                    return status;
+                }
+            }
+            panic!("the event stream ended before the turn completed");
+        })
+        .await
+        .expect("timed out waiting for the turn");
+        assert_eq!(status, TurnStatus::TokenLimit);
+        assert_eq!(
+            session
+                .last_turn()
+                .expect("a turn report")
+                .stop_reason
+                .as_deref(),
+            Some("max_tokens")
+        );
+
+        agent.await.expect("agent");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    #[test]
+    fn a_later_title_updates_the_summary_but_keeps_the_tool_name() {
+        let shared = Arc::new(Mutex::new(AcpShared::new()));
+        let started = AcpToolCall::from_value(&json!({
+            "toolCallId": "call-1",
+            "name": "read_file",
+            "kind": "read",
+            "status": "in_progress",
+            "title": "Read package.json",
+            "locations": [{"path": "/w/package.json"}]
+        }));
+        let HarnessEvent::ToolCall { tool_call } = tool_event(&started, &shared) else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(tool_call.name, "read_file");
+
+        let update = AcpToolCall::from_value(&json!({
+            "toolCallId": "call-1",
+            "status": "in_progress",
+            "title": "Read apps/ui/package.json"
+        }));
+        let HarnessEvent::ToolCall { tool_call } = tool_event(&update, &shared) else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(
+            tool_call.name, "read_file",
+            "the title is not the tool name"
+        );
+        assert_eq!(tool_call.summary, "Read apps/ui/package.json");
+    }
+
+    #[test]
+    fn a_status_only_update_keeps_a_kind_only_tools_name() {
+        let shared = Arc::new(Mutex::new(AcpShared::new()));
+        let started = AcpToolCall::from_value(&json!({
+            "toolCallId": "call-2",
+            "kind": "read",
+            "status": "in_progress"
+        }));
+        let HarnessEvent::ToolCall { tool_call } = tool_event(&started, &shared) else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(tool_call.name, "Read");
+
+        let update = AcpToolCall::from_value(&json!({
+            "toolCallId": "call-2",
+            "status": "completed"
+        }));
+        let HarnessEvent::ToolCall { tool_call } = tool_event(&update, &shared) else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(
+            tool_call.name, "Read",
+            "a status-only update must not rename the call to other"
+        );
+        assert_eq!(tool_call.summary, "");
+    }
+
+    #[test]
+    fn titleless_tool_updates_keep_the_earlier_name_and_summary() {
+        let shared = Arc::new(Mutex::new(AcpShared::new()));
+        let started = AcpToolCall::from_value(&json!({
+            "toolCallId": "call-1",
+            "name": "read_file",
+            "kind": "read",
+            "status": "in_progress",
+            "title": "Read package.json",
+            "locations": [{"path": "/w/package.json"}]
+        }));
+        let HarnessEvent::ToolCall { tool_call } = tool_event(&started, &shared) else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(tool_call.name, "read_file");
+        assert_eq!(tool_call.summary, "Read package.json");
+
+        let update = AcpToolCall::from_value(&json!({
+            "toolCallId": "call-1",
+            "kind": "read",
+            "status": "completed",
+            "rawOutput": "{\"name\":\"h4rn\"}"
+        }));
+        let HarnessEvent::ToolCall { tool_call } = tool_event(&update, &shared) else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(tool_call.name, "read_file");
+        assert_eq!(tool_call.summary, "Read package.json");
+        assert!(tool_call.output.is_some());
+        assert!(lock(&shared).tool_labels.is_empty(), "the id is forgotten");
     }
 }

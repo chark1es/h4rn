@@ -9,7 +9,7 @@
 
 use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use tokio::process::Child;
@@ -122,6 +122,10 @@ const STDERR_RING_BYTES: usize = 8 * 1024;
 pub(crate) struct StderrRing {
     inner: Arc<Mutex<RingInner>>,
     bytes: Arc<AtomicUsize>,
+    /// Whether the reader has seen the pipe close, so [`Self::wait_closed`] can
+    /// tell a drained tail from one that is still arriving.
+    closed: Arc<AtomicBool>,
+    closed_notify: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Debug, Default)]
@@ -171,6 +175,35 @@ impl StderrRing {
             .collect::<Vec<_>>()
             .join("\n")
     }
+
+    /// Marks the reader's pipe as drained and wakes anyone waiting on it.
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.closed_notify.notify_waiters();
+    }
+
+    /// Waits up to `timeout` for the reader to drain the pipe to its end.
+    ///
+    /// A failure row built before the reader caught up can miss the agent's
+    /// only diagnostic, so a caller that just saw the transport die waits here
+    /// before reading [`Self::snapshot`]. A grandchild can hold the pipe open
+    /// past the process's exit, hence the bound.
+    pub(crate) async fn wait_closed(&self, timeout: std::time::Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if self.closed.load(Ordering::SeqCst) {
+                return true;
+            }
+            let notified = self.closed_notify.notified();
+            if self.closed.load(Ordering::SeqCst) {
+                return true;
+            }
+            match tokio::time::timeout_at(deadline, notified).await {
+                Ok(()) => {}
+                Err(_) => return self.closed.load(Ordering::SeqCst),
+            }
+        }
+    }
 }
 
 /// Reads a child's stderr into a [`StderrRing`] until it closes.
@@ -192,6 +225,7 @@ pub(crate) fn spawn_stderr_reader(
                 }
             }
         }
+        ring.close();
     })
 }
 

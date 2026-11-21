@@ -987,6 +987,102 @@ fn spawn_stderr_reader(
     })
 }
 
+/// Decodes streamed bytes without turning a split UTF-8 sequence into U+FFFD.
+///
+/// Chunks end at arbitrary byte boundaries; an incomplete trailing sequence is
+/// carried into the next chunk, while genuinely invalid bytes decode lossily.
+#[derive(Default)]
+struct Utf8Stream {
+    pending: Vec<u8>,
+}
+
+impl Utf8Stream {
+    fn push(&mut self, bytes: &[u8]) -> String {
+        // Only the incomplete suffix of the previous chunk is carried over, so
+        // walking a chunk of invalid bytes never shifts the whole buffer.
+        self.pending.extend_from_slice(bytes);
+        let mut text = String::with_capacity(self.pending.len());
+        let mut cursor = 0;
+        loop {
+            match std::str::from_utf8(&self.pending[cursor..]) {
+                Ok(complete) => {
+                    text.push_str(complete);
+                    cursor = self.pending.len();
+                    break;
+                }
+                Err(error) => {
+                    let valid = error.valid_up_to();
+                    if let Ok(prefix) = std::str::from_utf8(&self.pending[cursor..cursor + valid]) {
+                        text.push_str(prefix);
+                    }
+                    cursor += valid;
+                    match error.error_len() {
+                        Some(len) => {
+                            text.push(char::REPLACEMENT_CHARACTER);
+                            cursor += len;
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+        // Keep only the bytes that could start a sequence continued by the
+        // next chunk.
+        self.pending.drain(..cursor);
+        text
+    }
+
+    /// Flushes the end of a stream: leftover partial bytes become one U+FFFD
+    /// instead of being dropped silently.
+    fn finish(&mut self) -> String {
+        if self.pending.is_empty() {
+            return String::new();
+        }
+        self.pending.clear();
+        String::from(char::REPLACEMENT_CHARACTER)
+    }
+}
+
+/// Turns one OpenCode event-stream chunk into complete lines.
+///
+/// The UTF-8 decoder and the line buffer are one step, so this is the function
+/// the stream loop calls: a character split across two chunks is decoded once,
+/// not two replacement characters, and a line split across chunks is joined
+/// before the parser sees it. The unfinished line stays buffered for the next
+/// chunk.
+#[derive(Default)]
+struct SseLines {
+    utf8: Utf8Stream,
+    buffer: String,
+}
+
+impl SseLines {
+    /// Decodes a chunk and returns the lines it completed.
+    fn push(&mut self, chunk: &[u8]) -> Vec<String> {
+        let text = self.utf8.push(chunk);
+        self.split(&text)
+    }
+
+    /// Finishes the stream. A truncated trailing character becomes one
+    /// replacement character; an unterminated last line is not dispatched, just
+    /// as it never was on a live stream.
+    fn finish(&mut self) -> Vec<String> {
+        let text = self.utf8.finish();
+        self.split(&text)
+    }
+
+    fn split(&mut self, text: &str) -> Vec<String> {
+        self.buffer.push_str(text);
+        let mut lines = Vec::new();
+        while let Some(position) = self.buffer.find('\n') {
+            let line = self.buffer[..position].to_string();
+            self.buffer.drain(..=position);
+            lines.push(line);
+        }
+        lines
+    }
+}
+
 fn spawn_sse(
     http: reqwest::Client,
     base_url: String,
@@ -1011,26 +1107,12 @@ fn spawn_sse(
             {
                 Ok(response) if response.status().is_success() => {
                     let mut stream = response.bytes_stream();
-                    let mut buffer = String::new();
-                    'stream: while let Some(chunk) = stream.next().await {
-                        match chunk {
-                            Ok(bytes) => {
-                                buffer.push_str(&String::from_utf8_lossy(&bytes));
-                                while let Some(position) = buffer.find('\n') {
-                                    let line = buffer[..position].to_string();
-                                    buffer.drain(..=position);
-                                    let events = {
-                                        let mut parser = lock(&parser);
-                                        parser.push_line(&line)
-                                    };
-                                    for event in events {
-                                        if events_tx.send(event).await.is_err() {
-                                            break 'stream;
-                                        }
-                                    }
-                                }
-                            }
-                            Err(error) => {
+                    let mut lines = SseLines::default();
+                    let mut finished = false;
+                    'stream: loop {
+                        let complete = match stream.next().await {
+                            Some(Ok(bytes)) => lines.push(&bytes),
+                            Some(Err(error)) => {
                                 if !shutting_down.load(Ordering::SeqCst) {
                                     let _ = events_tx
                                         .send(HarnessEvent::Error {
@@ -1041,7 +1123,23 @@ fn spawn_sse(
                                         })
                                         .await;
                                 }
-                                break;
+                                break 'stream;
+                            }
+                            None if !finished => {
+                                finished = true;
+                                lines.finish()
+                            }
+                            None => break 'stream,
+                        };
+                        for line in complete {
+                            let events = {
+                                let mut parser = lock(&parser);
+                                parser.push_line(&line)
+                            };
+                            for event in events {
+                                if events_tx.send(event).await.is_err() {
+                                    break 'stream;
+                                }
                             }
                         }
                     }
@@ -1419,6 +1517,65 @@ mod tests {
         assert_eq!(parse_version("\n\n"), None);
         assert_eq!(parse_semver("2.2.7"), Some((2, 2, 7)));
         assert!(parse_semver("2.1.0") < parse_semver("2.2.6"));
+    }
+
+    #[test]
+    fn the_stream_loop_decodes_a_character_split_across_chunks() {
+        // Exactly the line the OpenCode event loop parses, split inside the
+        // emoji between two network chunks. The loop must join it and decode it
+        // once: reverting the read loop to per-chunk lossy decoding would turn
+        // the emoji into two replacement characters here.
+        let payload = "data: {\"type\":\"session.text.delta\",\"data\":{\"sessionID\":\"s1\",\"delta\":\"🚀日本\"}}\n";
+        let bytes = payload.as_bytes();
+        let split = payload.find('🚀').expect("the emoji") + 1;
+        assert!(split < payload.len());
+        let mut lines = SseLines::default();
+        let mut parser = OpenCodeParser::new();
+        let mut text = String::new();
+        let mut started = false;
+        for chunk in [&bytes[..split], &bytes[split..]] {
+            for line in lines.push(chunk) {
+                for event in parser.push_line(&line) {
+                    match event {
+                        HarnessEvent::TextDelta { text: delta } => text.push_str(&delta),
+                        HarnessEvent::SessionStarted { .. } => started = true,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(started, "the joined line named the session");
+        assert_eq!(text, "🚀日本", "the split character arrived intact");
+    }
+
+    #[test]
+    fn streamed_utf8_survives_every_split_boundary() {
+        let text = "a🚀日本z";
+        let bytes = text.as_bytes();
+        for split in 0..=bytes.len() {
+            let mut decoder = Utf8Stream::default();
+            let mut decoded = decoder.push(&bytes[..split]);
+            decoded.push_str(&decoder.push(&bytes[split..]));
+            assert_eq!(decoded, text, "split at byte {split}");
+        }
+    }
+
+    #[test]
+    fn utf8_stream_stays_linear_on_a_chunk_of_invalid_bytes() {
+        let mut stream = Utf8Stream::default();
+        let garbage = vec![0xFFu8; 512 * 1024];
+        let text = stream.push(&garbage);
+        assert_eq!(text.chars().count(), garbage.len());
+        assert!(text.chars().all(|ch| ch == char::REPLACEMENT_CHARACTER));
+        assert_eq!(stream.finish(), "", "nothing was left incomplete");
+    }
+
+    #[test]
+    fn utf8_stream_finishes_a_truncated_character() {
+        let mut stream = Utf8Stream::default();
+        assert_eq!(stream.push(b"ok\xE2\x82"), "ok");
+        assert_eq!(stream.finish(), "\u{FFFD}");
+        assert_eq!(stream.finish(), "", "finish is idempotent");
     }
 
     #[test]
