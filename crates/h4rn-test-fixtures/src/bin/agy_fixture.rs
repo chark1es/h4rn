@@ -51,10 +51,6 @@ fn main() {
                 sessions += 1;
                 if let Some(cwd) = params.get("cwd").and_then(Value::as_str) {
                     log_start(cwd, "new");
-                    // A test can ask for a diagnostic before the handshake
-                    // completes, so it is surely buffered before any later
-                    // prompt write fails.
-                    write_startup_diagnostic(std::path::Path::new(cwd));
                 }
                 reply(
                     &mut stdout,
@@ -70,7 +66,6 @@ fn main() {
                     .to_string();
                 if let Some(cwd) = params.get("cwd").and_then(Value::as_str) {
                     log_start(cwd, &format!("load {session_id}"));
-                    write_startup_diagnostic(std::path::Path::new(cwd));
                 }
                 reply(&mut stdout, id, session_reply(&session_id));
             }
@@ -98,6 +93,27 @@ fn main() {
                     // diagnostic text.
                     wait_for_exit_gate();
                     eprintln!("agy-fixture: the session died mid-turn");
+                    std::process::exit(7);
+                }
+                if text.contains("H4RN_FIXTURE_CLOSE_STDOUT") {
+                    // Close stdout first, then leave the only diagnostic on
+                    // stderr and exit. The daemon wakes on the EOF before the
+                    // process is reaped, so its failure row can carry the line
+                    // only through the exit report.
+                    close_stdout();
+                    // Leave the daemon's reader to wake on the EOF first: the
+                    // diagnostic is written after a pause, so only the exit
+                    // report can carry it.
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    eprintln!("agy-fixture: the session died after stdout closed");
+                    std::process::exit(7);
+                }
+                if text.contains("H4RN_FIXTURE_RATE_LIMITED") {
+                    // The same ordering with a rate-limit reset in the exit
+                    // report, so the daemon's auto-resume path must still run.
+                    close_stdout();
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    eprintln!("agy-fixture: rate limit reached, resets at 2099-12-01T00:00:00Z");
                     std::process::exit(7);
                 }
                 let closing_stdin = text.contains("H4RN_FIXTURE_CLOSE_STDIN");
@@ -170,23 +186,14 @@ fn wait_for_exit_gate() {
     }
 }
 
-/// Writes the diagnostic a test opted into before the session handshake ends.
+/// Writes the diagnostic a test checks, then closes this process's stdin.
 ///
-/// Writing it here, not at the moment the failure is provoked, puts it in the
-/// client's stderr buffer before any prompt can fail on the closed pipe.
-fn write_startup_diagnostic(workspace: &std::path::Path) {
-    if workspace.join(".agy-fixture-startup-stderr").exists() {
-        eprintln!("agy-fixture: closing stdin before the next prompt");
-    }
-}
-
-/// Closes this process's stdin, announces it, and stays alive.
-///
-/// Staying alive keeps stdout open: the only thing the daemon sees is its next
-/// prompt write failing on a closed pipe, which is exactly the death the test
-/// needs it to report once, with both the writer's I/O error and the stderr
-/// line above.
+/// The diagnostic and the close are one step: the daemon's next prompt write
+/// fails on the closed pipe, and the row it publishes must wait for this line
+/// to reach the client's stderr buffer instead of assuming a handshake-time
+/// line.
 fn close_stdin_and_wait() -> ! {
+    eprintln!("agy-fixture: closing stdin before the next prompt");
     #[cfg(unix)]
     {
         // SAFETY: closing this process's own stdin descriptor is the point of
@@ -200,6 +207,21 @@ fn close_stdin_and_wait() -> ! {
     }
     loop {
         std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+}
+
+/// Closes this process's own stdout, leaving stdin and stderr open.
+///
+/// The daemon's reader sees EOF at once, before the process has exited, which
+/// is the race the exit report's bounded wait exists for.
+fn close_stdout() {
+    #[cfg(unix)]
+    {
+        // SAFETY: closing this process's own stdout descriptor is the point of
+        // the fixture.
+        unsafe {
+            libc::close(1);
+        }
     }
 }
 

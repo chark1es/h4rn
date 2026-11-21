@@ -555,6 +555,18 @@ a replacement for a turn that is about to be marked failed. When the pump instea
 pending turn to a fresh startup, the dead session's held transport report is dropped with it: the
 retry must not inherit that session's death as its error row.
 
+**Addendum: a failed startup clears and settles together, and a death waits for its report.** A
+startup that fails clears the slot it owns and settles the turn it captured under one record lock,
+so a second startup scheduled for the same turn runs either before that failure (and sees its
+`Starting` slot) or after the turn has ended (and starts nothing); it can never take the empty slot
+and write the prompt just before the failure is recorded. When stdout closes before the agent is
+reaped, the prompt that wakes on the EOF waits up to 500 ms for the supervisor's exit report and the
+stderr drain, then merges the exit status and the agent's last stderr line into the turn's one row.
+A rate-limit reset that only the exit report carries still reaches the auto-resume schedule exactly
+as an exit report on its own does. A writer that sees stdin close likewise waits for the stderr
+reader to drain the pipe before it wakes the caller, so a diagnostic printed in the same step as the
+close is part of the failure row.
+
 ## ADR-027: Push notifications are metadata-only wake signals
 
 **Status:** Proposed

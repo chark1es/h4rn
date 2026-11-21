@@ -77,6 +77,13 @@ const MAX_TOTAL_IMAGE_BYTES: usize = 80 * 1024 * 1024;
 const MAX_TEXT_RESOURCE_BYTES: u64 = 2 * 1024 * 1024;
 const TOUCHED_PATH_LIMIT: usize = 512;
 const TURN_TEXT_LIMIT: usize = 16 * 1024;
+/// How long a prompt that just lost its transport waits for the supervisor's
+/// exit report before it publishes the turn's one failure row.
+///
+/// stdout can close before the process is reaped and its stderr drained; the
+/// short bound lets that report (status, stderr, any rate-limit reset) reach
+/// the row without holding a dead turn open.
+const DEATH_DETAIL_WAIT: Duration = Duration::from_millis(500);
 
 /// Overrides the `agy` executable used by the adapter.
 pub const ENV_AGY_PATH: &str = "H4RN_AGY_PATH";
@@ -686,11 +693,29 @@ impl HarnessSession for AcpSession {
                         .await;
                 }
                 Err(error) => {
+                    // A transport death reaches this task and the bridge
+                    // separately: the stdout close fails the prompt here, while
+                    // the supervisor reaps the process and builds its exit
+                    // report (status plus the stderr the reader drained). The
+                    // close can win that race, so wait briefly for the report:
+                    // the one row this turn publishes should name the exit and
+                    // the agent's last words - including any rate-limit reset -
+                    // rather than settle for the bare close notice.
+                    let exit = if client.is_supervised() && matches!(error, AcpError::Closed { .. })
+                    {
+                        client.wait_for_exit(DEATH_DETAIL_WAIT).await
+                    } else {
+                        None
+                    };
                     let mut detail = error.to_string();
-                    let stderr = client.stderr_tail();
-                    if !stderr.is_empty() {
-                        detail.push('\n');
-                        detail.push_str(&stderr);
+                    if let Some(report) = &exit {
+                        detail = merged_detail(detail, &report.stderr);
+                        detail = merged_detail(detail, &format!("agy exited ({})", report.status));
+                    } else {
+                        // No process to wait for (an in-process transport): the
+                        // ring's tail is all the adapter knows.
+                        let stderr = client.stderr_tail();
+                        detail = merged_detail(detail, &stderr);
                     }
                     let limit = detect_limit(&detail, Utc::now());
                     let usage = Usage {
@@ -1063,6 +1088,40 @@ fn spawn_event_bridge(
             }
         }
     })
+}
+
+/// Adds `extra` to a failure's detail when it says something new.
+///
+/// The agent's stderr and the exit status describe the same death as the
+/// transport error, so they are merged instead of published as extra rows.
+fn merged_detail(detail: String, extra: &str) -> String {
+    let extra = extra.trim();
+    if extra.is_empty() || detail.contains(extra) {
+        return detail;
+    }
+    most_specific_detail(detail.clone(), format!("{detail}\n{extra}"))
+}
+
+/// The more specific of two messages that describe one failure.
+///
+/// The agent's stderr is the most specific detail either report can add and it
+/// always spans an extra line, so a multi-line message wins; between equally
+/// detailed notices the longer one is kept. This is the daemon's rule too, so
+/// the adapter's merged row and the daemon's merge pick the same text.
+fn most_specific_detail(first: String, second: String) -> String {
+    let first_lines = first.lines().count();
+    let second_lines = second.lines().count();
+    match second_lines.cmp(&first_lines) {
+        std::cmp::Ordering::Greater => second,
+        std::cmp::Ordering::Less => first,
+        std::cmp::Ordering::Equal => {
+            if second.len() > first.len() {
+                second
+            } else {
+                first
+            }
+        }
+    }
 }
 
 fn register_approval(

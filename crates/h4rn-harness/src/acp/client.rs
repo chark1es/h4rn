@@ -40,6 +40,11 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 const PROMPT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 const KILL_GRACE: Duration = Duration::from_secs(2);
 const MAX_READ_BYTES: u64 = 8 * 1024 * 1024;
+/// How long the supervisor waits for the stderr reader to drain after exit.
+///
+/// A grandchild can inherit the agent's stderr and hold the pipe open past the
+/// process's exit; the bound keeps the exit report from waiting on it.
+const STDERR_DRAIN_GRACE: Duration = Duration::from_millis(500);
 
 /// Environment variables an agent process should not inherit from h4rn.
 ///
@@ -278,6 +283,21 @@ impl PendingPrompt {
     }
 }
 
+/// What one agent process left behind when it exited.
+///
+/// The reader can report the transport dead as soon as stdout closes, before
+/// the supervisor has reaped the process and drained its stderr. A prompt
+/// waiting on that death reads this report so its one failure row names the
+/// exit and the agent's last words (and any rate-limit reset in them) instead
+/// of the bare stdout-close notice.
+#[derive(Clone, Debug)]
+pub(crate) struct ExitReport {
+    /// Human-readable exit status.
+    pub status: String,
+    /// The tail of stderr at exit.
+    pub stderr: String,
+}
+
 struct Shared {
     config: AcpClientConfig,
     workspace: PathBuf,
@@ -295,6 +315,11 @@ struct Shared {
     /// agent's stdin or stdout fails, so a pending prompt that fails because of
     /// it can see the transport is dead even before the process is reaped.
     health: TransportHealth,
+    /// The process exit report, once the supervisor has reaped the agent and
+    /// drained its stderr. `None` for a client over a test's pipe pair, which
+    /// has no process to report.
+    exit: Mutex<Option<ExitReport>>,
+    exit_notify: tokio::sync::Notify,
     writer: Mutex<Option<tokio::task::JoinHandle<()>>>,
     reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
     supervisor: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -354,9 +379,6 @@ impl AcpClient {
 
         let stderr_ring = StderrRing::new();
         let stderr_task = spawn_stderr_reader(stderr, stderr_ring.clone());
-        // Keep the task alive for the process lifetime; the client owns the
-        // process, not the reader handle.
-        std::mem::forget(stderr_task);
 
         let client = Self::start(config, workspace, stdout, stdin, Some(pid), stderr_ring);
         {
@@ -374,6 +396,12 @@ impl AcpClient {
                         message: "the ACP agent exited".into(),
                     },
                 );
+                // The agent's last diagnostic can still be in the pipe when the
+                // notable events are sent: let the reader drain it before the
+                // exit report is built, so the one failure row a waiting prompt
+                // publishes carries it. A grandchild may hold the pipe open, so
+                // the wait is bounded.
+                let _ = tokio::time::timeout(STDERR_DRAIN_GRACE, stderr_task).await;
                 let (status_text, stderr_tail) = match status {
                     Ok(status) => (status.to_string(), shared.stderr.snapshot()),
                     Err(error) => (
@@ -381,6 +409,11 @@ impl AcpClient {
                         shared.stderr.snapshot(),
                     ),
                 };
+                *lock(&shared.exit) = Some(ExitReport {
+                    status: status_text.clone(),
+                    stderr: stderr_tail.clone(),
+                });
+                shared.exit_notify.notify_waiters();
                 let _ = shared
                     .events_tx
                     .send(AcpEvent::Exited {
@@ -426,6 +459,8 @@ impl AcpClient {
             pid,
             shutting_down: AtomicBool::new(false),
             health: TransportHealth::new(),
+            exit: Mutex::new(None),
+            exit_notify: tokio::sync::Notify::new(),
             writer: Mutex::new(None),
             reader: Mutex::new(None),
             supervisor: Mutex::new(None),
@@ -631,6 +666,42 @@ impl AcpClient {
     /// The tail of the agent's stderr.
     pub fn stderr_tail(&self) -> String {
         self.shared.stderr.snapshot()
+    }
+
+    /// Whether a supervisor task owns a real child process.
+    ///
+    /// Only a supervised client produces an exit report; a client over a
+    /// test's pipe pair has no process to wait for.
+    pub(crate) fn is_supervised(&self) -> bool {
+        self.shared.pid.is_some()
+    }
+
+    /// The process exit report, once the supervisor has reaped the agent.
+    pub(crate) fn exit_report(&self) -> Option<ExitReport> {
+        lock(&self.shared.exit).clone()
+    }
+
+    /// Waits up to `timeout` for the process exit report.
+    ///
+    /// `None` when this client has no process to report or the supervisor has
+    /// not produced it in time. The report includes the stderr the reader
+    /// drained after the exit, which is the most specific detail a failure row
+    /// can carry.
+    pub(crate) async fn wait_for_exit(&self, timeout: Duration) -> Option<ExitReport> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Some(report) = self.exit_report() {
+                return Some(report);
+            }
+            let notified = self.shared.exit_notify.notified();
+            if let Some(report) = self.exit_report() {
+                return Some(report);
+            }
+            match tokio::time::timeout_at(deadline, notified).await {
+                Ok(()) => {}
+                Err(_) => return self.exit_report(),
+            }
+        }
     }
 
     /// Whether the transport has closed.
@@ -963,6 +1034,15 @@ where
                 // waking any caller: a prompt that observes this failure must
                 // never find an open client or a live agent behind it.
                 close_transport(&shared);
+                // The agent may have written its last diagnostic just before
+                // the pipe broke. The caller's failure row is built from this
+                // error plus `stderr_tail()`, so let the reader drain the pipe
+                // (the process was just killed, so it closes) before either is
+                // published. Bounded: a grandchild may hold the pipe open, and
+                // a client over a test's pipe pair has no reader to wait for.
+                if shared.pid.is_some() {
+                    let _ = shared.stderr.wait_closed(STDERR_DRAIN_GRACE).await;
+                }
                 fail_pending(
                     &shared,
                     AcpError::Closed {
@@ -986,6 +1066,11 @@ where
             if let Err(error) = stdin.flush().await {
                 let detail = error.to_string();
                 close_transport(&shared);
+                // See the write failure above: the row this wakes carries both
+                // the I/O error and whatever the agent last wrote.
+                if shared.pid.is_some() {
+                    let _ = shared.stderr.wait_closed(STDERR_DRAIN_GRACE).await;
+                }
                 fail_pending(
                     &shared,
                     AcpError::Closed {

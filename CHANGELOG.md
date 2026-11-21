@@ -75,7 +75,17 @@ All notable changes to h4rn are recorded here. The format follows
   lock, so a delivery cannot see the empty slot in between and start a replacement agent for a turn
   that is about to be marked failed. When the pump instead leaves a still-pending turn for a fresh
   startup, the dead session's held transport report is dropped with it, so the retry does not
-  inherit the old session's death as an error row on an otherwise successful turn.
+  inherit the old session's death as an error row on an otherwise successful turn. A failed
+  startup clears its own slot and settles the turn it carried under that same lock, so a second
+  startup scheduled for the same turn (a Send, a delayed queue advance) can no longer take the
+  empty slot, start an agent and write the prompt just before the turn is recorded as failed.
+- **A dead agent's exit report still reaches the turn's one row.** When stdout closes before the
+  process is reaped, the prompt that wakes on the EOF now waits briefly (up to 500 ms) for the
+  supervisor's exit report and the stderr drain, and merges the exit status and the agent's last
+  stderr line into the same failure row. A rate-limit reset that only the exit report carries still
+  reaches the limit and auto-resume handling, and the writer that sees stdin close waits for the
+  stderr reader to drain the pipe before it wakes a caller, so a diagnostic printed in the same step
+  as the close is not lost.
 - **A model change during a startup discards that startup.** Failing over while a session is still
   booting the limited model supersedes the startup, so the resume runs on a session started with
   the new model instead of the one that was already on its way.

@@ -2757,7 +2757,14 @@ impl Inner {
         turn: Arc<TurnDispatch>,
         message: String,
     ) {
-        let (turn_id, advance) = {
+        // Clearing the slot this startup owns and settling the turn it carried
+        // are one lock scope. A second startup scheduled meanwhile (a Send, a
+        // delayed queue advance) must not see the empty slot while the turn is
+        // still active: it would start an agent and write that turn's prompt
+        // just before this path records the failure. Under one scope it either
+        // runs before this startup (and sees its `Starting` slot) or after the
+        // turn has ended (and starts nothing).
+        let (settled, advance) = {
             let mut record = handle.lock().await;
             if let Some(generation) = generation {
                 if !record.session.is_starting(generation) {
@@ -2769,27 +2776,26 @@ impl Inner {
             let captured = record
                 .dispatch_for(&turn.turn_id)
                 .map(|_| turn.turn_id.clone());
-            // `settle_turn` spawns its own advance when it settles the captured
-            // turn; only a turn this failure leaves alone needs one.
-            let advance = record.active.is_some() && captured.is_none();
-            (captured, advance)
+            let settled = match captured {
+                Some(turn_id) => {
+                    self.settle_turn_locked(
+                        &mut record,
+                        &turn_id,
+                        TurnEnd::failed(
+                            message,
+                            Some("Install the harness or pick a different one, then retry".into()),
+                            false,
+                        ),
+                    )
+                    .await
+                }
+                None => false,
+            };
+            // A settlement spawns its own advance; only a turn this failure
+            // leaves alone (or a turn the settlement promoted) needs one here.
+            (settled, record.active.is_some())
         };
-        let settled = match turn_id {
-            Some(turn_id) => {
-                self.settle_turn(
-                    &handle,
-                    &turn_id,
-                    TurnEnd::failed(
-                        message,
-                        Some("Install the harness or pick a different one, then retry".into()),
-                        false,
-                    ),
-                )
-                .await
-            }
-            None => false,
-        };
-        if advance && !settled {
+        if settled || advance {
             self.spawn_advance(handle);
         }
     }
@@ -4111,6 +4117,30 @@ mod tests {
     use crate::harnesses::StaticHarnessCatalog;
     use crate::journal::SqliteJournal;
 
+    /// Spawns `work` and returns when it is parked on the thread's record lock.
+    ///
+    /// `work` signals on the channel immediately before it takes the lock, and
+    /// the caller holds that lock until every such task has signalled. On the
+    /// test runtime the task then reaches its first `lock().await` in the same
+    /// poll, so the signal proves the task is queued behind the caller's guard.
+    /// Tokio's mutex is fair, so dropping the guard resumes the tasks in that
+    /// order: tests build an interleaving instead of guessing at it with
+    /// `yield_now` loops.
+    fn spawn_parked<T, F, Fut>(
+        work: F,
+    ) -> (
+        tokio::task::JoinHandle<T>,
+        tokio::sync::oneshot::Receiver<()>,
+    )
+    where
+        F: FnOnce(tokio::sync::oneshot::Sender<()>) -> Fut,
+        Fut: std::future::Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let (parked, arrived) = tokio::sync::oneshot::channel();
+        (tokio::spawn(work(parked)), arrived)
+    }
+
     /// Polls `ready` until it is true, for up to five seconds of wall clock.
     ///
     /// A shared counter is updated by another task, so the check cannot wait on
@@ -5089,15 +5119,16 @@ mod tests {
         assert_eq!(sessions.get(), 2, "the next message started its own agent");
     }
 
-    /// A delivery that lands exactly where the stream-end path used to detach
-    /// and then settle cannot start a replacement: the turn it belongs to is
-    /// failed once, and its prompt never reaches a fresh agent.
+    /// A startup that lands exactly where the pump used to clear a dead session
+    /// and then fail its turn cannot start an agent: the clear and the
+    /// settlement are one record-lock scope, so the startup runs before it
+    /// (seeing the live slot) or after the turn has ended (starting nothing).
     ///
-    /// The record lock is held while the pump and the delivery are queued on it,
-    /// pump first, so the delivery runs during the slot the old comment called
-    /// "the record is unlocked" - the moment a replacement used to slip in.
+    /// The competing startup is parked on the record lock before the guard is
+    /// dropped, so the interleaving is the lock's fair queue order rather than a
+    /// timing guess.
     #[tokio::test]
-    async fn a_delivery_in_the_pump_end_gap_cannot_run_the_failed_turn() {
+    async fn a_startup_in_the_pump_end_gap_cannot_run_the_failed_turn() {
         let workspace = tempfile::tempdir().expect("tempdir");
         let (harness, sessions) = FakeHarness::new().with_session_count();
         let (harness, sends) = harness.with_send_count();
@@ -5138,12 +5169,15 @@ mod tests {
         };
         b.note_started_generation(generation);
 
+        // The pump's stream end and a startup that was scheduled for B are
+        // queued on the record lock in that order, with the pump first.
         let guard = handle.lock().await;
-        let pump = tokio::spawn({
+        let (pump, pump_parked) = spawn_parked(|parked| {
             let inner = Arc::clone(&manager.inner);
             let handle = handle.clone();
             let session = Arc::clone(&session);
             async move {
+                parked.send(()).expect("the test is still waiting");
                 inner
                     .run_pump(
                         handle,
@@ -5155,24 +5189,23 @@ mod tests {
                     .await;
             }
         });
-        for _ in 0..32 {
-            tokio::task::yield_now().await;
-        }
-        let delivery = tokio::spawn({
+        pump_parked
+            .await
+            .expect("the pump is parked on the record lock");
+        let (startup, startup_parked) = spawn_parked(|parked| {
             let inner = Arc::clone(&manager.inner);
             let handle = handle.clone();
-            let session = Arc::clone(&session);
-            let b = Arc::clone(&b);
             async move {
-                inner.deliver(handle, b, session).await;
+                parked.send(()).expect("the test is still waiting");
+                inner.start_session(handle).await;
             }
         });
-        for _ in 0..32 {
-            tokio::task::yield_now().await;
-        }
+        startup_parked
+            .await
+            .expect("the competing startup is parked on the record lock");
         drop(guard);
         pump.await.expect("pump task");
-        delivery.await.expect("delivery task");
+        startup.await.expect("startup task");
 
         let mut errors = 0;
         let (turn, status) = loop {
@@ -5194,18 +5227,143 @@ mod tests {
         assert_eq!(turn, b.turn_id);
         assert_eq!(status, TurnStatus::Failed);
         assert_eq!(errors, 1, "the turn is failed exactly once");
-        for _ in 0..64 {
-            tokio::task::yield_now().await;
-        }
         assert_eq!(
             sessions.get(),
             1,
-            "the delivery did not start a replacement session"
+            "the startup that arrived after the clear started no agent"
         );
         assert_eq!(
             sends.get(),
             1,
-            "the failed turn's prompt never reached a replacement agent"
+            "the failed turn's prompt never reached an agent"
+        );
+        let record = handle.lock().await;
+        assert!(record.active.is_none(), "the turn ended");
+        assert!(
+            matches!(record.session, SessionSlot::None),
+            "the slot is left free for the next turn's own startup"
+        );
+    }
+
+    /// A startup that fails clears its own slot and settles the turn it carried
+    /// in one record-lock scope, so a second startup scheduled for the same
+    /// turn cannot take the empty slot, start an agent and write the prompt
+    /// just before the turn is recorded as failed.
+    ///
+    /// Both scheduled actors are parked on the record lock before the guard is
+    /// dropped: the failure first, the competing startup second.
+    #[tokio::test]
+    async fn a_second_startup_cannot_take_the_slot_a_failing_startup_is_clearing() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, sessions) = FakeHarness::new().with_session_count();
+        let (harness, sends) = harness.with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(sessions.get(), 1);
+        assert_eq!(sends.get(), 1);
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        // The state the first startup leaves: no session, its turn active, and
+        // the slot marked as starting for the generation it captured. The
+        // live session from the first turn is detached, as a restart would.
+        let (a, generation) = {
+            let mut record = handle.lock().await;
+            if let Some(previous) = record
+                .session
+                .generation()
+                .and_then(|generation| record.detach_session(generation))
+            {
+                drop(previous);
+            }
+            let generation = record.next_session_gen();
+            record.session = SessionSlot::Starting(generation);
+            let a = record.begin_turn(
+                manager.now(),
+                UserInput {
+                    text: "A".into(),
+                    attachments: Vec::new(),
+                },
+            );
+            (a, generation)
+        };
+
+        let guard = handle.lock().await;
+        let (failing, failing_parked) = spawn_parked(|parked| {
+            let inner = Arc::clone(&manager.inner);
+            let handle = handle.clone();
+            let a = Arc::clone(&a);
+            async move {
+                parked.send(()).expect("the test is still waiting");
+                inner
+                    .fail_session(
+                        handle,
+                        Some(generation),
+                        a,
+                        "the harness could not start".into(),
+                    )
+                    .await;
+            }
+        });
+        failing_parked
+            .await
+            .expect("the failing startup is parked on the record lock");
+        let (second, second_parked) = spawn_parked(|parked| {
+            let inner = Arc::clone(&manager.inner);
+            let handle = handle.clone();
+            async move {
+                parked.send(()).expect("the test is still waiting");
+                inner.start_session(handle).await;
+            }
+        });
+        second_parked
+            .await
+            .expect("the competing startup is parked on the record lock");
+        drop(guard);
+        failing.await.expect("failing startup task");
+        second.await.expect("second startup task");
+
+        let mut errors = 0;
+        let (turn, status) = loop {
+            let wire = next_event(&mut events).await;
+            match wire.event {
+                Event::Error { message, .. } => {
+                    errors += 1;
+                    assert_eq!(message, "the harness could not start");
+                }
+                Event::TurnCompleted {
+                    turn_id, status, ..
+                } => break (turn_id, status),
+                _ => {}
+            }
+        };
+        assert_eq!(turn, a.turn_id);
+        assert_eq!(status, TurnStatus::Failed);
+        assert_eq!(errors, 1, "the turn is failed exactly once");
+        assert_eq!(
+            sessions.get(),
+            1,
+            "the competing startup started no agent for the failed turn"
+        );
+        assert_eq!(
+            sends.get(),
+            1,
+            "the competing startup never wrote the failed turn's prompt"
+        );
+        let record = handle.lock().await;
+        assert!(record.active.is_none(), "the turn ended");
+        assert!(
+            matches!(record.session, SessionSlot::None),
+            "the slot stays free for the next turn"
         );
     }
 

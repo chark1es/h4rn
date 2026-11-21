@@ -156,12 +156,15 @@ struct TurnOutcome {
     status: TurnStatus,
     errors: Vec<String>,
     text: String,
+    /// Usage limits reported during the turn: (has a reset time, auto-resume).
+    limits: Vec<(bool, bool)>,
 }
 
 async fn next_turn(events: &mut broadcast::Receiver<WireEvent>) -> TurnOutcome {
     tokio::time::timeout(TURN_TIMEOUT, async {
         let mut errors = Vec::new();
         let mut text = String::new();
+        let mut limits = Vec::new();
         loop {
             let Ok(wire) = events.recv().await else {
                 panic!("the event stream closed before the turn ended");
@@ -169,6 +172,11 @@ async fn next_turn(events: &mut broadcast::Receiver<WireEvent>) -> TurnOutcome {
             match wire.event {
                 Event::Error { message, .. } => errors.push(message),
                 Event::MessageDelta { text: delta, .. } => text.push_str(&delta),
+                Event::UsageLimitHit {
+                    reset_at,
+                    auto_resume,
+                    ..
+                } => limits.push((reset_at.is_some(), auto_resume)),
                 Event::TurnCompleted {
                     turn_id, status, ..
                 } => {
@@ -177,6 +185,7 @@ async fn next_turn(events: &mut broadcast::Receiver<WireEvent>) -> TurnOutcome {
                         status,
                         errors,
                         text,
+                        limits,
                     };
                 }
                 _ => {}
@@ -276,14 +285,14 @@ async fn a_closed_acp_transport_is_replaced_before_the_next_turn() {
 /// An agent that leaves a diagnostic on stderr and closes its stdin before the
 /// next prompt is flushed leaves one failure row, and that row names both the
 /// writer's I/O error and the agent's own stderr line.
+///
+/// The fixture prints the line at the moment it closes stdin, not at the
+/// handshake: the row must wait for the stderr drain rather than rely on an
+/// early-buffered diagnostic.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_closed_stdin_keeps_both_the_io_error_and_the_stderr_detail() {
     let workspace = tempfile::tempdir().expect("tempdir");
-    // The fixture writes this diagnostic before its session handshake reply, so
-    // it is in the client's stderr buffer long before a prompt write fails.
-    std::fs::write(workspace.path().join(".agy-fixture-startup-stderr"), b"")
-        .expect("opt into the startup diagnostic");
     let manager = manager().await;
     let mut events = manager.subscribe();
     let host = HostId::new("host_test");
@@ -344,6 +353,93 @@ async fn a_closed_stdin_keeps_both_the_io_error_and_the_stderr_detail() {
     assert!(
         row.contains("agy-fixture: closing stdin before the next prompt"),
         "the row keeps the agent's stderr line: {row}"
+    );
+
+    manager.shutdown().await;
+}
+
+/// The process closes stdout first, then writes its only diagnostic to stderr
+/// and exits. The daemon's reader wakes on the EOF before the exit report
+/// exists, so the failure row can name the line only if the prompt path waits
+/// for the report (and its drained stderr).
+#[cfg(unix)]
+#[tokio::test]
+async fn an_exit_report_after_the_stdout_eof_still_names_the_stderr() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let manager = manager().await;
+    let mut events = manager.subscribe();
+    let host = HostId::new("host_test");
+
+    let created = manager
+        .create_thread(new_thread(&host, workspace.path(), "first"))
+        .await
+        .expect("create");
+    let first = next_turn(&mut events).await;
+    assert_eq!(first.status, TurnStatus::Completed, "{:?}", first.errors);
+
+    let thread_id: ThreadId = created.thread_id.clone();
+    manager
+        .send_message(
+            &thread_id,
+            "please H4RN_FIXTURE_CLOSE_STDOUT".into(),
+            Vec::new(),
+        )
+        .await
+        .expect("send");
+    let failed = next_turn(&mut events).await;
+    assert_eq!(failed.status, TurnStatus::Failed);
+    assert_eq!(
+        failed.errors.len(),
+        1,
+        "one row for one dead transport: {:?}",
+        failed.errors
+    );
+    assert!(
+        failed.errors[0].contains("agy-fixture: the session died after stdout closed"),
+        "the row waits for the exit report and keeps its stderr: {:?}",
+        failed.errors
+    );
+
+    manager.shutdown().await;
+}
+
+/// A rate-limit reset that only the exit report carries still reaches the
+/// daemon's limit handling: the turn reports a limit with a reset time and
+/// auto-resume, exactly as it does when the report wins the race on its own.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_exit_report_after_the_stdout_eof_still_schedules_the_resume() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let manager = manager().await;
+    let mut events = manager.subscribe();
+    let host = HostId::new("host_test");
+
+    let created = manager
+        .create_thread(new_thread(&host, workspace.path(), "first"))
+        .await
+        .expect("create");
+    let first = next_turn(&mut events).await;
+    assert_eq!(first.status, TurnStatus::Completed, "{:?}", first.errors);
+
+    let thread_id: ThreadId = created.thread_id.clone();
+    manager
+        .send_message(
+            &thread_id,
+            "please H4RN_FIXTURE_RATE_LIMITED".into(),
+            Vec::new(),
+        )
+        .await
+        .expect("send");
+    let failed = next_turn(&mut events).await;
+    assert!(
+        failed.status == TurnStatus::Failed,
+        "the turn failed at its end: {:?}",
+        failed.status
+    );
+    assert!(
+        failed.limits.iter().any(|(reset, auto)| *reset && *auto),
+        "the exit report's rate limit reached the auto-resume path: {:?}",
+        failed.limits
     );
 
     manager.shutdown().await;
