@@ -94,6 +94,18 @@ All notable changes to h4rn are recorded here. The format follows
   for as long as the daemon holds the session, so that stream may not end at all. A generic close
   with no exit report behind it publishes after a bounded 500 ms wait, and the dead session is
   detached with the row, so the next message starts a fresh agent.
+- **A rate limit that arrives after `end_turn` still pauses the thread.** ACP can answer a turn and
+  only then exit, leaving the provider's reset on the exit report rather than on the turn. The
+  completion now sees the closed transport and waits (up to 500 ms) for that report before it
+  detaches the session and promotes the queue, so the schedule is armed and the message queued
+  behind the turn waits instead of starting at once on a fresh agent. A death between turns still
+  publishes its one diagnostic row, but without flipping a thread whose auto-resume just armed from
+  Scheduled to Error, and a stderr-less exit report now names that row instead of the longer
+  generic stdout-close notice (reports of one kind are still compared by detail).
+- **The ACP test peer models a limit that only the exit report carries.** `agy-fixture` can answer
+  a turn, close stdout and exit with the reset on stderr, both right after `end_turn` and as an
+  idle death, and it can exit mid-turn with no stderr at all, so all three orderings are covered
+  end-to-end.
 - **A pump ends with the session it detached.** When a turn settles on a closed transport, or an
   idle death is published, the pump now detaches and shuts its session down, schedules any
   successor and returns instead of waiting for a stream end that the session it still holds keeps

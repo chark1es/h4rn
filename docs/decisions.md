@@ -593,6 +593,19 @@ ends each pump. The `agy-fixture` peer gained the two deaths that happen outside
 followed by an exit, and an answer followed by a stopped stdin reader and a reset on stderr, which
 the write deadline turns into a typed limit.
 
+**Addendum: a completion on a closed transport waits for its exit report, and a death does not raise
+a failure.** ACP can answer `end_turn` and only then exit, with the provider's reset on the exit
+report rather than on the turn. The completion therefore gets the same 500 ms window for that
+report that every other death gets, and a limit it carries is armed while the turn still owns the
+record, before the completion detaches the session and promotes the queue; otherwise the queued
+message would start at once on a fresh agent. A row published for a death between turns is a
+diagnostic, not a failed turn: it never raises a failure, so a thread whose auto-resume just armed
+stays Scheduled (as on main, where only the wire row was published). When several reports describe
+one death, the exit/status report (`retryable: false`) always wins over the generic stdout-close
+notice (`retryable: true`) even when its text is shorter, and only reports of the same kind are
+compared by detail. The `agy-fixture` peer models both new orderings, plus a mid-turn exit with no
+stderr at all.
+
 ## ADR-027: Push notifications are metadata-only wake signals
 
 **Status:** Proposed

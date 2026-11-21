@@ -93,6 +93,17 @@ session, so a shutdown that interrupts the turn while the write is pending
 leaves no schedule behind. `GetLimits` returns the history plus the current
 policy, and `ListResets` returns schedules and history.
 
+An agent may also answer `end_turn` and only then exit, with the provider's
+reset on the exit report. The completion sees a closed transport, waits
+briefly for that report, and applies its limit before the turn settles, so the
+schedule is armed and the message queued behind the turn stays paused. A death
+between turns publishes one diagnostic row; it does not raise a failure, so a
+thread whose auto-resume just armed stays Scheduled (and a thread with no limit
+is not turned into an Error asking for attention by the agent's exit alone).
+When several reports describe one death, the exit/status report wins over the
+generic stdout-close notice even when its text is shorter; only reports of the
+same kind are compared by detail.
+
 ### Scheduling
 
 - **Known reset inside `max_wait`**: resume exactly at the reset plus

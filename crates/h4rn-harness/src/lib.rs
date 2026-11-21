@@ -207,12 +207,15 @@ pub enum HarnessEvent {
     },
 }
 
-/// The more specific of two messages that describe one failure.
+/// The more specific of two messages that describe one failure of the same
+/// kind.
 ///
 /// The agent's stderr is the most specific detail either report can add and it
 /// always spans an extra line, so a multi-line message wins; between equally
 /// detailed notices the longer one is kept. The adapter and the daemon share
-/// this rule so their merged failure rows pick the same text.
+/// this rule so their merged failure rows pick the same text. Only reports of
+/// one kind are compared this way: [`merge_transport_detail`] decides between
+/// the generic close notice and the exit/status report.
 pub fn most_specific_detail(first: String, second: String) -> String {
     let first_lines = first.lines().count();
     let second_lines = second.lines().count();
@@ -226,6 +229,28 @@ pub fn most_specific_detail(first: String, second: String) -> String {
                 first
             }
         }
+    }
+}
+
+/// Names one dead transport's failure row from two reports of it.
+///
+/// A report that carries the exit status or the drained stderr
+/// (`retryable: false`) is always the specific account of the death, even when
+/// its text is shorter than the generic stdout-close notice
+/// (`retryable: true`); a generic notice that arrives after it adds nothing.
+/// Only two reports of the same kind are compared by [`most_specific_detail`].
+/// The exit report's own message already appends its stderr when it drained
+/// any.
+pub fn merge_transport_detail(
+    held: String,
+    held_retryable: bool,
+    message: String,
+    retryable: bool,
+) -> String {
+    match (held_retryable, retryable) {
+        (true, false) => message,
+        (false, true) => held,
+        _ => most_specific_detail(held, message),
     }
 }
 

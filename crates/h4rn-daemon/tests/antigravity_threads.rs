@@ -13,7 +13,9 @@ use h4rn_daemon::harnesses::{HarnessCatalog, StaticHarnessCatalog};
 use h4rn_daemon::journal::{SqliteJournal, WireEvent};
 use h4rn_daemon::threads::{NewThread, ThreadManager, ThreadManagerOptions};
 use h4rn_harness::{AntigravityHarness, HarnessInstall};
-use h4rn_protocol::{Event, HarnessKind, HostId, RuntimeMode, ThreadId, TurnId, TurnStatus};
+use h4rn_protocol::{
+    AgentState, Event, HarnessKind, HostId, RuntimeMode, ThreadId, TurnId, TurnStatus,
+};
 use tokio::sync::broadcast;
 
 const TURN_TIMEOUT: Duration = Duration::from_secs(60);
@@ -427,9 +429,60 @@ async fn an_exit_report_after_the_stdout_eof_still_names_the_stderr() {
     manager.shutdown().await;
 }
 
+/// The process closes stdout and then exits without writing any stderr. The
+/// exit status is shorter than the generic stdout-close notice, but it is the
+/// specific account of the death and must name the row.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stderrless_exit_report_still_names_the_exit_status() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let Some(manager) = manager().await else {
+        return skip_without_fixture();
+    };
+    let mut events = manager.subscribe();
+    let host = HostId::new("host_test");
+
+    let created = manager
+        .create_thread(new_thread(&host, workspace.path(), "first"))
+        .await
+        .expect("create");
+    let first = next_turn(&mut events).await;
+    assert_eq!(first.status, TurnStatus::Completed, "{:?}", first.errors);
+
+    let thread_id: ThreadId = created.thread_id.clone();
+    manager
+        .send_message(
+            &thread_id,
+            "please H4RN_FIXTURE_SILENT_EXIT".into(),
+            Vec::new(),
+        )
+        .await
+        .expect("send");
+    let failed = next_turn(&mut events).await;
+    assert_eq!(failed.status, TurnStatus::Failed);
+    assert_eq!(
+        failed.errors.len(),
+        1,
+        "one row for one dead transport: {:?}",
+        failed.errors
+    );
+    let row = &failed.errors[0];
+    assert!(
+        row.starts_with("agy exited ("),
+        "the exit status names the row: {row}"
+    );
+    assert!(
+        !row.contains("stdout closed"),
+        "the generic close notice did not fold the exit report away: {row}"
+    );
+
+    manager.shutdown().await;
+}
+
 /// A rate-limit reset that only the exit report carries still reaches the
 /// daemon's limit handling: the turn reports a limit with a reset time and
-/// auto-resume, exactly as it does when the report wins the race on its own.#[cfg(unix)]
+/// auto-resume, exactly as it does when the report wins the race on its own.
+#[cfg(unix)]
 #[tokio::test]
 async fn an_exit_report_after_the_stdout_eof_still_schedules_the_resume() {
     let workspace = tempfile::tempdir().expect("tempdir");
@@ -474,6 +527,179 @@ async fn an_exit_report_after_the_stdout_eof_still_schedules_the_resume() {
         schedules[0].state,
         h4rn_protocol::ResumeState::Waiting,
         "a reset beyond the policy's max wait is retried at the cap: {schedules:?}"
+    );
+
+    manager.shutdown().await;
+}
+
+/// A limit that only the exit report carries after `end_turn` still pauses the
+/// thread: the completion arrives on a closed transport, so the pump waits for
+/// the report and arms the schedule before promoting the message queued behind
+/// the turn.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_limit_only_the_exit_report_carries_pauses_after_end_turn() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let Some(manager) = manager().await else {
+        return skip_without_fixture();
+    };
+    let mut events = manager.subscribe();
+    let host = HostId::new("host_test");
+
+    let created = manager
+        .create_thread(new_thread(&host, workspace.path(), "first"))
+        .await
+        .expect("create");
+    let first = next_turn(&mut events).await;
+    assert_eq!(first.status, TurnStatus::Completed, "{:?}", first.errors);
+
+    // The marker turn is answered, then its stdout closes; the reset is only on
+    // the exit report that follows. The follow-up queues behind the turn.
+    let thread_id: ThreadId = created.thread_id.clone();
+    manager
+        .send_message(
+            &thread_id,
+            "please H4RN_FIXTURE_LIMIT_EXIT_AFTER_TURN".into(),
+            Vec::new(),
+        )
+        .await
+        .expect("send");
+    let queued = manager
+        .send_message(&thread_id, "queued".into(), Vec::new())
+        .await
+        .expect("queue");
+    let waiting = workspace
+        .path()
+        .join(".agy-fixture-limit-after-turn-waiting");
+    tokio::time::timeout(TURN_TIMEOUT, async {
+        while !waiting.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the fixture answered and closed stdout");
+    std::fs::write(
+        workspace.path().join(".agy-fixture-limit-after-turn-gate"),
+        b"",
+    )
+    .expect("release the fixture's exit gate");
+
+    let ended = next_turn(&mut events).await;
+    assert_eq!(ended.status, TurnStatus::Completed, "{:?}", ended.errors);
+    assert!(
+        ended.limits.iter().any(|(reset, auto)| *reset && *auto),
+        "the exit report's limit armed the resume: {:?}",
+        ended.limits
+    );
+
+    let meter = manager.meter().expect("the test manager has a meter");
+    let schedules = meter.schedules().await.expect("read schedules");
+    assert_eq!(schedules.len(), 1, "one persisted schedule: {schedules:?}");
+    assert_eq!(schedules[0].thread_id, thread_id);
+
+    // The limit arrived before the completion could promote the queue, so the
+    // queued turn did not start on a fresh agent.
+    assert_eq!(
+        session_starts(workspace.path()),
+        1,
+        "the queued turn did not start a new agent"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), next_turn(&mut events))
+            .await
+            .is_err(),
+        "the queued turn ({}) started past a usage limit",
+        queued.turn_id
+    );
+
+    manager.shutdown().await;
+}
+
+/// An idle death whose exit report carries the reset keeps the thread
+/// Scheduled: the diagnostic row is published without flipping the thread to
+/// Error, so its armed auto-resume stays in place.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_idle_limit_exit_keeps_the_thread_scheduled() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let Some(manager) = manager().await else {
+        return skip_without_fixture();
+    };
+    let mut events = manager.subscribe();
+    let host = HostId::new("host_test");
+
+    let created = manager
+        .create_thread(new_thread(&host, workspace.path(), "first"))
+        .await
+        .expect("create");
+    let first = next_turn(&mut events).await;
+    assert_eq!(first.status, TurnStatus::Completed, "{:?}", first.errors);
+
+    // The marker turn is answered while the transport is healthy; the death
+    // happens only after the test has seen that completion.
+    let thread_id: ThreadId = created.thread_id.clone();
+    manager
+        .send_message(
+            &thread_id,
+            "please H4RN_FIXTURE_LIMIT_EXIT_BETWEEN_TURNS".into(),
+            Vec::new(),
+        )
+        .await
+        .expect("send");
+    let answered = next_turn(&mut events).await;
+    assert_eq!(
+        answered.status,
+        TurnStatus::Completed,
+        "{:?}",
+        answered.errors
+    );
+    std::fs::write(workspace.path().join(".agy-fixture-limit-idle-gate"), b"")
+        .expect("let the idle agent close and exit");
+
+    let row = tokio::time::timeout(TURN_TIMEOUT, async {
+        loop {
+            let Ok(wire) = events.recv().await else {
+                panic!("the event stream closed before the idle death was reported");
+            };
+            if let Event::Error { message, .. } = wire.event {
+                return message;
+            }
+        }
+    })
+    .await
+    .expect("the idle death is published without another Send");
+    assert!(
+        row.contains("stdout closed"),
+        "the row is the idle death's diagnostic: {row}"
+    );
+
+    let meter = manager.meter().expect("the test manager has a meter");
+    let schedules = meter.schedules().await.expect("read schedules");
+    assert_eq!(schedules.len(), 1, "one persisted schedule: {schedules:?}");
+    assert_eq!(schedules[0].thread_id, thread_id);
+    let summary = manager
+        .thread_summary(&thread_id)
+        .await
+        .expect("thread summary");
+    assert_eq!(
+        summary.agent_state,
+        AgentState::Scheduled,
+        "the idle row did not turn the armed resume into an Error"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), async {
+            loop {
+                let Ok(wire) = events.recv().await else {
+                    return None;
+                };
+                if let Event::Error { message, .. } = wire.event {
+                    return Some(message);
+                }
+            }
+        })
+        .await
+        .is_err(),
+        "one idle death is one diagnostic row"
     );
 
     manager.shutdown().await;

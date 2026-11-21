@@ -64,7 +64,7 @@ use crate::attachments::{self, AttachmentClass, AttachmentDelivery};
 use crate::{
     AttachmentRef, ENV_MCP_AUTH_TOKEN, ENV_MCP_BEARER_TOKEN, Harness, HarnessError, HarnessEvent,
     HarnessInstall, HarnessSession, SessionSpec, TransportHealth, TurnReport, UserInput,
-    detect_limit, most_specific_detail,
+    detect_limit, merge_transport_detail, most_specific_detail,
 };
 
 mod stream;
@@ -757,15 +757,24 @@ impl HarnessSession for AcpSession {
                     } else {
                         None
                     };
+                    let exit = exit
+                        .as_ref()
+                        .map(|report| exit_detail(&report.status, &report.stderr));
                     let mut detail = error.to_string();
-                    if let Some(report) = &exit {
-                        detail = merged_detail(detail, &report.stderr);
-                        detail = merged_detail(detail, &format!("agy exited ({})", report.status));
-                    } else {
-                        // No process to wait for (an in-process transport): the
-                        // ring's tail is all the adapter knows.
-                        let stderr = client.stderr_tail();
-                        detail = merged_detail(detail, &stderr);
+                    match &exit {
+                        // The exit report is this death's specific account: it
+                        // wins over the generic close notice even when its text
+                        // is shorter, and it already appends the stderr it
+                        // drained.
+                        Some(report) => {
+                            detail = merge_transport_detail(detail, true, report.clone(), false);
+                        }
+                        None => {
+                            // No process to wait for (an in-process transport):
+                            // the ring's tail is all the adapter knows.
+                            let stderr = client.stderr_tail();
+                            detail = merged_detail(detail, &stderr);
+                        }
                     }
                     let limit = detect_limit(&detail, Utc::now());
                     let usage = Usage {
@@ -805,10 +814,15 @@ impl HarnessSession for AcpSession {
                         // takes no deadline, so `Closed` is the only transport
                         // error this task can see.
                         let message = detail.trim().to_string();
-                        let retryable = !matches!(
-                            error,
-                            AcpError::Protocol { .. } | AcpError::OutsideWorkspace { .. }
-                        );
+                        // A report that carries the exit status and the drained
+                        // stderr is the non-retryable exit report, exactly as
+                        // the bridge tags the same death; only the bare close
+                        // notice is retryable.
+                        let retryable = exit.is_none()
+                            && !matches!(
+                                error,
+                                AcpError::Protocol { .. } | AcpError::OutsideWorkspace { .. }
+                            );
                         let event = if matches!(error, AcpError::Closed { .. }) {
                             HarnessEvent::TransportClosed { message, retryable }
                         } else {
@@ -1113,13 +1127,8 @@ fn spawn_event_bridge(
                             auto_resume: signal.reset_at.is_some(),
                         }]
                     } else {
-                        let message = if stderr.trim().is_empty() {
-                            format!("agy exited ({status})")
-                        } else {
-                            format!("agy exited ({status}): {}", stderr.trim())
-                        };
                         vec![HarnessEvent::TransportClosed {
-                            message,
+                            message: exit_detail(&status, &stderr),
                             retryable: false,
                         }]
                     }
@@ -1153,9 +1162,24 @@ async fn prompt_write_detail(client: &AcpClient, detail: String) -> String {
         && let Some(report) = client.wait_for_exit(DEATH_DETAIL_WAIT).await
     {
         detail = merged_detail(detail, &report.stderr);
-        return merged_detail(detail, &format!("agy exited ({})", report.status));
+        return merged_detail(detail, &exit_detail(&report.status, &report.stderr));
     }
     merged_detail(detail, &client.stderr_tail())
+}
+
+/// The non-retryable exit/status report's text.
+///
+/// The exit status is the specific account of the death, so it leads, and the
+/// stderr the reader drained is appended when it has any. Both the bridge and
+/// the failed-prompt path name a death this way, so the daemon merges the two
+/// reports into the same row.
+fn exit_detail(status: &str, stderr: &str) -> String {
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        format!("agy exited ({status})")
+    } else {
+        format!("agy exited ({status}): {stderr}")
+    }
 }
 
 /// Adds `extra` to a failure's detail when it says something new.

@@ -11,6 +11,13 @@
 //! followed by an exit (`H4RN_FIXTURE_DIE_BETWEEN_TURNS`) and an answer followed
 //! by a stopped stdin reader and a rate-limit reset on stderr
 //! (`H4RN_FIXTURE_STALL_STDIN`).
+//!
+//! Two more orderings cover a rate limit that only the exit report carries
+//! after the turn already ended: an answer, a closed stdout and only then the
+//! exit (`H4RN_FIXTURE_LIMIT_EXIT_AFTER_TURN`), and an idle close followed by
+//! the exit (`H4RN_FIXTURE_LIMIT_EXIT_BETWEEN_TURNS`). A mid-turn exit with no
+//! stderr at all (`H4RN_FIXTURE_SILENT_EXIT`) proves the exit status still names
+//! the row when there is no stderr to outrank it.
 
 use std::io::{BufRead, Write};
 
@@ -113,6 +120,14 @@ fn main() {
                     eprintln!("agy-fixture: the session died after stdout closed");
                     std::process::exit(7);
                 }
+                if text.contains("H4RN_FIXTURE_SILENT_EXIT") {
+                    // Close stdout and exit with no stderr at all: the row can
+                    // only name the exit status, which must beat the generic
+                    // stdout-close notice.
+                    close_stdout();
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    std::process::exit(7);
+                }
                 if text.contains("H4RN_FIXTURE_RATE_LIMITED") {
                     // The same ordering with a rate-limit reset in the exit
                     // report, so the daemon's auto-resume path must still run.
@@ -165,6 +180,34 @@ fn main() {
                     // running, which is the case the daemon's one failure row
                     // must describe with both the I/O error and stderr.
                     close_stdin_and_wait(None);
+                }
+                if text.contains("H4RN_FIXTURE_LIMIT_EXIT_AFTER_TURN") {
+                    // Answer this turn, close stdout at once, and only then
+                    // leave the reset on stderr and exit. The turn's completion
+                    // sees a closed transport, and the limit arrives solely
+                    // through the exit report that follows. The gate marks that
+                    // the answer was written and stdout closed, so a test can
+                    // queue work behind the turn before the report lands.
+                    close_stdout();
+                    wait_for_gate(
+                        ".agy-fixture-limit-after-turn-waiting",
+                        ".agy-fixture-limit-after-turn-gate",
+                    );
+                    eprintln!("agy-fixture: rate limit reached, resets at 2099-12-01T00:00:00Z");
+                    std::process::exit(7);
+                }
+                if text.contains("H4RN_FIXTURE_LIMIT_EXIT_BETWEEN_TURNS") {
+                    // Answer this turn while the transport is healthy, then
+                    // let the test end the turn and only afterwards close
+                    // stdout: the idle death's exit report carries the reset.
+                    wait_for_gate(
+                        ".agy-fixture-limit-idle-waiting",
+                        ".agy-fixture-limit-idle-gate",
+                    );
+                    close_stdout();
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    eprintln!("agy-fixture: rate limit reached, resets at 2099-12-01T00:00:00Z");
+                    std::process::exit(7);
                 }
                 if text.contains("H4RN_FIXTURE_DIE_BETWEEN_TURNS") {
                     // Answer this turn, then leave the session idle and only
