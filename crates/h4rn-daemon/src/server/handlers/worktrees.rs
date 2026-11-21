@@ -25,8 +25,8 @@ pub(super) async fn handle(
         ClientRequest::ListWorktrees => Ok(ResponseBody::Worktrees {
             worktrees: conn.state.worktrees.list().await,
         }),
-        ClientRequest::ClearWorktrees { paths, force } => {
-            let outcome = conn.state.worktrees.clear(paths, force).await;
+        ClientRequest::ClearWorktrees { paths, force, bulk } => {
+            let outcome = conn.state.worktrees.clear(paths, force, bulk).await;
             Ok(ResponseBody::WorktreesCleared {
                 removed: outcome.removed,
                 skipped: outcome.skipped,

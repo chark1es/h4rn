@@ -113,6 +113,7 @@ describe("worktree store", () => {
         type: "clear_worktrees",
         paths: ["/b", "/c"],
         force: false,
+        bulk: false,
       },
       { timeoutMs: 600_000 },
     );
@@ -122,7 +123,51 @@ describe("worktree store", () => {
     expect(outcome).toEqual({
       removed: 1,
       skipped: [{ path: "/c", reason: "has uncommitted changes" }],
+      bulk: false,
     });
+  });
+
+  it("sends bulk for Clear all and keeps it for the forced retry of its skips", async () => {
+    request.mockResolvedValueOnce({
+      type: "worktrees",
+      worktrees: [row({ path: "/b" }), row({ path: "/c", dirty: true })],
+    });
+    await loadWorktrees();
+    request.mockResolvedValue({
+      type: "worktrees_cleared",
+      removed: ["/b"],
+      skipped: [{ path: "/c", reason: "has uncommitted changes" }],
+      worktrees: [row({ path: "/c", dirty: true })],
+    });
+
+    // Clear all: the captured paths go out with `bulk: true`.
+    const all = captureClear(["/b", "/c"], true);
+    expect(all.bulk).toBe(true);
+    await clearWorktrees(all.paths, false, all.client, all.bulk);
+    expect(request).toHaveBeenLastCalledWith(
+      { type: "clear_worktrees", paths: ["/b", "/c"], force: false, bulk: true },
+      { timeoutMs: 600_000 },
+    );
+    const outcome = getWorktreeState().outcome;
+    expect(outcome?.bulk).toBe(true);
+
+    // The forced retry of Clear all's skips keeps `bulk`.
+    const retry = captureClear(["/c"], outcome?.bulk ?? false);
+    await clearWorktrees(retry.paths, true, retry.client, retry.bulk);
+    expect(request).toHaveBeenLastCalledWith(
+      { type: "clear_worktrees", paths: ["/c"], force: true, bulk: true },
+      { timeoutMs: 600_000 },
+    );
+
+    // A per-row Remove is never bulk.
+    const one = captureClear(["/c"]);
+    expect(one.bulk).toBe(false);
+    await clearWorktrees(one.paths, false, one.client, one.bulk);
+    expect(request).toHaveBeenLastCalledWith(
+      { type: "clear_worktrees", paths: ["/c"], force: false, bulk: false },
+      { timeoutMs: 600_000 },
+    );
+    expect(getWorktreeState().outcome?.bulk).toBe(false);
   });
 
   it("sends the explicit paths it is given, and force for a retry", async () => {
@@ -140,6 +185,7 @@ describe("worktree store", () => {
         type: "clear_worktrees",
         paths: ["/a"],
         force: false,
+        bulk: false,
       },
       { timeoutMs: 600_000 },
     );
@@ -149,6 +195,7 @@ describe("worktree store", () => {
         type: "clear_worktrees",
         paths: ["/c"],
         force: true,
+        bulk: false,
       },
       { timeoutMs: 600_000 },
     );

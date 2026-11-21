@@ -213,6 +213,7 @@ async fn a_settled_subagent_worktree_is_listed_and_cleared_over_the_wire() {
         .request(ClientRequest::ClearWorktrees {
             paths: Some(vec![entry.path.clone()]),
             force: false,
+            bulk: false,
         })
         .await
         .expect("clear worktrees");
@@ -351,6 +352,7 @@ async fn clearing_a_worktree_while_its_child_still_works_skips_it() {
         .request(ClientRequest::ClearWorktrees {
             paths: Some(vec![entry.path.clone()]),
             force: false,
+            bulk: false,
         })
         .await
         .expect("clear worktrees");

@@ -184,7 +184,14 @@ export function WorktreeSettings() {
               type="button"
               className="q-btn secondary"
               disabled={busy || clearable.length === 0}
-              onClick={() => setConfirmAll(captureClear(clearable.map((row) => row.path)))}
+              onClick={() =>
+                setConfirmAll(
+                  captureClear(
+                    clearable.map((row) => row.path),
+                    true,
+                  ),
+                )
+              }
             >
               Clear all
             </button>
@@ -219,7 +226,14 @@ export function WorktreeSettings() {
                     className="q-btn secondary"
                     style={{ marginTop: 8 }}
                     disabled={busy}
-                    onClick={() => setForcing(captureClear(forceable.map((item) => item.path)))}
+                    onClick={() =>
+                      setForcing(
+                        captureClear(
+                          forceable.map((item) => item.path),
+                          outcome?.bulk ?? false,
+                        ),
+                      )
+                    }
                   >
                     Remove anyway
                   </button>
@@ -266,7 +280,7 @@ export function WorktreeSettings() {
         }}
         onConfirm={() => {
           if (confirmAll) {
-            void clearWorktrees(confirmAll.paths, false, confirmAll.client);
+            void clearWorktrees(confirmAll.paths, false, confirmAll.client, confirmAll.bulk);
           }
           setConfirmAll(null);
         }}
@@ -282,7 +296,12 @@ export function WorktreeSettings() {
         }}
         onConfirm={() => {
           if (removing) {
-            void clearWorktrees(removing.confirmation.paths, false, removing.confirmation.client);
+            void clearWorktrees(
+              removing.confirmation.paths,
+              false,
+              removing.confirmation.client,
+              removing.confirmation.bulk,
+            );
           }
           setRemoving(null);
         }}
@@ -298,7 +317,7 @@ export function WorktreeSettings() {
         }}
         onConfirm={() => {
           if (forcing) {
-            void clearWorktrees(forcing.paths, true, forcing.client);
+            void clearWorktrees(forcing.paths, true, forcing.client, forcing.bulk);
           }
           setForcing(null);
         }}

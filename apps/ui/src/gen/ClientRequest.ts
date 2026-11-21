@@ -928,4 +928,9 @@ paths: Array<string> | null,
 /**
  * Remove even with uncommitted changes or unmerged commits.
  */
-force: boolean, };
+force: boolean, 
+/**
+ * Clear all: apply the same exclusions as `paths: None` — never a
+ * thread workspace — to the given paths.
+ */
+bulk: boolean, };

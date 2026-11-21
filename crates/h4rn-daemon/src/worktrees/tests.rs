@@ -513,11 +513,16 @@ fn thread_workspaces_that_are_linked_worktrees_are_tracked() {
 
     // Clearing everything never removes a thread's workspace; naming it does.
     let data = fixture.data_dir();
-    let selection = select_entries(&entries, None, &HashSet::new());
+    let selection = select_entries(&entries, None, false, &HashSet::new());
     assert!(selection.targets.is_empty() && selection.skipped.is_empty());
     assert!(linked.is_dir());
     let path = entries[0].path.clone();
-    let selection = select_entries(&entries, Some(std::slice::from_ref(&path)), &HashSet::new());
+    let selection = select_entries(
+        &entries,
+        Some(std::slice::from_ref(&path)),
+        false,
+        &HashSet::new(),
+    );
     assert_eq!(selection.targets.len(), 1);
     assert!(
         matches!(
@@ -538,31 +543,38 @@ fn selecting_entries_keeps_unknown_and_active_paths_apart() {
     let entries = vec![active];
 
     // Clearing everything leaves active entries alone without reporting them.
-    let selection = select_entries(&entries, None, &HashSet::new());
+    let selection = select_entries(&entries, None, false, &HashSet::new());
     assert!(selection.targets.is_empty() && selection.skipped.is_empty());
 
     // An explicit path is selected; whether it can go is the re-check's call.
     let selection = select_entries(
         &entries,
         Some(std::slice::from_ref(&entries[0].path)),
+        false,
         &HashSet::new(),
     );
     assert_eq!(selection.targets.len(), 1);
 
-    let selection = select_entries(&entries, Some(&["/nowhere".into()]), &HashSet::new());
+    let selection = select_entries(&entries, Some(&["/nowhere".into()]), false, &HashSet::new());
     assert_eq!(selection.skipped[0].reason, "not tracked");
     assert_eq!(selection.skipped[0].path, "/nowhere");
 
     // Requests match listed paths exactly, up to a trailing separator; a
     // spelling that only normalises to the listed path does not.
     let path = &entries[0].path;
-    let selection = select_entries(&entries, Some(&[format!("{path}/")]), &HashSet::new());
+    let selection = select_entries(
+        &entries,
+        Some(&[format!("{path}/")]),
+        false,
+        &HashSet::new(),
+    );
     assert_eq!(selection.targets.len(), 1);
     let name = linked.file_name().expect("name").to_string_lossy();
     let spelled = format!("{path}/../{name}");
     let selection = select_entries(
         &entries,
         Some(std::slice::from_ref(&spelled)),
+        false,
         &HashSet::new(),
     );
     assert!(selection.targets.is_empty());
@@ -1398,7 +1410,9 @@ async fn clear_through_the_tracker_skips_a_busy_thread_and_keeps_the_checkout() 
         .unwrap_or_else(|| panic!("the thread workspace is listed: {listed:?}"));
     assert_eq!(entry.status, WorktreeStatus::Active);
 
-    let outcome = tracker.clear(Some(vec![entry.path.clone()]), false).await;
+    let outcome = tracker
+        .clear(Some(vec![entry.path.clone()]), false, false)
+        .await;
     assert!(outcome.removed.is_empty(), "{:?}", outcome.skipped);
     assert_eq!(outcome.skipped[0].reason, format!("in use by {title}"));
     assert!(linked.is_dir(), "the checkout is kept");
@@ -1462,7 +1476,9 @@ async fn clear_through_the_tracker_sees_a_thread_the_listing_missed() {
         "the listing only knows the finished subagent"
     );
 
-    let outcome = tracker.clear(Some(vec![entry.path.clone()]), false).await;
+    let outcome = tracker
+        .clear(Some(vec![entry.path.clone()]), false, false)
+        .await;
     assert!(outcome.removed.is_empty(), "{:?}", outcome.skipped);
     assert_eq!(outcome.skipped[0].reason, format!("in use by {title}"));
     assert!(path.is_dir(), "the checkout is kept");
@@ -1494,7 +1510,9 @@ async fn a_busy_thread_whose_workspace_goes_through_a_symlink_keeps_the_checkout
     let title = wait_busy(&threads, &thread).await;
 
     let target = entry(&linked, &fixture.repo, Some("link-busy-branch"), false);
-    let outcome = tracker.clear(Some(vec![target.path.clone()]), false).await;
+    let outcome = tracker
+        .clear(Some(vec![target.path.clone()]), false, false)
+        .await;
     assert!(outcome.removed.is_empty(), "{:?}", outcome.skipped);
     assert_eq!(outcome.skipped[0].reason, format!("in use by {title}"));
     assert!(linked.is_dir(), "the checkout is kept");
@@ -1531,7 +1549,9 @@ async fn a_busy_accessor_found_only_in_the_store_keeps_the_checkout() {
         .expect("record the access");
 
     let target = entry(&linked, &fixture.repo, Some("store-branch"), false);
-    let outcome = tracker.clear(Some(vec![target.path.clone()]), false).await;
+    let outcome = tracker
+        .clear(Some(vec![target.path.clone()]), false, false)
+        .await;
     assert!(outcome.removed.is_empty(), "{:?}", outcome.skipped);
     assert_eq!(outcome.skipped[0].reason, format!("in use by {title}"));
     assert!(linked.is_dir(), "the checkout is kept");
@@ -1572,7 +1592,9 @@ async fn a_moved_harness_worktree_stays_listed_and_is_cleared_by_registration() 
     assert_eq!(entry.origin, WorktreeOrigin::Harness);
 
     // A clear by path drops the registration rather than reporting "not tracked".
-    let outcome = tracker.clear(Some(vec![entry.path.clone()]), false).await;
+    let outcome = tracker
+        .clear(Some(vec![entry.path.clone()]), false, false)
+        .await;
     assert_eq!(
         outcome.removed,
         vec![entry.path.clone()],
@@ -1643,7 +1665,9 @@ async fn a_failed_tool_call_during_a_turn_keeps_the_worktree_busy() {
         "a turn in flight keeps the entry active even at agent state Error"
     );
 
-    let outcome = tracker.clear(Some(vec![entry.path.clone()]), false).await;
+    let outcome = tracker
+        .clear(Some(vec![entry.path.clone()]), false, false)
+        .await;
     assert!(outcome.removed.is_empty(), "{:?}", outcome.skipped);
     assert_eq!(outcome.skipped[0].reason, format!("in use by {title}"));
     assert!(linked.is_dir(), "the checkout is kept");
@@ -2450,7 +2474,9 @@ async fn an_owned_row_stays_listed_while_its_registration_remains() {
         "the branch is known gone, so the row never promises it"
     );
 
-    let outcome = tracker.clear(Some(vec![entry.path.clone()]), false).await;
+    let outcome = tracker
+        .clear(Some(vec![entry.path.clone()]), false, false)
+        .await;
     assert_eq!(
         outcome.removed,
         vec![entry.path.clone()],
@@ -3576,13 +3602,17 @@ async fn a_symlink_that_replaced_a_tracked_checkout_is_never_followed() {
 
     for force in [false, true] {
         let outcome = tracker
-            .clear(Some(vec![tracked.to_string_lossy().into_owned()]), force)
+            .clear(
+                Some(vec![tracked.to_string_lossy().into_owned()]),
+                force,
+                false,
+            )
             .await;
         assert!(outcome.removed.is_empty(), "force={force}: {outcome:?}");
         assert_eq!(outcome.skipped.len(), 1, "force={force}");
         assert_eq!(outcome.skipped[0].reason, "not a registered worktree");
     }
-    let outcome = tracker.clear(None, true).await;
+    let outcome = tracker.clear(None, true, false).await;
     assert!(outcome.removed.is_empty(), "{outcome:?}");
 
     assert!(
@@ -3648,17 +3678,40 @@ fn clear_all_leaves_a_thread_workspace_alone_whatever_its_origin() {
     let harness = entry(&linked, &fixture.repo, Some("thread-harness-branch"), false);
     assert_eq!(harness.origin, WorktreeOrigin::Harness);
     let entries = vec![harness];
-    let selection = select_entries(&entries, None, &thread_workspaces);
+    let selection = select_entries(&entries, None, false, &thread_workspaces);
     assert!(selection.targets.is_empty() && selection.skipped.is_empty());
-    let selection = select_entries(&entries, None, &HashSet::new());
+    let selection = select_entries(&entries, None, false, &HashSet::new());
     assert_eq!(selection.targets.len(), 1);
     // Naming it still selects it.
     let selection = select_entries(
         &entries,
         Some(std::slice::from_ref(&entries[0].path)),
+        false,
         &thread_workspaces,
     );
     assert_eq!(selection.targets.len(), 1);
+    // Clear all sends the paths it showed with `bulk`: the same exclusion
+    // applies to them, and the row is dropped rather than reported.
+    let selection = select_entries(
+        &entries,
+        Some(std::slice::from_ref(&entries[0].path)),
+        true,
+        &thread_workspaces,
+    );
+    assert!(selection.targets.is_empty() && selection.skipped.is_empty());
+    let mut thread_row = entries[0].clone();
+    thread_row.origin = WorktreeOrigin::Thread;
+    let thread_rows = vec![thread_row];
+    let selection = select_entries(
+        &thread_rows,
+        Some(std::slice::from_ref(&thread_rows[0].path)),
+        true,
+        &HashSet::new(),
+    );
+    assert!(
+        selection.targets.is_empty(),
+        "thread-origin rows are excluded too"
+    );
 }
 
 #[test]
@@ -3691,4 +3744,340 @@ fn oversized_registration_metadata_is_not_read() {
             .all(|registration| registration.path != big_gitdir),
         "{registrations:?}"
     );
+}
+
+/// Waits until the thread has finished its turn and is no longer busy.
+async fn wait_idle(threads: &ThreadManager, thread: &ThreadId) {
+    for _ in 0..250 {
+        if let Some(summary) = threads.thread_summary(thread).await
+            && !is_busy(
+                summary.tab,
+                summary.agent_state,
+                threads.turn_in_flight(thread).await,
+            )
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("thread {thread:?} never settled");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_owned_row_whose_recorded_path_became_a_symlink_is_never_followed() {
+    let fixture = Fixture::new();
+    let other = fixture.add_worktree("wt-owned-target", "owned-target-branch");
+    std::fs::write(other.join("work.txt"), "the other checkout's work").expect("work");
+    let (tracker, threads, subagents) = managers(
+        &fixture,
+        vec![
+            Arc::new(FakeHarness::with_events(Vec::new())),
+            Arc::new(FakeHarness::new().with_kind(HarnessKind::Codex)),
+        ],
+    )
+    .await;
+    let parent = start_thread(&threads, &fixture.repo, "parent").await;
+    let view = subagents
+        .spawn(h4rn_protocol::SpawnSubagentRequest {
+            parent_thread: parent.clone(),
+            task: "settle and leave the branch".into(),
+            harness: Some(HarnessKind::Codex),
+            host: None,
+            model: None,
+            isolation: SubagentIsolation::Worktree,
+            context: Default::default(),
+            budget: Default::default(),
+        })
+        .await
+        .expect("spawn subagent");
+    let settled = wait_settled(&tracker, &view.subagent_id).await;
+    assert!(!settled.exists);
+    let recorded = PathBuf::from(&view.workspace_path);
+    assert_eq!(Path::new(&settled.path), recorded, "listed as recorded");
+
+    // The recorded path becomes a symlink to another registered worktree.
+    std::fs::create_dir_all(recorded.parent().expect("parent")).expect("parent dir");
+    std::os::unix::fs::symlink(&other, &recorded).expect("symlink");
+
+    let listed = tracker.list().await;
+    let row = listed
+        .iter()
+        .find(|entry| entry.subagent_id.as_ref() == Some(&view.subagent_id))
+        .unwrap_or_else(|| panic!("the owned row is listed: {listed:?}"))
+        .clone();
+    assert_eq!(Path::new(&row.path), recorded, "never the symlink's target");
+    assert!(!row.exists, "a symlink is not a checkout");
+    // The child thread's workspace resolves through the symlink, so the target
+    // may show up as that thread's workspace, but never as an owned row.
+    assert!(
+        listed
+            .iter()
+            .all(|entry| !(entry.owned && Path::new(&entry.path) == other)),
+        "{listed:?}"
+    );
+
+    for (force, bulk) in [(false, false), (true, false), (false, true), (true, true)] {
+        let outcome = tracker
+            .clear(Some(vec![row.path.clone()]), force, bulk)
+            .await;
+        assert!(
+            outcome.removed.is_empty(),
+            "force={force} bulk={bulk}: {outcome:?}"
+        );
+        assert_eq!(outcome.skipped.len(), 1, "force={force} bulk={bulk}");
+        assert_eq!(outcome.skipped[0].reason, "not a registered worktree");
+    }
+    let outcome = tracker.clear(None, true, false).await;
+    assert!(outcome.removed.is_empty(), "{outcome:?}");
+
+    assert!(
+        recorded
+            .symlink_metadata()
+            .expect("still there")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        std::fs::read_to_string(other.join("work.txt")).expect("work kept"),
+        "the other checkout's work"
+    );
+    assert!(
+        git::registrations(&fixture.repo)
+            .expect("list")
+            .iter()
+            .any(|registration| registration.path == other),
+        "the other worktree stays registered"
+    );
+    assert!(
+        git::branch_exists(&fixture.repo, "owned-target-branch"),
+        "the target's branch is untouched"
+    );
+    let _ = threads.interrupt(&parent).await;
+}
+
+#[tokio::test]
+async fn a_bulk_clear_skips_a_row_that_became_a_thread_workspace() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-bulk", "bulk-branch");
+    let (tracker, threads, _subagents) =
+        managers(&fixture, vec![Arc::new(FakeHarness::new())]).await;
+    tracker
+        .inner
+        .store
+        .record(
+            &linked.to_string_lossy(),
+            &fixture.repo.to_string_lossy(),
+            Some("bulk-branch"),
+            "th_gone",
+            None,
+            Utc::now(),
+        )
+        .await
+        .expect("record the observation");
+
+    // Settings shows a harness row and captures its path for Clear all.
+    let listed = tracker.list().await;
+    let row = listed
+        .iter()
+        .find(|entry| Path::new(&entry.path) == linked)
+        .unwrap_or_else(|| panic!("listed: {listed:?}"))
+        .clone();
+    assert_eq!(row.origin, WorktreeOrigin::Harness);
+
+    // Behind the dialog, a thread starts in it and settles.
+    let thread = start_thread(&threads, &linked, "work here briefly").await;
+    wait_idle(&threads, &thread).await;
+
+    let outcome = tracker
+        .clear(Some(vec![row.path.clone()]), false, true)
+        .await;
+    assert!(outcome.removed.is_empty(), "{outcome:?}");
+    assert!(
+        outcome.skipped.is_empty(),
+        "dropped like Clear all drops it"
+    );
+    assert!(linked.is_dir(), "the thread workspace is kept");
+
+    // Naming it on its own still removes it.
+    let outcome = tracker
+        .clear(Some(vec![row.path.clone()]), false, false)
+        .await;
+    assert_eq!(outcome.removed, vec![row.path.clone()], "{outcome:?}");
+    assert!(!linked.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_registration_head_is_never_opened() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-fifo-head", "fifo-head-branch");
+    let admin =
+        PathBuf::from(git::run(&linked, ["rev-parse", "--absolute-git-dir"]).expect("admin dir"));
+    // Only the registration is left, and its `HEAD` is a FIFO: opening it would
+    // block until a writer appears, which never happens.
+    std::fs::remove_dir_all(&linked).expect("remove the checkout");
+    let head = admin.join("HEAD");
+    std::fs::remove_file(&head).expect("remove HEAD");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&head)
+        .status()
+        .expect("run mkfifo");
+    assert!(status.success());
+
+    let repo = fixture.repo.clone();
+    let data_dir = fixture.data_dir();
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        git::FORCE_METADATA_FALLBACK.with(|forced| forced.set(true));
+        let registrations =
+            git::registrations_from_metadata(&repo, Duration::from_secs(30)).expect("read");
+        let list_input = ListInput {
+            subagents: Vec::new(),
+            parent_workspaces: HashMap::new(),
+            subagent_repos: HashMap::new(),
+            threads: Vec::new(),
+            stored: vec![StoredWorktree {
+                path: linked.to_string_lossy().into_owned(),
+                repo: repo.to_string_lossy().into_owned(),
+                branch: Some("fifo-head-branch".into()),
+                first_seen: Utc::now(),
+                last_seen: Utc::now(),
+                accesses: Vec::new(),
+            }],
+            subagents_root: git::norm(&data_dir.join("subagents")),
+        };
+        let (listed, _) = compute(&list_input, true);
+        let target = entry(&linked, &repo, Some("fifo-head-branch"), false);
+        let cleared = clear_one(&target, false, &data_dir);
+        let _ = done.send((registrations, listed, cleared, linked));
+    });
+    let (registrations, listed, cleared, linked) = finished
+        .recv_timeout(Duration::from_secs(20))
+        .expect("listing and clearing return promptly");
+    let registration = registrations
+        .iter()
+        .find(|registration| registration.path == linked)
+        .unwrap_or_else(|| panic!("listed: {registrations:?}"));
+    assert_eq!(registration.head, git::Head::Unknown);
+    assert!(
+        listed
+            .iter()
+            .any(|row| Path::new(&row.path) == linked && !row.exists),
+        "{listed:?}"
+    );
+    assert_eq!(
+        cleared.err().as_deref(),
+        Some("could not read the registration's HEAD")
+    );
+    assert!(admin.is_dir(), "the registration stays");
+}
+
+#[cfg(unix)]
+#[test]
+fn rebase_and_bisect_files_that_are_not_regular_count_as_in_progress() {
+    let fixture = Fixture::new();
+    let git_dir = fixture.repo.join(".git");
+    let needles = ["refs/heads/h4rn/sa-x", "h4rn/sa-x"];
+    let bisect = git_dir.join("BISECT_START");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&bisect)
+        .status()
+        .expect("run mkfifo");
+    assert!(status.success());
+    let (done, finished) = std::sync::mpsc::channel();
+    let repo = fixture.repo.clone();
+    std::thread::spawn(move || {
+        let _ = done.send(super::branch_in_progress(&repo, "h4rn/sa-x"));
+    });
+    let answer = finished
+        .recv_timeout(Duration::from_secs(20))
+        .expect("returns promptly");
+    assert_eq!(answer, Ok(Some("it is in use by a bisect".to_owned())));
+    std::fs::remove_file(&bisect).expect("remove the FIFO");
+
+    // An oversized state file is not read and counts as in progress too.
+    std::fs::create_dir_all(git_dir.join("rebase-merge")).expect("rebase dir");
+    let head_name = git_dir.join("rebase-merge/head-name");
+    std::fs::write(&head_name, "x".repeat(5000)).expect("big head-name");
+    assert!(super::file_has_line(&head_name, &needles));
+    // A small one that names another branch does not.
+    std::fs::write(&head_name, "refs/heads/other\n").expect("head-name");
+    assert!(!super::file_has_line(&head_name, &needles));
+    // A missing one does not.
+    assert!(!super::file_has_line(
+        &git_dir.join("BISECT_START"),
+        &needles
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_where_a_checkout_was_is_prunable_in_the_metadata_fallback() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-prune-link", "prune-link-branch");
+    let moved = fixture.root.path().join("wt-prune-link-moved");
+    std::fs::rename(&linked, &moved).expect("move away");
+    std::os::unix::fs::symlink(&moved, &linked).expect("symlink");
+    let registrations =
+        git::registrations_from_metadata(&fixture.repo, Duration::from_secs(30)).expect("read");
+    let registration = registrations
+        .iter()
+        .find(|registration| registration.path == linked)
+        .unwrap_or_else(|| panic!("listed: {registrations:?}"));
+    assert!(registration.prunable, "a symlink is not a live checkout");
+}
+
+#[cfg(unix)]
+#[test]
+fn is_dirty_gives_up_after_its_deadline() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-slow-status", "slow-status-branch");
+    let bin = tempfile::tempdir().expect("bin dir");
+    let fake = fake_git(bin.path(), "exec sleep 30");
+    git::GIT_PROGRAM.with(|program| *program.borrow_mut() = Some(fake));
+    git::OBSERVATION_LIMIT.with(|limit| limit.set(Some(Duration::from_millis(200))));
+    let started = std::time::Instant::now();
+    let dirty = git::is_dirty(&linked);
+    let elapsed = started.elapsed();
+    git::OBSERVATION_LIMIT.with(|limit| limit.set(None));
+    git::GIT_PROGRAM.with(|program| *program.borrow_mut() = None);
+    assert_eq!(dirty, None);
+    assert!(elapsed < Duration::from_secs(5), "took {elapsed:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_owned_row_under_a_symlinked_parent_stays_clearable() {
+    let fixture = Fixture::new();
+    let checkout = fixture.add_worktree("sa-linked", "h4rn/sa-linked");
+    // The recorded path reaches the checkout through a symlinked parent, as a
+    // data directory behind a symlink would.
+    let link = fixture.root.path().join("linked-parent");
+    std::os::unix::fs::symlink(checkout.parent().expect("parent"), &link).expect("symlink");
+    let recorded = link.join(checkout.file_name().expect("name"));
+    let views = vec![subagent_view(
+        "sa_linked",
+        "th_parent",
+        &recorded,
+        "h4rn/sa-linked",
+        SubagentState::Failed,
+    )];
+    let (entries, _) = compute(&input(&fixture, views), true);
+    let row = entries
+        .iter()
+        .find(|entry| entry.subagent_id.as_ref().map(SubagentId::as_str) == Some("sa_linked"))
+        .unwrap_or_else(|| panic!("listed: {entries:?}"));
+    assert_eq!(
+        Path::new(&row.path),
+        git::norm(&checkout),
+        "parent resolved"
+    );
+    assert!(row.exists);
+    assert_eq!(row.status, WorktreeStatus::Orphaned);
+    assert!(matches!(
+        clear_one(row, false, &fixture.data_dir()),
+        Ok(ClearOne::Removed)
+    ));
+    assert!(!checkout.exists());
 }

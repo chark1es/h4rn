@@ -2741,9 +2741,14 @@ class MockDaemon {
         return;
       case "clear_worktrees": {
         // Settings sends the explicit paths of the rows the user saw (for
-        // Clear all too); the fallback keeps other callers working.
+        // Clear all too, with `bulk`); the fallback keeps other callers
+        // working. Clear all never removes a thread workspace, so `bulk`
+        // drops those paths exactly as the daemon does.
         const targets =
-          body.paths ??
+          body.paths?.filter(
+            (path) =>
+              !body.bulk || this.worktrees.find((w) => w.path === path)?.origin !== "thread",
+          ) ??
           this.worktrees
             .filter((w) => w.status !== "active" && w.origin !== "thread")
             .map((w) => w.path);

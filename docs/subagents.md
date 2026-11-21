@@ -259,13 +259,19 @@ registration metadata directly instead of parsing output, which is byte-exact on
 every version: `<common>/worktrees/*/gitdir` holds the path of the linked
 worktree's `.git` file (only its final newline is stripped; the worktree is its
 parent), `<admin>/HEAD` is `ref: refs/heads/<b>` or a detached sha,
-`<admin>/locked` marks a lock, a `gitdir` target that no longer exists makes the
-registration prunable, and the main worktree is the parent of `<common>` for a
-non-bare repository. Each `gitdir` and `HEAD` file is read with a 4 KiB bound,
-as git only ever writes one short line there: an oversized `gitdir` skips that
-registration, and an oversized `HEAD` is unknown; for a bare repository it is `<common>` itself with an
-unknown `HEAD`, exactly as `-z` lists it (`bare`, no branch). Which form works is remembered for the rest of the
-process, so the failed probe happens once. The NUL-delimited form is parsed as
+`<admin>/locked` marks a lock, and a registration is prunable when its checkout
+path is not a real directory, checked without following symlinks (a symlink
+there is not a live checkout, whatever it points at). The main worktree is the
+parent of `<common>` for a non-bare repository; for a bare repository the main
+registration is `<common>` itself with an unknown `HEAD`, exactly as `-z` lists
+it (`bare`, no branch). Each `gitdir` and `HEAD` file is read only when it is a
+regular file (checked without following symlinks, before it is opened) and with
+a 4 KiB bound, as git only ever writes one short line there: a FIFO, device,
+directory or symlink is never opened (a FIFO would block the read until some
+writer appeared), so such a `gitdir`, or an oversized one, skips that
+registration, and such a `HEAD`, or an oversized one, is unknown. Which form
+works is remembered for the rest of the process, so the failed probe happens
+once. The NUL-delimited form is parsed as
 records, so a path containing a newline (or bytes that are not UTF-8 on Unix)
 stays one path; the metadata fallback keeps such paths byte-exact too. Only an
 observation of a path that is not valid UTF-8 is then skipped, because the
@@ -299,10 +305,14 @@ recorded repositories through nested subagent worktrees, several hops deep.
 **Requests.** `list_worktrees` (scope `view`) returns the list, active first,
 then orphaned, then settled, newest first within each. `clear_worktrees` (scope
 `admin`, because it deletes from disk) takes optional `paths` (default: every
-non-active entry except thread workspaces) and `force`, and returns the removed
-paths, the skipped ones with reasons, and the fresh list. Settings always sends
-the explicit paths of the rows the user saw, for Clear all as well as for one
-row, so a clear can only ever touch what was on screen. Removals run one at a
+non-active entry except thread workspaces), `force` and `bulk`, and returns the
+removed paths, the skipped ones with reasons, and the fresh list. Settings
+always sends the explicit paths of the rows the user saw, for Clear all as well
+as for one row, so a clear can only ever touch what was on screen. Clear all
+(and the forced retry of the paths Clear all skipped) sets `bulk`, which applies
+the Clear all exclusions to those paths: a row that became a thread's workspace
+while the dialog was open is left out, exactly as with `paths` omitted. A
+per-row Remove sends `bulk: false` and may remove a thread workspace it names. Removals run one at a
 time and are awaited: the response never reports completion while a delete is
 still running, and the fresh list always reflects what actually happened.
 
@@ -364,9 +374,10 @@ selection does no filesystem work at all.
 - A `thread` workspace is only removed when its path is named. It belongs to
   whoever created it, and its thread may be resumed there, so clearing
   everything leaves it alone. That holds by path, not only by origin: when
-  `paths` is omitted, any row (a `harness` observation, say) whose path is a
-  listed thread's workspace, or the top level of that workspace's checkout, is
-  left out too. A subagent child's workspace is its subagent's own worktree and
+  `paths` is omitted, or for the given paths when `bulk` is set, any row (a
+  `harness` observation, say) whose path is a thread's workspace in the fresh
+  listing the clear takes, or the top level of that workspace's checkout, is
+  left out too; it is dropped from the request rather than reported. A subagent child's workspace is its subagent's own worktree and
   does not count.
 - The destructive key is the path exactly as listed. Git resolves every path it
   is given through symlinks, so a selected path that is a symlink (or a file),
@@ -375,9 +386,16 @@ selection does no filesystem work at all.
   or not a registration still names it. An existing checkout must also have a
   registration at exactly its path in the registration snapshot, in preflight,
   prepare and the final verification before removal; otherwise it is skipped
-  with the same reason. So a tracked worktree that was moved away and whose old
-  path now is a symlink to another worktree of the same repository is never
-  cleared through that symlink: the other worktree is untouched.
+  with the same reason. Every row is listed under the path that was recorded
+  for it, never re-canonicalised through its own final component: a stored
+  observation under its stored path, and an owned subagent row under the
+  subagent's recorded `workspace_path` with only its parent normalised (so a
+  data directory reached through a symlink stays clearable, matching how git
+  records registration paths). So a tracked worktree (owned or not) that was
+  moved away and whose old path now is a symlink to another worktree of the
+  same repository is listed with `exists: false` and is never cleared through
+  that symlink, by an ordinary, forced or bulk clear: the other worktree is
+  untouched.
 - Without `force`, a worktree with uncommitted changes, or an owned branch not
   merged into the repository's `HEAD`, is skipped. Dirtiness is asked of git
   again in preflight rather than trusted from the listing, and untracked files
@@ -449,8 +467,9 @@ selection does no filesystem work at all.
   reported as `contains submodules` (forceable); with `force` git removes it.
   Any other nested `.git` is the never-forceable reason above: a linked
   worktree of a submodule placed inside the checkout, a gitfile at a path that
-  is not a gitlink, a gitfile pointing elsewhere, one that cannot be read or is
-  larger than 4 KiB (only that much of a `.git` file is ever read), or any
+  is not a gitlink, a gitfile pointing elsewhere, one that cannot be read, is
+  not a regular file, or is larger than 4 KiB (only a regular `.git` file is
+  ever opened, and only that much of it is read), or any
   nested checkout when the gitlink lookup itself fails. The scan is bounded by the
   30-second per-command deadline, checked for every directory entry and once
   more before answering "nothing found"; running out of time, or a directory
@@ -495,7 +514,11 @@ selection does no filesystem work at all.
   checkout is gone, an ordinary clear re-checks everything immediately before
   deleting: it takes a fresh registration snapshot (so a worktree that took the
   branch over after the checkout went is seen), re-runs the rebase/bisect
-  checks, and re-runs `git merge-base --is-ancestor <verified-sha> HEAD`; a tip
+  checks (`rebase-merge/head-name`, `rebase-merge/update-refs`,
+  `rebase-apply/head-name` and `BISECT_START` in every worktree's git dir; each
+  is read only when it is a regular file of at most 4 KiB, and anything else
+  there — a FIFO, a symlink, an oversized or unreadable file — counts as a
+  rebase or bisect in progress, so the branch is left), and re-runs `git merge-base --is-ancestor <verified-sha> HEAD`; a tip
   that is no longer an ancestor is the same forceable
   `branch <b> has unmerged commits`. It then deletes exactly that verified tip
   with `git update-ref --no-deref -d refs/heads/<b> <verified-sha>`. If

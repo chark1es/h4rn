@@ -5,11 +5,19 @@ import type { H4rnClient } from "@/lib/client/client";
 import { toProtoError } from "@/lib/client/errors";
 import { getClient } from "@/lib/store/appStore";
 
-/** What the last clear did; the page words it under the Settled group. */
-export type ClearOutcome = { removed: number; skipped: SkippedWorktree[] };
+/**
+ * What the last clear did; the page words it under the Settled group. `bulk`
+ * records that it was a Clear all, so a forced retry of its skips keeps the
+ * same exclusions.
+ */
+export type ClearOutcome = { removed: number; skipped: SkippedWorktree[]; bulk: boolean };
 
-/** The machine and the exact paths a destructive confirmation was opened for. */
-export type ClearConfirmation = { client: H4rnClient; paths: string[] };
+/**
+ * The machine and the exact paths a destructive confirmation was opened for,
+ * and whether it is a Clear all (`bulk`): the daemon then never removes a
+ * thread workspace among those paths, as for a clear with no paths.
+ */
+export type ClearConfirmation = { client: H4rnClient; paths: string[]; bulk: boolean };
 
 export type WorktreeState = {
   rows: TrackedWorktree[];
@@ -69,8 +77,8 @@ export function useWorktrees<T>(selector: (value: WorktreeState) => T): T {
  * Taken when the dialog opens, so a refresh behind it cannot change what
  * Confirm removes, and a machine switch makes Confirm refuse instead.
  */
-export function captureClear(paths: string[]): ClearConfirmation {
-  return { client: getClient(), paths: [...paths] };
+export function captureClear(paths: string[], bulk = false): ClearConfirmation {
+  return { client: getClient(), paths: [...paths], bulk };
 }
 
 /** The last clear's result, only while it came from the client in use now. */
@@ -293,12 +301,15 @@ export async function loadWorktrees(): Promise<void> {
  *
  * `expectedClient` comes from a confirmation captured when its dialog opened:
  * if the machine changed since, the paths describe another host and the clear
- * is refused rather than sent.
+ * is refused rather than sent. `bulk` marks a Clear all (or the forced retry
+ * of its skips): the daemon applies the Clear all exclusions to the paths, so
+ * a row that became a thread workspace behind the dialog is left alone.
  */
 export async function clearWorktrees(
   paths: string[],
   force = false,
   expectedClient?: H4rnClient,
+  bulk = false,
 ): Promise<void> {
   if (state.clearing) return;
   const client = getClient();
@@ -315,7 +326,7 @@ export async function clearWorktrees(
     const response = await client.request(
       // Per-git-call bound is 30 s; a clear of several entries can take longer
       // than the 60 s listing timeout, so it gets a 10x budget.
-      { type: "clear_worktrees", paths, force },
+      { type: "clear_worktrees", paths, force, bulk },
       { timeoutMs: 600_000 },
     );
     if (getClient() !== client) {
@@ -331,7 +342,7 @@ export async function clearWorktrees(
       loaded: true,
       clearing: false,
       error: null,
-      outcome: { removed: response.removed.length, skipped: response.skipped },
+      outcome: { removed: response.removed.length, skipped: response.skipped, bulk },
       outcomeSource: client,
     });
   } catch (error) {

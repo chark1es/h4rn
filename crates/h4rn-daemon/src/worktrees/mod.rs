@@ -398,12 +398,14 @@ impl WorktreeTracker {
     ///
     /// `paths: None` targets every non-active entry except thread workspaces
     /// (by origin or by path), which are only removed when named explicitly.
+    /// `bulk` applies that thread-workspace exclusion to the given paths too
+    /// (Settings' Clear all sends the paths it showed with `bulk: true`).
     /// Active entries are never removed. Without `force`, dirty worktrees and
     /// owned branches with unmerged commits are skipped.
-    pub async fn clear(&self, paths: Option<Vec<String>>, force: bool) -> ClearOutcome {
+    pub async fn clear(&self, paths: Option<Vec<String>>, force: bool, bulk: bool) -> ClearOutcome {
         let _guard = self.inner.clear_lock.lock().await;
         let (entries, thread_workspaces) = self.list_with(false).await;
-        let selection = select_entries(&entries, paths.as_deref(), &thread_workspaces);
+        let selection = select_entries(&entries, paths.as_deref(), bulk, &thread_workspaces);
         let mut removed = Vec::new();
         let mut skipped = selection.skipped;
         // One entry at a time: the listing is a snapshot, so each removal runs
@@ -1069,7 +1071,13 @@ pub(crate) fn compute_listing(
 
     // 1. Worktrees h4rn made for isolated subagents.
     for view in &input.subagents {
-        let path = git::norm(Path::new(&view.workspace_path));
+        // Listed under the recorded path with only its parent normalised:
+        // clearing acts on the path as listed, and a recorded path that is now
+        // a symlink must keep its own name (which `checkout_at` then refuses)
+        // rather than turn into whatever the symlink points at. Normalising
+        // the parent keeps a data directory reached through a symlink
+        // clearable, matching how git records registration paths.
+        let path = git::norm_listed(Path::new(&view.workspace_path));
         let repo = subagent_repo(input, view, &path);
         // The protocol carries paths as strings, so a path that cannot
         // round-trip through UTF-8 is never listed.
@@ -1629,18 +1637,38 @@ fn branch_in_progress(repo: &Path, branch: &str) -> Result<Option<String>, Strin
     Ok(None)
 }
 
-/// Whether `path` exists and has a whole (trimmed) line equal to a needle.
+/// One rebase or bisect state file: `None` when it does not exist, `Some(None)`
+/// when something is there but cannot be read safely, `Some(Some(text))`
+/// otherwise.
+///
+/// Only a regular file of at most 4 KiB is read (see [`git::read_bounded`]);
+/// a FIFO, a symlink, a directory, an oversized or unreadable file is
+/// "something there, unknown", which callers read as in progress.
+fn state_file(path: &Path) -> Option<Option<String>> {
+    match path.symlink_metadata() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        _ => {
+            Some(git::read_bounded(path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+        }
+    }
+}
+
+/// Whether `path` exists and has a whole (trimmed) line equal to a needle; a
+/// state file that cannot be read safely counts as a match.
 fn file_has_line(path: &Path, needles: &[&str]) -> bool {
-    std::fs::read_to_string(path)
-        .is_ok_and(|text| text.lines().any(|line| needles.contains(&line.trim())))
+    state_file(path).is_some_and(|text| {
+        text.is_none_or(|text| text.lines().any(|line| needles.contains(&line.trim())))
+    })
 }
 
 /// Whether `path` exists and has a whole whitespace-separated token equal to a
-/// needle.
+/// needle; a state file that cannot be read safely counts as a match.
 fn file_has_token(path: &Path, needles: &[&str]) -> bool {
-    std::fs::read_to_string(path).is_ok_and(|text| {
-        text.split_whitespace()
-            .any(|token| needles.contains(&token))
+    state_file(path).is_some_and(|text| {
+        text.is_none_or(|text| {
+            text.split_whitespace()
+                .any(|token| needles.contains(&token))
+        })
     })
 }
 
@@ -2273,28 +2301,36 @@ fn trim_separator(path: &str) -> &str {
     }
 }
 
+/// Whether clearing everything leaves `entry` alone because it is a thread
+/// workspace.
+///
+/// A thread workspace belongs to whoever made it (another tool, the user) and
+/// the thread may still be resumed in it, so only a non-bulk explicit path
+/// removes one. That holds by path too: a row of any origin at a thread's
+/// workspace (or its checkout's top level), from the fresh listing, is left
+/// alone.
+fn thread_workspace(entry: &TrackedWorktree, thread_workspaces: &HashSet<PathBuf>) -> bool {
+    entry.origin == WorktreeOrigin::Thread || thread_workspaces.contains(Path::new(&entry.path))
+}
+
 /// Picks the entries a clear request names.
 ///
 /// Pure: a requested path matches a listed one only when the two strings are
 /// byte-equal after trailing separators are trimmed. Nothing is normalised,
-/// so a request can never reach a row through a symlink.
+/// so a request can never reach a row through a symlink. A `bulk` request
+/// (Clear all with the paths it showed) leaves thread workspaces out exactly
+/// as `paths: None` does; they are dropped from it, not reported.
 fn select_entries<'a>(
     entries: &'a [TrackedWorktree],
     paths: Option<&[String]>,
+    bulk: bool,
     thread_workspaces: &HashSet<PathBuf>,
 ) -> Selection<'a> {
     let mut targets: Vec<&TrackedWorktree> = Vec::new();
     let mut skipped = Vec::new();
     match paths {
-        // A thread workspace belongs to whoever made it (another tool, the
-        // user) and the thread may still be resumed in it, so clearing
-        // everything leaves it alone; only an explicit path removes one. That
-        // holds by path too: a row of any origin at a thread's workspace (or
-        // its checkout's top level) is left alone.
         None => targets.extend(entries.iter().filter(|entry| {
-            entry.status != WorktreeStatus::Active
-                && entry.origin != WorktreeOrigin::Thread
-                && !thread_workspaces.contains(Path::new(&entry.path))
+            entry.status != WorktreeStatus::Active && !thread_workspace(entry, thread_workspaces)
         })),
         Some(paths) => {
             let mut seen = HashSet::new();
@@ -2307,6 +2343,7 @@ fn select_entries<'a>(
                     .iter()
                     .find(|entry| trim_separator(&entry.path) == wanted)
                 {
+                    Some(entry) if bulk && thread_workspace(entry, thread_workspaces) => {}
                     Some(entry) => targets.push(entry),
                     None => skipped.push(SkippedWorktree {
                         path: requested.clone(),

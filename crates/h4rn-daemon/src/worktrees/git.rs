@@ -657,10 +657,12 @@ fn unsupported_porcelain_z(code: Option<i32>, stderr: &str) -> bool {
 /// `<common>/worktrees/<id>/gitdir` holds the absolute path of the linked
 /// worktree's `.git` file (only the final newline is stripped; the worktree is
 /// its parent), `<id>/HEAD` is `ref: refs/heads/<b>` or a detached sha,
-/// `<id>/locked` marks a lock, and a `gitdir` target that no longer exists
-/// makes the registration prunable. The main worktree is the parent of
-/// `<common>` for a non-bare repository; for a bare one it is `<common>`
-/// itself with an unknown `HEAD`, as `-z` reports it (`bare`, no branch). A
+/// `<id>/locked` marks a lock, and a checkout path that is not a real
+/// directory (checked without following symlinks: a symlink there is not a live
+/// checkout) makes the registration prunable. The main worktree is the parent
+/// of `<common>` for a non-bare repository; for a bare one the main
+/// registration is `<common>` itself with an unknown `HEAD`, as `-z` reports it
+/// (`bare`, no branch). Only regular files are read (see [`read_bounded`]). A
 /// `HEAD` that cannot be read or parsed is [`Head::Unknown`]. Paths are kept
 /// byte-exact, valid UTF-8 or not, exactly as the `-z` parser keeps them:
 /// containment, the exact-registration lookup and branch occupancy must see
@@ -714,10 +716,13 @@ pub(crate) fn registrations_from_metadata(
         let Some(path) = gitdir.parent() else {
             continue;
         };
+        // A symlink (or anything else that is not a real directory) where the
+        // checkout was is not a live checkout: never follow it to decide.
+        let prunable = !path.symlink_metadata().is_ok_and(|meta| meta.is_dir());
         registrations.push(Registration {
             path: norm_listed(path),
             head: read_head(&admin.join("HEAD")),
-            prunable: !gitdir.exists(),
+            prunable,
             locked: admin.join("locked").exists(),
         });
     }
@@ -729,10 +734,19 @@ const MAX_METADATA_BYTES: u64 = 4 * 1024;
 
 /// Reads at most [`MAX_METADATA_BYTES`] of a small git metadata file.
 ///
-/// `None` when the file cannot be read or is larger than that: such a file is
-/// never one git wrote, and reading it whole is never needed to refuse it.
-fn read_bounded(path: &Path) -> Option<Vec<u8>> {
+/// `None` when the file cannot be read, is larger than that, or is not a
+/// regular file: such a file is never one git wrote, and reading it whole is
+/// never needed to refuse it. The type is checked without following symlinks
+/// before opening, so a FIFO (which would block `open` until a writer comes),
+/// a device or a symlink is never opened.
+pub(crate) fn read_bounded(path: &Path) -> Option<Vec<u8>> {
     use std::io::Read;
+    if !path
+        .symlink_metadata()
+        .is_ok_and(|meta| meta.file_type().is_file())
+    {
+        return None;
+    }
     let mut bytes = Vec::new();
     std::fs::File::open(path)
         .ok()?
@@ -1014,10 +1028,27 @@ pub fn status(worktree: &Path, limit: Duration) -> Result<String, String> {
     run_with_timeout(worktree, args, limit)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only: a shorter observation deadline for [`is_dirty`] on this
+    /// thread.
+    pub static OBSERVATION_LIMIT: std::cell::Cell<Option<Duration>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// [`OBSERVATION_GIT_TIMEOUT`], or a test's shorter one.
+fn observation_timeout() -> Duration {
+    #[cfg(test)]
+    if let Some(limit) = OBSERVATION_LIMIT.with(std::cell::Cell::get) {
+        return limit;
+    }
+    OBSERVATION_GIT_TIMEOUT
+}
+
 /// Whether the worktree has uncommitted changes (see [`status`]); `None` when
 /// git failed or outlived [`OBSERVATION_GIT_TIMEOUT`].
 pub fn is_dirty(worktree: &Path) -> Option<bool> {
-    status(worktree, OBSERVATION_GIT_TIMEOUT)
+    status(worktree, observation_timeout())
         .ok()
         .map(|out| !out.is_empty())
 }

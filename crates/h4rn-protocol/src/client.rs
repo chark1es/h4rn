@@ -881,6 +881,10 @@ pub enum ClientRequest {
         /// Remove even with uncommitted changes or unmerged commits.
         #[serde(default)]
         force: bool,
+        /// Clear all: apply the same exclusions as `paths: None` — never a
+        /// thread workspace — to the given paths.
+        #[serde(default)]
+        bulk: bool,
     },
 }
 
@@ -1155,6 +1159,7 @@ mod tests {
                 ClientRequest::ClearWorktrees {
                     paths: None,
                     force: false,
+                    bulk: false,
                 },
                 Admin,
             ),
