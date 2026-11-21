@@ -726,16 +726,15 @@ impl HarnessSession for AcpSession {
                         // the same death the bridge reports on its own stream:
                         // tag it so the two are one row. Any other failure here
                         // (a protocol or RPC error) stays an ordinary error and
-                        // is never collapsed with a transport death.
+                        // is never collapsed with a transport death. `wait()`
+                        // takes no deadline, so `Closed` is the only transport
+                        // error this task can see.
                         let message = detail.trim().to_string();
                         let retryable = !matches!(
                             error,
                             AcpError::Protocol { .. } | AcpError::OutsideWorkspace { .. }
                         );
-                        let event = if matches!(
-                            error,
-                            AcpError::Closed { .. } | AcpError::Timeout { .. }
-                        ) {
+                        let event = if matches!(error, AcpError::Closed { .. }) {
                             HarnessEvent::TransportClosed { message, retryable }
                         } else {
                             HarnessEvent::Error { message, retryable }

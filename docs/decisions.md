@@ -536,6 +536,19 @@ stdin cannot outlive the failure. A failover that arrives while a startup is sti
 model supersedes that startup, so the resume starts on the new model. A prompt result without a
 string `stopReason` is a failure, never an implicit `end_turn`.
 
+**Addendum: a startup's death is the turn's, and a death has one row.** A turn may move off the
+previous turn's session once: if that agent exits while a promoted message is still waiting, the
+message gets one fresh startup. But a session started for a turn is that turn's only attempt: if it
+loses its event stream before its prompt is claimed, the turn fails ("the agent exited before it
+accepted the prompt", with the agent's stderr when there is any) and the queue advances, instead of
+a replacement session being started for the same turn forever. A transport death is often reported
+more than once (the bridge's generic stdout-close notice, the prompt failure that carries the agent's
+stderr, an exit row): the first report is held for the turn's settlement, later ones only sharpen its
+detail, and the settlement publishes the most specific of them as the turn's one row, so the generic
+notice can never hide the stderr. A frame the client's writer drops because the writer task exited
+tears the transport down before the caller is woken, so a prompt error never leaves an open client
+behind it.
+
 ## ADR-027: Push notifications are metadata-only wake signals
 
 **Status:** Proposed

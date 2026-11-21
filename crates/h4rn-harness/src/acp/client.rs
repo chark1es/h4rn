@@ -794,6 +794,14 @@ impl AcpClient {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => {
                     lock(&self.shared.pending).remove(&key);
+                    // The writer that held this frame is gone without writing
+                    // it, so no reply can ever come: the transport is dead even
+                    // if the reader is still open. Tear it down before waking
+                    // anyone, so a later send cannot find an open client.
+                    teardown_transport(
+                        &self.shared,
+                        "the ACP writer exited before the request was written".into(),
+                    );
                     return Err(AcpError::Closed {
                         message: "the ACP writer exited before the request was written".into(),
                     });
@@ -1890,6 +1898,105 @@ mod tests {
         ) -> std::task::Poll<std::io::Result<()>> {
             std::task::Poll::Ready(Ok(()))
         }
+    }
+
+    /// A writer that takes a frame and never finishes writing it.
+    struct StalledWriter;
+    impl AsyncWrite for StalledWriter {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Pending
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// A prompt whose frame its writer drops (the writer exited before it
+    /// acknowledged the flush) has no reply coming: the transport is torn down
+    /// rather than left open behind the error.
+    #[tokio::test]
+    async fn a_dropped_prompt_write_tears_the_transport_down() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (agent_write, client_read) = tokio::io::duplex(64);
+        let client = Arc::new(AcpClient::start_for_test(
+            config(workspace.path()),
+            client_read,
+            StalledWriter,
+        ));
+        let _agent_write = agent_write;
+        let _events = client.take_events().expect("events");
+
+        let prompting = client.clone();
+        let prompt = tokio::spawn(async move {
+            prompting
+                .start_prompt("s-1", &[PromptContent::text("ping")])
+                .await
+                .map(|_| ())
+        });
+        let sender = lock(&client.shared.stdin_tx).clone().expect("writer");
+        // The prompt is registered and its frame queued; the writer then takes
+        // the frame and is stuck writing it, so the caller waits for the flush
+        // acknowledgement.
+        for _ in 0..1_000 {
+            if !lock(&client.shared.pending).is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !lock(&client.shared.pending).is_empty(),
+            "the prompt write was enqueued"
+        );
+        for _ in 0..1_000 {
+            if sender.capacity() == FRAME_CHANNEL_CAPACITY {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            sender.capacity(),
+            FRAME_CHANNEL_CAPACITY,
+            "the writer took the prompt frame"
+        );
+
+        // The writer dies without acknowledging the frame it held.
+        lock(&client.shared.writer).take().expect("writer").abort();
+        let outcome = tokio::time::timeout(Duration::from_secs(5), prompt)
+            .await
+            .expect("the dropped write returns instead of waiting for its deadline")
+            .expect("prompt task");
+        match outcome {
+            Err(AcpError::Closed { message }) => {
+                assert_eq!(
+                    message,
+                    "the ACP writer exited before the request was written"
+                );
+            }
+            other => panic!("expected a closed transport, got {other:?}"),
+        }
+        assert!(
+            client.is_closed(),
+            "no reply can come from a frame its writer dropped"
+        );
+        assert!(
+            client.cancel("s-1").await.is_err(),
+            "later frames are refused instead of queued for a dead writer"
+        );
     }
 
     #[tokio::test]

@@ -30,8 +30,37 @@ fn fixture_binary() -> PathBuf {
     BINARY.get_or_init(build_fixture).clone()
 }
 
+/// A build directory owned by this test process.
+///
+/// A shared directory would let another checkout on the same machine rebuild or
+/// replace the fixture between this process's path lookup and its launch, so the
+/// binary the test runs might not be the one it built. Cargo's per-target test
+/// tmp directory is unique to this checkout's target dir; when it is not set
+/// (a non-Cargo runner), a process-owned temporary directory keeps the same
+/// guarantee and lives exactly as long as the test binary.
+fn fixture_target_dir() -> &'static PathBuf {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    static OWNED: OnceLock<tempfile::TempDir> = OnceLock::new();
+    DIR.get_or_init(|| match std::env::var_os("CARGO_TARGET_TMPDIR") {
+        Some(dir) => {
+            // Cargo's tmp directory belongs to one target dir; the checkout is
+            // part of the name too, so two checkouts that share a target dir
+            // still cannot rebuild each other's fixture.
+            use std::hash::{DefaultHasher, Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            env!("CARGO_MANIFEST_DIR").hash(&mut hasher);
+            let checkout = hasher.finish();
+            PathBuf::from(dir).join(format!("agy-fixture-build-{checkout:016x}"))
+        }
+        None => OWNED
+            .get_or_init(|| tempfile::tempdir().expect("a temporary build directory"))
+            .path()
+            .to_path_buf(),
+    })
+}
+
 fn build_fixture() -> PathBuf {
-    let target_dir = std::env::temp_dir().join("h4rn-agy-fixture");
+    let target_dir = fixture_target_dir().clone();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let output = std::process::Command::new(cargo)
         .args([

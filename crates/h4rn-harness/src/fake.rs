@@ -12,14 +12,57 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-use futures::stream::{BoxStream, StreamExt};
+use futures::channel::mpsc::{self, UnboundedSender, unbounded};
+use futures::stream::BoxStream;
+use futures::{SinkExt, StreamExt};
 use h4rn_protocol::{ApprovalDecision, HarnessKind, ToolCall, ToolCallStatus, TurnStatus, Usage};
 
 use crate::{
     Harness, HarnessError, HarnessEvent, HarnessInstall, HarnessSession, SessionSpec,
     TransportHealth, UserInput,
 };
+
+/// The event producer for one fake session.
+///
+/// Production sessions read their transport into a bounded queue; a test that
+/// wants the same back-pressure opts in with
+/// [`FakeHarness::with_bounded_event_queue`]. Then a pump that stops draining
+/// blocks the session's own `send`, exactly like a real adapter whose queue
+/// filled up.
+#[derive(Clone, Debug)]
+enum EventSink {
+    Unbounded(UnboundedSender<HarnessEvent>),
+    Bounded(mpsc::Sender<HarnessEvent>),
+}
+
+impl EventSink {
+    /// Queues an event without waiting; a full bounded queue drops it.
+    ///
+    /// Used from paths that cannot await (a sync trait method, a detached
+    /// task). Tests that count events use the unbounded sink.
+    fn try_send(&self, event: HarnessEvent) {
+        match self {
+            Self::Unbounded(sender) => {
+                let _ = sender.unbounded_send(event);
+            }
+            Self::Bounded(sender) => {
+                let _ = sender.clone().try_send(event);
+            }
+        }
+    }
+
+    /// Queues an event, waiting for room in a bounded queue.
+    async fn send(&self, event: HarnessEvent) {
+        match self {
+            Self::Unbounded(sender) => {
+                let _ = sender.unbounded_send(event);
+            }
+            Self::Bounded(sender) => {
+                let _ = sender.clone().send(event).await;
+            }
+        }
+    }
+}
 
 /// A fake harness adapter.
 #[derive(Clone, Debug)]
@@ -72,6 +115,14 @@ pub struct FakeHarness {
     /// A test-only diagnostic the session parks on its stream just before a
     /// dead send's transport failure, and the gate that holds that failure.
     diagnostic_before_death: Option<(String, Gate)>,
+    /// A test-only capacity for the session's event queue, so a pump that stops
+    /// draining blocks the session's own `send`.
+    event_queue_capacity: Option<usize>,
+    /// Ends every session's event stream right after its handshake.
+    immediate_stream_end: bool,
+    /// Holds a dead send's failure until the returned gate opens, after the
+    /// session has reported the transport death on its stream.
+    generic_death_gate: Option<Gate>,
 }
 
 /// A shared count of prompts a fake session was asked to write.
@@ -239,6 +290,9 @@ impl Default for FakeHarness {
             stderr: None,
             streaming_send: None,
             diagnostic_before_death: None,
+            event_queue_capacity: None,
+            immediate_stream_end: false,
+            generic_death_gate: None,
         }
     }
 }
@@ -473,6 +527,36 @@ impl FakeHarness {
         self.diagnostic_before_death = Some((message.into(), gate.clone()));
         (self, gate)
     }
+
+    /// Gives each session a bounded event queue of `capacity` events.
+    ///
+    /// The daemon's pump must keep draining while a write holds the session
+    /// lock: with a bounded queue, a pump that waited for that lock would leave
+    /// the queue full and block the write forever.
+    pub fn with_bounded_event_queue(mut self, capacity: usize) -> Self {
+        self.event_queue_capacity = Some(capacity.max(1));
+        self
+    }
+
+    /// Ends every session's event stream right after its handshake.
+    ///
+    /// A test uses this to model an agent that exits immediately: no session
+    /// ever accepts a prompt.
+    pub fn with_immediate_stream_end(mut self) -> Self {
+        self.immediate_stream_end = true;
+        self
+    }
+
+    /// Reports a dead send's transport death on the stream and holds the send
+    /// itself until the returned [`Gate`] is released.
+    ///
+    /// A test uses this to order the bridge's generic stdout-close notice
+    /// before the failure that carries the agent's stderr.
+    pub fn with_generic_death_gate(mut self) -> (Self, Gate) {
+        let gate = Gate::new();
+        self.generic_death_gate = Some(gate.clone());
+        (self, gate)
+    }
 }
 
 #[async_trait]
@@ -518,12 +602,24 @@ impl Harness for FakeHarness {
             }
         }
 
-        let (sender, receiver) = unbounded();
+        let (sender, receiver): (EventSink, BoxStream<'static, HarnessEvent>) =
+            match self.event_queue_capacity {
+                Some(capacity) => {
+                    let (sender, receiver) = mpsc::channel(capacity);
+                    (EventSink::Bounded(sender), receiver.boxed())
+                }
+                None => {
+                    let (sender, receiver) = unbounded();
+                    (EventSink::Unbounded(sender), receiver.boxed())
+                }
+            };
         let session_id = spec
             .resume_id
             .clone()
             .unwrap_or_else(|| format!("fake-{}", uuid_like(&spec.workspace)));
-        let _ = sender.unbounded_send(HarnessEvent::SessionStarted { session_id });
+        sender
+            .send(HarnessEvent::SessionStarted { session_id })
+            .await;
 
         let session_scripts = self.session_scripts.clone();
         let primed = session_scripts.is_some();
@@ -534,7 +630,7 @@ impl Harness for FakeHarness {
         let scripted = session_scripts.is_some() || self.script.is_some();
         if scripted {
             for event in &initial {
-                let _ = sender.unbounded_send(event.clone());
+                sender.send(event.clone()).await;
             }
         }
 
@@ -574,6 +670,8 @@ impl Harness for FakeHarness {
             health: TransportHealth::new(),
             streaming_send: self.streaming_send.clone(),
             diagnostic_before_death: self.diagnostic_before_death.clone(),
+            immediate_stream_end: self.immediate_stream_end,
+            generic_death_gate: self.generic_death_gate.clone(),
         }))
     }
 }
@@ -584,8 +682,8 @@ pub struct FakeSession {
     workspace: PathBuf,
     /// The stream's producer. `None` (or dropped) ends the stream after the
     /// events already queued.
-    sender: Option<UnboundedSender<HarnessEvent>>,
-    receiver: Option<UnboundedReceiver<HarnessEvent>>,
+    sender: Option<EventSink>,
+    receiver: Option<BoxStream<'static, HarnessEvent>>,
     script: Option<Vec<HarnessEvent>>,
     session_scripts: Option<Arc<SessionScripts>>,
     /// The daemon's first `send` is the input that started the scripted turn.
@@ -631,6 +729,10 @@ pub struct FakeSession {
     /// A test-only diagnostic parked on the stream before a dead send's
     /// transport failure, and the gate that holds that failure.
     diagnostic_before_death: Option<(String, Gate)>,
+    /// Ends this session's event stream right after its handshake.
+    immediate_stream_end: bool,
+    /// Holds a dead send's failure until this gate opens.
+    generic_death_gate: Option<Gate>,
 }
 
 #[async_trait]
@@ -658,14 +760,23 @@ impl HarnessSession for FakeSession {
         if let Some((count, gate)) = self.streaming_send.clone() {
             // The write does not return until the daemon's pump has applied
             // every event it streamed, so a pump that waits for this session's
-            // lock can never see the completion that ends the turn.
-            for _ in 0..count {
-                self.emit(HarnessEvent::TextDelta { text: "x".into() });
+            // lock can never see the completion that ends the turn. With a
+            // bounded event queue the streamed events also back-pressure: a
+            // pump that stopped draining would leave this write blocked.
+            let sender = self.sender.clone();
+            if let Some(sender) = sender {
+                for _ in 0..count {
+                    sender
+                        .send(HarnessEvent::TextDelta { text: "x".into() })
+                        .await;
+                }
+                sender
+                    .send(HarnessEvent::TurnCompleted {
+                        status: TurnStatus::Completed,
+                        usage: usage_for(&input.text),
+                    })
+                    .await;
             }
-            self.emit(HarnessEvent::TurnCompleted {
-                status: TurnStatus::Completed,
-                usage: usage_for(&input.text),
-            });
             gate.wait().await;
             return Ok(());
         }
@@ -700,6 +811,12 @@ impl HarnessSession for FakeSession {
                 message: "the harness transport closed".into(),
                 retryable: false,
             });
+            if let Some(gate) = self.generic_death_gate.clone() {
+                // The bridge's generic stdout-close notice is already on the
+                // stream; the failure that carries the stderr waits until the
+                // test has seen that notice consumed.
+                gate.wait().await;
+            }
             if let Some(gate) = self.trailing_completion_gate.clone() {
                 let sender = self.sender.clone();
                 tokio::spawn(async move {
@@ -713,9 +830,16 @@ impl HarnessSession for FakeSession {
                     );
                 });
             }
+            // The failure a dead write reports carries the agent's stderr, the
+            // way the ACP prompt task appends its client's stderr tail.
+            let message = if self.stderr.trim().is_empty() {
+                "the harness transport closed".to_owned()
+            } else {
+                format!("the harness transport closed\n{}", self.stderr.trim())
+            };
             return Err(HarnessError::Transport {
                 harness: self.kind,
-                message: "the harness transport closed".into(),
+                message,
             });
         }
 
@@ -889,16 +1013,23 @@ impl HarnessSession for FakeSession {
     }
 
     fn events(&mut self) -> BoxStream<'static, HarnessEvent> {
-        match self.receiver.take() {
-            // A test can hold the end of the stream open, so "the agent exited
-            // after this turn" is ordered against everything else it does.
-            Some(receiver) => match self.stream_end_gate.clone() {
-                Some(gate) => receiver
-                    .take_until(async move { gate.wait().await })
-                    .boxed(),
-                None => receiver.boxed(),
-            },
-            None => futures::stream::empty().boxed(),
+        let Some(receiver) = self.receiver.take() else {
+            return futures::stream::empty().boxed();
+        };
+        // An agent that exits at startup delivers its handshake and nothing
+        // else, so the daemon sees the stream close before it writes a prompt.
+        let receiver: BoxStream<'static, HarnessEvent> = if self.immediate_stream_end {
+            receiver.take(1).boxed()
+        } else {
+            receiver
+        };
+        // A test can hold the end of the stream open, so "the agent exited
+        // after this turn" is ordered against everything else it does.
+        match self.stream_end_gate.clone() {
+            Some(gate) => receiver
+                .take_until(async move { gate.wait().await })
+                .boxed(),
+            None => receiver,
         }
     }
 
@@ -954,11 +1085,11 @@ impl FakeSession {
     }
 }
 
-fn send_opt(sender: &Option<UnboundedSender<HarnessEvent>>, event: HarnessEvent) {
+fn send_opt(sender: &Option<EventSink>, event: HarnessEvent) {
     // A closed receiver means the consumer went away; that is not an error for
     // the fake session, and the daemon handles the same case by shutting down.
     if let Some(sender) = sender {
-        let _ = sender.unbounded_send(event);
+        sender.try_send(event);
     }
 }
 

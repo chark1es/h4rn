@@ -80,6 +80,20 @@ All notable changes to h4rn are recorded here. The format follows
 - **A Stop after Antigravity's turn ended no longer interrupts the next turn.** The interrupt flag
   is cleared when a prompt is sent and only set while a prompt is running, so a late Stop cannot
   colour the following turn.
+- **An agent that exits at startup no longer replaces itself forever.** A turn whose own startup's
+  session loses its event stream before the prompt is claimed now ends as failed ("the agent exited
+  before it accepted the prompt", with the agent's stderr when there is any) and the queue advances.
+  A promoted message may still move off the previous turn's agent once, but a session started for a
+  turn is that turn's only attempt, so a harness whose sessions all die at start fails the turns it
+  was given instead of starting replacements in a loop.
+- **A transport death's one row keeps the agent's stderr.** The bridge usually reports a dead
+  transport first with its generic stdout-close notice and only then with the prompt failure that
+  carries the agent's stderr. The first report is now held for the turn's settlement, later reports
+  sharpen it, and the settlement publishes the most specific detail as the single row, so the
+  generic notice can no longer take that row and leave the stderr out.
+- **A refused or dropped ACP frame tears the client down.** When the ACP writer task exits without
+  writing or acknowledging a queued frame, the client is now closed and the agent killed before the
+  caller sees the error, so a later send can never find an open client behind a dead writer.
 - **A titleless `tool_call_update` keeps the tool's name, summary and input.** Updates are merged
   into the call's last title, kind, input and locations, so a later title reaches the row while a
   status-only update can neither rename a kind-only call to "other" nor empty the expanded card's
