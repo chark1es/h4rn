@@ -392,6 +392,7 @@ describe("forceCanFix", () => {
     expect(forceCanFix("contains submodules")).toBe(true);
     expect(forceCanFix("could not read the registration's HEAD")).toBe(true);
     expect(forceCanFix("has files hidden from git status")).toBe(true);
+    expect(forceCanFix("has a git operation in progress")).toBe(true);
     for (const blocked of [
       "in use by Fix it",
       "not tracked",

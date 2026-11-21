@@ -259,16 +259,28 @@ a git that clearly rejects `-z` triggers the fallback: an `unknown switch` or
 repository error is reported as a failure. On such a git the daemon reads git's
 registration metadata directly instead of parsing output, which is byte-exact on
 every version: `<common>/worktrees/*/gitdir` holds the path of the linked
-worktree's `.git` file (only its final newline is stripped; the worktree is its
-parent), `<admin>/HEAD` is `ref: refs/heads/<b>` or a detached sha,
+worktree's `.git` file (only its final newline is stripped). The checkout is
+derived from it as git derives it: a trailing `.git` component is stripped when
+there is one, and otherwise the target is the checkout verbatim (the `-z`
+cross-check below uses the same path, so a `gitdir` without a `/.git` suffix
+does not make a snapshot incomplete). `<admin>/HEAD` is `ref: refs/heads/<b>`
+or a detached object id,
 an `<admin>/locked` entry marks a lock by its presence alone, checked without
 following symlinks (a dangling symlink named `locked` is a lock too), and a
 registration is prunable when its checkout path is not a real directory,
 checked without following symlinks (a symlink there is not a live checkout,
-whatever it points at). The main worktree is the
-parent of `<common>` for a non-bare repository; for a bare repository the main
-registration is `<common>` itself with an unknown `HEAD`, marked bare, exactly
-as `-z` lists it (`bare`, no branch). Each `gitdir` and `HEAD` file is read only when it is a
+whatever it points at). Whether the repository is bare is decided by asking
+git (`git --git-dir=<common> rev-parse --is-bare-repository`, bounded), never by
+the common dir's name. For a bare repository the main registration is
+`<common>` itself with an unknown `HEAD`, marked bare, exactly as `-z` lists it
+(`bare`, no branch). For a non-bare repository whose common dir is named `.git`
+the main worktree is its parent. A non-bare repository whose common dir has
+another name (made with `--separate-git-dir`) says nothing about its main
+worktree through that name, and `rev-parse --show-toplevel` is unreliable
+there, so the main registration is `core.worktree` when that is set; when it is
+not, no main registration is made and the snapshot is marked incomplete rather
+than inventing a bogus bare main at the git directory. A non-bare main
+registration's `HEAD` is read from `<common>/HEAD`. Each `gitdir` and `HEAD` file is read only when it is a
 regular file, or a symlink whose target is a regular file (git itself reads a
 symlinked `gitdir`, so such a registration is not lost), and with a 4 KiB
 bound, as git only ever writes one short line there: a FIFO, device or
@@ -285,7 +297,12 @@ call the daemon enumerates `<common>/worktrees/*` with the same rules (bounded
 by the call's deadline, no symlink followed for the admin directory itself),
 and the snapshot is incomplete when any admin entry's `gitdir` is unreadable,
 empty or not a regular file, or when the checkout its `gitdir` names is not
-one of the returned registrations. An incomplete snapshot never proves that
+one of the returned registrations. The returned paths are indexed once, and the
+deadline is checked for every admin entry while matching too: running out of
+time marks the snapshot incomplete. The common dir the cross-check (and the
+fallback) reads is resolved once per repository for a whole clear, and once per
+repository for a whole listing, rather than with a `rev-parse
+--git-common-dir` for every snapshot. An incomplete snapshot never proves that
 something is absent; see the clearing rules for what that refuses. Which form
 works is remembered for the rest of the process, so the failed probe happens
 once. The NUL-delimited form is parsed as
@@ -321,8 +338,20 @@ and the opened descriptor is checked with `fstat` and refused unless it is a
 regular file. A FIFO swapped in between the check and the open therefore opens
 at once and is refused instead of hanging the clear.
 
+Bare repositories are tracked too. When a workspace's common dir is a bare
+repository (asked of git, as above, never guessed from a name like
+`project.git`), the repository root is the common dir itself: that is where git
+commands about its linked worktrees run. So a thread working in a linked
+checkout of `project.git` lists a `thread` row whose `repo` is `project.git`,
+and a worktree-isolated subagent spawned from that thread records
+`project.git` as its repository and is cleared like any other (its bare main
+registration never holds a branch; see the clearing rules). A non-bare
+repository whose common dir is not named `.git` (`--separate-git-dir`) is not
+resolved to a repository root.
+
 A worktree-isolated child records the parent repository's main worktree at
-spawn, not the workspace it happened to start in. That matters for nested
+spawn (or, for a bare repository, the repository directory), not the workspace
+it happened to start in. That matters for nested
 children: a grandchild's parent workspace is the child's own worktree, which is
 deleted when the child settles, so the branch would otherwise become unfindable.
 If only an old record remains (one written before this), listing follows the
@@ -415,9 +444,11 @@ selection does no filesystem work at all.
   or inside it keeps the entry (`in use by <title>` when busy,
   `is a thread workspace` otherwise), so a thread assigned to a workspace
   inside a later entry while an earlier one is being cleared is caught. The
-  selection and the live re-check share one comparison: the workspace
-  normalised, plus, when it no longer exists, as recorded with `.`/`..` folded
-  lexically, matched by whole components against the entry's path, so a
+  selection and the live re-check share one workspace comparison: the
+  workspace normalised, plus, when it no longer exists, as recorded with
+  `.`/`..` folded lexically, matched by whole components. The selection matches
+  it against the entry's listed path; the live re-check matches it against both
+  the listed path and the listed path's normalised form, so a
   thread that settled in `<entry>/link/src` is caught even after `src` is gone
   and `link` points outside the entry. The only exemption is an owned entry's
   own subagent child (its accessor carrying that subagent's id, or the
@@ -469,10 +500,12 @@ selection does no filesystem work at all.
   checkout's directory is already gone, the same check uses the detached
   registration's `HEAD` commit from the registration snapshot (`-z` output, or
   git's metadata on an older git).
-- The registration's `HEAD` is one of attached (a branch), detached (a sha) or
-  unknown. It is unknown when the metadata fallback cannot read or parse the
-  `HEAD` file, or when a `-z` record has neither `branch` nor `detached` (or a
-  `detached` record lacks its sha). A detached `HEAD` naming the all-zero
+- The registration's `HEAD` is one of attached (a branch), detached (an object
+  id) or unknown. It is unknown when the metadata fallback cannot read or parse
+  the `HEAD` file, or when a `-z` record has neither `branch` nor `detached` (or
+  a `detached` record lacks its sha). In both sources a detached `HEAD` must be
+  a full hex object id, 40 (SHA-1) or 64 (SHA-256) characters; anything else
+  (`HEAD 1234`, say) is unknown. A detached `HEAD` naming the all-zero
   object id (any length, which git prints when it cannot resolve `HEAD`) is
   unknown in both sources too. Without `force`, a missing checkout whose
   registration `HEAD` is unknown is skipped as
@@ -486,6 +519,19 @@ selection does no filesystem work at all.
   reason it would have been skipped at preflight, and its registration and
   commit stay. A nested worktree created after preflight is likewise still
   detected, and both checkouts are kept.
+- Without `force`, a checkout with a git operation in progress is skipped as
+  `has a git operation in progress` (forceable), whether its directory exists
+  or is already gone. The selected registration's own admin dir (the
+  `<common>/worktrees/<id>` whose `gitdir` names the checkout; the main worktree
+  never gets this far) is inspected for `rebase-merge/`, `rebase-apply/`,
+  `MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `BISECT_LOG`, `sequencer/`
+  and `AUTO_MERGE`, by presence only and without following symlinks. A paused
+  `git rebase -i --autostash` keeps its autostash there, and the checkout looks
+  clean while the rebase is paused, so removing the registration would throw
+  that work away. An admin dir that cannot be found or read is skipped with the
+  same reason. The check runs in preflight and again in prepare and the final
+  verification immediately before removal; a forced clear removes the checkout
+  and its admin dir, operation state included.
 - A worktree git reports as locked is skipped as `is locked; unlock it first`
   (not forceable); the checkout and its registration stay until it is unlocked.
   The same wording applies when the checkout's directory is already gone but

@@ -106,9 +106,10 @@ fn entry(path: &Path, repo: &Path, branch: Option<&str>, owned: bool) -> Tracked
 
 /// The two blocking phases of a clear, for the unit tests below.
 fn clear_one(entry: &TrackedWorktree, force: bool, data_dir: &Path) -> Result<ClearOne, String> {
-    let plan = preflight(entry, force)?;
-    let prepared = prepare(entry, force)?;
-    execute(entry, force, data_dir, &plan, &prepared)
+    let commons = git::CommonDirs::default();
+    let plan = preflight(entry, force, &commons)?;
+    let prepared = prepare(entry, force, &commons)?;
+    execute(entry, force, data_dir, &plan, &prepared, &commons)
 }
 
 fn subagent_view(
@@ -714,7 +715,15 @@ async fn a_branch_that_gains_unmerged_work_after_preflight_is_kept_without_force
             }
         }
     };
-    let outcome = run_clear_entry(&tracker.inner, target.clone(), false, false, hook).await;
+    let outcome = run_clear_entry(
+        &tracker.inner,
+        target.clone(),
+        false,
+        false,
+        Default::default(),
+        hook,
+    )
+    .await;
     let Err(reason) = outcome else {
         panic!("a branch that gained work is never deleted");
     };
@@ -728,7 +737,15 @@ async fn a_branch_that_gains_unmerged_work_after_preflight_is_kept_without_force
     // A forced clear still deletes it.
     let no_hook = |_| std::future::ready(());
     assert!(matches!(
-        run_clear_entry(&tracker.inner, target, true, false, no_hook).await,
+        run_clear_entry(
+            &tracker.inner,
+            target,
+            true,
+            false,
+            Default::default(),
+            no_hook
+        )
+        .await,
         Ok(ClearOne::Removed)
     ));
     assert!(!git::branch_exists(&fixture.repo, "h4rn/sa-moved"));
@@ -757,7 +774,15 @@ async fn a_checkout_that_detaches_after_preflight_is_kept_without_force() {
             }
         }
     };
-    let outcome = run_clear_entry(&tracker.inner, target, false, false, hook).await;
+    let outcome = run_clear_entry(
+        &tracker.inner,
+        target,
+        false,
+        false,
+        Default::default(),
+        hook,
+    )
+    .await;
     assert_eq!(
         outcome.err().as_deref(),
         Some("detached HEAD has commits on no branch")
@@ -1697,7 +1722,15 @@ async fn a_clear_rechecks_between_preflight_and_removal_and_keeps_the_checkout()
             }
         }
     };
-    let outcome = run_clear_entry(&tracker.inner, entry, false, false, hook).await;
+    let outcome = run_clear_entry(
+        &tracker.inner,
+        entry,
+        false,
+        false,
+        Default::default(),
+        hook,
+    )
+    .await;
 
     let Err(reason) = outcome else {
         panic!("the entry became busy before removal");
@@ -1743,7 +1776,7 @@ fn git_refusing_a_dirty_checkout_reads_as_uncommitted_changes() {
     // Preflight would catch this first; removal is called directly to prove
     // git's own refusal is reported in our words, not git's. With no verified
     // branch there is nothing for removal to do beyond the checkout.
-    let prepared = prepare(&entries[0], false).expect("prepare");
+    let prepared = prepare(&entries[0], false, &Default::default()).expect("prepare");
     assert_eq!(
         execute(
             &entries[0],
@@ -1751,6 +1784,7 @@ fn git_refusing_a_dirty_checkout_reads_as_uncommitted_changes() {
             &fixture.data_dir(),
             &super::Preflight { branch: None },
             &prepared,
+            &Default::default(),
         )
         .err()
         .as_deref(),
@@ -1867,7 +1901,15 @@ async fn a_nested_worktree_created_after_preflight_is_detected() {
             }
         }
     };
-    let outcome = run_clear_entry(&tracker.inner, target, false, false, hook).await;
+    let outcome = run_clear_entry(
+        &tracker.inner,
+        target,
+        false,
+        false,
+        Default::default(),
+        hook,
+    )
+    .await;
     let Err(reason) = outcome else {
         panic!("a nested worktree created after preflight is never removed");
     };
@@ -1908,7 +1950,15 @@ async fn a_checkout_detached_and_moved_away_after_preflight_keeps_its_registrati
             }
         }
     };
-    let outcome = run_clear_entry(&tracker.inner, target, false, false, hook).await;
+    let outcome = run_clear_entry(
+        &tracker.inner,
+        target,
+        false,
+        false,
+        Default::default(),
+        hook,
+    )
+    .await;
     assert_eq!(
         outcome.err().as_deref(),
         Some("detached HEAD has commits on no branch")
@@ -1928,7 +1978,7 @@ fn a_branch_checked_out_after_the_checkout_is_removed_is_not_deleted() {
     let fixture = Fixture::new();
     let linked = fixture.add_worktree("sa-occupied", "h4rn/sa-occupied");
     let target = entry(&linked, &fixture.repo, Some("h4rn/sa-occupied"), true);
-    let plan = preflight(&target, false).expect("preflight");
+    let plan = preflight(&target, false, &Default::default()).expect("preflight");
 
     // Execute's checkout removal.
     run(
@@ -1948,8 +1998,14 @@ fn a_branch_checked_out_after_the_checkout_is_removed_is_not_deleted() {
         ],
     );
 
-    let outcome = delete_owned_branch(&fixture.repo, "h4rn/sa-occupied", &plan, false)
-        .expect("a checked-out branch is a reported skip");
+    let outcome = delete_owned_branch(
+        &fixture.repo,
+        "h4rn/sa-occupied",
+        &plan,
+        false,
+        &Default::default(),
+    )
+    .expect("a checked-out branch is a reported skip");
     assert!(
         outcome
             .as_deref()
@@ -1967,7 +2023,7 @@ fn a_registration_whose_head_is_unknown_blocks_the_branch_delete() {
     let fixture = Fixture::new();
     let linked = fixture.add_worktree("sa-unknown-holder", "h4rn/sa-unknown-holder");
     let target = entry(&linked, &fixture.repo, Some("h4rn/sa-unknown-holder"), true);
-    let plan = preflight(&target, false).expect("preflight");
+    let plan = preflight(&target, false, &Default::default()).expect("preflight");
     run(
         &fixture.repo,
         &["worktree", "remove", &linked.to_string_lossy()],
@@ -1979,7 +2035,13 @@ fn a_registration_whose_head_is_unknown_blocks_the_branch_delete() {
     std::fs::write(admin.join("HEAD"), "not a head\n").expect("garbage HEAD");
 
     git::FORCE_METADATA_FALLBACK.with(|forced| forced.set(true));
-    let outcome = delete_owned_branch(&fixture.repo, "h4rn/sa-unknown-holder", &plan, false);
+    let outcome = delete_owned_branch(
+        &fixture.repo,
+        "h4rn/sa-unknown-holder",
+        &plan,
+        false,
+        &Default::default(),
+    );
     git::FORCE_METADATA_FALLBACK.with(|forced| forced.set(false));
     let outcome = outcome.expect("an unknown holder is a reported skip");
     assert!(
@@ -2017,7 +2079,15 @@ async fn a_branch_rewound_after_preflight_is_kept_and_reported_as_unmerged() {
             }
         }
     };
-    let outcome = run_clear_entry(&tracker.inner, target, false, false, hook).await;
+    let outcome = run_clear_entry(
+        &tracker.inner,
+        target,
+        false,
+        false,
+        Default::default(),
+        hook,
+    )
+    .await;
     assert_eq!(
         outcome.err().as_deref(),
         Some("branch h4rn/sa-rewound has unmerged commits")
@@ -2176,7 +2246,15 @@ async fn git_s_removal_backstop_counts_untracked_files_whatever_the_config() {
             }
         }
     };
-    let outcome = run_clear_entry(&tracker.inner, target, false, false, hook).await;
+    let outcome = run_clear_entry(
+        &tracker.inner,
+        target,
+        false,
+        false,
+        Default::default(),
+        hook,
+    )
+    .await;
     assert_eq!(outcome.err().as_deref(), Some("has uncommitted changes"));
     assert!(
         linked.join("late.txt").is_file(),
@@ -2189,15 +2267,22 @@ fn a_checkout_switched_to_another_branch_before_execute_is_kept() {
     let fixture = Fixture::new();
     let linked = fixture.add_worktree("wt-switch", "switch-branch");
     let target = entry(&linked, &fixture.repo, Some("switch-branch"), false);
-    let plan = preflight(&target, false).expect("preflight");
-    let prepared = prepare(&target, false).expect("prepare");
+    let plan = preflight(&target, false, &Default::default()).expect("preflight");
+    let prepared = prepare(&target, false, &Default::default()).expect("prepare");
 
     // Between the live activity check and the destructive call.
     run(&linked, &["checkout", "-q", "-b", "switched-late"]);
     assert_eq!(
-        execute(&target, false, &fixture.data_dir(), &plan, &prepared)
-            .err()
-            .as_deref(),
+        execute(
+            &target,
+            false,
+            &fixture.data_dir(),
+            &plan,
+            &prepared,
+            &Default::default()
+        )
+        .err()
+        .as_deref(),
         Some("checkout is no longer on switch-branch")
     );
     assert!(linked.is_dir(), "the switched checkout is kept");
@@ -2208,8 +2293,8 @@ fn a_checkout_detached_and_moved_away_before_execute_keeps_its_registration() {
     let fixture = Fixture::new();
     let linked = fixture.add_worktree("wt-flip", "flip-branch");
     let target = entry(&linked, &fixture.repo, Some("flip-branch"), false);
-    let plan = preflight(&target, false).expect("preflight");
-    let prepared = prepare(&target, false).expect("prepare");
+    let plan = preflight(&target, false, &Default::default()).expect("preflight");
+    let prepared = prepare(&target, false, &Default::default()).expect("prepare");
 
     // Prepare saw an existing checkout; by execute it is detached onto a
     // commit no ref reaches and its directory is gone. The checks for the
@@ -2222,9 +2307,16 @@ fn a_checkout_detached_and_moved_away_before_execute_keeps_its_registration() {
     let moved = git::norm(&fixture.root.path().join("wt-flip-moved"));
     std::fs::rename(&linked, &moved).expect("move the checkout away");
     assert_eq!(
-        execute(&target, false, &fixture.data_dir(), &plan, &prepared)
-            .err()
-            .as_deref(),
+        execute(
+            &target,
+            false,
+            &fixture.data_dir(),
+            &plan,
+            &prepared,
+            &Default::default()
+        )
+        .err()
+        .as_deref(),
         Some("detached HEAD has commits on no branch")
     );
     let registrations = git::registrations(&fixture.repo).expect("list");
@@ -2529,7 +2621,7 @@ fn a_branch_lookup_failure_after_removal_is_reported() {
     let fixture = Fixture::new();
     let linked = fixture.add_worktree("sa-lookup", "h4rn/sa-lookup");
     let own = entry(&linked, &fixture.repo, Some("h4rn/sa-lookup"), true);
-    let prepared = prepare(&own, false).expect("prepare");
+    let prepared = prepare(&own, false, &Default::default()).expect("prepare");
     let tools = tempfile::tempdir().expect("tools");
     let failing = fake_git(
         tools.path(),
@@ -2544,6 +2636,7 @@ done"#,
         &fixture.data_dir(),
         &super::Preflight { branch: None },
         &prepared,
+        &Default::default(),
     );
     git::GIT_PROGRAM.with(|slot| *slot.borrow_mut() = None);
     assert!(
@@ -2570,9 +2663,9 @@ fn update_ref_refusals_are_triaged_by_the_new_tip() {
 
     let case = |hook: Box<dyn FnOnce()>| {
         run(&repo, &["branch", "-f", branch, "main"]);
-        let plan = preflight(&own, false).expect("preflight");
+        let plan = preflight(&own, false, &Default::default()).expect("preflight");
         BEFORE_UPDATE_REF.with(|slot| *slot.borrow_mut() = Some(hook));
-        delete_owned_branch(&repo, branch, &plan, false)
+        delete_owned_branch(&repo, branch, &plan, false, &Default::default())
     };
 
     // Deleted by someone else: the branch is gone, which is what we wanted.
@@ -2741,19 +2834,28 @@ fn a_submodule_is_forceable_but_another_repository_s_gitfile_is_not() {
 #[test]
 fn an_unreadable_registration_head_is_unknown_in_both_sources() {
     // `-z`: a record with neither `branch` nor `detached` (a bare one too),
-    // or `detached` without its sha, is unknown.
-    let parsed = git::parse_registrations(
-        b"worktree /wt-a\0HEAD 1234\0\0worktree /wt-b\0HEAD abcd\0detached\0\0\
-          worktree /wt-c\0bare\0\0worktree /wt-d\0detached\0\0",
+    // `detached` without its sha, or a detached HEAD that is not a full hex
+    // object id, is unknown.
+    let full = "abcd".repeat(10);
+    let out = format!(
+        "worktree /wt-a\0HEAD 1234\0\0worktree /wt-b\0HEAD abcd\0detached\0\0\
+         worktree /wt-c\0bare\0\0worktree /wt-d\0detached\0\0\
+         worktree /wt-e\0HEAD 1234\0detached\0\0worktree /wt-f\0HEAD {}\0detached\0\0\
+         worktree /wt-g\0HEAD {full}\0detached\0\0",
+        "g".repeat(40),
     );
+    let parsed = git::parse_registrations(out.as_bytes());
     let heads: Vec<git::Head> = parsed.into_iter().map(|r| r.head).collect();
     assert_eq!(
         heads,
         vec![
             git::Head::Unknown,
-            git::Head::Detached("abcd".into()),
             git::Head::Unknown,
             git::Head::Unknown,
+            git::Head::Unknown,
+            git::Head::Unknown,
+            git::Head::Unknown,
+            git::Head::Detached(full.clone()),
         ]
     );
 
@@ -2763,14 +2865,16 @@ fn an_unreadable_registration_head_is_unknown_in_both_sources() {
     let admin =
         PathBuf::from(git::run(&linked, ["rev-parse", "--absolute-git-dir"]).expect("admin dir"));
     std::fs::remove_dir_all(&linked).expect("remove the checkout");
-    std::fs::write(admin.join("HEAD"), "not a head\n").expect("garbage HEAD");
-    let registrations =
-        git::registrations_from_metadata(&fixture.repo, Duration::from_secs(30)).expect("read");
-    let registration = registrations
-        .iter()
-        .find(|registration| registration.path == linked)
-        .unwrap_or_else(|| panic!("listed: {registrations:?}"));
-    assert_eq!(registration.head, git::Head::Unknown);
+    for garbage in ["not a head\n", "1234\n"] {
+        std::fs::write(admin.join("HEAD"), garbage).expect("garbage HEAD");
+        let registrations =
+            git::registrations_from_metadata(&fixture.repo, Duration::from_secs(30)).expect("read");
+        let registration = registrations
+            .iter()
+            .find(|registration| registration.path == linked)
+            .unwrap_or_else(|| panic!("listed: {registrations:?}"));
+        assert_eq!(registration.head, git::Head::Unknown, "{garbage:?}");
+    }
 
     // Without force, a missing checkout whose HEAD is unknown keeps its
     // registration.
@@ -2790,7 +2894,7 @@ fn an_assume_unchanged_edit_after_preflight_is_kept() {
     let fixture = Fixture::new();
     let linked = fixture.add_worktree("wt-hidden", "hidden-branch");
     let target = entry(&linked, &fixture.repo, Some("hidden-branch"), false);
-    preflight(&target, false).expect("preflight");
+    preflight(&target, false, &Default::default()).expect("preflight");
 
     run(
         &linked,
@@ -2799,7 +2903,9 @@ fn an_assume_unchanged_edit_after_preflight_is_kept() {
     std::fs::write(linked.join("README.md"), "hidden edit").expect("edit");
     assert_eq!(git::is_dirty(&linked), Some(false), "status hides the edit");
     assert_eq!(
-        prepare(&target, false).err().as_deref(),
+        prepare(&target, false, &Default::default())
+            .err()
+            .as_deref(),
         Some("has files hidden from git status")
     );
     assert_eq!(
@@ -2825,8 +2931,8 @@ fn a_nested_worktree_registered_just_before_execute_is_detected() {
     ignore(&fixture, ".claude/");
     let parent = fixture.add_worktree("parent-exec-nested", "parent-exec-branch");
     let target = entry(&parent, &fixture.repo, Some("parent-exec-branch"), false);
-    let plan = preflight(&target, false).expect("preflight");
-    let prepared = prepare(&target, false).expect("prepare");
+    let plan = preflight(&target, false, &Default::default()).expect("preflight");
+    let prepared = prepare(&target, false, &Default::default()).expect("prepare");
 
     // Between the live activity check and the destructive call.
     let child = parent.join(".claude/worktrees/exec-child");
@@ -2842,7 +2948,14 @@ fn a_nested_worktree_registered_just_before_execute_is_detected() {
             &child.to_string_lossy(),
         ],
     );
-    let outcome = execute(&target, false, &fixture.data_dir(), &plan, &prepared);
+    let outcome = execute(
+        &target,
+        false,
+        &fixture.data_dir(),
+        &plan,
+        &prepared,
+        &Default::default(),
+    );
     let Err(reason) = outcome else {
         panic!("a nested worktree registered before execute is never removed");
     };
@@ -2998,17 +3111,24 @@ fn a_checkout_that_reappears_before_execute_gets_every_check() {
     let away = fixture.root.path().join("wt-reappear-away");
     std::fs::rename(&linked, &away).expect("move away");
     let target = entry(&linked, &fixture.repo, Some("reappear-branch"), false);
-    let plan = preflight(&target, false).expect("preflight");
-    let prepared = prepare(&target, false).expect("prepare saw it missing");
+    let plan = preflight(&target, false, &Default::default()).expect("preflight");
+    let prepared = prepare(&target, false, &Default::default()).expect("prepare saw it missing");
 
     // By execute the checkout is back, now holding another repository's clone.
     std::fs::rename(&away, &linked).expect("move back");
     let clone = linked.join("vendor/other");
     init_repo(&clone);
     assert_eq!(
-        execute(&target, false, &fixture.data_dir(), &plan, &prepared)
-            .err()
-            .as_deref(),
+        execute(
+            &target,
+            false,
+            &fixture.data_dir(),
+            &plan,
+            &prepared,
+            &Default::default()
+        )
+        .err()
+        .as_deref(),
         Some(
             format!(
                 "contains another git checkout at {}",
@@ -3032,8 +3152,8 @@ fn an_assume_unchanged_edit_just_before_execute_is_kept() {
     let fixture = Fixture::new();
     let linked = fixture.add_worktree("wt-hidden-exec", "hidden-exec-branch");
     let target = entry(&linked, &fixture.repo, Some("hidden-exec-branch"), false);
-    let plan = preflight(&target, false).expect("preflight");
-    let prepared = prepare(&target, false).expect("prepare");
+    let plan = preflight(&target, false, &Default::default()).expect("preflight");
+    let prepared = prepare(&target, false, &Default::default()).expect("prepare");
 
     // Between the live activity check and the destructive call.
     run(
@@ -3043,9 +3163,16 @@ fn an_assume_unchanged_edit_just_before_execute_is_kept() {
     std::fs::write(linked.join("README.md"), "hidden late edit").expect("edit");
     assert_eq!(git::is_dirty(&linked), Some(false), "status hides the edit");
     assert_eq!(
-        execute(&target, false, &fixture.data_dir(), &plan, &prepared)
-            .err()
-            .as_deref(),
+        execute(
+            &target,
+            false,
+            &fixture.data_dir(),
+            &plan,
+            &prepared,
+            &Default::default()
+        )
+        .err()
+        .as_deref(),
         Some("has files hidden from git status")
     );
     assert_eq!(
@@ -3067,15 +3194,22 @@ fn a_missing_registration_whose_last_ref_goes_before_execute_is_kept() {
     run(&linked, &["branch", "temp-ref"]);
     std::fs::remove_dir_all(&linked).expect("remove the checkout");
     let target = entry(&linked, &fixture.repo, None, false);
-    let plan = preflight(&target, false).expect("preflight");
-    let prepared = prepare(&target, false).expect("prepare");
+    let plan = preflight(&target, false, &Default::default()).expect("preflight");
+    let prepared = prepare(&target, false, &Default::default()).expect("prepare");
 
     // Gone again before the destructive step.
     run(&fixture.repo, &["branch", "-D", "temp-ref"]);
     assert_eq!(
-        execute(&target, false, &fixture.data_dir(), &plan, &prepared)
-            .err()
-            .as_deref(),
+        execute(
+            &target,
+            false,
+            &fixture.data_dir(),
+            &plan,
+            &prepared,
+            &Default::default()
+        )
+        .err()
+        .as_deref(),
         Some("detached HEAD has commits on no branch")
     );
     let registrations = git::registrations(&fixture.repo).expect("list");
@@ -3327,8 +3461,8 @@ fn a_recreated_owned_checkout_without_a_branch_is_refused_even_with_force() {
         let fixture = Fixture::new();
         let path = git::norm(&fixture.root.path().join("sa-recreated"));
         let own = entry(&path, &fixture.repo, None, true);
-        let plan = preflight(&own, force).expect("preflight");
-        let prepared = prepare(&own, force).expect("prepare saw it missing");
+        let plan = preflight(&own, force, &Default::default()).expect("preflight");
+        let prepared = prepare(&own, force, &Default::default()).expect("prepare saw it missing");
 
         // Someone else's checkout at the same path, before execute.
         run(
@@ -3343,9 +3477,16 @@ fn a_recreated_owned_checkout_without_a_branch_is_refused_even_with_force() {
             ],
         );
         assert_eq!(
-            execute(&own, force, &fixture.data_dir(), &plan, &prepared)
-                .err()
-                .as_deref(),
+            execute(
+                &own,
+                force,
+                &fixture.data_dir(),
+                &plan,
+                &prepared,
+                &Default::default()
+            )
+            .err()
+            .as_deref(),
             Some(RECREATED),
             "force={force}"
         );
@@ -3356,7 +3497,7 @@ fn a_recreated_owned_checkout_without_a_branch_is_refused_even_with_force() {
         let fixture = Fixture::new();
         let path = git::norm(&fixture.root.path().join("sa-recreated-early"));
         let own = entry(&path, &fixture.repo, None, true);
-        preflight(&own, force).expect("preflight");
+        preflight(&own, force, &Default::default()).expect("preflight");
         run(
             &fixture.repo,
             &[
@@ -3369,7 +3510,7 @@ fn a_recreated_owned_checkout_without_a_branch_is_refused_even_with_force() {
             ],
         );
         assert_eq!(
-            prepare(&own, force).err().as_deref(),
+            prepare(&own, force, &Default::default()).err().as_deref(),
             Some(RECREATED),
             "force={force}"
         );
@@ -3408,7 +3549,7 @@ fn an_owned_row_whose_repository_cannot_be_found_is_kept() {
     assert_eq!(row.branch.as_deref(), Some("h4rn/sa-lost"));
     for force in [false, true] {
         assert_eq!(
-            preflight(row, force).err().as_deref(),
+            preflight(row, force, &Default::default()).err().as_deref(),
             Some("its repository could not be found")
         );
     }
@@ -3536,20 +3677,29 @@ fn a_filesystem_monitor_that_reports_nothing_hides_no_edit() {
     assert_eq!(git::is_dirty(&linked), Some(true));
     let target = entry(&linked, &fixture.repo, Some("fsmonitor-branch"), false);
     assert_eq!(
-        preflight(&target, false).err().as_deref(),
+        preflight(&target, false, &Default::default())
+            .err()
+            .as_deref(),
         Some("has uncommitted changes")
     );
 
     // Git's removal backstop, for an edit made after prepare.
     let late = fixture.add_worktree("wt-fsmonitor-late", "fsmonitor-late-branch");
     let target = entry(&late, &fixture.repo, Some("fsmonitor-late-branch"), false);
-    let plan = preflight(&target, false).expect("preflight");
-    let prepared = prepare(&target, false).expect("prepare");
+    let plan = preflight(&target, false, &Default::default()).expect("preflight");
+    let prepared = prepare(&target, false, &Default::default()).expect("prepare");
     edit_behind_fsmonitor(&late, "late edit behind the monitor");
     assert_eq!(
-        execute(&target, false, &fixture.data_dir(), &plan, &prepared)
-            .err()
-            .as_deref(),
+        execute(
+            &target,
+            false,
+            &fixture.data_dir(),
+            &plan,
+            &prepared,
+            &Default::default()
+        )
+        .err()
+        .as_deref(),
         Some("has uncommitted changes")
     );
     assert_eq!(
@@ -4056,7 +4206,7 @@ fn rebase_and_bisect_files_that_are_not_regular_count_as_in_progress() {
     let (done, finished) = std::sync::mpsc::channel();
     let repo = fixture.repo.clone();
     std::thread::spawn(move || {
-        let _ = done.send(super::branch_in_progress(&repo, "h4rn/sa-x"));
+        let _ = done.send(super::branch_in_progress(&repo.join(".git"), "h4rn/sa-x"));
     });
     let answer = finished
         .recv_timeout(Duration::from_secs(20))
@@ -4343,7 +4493,7 @@ fn an_unreadable_registration_makes_the_snapshot_incomplete() {
     let plan = super::Preflight {
         branch: Some(super::BranchDelete::Verified { sha }),
     };
-    let deleted = delete_owned_branch(&fixture.repo, branch, &plan, false);
+    let deleted = delete_owned_branch(&fixture.repo, branch, &plan, false, &Default::default());
     let owned_outcome = clear_one(&owned, false, &fixture.data_dir());
     let forced_outcome = clear_one(&owned, true, &fixture.data_dir());
     let existing_outcome = clear_one(&existing, true, &fixture.data_dir());
@@ -4478,7 +4628,7 @@ fn an_emptied_gitdir_makes_the_porcelain_snapshot_incomplete() {
     let plan = super::Preflight {
         branch: Some(super::BranchDelete::Verified { sha }),
     };
-    let deleted = delete_owned_branch(&fixture.repo, branch, &plan, false);
+    let deleted = delete_owned_branch(&fixture.repo, branch, &plan, false, &Default::default());
     assert_eq!(
         deleted,
         Ok(Some(format!(
@@ -4763,4 +4913,269 @@ async fn a_bulk_clear_compares_live_workspaces_like_the_selection() {
     assert_eq!(outcome.skipped[0].reason, "is a thread workspace");
     assert!(later.is_dir(), "the later checkout is kept");
     assert!(!first.exists());
+}
+
+/// Pauses an interactive rebase with `--autostash` at a `break` in `checkout`,
+/// after an uncommitted edit so the autostash exists. Returns the checkout's
+/// admin dir.
+fn pause_rebase_with_autostash(checkout: &Path) -> PathBuf {
+    std::fs::write(checkout.join("README.md"), "# edited, then stashed\n").expect("edit");
+    let output = std::process::Command::new("git")
+        .args(["rebase", "-i", "--autostash", "HEAD"])
+        .env("GIT_SEQUENCE_EDITOR", "printf 'break\\n' >")
+        .current_dir(checkout)
+        .output()
+        .expect("run git rebase");
+    assert!(
+        output.status.success(),
+        "rebase: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let admin =
+        PathBuf::from(git::run(checkout, ["rev-parse", "--absolute-git-dir"]).expect("admin dir"));
+    assert!(
+        admin.join("rebase-merge/autostash").is_file(),
+        "the rebase is paused with an autostash"
+    );
+    admin
+}
+
+#[test]
+fn a_paused_rebase_keeps_the_worktree_and_its_autostash() {
+    for gone in [false, true] {
+        let fixture = Fixture::new();
+        let branch = if gone { "rebase-gone" } else { "rebase-here" };
+        let linked = fixture.add_worktree(&format!("wt-{branch}"), branch);
+        let admin = pause_rebase_with_autostash(&linked);
+        if gone {
+            std::fs::remove_dir_all(&linked).expect("remove the checkout");
+        }
+        let target = entry(&linked, &fixture.repo, Some(branch), false);
+        let data = fixture.data_dir();
+
+        let outcome = clear_one(&target, false, &data);
+        assert_eq!(
+            outcome.err().as_deref(),
+            Some("has a git operation in progress"),
+            "gone={gone}"
+        );
+        assert_eq!(linked.is_dir(), !gone, "gone={gone}: the checkout is kept");
+        assert!(
+            admin.join("rebase-merge/autostash").is_file(),
+            "gone={gone}: the rebase state and its autostash are kept"
+        );
+
+        let forced = clear_one(&target, true, &data);
+        assert!(
+            matches!(forced, Ok(ClearOne::Removed)),
+            "gone={gone}: {forced:?}"
+        );
+        assert!(!linked.exists(), "gone={gone}");
+        assert!(!admin.exists(), "gone={gone}: the registration is removed");
+    }
+}
+
+#[test]
+fn an_operation_started_after_prepare_is_caught_before_removal() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-late-merge", "late-merge");
+    let target = entry(&linked, &fixture.repo, Some("late-merge"), false);
+    let commons = git::CommonDirs::default();
+    let plan = preflight(&target, false, &commons).expect("preflight");
+    let prepared = prepare(&target, false, &commons).expect("prepare");
+    let admin =
+        PathBuf::from(git::run(&linked, ["rev-parse", "--absolute-git-dir"]).expect("admin dir"));
+    // Presence alone counts, without following a symlink: a dangling one too.
+    std::os::unix::fs::symlink(
+        fixture.root.path().join("nowhere"),
+        admin.join("MERGE_HEAD"),
+    )
+    .expect("dangling MERGE_HEAD");
+    let outcome = execute(
+        &target,
+        false,
+        &fixture.data_dir(),
+        &plan,
+        &prepared,
+        &commons,
+    );
+    assert_eq!(
+        outcome.err().as_deref(),
+        Some("has a git operation in progress")
+    );
+    assert!(linked.is_dir());
+}
+
+#[test]
+fn a_linked_checkout_of_a_bare_repository_belongs_to_it() {
+    let fixture = Fixture::new();
+    run(
+        fixture.root.path(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            &fixture.repo.to_string_lossy(),
+            "project.git",
+        ],
+    );
+    let bare = git::norm(&fixture.root.path().join("project.git"));
+    let linked = fixture.root.path().join("project-wt");
+    run(
+        &bare,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "bare-feature",
+            &linked.to_string_lossy(),
+            "main",
+        ],
+    );
+    let linked = git::norm(&linked);
+    assert_eq!(git::repo_of(&linked), Some(bare.clone()));
+    assert_eq!(git::repo_of(&bare), Some(bare.clone()));
+
+    // A thread working in it lists a thread row of the bare repository.
+    let mut list_input = input(&fixture, Vec::new());
+    list_input.threads = vec![ThreadInfo {
+        thread_id: ThreadId::new("th_bare"),
+        title: "bare".into(),
+        workspace: linked.to_string_lossy().into_owned(),
+        working: false,
+        last_activity: Utc::now(),
+    }];
+    let (entries, _) = compute(&list_input, true);
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0].origin, WorktreeOrigin::Thread);
+    assert_eq!(Path::new(&entries[0].path), linked);
+    assert_eq!(Path::new(&entries[0].repo), bare);
+    assert_eq!(entries[0].branch.as_deref(), Some("bare-feature"));
+}
+
+#[test]
+fn a_separate_git_dir_repository_has_no_bogus_bare_main_in_the_fallback() {
+    let fixture = Fixture::new();
+    let gitdir = fixture.root.path().join("sep.gitdir");
+    let main = fixture.root.path().join("sep");
+    run(
+        fixture.root.path(),
+        &[
+            "init",
+            "-q",
+            "-b",
+            "main",
+            "--separate-git-dir",
+            &gitdir.to_string_lossy(),
+            &main.to_string_lossy(),
+        ],
+    );
+    let (gitdir, main) = (git::norm(&gitdir), git::norm(&main));
+    run(&main, &["config", "user.email", "wt@h4rn.invalid"]);
+    run(&main, &["config", "user.name", "h4rn worktrees"]);
+    run(&main, &["commit", "-q", "--allow-empty", "-m", "init"]);
+    let linked = fixture.root.path().join("sep-linked");
+    run(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "sep-feature",
+            &linked.to_string_lossy(),
+        ],
+    );
+    let linked = git::norm(&linked);
+    assert_eq!(git::repo_of(&linked), None, "not bare, not named .git");
+
+    git::FORCE_METADATA_FALLBACK.with(|forced| forced.set(true));
+    let without = git::registrations(&main);
+    run(&main, &["config", "core.worktree", &main.to_string_lossy()]);
+    let with = git::registrations(&main);
+    git::FORCE_METADATA_FALLBACK.with(|forced| forced.set(false));
+
+    // Without `core.worktree` the main worktree is unknown: not registered,
+    // and the snapshot is incomplete.
+    let without = without.expect("read");
+    assert!(!without.complete, "{without:?}");
+    assert!(
+        without
+            .iter()
+            .all(|registration| !registration.bare && registration.path != gitdir),
+        "{without:?}"
+    );
+    assert!(
+        without
+            .iter()
+            .any(|registration| registration.path == linked
+                && registration.head == git::Head::Branch("sep-feature".into())),
+        "{without:?}"
+    );
+
+    // With it, the main worktree is registered there, not bare.
+    let with = with.expect("read");
+    assert!(with.complete, "{with:?}");
+    assert!(
+        with.iter().any(|registration| registration.path == main
+            && !registration.bare
+            && registration.head == git::Head::Branch("main".into())),
+        "{with:?}"
+    );
+    assert!(with.iter().all(|registration| !registration.bare));
+}
+
+#[test]
+fn a_gitdir_without_a_dot_git_suffix_names_the_checkout_like_git() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-no-suffix", "no-suffix");
+    let admin =
+        PathBuf::from(git::run(&linked, ["rev-parse", "--absolute-git-dir"]).expect("admin dir"));
+    // Git strips a trailing `/.git` only when it is there.
+    std::fs::write(admin.join("gitdir"), format!("{}\n", linked.display())).expect("gitdir");
+    let porcelain = git::porcelain_z(&fixture.repo, Duration::from_secs(30))
+        .expect("run")
+        .expect("this git supports -z");
+    assert!(
+        porcelain
+            .iter()
+            .any(|registration| registration.path == linked),
+        "git names the target verbatim: {porcelain:?}"
+    );
+    let snapshot = git::registrations(&fixture.repo).expect("-z");
+    assert!(snapshot.complete, "{snapshot:?}");
+
+    let metadata =
+        git::registrations_from_metadata(&fixture.repo, Duration::from_secs(30)).expect("read");
+    assert!(metadata.complete, "{metadata:?}");
+    assert!(
+        metadata
+            .iter()
+            .any(|registration| registration.path == linked),
+        "{metadata:?}"
+    );
+}
+
+#[test]
+fn a_clear_resolves_the_common_dir_once() {
+    let fixture = Fixture::new();
+    let branch = "h4rn/sa-once";
+    let linked = fixture.add_worktree("wt-once", branch);
+    let target = entry(&linked, &fixture.repo, Some(branch), true);
+    let log = fixture.root.path().join("common-dir.log");
+    let counting = fake_git(
+        fixture.root.path(),
+        &format!(
+            "for arg; do [ \"$arg\" = --git-common-dir ] && echo x >> '{}'; done",
+            log.display()
+        ),
+    );
+    git::GIT_PROGRAM.with(|slot| *slot.borrow_mut() = Some(counting));
+    let outcome = clear_one(&target, false, &fixture.data_dir());
+    git::GIT_PROGRAM.with(|slot| *slot.borrow_mut() = None);
+    assert!(matches!(outcome, Ok(ClearOne::Removed)), "{outcome:?}");
+    assert!(!git::branch_exists(&fixture.repo, branch));
+    let lookups = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(lookups.lines().count(), 1, "one rev-parse --git-common-dir");
 }

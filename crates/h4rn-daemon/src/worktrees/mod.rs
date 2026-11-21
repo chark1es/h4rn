@@ -493,6 +493,8 @@ impl WorktreeTracker {
         let selection = select_entries(&entries, paths.as_deref(), bulk, &thread_workspaces);
         let mut removed = Vec::new();
         let mut skipped = selection.skipped;
+        // Each repository's common dir is resolved once for the whole clear.
+        let commons = Arc::new(git::CommonDirs::default());
         // One entry at a time: the listing is a snapshot, so each removal runs
         // a blocking preflight, then asks the live thread and subagent state
         // again, and only then touches the disk. Both spawn_blocking calls are
@@ -500,7 +502,17 @@ impl WorktreeTracker {
         for entry in selection.targets {
             let entry = entry.clone();
             let path = entry.path.clone();
-            match run_clear_entry(&self.inner, entry, force, bulk, &mut after_preflight).await {
+            let commons = Arc::clone(&commons);
+            match run_clear_entry(
+                &self.inner,
+                entry,
+                force,
+                bulk,
+                commons,
+                &mut after_preflight,
+            )
+            .await
+            {
                 Ok(ClearOne::Removed) => removed.push(path),
                 Ok(ClearOne::RemovedWithBranchFailure(reason)) => {
                     skipped.push(SkippedWorktree { path, reason });
@@ -1112,13 +1124,17 @@ fn registration_exists(
     repo: &Path,
     path: &Path,
     lists: &mut HashMap<PathBuf, Option<git::RegistrationSnapshot>>,
+    commons: &git::CommonDirs,
 ) -> Option<bool> {
     if repo.as_os_str().is_empty() {
         return Some(false);
     }
     lists
         .entry(repo.to_path_buf())
-        .or_insert_with(|| git::registrations(repo).ok())
+        .or_insert_with(|| {
+            let common = commons.get(repo, git::OBSERVATION_GIT_TIMEOUT).ok()?;
+            git::registrations_in(repo, &common, git::OBSERVATION_GIT_TIMEOUT).ok()
+        })
         .as_ref()
         .and_then(|snapshot| {
             let found = snapshot
@@ -1180,6 +1196,8 @@ pub(crate) fn compute_listing(
     // and then only once per repository.
     let mut registration_lists: HashMap<PathBuf, Option<git::RegistrationSnapshot>> =
         HashMap::new();
+    // Each repository's common dir is resolved once for the whole listing.
+    let commons = git::CommonDirs::default();
 
     // 1. Worktrees h4rn made for isolated subagents.
     for view in &input.subagents {
@@ -1215,7 +1233,7 @@ pub(crate) fn compute_listing(
                 None => Some(false),
             };
             if branch_known == Some(false) {
-                match registration_exists(repo, &path, &mut registration_lists) {
+                match registration_exists(repo, &path, &mut registration_lists, &commons) {
                     // Only the registration is left; never promise the branch.
                     Some(true) => branch = None,
                     None => {}
@@ -1306,7 +1324,7 @@ pub(crate) fn compute_listing(
         }
         let list = repo_lists
             .entry(repo.clone())
-            .or_insert_with(|| git::list_worktrees(&repo).unwrap_or_default());
+            .or_insert_with(|| git::list_worktrees_with(&repo, &commons).unwrap_or_default());
         let branch = list
             .iter()
             .find(|worktree| worktree.path == path)
@@ -1368,7 +1386,12 @@ pub(crate) fn compute_listing(
         // Only a successful snapshot that no longer names the path may forget
         // it; a failed snapshot keeps the row (exists: false) for a later try.
         if !exists {
-            match registration_exists(Path::new(&stored.repo), &path, &mut registration_lists) {
+            match registration_exists(
+                Path::new(&stored.repo),
+                &path,
+                &mut registration_lists,
+                &commons,
+            ) {
                 Some(true) => {}
                 Some(false) => {
                     gone.push(stored.path.clone());
@@ -1489,6 +1512,65 @@ const CLEAR_GIT_TIMEOUT: Duration = Duration::from_secs(30);
 /// The reason for a decision a partial registration snapshot cannot make
 /// (blocked).
 const INCOMPLETE_SNAPSHOT: &str = "could not read every worktree registration";
+
+/// The common dir of `repo` (resolved once per clear through `commons`) and a
+/// fresh registration snapshot taken with it.
+fn snapshot(
+    repo: &Path,
+    commons: &git::CommonDirs,
+) -> Result<(PathBuf, git::RegistrationSnapshot), String> {
+    let common = commons.get(repo, CLEAR_GIT_TIMEOUT)?;
+    let registrations = git::registrations_in(repo, &common, CLEAR_GIT_TIMEOUT)?;
+    Ok((common, registrations))
+}
+
+/// The reason for a checkout whose registration has a git operation in
+/// progress (forceable).
+const OPERATION_IN_PROGRESS: &str = "has a git operation in progress";
+
+/// What git leaves in a worktree's own admin dir while an operation is
+/// unfinished: a rebase (its autostash included), a merge, a cherry-pick, a
+/// revert, a bisect, a sequencer run, or a merge's conflicted result.
+const OPERATION_STATE: [&str; 8] = [
+    "rebase-merge",
+    "rebase-apply",
+    "MERGE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "BISECT_LOG",
+    "sequencer",
+    "AUTO_MERGE",
+];
+
+/// Refuses a registered checkout (existing or missing) whose own admin dir
+/// shows a git operation in progress. Blocking.
+///
+/// The admin dir is `<common>/worktrees/<id>` whose `gitdir` names `path`
+/// (the main worktree is refused long before this). State is checked by
+/// presence only, never following a symlink: whatever is there means the
+/// operation is unfinished, and removing the registration would throw away
+/// its state (a rebase's autostash, say). An admin dir that cannot be found
+/// or read is refused with the same (forceable) reason.
+fn verify_no_operation(common: &Path, path: &Path) -> Result<(), String> {
+    let admins = git::admin_dirs_for(common, path, CLEAR_GIT_TIMEOUT)
+        .map_err(|_| OPERATION_IN_PROGRESS.to_owned())?;
+    if admins.is_empty() {
+        return Err(OPERATION_IN_PROGRESS.into());
+    }
+    for admin in admins {
+        if !admin.symlink_metadata().is_ok_and(|meta| meta.is_dir()) {
+            return Err(OPERATION_IN_PROGRESS.into());
+        }
+        for name in OPERATION_STATE {
+            match admin.join(name).symlink_metadata() {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                // Present, or unknown: either way not provably idle.
+                _ => return Err(OPERATION_IN_PROGRESS.into()),
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Checks an existing checkout against one snapshot: it is registered at
 /// exactly `path` and holds no other registered worktree.
@@ -1760,14 +1842,14 @@ const RECREATED: &str = "the checkout was recreated during the clear";
 /// The reason for a missing checkout whose registration `HEAD` is unknown.
 const UNKNOWN_HEAD: &str = "could not read the registration's HEAD";
 
-/// A rebase or bisect in progress in any worktree of `repo` that names `branch`.
+/// A rebase or bisect in progress in any worktree of the repository whose
+/// common dir is `common` that names `branch`.
 ///
 /// The main git dir is `<common>` and every linked worktree's admin dir is
 /// under `<common>/worktrees`, so both are inspected for the files git writes
 /// while a rebase or bisect is running.
-fn branch_in_progress(repo: &Path, branch: &str) -> Result<Option<String>, String> {
-    let common = git::common_dir(repo, CLEAR_GIT_TIMEOUT)?;
-    let mut dirs = vec![common.clone()];
+fn branch_in_progress(common: &Path, branch: &str) -> Result<Option<String>, String> {
+    let mut dirs = vec![common.to_path_buf()];
     if let Ok(entries) = std::fs::read_dir(common.join("worktrees")) {
         for entry in entries.flatten() {
             if entry.path().is_dir() {
@@ -2011,13 +2093,18 @@ const HIDDEN_FILES: &str = "has files hidden from git status";
 /// without force, its own registration's `HEAD` must be known, and a detached
 /// one reachable from some ref.
 ///
+/// Without force, a registered checkout (existing or missing) must have no git
+/// operation in progress in its own admin dir (see [`verify_no_operation`]).
+///
 /// `thorough` gates only the nested-checkout scan, a whole tree walk: it runs
 /// in [`prepare`] and again on a state flip, never in the final pass before an
 /// unchanged checkout's removal, which must stay short. The hidden-file check
-/// is one `ls-files` and runs in every pass.
+/// is one `ls-files` and runs in every pass, as does the operation check.
+/// `common` is the repository's common dir, resolved once per clear.
 fn verify_current(
     entry: &TrackedWorktree,
     snapshot: &git::RegistrationSnapshot,
+    common: &Path,
     exists: bool,
     force: bool,
     thorough: bool,
@@ -2026,16 +2113,14 @@ fn verify_current(
     let repo = PathBuf::from(&entry.repo);
     if exists {
         verify_registered(snapshot, &path)?;
-        if thorough {
-            let common = git::common_dir(&repo, CLEAR_GIT_TIMEOUT)?;
-            if let Some(nested) = nested_checkout(&path, &common, nested_scan_limit())? {
-                return Err(format!(
-                    "contains another git checkout at {}",
-                    nested.display()
-                ));
-            }
+        if thorough && let Some(nested) = nested_checkout(&path, common, nested_scan_limit())? {
+            return Err(format!(
+                "contains another git checkout at {}",
+                nested.display()
+            ));
         }
         if !force {
+            verify_no_operation(common, &path)?;
             verify_checkout(&path, &repo, entry.branch.as_deref())?;
             // An edit to an assume-unchanged or skip-worktree file never shows
             // in `git status`, so neither our dirty check nor git's removal
@@ -2050,6 +2135,7 @@ fn verify_current(
     } else if let Some(registration) = own_registration(snapshot, &path)?
         && !force
     {
+        verify_no_operation(common, &path)?;
         // Only the registration is left. Its HEAD may hold a commit that no
         // branch, remote-tracking branch or tag reaches; deleting the
         // registration would lose the only name for that work.
@@ -2076,6 +2162,7 @@ async fn run_clear_entry<F, Fut>(
     entry: TrackedWorktree,
     force: bool,
     bulk: bool,
+    commons: Arc<git::CommonDirs>,
     after_preflight: F,
 ) -> Result<ClearOne, String>
 where
@@ -2084,7 +2171,12 @@ where
 {
     let path = entry.path.clone();
     let preflight_entry = entry.clone();
-    let plan = match tokio::task::spawn_blocking(move || preflight(&preflight_entry, force)).await {
+    let preflight_commons = Arc::clone(&commons);
+    let plan = match tokio::task::spawn_blocking(move || {
+        preflight(&preflight_entry, force, &preflight_commons)
+    })
+    .await
+    {
         Ok(Ok(plan)) => plan,
         Ok(Err(reason)) => return Err(reason),
         Err(error) => {
@@ -2094,22 +2186,28 @@ where
     };
     after_preflight(path.clone()).await;
     let prepare_entry = entry.clone();
-    let prepared = match tokio::task::spawn_blocking(move || prepare(&prepare_entry, force)).await {
-        Ok(Ok(prepared)) => prepared,
-        Ok(Err(reason)) => return Err(reason),
-        Err(error) => {
-            tracing::warn!(%error, %path, "worktree prepare task failed");
-            return Err("the clear task failed".into());
-        }
-    };
+    let prepare_commons = Arc::clone(&commons);
+    let prepared =
+        match tokio::task::spawn_blocking(move || prepare(&prepare_entry, force, &prepare_commons))
+            .await
+        {
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(reason)) => return Err(reason),
+            Err(error) => {
+                tracing::warn!(%error, %path, "worktree prepare task failed");
+                return Err("the clear task failed".into());
+            }
+        };
     match inner.still_active(&entry, bulk).await {
         Some(LiveUse::Active(active)) => return Err(in_use_reason(&active)),
         Some(LiveUse::ThreadWorkspace) => return Err(THREAD_WORKSPACE.into()),
         None => {}
     }
     let data_dir = inner.data_dir.clone();
-    match tokio::task::spawn_blocking(move || execute(&entry, force, &data_dir, &plan, &prepared))
-        .await
+    match tokio::task::spawn_blocking(move || {
+        execute(&entry, force, &data_dir, &plan, &prepared, &commons)
+    })
+    .await
     {
         Ok(result) => result,
         Err(error) => {
@@ -2127,7 +2225,11 @@ where
 /// registration has been checked for detached work no ref reaches. The owned
 /// branch is resolved to a sha here so removal deletes exactly the tip this
 /// phase verified.
-fn preflight(entry: &TrackedWorktree, force: bool) -> Result<Preflight, String> {
+fn preflight(
+    entry: &TrackedWorktree,
+    force: bool,
+    commons: &git::CommonDirs,
+) -> Result<Preflight, String> {
     let path = PathBuf::from(&entry.path);
     if entry.repo.is_empty() {
         return Err("its repository could not be found".into());
@@ -2139,7 +2241,7 @@ fn preflight(entry: &TrackedWorktree, force: bool) -> Result<Preflight, String> 
     let exists = checkout_at(&path)?;
     // One snapshot answers the exact-registration check, the nested-worktree
     // check and the missing checkout's own registration.
-    let registrations = git::registrations_with_timeout(&repo, CLEAR_GIT_TIMEOUT)?;
+    let (common, registrations) = snapshot(&repo, commons)?;
     // Git would happily remove a checkout that holds another worktree, leaving
     // the nested registration pointing into a directory that no longer exists.
     // That checkout is never removed, with or without force. Only an existing
@@ -2153,6 +2255,12 @@ fn preflight(entry: &TrackedWorktree, force: bool) -> Result<Preflight, String> 
     }
     let mut branch = None;
     if !force {
+        // A paused rebase, merge, cherry-pick, revert or bisect keeps its
+        // state (a rebase's autostash, say) in the registration's admin dir;
+        // removing the registration would throw it away.
+        if exists || exact_registration(&registrations, &path).is_some() {
+            verify_no_operation(&common, &path)?;
+        }
         // The listing is only a snapshot: a turn may have written since. Ask
         // git again here, and never read "could not ask" as clean.
         // `status --porcelain` with untracked files always counted, whatever
@@ -2199,14 +2307,18 @@ fn preflight(entry: &TrackedWorktree, force: bool) -> Result<Preflight, String> 
 /// with no branch and no directory whose directory exists now is refused as
 /// recreated. The live activity check runs after this, and only then does
 /// [`execute`] touch the disk.
-fn prepare(entry: &TrackedWorktree, force: bool) -> Result<Prepared, String> {
+fn prepare(
+    entry: &TrackedWorktree,
+    force: bool,
+    commons: &git::CommonDirs,
+) -> Result<Prepared, String> {
     let repo = PathBuf::from(&entry.repo);
-    let registrations = git::registrations_with_timeout(&repo, CLEAR_GIT_TIMEOUT)?;
+    let (common, registrations) = snapshot(&repo, commons)?;
     let was_dir = checkout_at(Path::new(&entry.path))?;
     if recreated(entry, was_dir) {
         return Err(RECREATED.into());
     }
-    verify_current(entry, &registrations, was_dir, force, true)?;
+    verify_current(entry, &registrations, &common, was_dir, force, true)?;
     Ok(Prepared { was_dir })
 }
 
@@ -2237,13 +2349,14 @@ fn execute(
     data_dir: &Path,
     plan: &Preflight,
     prepared: &Prepared,
+    commons: &git::CommonDirs,
 ) -> Result<ClearOne, String> {
     let path = PathBuf::from(&entry.path);
     let repo = PathBuf::from(&entry.repo);
     // The snapshot first, then the directory: whatever the snapshot does not
     // show (a nested worktree, the checkout's own registration) was registered
     // after this point, and the directory check below is newer still.
-    let registrations = git::registrations_with_timeout(&repo, CLEAR_GIT_TIMEOUT)?;
+    let (common, registrations) = snapshot(&repo, commons)?;
     let exists = checkout_at(&path)?;
     let flipped = exists != prepared.was_dir;
     // The selected row was an owned checkout with no branch and no directory,
@@ -2256,7 +2369,7 @@ fn execute(
     // missing checkout's registration (already missing at prepare or just
     // vanished) gets its HEAD checks here too, so a ref deleted since prepare
     // is seen. Only a flip repeats the nested-checkout scan.
-    verify_current(entry, &registrations, exists, force, flipped)?;
+    verify_current(entry, &registrations, &common, exists, force, flipped)?;
     if exists {
         // Git's own remove semantics: without `--force` it refuses a checkout
         // with modifications, which is what we want. Ignored files go with the
@@ -2319,7 +2432,7 @@ fn execute(
             }
         };
         if exists {
-            branch_failure = delete_owned_branch(&repo, branch, plan, force)?;
+            branch_failure = delete_owned_branch(&repo, branch, plan, force, commons)?;
         }
     }
     if let Some(subagent_id) = &entry.subagent_id {
@@ -2359,6 +2472,7 @@ fn delete_owned_branch(
     branch: &str,
     plan: &Preflight,
     force: bool,
+    commons: &git::CommonDirs,
 ) -> Result<Option<String>, String> {
     if force {
         // Forced clears keep git's own command; it still refuses a branch
@@ -2373,8 +2487,8 @@ fn delete_owned_branch(
     }
     // The checkout just went away, so a fresh snapshot no longer contains its
     // registration but does show any worktree that took the branch over.
-    let registrations = match git::registrations_with_timeout(repo, CLEAR_GIT_TIMEOUT) {
-        Ok(registrations) => registrations,
+    let (common, registrations) = match snapshot(repo, commons) {
+        Ok(found) => found,
         Err(error) => return Ok(Some(branch_delete_failure(branch, &error))),
     };
     match plan.branch.as_ref() {
@@ -2416,7 +2530,7 @@ fn delete_owned_branch(
                     unknown.path.display()
                 )));
             }
-            match branch_in_progress(repo, branch) {
+            match branch_in_progress(&common, branch) {
                 Ok(Some(why)) => return Ok(Some(branch_delete_failure(branch, &why))),
                 Ok(None) => {}
                 Err(error) => return Ok(Some(branch_delete_failure(branch, &error))),

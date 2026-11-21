@@ -159,6 +159,7 @@ export const WORKTREE_SKIP_REASONS = {
     "contains submodules",
     "could not read the registration's HEAD",
     "has files hidden from git status",
+    "has a git operation in progress",
   ],
   /** `checkout is no longer on <branch>` — force removes the replacement. */
   forceablePrefixes: ["checkout is no longer on"],

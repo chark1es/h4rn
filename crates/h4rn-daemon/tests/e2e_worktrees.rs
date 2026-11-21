@@ -379,3 +379,206 @@ async fn clearing_a_worktree_while_its_child_still_works_skips_it() {
     let _ = shutdown.send(());
     let _ = task.await;
 }
+
+#[tokio::test]
+async fn a_thread_in_a_linked_checkout_of_a_bare_repository_is_tracked_and_its_subagent_cleared() {
+    // `project.git` is bare; the parent thread works in a linked checkout of it.
+    let origin = git_repo();
+    let root = tempfile::tempdir().expect("root");
+    let run = |dir: &std::path::Path, args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    };
+    run(
+        root.path(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            &origin.path().display().to_string(),
+            "project.git",
+        ],
+    );
+    let bare = std::fs::canonicalize(root.path().join("project.git")).expect("bare");
+    let checkout = root.path().join("project-wt");
+    run(
+        &bare,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "bare-feature",
+            &checkout.display().to_string(),
+        ],
+    );
+    let checkout = std::fs::canonicalize(&checkout).expect("checkout");
+
+    let data = tempfile::tempdir().expect("data dir");
+    let mut catalog = StaticHarnessCatalog::new();
+    catalog.register(Arc::new(FakeHarness::new()));
+    catalog.register(Arc::new(FakeHarness::new().with_kind(HarnessKind::Codex)));
+    let config = Config {
+        data_dir: data.path().to_path_buf(),
+        bind: "127.0.0.1:0".parse().expect("bind"),
+        extra_bind: None,
+        log_level: "off".to_owned(),
+        tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
+    };
+    let daemon = DaemonBuilder::new(config)
+        .with_catalog(Arc::new(catalog))
+        .build()
+        .await
+        .expect("build daemon");
+    let token = TokenStore::new(data.path())
+        .load()
+        .expect("read token")
+        .expect("token exists");
+    let manager = daemon.manager();
+    let subagents = daemon.subagents();
+    let bound = daemon.bind().await.expect("bind daemon");
+    let addr = bound.local_addr();
+    let (shutdown, rx) = oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        bound
+            .serve(async move {
+                let _ = rx.await;
+            })
+            .await
+    });
+
+    let (ws, _) = connect_async(format!("ws://{addr}/ws?token={token}"))
+        .await
+        .expect("connect");
+    let mut client = Client { ws, next_id: 1 };
+    client
+        .request(ClientRequest::Hello {
+            protocol_version: h4rn_protocol::PROTOCOL_VERSION,
+            device: DeviceInfo {
+                device_id: DeviceId::new("dev_worktrees_bare"),
+                name: "test".into(),
+                platform: "linux".into(),
+                app_version: "0.0.0".into(),
+            },
+        })
+        .await
+        .expect("hello");
+
+    let host =
+        h4rn_daemon::hosts::HostInventory::detect(Arc::new(StaticHarnessCatalog::new())).local_id();
+    let parent = manager
+        .create_thread(NewThread {
+            thread_id: None,
+            parent_thread_id: None,
+            subagent_id: None,
+            host,
+            harness: HarnessKind::ClaudeCode,
+            workspace_path: checkout.display().to_string(),
+            model: "default".into(),
+            prompt: "parent thread".into(),
+            attachments: Vec::new(),
+            runtime_mode: RuntimeMode::ApprovalRequired,
+            worktree: None,
+        })
+        .await
+        .expect("create parent")
+        .thread_id;
+
+    // The parent's checkout is listed as a thread row of the bare repository.
+    let checkout_path = checkout.display().to_string();
+    let bare_path = bare.display().to_string();
+    let listed = client.list().await;
+    let row = listed
+        .iter()
+        .find(|entry| entry.path == checkout_path)
+        .unwrap_or_else(|| panic!("the thread's checkout is listed: {listed:?}"));
+    assert_eq!(row.origin, WorktreeOrigin::Thread);
+    assert_eq!(row.repo, bare_path);
+    assert_eq!(row.branch.as_deref(), Some("bare-feature"));
+
+    let view = subagents
+        .spawn(SpawnSubagentRequest {
+            parent_thread: parent,
+            task: "reply with pong".into(),
+            harness: Some(HarnessKind::Codex),
+            host: None,
+            model: None,
+            isolation: SubagentIsolation::Worktree,
+            context: Default::default(),
+            budget: Default::default(),
+        })
+        .await
+        .expect("spawn subagent");
+    let finished = subagents
+        .wait(&view.subagent_id, Duration::from_secs(20))
+        .await
+        .expect("wait for the child");
+    assert_eq!(finished.state, SubagentState::Completed);
+
+    let mut settled = None;
+    for _ in 0..600 {
+        let listed = client.list().await;
+        if let Some(found) = listed
+            .iter()
+            .find(|entry| entry.subagent_id.as_ref() == Some(&view.subagent_id))
+            .filter(|entry| entry.status == WorktreeStatus::Settled)
+        {
+            settled = Some(found.clone());
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let entry = settled.unwrap_or_else(|| panic!("the subagent worktree must settle"));
+    assert_eq!(
+        entry.repo, bare_path,
+        "the subagent belongs to the bare repository"
+    );
+    let branch = entry.branch.clone().expect("branch");
+
+    let response = client
+        .request(ClientRequest::ClearWorktrees {
+            paths: Some(vec![entry.path.clone()]),
+            force: false,
+            bulk: false,
+        })
+        .await
+        .expect("clear worktrees");
+    let ResponseBody::WorktreesCleared {
+        removed,
+        skipped,
+        worktrees,
+    } = response
+    else {
+        panic!("unexpected response: {response:?}");
+    };
+    assert_eq!(removed, vec![entry.path.clone()], "skipped: {skipped:?}");
+    assert!(
+        worktrees
+            .iter()
+            .all(|worktree| worktree.subagent_id.as_ref() != Some(&view.subagent_id)),
+        "{worktrees:?}"
+    );
+    assert!(
+        worktrees
+            .iter()
+            .any(|worktree| worktree.path == checkout_path),
+        "the parent's checkout stays listed: {worktrees:?}"
+    );
+    let branches = std::process::Command::new("git")
+        .args(["branch", "--list", &branch])
+        .current_dir(&bare)
+        .output()
+        .expect("list branches");
+    assert!(
+        String::from_utf8_lossy(&branches.stdout).trim().is_empty(),
+        "clearing deletes the h4rn branch"
+    );
+    assert!(checkout.is_dir(), "the parent's checkout is untouched");
+
+    let _ = shutdown.send(());
+    let _ = task.await;
+}
