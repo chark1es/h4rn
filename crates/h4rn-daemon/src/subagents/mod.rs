@@ -1178,7 +1178,9 @@ impl Inner {
             } else {
                 match status {
                     TurnStatus::Completed => SubagentState::Completed,
-                    TurnStatus::Failed => SubagentState::Failed,
+                    TurnStatus::Failed | TurnStatus::TokenLimit | TurnStatus::TurnLimit => {
+                        SubagentState::Failed
+                    }
                     TurnStatus::Interrupted => SubagentState::Cancelled,
                 }
             }

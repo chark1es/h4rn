@@ -1,4 +1,4 @@
-import { CircleAlertIcon, ClockIcon, PauseIcon, RotateCcwIcon } from "lucide-react";
+import { CircleAlertIcon, ClockIcon, CornerDownLeftIcon, PauseIcon } from "lucide-react";
 import type { ReactNode } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
@@ -11,6 +11,7 @@ import { glyphForAgentState } from "@/lib/agent";
 import { harnessLabel, harnessSeed } from "@/lib/entities";
 import { absoluteTime, countdown } from "@/lib/format";
 import type { DelegatedItem, MessageItem, StreamTurn, TurnItem } from "@/lib/store/projection";
+import { stoppedNotice } from "@/lib/turn";
 import { cn } from "@/lib/utils";
 import { Markdown } from "./Markdown";
 import { ToolCard } from "./ToolCard";
@@ -116,13 +117,14 @@ export function TurnBlock({
   turn,
   threadId,
   summary,
-  onRetry,
+  onReply,
   staleAt = null,
 }: {
   turn: StreamTurn;
   threadId: string;
   summary: ThreadSummary;
-  onRetry: () => void;
+  /** Focus the composer so the person can reply to a stopped or failed turn. */
+  onReply: () => void;
   staleAt?: number | null;
 }) {
   const userItems = turn.items.filter(
@@ -135,6 +137,7 @@ export function TurnBlock({
   const toolName = runningTool?.kind === "tool" ? runningTool.toolCall.name : undefined;
   const glyph = glyphForAgentState(summary.agent_state, toolName);
   const live = turn.status === "running" && summary.agent_state !== "awaiting_approval";
+  const stopped = stoppedNotice(turn.status);
   const failed = turn.status === "failed" || turn.status === "interrupted";
 
   if (isUserTurn) {
@@ -143,6 +146,16 @@ export function TurnBlock({
         {userItems.map((item) => (
           <UserMessage key={item.itemId} item={item} at={turn.startedAt} />
         ))}
+        {stopped !== null ? (
+          <div className={cn("q-live-line", "q-warn")}>
+            <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+            <span>{stopped}</span>
+            <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onReply}>
+              <CornerDownLeftIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+              Reply
+            </button>
+          </div>
+        ) : null}
       </>
     );
   }
@@ -213,16 +226,25 @@ export function TurnBlock({
         </div>
       ) : null}
 
-      {failed ? (
+      {stopped !== null ? (
+        <div className={cn("q-live-line", "q-warn")}>
+          <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+          <span>{stopped}</span>
+          <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onReply}>
+            <CornerDownLeftIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+            Reply
+          </button>
+        </div>
+      ) : failed ? (
         <div className={cn("q-live-line", "q-danger")}>
           <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           <span>
             {turn.status === "failed" ? "The turn failed" : "The turn was interrupted"}. Nothing
             after this ran.
           </span>
-          <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onRetry}>
-            <RotateCcwIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-            Retry
+          <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onReply}>
+            <CornerDownLeftIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+            Reply
           </button>
         </div>
       ) : null}

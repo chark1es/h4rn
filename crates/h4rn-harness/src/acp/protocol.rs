@@ -607,17 +607,30 @@ impl AcpToolCall {
 
     /// A one-line summary suitable for the collapsed tool row.
     pub fn summary(&self) -> String {
-        if let Some(title) = self.title.as_deref().filter(|title| !title.is_empty()) {
+        Self::summary_of(
+            self.title.as_deref(),
+            self.raw_input.as_ref(),
+            &self.locations,
+        )
+    }
+
+    /// The collapsed-row summary for fields that updates have been merged into.
+    pub fn summary_of(
+        title: Option<&str>,
+        raw_input: Option<&Value>,
+        locations: &[AcpLocation],
+    ) -> String {
+        if let Some(title) = title.filter(|title| !title.is_empty()) {
             return truncate(title, 140);
         }
-        if let Some(input) = self.raw_input.as_ref() {
+        if let Some(input) = raw_input {
             for key in ["command", "path", "file_path", "query", "url", "pattern"] {
                 if let Some(text) = input.get(key).and_then(Value::as_str) {
                     return truncate(text, 140);
                 }
             }
         }
-        if let Some(path) = self.locations.first() {
+        if let Some(path) = locations.first() {
             return truncate(&path.path, 140);
         }
         String::new()
@@ -1004,10 +1017,16 @@ pub struct AcpPromptResult {
 
 impl AcpPromptResult {
     /// Parses a `session/prompt` result.
+    ///
+    /// A missing or non-string `stopReason` becomes an empty string, which is
+    /// not a normal completion: the adapter reports it as a failure instead of
+    /// guessing that the turn ended.
     pub fn from_value(value: &Value) -> Self {
         Self {
-            stop_reason: string_field(value, &["stopReason", "stop_reason"])
-                .unwrap_or_else(|| "end_turn".into()),
+            stop_reason: field(value, &["stopReason", "stop_reason"])
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
             usage: field(value, &["usage"])
                 .map(AcpUsage::from_value)
                 .unwrap_or_default(),
@@ -1016,16 +1035,27 @@ impl AcpPromptResult {
     }
 
     /// Whether the turn ended normally.
+    ///
+    /// Only `end_turn` is a normal completion. `max_tokens` and
+    /// `max_turn_requests` ended the turn early and are reported separately so
+    /// the UI never shows a truncated reply as a completed one.
     pub fn completed(&self) -> bool {
-        matches!(
-            self.stop_reason.as_str(),
-            "end_turn" | "max_tokens" | "max_turn_requests"
-        )
+        self.stop_reason == "end_turn"
     }
 
     /// Whether the user cancelled the turn.
     pub fn cancelled(&self) -> bool {
         self.stop_reason == "cancelled"
+    }
+
+    /// Whether the reply hit the output token limit.
+    pub fn token_limited(&self) -> bool {
+        self.stop_reason == "max_tokens"
+    }
+
+    /// Whether the turn hit its request limit.
+    pub fn turn_limited(&self) -> bool {
+        self.stop_reason == "max_turn_requests"
     }
 }
 
@@ -1311,6 +1341,46 @@ mod tests {
         let link = PromptContent::resource_link("file:///a.bin", "a.bin", None, Some(3)).to_json();
         assert_eq!(link["type"], "resource_link");
         assert_eq!(link["size"], 3);
+    }
+
+    #[test]
+    fn only_end_turn_is_a_normal_completion() {
+        let end = AcpPromptResult::from_value(&json!({"stopReason": "end_turn"}));
+        assert!(end.completed());
+        assert!(!end.token_limited());
+        assert!(!end.turn_limited());
+
+        let tokens = AcpPromptResult::from_value(&json!({"stopReason": "max_tokens"}));
+        assert!(!tokens.completed());
+        assert!(tokens.token_limited());
+
+        let requests = AcpPromptResult::from_value(&json!({"stopReason": "max_turn_requests"}));
+        assert!(!requests.completed());
+        assert!(requests.turn_limited());
+
+        let refused = AcpPromptResult::from_value(&json!({"stopReason": "refusal"}));
+        assert!(!refused.completed());
+        assert!(!refused.cancelled());
+        assert!(!refused.token_limited());
+    }
+
+    #[test]
+    fn a_missing_or_non_string_stop_reason_is_not_a_completion() {
+        for result in [
+            json!({}),
+            json!({"stopReason": 3}),
+            json!({"stopReason": null}),
+        ] {
+            let parsed = AcpPromptResult::from_value(&result);
+            assert_eq!(parsed.stop_reason, "", "{result}");
+            assert!(
+                !parsed.completed(),
+                "a turn without a stop reason must not count as completed: {result}"
+            );
+            assert!(!parsed.cancelled());
+            assert!(!parsed.token_limited());
+            assert!(!parsed.turn_limited());
+        }
     }
 
     #[test]

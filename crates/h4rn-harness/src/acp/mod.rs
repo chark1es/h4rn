@@ -22,7 +22,7 @@ mod client;
 mod process;
 mod protocol;
 
-pub use client::{AcpClient, AcpClientConfig, AcpError, AcpEvent};
+pub use client::{AcpClient, AcpClientConfig, AcpError, AcpEvent, PendingPrompt};
 pub use protocol::{
     ACP_PROTOCOL_VERSION, AcpAuthMethod, AcpCommand, AcpContentChunk, AcpDiff, AcpLocation,
     AcpMcpServer, AcpMode, AcpModel, AcpPermissionOption, AcpPermissionRequest, AcpPromptResult,

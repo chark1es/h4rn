@@ -116,6 +116,62 @@ fn parse_block(block: &str) -> Option<SseEvent> {
     Some(event)
 }
 
+/// Decodes streamed bytes without turning a split UTF-8 sequence into U+FFFD.
+///
+/// SSE chunks end at arbitrary byte boundaries; an incomplete trailing sequence
+/// is carried into the next chunk, while genuinely invalid bytes decode lossily.
+#[derive(Default)]
+struct Utf8Stream {
+    pending: Vec<u8>,
+}
+
+impl Utf8Stream {
+    fn push(&mut self, bytes: &[u8]) -> String {
+        // Only the incomplete suffix of the previous chunk is carried over, so
+        // walking a chunk of invalid bytes never shifts the whole buffer.
+        self.pending.extend_from_slice(bytes);
+        let mut text = String::with_capacity(self.pending.len());
+        let mut cursor = 0;
+        loop {
+            match std::str::from_utf8(&self.pending[cursor..]) {
+                Ok(complete) => {
+                    text.push_str(complete);
+                    cursor = self.pending.len();
+                    break;
+                }
+                Err(error) => {
+                    let valid = error.valid_up_to();
+                    if let Ok(prefix) = std::str::from_utf8(&self.pending[cursor..cursor + valid]) {
+                        text.push_str(prefix);
+                    }
+                    cursor += valid;
+                    match error.error_len() {
+                        Some(len) => {
+                            text.push(char::REPLACEMENT_CHARACTER);
+                            cursor += len;
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+        // Keep only the bytes that could start a sequence continued by the
+        // next chunk.
+        self.pending.drain(..cursor);
+        text
+    }
+
+    /// Flushes the end of a stream: leftover partial bytes become one U+FFFD
+    /// instead of being dropped silently.
+    fn finish(&mut self) -> String {
+        if self.pending.is_empty() {
+            return String::new();
+        }
+        self.pending.clear();
+        String::from(char::REPLACEMENT_CHARACTER)
+    }
+}
+
 /// A streamable-HTTP connection.
 pub struct StreamableHttpUpstream {
     name: String,
@@ -528,6 +584,34 @@ pub async fn connect_legacy_sse(
     discover(upstream, limits).await
 }
 
+/// Decodes one chunk of a legacy SSE byte stream into complete events.
+///
+/// The stream loop below calls this, so the UTF-8 decoder is on the path a
+/// reader actually takes: a character split between two chunks is decoded once
+/// (not two replacement characters) and an event split between two chunks is
+/// joined before it is dispatched. An unfinished event stays buffered.
+#[derive(Default)]
+struct SseChunks {
+    utf8: Utf8Stream,
+    decoder: SseDecoder,
+}
+
+impl SseChunks {
+    /// Decodes a chunk and returns the events it completed.
+    fn push(&mut self, chunk: &[u8]) -> Vec<SseEvent> {
+        let text = self.utf8.push(chunk);
+        self.decoder.push(&text)
+    }
+
+    /// Finishes the stream. A truncated trailing character becomes one
+    /// replacement character; an event without its terminating blank line is
+    /// not dispatched, just as it never was on a live stream.
+    fn finish(&mut self) -> Vec<SseEvent> {
+        let text = self.utf8.finish();
+        self.decoder.push(&text)
+    }
+}
+
 async fn read_sse_stream(
     response: reqwest::Response,
     pending: Pending,
@@ -537,20 +621,25 @@ async fn read_sse_stream(
     endpoint_tx: oneshot::Sender<Result<String, UpstreamError>>,
 ) {
     let mut endpoint_tx = Some(endpoint_tx);
-    let mut decoder = SseDecoder::default();
+    let mut chunks = SseChunks::default();
     let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = match chunk {
-            Ok(chunk) => chunk,
-            Err(error) => {
+    let mut finished = false;
+    loop {
+        let complete = match stream.next().await {
+            Some(Ok(chunk)) => chunks.push(&chunk),
+            Some(Err(error)) => {
                 if let Some(sender) = endpoint_tx.take() {
                     let _ = sender.send(Err(UpstreamError::Transport(error.to_string())));
                 }
                 break;
             }
+            None if !finished => {
+                finished = true;
+                chunks.finish()
+            }
+            None => break,
         };
-        let text = String::from_utf8_lossy(&chunk);
-        for event in decoder.push(&text) {
+        for event in complete {
             match event.event.as_deref() {
                 Some("endpoint") | None if endpoint_tx.is_some() => {
                     if let Some(sender) = endpoint_tx.take() {
@@ -647,6 +736,55 @@ mod tests {
                 data: "/message".into(),
             }]
         );
+    }
+
+    #[test]
+    fn sse_data_survives_a_utf8_character_split_across_chunks() {
+        let text = "event: message\ndata: {\"text\":\"🚀日本\"}\n\n";
+        let bytes = text.as_bytes();
+        for split in 0..=bytes.len() {
+            let mut stream = Utf8Stream::default();
+            let mut decoder = SseDecoder::default();
+            let mut events = decoder.push(&stream.push(&bytes[..split]));
+            events.extend(decoder.push(&stream.push(&bytes[split..])));
+            assert_eq!(events.len(), 1, "split at byte {split}");
+            assert_eq!(
+                events[0].data, "{\"text\":\"🚀日本\"}",
+                "split at byte {split}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_reader_loop_decodes_a_character_split_across_chunks() {
+        // Drive the reader's own chunks -> events step: reverting the loop to
+        // per-chunk lossy decoding would leave two replacement characters here.
+        let text = "event: message\ndata: {\"text\":\"🚀日本\"}\n\n";
+        let bytes = text.as_bytes();
+        let split = text.find('🚀').expect("the emoji") + 1;
+        let mut chunks = SseChunks::default();
+        let mut events = chunks.push(&bytes[..split]);
+        events.extend(chunks.push(&bytes[split..]));
+        assert_eq!(events.len(), 1, "one event across the split");
+        assert_eq!(events[0].data, "{\"text\":\"🚀日本\"}");
+    }
+
+    #[test]
+    fn utf8_stream_stays_linear_on_a_chunk_of_invalid_bytes() {
+        let mut stream = Utf8Stream::default();
+        let garbage = vec![0xFFu8; 512 * 1024];
+        let text = stream.push(&garbage);
+        assert_eq!(text.chars().count(), garbage.len());
+        assert!(text.chars().all(|ch| ch == char::REPLACEMENT_CHARACTER));
+        assert_eq!(stream.finish(), "", "nothing was left incomplete");
+    }
+
+    #[test]
+    fn utf8_stream_finishes_a_truncated_character() {
+        let mut stream = Utf8Stream::default();
+        assert_eq!(stream.push(b"ok\xE2\x82"), "ok");
+        assert_eq!(stream.finish(), "\u{FFFD}");
+        assert_eq!(stream.finish(), "", "finish is idempotent");
     }
 
     #[test]

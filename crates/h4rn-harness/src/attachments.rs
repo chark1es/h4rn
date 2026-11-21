@@ -112,6 +112,49 @@ pub fn path_line(attachment: &AttachmentRef) -> String {
     )
 }
 
+/// Reads a text attachment, decoding UTF-8 (with or without a BOM) and
+/// UTF-16LE/UTF-16BE with a byte-order mark.
+///
+/// Returns `None` when the bytes are not valid text in a supported encoding so
+/// the caller can keep delivering the file by path instead of inlining it. A
+/// UTF-8 BOM is stripped; it is an encoding marker, not content.
+pub fn read_text(path: &Path) -> Option<String> {
+    decode_text(&std::fs::read(path).ok()?)
+}
+
+fn decode_text(bytes: &[u8]) -> Option<String> {
+    // UTF-32LE starts with the UTF-16LE BOM bytes followed by two NULs, and
+    // would otherwise decode as NUL-filled text. Neither UTF-32 order is
+    // inlineable, so the file stays a link.
+    if bytes.starts_with(&[0x00, 0x00, 0xFE, 0xFF]) || bytes.starts_with(&[0xFF, 0xFE, 0x00, 0x00])
+    {
+        return None;
+    }
+    let text = if let Some(body) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        std::str::from_utf8(body).ok().map(str::to_owned)
+    } else if let Some(body) = bytes.strip_prefix(&[0xFF, 0xFE]) {
+        decode_utf16(body, u16::from_le_bytes)
+    } else if let Some(body) = bytes.strip_prefix(&[0xFE, 0xFF]) {
+        decode_utf16(body, u16::from_be_bytes)
+    } else {
+        std::str::from_utf8(bytes).ok().map(str::to_owned)
+    }?;
+    // A NUL means the bytes were not the text they appeared to be (for
+    // example a binary file that happens to decode). Keep it a link.
+    (!text.contains('\0')).then_some(text)
+}
+
+fn decode_utf16(bytes: &[u8], decode: fn([u8; 2]) -> u16) -> Option<String> {
+    if bytes.len() % 2 != 0 {
+        return None;
+    }
+    let units = bytes
+        .chunks_exact(2)
+        .map(|pair| decode([pair[0], pair[1]]))
+        .collect::<Vec<_>>();
+    String::from_utf16(&units).ok()
+}
+
 fn media_type_from_path(path: &Path) -> &'static str {
     let extension = path
         .extension()
@@ -200,6 +243,71 @@ mod tests {
             AttachmentClass::of("", Path::new("/tmp/a.bin")),
             AttachmentClass::Other
         );
+    }
+
+    #[test]
+    fn text_attachments_decode_utf8_and_both_utf16_byte_orders() {
+        let utf8 = "Aim: 🚀\n".as_bytes();
+        assert_eq!(decode_text(utf8).as_deref(), Some("Aim: 🚀\n"));
+
+        let mut utf8_bom = vec![0xEF, 0xBB, 0xBF];
+        utf8_bom.extend_from_slice(utf8);
+        assert_eq!(decode_text(&utf8_bom).as_deref(), Some("Aim: 🚀\n"));
+
+        let text = "日本語 notes\n";
+        let mut utf16_le = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            utf16_le.extend_from_slice(&unit.to_le_bytes());
+        }
+        assert_eq!(decode_text(&utf16_le).as_deref(), Some(text));
+
+        let mut utf16_be = vec![0xFE, 0xFF];
+        for unit in text.encode_utf16() {
+            utf16_be.extend_from_slice(&unit.to_be_bytes());
+        }
+        assert_eq!(decode_text(&utf16_be).as_deref(), Some(text));
+    }
+
+    #[test]
+    fn binary_attachments_stay_unreadable() {
+        assert_eq!(decode_text(&[0xFF, 0x00, 0xFE, 0x01]), None);
+        assert_eq!(decode_text(&[0xFF, 0xFE, 0x41]), None);
+        assert_eq!(decode_text(&[0x89, b'P', b'N', b'G']), None);
+    }
+
+    #[test]
+    fn utf32_files_are_links_not_nul_filled_text() {
+        // UTF-32LE starts with the UTF-16LE BOM followed by two NULs.
+        let mut utf32_le = vec![0xFF, 0xFE, 0x00, 0x00];
+        for ch in "notes\n".chars() {
+            utf32_le.extend_from_slice(&(ch as u32).to_le_bytes());
+        }
+        assert_eq!(decode_text(&utf32_le), None);
+
+        let mut utf32_be = vec![0x00, 0x00, 0xFE, 0xFF];
+        for ch in "notes\n".chars() {
+            utf32_be.extend_from_slice(&(ch as u32).to_be_bytes());
+        }
+        assert_eq!(decode_text(&utf32_be), None);
+    }
+
+    #[test]
+    fn decoded_text_with_a_nul_is_not_inlined() {
+        // UTF-16LE "A\0" decodes cleanly but is not text worth embedding.
+        assert_eq!(decode_text(&[0xFF, 0xFE, 0x41, 0x00, 0x00, 0x00]), None);
+        assert_eq!(decode_text(b"a\0b"), None);
+    }
+
+    #[test]
+    fn read_text_uses_the_file_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("notes.txt");
+        let mut encoded = vec![0xFF, 0xFE];
+        for unit in "héllo".encode_utf16() {
+            encoded.extend_from_slice(&unit.to_le_bytes());
+        }
+        std::fs::write(&path, encoded).expect("write");
+        assert_eq!(read_text(&path).as_deref(), Some("héllo"));
     }
 
     #[test]
