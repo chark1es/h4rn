@@ -14,6 +14,7 @@ import {
   clearWorktrees,
   dismissWorktreeOutcome,
   forceCanFix,
+  forceRemoveDescription,
   inUseWorktrees,
   loadWorktrees,
   removeDescription,
@@ -307,7 +308,7 @@ export function WorktreeSettings() {
       <ConfirmDialog
         open={forcing !== null}
         title={`Remove ${forceCount} ${forceCount === 1 ? "worktree" : "worktrees"} anyway?`}
-        description={`Uncommitted changes and unmerged commits in these worktrees are lost. Any checkout now at these paths is deleted. This can't be undone.${threadNote}`}
+        description={forceRemoveDescription(threadNote)}
         confirmLabel="Remove anyway"
         onOpenChange={(open) => {
           if (!open) setForcing(null);

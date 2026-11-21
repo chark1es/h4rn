@@ -157,7 +157,10 @@ parent's own turns.
 
 `spawn_subagent` validates the task, harness, budget and isolation before it
 creates anything. A worktree spawn on a non-repository workspace fails with a
-hint instead of silently running shared.
+hint instead of silently running shared. The repository probes (is the
+workspace a repository, which repository is it) and `git worktree add` all
+shell out and block, so a worktree spawn runs them on a blocking thread
+(`spawn_blocking`), never on the async runtime.
 
 ## Tracking and clearing worktrees
 
@@ -271,7 +274,9 @@ registration is prunable when its checkout path is not a real directory,
 checked without following symlinks (a symlink there is not a live checkout,
 whatever it points at). Whether the repository is bare is decided by asking
 git (`git --git-dir=<common> rev-parse --is-bare-repository`, bounded), never by
-the common dir's name. For a bare repository the main registration is
+the common dir's name. The answer is cached next to the common dir (once per
+clear, once per listing) and reused by the repository lookup and by the
+fallback for that common dir, so several snapshots ask once. For a bare repository the main registration is
 `<common>` itself with an unknown `HEAD`, marked bare, exactly as `-z` lists it
 (`bare`, no branch). For a non-bare repository whose common dir is named `.git`
 the main worktree is its parent. A non-bare repository whose common dir has
@@ -299,7 +304,13 @@ and the snapshot is incomplete when any admin entry's `gitdir` is unreadable,
 empty or not a regular file, or when the checkout its `gitdir` names is not
 one of the returned registrations. The returned paths are indexed once, and the
 deadline is checked for every admin entry while matching too: running out of
-time marks the snapshot incomplete. The common dir the cross-check (and the
+time marks the snapshot incomplete. The same enumeration (in either form) builds
+the snapshot's mapping from each normalised checkout path to its admin dir,
+with the deadline checked for every entry; the snapshot carries it, and
+clearing's operation-in-progress and staged-changes checks look the admin dir
+up there rather than walking `<common>/worktrees` again. A timeout while
+enumerating is recorded as such, so the checks that need the mapping report the
+timeout rather than guess. The common dir the cross-check (and the
 fallback) reads is resolved once per repository for a whole clear, and once per
 repository for a whole listing, rather than with a `rev-parse
 --git-common-dir` for every snapshot. An incomplete snapshot never proves that
@@ -528,10 +539,33 @@ selection does no filesystem work at all.
   and `AUTO_MERGE`, by presence only and without following symlinks. A paused
   `git rebase -i --autostash` keeps its autostash there, and the checkout looks
   clean while the rebase is paused, so removing the registration would throw
-  that work away. An admin dir that cannot be found or read is skipped with the
-  same reason. The check runs in preflight and again in prepare and the final
-  verification immediately before removal; a forced clear removes the checkout
-  and its admin dir, operation state included.
+  that work away. The admin dir comes from the mapping the registration
+  snapshot carries (built while taking it, deadline-bounded; see above), not
+  from another walk of `<common>/worktrees`. A registration the snapshot lists
+  but whose admin dir the (complete) mapping does not hold is skipped as
+  `the registration could no longer be located` (forceable). A timeout while
+  enumerating the admin entries is skipped with the timeout reason,
+  `git timed out after 30s`, which stays blocked like every timeout (force does
+  not help). Any other failure to read the admin entries, or an admin dir that
+  cannot be read, is skipped as `has a git operation in progress`. The check
+  runs in preflight and again in prepare and the final verification
+  immediately before removal; a forced clear removes the checkout and its admin
+  dir, operation state included.
+- Without `force`, a checkout whose directory is already gone is skipped as
+  `has staged changes` (forceable) when its registration's index holds staged
+  work. Git skips its own cleanliness check for a missing checkout and deletes
+  the admin dir, index included, so `git --git-dir=<admin dir> diff-index
+  --cached --quiet <tree-ish> --` (bounded, trace variables stripped) compares
+  the index with the registration's `HEAD`: its detached commit, or its
+  branch's current tip (`refs/heads/<b>`). Exit 0 is clean and exit 1 is
+  staged work. Unknown is never clean: an unknown `HEAD`, an unborn branch, an
+  index that is not a regular file or cannot be checked, or any other git
+  failure is skipped with the same reason (a timeout keeps its own blocked
+  reason). A missing `index` file is clean, since nothing is staged. The admin
+  dir comes from the snapshot's mapping, as for the operation check. This runs
+  in preflight and again in prepare and the final verification before the
+  registration is removed; a forced clear removes the registration, index
+  included. A missing checkout with nothing staged clears as before.
 - A worktree git reports as locked is skipped as `is locked; unlock it first`
   (not forceable); the checkout and its registration stay until it is unlocked.
   The same wording applies when the checkout's directory is already gone but

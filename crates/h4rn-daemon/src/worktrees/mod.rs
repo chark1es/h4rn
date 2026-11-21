@@ -1046,18 +1046,23 @@ fn is_busy(tab: ThreadTab, agent_state: AgentState, turn_in_flight: bool) -> boo
 /// a child whose parent workspace is a removed subagent worktree only knows its
 /// repository from the record written at spawn. Then the parent thread's
 /// workspace, then git itself.
-fn subagent_repo(input: &ListInput, view: &SubagentView, path: &Path) -> Option<PathBuf> {
+fn subagent_repo(
+    input: &ListInput,
+    view: &SubagentView,
+    path: &Path,
+    commons: &git::CommonDirs,
+) -> Option<PathBuf> {
     if let Some(stored) = input.subagent_repos.get(view.subagent_id.as_str())
-        && let Some(repo) = repo_through_subagents(input, stored)
+        && let Some(repo) = repo_through_subagents(input, stored, commons)
     {
         return Some(repo);
     }
     if let Some(workspace) = input.parent_workspaces.get(view.parent_thread_id.as_str())
-        && let Some(repo) = repo_through_subagents(input, Path::new(workspace))
+        && let Some(repo) = repo_through_subagents(input, Path::new(workspace), commons)
     {
         return Some(repo);
     }
-    git::repo_of(path)
+    git::repo_of_with(path, commons)
 }
 
 /// The repository at `path`, following h4rn's own subagent worktrees.
@@ -1065,15 +1070,19 @@ fn subagent_repo(input: &ListInput, view: &SubagentView, path: &Path) -> Option<
 /// A nested child's parent workspace is `<data_dir>/subagents/<id>/worktree`,
 /// which is deleted when that subagent settles. Its recorded repository is the
 /// only reliable answer then, so follow it, bounded against a stale loop.
-fn repo_through_subagents(input: &ListInput, path: &Path) -> Option<PathBuf> {
+fn repo_through_subagents(
+    input: &ListInput,
+    path: &Path,
+    commons: &git::CommonDirs,
+) -> Option<PathBuf> {
     let mut path = git::norm(path);
     for _ in 0..MAX_REPO_HOPS {
         match subagent_worktree_owner(&path, &input.subagents_root) {
             Some(id) => match input.subagent_repos.get(&id) {
                 Some(stored) => path = git::norm(stored),
-                None => return git::repo_of(&path),
+                None => return git::repo_of_with(&path, commons),
             },
-            None => return git::repo_of(&path),
+            None => return git::repo_of_with(&path, commons),
         }
     }
     None
@@ -1133,7 +1142,7 @@ fn registration_exists(
         .entry(repo.to_path_buf())
         .or_insert_with(|| {
             let common = commons.get(repo, git::OBSERVATION_GIT_TIMEOUT).ok()?;
-            git::registrations_in(repo, &common, git::OBSERVATION_GIT_TIMEOUT).ok()
+            git::registrations_in(repo, &common, git::OBSERVATION_GIT_TIMEOUT, commons).ok()
         })
         .as_ref()
         .and_then(|snapshot| {
@@ -1196,7 +1205,8 @@ pub(crate) fn compute_listing(
     // and then only once per repository.
     let mut registration_lists: HashMap<PathBuf, Option<git::RegistrationSnapshot>> =
         HashMap::new();
-    // Each repository's common dir is resolved once for the whole listing.
+    // Each repository's common dir (and whether it is bare) is resolved once
+    // for the whole listing.
     let commons = git::CommonDirs::default();
 
     // 1. Worktrees h4rn made for isolated subagents.
@@ -1208,7 +1218,7 @@ pub(crate) fn compute_listing(
         // the parent keeps a data directory reached through a symlink
         // clearable, matching how git records registration paths.
         let path = git::norm_listed(Path::new(&view.workspace_path));
-        let repo = subagent_repo(input, view, &path);
+        let repo = subagent_repo(input, view, &path, &commons);
         // The protocol carries paths as strings, so a path that cannot
         // round-trip through UTF-8 is never listed.
         if path.to_str().is_none() || repo.as_ref().is_some_and(|repo| repo.to_str().is_none()) {
@@ -1316,7 +1326,7 @@ pub(crate) fn compute_listing(
         if path.starts_with(&input.subagents_root) || index.contains_key(&path) {
             continue;
         }
-        let Some(repo) = git::repo_of(&path) else {
+        let Some(repo) = git::repo_of_with(&path, &commons) else {
             continue;
         };
         if path.to_str().is_none() || repo.to_str().is_none() {
@@ -1514,14 +1524,74 @@ const CLEAR_GIT_TIMEOUT: Duration = Duration::from_secs(30);
 const INCOMPLETE_SNAPSHOT: &str = "could not read every worktree registration";
 
 /// The common dir of `repo` (resolved once per clear through `commons`) and a
-/// fresh registration snapshot taken with it.
+/// fresh registration snapshot taken with it, carrying the checkout→admin dir
+/// mapping read in the same pass.
 fn snapshot(
     repo: &Path,
     commons: &git::CommonDirs,
 ) -> Result<(PathBuf, git::RegistrationSnapshot), String> {
     let common = commons.get(repo, CLEAR_GIT_TIMEOUT)?;
-    let registrations = git::registrations_in(repo, &common, CLEAR_GIT_TIMEOUT)?;
+    let registrations = git::registrations_in(repo, &common, CLEAR_GIT_TIMEOUT, commons)?;
     Ok((common, registrations))
+}
+
+/// The reason for a listed registration whose admin dir the snapshot's
+/// mapping does not hold (forceable).
+const REGISTRATION_LOST: &str = "the registration could no longer be located";
+
+/// The reason for a missing checkout whose registration's index differs from
+/// its `HEAD` (forceable).
+const STAGED_CHANGES: &str = "has staged changes";
+
+/// The admin dirs of the registration at `path`, from the mapping `snapshot`
+/// carries (never a fresh walk of `<common>/worktrees`).
+///
+/// A complete mapping without the path is [`REGISTRATION_LOST`]; a timed-out
+/// enumeration is its `git timed out after Ns` reason (blocked, like every
+/// timeout); any other read failure is `unreadable`, the caller's own
+/// forceable reason.
+fn own_admin_dirs<'a>(
+    snapshot: &'a git::RegistrationSnapshot,
+    path: &Path,
+    unreadable: &str,
+) -> Result<&'a [PathBuf], String> {
+    snapshot.admin_dirs(path).map_err(|lookup| match lookup {
+        git::AdminLookup::NotFound => REGISTRATION_LOST.to_owned(),
+        git::AdminLookup::TimedOut(message) => message,
+        git::AdminLookup::Unreadable => unreadable.to_owned(),
+    })
+}
+
+/// Refuses a missing checkout whose registration's index holds staged work.
+/// Blocking.
+///
+/// With the checkout directory gone, git skips its cleanliness check and
+/// deletes the admin dir, index included, so the index is compared with the
+/// registration's `HEAD` first (see [`git::index_matches`]): its detached
+/// commit, or its branch's current tip. Anything that differs, and anything
+/// unknown (an unknown `HEAD`, an unborn branch, an index that cannot be
+/// read, any git failure), is [`STAGED_CHANGES`]; a timeout is its own
+/// (blocked) reason. A missing `index` file is clean: nothing is staged.
+fn verify_nothing_staged(
+    snapshot: &git::RegistrationSnapshot,
+    path: &Path,
+    registration: &git::Registration,
+) -> Result<(), String> {
+    let admins = own_admin_dirs(snapshot, path, STAGED_CHANGES)?;
+    let treeish = match &registration.head {
+        git::Head::Detached(sha) => sha.clone(),
+        git::Head::Branch(branch) => format!("refs/heads/{branch}"),
+        git::Head::Unknown => return Err(STAGED_CHANGES.into()),
+    };
+    for admin in admins {
+        match git::index_matches(admin, &treeish, CLEAR_GIT_TIMEOUT) {
+            Ok(true) => {}
+            Ok(false) => return Err(STAGED_CHANGES.into()),
+            Err(error) if git::timed_out(&error) => return Err(error),
+            Err(_) => return Err(STAGED_CHANGES.into()),
+        }
+    }
+    Ok(())
 }
 
 /// The reason for a checkout whose registration has a git operation in
@@ -1546,17 +1616,15 @@ const OPERATION_STATE: [&str; 8] = [
 /// shows a git operation in progress. Blocking.
 ///
 /// The admin dir is `<common>/worktrees/<id>` whose `gitdir` names `path`
-/// (the main worktree is refused long before this). State is checked by
-/// presence only, never following a symlink: whatever is there means the
-/// operation is unfinished, and removing the registration would throw away
-/// its state (a rebase's autostash, say). An admin dir that cannot be found
-/// or read is refused with the same (forceable) reason.
-fn verify_no_operation(common: &Path, path: &Path) -> Result<(), String> {
-    let admins = git::admin_dirs_for(common, path, CLEAR_GIT_TIMEOUT)
-        .map_err(|_| OPERATION_IN_PROGRESS.to_owned())?;
-    if admins.is_empty() {
-        return Err(OPERATION_IN_PROGRESS.into());
-    }
+/// (the main worktree is refused long before this), looked up in the mapping
+/// `snapshot` carries (see [`own_admin_dirs`]): a registration the mapping no
+/// longer holds is [`REGISTRATION_LOST`], a timed-out enumeration its timeout
+/// reason. State is checked by presence only, never following a symlink:
+/// whatever is there means the operation is unfinished, and removing the
+/// registration would throw away its state (a rebase's autostash, say). An
+/// admin dir that cannot be read is refused with the same (forceable) reason.
+fn verify_no_operation(snapshot: &git::RegistrationSnapshot, path: &Path) -> Result<(), String> {
+    let admins = own_admin_dirs(snapshot, path, OPERATION_IN_PROGRESS)?;
     for admin in admins {
         if !admin.symlink_metadata().is_ok_and(|meta| meta.is_dir()) {
             return Err(OPERATION_IN_PROGRESS.into());
@@ -2090,8 +2158,9 @@ const HIDDEN_FILES: &str = "has files hidden from git status";
 /// unreachable detached work and no file git hides from `status`
 /// (assume-unchanged or skip-worktree). For a missing checkout, a partial
 /// snapshot without its registration is refused (see [`own_registration`]);
-/// without force, its own registration's `HEAD` must be known, and a detached
-/// one reachable from some ref.
+/// without force, its own registration's `HEAD` must be known, a detached one
+/// reachable from some ref, and its index must hold nothing staged (see
+/// [`verify_nothing_staged`]).
 ///
 /// Without force, a registered checkout (existing or missing) must have no git
 /// operation in progress in its own admin dir (see [`verify_no_operation`]).
@@ -2120,7 +2189,7 @@ fn verify_current(
             ));
         }
         if !force {
-            verify_no_operation(common, &path)?;
+            verify_no_operation(snapshot, &path)?;
             verify_checkout(&path, &repo, entry.branch.as_deref())?;
             // An edit to an assume-unchanged or skip-worktree file never shows
             // in `git status`, so neither our dirty check nor git's removal
@@ -2135,11 +2204,13 @@ fn verify_current(
     } else if let Some(registration) = own_registration(snapshot, &path)?
         && !force
     {
-        verify_no_operation(common, &path)?;
+        verify_no_operation(snapshot, &path)?;
         // Only the registration is left. Its HEAD may hold a commit that no
         // branch, remote-tracking branch or tag reaches; deleting the
         // registration would lose the only name for that work.
         verify_missing_registration(&repo, registration)?;
+        // Removing it also deletes its index: staged work there is lost.
+        verify_nothing_staged(snapshot, &path, registration)?;
     }
     Ok(())
 }
@@ -2241,7 +2312,7 @@ fn preflight(
     let exists = checkout_at(&path)?;
     // One snapshot answers the exact-registration check, the nested-worktree
     // check and the missing checkout's own registration.
-    let (common, registrations) = snapshot(&repo, commons)?;
+    let (_, registrations) = snapshot(&repo, commons)?;
     // Git would happily remove a checkout that holds another worktree, leaving
     // the nested registration pointing into a directory that no longer exists.
     // That checkout is never removed, with or without force. Only an existing
@@ -2259,7 +2330,7 @@ fn preflight(
         // state (a rebase's autostash, say) in the registration's admin dir;
         // removing the registration would throw it away.
         if exists || exact_registration(&registrations, &path).is_some() {
-            verify_no_operation(&common, &path)?;
+            verify_no_operation(&registrations, &path)?;
         }
         // The listing is only a snapshot: a turn may have written since. Ask
         // git again here, and never read "could not ask" as clean.
@@ -2286,6 +2357,9 @@ fn preflight(
             // branch, remote-tracking branch or tag reaches; deleting the
             // registration would lose the only name for that work.
             verify_missing_registration(&repo, registration)?;
+            // Git skips its cleanliness check for a missing checkout and
+            // deletes the admin dir, index included.
+            verify_nothing_staged(&registrations, &path, registration)?;
         }
         if entry.owned
             && let Some(name) = &entry.branch

@@ -5179,3 +5179,199 @@ fn a_clear_resolves_the_common_dir_once() {
     let lookups = std::fs::read_to_string(&log).unwrap_or_default();
     assert_eq!(lookups.lines().count(), 1, "one rev-parse --git-common-dir");
 }
+
+/// The admin dir of the linked checkout at `checkout`.
+fn admin_dir_of(checkout: &Path) -> PathBuf {
+    PathBuf::from(git::run(checkout, ["rev-parse", "--absolute-git-dir"]).expect("admin dir"))
+}
+
+#[test]
+fn staged_work_in_a_moved_checkouts_index_keeps_its_registration() {
+    for detached in [false, true] {
+        let fixture = Fixture::new();
+        let branch = if detached {
+            "staged-detached"
+        } else {
+            "staged"
+        };
+        let linked = fixture.add_worktree(&format!("wt-{branch}"), branch);
+        if detached {
+            run(&linked, &["checkout", "-q", "--detach"]);
+        }
+        let admin = admin_dir_of(&linked);
+        // A new version of a tracked file, staged and never committed.
+        std::fs::write(linked.join("README.md"), "# staged only\n").expect("edit");
+        run(&linked, &["add", "README.md"]);
+        // The checkout is moved aside: git skips its cleanliness check for a
+        // missing directory and would delete the admin dir, index included.
+        let aside = fixture.root.path().join(format!("aside-{branch}"));
+        std::fs::rename(&linked, &aside).expect("move the checkout aside");
+        let target = entry(&linked, &fixture.repo, (!detached).then_some(branch), false);
+        let data = fixture.data_dir();
+
+        let outcome = clear_one(&target, false, &data);
+        assert_eq!(
+            outcome.err().as_deref(),
+            Some("has staged changes"),
+            "detached={detached}"
+        );
+        assert!(admin.is_dir(), "detached={detached}: the admin dir is kept");
+        assert!(
+            admin.join("index").is_file(),
+            "detached={detached}: the index with the staged work is kept"
+        );
+
+        let forced = clear_one(&target, true, &data);
+        assert!(
+            matches!(forced, Ok(ClearOne::Removed)),
+            "detached={detached}: {forced:?}"
+        );
+        assert!(!admin.exists(), "detached={detached}: registration removed");
+    }
+}
+
+#[test]
+fn a_missing_checkout_with_nothing_staged_still_clears() {
+    for without_index in [false, true] {
+        let fixture = Fixture::new();
+        let branch = if without_index {
+            "no-index"
+        } else {
+            "clean-index"
+        };
+        let linked = fixture.add_worktree(&format!("wt-{branch}"), branch);
+        let admin = admin_dir_of(&linked);
+        std::fs::remove_dir_all(&linked).expect("remove the checkout");
+        if without_index {
+            // No index at all: nothing is staged.
+            std::fs::remove_file(admin.join("index")).expect("remove the index");
+        }
+        let target = entry(&linked, &fixture.repo, Some(branch), false);
+        let outcome = clear_one(&target, false, &fixture.data_dir());
+        assert!(
+            matches!(outcome, Ok(ClearOne::Removed)),
+            "without_index={without_index}: {outcome:?}"
+        );
+        assert!(!admin.exists(), "without_index={without_index}");
+    }
+}
+
+#[test]
+fn a_missing_checkout_on_an_unborn_branch_is_not_read_as_clean() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-unborn", "unborn-base");
+    let admin = admin_dir_of(&linked);
+    std::fs::remove_dir_all(&linked).expect("remove the checkout");
+    // The registration's branch has no commit: its index cannot be compared.
+    std::fs::write(admin.join("HEAD"), "ref: refs/heads/never-born\n").expect("HEAD");
+    let target = entry(&linked, &fixture.repo, Some("never-born"), false);
+    let outcome = clear_one(&target, false, &fixture.data_dir());
+    assert_eq!(outcome.err().as_deref(), Some("has staged changes"));
+    assert!(admin.is_dir(), "the registration is kept");
+}
+
+#[test]
+fn the_operation_check_uses_the_snapshots_admin_mapping() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-mapping", "mapping");
+    let snapshot = git::registrations(&fixture.repo).expect("snapshot");
+    assert!(
+        matches!(
+            &snapshot.admins,
+            git::AdminDirs::Read { by_checkout, complete: true }
+                if by_checkout.get(&linked) == Some(&vec![admin_dir_of(&linked)])
+        ),
+        "{snapshot:?}"
+    );
+    assert_eq!(super::verify_no_operation(&snapshot, &linked), Ok(()));
+
+    let with = |admins: git::AdminDirs| {
+        let mut changed = snapshot.clone();
+        changed.admins = admins;
+        changed
+    };
+    // Listed, but no longer in a complete mapping.
+    let lost = with(git::AdminDirs::Read {
+        by_checkout: HashMap::new(),
+        complete: true,
+    });
+    assert_eq!(
+        super::verify_no_operation(&lost, &linked).err().as_deref(),
+        Some("the registration could no longer be located")
+    );
+    // Not in a mapping that could not read everything: the operation reason.
+    let partial = with(git::AdminDirs::Read {
+        by_checkout: HashMap::new(),
+        complete: false,
+    });
+    assert_eq!(
+        super::verify_no_operation(&partial, &linked)
+            .err()
+            .as_deref(),
+        Some("has a git operation in progress")
+    );
+    assert_eq!(
+        super::verify_no_operation(&with(git::AdminDirs::Unreadable), &linked)
+            .err()
+            .as_deref(),
+        Some("has a git operation in progress")
+    );
+}
+
+#[test]
+fn a_timed_out_admin_enumeration_is_a_blocked_timeout() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-enum-timeout", "enum-timeout");
+    let commons = git::CommonDirs::default();
+    let common = commons
+        .get(&fixture.repo, Duration::from_secs(30))
+        .expect("common dir");
+    // Cached bareness means the fallback needs no git call, so a zero deadline
+    // is spent in the admin enumeration itself.
+    assert_eq!(commons.is_bare(&common, Duration::from_secs(30)), Ok(false));
+    git::FORCE_METADATA_FALLBACK.with(|forced| forced.set(true));
+    let snapshot = git::registrations_in(&fixture.repo, &common, Duration::ZERO, &commons);
+    git::FORCE_METADATA_FALLBACK.with(|forced| forced.set(false));
+    let snapshot = snapshot.expect("snapshot");
+    assert!(!snapshot.complete, "{snapshot:?}");
+    assert!(
+        matches!(&snapshot.admins, git::AdminDirs::TimedOut(_)),
+        "{snapshot:?}"
+    );
+    let reason = super::verify_no_operation(&snapshot, &linked).expect_err("refused");
+    assert!(git::timed_out(&reason), "{reason}");
+}
+
+#[test]
+fn bareness_is_asked_once_per_common_dir() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-bare-once", "h4rn/sa-bare-once");
+    let target = entry(&linked, &fixture.repo, Some("h4rn/sa-bare-once"), true);
+    let log = fixture.root.path().join("is-bare.log");
+    let counting = fake_git(
+        fixture.root.path(),
+        &format!(
+            "for arg; do [ \"$arg\" = --is-bare-repository ] && echo x >> '{}'; done",
+            log.display()
+        ),
+    );
+    git::GIT_PROGRAM.with(|slot| *slot.borrow_mut() = Some(counting));
+    // `repo_of` through one cache, twice.
+    let commons = git::CommonDirs::default();
+    let first = git::repo_of_with(&linked, &commons);
+    let second = git::repo_of_with(&linked, &commons);
+    // A whole clear under the metadata fallback: four snapshots, one answer.
+    git::FORCE_METADATA_FALLBACK.with(|forced| forced.set(true));
+    let outcome = clear_one(&target, false, &fixture.data_dir());
+    git::FORCE_METADATA_FALLBACK.with(|forced| forced.set(false));
+    git::GIT_PROGRAM.with(|slot| *slot.borrow_mut() = None);
+    assert_eq!(first, Some(fixture.repo.clone()));
+    assert_eq!(second, first);
+    assert!(matches!(outcome, Ok(ClearOne::Removed)), "{outcome:?}");
+    let asked = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(
+        asked.lines().count(),
+        2,
+        "once for the repo_of cache, once for the clear"
+    );
+}

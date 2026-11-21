@@ -666,22 +666,34 @@ impl Inner {
             SubagentIsolation::Shared => (parent.workspace_path.clone(), None, None, None),
             SubagentIsolation::Worktree => {
                 let workspace = PathBuf::from(&parent.workspace_path);
-                if !worktree::is_git_repo(&workspace) {
-                    return Err(SubagentError::Invalid(format!(
-                        "worktree isolation needs a git repository; {} is not one",
-                        parent.workspace_path
-                    )));
-                }
-                // A nested child's parent workspace may itself be a subagent
-                // worktree (a linked worktree). Record the repository's main
-                // worktree so the branch can be found after that directory is
-                // removed. The worktree is still created from the parent's
-                // workspace so the child branches from the parent's HEAD.
-                let repo =
-                    crate::worktrees::git::repo_of(&workspace).unwrap_or_else(|| workspace.clone());
                 let branch = format!("h4rn/sa-{}", short_id(subagent_id.as_str()));
                 let dest = worktree::worktree_path(&self.data_dir, subagent_id.as_str());
-                worktree::create(&workspace, &dest, &branch).map_err(SubagentError::Internal)?;
+                // Every probe and `git worktree add` shells out and blocks, so
+                // they run off the async runtime.
+                let workspace_text = parent.workspace_path.clone();
+                let (create_branch, create_dest) = (branch.clone(), dest.clone());
+                let repo = tokio::task::spawn_blocking(move || {
+                    if !worktree::is_git_repo(&workspace) {
+                        return Err(SubagentError::Invalid(format!(
+                            "worktree isolation needs a git repository; {workspace_text} is not one"
+                        )));
+                    }
+                    // A nested child's parent workspace may itself be a
+                    // subagent worktree (a linked worktree). Record the
+                    // repository's main worktree so the branch can be found
+                    // after that directory is removed. The worktree is still
+                    // created from the parent's workspace so the child
+                    // branches from the parent's HEAD.
+                    let repo = crate::worktrees::git::repo_of(&workspace)
+                        .unwrap_or_else(|| workspace.clone());
+                    worktree::create(&workspace, &create_dest, &create_branch)
+                        .map_err(SubagentError::Internal)?;
+                    Ok(repo)
+                })
+                .await
+                .map_err(|error| {
+                    SubagentError::Internal(format!("the worktree setup task failed: {error}"))
+                })??;
                 (
                     dest.display().to_string(),
                     Some(branch),

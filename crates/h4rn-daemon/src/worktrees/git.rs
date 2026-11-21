@@ -87,12 +87,73 @@ pub struct Registration {
 /// an admin entry whose `gitdir` it cannot read).
 /// A snapshot that is not complete never proves that something is absent: a
 /// missing registration may be exactly the unreadable one.
+///
+/// It also carries where each linked registration's admin dir is (see
+/// [`AdminDirs`]), read in the same pass, so a clear never walks
+/// `<common>/worktrees` again to find one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RegistrationSnapshot {
     /// Every registration that could be read, main worktree included.
     pub registrations: Vec<Registration>,
     /// Whether every registration could be read.
     pub complete: bool,
+    /// The admin dirs found while taking this snapshot.
+    pub admins: AdminDirs,
+}
+
+/// Where the admin dirs (`<common>/worktrees/<id>`) of a snapshot's linked
+/// registrations are, as the snapshot read them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AdminDirs {
+    /// Every admin dir whose `gitdir` could be read, by the checkout path it
+    /// names (normalised as registration paths are). `complete` is false when
+    /// some admin entry could not be read: a path missing from the map may be
+    /// exactly that entry's.
+    Read {
+        /// Admin dirs by checkout path.
+        by_checkout: HashMap<PathBuf, Vec<PathBuf>>,
+        /// Whether every admin entry could be read.
+        complete: bool,
+    },
+    /// The deadline passed while enumerating them; holds the
+    /// `git timed out after Ns` message.
+    TimedOut(String),
+    /// `<common>/worktrees` could not be listed.
+    Unreadable,
+}
+
+/// Why [`RegistrationSnapshot::admin_dirs`] has no answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AdminLookup {
+    /// Every admin entry was read and none names the checkout.
+    NotFound,
+    /// The enumeration ran out of time; holds the timeout message.
+    TimedOut(String),
+    /// The enumeration could not read everything, and nothing that was read
+    /// names the checkout.
+    Unreadable,
+}
+
+impl RegistrationSnapshot {
+    /// The admin dirs whose `gitdir` names `checkout` (a normalised
+    /// registration path), as this snapshot read them. Never empty when `Ok`.
+    ///
+    /// A timed-out enumeration never answers, even for a path it did read:
+    /// a second admin dir naming the same checkout may be the one it missed.
+    pub fn admin_dirs(&self, checkout: &Path) -> Result<&[PathBuf], AdminLookup> {
+        match &self.admins {
+            AdminDirs::Read {
+                by_checkout,
+                complete,
+            } => match by_checkout.get(checkout) {
+                Some(admins) if !admins.is_empty() => Ok(admins),
+                _ if *complete => Err(AdminLookup::NotFound),
+                _ => Err(AdminLookup::Unreadable),
+            },
+            AdminDirs::TimedOut(message) => Err(AdminLookup::TimedOut(message.clone())),
+            AdminDirs::Unreadable => Err(AdminLookup::Unreadable),
+        }
+    }
 }
 
 impl std::ops::Deref for RegistrationSnapshot {
@@ -530,9 +591,15 @@ fn strip_verbatim(path: PathBuf) -> PathBuf {
 /// `None`. Bounded by [`OBSERVATION_GIT_TIMEOUT`] per git call because the
 /// observation watcher calls it.
 pub(crate) fn repo_of(workspace: &Path) -> Option<PathBuf> {
+    repo_of_with(workspace, &CommonDirs::default())
+}
+
+/// [`repo_of`], asking whether the common dir is bare through `commons` (so a
+/// listing asks once per common dir).
+pub(crate) fn repo_of_with(workspace: &Path, commons: &CommonDirs) -> Option<PathBuf> {
     let common = observed_path(workspace, "--git-common-dir")?;
     let common = norm(&workspace.join(common));
-    if is_bare(&common, OBSERVATION_GIT_TIMEOUT).ok()? {
+    if commons.is_bare(&common, OBSERVATION_GIT_TIMEOUT).ok()? {
         return Some(common);
     }
     if common.file_name()? == ".git" {
@@ -613,24 +680,46 @@ pub fn common_dir(repo: &Path, limit: Duration) -> Result<PathBuf, String> {
 /// Every registration snapshot cross-checks git's answer against the admin
 /// entries under the common dir, and clearing inspects those admin entries
 /// too; resolving it with `rev-parse --git-common-dir` for every snapshot
-/// would cost one git spawn each. Only successful lookups are kept, so a
-/// timeout is retried by the next caller.
+/// would cost one git spawn each. Whether each common dir is bare (see
+/// [`is_bare`]) is kept next to it, for [`repo_of_with`] and the metadata
+/// fallback. Only successful lookups are kept, so a timeout is retried by the
+/// next caller.
 #[derive(Debug, Default)]
-pub struct CommonDirs(std::sync::Mutex<HashMap<PathBuf, PathBuf>>);
+pub struct CommonDirs(std::sync::Mutex<CommonCache>);
+
+/// What [`CommonDirs`] has learned so far.
+#[derive(Debug, Default)]
+pub struct CommonCache {
+    /// Common dir by repository.
+    dirs: HashMap<PathBuf, PathBuf>,
+    /// Bareness by common dir.
+    bare: HashMap<PathBuf, bool>,
+}
 
 impl CommonDirs {
     /// The common dir of `repo`, asking git (bounded by `limit`) only the
     /// first time.
     pub fn get(&self, repo: &Path, limit: Duration) -> Result<PathBuf, String> {
-        if let Some(common) = self.lock().get(repo) {
+        if let Some(common) = self.lock().dirs.get(repo) {
             return Ok(common.clone());
         }
         let common = common_dir(repo, limit)?;
-        self.lock().insert(repo.to_path_buf(), common.clone());
+        self.lock().dirs.insert(repo.to_path_buf(), common.clone());
         Ok(common)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, PathBuf>> {
+    /// Whether the repository whose common dir is `common` is bare (see
+    /// [`is_bare`]), asking git (bounded by `limit`) only the first time.
+    pub fn is_bare(&self, common: &Path, limit: Duration) -> Result<bool, String> {
+        if let Some(bare) = self.lock().bare.get(common) {
+            return Ok(*bare);
+        }
+        let bare = is_bare(common, limit)?;
+        self.lock().bare.insert(common.to_path_buf(), bare);
+        Ok(bare)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, CommonCache> {
         self.0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -672,16 +761,18 @@ pub fn list_worktrees(repo: &Path) -> Result<Vec<GitWorktree>, String> {
 pub fn list_worktrees_with(repo: &Path, commons: &CommonDirs) -> Result<Vec<GitWorktree>, String> {
     let main = norm(repo);
     let common = commons.get(repo, OBSERVATION_GIT_TIMEOUT)?;
-    Ok(registrations_in(repo, &common, OBSERVATION_GIT_TIMEOUT)?
-        .registrations
-        .into_iter()
-        .filter(|registration| registration.path != main)
-        .filter(|registration| registration.path.to_str().is_some())
-        .map(|registration| GitWorktree {
-            branch: registration.branch().map(str::to_owned),
-            path: registration.path,
-        })
-        .collect())
+    Ok(
+        registrations_in(repo, &common, OBSERVATION_GIT_TIMEOUT, commons)?
+            .registrations
+            .into_iter()
+            .filter(|registration| registration.path != main)
+            .filter(|registration| registration.path.to_str().is_some())
+            .map(|registration| GitWorktree {
+                branch: registration.branch().map(str::to_owned),
+                path: registration.path,
+            })
+            .collect(),
+    )
 }
 
 /// Every worktree registration of `repo`, main checkout included, resolving
@@ -689,7 +780,12 @@ pub fn list_worktrees_with(repo: &Path, commons: &CommonDirs) -> Result<Vec<GitW
 #[cfg(test)]
 pub fn registrations(repo: &Path) -> Result<RegistrationSnapshot, String> {
     let common = common_dir(repo, OBSERVATION_GIT_TIMEOUT)?;
-    registrations_in(repo, &common, OBSERVATION_GIT_TIMEOUT)
+    registrations_in(
+        repo,
+        &common,
+        OBSERVATION_GIT_TIMEOUT,
+        &CommonDirs::default(),
+    )
 }
 
 /// Whether `git worktree list --porcelain -z` works in this process.
@@ -705,37 +801,64 @@ static PORCELAIN_Z: AtomicU8 = AtomicU8::new(PORCELAIN_Z_UNKNOWN);
 /// Every worktree registration of `repo`, whose common dir is `common`.
 ///
 /// Callers that take several snapshots of one repository resolve the common
-/// dir once (see [`CommonDirs`]).
+/// dir (and its bareness) once (see [`CommonDirs`]).
 ///
 /// `-z` (git 2.36+) is used when available. An older git rejects the switch,
 /// and then git's own registration metadata is read instead (see
 /// [`metadata_registrations`]); which form works is cached for the rest
-/// of the process. Bounded by `limit` overall.
+/// of the process. Either way the admin entries are enumerated once, and the
+/// snapshot carries the checkout→admin dir mapping built from them (see
+/// [`AdminDirs`]). Bounded by `limit` overall.
 pub fn registrations_in(
     repo: &Path,
     common: &Path,
     limit: Duration,
+    commons: &CommonDirs,
 ) -> Result<RegistrationSnapshot, String> {
     let deadline = Instant::now() + limit;
     if forced_metadata_fallback() || PORCELAIN_Z.load(Ordering::Relaxed) == PORCELAIN_Z_UNSUPPORTED
     {
-        return metadata_registrations(common, deadline);
+        return metadata_registrations(common, deadline, limit, commons);
     }
     match porcelain_z(repo, limit)? {
         // Git exits 0 even when it skipped an admin entry it could not read,
         // so the answer is complete only if it represents every admin entry.
         Some(registrations) => {
             PORCELAIN_Z.store(PORCELAIN_Z_WORKS, Ordering::Relaxed);
-            let complete = represents_every_admin_entry(common, &registrations, deadline);
+            let scan = admin_entries(common, deadline);
+            let complete =
+                represents_every_admin_entry(scan.as_ref().ok(), &registrations, deadline);
             Ok(RegistrationSnapshot {
                 registrations,
                 complete,
+                admins: admin_dirs(scan, limit),
             })
         }
         None => {
             PORCELAIN_Z.store(PORCELAIN_Z_UNSUPPORTED, Ordering::Relaxed);
-            metadata_registrations(common, deadline)
+            metadata_registrations(common, deadline, limit, commons)
         }
+    }
+}
+
+/// The checkout→admin dir mapping from one enumeration of the admin entries.
+fn admin_dirs(scan: Result<AdminScan, String>, limit: Duration) -> AdminDirs {
+    let Ok(scan) = scan else {
+        return AdminDirs::Unreadable;
+    };
+    if scan.timed_out {
+        return AdminDirs::TimedOut(timeout_message(limit));
+    }
+    let mut by_checkout: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+    for entry in scan.entries {
+        by_checkout
+            .entry(entry.listed)
+            .or_default()
+            .push(entry.admin);
+    }
+    AdminDirs::Read {
+        by_checkout,
+        complete: scan.complete,
     }
 }
 
@@ -752,26 +875,27 @@ pub fn registrations_in(
 /// snapshot incomplete. Stray plain files and admin directories without any
 /// `gitdir` hold no registration, as for git (see [`admin_entries`]). The
 /// answer's paths are indexed once, so matching is linear in the entries.
+/// `scan` is `None` when the admin directory could not be listed.
 fn represents_every_admin_entry(
-    common: &Path,
+    scan: Option<&AdminScan>,
     registrations: &[Registration],
     deadline: Instant,
 ) -> bool {
-    let Ok((entries, complete)) = admin_entries(common, deadline) else {
+    let Some(scan) = scan else {
         return false;
     };
-    if !complete {
+    if !scan.complete {
         return false;
     }
     let listed: HashSet<&Path> = registrations
         .iter()
         .map(|registration| registration.path.as_path())
         .collect();
-    for entry in &entries {
+    for entry in &scan.entries {
         if Instant::now() >= deadline {
             return false;
         }
-        if !listed.contains(norm_listed(&entry.checkout).as_path()) {
+        if !listed.contains(entry.listed.as_path()) {
             return false;
         }
     }
@@ -785,6 +909,18 @@ struct AdminEntry {
     /// The checkout the `gitdir` names, not yet normalised (see
     /// [`checkout_of_gitdir`]).
     checkout: PathBuf,
+    /// `checkout` normalised as registration paths are (see [`norm_listed`]).
+    listed: PathBuf,
+}
+
+/// One enumeration of `<common>/worktrees`.
+struct AdminScan {
+    /// Every admin entry whose `gitdir` could be read.
+    entries: Vec<AdminEntry>,
+    /// Whether every admin entry could be read (false after a timeout too).
+    complete: bool,
+    /// Whether the deadline cut the enumeration short.
+    timed_out: bool,
 }
 
 /// The checkout a registration's `gitdir` target names, as git derives it:
@@ -799,35 +935,12 @@ fn checkout_of_gitdir(gitdir: PathBuf) -> PathBuf {
     gitdir
 }
 
-/// Every admin directory under `<common>/worktrees` whose `gitdir` names
-/// `checkout` (compared as the registration snapshot compares paths).
-///
-/// `Err` when the admin directory cannot be listed, or when the enumeration
-/// was cut short or skipped an unreadable entry and nothing matched: the
-/// unreadable entry may be the one. Bounded by `limit`.
-pub fn admin_dirs_for(
-    common: &Path,
-    checkout: &Path,
-    limit: Duration,
-) -> Result<Vec<PathBuf>, String> {
-    let deadline = Instant::now() + limit;
-    let (entries, complete) = admin_entries(common, deadline)?;
-    let found: Vec<PathBuf> = entries
-        .into_iter()
-        .filter(|entry| norm_listed(&entry.checkout) == checkout)
-        .map(|entry| entry.admin)
-        .collect();
-    if found.is_empty() && !complete {
-        return Err("could not read every worktree registration".into());
-    }
-    Ok(found)
-}
-
 /// Every admin directory under `<common>/worktrees` with a readable `gitdir`,
 /// and whether every one could be read.
 ///
-/// Bounded by `deadline`, checked per entry; running out of time stops the
-/// enumeration and reports it incomplete. A stray plain file, or an admin
+/// Bounded by `deadline`, checked per entry (before its checkout path is
+/// normalised); running out of time stops the enumeration and reports it
+/// incomplete and timed out. A stray plain file, or an admin
 /// directory without any `gitdir`, holds no registration and is skipped as git
 /// skips it. An entry that is neither a directory nor a plain file (checked
 /// without following symlinks), or whose `gitdir` exists but cannot be read
@@ -836,18 +949,28 @@ pub fn admin_dirs_for(
 /// registration is unknown. The checkout is derived like git does (see
 /// [`checkout_of_gitdir`]). `Err` only when the directory itself cannot be
 /// listed.
-fn admin_entries(common: &Path, deadline: Instant) -> Result<(Vec<AdminEntry>, bool), String> {
+fn admin_entries(common: &Path, deadline: Instant) -> Result<AdminScan, String> {
     let admin_root = common.join("worktrees");
     let mut found = Vec::new();
     let entries = match std::fs::read_dir(&admin_root) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((found, true)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(AdminScan {
+                entries: found,
+                complete: true,
+                timed_out: false,
+            });
+        }
         Err(error) => return Err(format!("could not read {}: {error}", admin_root.display())),
     };
     let mut complete = true;
     for entry in entries {
         if Instant::now() >= deadline {
-            return Ok((found, false));
+            return Ok(AdminScan {
+                entries: found,
+                complete: false,
+                timed_out: true,
+            });
         }
         let admin = entry
             .map_err(|error| format!("could not read {}: {error}", admin_root.display()))?
@@ -887,9 +1010,18 @@ fn admin_entries(common: &Path, deadline: Instant) -> Result<(Vec<AdminEntry>, b
         // Relative `gitdir` files (newer git's `worktree.useRelativePaths`)
         // are relative to the admin directory; an absolute one replaces it.
         let checkout = checkout_of_gitdir(admin.join(path_from_bytes(gitdir)));
-        found.push(AdminEntry { admin, checkout });
+        let listed = norm_listed(&checkout);
+        found.push(AdminEntry {
+            admin,
+            checkout,
+            listed,
+        });
     }
-    Ok((found, complete))
+    Ok(AdminScan {
+        entries: found,
+        complete,
+        timed_out: false,
+    })
 }
 
 /// `git worktree list --porcelain -z`, parsed; `Ok(None)` when this git
@@ -932,7 +1064,7 @@ pub(crate) fn registrations_from_metadata(
 ) -> Result<RegistrationSnapshot, String> {
     let deadline = Instant::now() + limit;
     let common = common_dir(repo, limit)?;
-    metadata_registrations(&common, deadline)
+    metadata_registrations(&common, deadline, limit, &CommonDirs::default())
 }
 
 /// Every registration, read from git's metadata rather than parsed output.
@@ -946,7 +1078,8 @@ pub(crate) fn registrations_from_metadata(
 /// marks a lock, and a checkout path that is not a real directory (checked
 /// without following symlinks: a symlink there is not a live checkout) makes
 /// the registration prunable. Whether the repository is bare is git's answer
-/// (see [`is_bare`]), never the common dir's name. For a bare one the main
+/// (see [`is_bare`], asked once per common dir through `commons`), never the
+/// common dir's name. For a bare one the main
 /// registration is `<common>` itself with an unknown `HEAD` and `bare` set, as
 /// `-z` reports it (`bare`, no branch). For a non-bare one it is the parent of
 /// a common dir named `.git`; otherwise (`--separate-git-dir`) it is
@@ -969,11 +1102,13 @@ pub(crate) fn registrations_from_metadata(
 fn metadata_registrations(
     common: &Path,
     deadline: Instant,
+    limit: Duration,
+    commons: &CommonDirs,
 ) -> Result<RegistrationSnapshot, String> {
     let left = || deadline.saturating_duration_since(Instant::now());
     let mut registrations = Vec::new();
     let mut main_known = true;
-    if is_bare(common, left())? {
+    if commons.is_bare(common, left())? {
         // A bare repository: `-z` lists the repository directory itself.
         registrations.push(Registration {
             path: common.to_path_buf(),
@@ -1002,14 +1137,19 @@ fn metadata_registrations(
             None => main_known = false,
         }
     }
-    let (entries, complete) = admin_entries(common, deadline)?;
-    let complete = complete && main_known;
-    for AdminEntry { admin, checkout } in entries {
+    let scan = admin_entries(common, deadline)?;
+    let complete = scan.complete && main_known;
+    for entry in &scan.entries {
+        let AdminEntry {
+            admin,
+            checkout,
+            listed,
+        } = entry;
         // A symlink (or anything else that is not a real directory) where the
         // checkout was is not a live checkout: never follow it to decide.
         let prunable = !checkout.symlink_metadata().is_ok_and(|meta| meta.is_dir());
         registrations.push(Registration {
-            path: norm_listed(&checkout),
+            path: listed.clone(),
             head: read_head(&admin.join("HEAD")),
             prunable,
             // Presence alone locks, so a dangling symlink named `locked` is a
@@ -1021,6 +1161,7 @@ fn metadata_registrations(
     Ok(RegistrationSnapshot {
         registrations,
         complete,
+        admins: admin_dirs(Ok(scan), limit),
     })
 }
 
@@ -1264,6 +1405,45 @@ pub fn hidden_file(worktree: &Path, limit: Duration) -> Result<Option<PathBuf>, 
         }
     }
     Ok(None)
+}
+
+/// Whether the index in the linked registration's admin dir `admin` matches
+/// `treeish` (the registration's detached commit, or `refs/heads/<branch>`).
+///
+/// For a registration whose checkout directory is gone: git skips its own
+/// cleanliness check then, and removing the registration deletes the admin dir
+/// and the index with it, so anything staged there would be lost. Runs
+/// `git --git-dir=<admin> diff-index --cached --quiet <treeish> --`, bounded by
+/// `limit` (trace variables stripped like every call here). `Ok(true)` when
+/// git exits 0, or when there is no `index` file at all (nothing is staged);
+/// `Ok(false)` when it exits 1. Anything else (an index that is not a regular
+/// file or cannot be checked, a tree-ish that does not resolve, such as an
+/// unborn branch, any other failure) is `Err`, never "clean"; a timeout is the
+/// usual `git timed out after Ns` error.
+pub fn index_matches(admin: &Path, treeish: &str, limit: Duration) -> Result<bool, String> {
+    match admin.join("index").symlink_metadata() {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => return Err("the index is not a regular file".into()),
+        Err(error) => return Err(format!("could not check the index: {error}")),
+    }
+    let (status, _, stderr) = run_raw(
+        admin,
+        [
+            "--git-dir=.",
+            "diff-index",
+            "--cached",
+            "--quiet",
+            treeish,
+            "--",
+        ],
+        limit,
+    )?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(failure_message(status, &stderr)),
+    }
 }
 
 /// Every gitlink (mode `160000`, a submodule) in the index of the checkout at

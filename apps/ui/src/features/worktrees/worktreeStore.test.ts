@@ -27,6 +27,7 @@ import {
   clearWorktrees,
   dismissWorktreeOutcome,
   forceCanFix,
+  forceRemoveDescription,
   getWorktreeState,
   inUseWorktrees,
   loadWorktrees,
@@ -393,6 +394,8 @@ describe("forceCanFix", () => {
     expect(forceCanFix("could not read the registration's HEAD")).toBe(true);
     expect(forceCanFix("has files hidden from git status")).toBe(true);
     expect(forceCanFix("has a git operation in progress")).toBe(true);
+    expect(forceCanFix("has staged changes")).toBe(true);
+    expect(forceCanFix("the registration could no longer be located")).toBe(true);
     for (const blocked of [
       "in use by Fix it",
       "not tracked",
@@ -458,6 +461,18 @@ describe("worktreeSubline", () => {
     expect(line).toContain("Thread workspace");
     expect(line).toContain("Fix it");
     expect(line).toContain("Uncommitted changes");
+  });
+});
+
+describe("forceRemoveDescription", () => {
+  it("names every kind of work a forced removal discards", () => {
+    const text = forceRemoveDescription("");
+    expect(text).toContain("Uncommitted changes and unmerged commits");
+    expect(text).toContain(
+      "Any rebase, merge, cherry-pick or bisect in progress — including its autostash — and staged changes are lost.",
+    );
+    expect(text).toContain("This can't be undone.");
+    expect(forceRemoveDescription(" Note.").endsWith("undone. Note.")).toBe(true);
   });
 });
 

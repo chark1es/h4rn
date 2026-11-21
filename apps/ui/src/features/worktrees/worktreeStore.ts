@@ -160,6 +160,8 @@ export const WORKTREE_SKIP_REASONS = {
     "could not read the registration's HEAD",
     "has files hidden from git status",
     "has a git operation in progress",
+    "has staged changes",
+    "the registration could no longer be located",
   ],
   /** `checkout is no longer on <branch>` — force removes the replacement. */
   forceablePrefixes: ["checkout is no longer on"],
@@ -229,6 +231,18 @@ export function removeDescription(row: TrackedWorktree): string {
   return `${base} ${skipped}${
     row.origin === "thread" ? " Its thread may still be resumed there." : ""
   }`;
+}
+
+/**
+ * What "Remove anyway" discards, for its confirmation. `threadNote` is added
+ * when thread workspaces are among the rows.
+ */
+export function forceRemoveDescription(threadNote: string): string {
+  return (
+    "Uncommitted changes and unmerged commits in these worktrees are lost. Any rebase, merge, " +
+    "cherry-pick or bisect in progress — including its autostash — and staged changes are lost. " +
+    `Any checkout now at these paths is deleted. This can't be undone.${threadNote}`
+  );
 }
 
 /**
