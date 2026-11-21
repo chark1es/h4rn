@@ -199,12 +199,39 @@ pub enum HarnessEvent {
     /// exit status and the drained stderr is `retryable: false`. A death
     /// reported between turns is held for the first report and published from
     /// the second, so the row is never the generic notice.
+    ///
+    /// `kind` says which part of the transport died. Only [`Exit`] is the
+    /// process-exit report that can carry the provider's reset: a read error is
+    /// also `retryable: false`, but it is not the last account of the death.
+    ///
+    /// [`Exit`]: TransportCloseKind::Exit
     TransportClosed {
         /// What happened.
         message: String,
         /// Whether a retry is safe.
         retryable: bool,
+        /// Which end of the transport reported the death.
+        kind: TransportCloseKind,
     },
+}
+
+/// Which part of a session's transport reported its death.
+///
+/// A transport can die in several ways, and one of them is final: only the
+/// agent's exit report can still carry its stderr and a provider reset after
+/// the stream is already unusable. The others may be followed by that report
+/// within the same bounded window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TransportCloseKind {
+    /// The agent's stdout ended (the bridge's generic close notice).
+    Eof,
+    /// Reading the agent's stdout failed.
+    Read,
+    /// Writing to the agent failed, timed out, or the writer exited.
+    Write,
+    /// The agent process exited and was reaped. Its report is the specific
+    /// account of the death, with the status and stderr it drained.
+    Exit,
 }
 
 /// The more specific of two messages that describe one failure of the same

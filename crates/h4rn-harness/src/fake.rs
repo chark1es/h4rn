@@ -19,7 +19,7 @@ use h4rn_protocol::{ApprovalDecision, HarnessKind, ToolCall, ToolCallStatus, Tur
 
 use crate::{
     Harness, HarnessError, HarnessEvent, HarnessInstall, HarnessSession, LimitSignal, SessionSpec,
-    TransportHealth, UserInput,
+    TransportCloseKind, TransportHealth, UserInput,
 };
 
 /// The event producer for one fake session.
@@ -918,6 +918,7 @@ impl HarnessSession for FakeSession {
             self.emit(HarnessEvent::TransportClosed {
                 message: "the harness transport closed".into(),
                 retryable: false,
+                kind: TransportCloseKind::Write,
             });
             if let Some(gate) = self.generic_death_gate.clone() {
                 // The bridge's generic stdout-close notice is already on the

@@ -606,6 +606,26 @@ notice (`retryable: true`) even when its text is shorter, and only reports of th
 compared by detail. The `agy-fixture` peer models both new orderings, plus a mid-turn exit with no
 stderr at all.
 
+**Addendum: a death names its end, and the restart, write and registration paths re-check.** A
+transport death now says which part of the transport reported it (stdout EOF, a stdout read error, a
+writer failure, or the process exit). Only the exit kind is the process's final account, so a read
+error that is also non-retryable no longer ends the wait for the exit report's status, stderr and
+rate-limit reset; both a completion on a closed transport and a death between turns keep waiting for
+that kind. Every non-deliberate exit publishes its exit report even when its stderr carries a typed
+limit, so the limit arms auto-resume and the pump still learns that the session is dead and detaches
+it; an idle death therefore reaches the next Send as a fresh session rather than as a failed write on
+a dead one. Events buffered inside the exit-report window are applied to the completing turn before
+it settles, and the idle fallback prefers a queued report over its deadline, so a tool update that
+completed behind a closed completion is part of the turn it belongs to. Two ownership checks moved
+under the lock they guard: a proxy restart re-checks that no turn became active under the same lock
+as its detach and skips the thread when one did (the new routing applies on the next session start),
+and an ACP request checks the closed state under the pending-map lock, so the reader's final drain
+either drains it or registration rejects it instead of leaving a waiter behind. A prompt write that
+lost its session to a restart, a shutdown or a model change puts its still-claimed prompt back and
+delivers it on the live session or a fresh startup instead of returning with the turn Working. The
+`agy-fixture` peer models the exit-only idle death by holding stdout open from a keeper process, so
+no EOF can announce the death.
+
 ## ADR-027: Push notifications are metadata-only wake signals
 
 **Status:** Proposed

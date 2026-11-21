@@ -63,8 +63,8 @@ use crate::acp::{
 use crate::attachments::{self, AttachmentClass, AttachmentDelivery};
 use crate::{
     AttachmentRef, ENV_MCP_AUTH_TOKEN, ENV_MCP_BEARER_TOKEN, Harness, HarnessError, HarnessEvent,
-    HarnessInstall, HarnessSession, SessionSpec, TransportHealth, TurnReport, UserInput,
-    detect_limit, merge_transport_detail, most_specific_detail,
+    HarnessInstall, HarnessSession, SessionSpec, TransportCloseKind, TransportHealth, TurnReport,
+    UserInput, detect_limit, merge_transport_detail, most_specific_detail,
 };
 
 mod stream;
@@ -824,7 +824,15 @@ impl HarnessSession for AcpSession {
                                 AcpError::Protocol { .. } | AcpError::OutsideWorkspace { .. }
                             );
                         let event = if matches!(error, AcpError::Closed { .. }) {
-                            HarnessEvent::TransportClosed { message, retryable }
+                            HarnessEvent::TransportClosed {
+                                message,
+                                retryable,
+                                kind: if exit.is_some() {
+                                    TransportCloseKind::Exit
+                                } else {
+                                    TransportCloseKind::Write
+                                },
+                            }
                         } else {
                             HarnessEvent::Error { message, retryable }
                         };
@@ -1107,6 +1115,7 @@ fn spawn_event_bridge(
                         vec![HarnessEvent::TransportClosed {
                             message,
                             retryable: true,
+                            kind: TransportCloseKind::Eof,
                         }]
                     }
                 }
@@ -1121,23 +1130,41 @@ fn spawn_event_bridge(
                         // already on the stream; a second exit row would
                         // duplicate it.
                         Vec::new()
-                    } else if let Some(signal) = detect_limit(&stderr, Utc::now()) {
-                        vec![HarnessEvent::LimitHit {
-                            reset_at: signal.reset_at,
-                            auto_resume: signal.reset_at.is_some(),
-                        }]
                     } else {
-                        vec![HarnessEvent::TransportClosed {
+                        // The exit report is always the specific account of the
+                        // death, even when its stderr carries a typed limit: the
+                        // limit is applied first, and the report itself still
+                        // tells the pump that the session is dead so it detaches
+                        // it instead of waiting for a stream end the held
+                        // session keeps from happening.
+                        let mut events = Vec::new();
+                        if let Some(signal) = detect_limit(&stderr, Utc::now()) {
+                            events.push(HarnessEvent::LimitHit {
+                                reset_at: signal.reset_at,
+                                auto_resume: signal.reset_at.is_some(),
+                            });
+                        }
+                        events.push(HarnessEvent::TransportClosed {
                             message: exit_detail(&status, &stderr),
                             retryable: false,
-                        }]
+                            kind: TransportCloseKind::Exit,
+                        });
+                        events
                     }
                 }
                 AcpEvent::Error { message, retryable } => {
                     vec![HarnessEvent::Error { message, retryable }]
                 }
-                AcpEvent::TransportClosed { message, retryable } => {
-                    vec![HarnessEvent::TransportClosed { message, retryable }]
+                AcpEvent::TransportClosed {
+                    message,
+                    retryable,
+                    kind,
+                } => {
+                    vec![HarnessEvent::TransportClosed {
+                        message,
+                        retryable,
+                        kind,
+                    }]
                 }
             };
             for event in mapped {
@@ -1979,6 +2006,47 @@ mod tests {
                 );
             }
             other => panic!("unexpected event {other:?}"),
+        }
+        bridge.abort();
+    }
+
+    /// An exit report whose stderr carries a reset is still a death report: the
+    /// pump needs it to detach the dead session, so the limit and the exit kind
+    /// are published together.
+    #[tokio::test]
+    async fn an_exit_report_with_a_reset_still_reports_the_death() {
+        let (tx, rx) = mpsc::channel(8);
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let bridge = spawn_event_bridge(
+            rx,
+            out_tx,
+            Arc::new(Mutex::new(AcpShared::new())),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        tx.send(AcpEvent::Exited {
+            status: "exited: 7".into(),
+            stderr: "rate limit reached, resets at 2099-12-01T00:00:00Z".into(),
+            deliberate: false,
+        })
+        .await
+        .expect("send");
+
+        assert!(
+            matches!(
+                out_rx.recv().await.expect("limit"),
+                HarnessEvent::LimitHit {
+                    reset_at: Some(_),
+                    auto_resume: true,
+                }
+            ),
+            "the exit report's reset reaches the schedule"
+        );
+        match out_rx.recv().await.expect("exit") {
+            HarnessEvent::TransportClosed { kind, .. } => {
+                assert_eq!(kind, TransportCloseKind::Exit);
+            }
+            other => panic!("the exit report is still the death: {other:?}"),
         }
         bridge.abort();
     }

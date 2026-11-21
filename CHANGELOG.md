@@ -7,6 +7,34 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A proxy restart no longer drops a session a new message just claimed.** A restart that
+  inspected a thread as idle now re-checks under the same lock as its detach that no turn became
+  active in between. A Send that claimed the session keeps it, and the new proxy routing applies on
+  the thread's next session start instead of shutting down an agent that is already writing.
+- **A prompt whose session was detached mid-write is delivered again.** When a write fails after a
+  restart, a shutdown or a model change detached its session, the turn is still active and no other
+  path owns it. The prompt now goes back to the queue and is written on a live session or a fresh
+  startup instead of leaving the turn Working with nobody delivering it.
+- **An ACP request registered while the reader drains can no longer be lost.** The closed check and
+  the pending-map insert happen under one lock, so teardown either drains the request or rejects its
+  registration with `Closed`; a request inserted after the final drain no longer waits for a reply
+  no reader can deliver.
+- **An idle agent that only the process exit announces is detached immediately.** An exit whose
+  stderr carries a rate limit used to publish only the limit, so the pump never learned the session
+  was dead: the dead agent stayed attached and the next message failed on it. The exit report now
+  always follows its limit, so the session is detached and the next message starts a fresh agent.
+- **A stdout read error is no longer mistaken for the process-exit report.** Transport deaths now
+  carry their kind (EOF, read, write or exit). Only the exit kind ends the wait for a closed
+  transport's final report, so a read error that precedes the exit cannot detach the session and
+  promote queued work before the exit's rate-limit reset has armed auto-resume.
+- **Tool updates buffered behind a closed transport's completion reach their turn.** Events that
+  arrive inside the exit-report window are applied to the completing turn before it settles, so a
+  tool card that completed there no longer stays Running. The idle fallback also prefers a queued
+  report over its deadline, so the exit report names the row whenever both are ready.
+- **The ACP fixture models a death only the exit can report.** `agy-fixture` can answer a turn and
+  then exit while a keeper process holds stdout open, so the reader never sees EOF; the reset it
+  prints on stderr makes the exit report a typed limit, which is the ordering that used to leave
+  the dead session attached.
 - **Characters split across streamed chunks arrive intact.** OpenCode's event stream and the MCP
   hub's SSE client now carry an incomplete trailing UTF-8 sequence into the next chunk instead of
   decoding each chunk alone, so an emoji or CJK character split between two chunks is no longer

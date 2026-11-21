@@ -17,9 +17,12 @@
 //! exit (`H4RN_FIXTURE_LIMIT_EXIT_AFTER_TURN`), and an idle close followed by
 //! the exit (`H4RN_FIXTURE_LIMIT_EXIT_BETWEEN_TURNS`). A mid-turn exit with no
 //! stderr at all (`H4RN_FIXTURE_SILENT_EXIT`) proves the exit status still names
-//! the row when there is no stderr to outrank it.
+//! the row when there is no stderr to outrank it. An idle death with no EOF at
+//! all (`H4RN_FIXTURE_IDLE_EXIT_ONLY`) holds stdout open from a keeper process,
+//! so only the exit report can announce it.
 
 use std::io::{BufRead, Write};
+use std::process::{Command, Stdio};
 
 use serde_json::{Value, json};
 
@@ -206,6 +209,26 @@ fn main() {
                     );
                     close_stdout();
                     std::thread::sleep(std::time::Duration::from_millis(150));
+                    eprintln!("agy-fixture: rate limit reached, resets at 2099-12-01T00:00:00Z");
+                    std::process::exit(7);
+                }
+                if text.contains("H4RN_FIXTURE_IDLE_EXIT_ONLY") {
+                    // Answer this turn, wait for the test to end it, then die
+                    // with only the process exit to report it: a keeper process
+                    // inherits stdout and holds its pipe open, so the daemon's
+                    // reader never sees EOF and cannot publish the generic close
+                    // notice. The reset on stderr makes the exit report a typed
+                    // limit, which is the ordering that used to leave the dead
+                    // session attached until the next Send failed on it.
+                    wait_for_gate(
+                        ".agy-fixture-idle-exit-waiting",
+                        ".agy-fixture-idle-exit-gate",
+                    );
+                    let _keeper = Command::new("sleep")
+                        .arg("5")
+                        .stdin(Stdio::null())
+                        .stderr(Stdio::null())
+                        .spawn();
                     eprintln!("agy-fixture: rate limit reached, resets at 2099-12-01T00:00:00Z");
                     std::process::exit(7);
                 }
