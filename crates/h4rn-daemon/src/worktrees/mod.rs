@@ -355,7 +355,7 @@ impl WorktreeTracker {
     /// Active first, then orphaned, then settled; newest `last_seen` first
     /// within each group.
     pub async fn list(&self) -> Vec<TrackedWorktree> {
-        self.list_with(true).await
+        self.list_with(true).await.0
     }
 
     /// [`Self::list`], optionally without the dirty check.
@@ -363,23 +363,26 @@ impl WorktreeTracker {
     /// Clearing first lists without `git status` for every entry because the
     /// per-entry removal checks dirtiness again anyway; the final response
     /// listing asks git for it.
-    async fn list_with(&self, with_dirty: bool) -> Vec<TrackedWorktree> {
+    ///
+    /// Also returns every thread workspace (and its checkout's top level),
+    /// which clearing everything must leave alone whatever row names it.
+    async fn list_with(&self, with_dirty: bool) -> (Vec<TrackedWorktree>, HashSet<PathBuf>) {
         let input = self.inner.list_input().await;
         let inner = Arc::clone(&self.inner);
         let computed = tokio::time::timeout(
             GIT_BUDGET,
-            tokio::task::spawn_blocking(move || compute(&input, with_dirty)),
+            tokio::task::spawn_blocking(move || compute_listing(&input, with_dirty)),
         )
         .await;
-        let (entries, gone) = match computed {
+        let (entries, gone, thread_workspaces) = match computed {
             Ok(Ok(result)) => result,
             Ok(Err(error)) => {
                 tracing::warn!(%error, "worktree listing task failed");
-                return Vec::new();
+                return (Vec::new(), HashSet::new());
             }
             Err(_) => {
                 tracing::warn!("worktree listing timed out");
-                return Vec::new();
+                return (Vec::new(), HashSet::new());
             }
         };
         // A harness worktree whose directory is gone has nothing left to clear.
@@ -388,19 +391,19 @@ impl WorktreeTracker {
                 tracing::warn!(%error, %path, "could not forget a vanished worktree");
             }
         }
-        entries
+        (entries, thread_workspaces)
     }
 
     /// Removes tracked worktrees from disk.
     ///
-    /// `paths: None` targets every non-active entry except thread workspaces,
-    /// which are only removed when named explicitly. Active entries are never
-    /// removed. Without `force`, dirty worktrees and owned branches with
-    /// unmerged commits are skipped.
+    /// `paths: None` targets every non-active entry except thread workspaces
+    /// (by origin or by path), which are only removed when named explicitly.
+    /// Active entries are never removed. Without `force`, dirty worktrees and
+    /// owned branches with unmerged commits are skipped.
     pub async fn clear(&self, paths: Option<Vec<String>>, force: bool) -> ClearOutcome {
         let _guard = self.inner.clear_lock.lock().await;
-        let entries = self.list_with(false).await;
-        let selection = select_entries(&entries, paths.as_deref());
+        let (entries, thread_workspaces) = self.list_with(false).await;
+        let selection = select_entries(&entries, paths.as_deref(), &thread_workspaces);
         let mut removed = Vec::new();
         let mut skipped = selection.skipped;
         // One entry at a time: the listing is a snapshot, so each removal runs
@@ -1014,12 +1017,30 @@ fn registration_exists(
         })
 }
 
+/// Whether a real directory is at `path`. A symlink there is never followed:
+/// it is not a checkout, whatever it points at.
+fn is_real_dir(path: &Path) -> bool {
+    path.symlink_metadata().is_ok_and(|meta| meta.is_dir())
+}
+
+/// [`compute_listing`] without the thread workspaces.
+#[cfg(test)]
+pub(crate) fn compute(input: &ListInput, with_dirty: bool) -> (Vec<TrackedWorktree>, Vec<String>) {
+    let (entries, gone, _) = compute_listing(input, with_dirty);
+    (entries, gone)
+}
+
 /// Computes the tracked list from plain data. Blocking (shells out to git).
 ///
-/// Returns the entries, sorted, and the stored harness paths whose directory is
-/// gone and can be forgotten. `with_dirty` asks git for uncommitted changes;
-/// clearing's selection listing skips it because `clear_one` checks again.
-pub(crate) fn compute(input: &ListInput, with_dirty: bool) -> (Vec<TrackedWorktree>, Vec<String>) {
+/// Returns the entries, sorted; the stored harness paths whose directory is
+/// gone and can be forgotten; and every thread workspace outside h4rn's own
+/// subagent worktrees, normalised, plus the top level of each one that is a
+/// linked worktree. `with_dirty` asks git for uncommitted changes; clearing's
+/// selection listing skips it because `clear_one` checks again.
+pub(crate) fn compute_listing(
+    input: &ListInput,
+    with_dirty: bool,
+) -> (Vec<TrackedWorktree>, Vec<String>, HashSet<PathBuf>) {
     let now = Utc::now();
     let infos: HashMap<&str, &ThreadInfo> = input
         .threads
@@ -1055,7 +1076,7 @@ pub(crate) fn compute(input: &ListInput, with_dirty: bool) -> (Vec<TrackedWorktr
         if path.to_str().is_none() || repo.as_ref().is_some_and(|repo| repo.to_str().is_none()) {
             continue;
         }
-        let exists = path.is_dir();
+        let exists = is_real_dir(&path);
         let mut branch = view.branch.clone();
         // A missing checkout is dropped only when git proved there is nothing
         // left to clear: the branch lookup succeeded without it AND a
@@ -1126,9 +1147,14 @@ pub(crate) fn compute(input: &ListInput, with_dirty: bool) -> (Vec<TrackedWorktr
     // checkout's top level, which is what `git worktree remove` takes.
     let mut tops: HashMap<PathBuf, Option<PathBuf>> = HashMap::new();
     let mut by_workspace: HashMap<PathBuf, Vec<&ThreadInfo>> = HashMap::new();
+    let mut thread_workspaces: HashSet<PathBuf> = HashSet::new();
     for info in &input.threads {
         let workspace = git::norm(Path::new(&info.workspace));
-        if workspace.starts_with(&input.subagents_root) || !workspace.is_dir() {
+        if workspace.starts_with(&input.subagents_root) {
+            continue;
+        }
+        thread_workspaces.insert(workspace.clone());
+        if !workspace.is_dir() {
             continue;
         }
         let top = tops
@@ -1140,6 +1166,7 @@ pub(crate) fn compute(input: &ListInput, with_dirty: bool) -> (Vec<TrackedWorktr
             })
             .clone();
         if let Some(top) = top {
+            thread_workspaces.insert(top.clone());
             by_workspace.entry(top).or_default().push(info);
         }
     }
@@ -1199,7 +1226,10 @@ pub(crate) fn compute(input: &ListInput, with_dirty: bool) -> (Vec<TrackedWorktr
     // 3. Observed harness worktrees, merged by path.
     let mut gone = Vec::new();
     for stored in &input.stored {
-        let path = git::norm(Path::new(&stored.path));
+        // Listed under exactly the stored path: clearing acts on the path as
+        // listed, so it is never re-canonicalised (through a symlink that
+        // replaced the checkout, say) into some other path.
+        let path = PathBuf::from(&stored.path);
         // A row under h4rn's own subagent worktrees is derived live, and a row
         // whose repository itself is gone can never be cleared through git:
         // forget both (the store only; nothing on disk is touched).
@@ -1207,7 +1237,7 @@ pub(crate) fn compute(input: &ListInput, with_dirty: bool) -> (Vec<TrackedWorktr
             gone.push(stored.path.clone());
             continue;
         }
-        let exists = path.is_dir();
+        let exists = is_real_dir(&path);
         // A checkout whose directory is gone is still clearable while its own
         // registration remains: removing that registration is the only cleanup
         // left, and forgetting the row here would report it as untracked.
@@ -1282,7 +1312,7 @@ pub(crate) fn compute(input: &ListInput, with_dirty: bool) -> (Vec<TrackedWorktr
     }
 
     for entry in &mut entries {
-        entry.exists = Path::new(&entry.path).is_dir();
+        entry.exists = is_real_dir(Path::new(&entry.path));
         entry.dirty = if with_dirty && entry.exists {
             git::is_dirty(Path::new(&entry.path))
         } else {
@@ -1295,7 +1325,7 @@ pub(crate) fn compute(input: &ListInput, with_dirty: bool) -> (Vec<TrackedWorktr
             .cmp(&status_rank(b.status))
             .then(b.last_seen.cmp(&a.last_seen))
     });
-    (entries, gone)
+    (entries, gone, thread_workspaces)
 }
 
 // ---------------------------------------------------------------------------
@@ -1334,24 +1364,52 @@ const CLEAR_GIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Another registered worktree nested inside `path`, from one snapshot.
 fn contained_worktree(registrations: &[git::Registration], path: &Path) -> Option<PathBuf> {
-    let selected = git::norm(path);
     registrations
         .iter()
-        .find(|registration| {
-            registration.path != selected && registration.path.starts_with(&selected)
-        })
+        .find(|registration| registration.path != path && registration.path.starts_with(path))
         .map(|registration| registration.path.clone())
 }
 
 /// The registration for exactly `path`, from one snapshot.
+///
+/// Exact: `path` is the listed path a clear acts on, never re-canonicalised.
 fn exact_registration<'a>(
     registrations: &'a [git::Registration],
     path: &Path,
 ) -> Option<&'a git::Registration> {
-    let selected = git::norm(path);
     registrations
         .iter()
-        .find(|registration| registration.path == selected)
+        .find(|registration| registration.path == path)
+}
+
+/// The reason for a path that is not exactly a registered worktree (blocked).
+const NOT_REGISTERED: &str = "not a registered worktree";
+
+/// What is at a selected path: `Ok(true)` a real directory, `Ok(false)`
+/// nothing at all.
+///
+/// Git resolves every path it is given through symlinks, so a path that is a
+/// symlink (or a file), or that resolves elsewhere through a symlinked parent,
+/// is never handed to it: git would act on whatever the symlink points at,
+/// which may be another worktree entirely. Such a path is refused as
+/// [`NOT_REGISTERED`].
+fn checkout_at(path: &Path) -> Result<bool, String> {
+    let exists = match path.symlink_metadata() {
+        Ok(meta) if meta.is_dir() => true,
+        Ok(_) => return Err(NOT_REGISTERED.into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(format!("could not check the checkout: {error}")),
+    };
+    if git::norm(path) != path {
+        return Err(NOT_REGISTERED.into());
+    }
+    Ok(exists)
+}
+
+/// Whether the selected row was an owned checkout with nothing left on disk or
+/// in its branch: a directory at its path now is someone else's new checkout.
+fn recreated(entry: &TrackedWorktree, exists: bool) -> bool {
+    exists && !entry.exists && entry.owned && entry.branch.is_none()
 }
 
 /// An owned branch and the way preflight verified it.
@@ -1527,8 +1585,9 @@ fn verify_missing_registration(
     }
 }
 
-/// The reason for an owned checkout that reappeared after prepare saw it gone
-/// with no branch left (never forceable).
+/// The reason for an owned checkout whose selected row had no directory and no
+/// branch left, but whose directory exists at prepare or execute (never
+/// forceable).
 const RECREATED: &str = "the checkout was recreated during the clear";
 
 /// The reason for a missing checkout whose registration `HEAD` is unknown.
@@ -1595,17 +1654,21 @@ fn branch_delete_failure(branch: &str, why: &str) -> String {
 /// Git's own dirtiness refusal is the backstop for anything written after
 /// preflight. It runs `git status` under the user's config, so the config is
 /// overridden for that call: untracked files and submodules always count.
+/// [`git::SAFETY_CONFIG`] keeps a filesystem monitor or the untracked cache
+/// from hiding anything from that `git status` either.
 fn worktree_remove(repo: &Path, path: &Path, force: bool) -> Result<(), String> {
-    let mut args: Vec<&OsStr> = [
-        "-c",
-        "status.showUntrackedFiles=all",
-        "-c",
-        "diff.ignoreSubmodules=none",
-        "worktree",
-        "remove",
-    ]
-    .map(OsStr::new)
-    .to_vec();
+    let mut args: Vec<&OsStr> = git::SAFETY_CONFIG
+        .into_iter()
+        .chain([
+            "-c",
+            "status.showUntrackedFiles=all",
+            "-c",
+            "diff.ignoreSubmodules=none",
+            "worktree",
+            "remove",
+        ])
+        .map(OsStr::new)
+        .collect();
     if force {
         args.push(OsStr::new("--force"));
     }
@@ -1750,8 +1813,9 @@ const HIDDEN_FILES: &str = "has files hidden from git status";
 
 /// The checks for the checkout's state as it is now. Blocking.
 ///
-/// An existing checkout must hold no registered worktree (from
-/// `registrations`), and, when `thorough`, no nested checkout of any
+/// An existing checkout must be registered at exactly its path and hold no
+/// registered worktree (both from `registrations`), and, when `thorough`, no
+/// nested checkout of any
 /// repository. Without force it must still be on its listed branch with no
 /// unreachable detached work and no file git hides from `status`
 /// (assume-unchanged or skip-worktree). For a missing checkout, without force,
@@ -1772,6 +1836,11 @@ fn verify_current(
     let path = PathBuf::from(&entry.path);
     let repo = PathBuf::from(&entry.repo);
     if exists {
+        // `git worktree remove` acts on whatever registration git resolves the
+        // path to; only exactly this path's own registration may be removed.
+        if exact_registration(registrations, &path).is_none() {
+            return Err(NOT_REGISTERED.into());
+        }
         // `git worktree remove` would leave a nested registration pointing
         // into a directory that no longer exists, or delete another
         // repository's clone outright; neither is ever forceable.
@@ -1881,18 +1950,20 @@ fn preflight(entry: &TrackedWorktree, force: bool) -> Result<Preflight, String> 
     if git::norm(&path) == git::norm(&repo) {
         return Err("is the repository's main worktree".into());
     }
-    // One snapshot answers both the nested-worktree check and the missing
-    // checkout's own registration.
+    let exists = checkout_at(&path)?;
+    // One snapshot answers the exact-registration check, the nested-worktree
+    // check and the missing checkout's own registration.
     let registrations = git::registrations_with_timeout(&repo, CLEAR_GIT_TIMEOUT)?;
+    if exists && exact_registration(&registrations, &path).is_none() {
+        return Err(NOT_REGISTERED.into());
+    }
     // Git would happily remove a checkout that holds another worktree, leaving
     // the nested registration pointing into a directory that no longer exists.
     // That checkout is never removed, with or without force. Only an existing
     // checkout can hold a nested one: when the selected directory is gone there
     // is no working tree to protect, and dropping its own registration must
     // leave the nested registration alone.
-    if path.is_dir()
-        && let Some(inner) = contained_worktree(&registrations, &path)
-    {
+    if exists && let Some(inner) = contained_worktree(&registrations, &path) {
         return Err(format!("contains another worktree at {}", inner.display()));
     }
     let mut branch = None;
@@ -1900,27 +1971,19 @@ fn preflight(entry: &TrackedWorktree, force: bool) -> Result<Preflight, String> 
         // The listing is only a snapshot: a turn may have written since. Ask
         // git again here, and never read "could not ask" as clean.
         // `status --porcelain` with untracked files always counted, whatever
-        // the user's config says. Anything written after this is caught by
-        // git's own refusal in `worktree_remove`.
-        match git::run_with_timeout(
-            &path,
-            [
-                "status",
-                "--porcelain",
-                "--untracked-files=all",
-                "--ignore-submodules=none",
-            ],
-            CLEAR_GIT_TIMEOUT,
-        ) {
+        // the user's config says, and no filesystem monitor or untracked cache
+        // trusted. Anything written after this is caught by git's own refusal
+        // in `worktree_remove`.
+        match git::status(&path, CLEAR_GIT_TIMEOUT) {
             Ok(out) if !out.is_empty() => return Err("has uncommitted changes".into()),
             Ok(_) => {}
             Err(error) if git::timed_out(&error) => return Err(error),
-            Err(_) if path.is_dir() => {
+            Err(_) if exists => {
                 return Err("could not check for uncommitted changes".into());
             }
             Err(_) => {}
         }
-        if path.is_dir() {
+        if exists {
             // The checkout at this path must still be the one the listing
             // described. A replacement checkout recreated here on another
             // branch would otherwise be removed as if it were that entry.
@@ -1947,13 +2010,17 @@ fn preflight(entry: &TrackedWorktree, force: bool) -> Result<Preflight, String> 
 /// preflight and the destructive command: a checkout replaced on another
 /// branch or detached with unreachable work, a nested worktree or checkout
 /// created in the meantime (the nested-checkout scan runs here), files hidden
-/// from `status`, and a missing checkout's registration `HEAD`. The live
-/// activity check runs after this, and only then does [`execute`] touch the
-/// disk.
+/// from `status`, and a missing checkout's registration `HEAD`. An owned row
+/// with no branch and no directory whose directory exists now is refused as
+/// recreated. The live activity check runs after this, and only then does
+/// [`execute`] touch the disk.
 fn prepare(entry: &TrackedWorktree, force: bool) -> Result<Prepared, String> {
     let repo = PathBuf::from(&entry.repo);
     let registrations = git::registrations_with_timeout(&repo, CLEAR_GIT_TIMEOUT)?;
-    let was_dir = Path::new(&entry.path).is_dir();
+    let was_dir = checkout_at(Path::new(&entry.path))?;
+    if recreated(entry, was_dir) {
+        return Err(RECREATED.into());
+    }
     verify_current(entry, &registrations, was_dir, force, true)?;
     Ok(Prepared { was_dir })
 }
@@ -1968,8 +2035,10 @@ fn prepare(entry: &TrackedWorktree, force: bool) -> Result<Prepared, String> {
 /// snapshot; for a missing checkout, its registration's `HEAD` (unknown or
 /// detached and unreachable) from that snapshot; if the directory appeared or
 /// vanished since prepare, every check for the state that exists now (see
-/// [`verify_current`]), and an owned checkout with no branch that reappeared is
-/// refused outright. A missing checkout with no
+/// [`verify_current`]), and an owned checkout with no branch whose selected
+/// row had no directory is refused outright if one is there now. A path that
+/// is not exactly a registered checkout (a symlink there, say) is never handed
+/// to git (see [`checkout_at`]). A missing checkout with no
 /// registration in that snapshot is reported removed only because both were
 /// read after the activity check: no directory and no registration remain.
 /// The branch delete that follows re-checks everything from another fresh
@@ -1989,11 +2058,12 @@ fn execute(
     // show (a nested worktree, the checkout's own registration) was registered
     // after this point, and the directory check below is newer still.
     let registrations = git::registrations_with_timeout(&repo, CLEAR_GIT_TIMEOUT)?;
-    let exists = path.is_dir();
+    let exists = checkout_at(&path)?;
     let flipped = exists != prepared.was_dir;
-    // An owned checkout with no branch left had nothing on disk to protect;
-    // a directory there now is someone else's new checkout, whatever force says.
-    if flipped && exists && entry.owned && entry.branch.is_none() {
+    // The selected row was an owned checkout with no branch and no directory,
+    // so nothing was on disk to protect; a directory there now is someone
+    // else's new checkout, whatever force says.
+    if recreated(entry, exists) {
         return Err(RECREATED.into());
     }
     // Every pass checks the state that exists now against this snapshot: a
@@ -2195,27 +2265,47 @@ struct Selection<'a> {
     skipped: Vec<SkippedWorktree>,
 }
 
+/// `path` without trailing separators (unless that would leave nothing).
+fn trim_separator(path: &str) -> &str {
+    match path.trim_end_matches(std::path::is_separator) {
+        "" => path,
+        trimmed => trimmed,
+    }
+}
+
 /// Picks the entries a clear request names.
-fn select_entries<'a>(entries: &'a [TrackedWorktree], paths: Option<&[String]>) -> Selection<'a> {
+///
+/// Pure: a requested path matches a listed one only when the two strings are
+/// byte-equal after trailing separators are trimmed. Nothing is normalised,
+/// so a request can never reach a row through a symlink.
+fn select_entries<'a>(
+    entries: &'a [TrackedWorktree],
+    paths: Option<&[String]>,
+    thread_workspaces: &HashSet<PathBuf>,
+) -> Selection<'a> {
     let mut targets: Vec<&TrackedWorktree> = Vec::new();
     let mut skipped = Vec::new();
     match paths {
         // A thread workspace belongs to whoever made it (another tool, the
         // user) and the thread may still be resumed in it, so clearing
-        // everything leaves it alone; only an explicit path removes one.
+        // everything leaves it alone; only an explicit path removes one. That
+        // holds by path too: a row of any origin at a thread's workspace (or
+        // its checkout's top level) is left alone.
         None => targets.extend(entries.iter().filter(|entry| {
-            entry.status != WorktreeStatus::Active && entry.origin != WorktreeOrigin::Thread
+            entry.status != WorktreeStatus::Active
+                && entry.origin != WorktreeOrigin::Thread
+                && !thread_workspaces.contains(Path::new(&entry.path))
         })),
         Some(paths) => {
             let mut seen = HashSet::new();
             for requested in paths {
-                let wanted = git::norm(Path::new(requested));
-                if !seen.insert(wanted.clone()) {
+                let wanted = trim_separator(requested);
+                if !seen.insert(wanted) {
                     continue;
                 }
                 match entries
                     .iter()
-                    .find(|entry| Path::new(&entry.path) == wanted.as_path())
+                    .find(|entry| trim_separator(&entry.path) == wanted)
                 {
                     Some(entry) => targets.push(entry),
                     None => skipped.push(SkippedWorktree {

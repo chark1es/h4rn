@@ -172,6 +172,7 @@ export const WORKTREE_SKIP_REASONS = {
     "git timed out",
     "registration left in place",
     "the checkout was recreated during the clear",
+    "not a registered worktree",
   ],
   /** `branch <name> is a symbolic ref` — the ref is kept, target included. */
   blockedSuffixes: ["is a symbolic ref", "was left in place"],

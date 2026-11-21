@@ -132,7 +132,25 @@ const TRACE_VARS: &[&str] = &[
     "GIT_TRACE_PACKET",
     "GIT_TRACE_PERFORMANCE",
     "GIT_TRACE_SETUP",
+    "GIT_TRACE_REFS",
+    "GIT_TRACE_FSMONITOR",
+    "GIT_TRACE_SHALLOW",
     "GIT_CURL_VERBOSE",
+];
+
+/// Config overrides for every git call that decides whether work would be
+/// lost (`status`, `ls-files -v`, `worktree remove`).
+///
+/// A filesystem monitor (`core.fsmonitor`) or the untracked cache lets git
+/// skip looking at files it was told have not changed. A hook that reports
+/// nothing, or a stale cache, would then hide an edit or a new file, so these
+/// calls always look at the disk themselves. `-c` reaches the `git status` that
+/// `git worktree remove` runs in a child process too.
+pub const SAFETY_CONFIG: [&str; 4] = [
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.untrackedCache=false",
 ];
 
 fn command(dir: &Path) -> Command {
@@ -177,6 +195,7 @@ fn spawn(command: &mut Command) -> std::io::Result<std::process::Child> {
 }
 
 /// Runs git in `dir`, returning trimmed stdout or trimmed stderr on failure.
+#[cfg(test)]
 pub fn run<I, S>(dir: &Path, args: I) -> Result<String, String>
 where
     I: IntoIterator<Item = S>,
@@ -434,6 +453,22 @@ pub fn norm(path: &Path) -> PathBuf {
     fold(path.to_path_buf())
 }
 
+/// [`norm`], except that a final component that is a symlink is not followed.
+///
+/// Registration paths are compared exactly with the path a clear acts on, so a
+/// registered path that has since been replaced by a symlink must keep its own
+/// name instead of turning into the symlink's target (which may well be another
+/// registered worktree). The parent is still normalised.
+pub fn norm_listed(path: &Path) -> PathBuf {
+    let is_symlink = path
+        .symlink_metadata()
+        .is_ok_and(|meta| meta.file_type().is_symlink());
+    match (is_symlink, path.parent(), path.file_name()) {
+        (true, Some(parent), Some(name)) => norm(parent).join(name),
+        _ => norm(path),
+    }
+}
+
 /// Folds `.` and `..` lexically, without consulting the filesystem.
 fn fold(path: PathBuf) -> PathBuf {
     let mut out = PathBuf::new();
@@ -663,7 +698,9 @@ pub(crate) fn registrations_from_metadata(
         let admin = entry
             .map_err(|error| format!("could not read {}: {error}", admin_root.display()))?
             .path();
-        let Ok(bytes) = std::fs::read(admin.join("gitdir")) else {
+        // A real `gitdir` file is one short line; an oversized one is not
+        // read, and its registration is skipped.
+        let Some(bytes) = read_bounded(&admin.join("gitdir")) else {
             continue;
         };
         let gitdir = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
@@ -678,7 +715,7 @@ pub(crate) fn registrations_from_metadata(
             continue;
         };
         registrations.push(Registration {
-            path: norm(path),
+            path: norm_listed(path),
             head: read_head(&admin.join("HEAD")),
             prunable: !gitdir.exists(),
             locked: admin.join("locked").exists(),
@@ -687,9 +724,28 @@ pub(crate) fn registrations_from_metadata(
     Ok(registrations)
 }
 
-/// Reads a `HEAD` file. Unreadable or unparseable is [`Head::Unknown`].
+/// Largest git metadata file (`gitdir`, `HEAD`, a `.git` file) ever read.
+const MAX_METADATA_BYTES: u64 = 4 * 1024;
+
+/// Reads at most [`MAX_METADATA_BYTES`] of a small git metadata file.
+///
+/// `None` when the file cannot be read or is larger than that: such a file is
+/// never one git wrote, and reading it whole is never needed to refuse it.
+fn read_bounded(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_METADATA_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= MAX_METADATA_BYTES).then_some(bytes)
+}
+
+/// Reads a `HEAD` file. Unreadable, oversized or unparseable is
+/// [`Head::Unknown`].
 fn read_head(path: &Path) -> Head {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Some(text) = read_bounded(path).and_then(|bytes| String::from_utf8(bytes).ok()) else {
         return Head::Unknown;
     };
     let text = text.trim();
@@ -761,7 +817,7 @@ pub fn parse_registrations(out: &[u8]) -> Vec<Registration> {
                 registrations.push(partial.finish());
             }
             current = Some(Partial {
-                path: norm(&path_from_bytes(value)),
+                path: norm_listed(&path_from_bytes(value)),
                 branch: None,
                 sha: None,
                 detached: false,
@@ -797,24 +853,12 @@ pub fn parse_registrations(out: &[u8]) -> Vec<Registration> {
     registrations
 }
 
-/// Largest `.git` file [`gitfile_target`] reads.
-const MAX_GITFILE_BYTES: u64 = 4 * 1024;
-
 /// Where a nested `.git` file points: its `gitdir:` target, resolved against
 /// the file's own directory when relative. `None` when the file cannot be read,
-/// is not a gitfile, or is larger than [`MAX_GITFILE_BYTES`] (a real gitfile is
-/// one short line; reading a huge one is never needed to refuse it).
+/// is not a gitfile, or is larger than [`MAX_METADATA_BYTES`] (a real gitfile
+/// is one short line; reading a huge one is never needed to refuse it).
 pub fn gitfile_target(file: &Path) -> Option<PathBuf> {
-    use std::io::Read;
-    let mut bytes = Vec::new();
-    std::fs::File::open(file)
-        .ok()?
-        .take(MAX_GITFILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    if bytes.len() as u64 > MAX_GITFILE_BYTES {
-        return None;
-    }
+    let bytes = read_bounded(file)?;
     let mut target = bytes.strip_prefix(b"gitdir: ")?;
     while let Some(rest) = target
         .strip_suffix(b"\n")
@@ -832,19 +876,19 @@ pub fn gitfile_target(file: &Path) -> Option<PathBuf> {
 ///
 /// `git ls-files -v` tags an assume-unchanged entry with a lowercase letter
 /// and a skip-worktree entry with `S`; an edit to either never shows up as
-/// uncommitted. Only entries whose file is actually on disk count, so a
-/// sparse checkout's absent files do not. Bounded by `limit`.
+/// uncommitted. An assume-unchanged entry always counts: git does not look at
+/// the file at all, so even its deletion is hidden. A skip-worktree entry
+/// counts only when its file is on disk, so a sparse checkout's absent files do
+/// not. Runs with [`SAFETY_CONFIG`]; bounded by `limit`.
 pub fn hidden_file(worktree: &Path, limit: Duration) -> Result<Option<PathBuf>, String> {
-    let out = run_bytes_with_timeout(worktree, ["ls-files", "-v", "-z"], limit)?;
+    let args = SAFETY_CONFIG.into_iter().chain(["ls-files", "-v", "-z"]);
+    let out = run_bytes_with_timeout(worktree, args, limit)?;
     for record in out.split(|byte| *byte == 0) {
         let [tag, b' ', name @ ..] = record else {
             continue;
         };
-        if !(tag.is_ascii_lowercase() || *tag == b'S') {
-            continue;
-        }
         let file = worktree.join(path_from_bytes(name));
-        if file.symlink_metadata().is_ok() {
+        if tag.is_ascii_lowercase() || (*tag == b'S' && file.symlink_metadata().is_ok()) {
             return Ok(Some(file));
         }
     }
@@ -954,24 +998,28 @@ where
     ))
 }
 
-/// Whether the worktree has uncommitted changes; `None` when git failed.
+/// `git status --porcelain` in `worktree`, as clearing's dirty check runs it.
 ///
 /// Untracked files always count, whatever the user's `status.showUntrackedFiles`
 /// config says, and submodules are inspected rather than skipped: a file the
 /// user asked git to hide from `status` is still work that removing the
-/// checkout would lose.
+/// checkout would lose. Runs with [`SAFETY_CONFIG`]; bounded by `limit`.
+pub fn status(worktree: &Path, limit: Duration) -> Result<String, String> {
+    let args = SAFETY_CONFIG.into_iter().chain([
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--ignore-submodules=none",
+    ]);
+    run_with_timeout(worktree, args, limit)
+}
+
+/// Whether the worktree has uncommitted changes (see [`status`]); `None` when
+/// git failed or outlived [`OBSERVATION_GIT_TIMEOUT`].
 pub fn is_dirty(worktree: &Path) -> Option<bool> {
-    run(
-        worktree,
-        [
-            "status",
-            "--porcelain",
-            "--untracked-files=all",
-            "--ignore-submodules=none",
-        ],
-    )
-    .ok()
-    .map(|out| !out.is_empty())
+    status(worktree, OBSERVATION_GIT_TIMEOUT)
+        .ok()
+        .map(|out| !out.is_empty())
 }
 
 /// Whether `token` starts like an absolute path on Unix or Windows.

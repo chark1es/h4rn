@@ -188,12 +188,10 @@ worktree's subagent is finished but its directory is still on disk (cleanup
 failed, or the daemon restarted mid-run). An entry is not listed when its
 directory is gone, its branch (for owned entries) is gone and no registration of
 its own remains. While its exact registration remains it is still listed with
-`exists: false`. An
-owned entry whose directory and branch are both gone is still listed, with
-`exists: false` and no `branch` (so nothing promises a branch that is gone),
-while its exact registration remains in the repository's registration
-snapshot, so a clear can remove that registration instead of reporting the path
-as not tracked. A row is never hidden because git could not answer: an owned
+`exists: false`, so a clear can remove that registration instead of reporting
+the path as not tracked; an owned entry in that state whose branch is gone is
+listed with no `branch`, so nothing promises a branch that is gone. A row is
+never hidden because git could not answer: an owned
 entry whose directory is missing is dropped only when a successful branch
 lookup shows its branch gone and a successful snapshot shows no registration.
 If either lookup fails (git errors, or `for-each-ref` warns on stderr about a
@@ -208,7 +206,13 @@ Paths are compared after normalisation: the path is canonicalised exactly as
 written before any `..` is folded, so a workspace spelled through a symlink
 still resolves to the checkout the filesystem says it is. Only a missing path
 canonicalises its longest existing ancestor and folds the unresolved suffix
-lexically.
+lexically. Two places deliberately do not follow a final symlink. A stored
+observation is listed under exactly its stored path, never re-canonicalised,
+and registration snapshot paths keep their own last component when it has
+become a symlink: a registered checkout replaced by a symlink to some other
+worktree keeps its own name rather than turning into the other worktree's. And
+`exists` is true only for a real directory: a symlink at a listed path (to
+anything) is listed with `exists: false`.
 
 **What is stored.** Only observations that cannot be derived live go to
 `<data_dir>/worktrees.db`: `harness` worktrees and which threads used them.
@@ -257,7 +261,9 @@ worktree's `.git` file (only its final newline is stripped; the worktree is its
 parent), `<admin>/HEAD` is `ref: refs/heads/<b>` or a detached sha,
 `<admin>/locked` marks a lock, a `gitdir` target that no longer exists makes the
 registration prunable, and the main worktree is the parent of `<common>` for a
-non-bare repository; for a bare repository it is `<common>` itself with an
+non-bare repository. Each `gitdir` and `HEAD` file is read with a 4 KiB bound,
+as git only ever writes one short line there: an oversized `gitdir` skips that
+registration, and an oversized `HEAD` is unknown; for a bare repository it is `<common>` itself with an
 unknown `HEAD`, exactly as `-z` lists it (`bare`, no branch). Which form works is remembered for the rest of the
 process, so the failed probe happens once. The NUL-delimited form is parsed as
 records, so a path containing a newline (or bytes that are not UTF-8 on Unix)
@@ -274,7 +280,8 @@ as `harness`. Write failures are logged and never interrupt the watcher.
 
 Every git command the tracker runs, for observation, listing or clearing, has
 `GIT_TRACE`, `GIT_TRACE2`, `GIT_TRACE2_EVENT`, `GIT_TRACE2_PERF`,
-`GIT_TRACE_PACKET`, `GIT_TRACE_PERFORMANCE`, `GIT_TRACE_SETUP` and
+`GIT_TRACE_PACKET`, `GIT_TRACE_PERFORMANCE`, `GIT_TRACE_SETUP`,
+`GIT_TRACE_REFS`, `GIT_TRACE_FSMONITOR`, `GIT_TRACE_SHALLOW` and
 `GIT_CURL_VERBOSE` removed from its environment. Several lookups treat any
 stderr output from a successful command as inconclusive (a broken-ref warning),
 so trace output inherited from the daemon's environment must never reach them.
@@ -302,7 +309,12 @@ still running, and the fresh list always reflects what actually happened.
 A clear lists twice: once to pick its targets, and once at the end for the
 response. The selection listing skips `git status` for every entry because each
 removal checks dirtiness itself in preflight (with git's own refusal as the
-backstop); the response listing asks for it.
+backstop); the response listing asks for it, each entry's `git status` bounded
+to ten seconds like the watcher's calls (a timeout reports `dirty` as unknown).
+Requested paths are matched to listed rows exactly: the strings must be
+byte-equal once trailing separators are trimmed. Nothing is normalised, so a
+request spelled through a symlink or with `..` never reaches a row, and
+selection does no filesystem work at all.
 
 **Clearing rules.**
 
@@ -326,9 +338,10 @@ backstop); the response listing asks for it.
   not let the registration go; if the directory appeared or vanished since
   prepare, every check for the state that exists now (the existing-checkout
   checks including the nested scan, or the missing registration's `HEAD`). An
-  owned entry with no branch left whose directory reappeared since prepare is
-  refused outright as `the checkout was recreated during the clear` (not
-  forceable): prepare saw nothing on disk to protect, so the directory there
+  owned entry with no branch left whose selected row said `exists: false`, and
+  whose directory exists at prepare or at this final verification, is refused
+  outright as `the checkout was recreated during the clear` (not forceable):
+  the row the user chose had nothing on disk to protect, so the directory there
   now is a new checkout that is not this entry's. A checkout switched to
   another branch, an assume-unchanged file edited, or a nested worktree
   registered, in that window is therefore caught and the checkouts are kept.
@@ -350,7 +363,21 @@ backstop); the response listing asks for it.
   busy thread keeps the entry and is named in the reason.
 - A `thread` workspace is only removed when its path is named. It belongs to
   whoever created it, and its thread may be resumed there, so clearing
-  everything leaves it alone.
+  everything leaves it alone. That holds by path, not only by origin: when
+  `paths` is omitted, any row (a `harness` observation, say) whose path is a
+  listed thread's workspace, or the top level of that workspace's checkout, is
+  left out too. A subagent child's workspace is its subagent's own worktree and
+  does not count.
+- The destructive key is the path exactly as listed. Git resolves every path it
+  is given through symlinks, so a selected path that is a symlink (or a file),
+  or that only resolves to itself through a symlinked parent, is never handed to
+  git and is skipped as `not a registered worktree` (not forceable), whether
+  or not a registration still names it. An existing checkout must also have a
+  registration at exactly its path in the registration snapshot, in preflight,
+  prepare and the final verification before removal; otherwise it is skipped
+  with the same reason. So a tracked worktree that was moved away and whose old
+  path now is a symlink to another worktree of the same repository is never
+  cleared through that symlink: the other worktree is untouched.
 - Without `force`, a worktree with uncommitted changes, or an owned branch not
   merged into the repository's `HEAD`, is skipped. Dirtiness is asked of git
   again in preflight rather than trusted from the listing, and untracked files
@@ -360,6 +387,12 @@ backstop); the response listing asks for it.
   which every invocation runs with `-c status.showUntrackedFiles=all
   -c diff.ignoreSubmodules=none`, so that backstop counts untracked files and
   submodules whatever the user's config says.
+- Every git call that decides whether work would be lost (the dirty check, the
+  hidden-files `git ls-files -v`, and `git worktree remove` with the `git
+  status` it runs) also runs with `-c core.fsmonitor=false
+  -c core.untrackedCache=false`. A filesystem monitor hook that reports nothing
+  changed, or a stale untracked cache, would otherwise let git trust its index
+  and miss an edit or a new file.
 - Without `force`, an existing checkout must still be on the branch the listing
   gave it. If the current branch differs, the entry is skipped as
   `checkout is no longer on <branch>`; force removes the replacement checkout
@@ -426,11 +459,12 @@ backstop); the response listing asks for it.
 - Without `force`, prepare, and the final verification immediately before
   removal, also run `git ls-files -v` in an existing checkout, bounded like
   every other call. An
-  entry git tags as assume-unchanged (a lowercase tag) or skip-worktree (`S`)
-  whose file exists on disk is skipped as `has files hidden from git status`
-  (forceable): an edit to such a file never shows in `git status`, so neither
-  the dirty check nor git's removal backstop would see it. Sparse-checkout
-  files that are absent on disk do not count.
+  entry git tags as assume-unchanged (a lowercase tag), whether or not its file
+  is on disk, or skip-worktree (`S`) whose file exists on disk is skipped as
+  `has files hidden from git status` (forceable): an edit to such a file, and
+  for assume-unchanged even its deletion, never shows in `git status`, so
+  neither the dirty check nor git's removal backstop would see it. Only
+  skip-worktree files absent on disk (a sparse checkout) do not count.
 - Removal is plain `git worktree remove`, with `--force` only when the request
   asked for it, never merely because h4rn owns the checkout. Git's own contract
   applies: a removable checkout takes ignored files (build output, caches) with

@@ -1,6 +1,6 @@
 //! Worktree tracking tests over real temporary git repositories.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,9 +17,9 @@ use serde_json::json;
 use super::store::{StoredAccess, StoredWorktree};
 use super::{
     BEFORE_UPDATE_REF, ClearOne, ListInput, NESTED_SCAN_LIMIT, NESTED_SCAN_UNKNOWN, RECREATED,
-    RepoCaches, ThreadInfo, WorktreeTracker, branch_tip, compute, contained_worktree,
-    delete_owned_branch, execute, git, is_busy, nested_checkout, open_snapshot, preflight, prepare,
-    run_clear_entry, select_entries,
+    RepoCaches, ThreadInfo, WorktreeTracker, branch_tip, compute, compute_listing,
+    contained_worktree, delete_owned_branch, execute, git, is_busy, nested_checkout, open_snapshot,
+    preflight, prepare, run_clear_entry, select_entries,
 };
 use crate::harnesses::StaticHarnessCatalog;
 use crate::journal::SqliteJournal;
@@ -513,11 +513,11 @@ fn thread_workspaces_that_are_linked_worktrees_are_tracked() {
 
     // Clearing everything never removes a thread's workspace; naming it does.
     let data = fixture.data_dir();
-    let selection = select_entries(&entries, None);
+    let selection = select_entries(&entries, None, &HashSet::new());
     assert!(selection.targets.is_empty() && selection.skipped.is_empty());
     assert!(linked.is_dir());
     let path = entries[0].path.clone();
-    let selection = select_entries(&entries, Some(std::slice::from_ref(&path)));
+    let selection = select_entries(&entries, Some(std::slice::from_ref(&path)), &HashSet::new());
     assert_eq!(selection.targets.len(), 1);
     assert!(
         matches!(
@@ -538,16 +538,35 @@ fn selecting_entries_keeps_unknown_and_active_paths_apart() {
     let entries = vec![active];
 
     // Clearing everything leaves active entries alone without reporting them.
-    let selection = select_entries(&entries, None);
+    let selection = select_entries(&entries, None, &HashSet::new());
     assert!(selection.targets.is_empty() && selection.skipped.is_empty());
 
     // An explicit path is selected; whether it can go is the re-check's call.
-    let selection = select_entries(&entries, Some(std::slice::from_ref(&entries[0].path)));
+    let selection = select_entries(
+        &entries,
+        Some(std::slice::from_ref(&entries[0].path)),
+        &HashSet::new(),
+    );
     assert_eq!(selection.targets.len(), 1);
 
-    let selection = select_entries(&entries, Some(&["/nowhere".into()]));
+    let selection = select_entries(&entries, Some(&["/nowhere".into()]), &HashSet::new());
     assert_eq!(selection.skipped[0].reason, "not tracked");
     assert_eq!(selection.skipped[0].path, "/nowhere");
+
+    // Requests match listed paths exactly, up to a trailing separator; a
+    // spelling that only normalises to the listed path does not.
+    let path = &entries[0].path;
+    let selection = select_entries(&entries, Some(&[format!("{path}/")]), &HashSet::new());
+    assert_eq!(selection.targets.len(), 1);
+    let name = linked.file_name().expect("name").to_string_lossy();
+    let spelled = format!("{path}/../{name}");
+    let selection = select_entries(
+        &entries,
+        Some(std::slice::from_ref(&spelled)),
+        &HashSet::new(),
+    );
+    assert!(selection.targets.is_empty());
+    assert_eq!(selection.skipped[0].reason, "not tracked");
 }
 
 #[test]
@@ -3283,6 +3302,30 @@ fn a_recreated_owned_checkout_without_a_branch_is_refused_even_with_force() {
         );
         assert!(path.is_dir(), "force={force}");
         assert!(git::branch_exists(&fixture.repo, "someone-else"));
+
+        // Recreated before prepare: the selected row said nothing was there.
+        let fixture = Fixture::new();
+        let path = git::norm(&fixture.root.path().join("sa-recreated-early"));
+        let own = entry(&path, &fixture.repo, None, true);
+        preflight(&own, force).expect("preflight");
+        run(
+            &fixture.repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "someone-else-early",
+                &path.to_string_lossy(),
+            ],
+        );
+        assert_eq!(
+            prepare(&own, force).err().as_deref(),
+            Some(RECREATED),
+            "force={force}"
+        );
+        assert!(path.is_dir(), "force={force}");
+        assert!(git::branch_exists(&fixture.repo, "someone-else-early"));
     }
 }
 
@@ -3331,6 +3374,9 @@ const GIT_TRACE_VARS: &[&str] = &[
     "GIT_TRACE_PACKET",
     "GIT_TRACE_PERFORMANCE",
     "GIT_TRACE_SETUP",
+    "GIT_TRACE_REFS",
+    "GIT_TRACE_FSMONITOR",
+    "GIT_TRACE_SHALLOW",
     "GIT_CURL_VERBOSE",
 ];
 
@@ -3384,5 +3430,265 @@ fn branch_lookups_under_git_trace() {
         branch_tip(&fixture.repo, "h4rn/sa-traced")
             .expect("tip lookup")
             .is_some()
+    );
+}
+
+/// An fsmonitor hook that reports nothing changed: it prints its token and no
+/// paths, so git trusts its index for every file.
+#[cfg(unix)]
+fn silent_fsmonitor(fixture: &Fixture) {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    let hook = fixture.root.path().join("fsmonitor-hook");
+    {
+        let mut file = std::fs::File::create(&hook).expect("hook");
+        file.write_all(b"#!/bin/sh\nprintf 'token\\0'\n")
+            .expect("write hook");
+        file.sync_all().expect("sync hook");
+    }
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    run(
+        &fixture.repo,
+        &["config", "core.fsmonitor", &hook.to_string_lossy()],
+    );
+}
+
+/// Primes `linked`'s index under the hook, edits a tracked file, and checks
+/// that a plain `git status` (as the tracker runs it, without index writes)
+/// really does not see the edit.
+#[cfg(unix)]
+fn edit_behind_fsmonitor(linked: &Path, text: &str) {
+    run(linked, &["status", "--porcelain"]);
+    run(linked, &["status", "--porcelain"]);
+    std::fs::write(linked.join("README.md"), text).expect("edit");
+    let plain = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .current_dir(linked)
+        .output()
+        .expect("run git");
+    assert!(plain.status.success());
+    assert!(
+        plain.stdout.is_empty(),
+        "the hook hides the edit from a plain status: {}",
+        String::from_utf8_lossy(&plain.stdout)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_filesystem_monitor_that_reports_nothing_hides_no_edit() {
+    let fixture = Fixture::new();
+    silent_fsmonitor(&fixture);
+
+    // Preflight's own dirty check.
+    let linked = fixture.add_worktree("wt-fsmonitor", "fsmonitor-branch");
+    edit_behind_fsmonitor(&linked, "edited behind the monitor");
+    assert_eq!(git::is_dirty(&linked), Some(true));
+    let target = entry(&linked, &fixture.repo, Some("fsmonitor-branch"), false);
+    assert_eq!(
+        preflight(&target, false).err().as_deref(),
+        Some("has uncommitted changes")
+    );
+
+    // Git's removal backstop, for an edit made after prepare.
+    let late = fixture.add_worktree("wt-fsmonitor-late", "fsmonitor-late-branch");
+    let target = entry(&late, &fixture.repo, Some("fsmonitor-late-branch"), false);
+    let plan = preflight(&target, false).expect("preflight");
+    let prepared = prepare(&target, false).expect("prepare");
+    edit_behind_fsmonitor(&late, "late edit behind the monitor");
+    assert_eq!(
+        execute(&target, false, &fixture.data_dir(), &plan, &prepared)
+            .err()
+            .as_deref(),
+        Some("has uncommitted changes")
+    );
+    assert_eq!(
+        std::fs::read_to_string(late.join("README.md")).expect("edit kept"),
+        "late edit behind the monitor"
+    );
+}
+
+#[test]
+fn a_deleted_assume_unchanged_file_blocks_an_ordinary_clear() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-hidden-delete", "hidden-delete-branch");
+    run(
+        &linked,
+        &["update-index", "--assume-unchanged", "README.md"],
+    );
+    std::fs::remove_file(linked.join("README.md")).expect("delete");
+    assert_eq!(
+        git::is_dirty(&linked),
+        Some(false),
+        "status hides the deletion"
+    );
+    let target = entry(&linked, &fixture.repo, Some("hidden-delete-branch"), false);
+    assert_eq!(
+        clear_one(&target, false, &fixture.data_dir())
+            .err()
+            .as_deref(),
+        Some("has files hidden from git status")
+    );
+    assert!(linked.is_dir());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_symlink_that_replaced_a_tracked_checkout_is_never_followed() {
+    let fixture = Fixture::new();
+    let tracked = git::norm(&fixture.root.path().join("wt-tracked"));
+    let other = git::norm(&fixture.root.path().join("wt-other"));
+    for path in [&tracked, &other] {
+        run(
+            &fixture.repo,
+            &["worktree", "add", "-q", "--detach", &path.to_string_lossy()],
+        );
+    }
+    std::fs::write(other.join("work.txt"), "the other checkout's work").expect("work");
+    let (tracker, _threads, _subagents) = managers(&fixture, Vec::new()).await;
+    tracker
+        .inner
+        .store
+        .record(
+            &tracked.to_string_lossy(),
+            &fixture.repo.to_string_lossy(),
+            None,
+            "th_gone",
+            None,
+            Utc::now(),
+        )
+        .await
+        .expect("record the observation");
+
+    // The tracked checkout moves away, and its old path becomes a symlink to
+    // a different, untracked worktree of the same repository.
+    std::fs::rename(&tracked, fixture.root.path().join("wt-tracked-away")).expect("move away");
+    std::os::unix::fs::symlink(&other, &tracked).expect("symlink");
+
+    let listed = tracker.list().await;
+    let row = listed
+        .iter()
+        .find(|entry| Path::new(&entry.path) == tracked)
+        .unwrap_or_else(|| panic!("listed under its stored path: {listed:?}"));
+    assert!(!row.exists, "a symlink is not a checkout");
+    assert!(listed.iter().all(|entry| Path::new(&entry.path) != other));
+
+    for force in [false, true] {
+        let outcome = tracker
+            .clear(Some(vec![tracked.to_string_lossy().into_owned()]), force)
+            .await;
+        assert!(outcome.removed.is_empty(), "force={force}: {outcome:?}");
+        assert_eq!(outcome.skipped.len(), 1, "force={force}");
+        assert_eq!(outcome.skipped[0].reason, "not a registered worktree");
+    }
+    let outcome = tracker.clear(None, true).await;
+    assert!(outcome.removed.is_empty(), "{outcome:?}");
+
+    assert!(
+        tracked
+            .symlink_metadata()
+            .expect("still there")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        std::fs::read_to_string(other.join("work.txt")).expect("work kept"),
+        "the other checkout's work"
+    );
+    assert!(
+        git::registrations(&fixture.repo)
+            .expect("list")
+            .iter()
+            .any(|registration| registration.path == other),
+        "the other worktree stays registered"
+    );
+}
+
+#[test]
+fn an_existing_directory_that_is_not_registered_is_not_removed() {
+    let fixture = Fixture::new();
+    let clone = git::norm(&fixture.root.path().join("not-registered"));
+    init_repo(&clone);
+    let target = entry(&clone, &fixture.repo, None, false);
+    for force in [false, true] {
+        assert_eq!(
+            clear_one(&target, force, &fixture.data_dir())
+                .err()
+                .as_deref(),
+            Some("not a registered worktree"),
+            "force={force}"
+        );
+    }
+    assert!(clone.join(".git").is_dir());
+}
+
+#[test]
+fn clear_all_leaves_a_thread_workspace_alone_whatever_its_origin() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-thread-harness", "thread-harness-branch");
+    let nested = linked.join("src");
+    std::fs::create_dir_all(&nested).expect("nested workspace");
+    let mut list_input = input(&fixture, Vec::new());
+    list_input.threads = vec![ThreadInfo {
+        thread_id: ThreadId::new("th_idle"),
+        title: "idle".into(),
+        workspace: nested.to_string_lossy().into_owned(),
+        working: false,
+        last_activity: Utc::now(),
+    }];
+    let (_, _, thread_workspaces) = compute_listing(&list_input, false);
+    assert!(thread_workspaces.contains(&git::norm(&nested)));
+    assert!(
+        thread_workspaces.contains(&linked),
+        "the workspace's checkout top level: {thread_workspaces:?}"
+    );
+
+    // A harness-origin row at that path is still a thread's workspace.
+    let harness = entry(&linked, &fixture.repo, Some("thread-harness-branch"), false);
+    assert_eq!(harness.origin, WorktreeOrigin::Harness);
+    let entries = vec![harness];
+    let selection = select_entries(&entries, None, &thread_workspaces);
+    assert!(selection.targets.is_empty() && selection.skipped.is_empty());
+    let selection = select_entries(&entries, None, &HashSet::new());
+    assert_eq!(selection.targets.len(), 1);
+    // Naming it still selects it.
+    let selection = select_entries(
+        &entries,
+        Some(std::slice::from_ref(&entries[0].path)),
+        &thread_workspaces,
+    );
+    assert_eq!(selection.targets.len(), 1);
+}
+
+#[test]
+fn oversized_registration_metadata_is_not_read() {
+    let fixture = Fixture::new();
+    let big_head = fixture.add_worktree("wt-big-head", "big-head-branch");
+    let big_gitdir = fixture.add_worktree("wt-big-gitdir", "big-gitdir-branch");
+    let admin = |name: &str| fixture.repo.join(".git/worktrees").join(name);
+    std::fs::write(
+        admin("wt-big-head").join("HEAD"),
+        format!("ref: refs/heads/big-head-branch{}\n", " ".repeat(4096)),
+    )
+    .expect("big HEAD");
+    std::fs::write(
+        admin("wt-big-gitdir").join("gitdir"),
+        format!("{}/.git{}\n", big_gitdir.display(), "/".repeat(4096)),
+    )
+    .expect("big gitdir");
+
+    let registrations =
+        git::registrations_from_metadata(&fixture.repo, Duration::from_secs(30)).expect("read");
+    let head = registrations
+        .iter()
+        .find(|registration| registration.path == big_head)
+        .unwrap_or_else(|| panic!("listed: {registrations:?}"));
+    assert_eq!(head.head, git::Head::Unknown);
+    assert!(
+        registrations
+            .iter()
+            .all(|registration| registration.path != big_gitdir),
+        "{registrations:?}"
     );
 }
