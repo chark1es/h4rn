@@ -1,6 +1,6 @@
 //! End-to-end: the Antigravity ACP adapter and the thread manager together.
 //!
-//! The agent is the `agy-fixture` binary another package builds: a minimal ACP
+//! The agent is the `agy-fixture` binary this package builds: a minimal ACP
 //! peer that echoes prompts and can vanish mid-turn. That is the one thing the
 //! daemon-level fake cannot model, because only a real transport reports its
 //! own death through the adapter.
@@ -18,27 +18,10 @@ use tokio::sync::broadcast;
 
 const TURN_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The fixture is another package's binary, so build it on demand next to the
-/// test binaries instead of relying on `CARGO_BIN_EXE_*`.
+/// The fixture is a `[[bin]]` target of this package, so Cargo builds it for
+/// the test and reports its path; no profile or target-directory guessing.
 fn fixture_binary() -> PathBuf {
-    let exe = std::env::current_exe().expect("test exe");
-    let profile_dir = exe
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("target profile dir");
-    let path = profile_dir.join(if cfg!(windows) {
-        "agy-fixture.exe"
-    } else {
-        "agy-fixture"
-    });
-    if !path.exists() {
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-        let status = std::process::Command::new(cargo)
-            .args(["build", "-p", "h4rn-harness", "--bin", "agy-fixture"])
-            .status()
-            .expect("run cargo build for the agy fixture");
-        assert!(status.success(), "building the agy fixture failed");
-    }
+    let path = PathBuf::from(env!("CARGO_BIN_EXE_agy-fixture"));
     assert!(
         path.exists(),
         "missing fixture binary at {}",
@@ -149,13 +132,33 @@ async fn a_closed_acp_transport_is_replaced_before_the_next_turn() {
     assert_eq!(session_starts(workspace.path()), 1, "one agent process");
 
     // This prompt makes the fixture exit without answering: the adapter sees a
-    // closed transport, the daemon fails the turn once, and it detaches.
+    // closed transport, the daemon fails the turn once, and it detaches. The
+    // fixture holds its death until the gate file appears, so the follow-up
+    // below can be queued while the transport is still alive.
     let thread_id: ThreadId = created.thread_id.clone();
     manager
         .send_message(&thread_id, "please H4RN_FIXTURE_EXIT".into(), Vec::new())
         .await
         .expect("send");
+    let waiting = workspace.path().join(".agy-fixture-exit-waiting");
+    tokio::time::timeout(TURN_TIMEOUT, async {
+        while !waiting.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the fixture reached its exit gate before the turn ended");
+
+    // The follow-up queues behind the dying turn, not behind a fresh one.
+    let queued = manager
+        .send_message(&thread_id, "second".into(), Vec::new())
+        .await
+        .expect("send");
+    std::fs::write(workspace.path().join(".agy-fixture-exit-gate"), b"")
+        .expect("release the fixture's exit gate");
+
     let failed = next_turn(&mut events).await;
+    assert_eq!(failed.turn_id, queued.turn_id, "the dying turn is A");
     assert_eq!(failed.status, TurnStatus::Failed);
     assert_eq!(
         failed.errors.len(),
@@ -164,12 +167,8 @@ async fn a_closed_acp_transport_is_replaced_before_the_next_turn() {
         failed.errors
     );
 
-    // The next message must not be written into the closed client: it starts a
-    // fresh process rather than reporting another transport failure.
-    manager
-        .send_message(&thread_id, "second".into(), Vec::new())
-        .await
-        .expect("send");
+    // The queued message must not be written into the closed client: it runs
+    // on a fresh process instead.
     let second = next_turn(&mut events).await;
     assert_ne!(second.turn_id, failed.turn_id);
     assert_eq!(second.status, TurnStatus::Completed, "{:?}", second.errors);
@@ -181,7 +180,7 @@ async fn a_closed_acp_transport_is_replaced_before_the_next_turn() {
     assert_eq!(
         session_starts(workspace.path()),
         2,
-        "the next turn started a fresh agent process"
+        "the queued turn started a fresh agent process"
     );
 
     manager.shutdown().await;

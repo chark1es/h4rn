@@ -3,7 +3,9 @@
 //! It speaks just enough of the protocol for the Antigravity adapter: the
 //! handshake, a session, one echo turn per prompt. A prompt containing
 //! `H4RN_FIXTURE_EXIT` makes the process vanish mid-turn, which is how the
-//! tests drive a dead transport without a real `agy` install.
+//! tests drive a dead transport without a real `agy` install. That death waits
+//! for a gate file in the session's workspace, so a test can queue a follow-up
+//! behind the turn before the transport dies.
 
 use std::io::{BufRead, Write};
 
@@ -84,7 +86,10 @@ fn main() {
                     .unwrap_or_default();
                 if text.contains("H4RN_FIXTURE_EXIT") {
                     // Vanish mid-turn: stdout closes, the daemon's client sees a
-                    // dead transport and never gets a prompt result.
+                    // dead transport and never gets a prompt result. The death
+                    // waits for a gate file the test creates, so the test can
+                    // first queue a follow-up behind this turn.
+                    wait_for_exit_gate();
                     std::process::exit(7);
                 }
                 let session_id = params
@@ -128,6 +133,23 @@ fn main() {
                 }
             }
         }
+    }
+}
+
+/// Announces that the dying turn has arrived, then waits for the test's gate.
+///
+/// The marker is written first so the test can queue a follow-up behind the
+/// turn, and only then create the gate the process is waiting for.
+fn wait_for_exit_gate() {
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    let waiting = cwd.join(".agy-fixture-exit-waiting");
+    let gate = cwd.join(".agy-fixture-exit-gate");
+    let _ = std::fs::write(&waiting, b"");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !gate.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
 }
 
