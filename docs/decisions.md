@@ -535,8 +535,8 @@ closed and kills the agent's process group before any caller is woken, so an age
 stdin cannot outlive the failure. A failover that arrives while a startup is still booting the old
 model supersedes that startup, so the resume starts on the new model. A prompt result without a
 string `stopReason` is a failure, never an implicit `end_turn`: ACP requires the field, and every
-Antigravity ACP recording in `crates/h4rn-harness/tests/fixtures` sends it, so a reply that omits it
-is malformed rather than a normal completion.
+recorded turn end in `crates/h4rn-harness/tests/fixtures` sends it, so a reply that omits it is
+malformed rather than a normal completion.
 
 **Addendum: a startup's death is the turn's, and a death has one row.** A turn may move off the
 previous turn's session once: if that agent exits while a promoted message is still waiting, the
@@ -568,6 +568,16 @@ A rate-limit reset that only the exit report carries still reaches the auto-resu
 as an exit report on its own does. A writer that sees stdin close likewise waits for the stderr
 reader to drain the pipe before it wakes the caller, so a diagnostic printed in the same step as the
 close is part of the failure row.
+
+**Addendum: a write deadline keeps the reset, and an idle death has one row.** A prompt that never
+reaches an agent that stopped reading stdin fails on the write deadline, and that path collects the
+same bounded stderr tail and exit report as a closed transport; a reset time printed there becomes
+the typed limit, so the daemon persists the schedule and the message queued behind it waits instead
+of running straight into the limit. A typed limit is rendered as the message alone under a
+`Rate limited:` prefix rather than as a rejected write. Between turns the bridge reports the same
+death twice as well (the generic close, then the exit status with the stderr it drained); those
+reports are held per session generation and published as one row when that session's stream ends,
+so the exit status and the stderr are never lost to the generic notice.
 
 ## ADR-027: Push notifications are metadata-only wake signals
 

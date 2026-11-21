@@ -315,6 +315,13 @@ struct ThreadRecord {
     /// out; holding it lets the settlement (or a second report) merge the most
     /// specific detail into that one row.
     transport_report: Option<TransportReport>,
+    /// A transport death reported while no turn was active.
+    ///
+    /// The adapter reports that death twice: the generic stdout-close notice,
+    /// then the exit status together with the stderr it drained. Holding both
+    /// until the session's own stream ends lets the one row for the death keep
+    /// the exit status and the stderr instead of taking the generic notice.
+    idle_transport_report: Option<IdleTransportReport>,
     /// A limit hit whose auto-resume schedule is armed for this thread.
     scheduled_limit: Option<ScheduledLimit>,
     /// Scheduled auto-resume target shown on the thread summary (ADR-024).
@@ -546,6 +553,25 @@ impl TransportReport {
     }
 }
 
+/// A transport death reported while no turn was active.
+///
+/// It is held until its session's stream ends, so the generic close and the
+/// exit report that follows it merge into one row for one session generation.
+struct IdleTransportReport {
+    generation: u64,
+    message: String,
+    retryable: bool,
+}
+
+impl IdleTransportReport {
+    /// Folds a second report of the same death into this one.
+    fn merge(&mut self, message: String, retryable: bool) {
+        let held = std::mem::take(&mut self.message);
+        self.message = most_specific_detail(held, message);
+        self.retryable |= retryable;
+    }
+}
+
 impl TurnDispatch {
     fn new(turn_id: TurnId, input: UserInput) -> Self {
         Self {
@@ -738,6 +764,7 @@ impl ThreadRecord {
         self.limit = None;
         self.transport_error_reported = None;
         self.transport_report = None;
+        self.idle_transport_report = None;
         self.branch = crate::fs::git::branch(std::path::Path::new(&self.meta.workspace_path));
         let turn_id = TurnId::new_uuid_v7();
         let item_id = assistant_item_id(&turn_id);
@@ -854,6 +881,43 @@ impl ThreadRecord {
         } else {
             None
         }
+    }
+
+    /// Holds a transport death reported between turns for `generation`.
+    ///
+    /// A second report for the same generation only sharpens the held detail.
+    /// A report for a death whose row is already published is dropped, exactly
+    /// as the immediate path dropped it, so one death never gets two rows.
+    fn hold_idle_transport_report(
+        &mut self,
+        generation: u64,
+        turn_id: &TurnId,
+        message: String,
+        retryable: bool,
+    ) {
+        if let Some(report) = self
+            .idle_transport_report
+            .as_mut()
+            .filter(|report| report.generation == generation)
+        {
+            report.merge(message, retryable);
+            return;
+        }
+        if !self.note_transport_error(turn_id) {
+            return;
+        }
+        self.idle_transport_report = Some(IdleTransportReport {
+            generation,
+            message,
+            retryable,
+        });
+    }
+
+    /// Takes the held idle report once its session's stream ends.
+    fn take_idle_transport_report(&mut self, generation: u64) -> Option<IdleTransportReport> {
+        self.idle_transport_report
+            .take()
+            .filter(|report| report.generation == generation)
     }
 
     /// The live session, when there is one.
@@ -1291,6 +1355,7 @@ impl ThreadManager {
             last_signature: None,
             transport_error_reported: None,
             transport_report: None,
+            idle_transport_report: None,
             scheduled_limit: None,
             resume_at: None,
             limit: None,
@@ -2383,6 +2448,7 @@ impl Inner {
                 last_signature: None,
                 transport_error_reported: None,
                 transport_report: None,
+                idle_transport_report: None,
                 scheduled_limit: None,
                 resume_at: None,
                 limit: None,
@@ -2872,8 +2938,13 @@ impl Inner {
         // A write that fails because the agent closed its stdin can leave its
         // only diagnostic on stderr. Keep both texts in the one row: the write
         // error is what the adapter reported, the tail is what the agent said
-        // before it went quiet.
-        let message = format!("the harness rejected the message: {message}");
+        // before it went quiet. A typed limit says what it is instead of
+        // blaming the write, because the adapter already reported it as one.
+        let message = if limit.is_some() {
+            format!("Rate limited: {message}")
+        } else {
+            format!("the harness rejected the message: {message}")
+        };
         let stderr_tail = stderr_tail.trim();
         let message = if stderr_tail.is_empty() || message.contains(stderr_tail) {
             message
@@ -3514,17 +3585,13 @@ impl Inner {
                             "dropped a late transport failure from a detached session"
                         );
                     } else if record.active.is_none() {
-                        // Nothing to merge with: a death between turns is its
-                        // own row.
-                        if record.note_transport_error(&turn_id) {
-                            domain.push(ThreadEvent::FailureRaised { at: now });
-                            wire.push(Event::Error {
-                                thread_id: Some(thread_id.clone()),
-                                message,
-                                hint: Some("Inspect the thread and retry when ready".into()),
-                                retryable,
-                            });
-                        }
+                        // Nothing to merge with yet: a death between turns is
+                        // its own row. The adapter reports that death twice,
+                        // the generic stdout close first and then the exit
+                        // status with the stderr it drained, so both are held
+                        // for this session generation and published as one row
+                        // when its stream ends.
+                        record.hold_idle_transport_report(generation, &turn_id, message, retryable);
                     } else if !record.note_transport_report(&turn_id, message, retryable) {
                         tracing::debug!(
                             thread_id = %thread_id,
@@ -3598,9 +3665,13 @@ impl Inner {
                 };
                 Some((active.turn_id.clone(), message, hint.clone()))
             });
+            // A death reported between turns has no settlement to wait for, so
+            // its held reports are published here as the session's one row.
+            let idle = record.take_idle_transport_report(generation);
             // The pump is this task, so it must not abort itself.
             record.clear_session(generation);
             record.pump = None;
+            let has_turn = turn.is_some();
             let settled = match turn {
                 Some((turn_id, message, hint)) => {
                     // Detach and settlement are one lock scope. A delivery that
@@ -3626,6 +3697,28 @@ impl Inner {
                     false
                 }
             };
+            if !has_turn && let Some(report) = idle {
+                // The session's stream ended with no turn to blame, so this is
+                // the row for the idle transport death: the generic close
+                // merged with the exit status and stderr that followed it.
+                let now = self.now();
+                let thread_id = record.meta.thread_id.clone();
+                if let Err(error) = self
+                    .emit(
+                        &mut record,
+                        vec![ThreadEvent::FailureRaised { at: now }],
+                        vec![Event::Error {
+                            thread_id: Some(thread_id),
+                            message: report.message,
+                            hint: Some("Inspect the thread and retry when ready".into()),
+                            retryable: report.retryable,
+                        }],
+                    )
+                    .await
+                {
+                    tracing::error!(%error, "failed to record a transport failure");
+                }
+            }
             (settled, record.active.is_some())
         };
         if settled || advance {
@@ -6205,6 +6298,81 @@ mod tests {
         );
     }
 
+    /// An agent that closes its stdout between turns and then exits reports the
+    /// same idle death twice: the generic close notice first, the exit status
+    /// and its stderr second. They are one row, and it keeps the stderr.
+    #[tokio::test]
+    async fn an_idle_close_and_exit_merge_into_one_row_with_the_stderr() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(FakeHarness::new(), host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        let (session, generation) = {
+            let record = handle.lock().await;
+            (
+                record.live_session().cloned().expect("a live session"),
+                record.session.generation().expect("a generation"),
+            )
+        };
+        // Between turns: the agent's stdout closes, then its exit report lands
+        // with the stderr the close notice could not carry.
+        let stream = futures::stream::iter(vec![
+            HarnessEvent::TransportClosed {
+                message: "the harness transport closed".into(),
+                retryable: false,
+            },
+            HarnessEvent::TransportClosed {
+                message: "agy exited (exited: 1): agy: the session ended".into(),
+                retryable: false,
+            },
+        ])
+        .boxed();
+        Arc::clone(&manager.inner)
+            .run_pump(handle.clone(), generation, session, None, stream)
+            .await;
+
+        let mut errors = Vec::new();
+        loop {
+            let wire = next_event(&mut events).await;
+            if let Event::Error { message, .. } = wire.event {
+                errors.push(message);
+                break;
+            }
+        }
+        assert!(
+            errors[0].contains("agy exited (exited: 1): agy: the session ended"),
+            "the row is the exit report with the stderr: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("agy: the session ended"),
+            "the row keeps the stderr the generic close lacked: {errors:?}"
+        );
+        let duplicate = tokio::time::timeout(Duration::from_millis(250), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                if let Event::Error { message, .. } = wire.event {
+                    return message;
+                }
+            }
+        })
+        .await;
+        assert!(
+            duplicate.is_err(),
+            "one idle death is one row, not two: {duplicate:?}"
+        );
+    }
+
     /// A failed write whose text merely mentions a limit is an ordinary failed
     /// turn: the daemon arms a resume only for the adapter's typed signal, so
     /// another harness's "payload size limit exceeded" cannot pause a thread.
@@ -6229,10 +6397,12 @@ mod tests {
             .await
             .expect("send");
         let mut errors = Vec::new();
+        let mut limit_rows = 0;
         loop {
             let wire = next_event(&mut events).await;
             match wire.event {
                 Event::Error { message, .. } => errors.push(message),
+                Event::UsageLimitHit { .. } => limit_rows += 1,
                 Event::TurnCompleted {
                     turn_id, status, ..
                 } => {
@@ -6243,6 +6413,10 @@ mod tests {
                 _ => {}
             }
         }
+        assert_eq!(
+            limit_rows, 0,
+            "no limit row is published before the turn completes"
+        );
         assert!(
             errors.iter().any(|row| row.contains("payload size limit")),
             "the write error is the turn's ordinary row: {errors:?}"
@@ -6309,5 +6483,95 @@ mod tests {
             meter.schedules().await.expect("read schedules").is_empty(),
             "a write that lost its turn armed no schedule"
         );
+    }
+
+    /// A typed limit from a failed write is the row the user reads and the
+    /// signal that pauses the thread: the message alone under a limit prefix,
+    /// the schedule persisted, and the message queued behind it not started.
+    #[tokio::test]
+    async fn a_typed_limit_from_a_failed_write_holds_the_queue_and_names_the_limit() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(5);
+        let harness = FakeHarness::new().with_limit_failure_after(
+            1,
+            "provider usage limit reached",
+            Some(reset_at),
+        );
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        let third = manager
+            .send_message(&created.thread_id, "third".into(), Vec::new())
+            .await
+            .expect("queue third");
+
+        let mut errors = Vec::new();
+        let mut limit_rows = 0;
+        loop {
+            let wire = next_event(&mut events).await;
+            match wire.event {
+                Event::Error { message, .. } => errors.push(message),
+                Event::UsageLimitHit {
+                    reset_at: hit_at, ..
+                } => {
+                    limit_rows += 1;
+                    assert_eq!(hit_at, Some(reset_at));
+                }
+                Event::TurnCompleted {
+                    turn_id, status, ..
+                } if turn_id == second.turn_id => {
+                    assert_eq!(status, TurnStatus::Failed);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(limit_rows, 1, "the typed limit is one row");
+        assert!(
+            errors
+                .iter()
+                .any(|row| row == "Rate limited: provider usage limit reached"),
+            "the row names the limit instead of blaming the write: {errors:?}"
+        );
+        assert!(
+            !errors
+                .iter()
+                .any(|row| row.starts_with("the harness rejected the message:")),
+            "a typed limit does not read like an ordinary rejected write: {errors:?}"
+        );
+        let schedules = meter.schedules().await.expect("read schedules");
+        assert_eq!(schedules.len(), 1, "the reset time is persisted");
+        assert_eq!(schedules[0].thread_id, created.thread_id);
+        assert_eq!(schedules[0].state, h4rn_protocol::ResumeState::Scheduled);
+
+        // The queued message waits for the schedule instead of running into
+        // the limit immediately.
+        let started = tokio::time::timeout(Duration::from_millis(250), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                if let Event::TurnStarted { turn_id, .. } = wire.event {
+                    return turn_id;
+                }
+            }
+        })
+        .await;
+        assert!(
+            started.is_err(),
+            "queued work does not start behind a typed limit: {started:?}"
+        );
+        let _ = third;
+        manager.shutdown().await;
     }
 }

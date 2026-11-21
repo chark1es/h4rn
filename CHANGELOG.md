@@ -86,15 +86,22 @@ All notable changes to h4rn are recorded here. The format follows
   reaches the limit and auto-resume handling, and the writer that sees stdin close waits for the
   stderr reader to drain the pipe before it wakes a caller, so a diagnostic printed in the same step
   as the close is not lost.
+- **An agent that closes between turns gets one failure row, not two.** The adapter reports that
+  death twice (the generic stdout close, then the exit status with the stderr it drained). The
+  reports are now merged per session generation and published as one row when the session's stream
+  ends, so the generic notice can no longer take the row and hide the exit status and stderr.
 - **A prompt that never reached the agent still reports its rate limit, but only when the adapter
   says so.** When the agent closed stdin before the next prompt could be flushed, the failure row
   still carries the agent's stderr and exit detail, and a reset time printed there reaches the
-  usage-limit path. The ACP adapter now parses that detail itself and returns a typed limit signal,
-  and the daemon arms the resume only for that signal, so another harness's transport error that
-  merely says "payload size limit exceeded" stays an ordinary failed turn. The limit is recorded
-  and its schedule armed only while the failed write still owns the turn and its session: a
-  shutdown that interrupted the turn while the write was pending drops the late limit instead of
-  leaving a schedule that would fire after restart.
+  usage-limit path. A write that times out because the agent stopped reading stdin collects the same
+  stderr tail and exit detail, so a reset time printed before the stall still arms the schedule and
+  the queued message waits instead of running into the limit. The ACP adapter parses that detail
+  itself and returns a typed limit signal, and the daemon arms the resume only for that signal, so
+  another harness's transport error that merely says "payload size limit exceeded" stays an
+  ordinary failed turn. A typed limit reads as `Rate limited: <message>` instead of a rejected
+  write. The limit is recorded and its schedule armed only while the failed write still owns the
+  turn and its session: a shutdown that interrupted the turn while the write was pending drops the
+  late limit instead of leaving a schedule that would fire after restart.
 - **A model change during a startup discards that startup.** Failing over while a session is still
   booting the limited model supersedes the startup, so the resume runs on a session started with
   the new model instead of the one that was already on its way.

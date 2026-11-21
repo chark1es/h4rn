@@ -485,6 +485,25 @@ impl AcpClient {
         Self::start(config, workspace, stdout, stdin, None, StderrRing::new())
     }
 
+    /// Builds a client over a test's pipe pair with a stderr ring the test owns.
+    ///
+    /// A test writes into the ring the way a spawned agent's stderr reader
+    /// would, so a failure path can be proven to keep the agent's last words.
+    #[cfg(test)]
+    pub(crate) fn start_for_test_with_stderr<R, W>(
+        config: AcpClientConfig,
+        stdout: R,
+        stdin: W,
+        stderr: StderrRing,
+    ) -> Self
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        let workspace = config.workspace.clone();
+        Self::start(config, workspace, stdout, stdin, None, stderr)
+    }
+
     /// Performs the `initialize` handshake and returns the agent's reply.
     pub async fn initialize(&self) -> Result<AcpServerInfo, AcpError> {
         let params = json!({

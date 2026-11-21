@@ -621,8 +621,12 @@ impl HarnessSession for AcpSession {
                 // the same death the prompt task would report: name the I/O
                 // error, the agent's stderr and its exit, so the daemon's one
                 // failure row keeps the agent's last words and any rate-limit
-                // reset in them.
-                let detail = if matches!(error, AcpError::Closed { .. }) {
+                // reset in them. A write timeout kills the agent just like a
+                // close, so it must also read the stderr the agent printed
+                // before it stopped reading: that is where a provider limit
+                // names its reset, and the daemon arms the resume from it.
+                let detail = if matches!(error, AcpError::Closed { .. } | AcpError::Timeout { .. })
+                {
                     prompt_write_detail(&client, error.to_string()).await
                 } else {
                     error.to_string()
@@ -1138,10 +1142,11 @@ fn spawn_event_bridge(
 
 /// Names what a prompt that never reached the agent's stdin left behind.
 ///
-/// The writer has already waited for the stderr reader to drain, so the
-/// ring's tail is available; a supervised client may also have reaped the
-/// process, and that exit report's stderr and status are the most specific
-/// detail the row can carry.
+/// The writer has already waited for the stderr reader to drain (a closed
+/// transport and a write deadline both kill the agent), so the ring's tail is
+/// available; a supervised client may also have reaped the process, and that
+/// exit report's stderr and status are the most specific detail the row can
+/// carry.
 async fn prompt_write_detail(client: &AcpClient, detail: String) -> String {
     let mut detail = detail;
     if client.is_supervised()
@@ -1973,6 +1978,64 @@ mod tests {
             json!({"jsonrpc": "2.0", "id": new_session["id"], "result": {"sessionId": "s-1"}}),
         )
         .await;
+    }
+
+    /// A prompt that never reaches an agent that stopped reading its stdin is a
+    /// write timeout, not a quiet turn: the agent's printed reset time is still
+    /// the most specific detail, so the failure is the typed limit the daemon
+    /// schedules a resume from.
+    #[tokio::test(start_paused = true)]
+    async fn a_prompt_write_timeout_keeps_the_stderr_reset_as_a_typed_limit() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        // A tiny stdin buffer that nobody drains: the prompt fills it and the
+        // writer blocks mid-frame until the write deadline.
+        let (client_write, agent_read) = tokio::io::duplex(64 * 1024);
+        let (mut agent_write, client_read) = tokio::io::duplex(64 * 1024);
+        let mut agent_read = BufReader::new(agent_read);
+        let stderr = crate::acp::StderrRing::new();
+        stderr.push("API usage limit reached; resets at 3:00 PM");
+        let client = AcpClient::start_for_test_with_stderr(
+            AcpClientConfig::new("/usr/local/bin/fake-acp", workspace.path()),
+            client_read,
+            client_write,
+            stderr,
+        );
+
+        // The agent answers the handshake, then stops reading stdin while it
+        // keeps the pipe open.
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let agent = tokio::spawn(async move {
+            handshake(&mut agent_read, &mut agent_write).await;
+            let _ = stop_rx.await;
+        });
+
+        let mut session = AcpSession::start_with(&client, &acp_spec(workspace.path()))
+            .await
+            .expect("start session");
+        let error = session
+            .send(UserInput {
+                text: "x".repeat(1024 * 1024),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect_err("a prompt the agent never reads must not claim to be on the wire");
+        match error {
+            HarnessError::RateLimited { message, limit, .. } => {
+                assert!(
+                    message.to_ascii_lowercase().contains("usage limit reached"),
+                    "the failure keeps the agent's last words: {message}"
+                );
+                assert!(
+                    limit.reset_at.is_some(),
+                    "the stderr named a reset time: {limit:?}"
+                );
+            }
+            other => panic!("expected the typed limit, got {other:?}"),
+        }
+        assert_eq!(session.agent_state(), AgentState::RateLimited);
+
+        let _ = stop_tx.send(());
+        agent.await.expect("agent");
     }
 
     #[tokio::test(flavor = "current_thread")]

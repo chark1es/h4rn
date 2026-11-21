@@ -254,7 +254,10 @@ pub enum HarnessError {
     /// never from an arbitrary error's text, so a transport failure that
     /// merely mentions a limit (an HTTP 413 payload limit, say) stays an
     /// ordinary failed turn.
-    #[error("{harness:?} is rate limited: {message}")]
+    ///
+    /// The display is the message alone: the adapter already names the harness
+    /// and the failure, and the daemon prefixes the limit for the user.
+    #[error("{message}")]
     RateLimited {
         /// Harness involved.
         harness: HarnessKind,
