@@ -76,6 +76,28 @@ pub struct Registration {
     pub locked: bool,
 }
 
+/// One read of every worktree registration of a repository.
+///
+/// `complete` is false when some registration could not be read (the metadata
+/// fallback met an admin entry whose `gitdir` is not a readable regular file).
+/// A snapshot that is not complete never proves that something is absent: a
+/// missing registration may be exactly the unreadable one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RegistrationSnapshot {
+    /// Every registration that could be read, main worktree included.
+    pub registrations: Vec<Registration>,
+    /// Whether every registration could be read.
+    pub complete: bool,
+}
+
+impl std::ops::Deref for RegistrationSnapshot {
+    type Target = [Registration];
+
+    fn deref(&self) -> &[Registration] {
+        &self.registrations
+    }
+}
+
 impl Registration {
     /// The checked-out branch by short name; `None` when detached or unknown.
     pub fn branch(&self) -> Option<&str> {
@@ -470,7 +492,7 @@ pub fn norm_listed(path: &Path) -> PathBuf {
 }
 
 /// Folds `.` and `..` lexically, without consulting the filesystem.
-fn fold(path: PathBuf) -> PathBuf {
+pub(crate) fn fold(path: PathBuf) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {
@@ -565,6 +587,7 @@ pub fn is_linked_worktree(workspace: &Path) -> bool {
 pub fn list_worktrees(repo: &Path) -> Result<Vec<GitWorktree>, String> {
     let main = norm(repo);
     Ok(registrations(repo)?
+        .registrations
         .into_iter()
         .filter(|registration| registration.path != main)
         .filter(|registration| registration.path.to_str().is_some())
@@ -579,7 +602,7 @@ pub fn list_worktrees(repo: &Path) -> Result<Vec<GitWorktree>, String> {
 ///
 /// Bounded by [`OBSERVATION_GIT_TIMEOUT`] because the observation watcher
 /// calls it through [`list_worktrees`].
-pub fn registrations(repo: &Path) -> Result<Vec<Registration>, String> {
+pub fn registrations(repo: &Path) -> Result<RegistrationSnapshot, String> {
     registrations_with_timeout(repo, OBSERVATION_GIT_TIMEOUT)
 }
 
@@ -602,15 +625,19 @@ static PORCELAIN_Z: AtomicU8 = AtomicU8::new(PORCELAIN_Z_UNKNOWN);
 pub fn registrations_with_timeout(
     repo: &Path,
     limit: Duration,
-) -> Result<Vec<Registration>, String> {
+) -> Result<RegistrationSnapshot, String> {
     if forced_metadata_fallback() || PORCELAIN_Z.load(Ordering::Relaxed) == PORCELAIN_Z_UNSUPPORTED
     {
         return registrations_from_metadata(repo, limit);
     }
     match porcelain_z(repo, limit)? {
+        // Git read every registration itself.
         Some(registrations) => {
             PORCELAIN_Z.store(PORCELAIN_Z_WORKS, Ordering::Relaxed);
-            Ok(registrations)
+            Ok(RegistrationSnapshot {
+                registrations,
+                complete: true,
+            })
         }
         None => {
             PORCELAIN_Z.store(PORCELAIN_Z_UNSUPPORTED, Ordering::Relaxed);
@@ -656,23 +683,32 @@ fn unsupported_porcelain_z(code: Option<i32>, stderr: &str) -> bool {
 /// The fallback for a git older than 2.36, and byte-exact on every version:
 /// `<common>/worktrees/<id>/gitdir` holds the absolute path of the linked
 /// worktree's `.git` file (only the final newline is stripped; the worktree is
-/// its parent), `<id>/HEAD` is `ref: refs/heads/<b>` or a detached sha,
-/// `<id>/locked` marks a lock, and a checkout path that is not a real
-/// directory (checked without following symlinks: a symlink there is not a live
-/// checkout) makes the registration prunable. The main worktree is the parent
-/// of `<common>` for a non-bare repository; for a bare one the main
-/// registration is `<common>` itself with an unknown `HEAD`, as `-z` reports it
-/// (`bare`, no branch). Only regular files are read (see [`read_bounded`]). A
-/// `HEAD` that cannot be read or parsed is [`Head::Unknown`]. Paths are kept
-/// byte-exact, valid UTF-8 or not, exactly as the `-z` parser keeps them:
-/// containment, the exact-registration lookup and branch occupancy must see
-/// every registration. Only what goes over the protocol is filtered to UTF-8.
+/// its parent), `<id>/HEAD` is `ref: refs/heads/<b>` or a detached sha, a
+/// `<id>/locked` entry of any kind (checked without following symlinks)
+/// marks a lock, and a checkout path that is not a real directory (checked
+/// without following symlinks: a symlink there is not a live checkout) makes
+/// the registration prunable. The main worktree is the parent of `<common>`
+/// for a non-bare repository; for a bare one the main registration is
+/// `<common>` itself with an unknown `HEAD`, as `-z` reports it (`bare`, no
+/// branch). Only regular files are read (see [`read_bounded`]); `gitdir` and
+/// `HEAD` may be symlinks to a regular file, as git itself reads them. A
+/// `HEAD` that cannot be read or parsed is [`Head::Unknown`]. An admin entry
+/// whose `gitdir` exists but cannot be read that way (not a regular file,
+/// oversized, unreadable, empty), or an admin entry that is neither a
+/// directory nor a plain file, makes the snapshot incomplete: its
+/// registration may be the one a caller is looking for. An admin entry
+/// without any `gitdir`, or a plain file there, is skipped as git skips it.
+/// Paths are kept byte-exact, valid UTF-8 or not, exactly as the `-z` parser
+/// keeps them: containment, the exact-registration lookup and branch
+/// occupancy must see every registration. Only what goes over the protocol is
+/// filtered to UTF-8.
 pub(crate) fn registrations_from_metadata(
     repo: &Path,
     limit: Duration,
-) -> Result<Vec<Registration>, String> {
+) -> Result<RegistrationSnapshot, String> {
     let common = common_dir(repo, limit)?;
     let mut registrations = Vec::new();
+    let mut complete = true;
     match common.parent() {
         Some(main) if common.file_name().is_some_and(|name| name == ".git") => {
             registrations.push(Registration {
@@ -693,20 +729,48 @@ pub(crate) fn registrations_from_metadata(
     let admin_root = common.join("worktrees");
     let entries = match std::fs::read_dir(&admin_root) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(registrations),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(RegistrationSnapshot {
+                registrations,
+                complete,
+            });
+        }
         Err(error) => return Err(format!("could not read {}: {error}", admin_root.display())),
     };
     for entry in entries {
         let admin = entry
             .map_err(|error| format!("could not read {}: {error}", admin_root.display()))?
             .path();
-        // A real `gitdir` file is one short line; an oversized one is not
-        // read, and its registration is skipped.
-        let Some(bytes) = read_bounded(&admin.join("gitdir")) else {
+        match admin.symlink_metadata() {
+            Ok(meta) if meta.is_dir() => {}
+            // A stray file holds no registration; git skips it too.
+            Ok(meta) if meta.is_file() => continue,
+            // A symlink, a FIFO, or an entry that vanished mid-read: unknown.
+            _ => {
+                complete = false;
+                continue;
+            }
+        }
+        let gitdir_file = admin.join("gitdir");
+        match gitdir_file.symlink_metadata() {
+            Ok(_) => {}
+            // No `gitdir` at all: git cannot list it either.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                complete = false;
+                continue;
+            }
+        }
+        // A real `gitdir` file is one short line. One that cannot be read as a
+        // regular file of at most 4 KiB is never followed, and its
+        // registration is unknown.
+        let Some(bytes) = read_bounded_following(&gitdir_file) else {
+            complete = false;
             continue;
         };
         let gitdir = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
         if gitdir.is_empty() {
+            complete = false;
             continue;
         }
         let gitdir = path_from_bytes(gitdir);
@@ -714,6 +778,7 @@ pub(crate) fn registrations_from_metadata(
         // are relative to the admin directory; an absolute one replaces it.
         let gitdir = admin.join(gitdir);
         let Some(path) = gitdir.parent() else {
+            complete = false;
             continue;
         };
         // A symlink (or anything else that is not a real directory) where the
@@ -723,43 +788,93 @@ pub(crate) fn registrations_from_metadata(
             path: norm_listed(path),
             head: read_head(&admin.join("HEAD")),
             prunable,
-            locked: admin.join("locked").exists(),
+            // Presence alone locks, so a dangling symlink named `locked` is a
+            // lock too.
+            locked: admin.join("locked").symlink_metadata().is_ok(),
         });
     }
-    Ok(registrations)
+    Ok(RegistrationSnapshot {
+        registrations,
+        complete,
+    })
 }
 
 /// Largest git metadata file (`gitdir`, `HEAD`, a `.git` file) ever read.
 const MAX_METADATA_BYTES: u64 = 4 * 1024;
 
-/// Reads at most [`MAX_METADATA_BYTES`] of a small git metadata file.
+/// Reads at most [`MAX_METADATA_BYTES`] of a small git metadata file, never
+/// following a symlink.
 ///
 /// `None` when the file cannot be read, is larger than that, or is not a
 /// regular file: such a file is never one git wrote, and reading it whole is
-/// never needed to refuse it. The type is checked without following symlinks
-/// before opening, so a FIFO (which would block `open` until a writer comes),
-/// a device or a symlink is never opened.
+/// never needed to refuse it. See [`read_metadata`].
 pub(crate) fn read_bounded(path: &Path) -> Option<Vec<u8>> {
+    read_metadata(path, false)
+}
+
+/// [`read_bounded`], following a symlink whose target is a regular file.
+///
+/// For `gitdir` and `HEAD`, which git itself reads through a symlink.
+pub(crate) fn read_bounded_following(path: &Path) -> Option<Vec<u8>> {
+    read_metadata(path, true)
+}
+
+/// Reads a small regular file without ever blocking in `open`.
+///
+/// The type is checked first (following symlinks only when `follow`), so a
+/// FIFO, a device or a refused symlink is normally never opened. That check
+/// and the open are separate steps, though, so on Unix the open itself also
+/// cannot block or follow what it must not: it uses `O_NONBLOCK` (a FIFO swapped
+/// in meanwhile opens at once instead of waiting for a writer) and, when not
+/// `follow`, `O_NOFOLLOW`. The opened descriptor is then checked again and
+/// anything that is not a regular file is refused before a byte is read.
+fn read_metadata(path: &Path, follow: bool) -> Option<Vec<u8>> {
     use std::io::Read;
-    if !path
-        .symlink_metadata()
-        .is_ok_and(|meta| meta.file_type().is_file())
-    {
+    let meta = if follow {
+        path.metadata()
+    } else {
+        path.symlink_metadata()
+    };
+    if !meta.is_ok_and(|meta| meta.file_type().is_file()) {
+        return None;
+    }
+    let file = open_nonblocking(path, follow).ok()?;
+    if !file.metadata().is_ok_and(|meta| meta.file_type().is_file()) {
         return None;
     }
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(MAX_METADATA_BYTES + 1)
+    file.take(MAX_METADATA_BYTES + 1)
         .read_to_end(&mut bytes)
         .ok()?;
     (bytes.len() as u64 <= MAX_METADATA_BYTES).then_some(bytes)
 }
 
-/// Reads a `HEAD` file. Unreadable, oversized or unparseable is
-/// [`Head::Unknown`].
+/// Opens `path` read-only with `O_NONBLOCK`, plus `O_NOFOLLOW` unless
+/// `follow`.
+#[cfg(unix)]
+fn open_nonblocking(path: &Path, follow: bool) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut flags = libc::O_NONBLOCK;
+    if !follow {
+        flags |= libc::O_NOFOLLOW;
+    }
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(path)
+}
+
+/// Opens `path` read-only; other platforms have no FIFOs to block on.
+#[cfg(not(unix))]
+fn open_nonblocking(path: &Path, _follow: bool) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
+/// Reads a `HEAD` file (a symlink to a regular file is followed, as git does).
+/// Unreadable, oversized or unparseable is [`Head::Unknown`].
 fn read_head(path: &Path) -> Head {
-    let Some(text) = read_bounded(path).and_then(|bytes| String::from_utf8(bytes).ok()) else {
+    let Some(text) = read_bounded_following(path).and_then(|bytes| String::from_utf8(bytes).ok())
+    else {
         return Head::Unknown;
     };
     let text = text.trim();

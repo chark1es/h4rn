@@ -2740,26 +2740,12 @@ class MockDaemon {
         this.ok(frame.id, { type: "worktrees", worktrees: this.worktrees });
         return;
       case "clear_worktrees": {
-        // Settings sends the explicit paths of the rows the user saw (for
-        // Clear all too, with `bulk`); the fallback keeps other callers
-        // working. Clear all never removes a thread workspace, so `bulk`
-        // drops those paths exactly as the daemon does.
-        const targets =
-          body.paths?.filter(
-            (path) =>
-              !body.bulk || this.worktrees.find((w) => w.path === path)?.origin !== "thread",
-          ) ??
-          this.worktrees
-            .filter((w) => w.status !== "active" && w.origin !== "thread")
-            .map((w) => w.path);
-        const removed: string[] = [];
-        const skipped: SkippedWorktree[] = [];
-        for (const path of targets) {
-          const entry = this.worktrees.find((candidate) => candidate.path === path);
-          const reason = entry ? worktreeSkipReason(entry, body.force) : "not tracked";
-          if (reason) skipped.push({ path, reason });
-          else removed.push(path);
-        }
+        const { removed, skipped } = clearMockWorktrees(
+          this.worktrees,
+          body.paths ?? null,
+          body.force,
+          body.bulk,
+        );
         this.worktrees = this.worktrees.filter((entry) => !removed.includes(entry.path));
         this.ok(frame.id, {
           type: "worktrees_cleared",
@@ -4229,6 +4215,58 @@ const MOCK_UNMERGED_BRANCH = "h4rn/sa-b71d04aa";
 /** The sample agent checkout that holds a submodule of the repository. */
 const MOCK_SUBMODULE_PATH = "/home/you/code/api/.claude/worktrees/agent-a41c9e0d";
 
+/**
+ * Workspaces of the sample threads. A row that is one of them, or holds one
+ * anywhere inside it, is a thread workspace that Clear all leaves alone.
+ */
+const MOCK_THREAD_WORKSPACES = [
+  "/home/you/.t3/worktrees/api/feature-search-index",
+  "/home/you/code/api/.claude/worktrees/agent-77e0b3f1/packages/web",
+];
+
+/** Whether Clear all leaves this row alone, compared by whole path components. */
+function isMockThreadWorkspace(entry: TrackedWorktree, workspaces: readonly string[]): boolean {
+  return (
+    entry.origin === "thread" ||
+    workspaces.some(
+      (workspace) => workspace === entry.path || workspace.startsWith(`${entry.path}/`),
+    )
+  );
+}
+
+/**
+ * What a clear does to the sample rows, as the daemon would decide it.
+ *
+ * Settings sends the explicit paths of the rows the user saw (for Clear all
+ * too, with `bulk`); `paths: null` keeps other callers working. Clear all
+ * (`bulk`, or no paths) never removes a thread workspace, by origin or by path,
+ * and reports each one it leaves out as skipped.
+ */
+export function clearMockWorktrees(
+  worktrees: readonly TrackedWorktree[],
+  paths: readonly string[] | null,
+  force: boolean,
+  bulk: boolean,
+  workspaces: readonly string[] = MOCK_THREAD_WORKSPACES,
+): { removed: string[]; skipped: SkippedWorktree[] } {
+  const removed: string[] = [];
+  const skipped: SkippedWorktree[] = [];
+  const targets =
+    paths ?? worktrees.filter((entry) => entry.status !== "active").map((entry) => entry.path);
+  const excludeThreads = bulk || paths === null;
+  for (const path of targets) {
+    const entry = worktrees.find((candidate) => candidate.path === path);
+    const reason = !entry
+      ? "not tracked"
+      : excludeThreads && isMockThreadWorkspace(entry, workspaces)
+        ? "is a thread workspace"
+        : worktreeSkipReason(entry, force);
+    if (reason) skipped.push({ path, reason });
+    else removed.push(path);
+  }
+  return { removed, skipped };
+}
+
 /** Why a clear leaves this worktree in place, or null when it can go. */
 function worktreeSkipReason(entry: TrackedWorktree, force: boolean): string | null {
   if (entry.status === "active") {
@@ -4243,7 +4281,10 @@ function worktreeSkipReason(entry: TrackedWorktree, force: boolean): string | nu
   return null;
 }
 
-/** Five worktrees: one in use, then a kept branch, an orphan, an agent checkout and a dirty one. */
+/**
+ * Six worktrees: one in use, then a kept branch, an orphan, two agent
+ * checkouts (one holding a thread's workspace) and a dirty one.
+ */
 function mockWorktrees(): TrackedWorktree[] {
   const repo = "/home/you/code/api";
   const minutes = (ago: number) => new Date(Date.now() - ago * 60_000).toISOString();
@@ -4299,6 +4340,21 @@ function mockWorktrees(): TrackedWorktree[] {
       accessed_by: [access("Audit the auth middleware", false, 300)],
       first_seen: minutes(320),
       last_seen: minutes(300),
+    },
+    {
+      path: "/home/you/code/api/.claude/worktrees/agent-77e0b3f1",
+      repo,
+      branch: "worktree-agent-77e0b3f1",
+      origin: "harness",
+      status: "settled",
+      exists: true,
+      dirty: false,
+      owned: false,
+      subagent_id: null,
+      task: null,
+      accessed_by: [access("Tidy the web package", false, 900)],
+      first_seen: minutes(960),
+      last_seen: minutes(900),
     },
     {
       path: "/home/you/.t3/worktrees/api/feature-search-index",

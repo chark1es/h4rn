@@ -248,6 +248,18 @@ pub(crate) struct ThreadInfo {
     pub last_activity: DateTime<Utc>,
 }
 
+/// What the live re-check found using an entry.
+enum LiveUse {
+    /// Something is busy in it; the entry with fresh `working` flags.
+    Active(TrackedWorktree),
+    /// Nothing is busy, but a bulk clear found a thread working in it.
+    ThreadWorkspace,
+}
+
+/// The reason for an entry a bulk clear leaves alone because it is (or holds)
+/// a thread's workspace (never forceable).
+const THREAD_WORKSPACE: &str = "is a thread workspace";
+
 /// A thread that might still use an entry, gathered from one of the sources a
 /// live re-check consults. Its activity is read only once all are collected.
 struct Candidate {
@@ -397,13 +409,35 @@ impl WorktreeTracker {
     /// Removes tracked worktrees from disk.
     ///
     /// `paths: None` targets every non-active entry except thread workspaces
-    /// (by origin or by path), which are only removed when named explicitly.
-    /// `bulk` applies that thread-workspace exclusion to the given paths too
-    /// (Settings' Clear all sends the paths it showed with `bulk: true`).
+    /// (by origin, or a row that is a listed thread's workspace or holds one),
+    /// which are only removed when named explicitly. `bulk` applies that
+    /// thread-workspace exclusion to the given paths too (Settings' Clear all
+    /// sends the paths it showed with `bulk: true`). Every entry the exclusion
+    /// leaves out is reported as skipped, and a bulk clear's live re-check
+    /// leaves out an entry that any thread, busy or settled, now works in.
     /// Active entries are never removed. Without `force`, dirty worktrees and
     /// owned branches with unmerged commits are skipped.
     pub async fn clear(&self, paths: Option<Vec<String>>, force: bool, bulk: bool) -> ClearOutcome {
+        self.clear_with(paths, force, bulk, |_| std::future::ready(()))
+            .await
+    }
+
+    /// [`Self::clear`], running `after_preflight` for every entry between its
+    /// preflight and prepare (see [`run_clear_entry`]); tests use it to change
+    /// one entry's surroundings while another is being cleared.
+    async fn clear_with<F, Fut>(
+        &self,
+        paths: Option<Vec<String>>,
+        force: bool,
+        bulk: bool,
+        mut after_preflight: F,
+    ) -> ClearOutcome
+    where
+        F: FnMut(String) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
         let _guard = self.inner.clear_lock.lock().await;
+        let bulk = bulk || paths.is_none();
         let (entries, thread_workspaces) = self.list_with(false).await;
         let selection = select_entries(&entries, paths.as_deref(), bulk, &thread_workspaces);
         let mut removed = Vec::new();
@@ -415,7 +449,7 @@ impl WorktreeTracker {
         for entry in selection.targets {
             let entry = entry.clone();
             let path = entry.path.clone();
-            match run_clear_entry(&self.inner, entry, force, |_| std::future::ready(())).await {
+            match run_clear_entry(&self.inner, entry, force, bulk, &mut after_preflight).await {
                 Ok(ClearOne::Removed) => removed.push(path),
                 Ok(ClearOne::RemovedWithBranchFailure(reason)) => {
                     skipped.push(SkippedWorktree { path, reason });
@@ -757,7 +791,18 @@ impl Inner {
     /// candidates; activity is checked once, at the end, over the whole set, so
     /// a thread found by one source while it was idle cannot be dropped before
     /// a later source would have seen it busy.
-    async fn still_active(self: &Arc<Self>, entry: &TrackedWorktree) -> Option<TrackedWorktree> {
+    ///
+    /// In a `bulk` clear, a thread whose workspace is the entry or inside it
+    /// protects the entry even while it is settled (the Clear all exclusion,
+    /// checked live): the answer is then [`LiveUse::ThreadWorkspace`] unless
+    /// something is busy. Threads under h4rn's own subagent worktrees do not
+    /// count for that, as in the listing: a subagent's child thread works in
+    /// the very worktree it leaves behind.
+    async fn still_active(
+        self: &Arc<Self>,
+        entry: &TrackedWorktree,
+        bulk: bool,
+    ) -> Option<LiveUse> {
         let mut fresh = entry.clone();
         // Normalising touches the filesystem, so it stays off the async runtime.
         let entry_path = entry.path.clone();
@@ -806,6 +851,7 @@ impl Inner {
             }
         }
         // Any thread working in the entry, listed or not.
+        let mut workspace_thread = false;
         let threads = self.threads.list_threads(&thread_filter()).await;
         let normalised = tokio::task::spawn_blocking(move || {
             threads
@@ -822,6 +868,7 @@ impl Inner {
             if workspace != target && !workspace.starts_with(&target) {
                 continue;
             }
+            workspace_thread |= !workspace.starts_with(&self.subagents_root);
             if seen.insert(summary.thread_id.as_str().to_owned()) {
                 let subagent_id = self
                     .threads
@@ -873,7 +920,13 @@ impl Inner {
         {
             active = true;
         }
-        active.then_some(fresh)
+        if active {
+            Some(LiveUse::Active(fresh))
+        } else if bulk && workspace_thread {
+            Some(LiveUse::ThreadWorkspace)
+        } else {
+            None
+        }
     }
 
     /// Refreshes one accessor's busy flag and title from the live thread.
@@ -995,15 +1048,16 @@ fn access_of(
 /// Whether `path` still has its own registration in `repo`.
 ///
 /// `Some(true)` / `Some(false)` once the repository's snapshot was read;
-/// `None` when git could not answer. A caller must never treat `None` as
-/// absence: a failed snapshot says nothing about what is still registered.
+/// `None` when git could not answer, or when the path is not in a snapshot
+/// that is not complete. A caller must never treat `None` as absence: a failed
+/// or partial snapshot says nothing about what is still registered.
 ///
 /// `lists` caches one snapshot per repository for the listing, so a repository
 /// with many vanished observations is asked only once.
 fn registration_exists(
     repo: &Path,
     path: &Path,
-    lists: &mut HashMap<PathBuf, Option<Vec<git::Registration>>>,
+    lists: &mut HashMap<PathBuf, Option<git::RegistrationSnapshot>>,
 ) -> Option<bool> {
     if repo.as_os_str().is_empty() {
         return Some(false);
@@ -1012,10 +1066,11 @@ fn registration_exists(
         .entry(repo.to_path_buf())
         .or_insert_with(|| git::registrations(repo).ok())
         .as_ref()
-        .map(|registrations| {
-            registrations
+        .and_then(|snapshot| {
+            let found = snapshot
                 .iter()
-                .any(|registration| registration.path == path)
+                .any(|registration| registration.path == path);
+            (found || snapshot.complete).then_some(found)
         })
 }
 
@@ -1036,8 +1091,9 @@ pub(crate) fn compute(input: &ListInput, with_dirty: bool) -> (Vec<TrackedWorktr
 ///
 /// Returns the entries, sorted; the stored harness paths whose directory is
 /// gone and can be forgotten; and every thread workspace outside h4rn's own
-/// subagent worktrees, normalised, plus the top level of each one that is a
-/// linked worktree. `with_dirty` asks git for uncommitted changes; clearing's
+/// subagent worktrees, normalised (and, when it no longer exists, also as
+/// recorded with `.`/`..` folded lexically), plus the top level of each one
+/// that is a linked worktree. `with_dirty` asks git for uncommitted changes; clearing's
 /// selection listing skips it because `clear_one` checks again.
 pub(crate) fn compute_listing(
     input: &ListInput,
@@ -1067,7 +1123,8 @@ pub(crate) fn compute_listing(
     let mut branch_lists: HashMap<PathBuf, Option<HashSet<String>>> = HashMap::new();
     // Registrations are asked for only when a stored path's directory is gone,
     // and then only once per repository.
-    let mut registration_lists: HashMap<PathBuf, Option<Vec<git::Registration>>> = HashMap::new();
+    let mut registration_lists: HashMap<PathBuf, Option<git::RegistrationSnapshot>> =
+        HashMap::new();
 
     // 1. Worktrees h4rn made for isolated subagents.
     for view in &input.subagents {
@@ -1157,11 +1214,17 @@ pub(crate) fn compute_listing(
     let mut by_workspace: HashMap<PathBuf, Vec<&ThreadInfo>> = HashMap::new();
     let mut thread_workspaces: HashSet<PathBuf> = HashSet::new();
     for info in &input.threads {
-        let workspace = git::norm(Path::new(&info.workspace));
+        let recorded = Path::new(&info.workspace);
+        let workspace = git::norm(recorded);
         if workspace.starts_with(&input.subagents_root) {
             continue;
         }
         thread_workspaces.insert(workspace.clone());
+        if !recorded.exists() {
+            // A workspace that is gone (a branch switch removed `src/`, say)
+            // still protects the checkout it was recorded in.
+            thread_workspaces.insert(git::fold(recorded.to_path_buf()));
+        }
         if !workspace.is_dir() {
             continue;
         }
@@ -1369,6 +1432,49 @@ enum ClearOne {
 
 /// Deadline for each git command run while clearing one entry.
 const CLEAR_GIT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The reason for a decision a partial registration snapshot cannot make
+/// (blocked).
+const INCOMPLETE_SNAPSHOT: &str = "could not read every worktree registration";
+
+/// Checks an existing checkout against one snapshot: it is registered at
+/// exactly `path` and holds no other registered worktree.
+///
+/// Containment is a decision by absence (no registration lies inside), so a
+/// snapshot that is not complete refuses: the unreadable registration may be
+/// the nested one, or this checkout's own.
+fn verify_registered(snapshot: &git::RegistrationSnapshot, path: &Path) -> Result<(), String> {
+    if !snapshot.complete {
+        return Err(INCOMPLETE_SNAPSHOT.into());
+    }
+    // `git worktree remove` acts on whatever registration git resolves the
+    // path to; only exactly this path's own registration may be removed.
+    if exact_registration(snapshot, path).is_none() {
+        return Err(NOT_REGISTERED.into());
+    }
+    // `git worktree remove` would leave a nested registration pointing into a
+    // directory that no longer exists, or delete another repository's clone
+    // outright; neither is ever forceable.
+    if let Some(inner) = contained_worktree(snapshot, path) {
+        return Err(format!("contains another worktree at {}", inner.display()));
+    }
+    Ok(())
+}
+
+/// A missing checkout's own registration, from one snapshot.
+///
+/// `Ok(None)` means none is left, which only a complete snapshot can say;
+/// otherwise the absence is unknown and refused.
+fn own_registration<'a>(
+    snapshot: &'a git::RegistrationSnapshot,
+    path: &Path,
+) -> Result<Option<&'a git::Registration>, String> {
+    match exact_registration(snapshot, path) {
+        Some(registration) => Ok(Some(registration)),
+        None if snapshot.complete => Ok(None),
+        None => Err(INCOMPLETE_SNAPSHOT.into()),
+    }
+}
 
 /// Another registered worktree nested inside `path`, from one snapshot.
 fn contained_worktree(registrations: &[git::Registration], path: &Path) -> Option<PathBuf> {
@@ -1842,13 +1948,15 @@ const HIDDEN_FILES: &str = "has files hidden from git status";
 /// The checks for the checkout's state as it is now. Blocking.
 ///
 /// An existing checkout must be registered at exactly its path and hold no
-/// registered worktree (both from `registrations`), and, when `thorough`, no
+/// registered worktree (both from `snapshot`, which must be complete; see
+/// [`verify_registered`]), and, when `thorough`, no
 /// nested checkout of any
 /// repository. Without force it must still be on its listed branch with no
 /// unreachable detached work and no file git hides from `status`
-/// (assume-unchanged or skip-worktree). For a missing checkout, without force,
-/// its own registration's `HEAD` must be known, and a detached one reachable
-/// from some ref.
+/// (assume-unchanged or skip-worktree). For a missing checkout, a partial
+/// snapshot without its registration is refused (see [`own_registration`]);
+/// without force, its own registration's `HEAD` must be known, and a detached
+/// one reachable from some ref.
 ///
 /// `thorough` gates only the nested-checkout scan, a whole tree walk: it runs
 /// in [`prepare`] and again on a state flip, never in the final pass before an
@@ -1856,7 +1964,7 @@ const HIDDEN_FILES: &str = "has files hidden from git status";
 /// is one `ls-files` and runs in every pass.
 fn verify_current(
     entry: &TrackedWorktree,
-    registrations: &[git::Registration],
+    snapshot: &git::RegistrationSnapshot,
     exists: bool,
     force: bool,
     thorough: bool,
@@ -1864,17 +1972,7 @@ fn verify_current(
     let path = PathBuf::from(&entry.path);
     let repo = PathBuf::from(&entry.repo);
     if exists {
-        // `git worktree remove` acts on whatever registration git resolves the
-        // path to; only exactly this path's own registration may be removed.
-        if exact_registration(registrations, &path).is_none() {
-            return Err(NOT_REGISTERED.into());
-        }
-        // `git worktree remove` would leave a nested registration pointing
-        // into a directory that no longer exists, or delete another
-        // repository's clone outright; neither is ever forceable.
-        if let Some(inner) = contained_worktree(registrations, &path) {
-            return Err(format!("contains another worktree at {}", inner.display()));
-        }
+        verify_registered(snapshot, &path)?;
         if thorough {
             let common = git::common_dir(&repo, CLEAR_GIT_TIMEOUT)?;
             if let Some(nested) = nested_checkout(&path, &common, nested_scan_limit())? {
@@ -1896,7 +1994,9 @@ fn verify_current(
                 Err(_) => return Err("could not check for uncommitted changes".into()),
             }
         }
-    } else if !force && let Some(registration) = exact_registration(registrations, &path) {
+    } else if let Some(registration) = own_registration(snapshot, &path)?
+        && !force
+    {
         // Only the registration is left. Its HEAD may hold a commit that no
         // branch, remote-tracking branch or tag reaches; deleting the
         // registration would lose the only name for that work.
@@ -1916,10 +2016,13 @@ fn verify_current(
 ///
 /// `after_preflight` runs between preflight and prepare; a test uses it to
 /// change the checkout in that window and prove prepare still catches it.
+/// `bulk` makes the live check leave out an entry any thread works in (see
+/// [`Inner::still_active`]).
 async fn run_clear_entry<F, Fut>(
     inner: &Arc<Inner>,
     entry: TrackedWorktree,
     force: bool,
+    bulk: bool,
     after_preflight: F,
 ) -> Result<ClearOne, String>
 where
@@ -1946,8 +2049,10 @@ where
             return Err("the clear task failed".into());
         }
     };
-    if let Some(active) = inner.still_active(&entry).await {
-        return Err(in_use_reason(&active));
+    match inner.still_active(&entry, bulk).await {
+        Some(LiveUse::Active(active)) => return Err(in_use_reason(&active)),
+        Some(LiveUse::ThreadWorkspace) => return Err(THREAD_WORKSPACE.into()),
+        None => {}
     }
     let data_dir = inner.data_dir.clone();
     match tokio::task::spawn_blocking(move || execute(&entry, force, &data_dir, &plan, &prepared))
@@ -1982,17 +2087,16 @@ fn preflight(entry: &TrackedWorktree, force: bool) -> Result<Preflight, String> 
     // One snapshot answers the exact-registration check, the nested-worktree
     // check and the missing checkout's own registration.
     let registrations = git::registrations_with_timeout(&repo, CLEAR_GIT_TIMEOUT)?;
-    if exists && exact_registration(&registrations, &path).is_none() {
-        return Err(NOT_REGISTERED.into());
-    }
     // Git would happily remove a checkout that holds another worktree, leaving
     // the nested registration pointing into a directory that no longer exists.
     // That checkout is never removed, with or without force. Only an existing
     // checkout can hold a nested one: when the selected directory is gone there
     // is no working tree to protect, and dropping its own registration must
     // leave the nested registration alone.
-    if exists && let Some(inner) = contained_worktree(&registrations, &path) {
-        return Err(format!("contains another worktree at {}", inner.display()));
+    if exists {
+        verify_registered(&registrations, &path)?;
+    } else {
+        own_registration(&registrations, &path)?;
     }
     let mut branch = None;
     if !force {
@@ -2068,7 +2172,8 @@ fn prepare(entry: &TrackedWorktree, force: bool) -> Result<Prepared, String> {
 /// is not exactly a registered checkout (a symlink there, say) is never handed
 /// to git (see [`checkout_at`]). A missing checkout with no
 /// registration in that snapshot is reported removed only because both were
-/// read after the activity check: no directory and no registration remain.
+/// read after the activity check and the snapshot is complete: no directory
+/// and no registration remain.
 /// The branch delete that follows re-checks everything from another fresh
 /// snapshot (see [`delete_owned_branch`]). Every git call is bounded by
 /// [`CLEAR_GIT_TIMEOUT`]; a timeout is a skip with that reason, or a branch
@@ -2190,7 +2295,8 @@ fn locked_worktree(error: &str) -> bool {
 /// Deletes one owned `h4rn/` branch after its checkout is gone. Blocking.
 ///
 /// An ordinary clear re-checks everything immediately before `update-ref`,
-/// from a fresh registration snapshot: occupancy, an in-progress rebase or
+/// from a fresh registration snapshot: occupancy (refused when the snapshot is
+/// not complete, since then no holder proves nothing), an in-progress rebase or
 /// bisect, and the verified sha's ancestry in `HEAD`. A forced clear keeps
 /// git's own `branch -D`. `Err` is a forceable skip; `Ok(Some(reason))` is a
 /// branch left in place that force cannot fix.
@@ -2232,6 +2338,26 @@ fn delete_owned_branch(
                 return Ok(Some(branch_delete_failure(
                     branch,
                     &format!("it is checked out in {}", holder.path.display()),
+                )));
+            }
+            // No holder in a partial snapshot proves nothing: the unreadable
+            // registration may have the branch checked out.
+            if !registrations.complete {
+                return Ok(Some(format!(
+                    "checkout removed, but branch {branch} could not be checked: the worktree list \
+                     is incomplete"
+                )));
+            }
+            // Likewise a registration whose HEAD could not be read may be the
+            // one holding the branch.
+            if let Some(unknown) = registrations
+                .iter()
+                .find(|registration| registration.head == git::Head::Unknown)
+            {
+                return Ok(Some(format!(
+                    "checkout removed, but branch {branch} could not be checked: the HEAD of {} \
+                     could not be read",
+                    unknown.path.display()
                 )));
             }
             match branch_in_progress(repo, branch) {
@@ -2306,11 +2432,16 @@ fn trim_separator(path: &str) -> &str {
 ///
 /// A thread workspace belongs to whoever made it (another tool, the user) and
 /// the thread may still be resumed in it, so only a non-bulk explicit path
-/// removes one. That holds by path too: a row of any origin at a thread's
-/// workspace (or its checkout's top level), from the fresh listing, is left
-/// alone.
+/// removes one. That holds by path too: a row of any origin that is a listed
+/// thread's workspace (or its checkout's top level), or that holds one
+/// anywhere inside it, from the fresh listing, is left alone. Comparison is
+/// component-wise.
 fn thread_workspace(entry: &TrackedWorktree, thread_workspaces: &HashSet<PathBuf>) -> bool {
-    entry.origin == WorktreeOrigin::Thread || thread_workspaces.contains(Path::new(&entry.path))
+    let path = Path::new(&entry.path);
+    entry.origin == WorktreeOrigin::Thread
+        || thread_workspaces
+            .iter()
+            .any(|workspace| workspace.starts_with(path))
 }
 
 /// Picks the entries a clear request names.
@@ -2319,7 +2450,9 @@ fn thread_workspace(entry: &TrackedWorktree, thread_workspaces: &HashSet<PathBuf
 /// byte-equal after trailing separators are trimmed. Nothing is normalised,
 /// so a request can never reach a row through a symlink. A `bulk` request
 /// (Clear all with the paths it showed) leaves thread workspaces out exactly
-/// as `paths: None` does; they are dropped from it, not reported.
+/// as `paths: None` does, and both report each one left out as skipped with
+/// [`THREAD_WORKSPACE`] (active rows `paths: None` passes over are not
+/// reported).
 fn select_entries<'a>(
     entries: &'a [TrackedWorktree],
     paths: Option<&[String]>,
@@ -2329,9 +2462,21 @@ fn select_entries<'a>(
     let mut targets: Vec<&TrackedWorktree> = Vec::new();
     let mut skipped = Vec::new();
     match paths {
-        None => targets.extend(entries.iter().filter(|entry| {
-            entry.status != WorktreeStatus::Active && !thread_workspace(entry, thread_workspaces)
-        })),
+        None => {
+            for entry in entries {
+                if entry.status == WorktreeStatus::Active {
+                    continue;
+                }
+                if thread_workspace(entry, thread_workspaces) {
+                    skipped.push(SkippedWorktree {
+                        path: entry.path.clone(),
+                        reason: THREAD_WORKSPACE.into(),
+                    });
+                } else {
+                    targets.push(entry);
+                }
+            }
+        }
         Some(paths) => {
             let mut seen = HashSet::new();
             for requested in paths {
@@ -2343,7 +2488,12 @@ fn select_entries<'a>(
                     .iter()
                     .find(|entry| trim_separator(&entry.path) == wanted)
                 {
-                    Some(entry) if bulk && thread_workspace(entry, thread_workspaces) => {}
+                    Some(entry) if bulk && thread_workspace(entry, thread_workspaces) => {
+                        skipped.push(SkippedWorktree {
+                            path: requested.clone(),
+                            reason: THREAD_WORKSPACE.into(),
+                        });
+                    }
                     Some(entry) => targets.push(entry),
                     None => skipped.push(SkippedWorktree {
                         path: requested.clone(),

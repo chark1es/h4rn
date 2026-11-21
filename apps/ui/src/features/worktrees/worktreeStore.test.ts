@@ -408,6 +408,9 @@ describe("forceCanFix", () => {
       "branch h4rn/sa-x could not be checked: warning: ignoring broken ref",
       "the checkout was recreated during the clear",
       "not a registered worktree",
+      "is a thread workspace",
+      "could not read every worktree registration",
+      "checkout removed, but branch h4rn/sa-x could not be checked: the worktree list is incomplete",
     ]) {
       expect(forceCanFix(blocked), blocked).toBe(false);
     }

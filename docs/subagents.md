@@ -221,9 +221,11 @@ thread list, and the list is recomputed on every request. An observed worktree
 whose directory is missing is still listed, with `exists: false`, while its own
 registration remains in the repository's snapshot: its registration is exactly
 what a clear removes. It is forgotten only when neither the directory nor the
-registration exists, and only after a successful snapshot proves the
-registration absent: a failed snapshot (a broken repository, a killed git)
-keeps the row with `exists: false` rather than guessing. A stored row whose
+registration exists, and only after a successful, complete snapshot proves the
+registration absent: a failed snapshot (a broken repository, a killed git), or
+one that could not read every registration (see below), keeps the row with
+`exists: false` rather than guessing. The same holds for an owned row: a
+partial snapshot never drops it. A stored row whose
 repository directory itself no longer exists can never be cleared through git,
 so it is forgotten from the store (nothing on disk is touched). Inside the
 daemon, registration snapshots (the `-z` parser and the metadata fallback alike)
@@ -259,17 +261,26 @@ registration metadata directly instead of parsing output, which is byte-exact on
 every version: `<common>/worktrees/*/gitdir` holds the path of the linked
 worktree's `.git` file (only its final newline is stripped; the worktree is its
 parent), `<admin>/HEAD` is `ref: refs/heads/<b>` or a detached sha,
-`<admin>/locked` marks a lock, and a registration is prunable when its checkout
-path is not a real directory, checked without following symlinks (a symlink
-there is not a live checkout, whatever it points at). The main worktree is the
+an `<admin>/locked` entry marks a lock by its presence alone, checked without
+following symlinks (a dangling symlink named `locked` is a lock too), and a
+registration is prunable when its checkout path is not a real directory,
+checked without following symlinks (a symlink there is not a live checkout,
+whatever it points at). The main worktree is the
 parent of `<common>` for a non-bare repository; for a bare repository the main
 registration is `<common>` itself with an unknown `HEAD`, exactly as `-z` lists
 it (`bare`, no branch). Each `gitdir` and `HEAD` file is read only when it is a
-regular file (checked without following symlinks, before it is opened) and with
-a 4 KiB bound, as git only ever writes one short line there: a FIFO, device,
-directory or symlink is never opened (a FIFO would block the read until some
-writer appeared), so such a `gitdir`, or an oversized one, skips that
-registration, and such a `HEAD`, or an oversized one, is unknown. Which form
+regular file, or a symlink whose target is a regular file (git itself reads a
+symlinked `gitdir`, so such a registration is not lost), and with a 4 KiB
+bound, as git only ever writes one short line there: a FIFO, device or
+directory is never opened (a FIFO would block the read until some writer
+appeared), and such a `HEAD`, or an oversized one, is unknown. Such a `gitdir`
+(not a regular file, oversized, unreadable or empty), or an admin entry that is
+neither a directory nor a plain file, makes the whole snapshot *incomplete*:
+the registration it holds cannot be read, so it might be the very one a
+decision is about. An admin entry with no `gitdir` at all, or a stray plain
+file, is skipped as git skips it. The `-z` form is always complete: git read
+every registration itself. An incomplete snapshot never proves that something
+is absent; see the clearing rules for what that refuses. Which form
 works is remembered for the rest of the process, so the failed probe happens
 once. The NUL-delimited form is parsed as
 records, so a path containing a newline (or bytes that are not UTF-8 on Unix)
@@ -295,6 +306,15 @@ Spawning git is retried a few times, with a short sleep, when it fails with
 `ETXTBSY` (the executable is briefly held open for writing by a process that
 forked while it was being written, as with a git upgraded in place).
 
+Every metadata file the daemon reads itself (registration `gitdir` and `HEAD`,
+a nested `.git` file, the rebase and bisect state files) is opened so that the
+open cannot block: the file type is checked first as a fast path, but on Unix
+the open itself also uses `O_NONBLOCK`, plus `O_NOFOLLOW` wherever a symlink
+must not be followed (nested `.git` files and the rebase/bisect state files),
+and the opened descriptor is checked with `fstat` and refused unless it is a
+regular file. A FIFO swapped in between the check and the open therefore opens
+at once and is refused instead of hanging the clear.
+
 A worktree-isolated child records the parent repository's main worktree at
 spawn, not the workspace it happened to start in. That matters for nested
 children: a grandchild's parent workspace is the child's own worktree, which is
@@ -311,7 +331,8 @@ always sends the explicit paths of the rows the user saw, for Clear all as well
 as for one row, so a clear can only ever touch what was on screen. Clear all
 (and the forced retry of the paths Clear all skipped) sets `bulk`, which applies
 the Clear all exclusions to those paths: a row that became a thread's workspace
-while the dialog was open is left out, exactly as with `paths` omitted. A
+while the dialog was open is left out and reported as skipped, exactly as with
+`paths` omitted. A
 per-row Remove sends `bulk: false` and may remove a thread workspace it names. Removals run one at a
 time and are awaited: the response never reports completion while a delete is
 still running, and the fresh list always reflects what actually happened.
@@ -375,10 +396,22 @@ selection does no filesystem work at all.
   whoever created it, and its thread may be resumed there, so clearing
   everything leaves it alone. That holds by path, not only by origin: when
   `paths` is omitted, or for the given paths when `bulk` is set, any row (a
-  `harness` observation, say) whose path is a thread's workspace in the fresh
-  listing the clear takes, or the top level of that workspace's checkout, is
-  left out too; it is dropped from the request rather than reported. A subagent child's workspace is its subagent's own worktree and
-  does not count.
+  `harness` observation, say) is left out when a thread's workspace in the
+  fresh listing the clear takes (or the top level of that workspace's
+  checkout) is the row's path or lies anywhere inside it, compared component
+  by component. A workspace is compared normalised while it exists, and also
+  as recorded with `.`/`..` folded lexically once it no longer does, so a
+  thread whose `src/` vanished in a branch switch still protects the checkout
+  it was in. Each row left out is reported as skipped with
+  `is a thread workspace` (not forceable), never dropped silently. During such
+  a bulk clear the per-entry live re-check enforces the same rule against the
+  live thread list: any thread, busy or settled, whose workspace is the entry
+  or inside it keeps the entry (`in use by <title>` when busy,
+  `is a thread workspace` otherwise), so a thread assigned to a workspace
+  inside a later entry while an earlier one is being cleared is caught. A
+  subagent child's workspace is its subagent's own worktree under
+  `<data_dir>/subagents`, and threads there do not count. An explicit
+  non-bulk clear still removes a settled thread's workspace it names.
 - The destructive key is the path exactly as listed. Git resolves every path it
   is given through symlinks, so a selected path that is a symlink (or a file),
   or that only resolves to itself through a symlinked parent, is never handed to
@@ -440,6 +473,18 @@ selection does no filesystem work at all.
   (not forceable); the checkout and its registration stay until it is unlocked.
   The same wording applies when the checkout's directory is already gone but
   its registration is locked.
+- Decisions that rest on something being *absent* from a registration
+  snapshot are refused when the snapshot is incomplete (an admin entry the
+  metadata fallback could not read): containment for an existing checkout (and
+  its exact registration) is skipped as
+  `could not read every worktree registration` (not forceable); so is a missing
+  checkout whose own registration is not in the snapshot, since "nothing
+  remains" cannot be shown; and before deleting an owned branch, an
+  incomplete snapshot with no holder is reported as
+  `checkout removed, but branch <b> could not be checked: the worktree list is incomplete`
+  (not forceable), and the branch stays. The same holds when any registration's
+  `HEAD` is unknown (it may be the holder): the branch stays with
+  `... could not be checked: the HEAD of <path> could not be read`.
 - An existing checkout that contains another registered worktree is never
   removed, with or without force: it is skipped as
   `contains another worktree at <path>` (not forceable). Git would otherwise
