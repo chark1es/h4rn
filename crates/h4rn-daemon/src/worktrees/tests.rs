@@ -3623,6 +3623,56 @@ fn branch_lookups_under_git_trace() {
     );
 }
 
+#[test]
+fn an_inherited_index_file_does_not_hide_staged_work() {
+    let mut command = std::process::Command::new(std::env::current_exe().expect("test binary"));
+    command.args([
+        "--exact",
+        "worktrees::tests::staged_check_under_an_inherited_index_file",
+        "--ignored",
+        "--test-threads=1",
+    ]);
+    // Points at a file that does not exist: git would read it as an empty
+    // index, so the staged check must not see it.
+    command.env(
+        "GIT_INDEX_FILE",
+        std::env::temp_dir().join("h4rn-no-such-index"),
+    );
+    let output = command.output().expect("run the child test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore = "run by an_inherited_index_file_does_not_hide_staged_work with GIT_INDEX_FILE set"]
+fn staged_check_under_an_inherited_index_file() {
+    assert!(
+        std::env::var_os("GIT_INDEX_FILE").is_some(),
+        "run through an_inherited_index_file_does_not_hide_staged_work"
+    );
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-inherited-index", "inherited-index-branch");
+    let admin =
+        PathBuf::from(git::run(&linked, ["rev-parse", "--absolute-git-dir"]).expect("admin dir"));
+    std::fs::write(linked.join("README.md"), "staged change\n").expect("edit");
+    // `run` goes through the tracker's own command builder, which strips the
+    // inherited variable, so this really stages into the worktree's index.
+    git::run(&linked, ["add", "README.md"]).expect("stage");
+    assert!(
+        !git::index_matches(
+            &admin,
+            "refs/heads/inherited-index-branch",
+            Duration::from_secs(30)
+        )
+        .expect("index check"),
+        "the worktree's own index holds staged work"
+    );
+}
+
 /// An fsmonitor hook that reports nothing changed: it prints its token and no
 /// paths, so git trusts its index for every file.
 #[cfg(unix)]

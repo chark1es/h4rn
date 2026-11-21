@@ -226,6 +226,23 @@ const TRACE_VARS: &[&str] = &[
     "GIT_CURL_VERBOSE",
 ];
 
+/// Variables that point git at a repository, index or object store other than
+/// the one each call names with `-C`/`--git-dir`.
+///
+/// A daemon started from a hook, a wrapper or `git rebase --exec` can inherit
+/// them; an inherited `GIT_INDEX_FILE` would make the staged-work check read a
+/// clean index while the registration's own index holds staged changes.
+const LOCATION_VARS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_PREFIX",
+];
+
 /// Config overrides for every git call that decides whether work would be
 /// lost (`status`, `ls-files -v`, `worktree remove`).
 ///
@@ -247,7 +264,7 @@ fn command(dir: &Path) -> Command {
     command
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_TERMINAL_PROMPT", "0");
-    for name in TRACE_VARS {
+    for name in TRACE_VARS.iter().chain(LOCATION_VARS) {
         command.env_remove(name);
     }
     command.arg("-C").arg(dir);

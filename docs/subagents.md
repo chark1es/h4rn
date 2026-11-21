@@ -336,7 +336,12 @@ Every git command the tracker runs, for observation, listing or clearing, has
 `GIT_CURL_VERBOSE` removed from its environment. Several lookups treat any
 stderr output from a successful command as inconclusive (a broken-ref warning),
 so trace output inherited from the daemon's environment must never reach them.
-Spawning git is retried a few times, with a short sleep, when it fails with
+The repository-location variables `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`,
+`GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`,
+`GIT_NAMESPACE` and `GIT_PREFIX` are removed too: every call names its
+repository with `-C`/`--git-dir`, and an inherited `GIT_INDEX_FILE` (a daemon
+started from a hook or `git rebase --exec`) would otherwise make the staged-work
+check read a different index. Spawning git is retried a few times, with a short sleep, when it fails with
 `ETXTBSY` (the executable is briefly held open for writing by a process that
 forked while it was being written, as with a git upgraded in place).
 
@@ -554,8 +559,9 @@ selection does no filesystem work at all.
 - Without `force`, a checkout whose directory is already gone is skipped as
   `has staged changes` (forceable) when its registration's index holds staged
   work. Git skips its own cleanliness check for a missing checkout and deletes
-  the admin dir, index included, so `git --git-dir=<admin dir> diff-index
-  --cached --quiet <tree-ish> --` (bounded, trace variables stripped) compares
+  the admin dir, index included, so `git -C <admin dir> --git-dir=. diff-index
+  --cached --quiet <tree-ish> --` (bounded, trace and location variables
+  stripped) compares
   the index with the registration's `HEAD`: its detached commit, or its
   branch's current tip (`refs/heads/<b>`). Exit 0 is clean and exit 1 is
   staged work. Unknown is never clean: an unknown `HEAD`, an unborn branch, an
@@ -709,6 +715,12 @@ selection does no filesystem work at all.
 An orphaned directory left by a restart shows up as `orphaned` and can be
 cleared; `restore` itself still folds a running child into `Failed` and does not
 touch the directory.
+
+Known limitation: a worktree-isolated spawn whose request is dropped (the client
+disconnects mid-spawn) can still finish creating its checkout and `h4rn/sa-*`
+branch inside `spawn_blocking`, which cannot be aborted, before any subagent
+record exists. Such a checkout is not listed (subagent rows come only from
+recorded subagents) and has to be removed with `git worktree remove`.
 
 ## Tests
 
