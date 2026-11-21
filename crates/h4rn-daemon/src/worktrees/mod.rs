@@ -99,7 +99,7 @@ struct Inner {
     threads: Arc<ThreadManager>,
     subagents: Arc<SubagentManager>,
     data_dir: PathBuf,
-    /// Normalised `<data_dir>/subagents`; everything under it is h4rn's own.
+    /// Normalised `<data_dir>/subagents`; worktrees under it are h4rn's own.
     subagents_root: PathBuf,
     store: WorktreeStore,
     /// Worktree lists taken at turn start, keyed by thread id.
@@ -248,6 +248,57 @@ pub(crate) struct ThreadInfo {
     pub last_activity: DateTime<Utc>,
 }
 
+/// One thread's workspace, in every form clearing compares entries against.
+#[derive(Clone, Debug)]
+pub(crate) struct ThreadWorkspace {
+    pub thread_id: ThreadId,
+    /// See [`workspace_forms`]; the listing also adds the top level of the
+    /// checkout the workspace is in when that is a linked worktree.
+    pub forms: Vec<PathBuf>,
+}
+
+/// Every form of a recorded thread workspace a comparison must consider.
+///
+/// The normalised path, plus, when the recorded path does not exist (a branch
+/// switch removed `src/`, a symlinked parent now points elsewhere), the
+/// recorded path with `.`/`..` folded lexically: the checkout it was recorded
+/// in still holds it, whatever the filesystem resolves it to now. Blocking
+/// (touches the filesystem). Both the Clear-all selection and the bulk live
+/// re-check use exactly this, with [`workspace_inside`].
+pub(crate) fn workspace_forms(recorded: &Path) -> Vec<PathBuf> {
+    let mut forms = vec![git::norm(recorded)];
+    if !recorded.exists() {
+        let folded = git::fold(recorded.to_path_buf());
+        if !forms.contains(&folded) {
+            forms.push(folded);
+        }
+    }
+    forms
+}
+
+/// Whether any form of a thread workspace is `entry` or lies inside it, by
+/// whole path components (a sibling `wt-a2` is not inside `wt-a`).
+fn workspace_inside(forms: &[PathBuf], entry: &Path) -> bool {
+    forms.iter().any(|form| form.starts_with(entry))
+}
+
+/// The threads whose workspace never protects `entry`: an owned entry's own
+/// subagent child, which works in exactly the worktree it leaves behind.
+///
+/// Recognised as the accessor carrying the entry's own subagent id. Every
+/// other thread counts, and a non-owned entry exempts none.
+fn own_child_threads(entry: &TrackedWorktree) -> HashSet<ThreadId> {
+    if !entry.owned {
+        return HashSet::new();
+    }
+    entry
+        .accessed_by
+        .iter()
+        .filter(|access| access.subagent_id.is_some() && access.subagent_id == entry.subagent_id)
+        .map(|access| access.thread_id.clone())
+        .collect()
+}
+
 /// What the live re-check found using an entry.
 enum LiveUse {
     /// Something is busy in it; the entry with fresh `working` flags.
@@ -378,7 +429,7 @@ impl WorktreeTracker {
     ///
     /// Also returns every thread workspace (and its checkout's top level),
     /// which clearing everything must leave alone whatever row names it.
-    async fn list_with(&self, with_dirty: bool) -> (Vec<TrackedWorktree>, HashSet<PathBuf>) {
+    async fn list_with(&self, with_dirty: bool) -> (Vec<TrackedWorktree>, Vec<ThreadWorkspace>) {
         let input = self.inner.list_input().await;
         let inner = Arc::clone(&self.inner);
         let computed = tokio::time::timeout(
@@ -390,11 +441,11 @@ impl WorktreeTracker {
             Ok(Ok(result)) => result,
             Ok(Err(error)) => {
                 tracing::warn!(%error, "worktree listing task failed");
-                return (Vec::new(), HashSet::new());
+                return (Vec::new(), Vec::new());
             }
             Err(_) => {
                 tracing::warn!("worktree listing timed out");
-                return (Vec::new(), HashSet::new());
+                return (Vec::new(), Vec::new());
             }
         };
         // A harness worktree whose directory is gone has nothing left to clear.
@@ -794,16 +845,27 @@ impl Inner {
     ///
     /// In a `bulk` clear, a thread whose workspace is the entry or inside it
     /// protects the entry even while it is settled (the Clear all exclusion,
-    /// checked live): the answer is then [`LiveUse::ThreadWorkspace`] unless
-    /// something is busy. Threads under h4rn's own subagent worktrees do not
-    /// count for that, as in the listing: a subagent's child thread works in
-    /// the very worktree it leaves behind.
+    /// checked live, with the same comparison as the selection: see
+    /// [`workspace_forms`]): the answer is then [`LiveUse::ThreadWorkspace`]
+    /// unless something is busy. Only an owned entry's own subagent child is
+    /// exempt from that (it works in the very worktree it leaves behind); its
+    /// activity still counts like any thread's.
     async fn still_active(
         self: &Arc<Self>,
         entry: &TrackedWorktree,
         bulk: bool,
     ) -> Option<LiveUse> {
         let mut fresh = entry.clone();
+        // The owned entry's subagent, read once: its child is exempt from the
+        // thread-workspace protection, and a live subagent keeps it active.
+        let view = match (&entry.subagent_id, entry.owned) {
+            (Some(id), true) => self.subagents.get(id).await,
+            _ => None,
+        };
+        let mut own_child = own_child_threads(entry);
+        if let Some(child) = view.as_ref().and_then(|view| view.child_thread_id.clone()) {
+            own_child.insert(child);
+        }
         // Normalising touches the filesystem, so it stays off the async runtime.
         let entry_path = entry.path.clone();
         let target = tokio::task::spawn_blocking(move || git::norm(Path::new(&entry_path)))
@@ -850,25 +912,24 @@ impl Inner {
                 tracing::warn!(%error, "could not reload worktree observations");
             }
         }
-        // Any thread working in the entry, listed or not.
+        // Any thread working in the entry, listed or not, compared exactly as
+        // the selection compares (the listed path; its normalised form too).
         let mut workspace_thread = false;
         let threads = self.threads.list_threads(&thread_filter()).await;
-        let normalised = tokio::task::spawn_blocking(move || {
+        let listed = PathBuf::from(&entry.path);
+        let inside = tokio::task::spawn_blocking(move || {
             threads
                 .into_iter()
-                .map(|summary| {
-                    let workspace = git::norm(Path::new(&summary.workspace_path));
-                    (summary, workspace)
+                .filter(|summary| {
+                    let forms = workspace_forms(Path::new(&summary.workspace_path));
+                    workspace_inside(&forms, &listed) || workspace_inside(&forms, &target)
                 })
                 .collect::<Vec<_>>()
         })
         .await
         .unwrap_or_default();
-        for (summary, workspace) in normalised {
-            if workspace != target && !workspace.starts_with(&target) {
-                continue;
-            }
-            workspace_thread |= !workspace.starts_with(&self.subagents_root);
+        for summary in inside {
+            workspace_thread |= !own_child.contains(&summary.thread_id);
             if seen.insert(summary.thread_id.as_str().to_owned()) {
                 let subagent_id = self
                     .threads
@@ -910,14 +971,7 @@ impl Inner {
                 None => {}
             }
         }
-        if entry.owned
-            && let Some(id) = &entry.subagent_id
-            && self
-                .subagents
-                .get(id)
-                .await
-                .is_some_and(|view| !view.is_terminal())
-        {
+        if view.is_some_and(|view| !view.is_terminal()) {
             active = true;
         }
         if active {
@@ -1090,15 +1144,16 @@ pub(crate) fn compute(input: &ListInput, with_dirty: bool) -> (Vec<TrackedWorktr
 /// Computes the tracked list from plain data. Blocking (shells out to git).
 ///
 /// Returns the entries, sorted; the stored harness paths whose directory is
-/// gone and can be forgotten; and every thread workspace outside h4rn's own
-/// subagent worktrees, normalised (and, when it no longer exists, also as
-/// recorded with `.`/`..` folded lexically), plus the top level of each one
-/// that is a linked worktree. `with_dirty` asks git for uncommitted changes; clearing's
-/// selection listing skips it because `clear_one` checks again.
+/// gone and can be forgotten; and every listed thread's workspace (see
+/// [`workspace_forms`]), with the top level of each one outside h4rn's own
+/// subagent worktrees that is a linked worktree. Subagent children are
+/// included: only the entry a child's own subagent left behind exempts it
+/// (see [`own_child_threads`]). `with_dirty` asks git for uncommitted changes;
+/// clearing's selection listing skips it because `clear_one` checks again.
 pub(crate) fn compute_listing(
     input: &ListInput,
     with_dirty: bool,
-) -> (Vec<TrackedWorktree>, Vec<String>, HashSet<PathBuf>) {
+) -> (Vec<TrackedWorktree>, Vec<String>, Vec<ThreadWorkspace>) {
     let now = Utc::now();
     let infos: HashMap<&str, &ThreadInfo> = input
         .threads
@@ -1212,34 +1267,32 @@ pub(crate) fn compute_listing(
     // checkout's top level, which is what `git worktree remove` takes.
     let mut tops: HashMap<PathBuf, Option<PathBuf>> = HashMap::new();
     let mut by_workspace: HashMap<PathBuf, Vec<&ThreadInfo>> = HashMap::new();
-    let mut thread_workspaces: HashSet<PathBuf> = HashSet::new();
+    let mut thread_workspaces: Vec<ThreadWorkspace> = Vec::new();
     for info in &input.threads {
-        let recorded = Path::new(&info.workspace);
-        let workspace = git::norm(recorded);
-        if workspace.starts_with(&input.subagents_root) {
-            continue;
+        let mut forms = workspace_forms(Path::new(&info.workspace));
+        let workspace = forms[0].clone();
+        // A subagent child's workspace still protects other entries, but it
+        // never makes a thread row: its worktree is listed as `subagent`.
+        if !workspace.starts_with(&input.subagents_root) && workspace.is_dir() {
+            let top = tops
+                .entry(workspace.clone())
+                .or_insert_with(|| {
+                    git::is_linked_worktree(&workspace)
+                        .then(|| git::toplevel(&workspace))
+                        .flatten()
+                })
+                .clone();
+            if let Some(top) = top {
+                if !forms.contains(&top) {
+                    forms.push(top.clone());
+                }
+                by_workspace.entry(top).or_default().push(info);
+            }
         }
-        thread_workspaces.insert(workspace.clone());
-        if !recorded.exists() {
-            // A workspace that is gone (a branch switch removed `src/`, say)
-            // still protects the checkout it was recorded in.
-            thread_workspaces.insert(git::fold(recorded.to_path_buf()));
-        }
-        if !workspace.is_dir() {
-            continue;
-        }
-        let top = tops
-            .entry(workspace.clone())
-            .or_insert_with(|| {
-                git::is_linked_worktree(&workspace)
-                    .then(|| git::toplevel(&workspace))
-                    .flatten()
-            })
-            .clone();
-        if let Some(top) = top {
-            thread_workspaces.insert(top.clone());
-            by_workspace.entry(top).or_default().push(info);
-        }
+        thread_workspaces.push(ThreadWorkspace {
+            thread_id: info.thread_id.clone(),
+            forms,
+        });
     }
     for (path, group) in by_workspace {
         if path.starts_with(&input.subagents_root) || index.contains_key(&path) {
@@ -2296,7 +2349,8 @@ fn locked_worktree(error: &str) -> bool {
 ///
 /// An ordinary clear re-checks everything immediately before `update-ref`,
 /// from a fresh registration snapshot: occupancy (refused when the snapshot is
-/// not complete, since then no holder proves nothing), an in-progress rebase or
+/// not complete, since then no holder proves nothing, or when a registration
+/// other than a bare main one has an unknown `HEAD`), an in-progress rebase or
 /// bisect, and the verified sha's ancestry in `HEAD`. A forced clear keeps
 /// git's own `branch -D`. `Err` is a forceable skip; `Ok(Some(reason))` is a
 /// branch left in place that force cannot fix.
@@ -2349,10 +2403,12 @@ fn delete_owned_branch(
                 )));
             }
             // Likewise a registration whose HEAD could not be read may be the
-            // one holding the branch.
+            // one holding the branch. A bare repository's main registration
+            // has no working tree and never holds a branch, so its (always
+            // unknown) HEAD proves nothing either way.
             if let Some(unknown) = registrations
                 .iter()
-                .find(|registration| registration.head == git::Head::Unknown)
+                .find(|registration| !registration.bare && registration.head == git::Head::Unknown)
             {
                 return Ok(Some(format!(
                     "checkout removed, but branch {branch} could not be checked: the HEAD of {} \
@@ -2434,14 +2490,18 @@ fn trim_separator(path: &str) -> &str {
 /// the thread may still be resumed in it, so only a non-bulk explicit path
 /// removes one. That holds by path too: a row of any origin that is a listed
 /// thread's workspace (or its checkout's top level), or that holds one
-/// anywhere inside it, from the fresh listing, is left alone. Comparison is
-/// component-wise.
-fn thread_workspace(entry: &TrackedWorktree, thread_workspaces: &HashSet<PathBuf>) -> bool {
+/// anywhere inside it, from the fresh listing, is left alone (see
+/// [`workspace_inside`]). Only an owned entry's own subagent child does not
+/// count (see [`own_child_threads`]).
+fn thread_workspace(entry: &TrackedWorktree, thread_workspaces: &[ThreadWorkspace]) -> bool {
+    if entry.origin == WorktreeOrigin::Thread {
+        return true;
+    }
     let path = Path::new(&entry.path);
-    entry.origin == WorktreeOrigin::Thread
-        || thread_workspaces
-            .iter()
-            .any(|workspace| workspace.starts_with(path))
+    let own_child = own_child_threads(entry);
+    thread_workspaces.iter().any(|workspace| {
+        !own_child.contains(&workspace.thread_id) && workspace_inside(&workspace.forms, path)
+    })
 }
 
 /// Picks the entries a clear request names.
@@ -2457,7 +2517,7 @@ fn select_entries<'a>(
     entries: &'a [TrackedWorktree],
     paths: Option<&[String]>,
     bulk: bool,
-    thread_workspaces: &HashSet<PathBuf>,
+    thread_workspaces: &[ThreadWorkspace],
 ) -> Selection<'a> {
     let mut targets: Vec<&TrackedWorktree> = Vec::new();
     let mut skipped = Vec::new();

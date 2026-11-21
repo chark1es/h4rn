@@ -45,6 +45,13 @@ describe("clearMockWorktrees", () => {
     expect(bulk.skipped).toEqual([{ path: "/wt/agent-b", reason: "is a thread workspace" }]);
   });
 
+  it("compares Windows paths by whole components too", () => {
+    const windows = [row("C:\\wt\\agent-a"), row("C:\\wt\\agent-ab")];
+    const all = clearMockWorktrees(windows, null, false, false, ["C:\\wt\\agent-a\\src"]);
+    expect(all.removed).toEqual(["C:\\wt\\agent-ab"]);
+    expect(all.skipped).toEqual([{ path: "C:\\wt\\agent-a", reason: "is a thread workspace" }]);
+  });
+
   it("removes a thread workspace named on its own", () => {
     const one = clearMockWorktrees(rows, ["/wt/agent-b", "/wt/thread"], false, false, workspaces);
     expect(one.removed).toEqual(["/wt/agent-b", "/wt/thread"]);

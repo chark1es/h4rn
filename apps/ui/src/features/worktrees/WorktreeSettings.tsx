@@ -9,6 +9,7 @@ import { useApp } from "@/lib/store/appStore";
 import {
   type ClearConfirmation,
   captureClear,
+  clearAllDescription,
   clearableWorktrees,
   clearWorktrees,
   dismissWorktreeOutcome,
@@ -269,11 +270,7 @@ export function WorktreeSettings() {
       <ConfirmDialog
         open={confirmAll !== null}
         title={`Remove ${clearAllCount} ${clearAllCount === 1 ? "worktree" : "worktrees"}?`}
-        description={`Checkouts are deleted from disk and h4rn/sa-* branches h4rn created are deleted. Worktrees with uncommitted changes or unmerged work are skipped. Ignored files such as build output are deleted with each checkout.${
-          keptThreads > 0
-            ? ` ${keptThreads === 1 ? "One thread workspace is" : `${keptThreads} thread workspaces are`} kept; remove ${keptThreads === 1 ? "it" : "them"} one at a time.`
-            : ""
-        }`}
+        description={clearAllDescription(keptThreads)}
         confirmLabel="Clear all"
         onOpenChange={(open) => {
           if (!open) setConfirmAll(null);

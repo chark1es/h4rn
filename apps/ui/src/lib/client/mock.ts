@@ -4224,14 +4224,19 @@ const MOCK_THREAD_WORKSPACES = [
   "/home/you/code/api/.claude/worktrees/agent-77e0b3f1/packages/web",
 ];
 
+/** A path's components, split on both `/` and `\` (Windows paths too). */
+function mockPathComponents(path: string): string[] {
+  return path.split(/[\\/]/).filter((part) => part !== "");
+}
+
 /** Whether Clear all leaves this row alone, compared by whole path components. */
 function isMockThreadWorkspace(entry: TrackedWorktree, workspaces: readonly string[]): boolean {
-  return (
-    entry.origin === "thread" ||
-    workspaces.some(
-      (workspace) => workspace === entry.path || workspace.startsWith(`${entry.path}/`),
-    )
-  );
+  if (entry.origin === "thread") return true;
+  const root = mockPathComponents(entry.path);
+  return workspaces.some((workspace) => {
+    const parts = mockPathComponents(workspace);
+    return parts.length >= root.length && root.every((part, index) => parts[index] === part);
+  });
 }
 
 /**

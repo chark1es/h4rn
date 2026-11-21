@@ -22,6 +22,7 @@ vi.mock("@/lib/store/appStore", () => ({
 
 import {
   captureClear,
+  clearAllDescription,
   clearableWorktrees,
   clearWorktrees,
   dismissWorktreeOutcome,
@@ -456,6 +457,21 @@ describe("worktreeSubline", () => {
     expect(line).toContain("Thread workspace");
     expect(line).toContain("Fix it");
     expect(line).toContain("Uncommitted changes");
+  });
+});
+
+describe("clearAllDescription", () => {
+  it("always says worktrees a thread is working in are kept", () => {
+    for (const kept of [0, 1, 3]) {
+      expect(clearAllDescription(kept)).toContain("Worktrees a thread is working in are kept.");
+    }
+    expect(clearAllDescription(0)).not.toContain("one at a time");
+    expect(clearAllDescription(1)).toContain(
+      "One thread workspace is kept; remove it one at a time.",
+    );
+    expect(clearAllDescription(3)).toContain(
+      "3 thread workspaces are kept; remove them one at a time.",
+    );
   });
 });
 

@@ -230,6 +230,21 @@ export function removeDescription(row: TrackedWorktree): string {
   }`;
 }
 
+/**
+ * What Clear all does, for its confirmation.
+ *
+ * The daemon decides which worktrees a thread is working in by path, at the
+ * moment it clears, so the copy always says they are kept; `keptThreads` adds
+ * the count of thread workspaces already left out of the rows shown.
+ */
+export function clearAllDescription(keptThreads: number): string {
+  const kept =
+    keptThreads > 0
+      ? ` ${keptThreads === 1 ? "One thread workspace is" : `${keptThreads} thread workspaces are`} kept; remove ${keptThreads === 1 ? "it" : "them"} one at a time.`
+      : "";
+  return `Checkouts are deleted from disk and h4rn/sa-* branches h4rn created are deleted. Worktrees with uncommitted changes or unmerged work are skipped. Worktrees a thread is working in are kept. Ignored files such as build output are deleted with each checkout.${kept}`;
+}
+
 /** The loaded page's layout: a notice above the groups, or the empty copy. */
 export type WorktreePage =
   | { kind: "loading" }

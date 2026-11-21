@@ -1,6 +1,6 @@
 //! Worktree tracking tests over real temporary git repositories.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,16 +10,17 @@ use h4rn_harness::{FakeHarness, Harness, HarnessEvent};
 use h4rn_protocol::{
     AgentState, HarnessKind, HostId, RuntimeMode, SubagentBudget, SubagentContext,
     SubagentCredential, SubagentId, SubagentIsolation, SubagentState, SubagentView, ThreadId,
-    ThreadTab, ToolCall, ToolCallStatus, TrackedWorktree, WorktreeOrigin, WorktreeStatus,
+    ThreadTab, ToolCall, ToolCallStatus, TrackedWorktree, WorktreeAccess, WorktreeOrigin,
+    WorktreeStatus,
 };
 use serde_json::json;
 
 use super::store::{StoredAccess, StoredWorktree};
 use super::{
-    BEFORE_UPDATE_REF, ClearOne, ListInput, NESTED_SCAN_LIMIT, NESTED_SCAN_UNKNOWN, RECREATED,
-    RepoCaches, ThreadInfo, WorktreeTracker, branch_tip, compute, compute_listing,
-    contained_worktree, delete_owned_branch, execute, git, is_busy, nested_checkout, open_snapshot,
-    preflight, prepare, run_clear_entry, select_entries,
+    BEFORE_UPDATE_REF, ClearOne, ListInput, LiveUse, NESTED_SCAN_LIMIT, NESTED_SCAN_UNKNOWN,
+    RECREATED, RepoCaches, ThreadInfo, ThreadWorkspace, WorktreeTracker, branch_tip, compute,
+    compute_listing, contained_worktree, delete_owned_branch, execute, git, is_busy,
+    nested_checkout, open_snapshot, preflight, prepare, run_clear_entry, select_entries,
 };
 use crate::harnesses::StaticHarnessCatalog;
 use crate::journal::SqliteJournal;
@@ -514,18 +515,13 @@ fn thread_workspaces_that_are_linked_worktrees_are_tracked() {
     // Clearing everything never removes a thread's workspace, and says so;
     // naming it does.
     let data = fixture.data_dir();
-    let selection = select_entries(&entries, None, false, &HashSet::new());
+    let selection = select_entries(&entries, None, false, &[]);
     assert!(selection.targets.is_empty());
     assert_eq!(selection.skipped.len(), 1);
     assert_eq!(selection.skipped[0].reason, "is a thread workspace");
     assert!(linked.is_dir());
     let path = entries[0].path.clone();
-    let selection = select_entries(
-        &entries,
-        Some(std::slice::from_ref(&path)),
-        false,
-        &HashSet::new(),
-    );
+    let selection = select_entries(&entries, Some(std::slice::from_ref(&path)), false, &[]);
     assert_eq!(selection.targets.len(), 1);
     assert!(
         matches!(
@@ -546,7 +542,7 @@ fn selecting_entries_keeps_unknown_and_active_paths_apart() {
     let entries = vec![active];
 
     // Clearing everything leaves active entries alone without reporting them.
-    let selection = select_entries(&entries, None, false, &HashSet::new());
+    let selection = select_entries(&entries, None, false, &[]);
     assert!(selection.targets.is_empty() && selection.skipped.is_empty());
 
     // An explicit path is selected; whether it can go is the re-check's call.
@@ -554,32 +550,22 @@ fn selecting_entries_keeps_unknown_and_active_paths_apart() {
         &entries,
         Some(std::slice::from_ref(&entries[0].path)),
         false,
-        &HashSet::new(),
+        &[],
     );
     assert_eq!(selection.targets.len(), 1);
 
-    let selection = select_entries(&entries, Some(&["/nowhere".into()]), false, &HashSet::new());
+    let selection = select_entries(&entries, Some(&["/nowhere".into()]), false, &[]);
     assert_eq!(selection.skipped[0].reason, "not tracked");
     assert_eq!(selection.skipped[0].path, "/nowhere");
 
     // Requests match listed paths exactly, up to a trailing separator; a
     // spelling that only normalises to the listed path does not.
     let path = &entries[0].path;
-    let selection = select_entries(
-        &entries,
-        Some(&[format!("{path}/")]),
-        false,
-        &HashSet::new(),
-    );
+    let selection = select_entries(&entries, Some(&[format!("{path}/")]), false, &[]);
     assert_eq!(selection.targets.len(), 1);
     let name = linked.file_name().expect("name").to_string_lossy();
     let spelled = format!("{path}/../{name}");
-    let selection = select_entries(
-        &entries,
-        Some(std::slice::from_ref(&spelled)),
-        false,
-        &HashSet::new(),
-    );
+    let selection = select_entries(&entries, Some(std::slice::from_ref(&spelled)), false, &[]);
     assert!(selection.targets.is_empty());
     assert_eq!(selection.skipped[0].reason, "not tracked");
 }
@@ -3690,6 +3676,17 @@ fn an_existing_directory_that_is_not_registered_is_not_removed() {
     assert!(clone.join(".git").is_dir());
 }
 
+/// One unrelated thread working at each of `paths`.
+fn workspaces(paths: &[PathBuf]) -> Vec<ThreadWorkspace> {
+    paths
+        .iter()
+        .map(|path| ThreadWorkspace {
+            thread_id: ThreadId::new("th_other"),
+            forms: vec![path.clone()],
+        })
+        .collect()
+}
+
 #[test]
 fn clear_all_leaves_a_thread_workspace_alone_whatever_its_origin() {
     let fixture = Fixture::new();
@@ -3705,9 +3702,10 @@ fn clear_all_leaves_a_thread_workspace_alone_whatever_its_origin() {
         last_activity: Utc::now(),
     }];
     let (_, _, thread_workspaces) = compute_listing(&list_input, false);
-    assert!(thread_workspaces.contains(&git::norm(&nested)));
+    assert_eq!(thread_workspaces.len(), 1);
+    assert!(thread_workspaces[0].forms.contains(&git::norm(&nested)));
     assert!(
-        thread_workspaces.contains(&linked),
+        thread_workspaces[0].forms.contains(&linked),
         "the workspace's checkout top level: {thread_workspaces:?}"
     );
 
@@ -3720,16 +3718,16 @@ fn clear_all_leaves_a_thread_workspace_alone_whatever_its_origin() {
     assert_eq!(selection.skipped.len(), 1, "reported, not dropped");
     assert_eq!(selection.skipped[0].path, entries[0].path);
     assert_eq!(selection.skipped[0].reason, "is a thread workspace");
-    let selection = select_entries(&entries, None, false, &HashSet::new());
+    let selection = select_entries(&entries, None, false, &[]);
     assert_eq!(selection.targets.len(), 1);
     // A workspace anywhere inside the row protects it.
-    let gone = HashSet::from([linked.join("gone").join("deeper")]);
+    let gone = workspaces(&[linked.join("gone").join("deeper")]);
     let selection = select_entries(&entries, None, false, &gone);
     assert!(selection.targets.is_empty());
     assert_eq!(selection.skipped[0].reason, "is a thread workspace");
     // Only component-wise: a sibling whose name merely starts the same does
     // not.
-    let sibling = HashSet::from([PathBuf::from(format!("{}-sibling", linked.display()))]);
+    let sibling = workspaces(&[PathBuf::from(format!("{}-sibling", linked.display()))]);
     let selection = select_entries(&entries, None, false, &sibling);
     assert_eq!(selection.targets.len(), 1);
     // Naming it still selects it.
@@ -3758,7 +3756,7 @@ fn clear_all_leaves_a_thread_workspace_alone_whatever_its_origin() {
         &thread_rows,
         Some(std::slice::from_ref(&thread_rows[0].path)),
         true,
-        &HashSet::new(),
+        &[],
     );
     assert!(
         selection.targets.is_empty(),
@@ -4336,8 +4334,9 @@ fn an_unreadable_registration_makes_the_snapshot_incomplete() {
     let existing = entry(&linked, &fixture.repo, Some("incomplete-branch"), false);
     let missing_harness = gone.join("harness");
 
-    // `-z` is git's own complete answer.
-    assert!(git::registrations(&fixture.repo).expect("-z").complete);
+    // `-z` skips the unreadable admin entry and exits 0, so its answer is not
+    // complete either.
+    assert!(!git::registrations(&fixture.repo).expect("-z").complete);
 
     git::FORCE_METADATA_FALLBACK.with(|forced| forced.set(true));
     let snapshot = git::registrations(&fixture.repo).expect("read");
@@ -4449,4 +4448,319 @@ fn a_dangling_locked_symlink_reads_as_locked() {
         .find(|registration| registration.path == linked)
         .unwrap_or_else(|| panic!("listed: {snapshot:?}"));
     assert!(registration.locked);
+}
+
+#[test]
+fn an_emptied_gitdir_makes_the_porcelain_snapshot_incomplete() {
+    let fixture = Fixture::new();
+    let branch = "h4rn/sa-empty-gitdir";
+    let holder = fixture.add_worktree("wt-empty-gitdir", branch);
+    let sha = git::run(&fixture.repo, ["rev-parse", branch]).expect("sha");
+    assert!(git::registrations(&fixture.repo).expect("-z").complete);
+
+    // Git skips an admin entry whose `gitdir` is empty and still exits 0, so
+    // the worktree holding the branch vanishes from its answer.
+    let admin =
+        PathBuf::from(git::run(&holder, ["rev-parse", "--absolute-git-dir"]).expect("admin dir"));
+    std::fs::write(admin.join("gitdir"), "").expect("empty gitdir");
+    let porcelain = git::porcelain_z(&fixture.repo, Duration::from_secs(30))
+        .expect("run")
+        .expect("this git supports -z");
+    assert!(
+        porcelain
+            .iter()
+            .all(|registration| registration.path != holder),
+        "git omits it: {porcelain:?}"
+    );
+    let snapshot = git::registrations(&fixture.repo).expect("-z");
+    assert!(!snapshot.complete, "{snapshot:?}");
+
+    let plan = super::Preflight {
+        branch: Some(super::BranchDelete::Verified { sha }),
+    };
+    let deleted = delete_owned_branch(&fixture.repo, branch, &plan, false);
+    assert_eq!(
+        deleted,
+        Ok(Some(format!(
+            "checkout removed, but branch {branch} could not be checked: the worktree list is \
+             incomplete"
+        )))
+    );
+    assert!(
+        git::branch_exists(&fixture.repo, branch),
+        "the branch is kept"
+    );
+}
+
+#[test]
+fn an_all_zero_detached_head_is_unknown_in_both_sources() {
+    let zeros = |len: usize| "0".repeat(len);
+    let out = format!(
+        "worktree /wt-a\0HEAD {}\0detached\0\0worktree /wt-b\0HEAD {}\0detached\0\0\
+         worktree /wt-c\0HEAD 0000\0detached\0\0worktree /wt-d\0HEAD {}\0detached\0\0",
+        zeros(40),
+        zeros(64),
+        "a".repeat(40),
+    );
+    let heads: Vec<git::Head> = git::parse_registrations(out.as_bytes())
+        .into_iter()
+        .map(|registration| registration.head)
+        .collect();
+    assert_eq!(
+        heads,
+        vec![
+            git::Head::Unknown,
+            git::Head::Unknown,
+            git::Head::Unknown,
+            git::Head::Detached("a".repeat(40)),
+        ]
+    );
+
+    // Metadata: a `HEAD` file holding the all-zero id, SHA-1 or SHA-256 long.
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-zero-head", "zero-head-branch");
+    let admin =
+        PathBuf::from(git::run(&linked, ["rev-parse", "--absolute-git-dir"]).expect("admin dir"));
+    std::fs::remove_dir_all(&linked).expect("remove the checkout");
+    for len in [40, 64] {
+        std::fs::write(admin.join("HEAD"), format!("{}\n", zeros(len))).expect("zero HEAD");
+        let registrations =
+            git::registrations_from_metadata(&fixture.repo, Duration::from_secs(30)).expect("read");
+        let registration = registrations
+            .iter()
+            .find(|registration| registration.path == linked)
+            .unwrap_or_else(|| panic!("listed: {registrations:?}"));
+        assert_eq!(registration.head, git::Head::Unknown, "{len} zeros");
+    }
+
+    // Without force, the missing checkout keeps its registration.
+    git::FORCE_METADATA_FALLBACK.with(|forced| forced.set(true));
+    let target = entry(&linked, &fixture.repo, Some("zero-head-branch"), false);
+    let outcome = clear_one(&target, false, &fixture.data_dir());
+    git::FORCE_METADATA_FALLBACK.with(|forced| forced.set(false));
+    assert_eq!(
+        outcome.err().as_deref(),
+        Some("could not read the registration's HEAD")
+    );
+    assert!(admin.is_dir(), "the registration stays");
+}
+
+#[test]
+fn a_bare_main_registration_does_not_block_an_owned_branch_delete() {
+    let fixture = Fixture::new();
+    run(
+        fixture.root.path(),
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            &fixture.repo.to_string_lossy(),
+            "bare.git",
+        ],
+    );
+    let bare = git::norm(&fixture.root.path().join("bare.git"));
+    for (fallback, name) in [(false, "sa-bare-z"), (true, "sa-bare-meta")] {
+        let branch = format!("h4rn/{name}");
+        run(&bare, &["branch", &branch, "main"]);
+        let linked = fixture.root.path().join(name);
+        run(
+            &bare,
+            &["worktree", "add", "-q", &linked.to_string_lossy(), &branch],
+        );
+        let linked = git::norm(&linked);
+        let target = entry(&linked, &bare, Some(&branch), true);
+
+        git::FORCE_METADATA_FALLBACK.with(|forced| forced.set(fallback));
+        let snapshot = git::registrations(&bare).expect("read");
+        let outcome = clear_one(&target, false, &fixture.data_dir());
+        git::FORCE_METADATA_FALLBACK.with(|forced| forced.set(false));
+
+        assert!(snapshot.complete, "fallback={fallback}: {snapshot:?}");
+        assert!(
+            snapshot.iter().any(|registration| registration.path == bare
+                && registration.bare
+                && registration.head == git::Head::Unknown),
+            "fallback={fallback}: {snapshot:?}"
+        );
+        assert!(
+            matches!(outcome, Ok(ClearOne::Removed)),
+            "fallback={fallback}: {outcome:?}"
+        );
+        assert!(!linked.exists(), "fallback={fallback}");
+        assert!(
+            !git::branch_exists(&bare, &branch),
+            "fallback={fallback}: the merged owned branch is deleted"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_independent_thread_inside_an_orphaned_subagent_checkout_keeps_it_out_of_clear_all() {
+    let fixture = Fixture::new();
+    let checkout = fixture.add_worktree("data/subagents/sa_orphan/worktree", "h4rn/sa-orphan");
+    let src = checkout.join("src");
+    std::fs::create_dir_all(&src).expect("src");
+    let views = vec![subagent_view(
+        "sa_orphan",
+        "th_parent",
+        &checkout,
+        "h4rn/sa-orphan",
+        SubagentState::Failed,
+    )];
+    let thread_at = |id: &str, workspace: &Path| ThreadInfo {
+        thread_id: ThreadId::new(id),
+        title: id.into(),
+        workspace: workspace.to_string_lossy().into_owned(),
+        working: false,
+        last_activity: Utc::now(),
+    };
+    let mut list_input = input(&fixture, views);
+    // The subagent's own child, settled, still works in the checkout.
+    list_input.threads = vec![thread_at("th_sa_orphan", &checkout)];
+    let (entries, _, workspaces) = compute_listing(&list_input, false);
+    let row = entries
+        .iter()
+        .find(|entry| entry.owned)
+        .unwrap_or_else(|| panic!("listed: {entries:?}"))
+        .clone();
+    assert_eq!(row.status, WorktreeStatus::Orphaned);
+    let selection = select_entries(&entries, None, false, &workspaces);
+    assert_eq!(
+        selection
+            .targets
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>(),
+        vec![row.path.as_str()],
+        "its own child does not protect it"
+    );
+    assert!(selection.skipped.is_empty(), "{:?}", selection.skipped);
+
+    // An independent thread opened inside it does, settled or not.
+    list_input.threads.push(thread_at("th_independent", &src));
+    let (entries, _, workspaces) = compute_listing(&list_input, false);
+    for paths in [None, Some(vec![row.path.clone()])] {
+        let selection = select_entries(&entries, paths.as_deref(), true, &workspaces);
+        assert!(selection.targets.is_empty(), "{paths:?}");
+        assert_eq!(selection.skipped.len(), 1, "{paths:?}");
+        assert_eq!(selection.skipped[0].path, row.path);
+        assert_eq!(selection.skipped[0].reason, "is a thread workspace");
+    }
+    // Naming it on its own still selects it.
+    let selection = select_entries(
+        &entries,
+        Some(std::slice::from_ref(&row.path)),
+        false,
+        &workspaces,
+    );
+    assert_eq!(selection.targets.len(), 1);
+
+    // The live scan of a bulk clear: a real settled thread inside the
+    // subagent checkout protects it; the same thread as the row's own child
+    // does not.
+    let (tracker, threads, _subagents) =
+        managers(&fixture, vec![Arc::new(FakeHarness::new())]).await;
+    let thread = start_thread(&threads, &src, "settle inside the subagent checkout").await;
+    wait_idle(&threads, &thread).await;
+    assert!(matches!(
+        tracker.inner.still_active(&row, true).await,
+        Some(LiveUse::ThreadWorkspace)
+    ));
+    assert!(
+        tracker.inner.still_active(&row, false).await.is_none(),
+        "only a bulk clear is protected from a settled thread"
+    );
+    let mut own = row.clone();
+    own.accessed_by = vec![WorktreeAccess {
+        thread_id: thread.clone(),
+        title: String::new(),
+        subagent_id: own.subagent_id.clone(),
+        working: false,
+        last_seen: Utc::now(),
+    }];
+    assert!(
+        tracker.inner.still_active(&own, true).await.is_none(),
+        "the subagent's own child is exempt"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_bulk_clear_compares_live_workspaces_like_the_selection() {
+    let fixture = Fixture::new();
+    // The symlink the hook leaves in `later` is ignored, so git's own removal
+    // would not refuse it as untracked.
+    ignore(&fixture, "link");
+    let first = fixture.add_worktree("wt-cmp-first", "cmp-first");
+    let later = fixture.add_worktree("wt-cmp-later", "cmp-later");
+    let outside = fixture.root.path().join("outside");
+    std::fs::create_dir_all(&outside).expect("outside");
+    let link = later.join("link");
+    let workspace = link.join("src");
+    let (tracker, threads, _subagents) =
+        managers(&fixture, vec![Arc::new(FakeHarness::new())]).await;
+    for (path, branch) in [(&first, "cmp-first"), (&later, "cmp-later")] {
+        tracker
+            .inner
+            .store
+            .record(
+                &path.to_string_lossy(),
+                &fixture.repo.to_string_lossy(),
+                Some(branch),
+                "th_gone",
+                None,
+                Utc::now(),
+            )
+            .await
+            .expect("record the observation");
+    }
+    let first_path = first.to_string_lossy().into_owned();
+    let later_path = later.to_string_lossy().into_owned();
+
+    // After selection, while the first entry is being cleared, a thread
+    // settles in `later/link/src`; then `src` disappears and `link` becomes a
+    // symlink pointing outside `later`.
+    let started: Arc<std::sync::Mutex<Option<ThreadId>>> = Arc::new(std::sync::Mutex::new(None));
+    let hook = {
+        let threads = Arc::clone(&threads);
+        let started = Arc::clone(&started);
+        let first_path = first_path.clone();
+        move |path: String| {
+            let threads = Arc::clone(&threads);
+            let started = Arc::clone(&started);
+            let (workspace, link, outside) = (workspace.clone(), link.clone(), outside.clone());
+            let now = path == first_path;
+            async move {
+                if now {
+                    std::fs::create_dir_all(&workspace).expect("workspace");
+                    let thread = start_thread(&threads, &workspace, "settle in link/src").await;
+                    wait_idle(&threads, &thread).await;
+                    std::fs::remove_dir_all(&link).expect("remove link/src");
+                    std::os::unix::fs::symlink(&outside, &link).expect("symlink");
+                    *started.lock().expect("lock") = Some(thread);
+                }
+            }
+        }
+    };
+    let outcome = tracker
+        .clear_with(
+            Some(vec![first_path.clone(), later_path.clone()]),
+            false,
+            true,
+            hook,
+        )
+        .await;
+    assert!(
+        started.lock().expect("lock").is_some(),
+        "the hook ran for the first entry"
+    );
+    // Resolved now, the workspace is outside `later`; as recorded, it is not.
+    let recorded = later.join("link").join("src");
+    assert!(!git::norm(&recorded).starts_with(&later));
+    assert_eq!(outcome.removed, vec![first_path], "{outcome:?}");
+    assert_eq!(outcome.skipped.len(), 1, "{outcome:?}");
+    assert_eq!(outcome.skipped[0].path, later_path);
+    assert_eq!(outcome.skipped[0].reason, "is a thread workspace");
+    assert!(later.is_dir(), "the later checkout is kept");
+    assert!(!first.exists());
 }

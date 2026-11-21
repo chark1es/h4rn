@@ -74,12 +74,17 @@ pub struct Registration {
     pub prunable: bool,
     /// The registration is locked (`git worktree lock`).
     pub locked: bool,
+    /// The registration is a bare repository's main one (porcelain `bare`).
+    /// It has no working tree and never holds a branch checked out.
+    pub bare: bool,
 }
 
 /// One read of every worktree registration of a repository.
 ///
-/// `complete` is false when some registration could not be read (the metadata
-/// fallback met an admin entry whose `gitdir` is not a readable regular file).
+/// `complete` is false when some registration could not be read: an admin
+/// entry under `<common>/worktrees` whose `gitdir` is not a readable regular
+/// file, or one that the answer does not represent (git's `-z` silently omits
+/// an admin entry whose `gitdir` it cannot read).
 /// A snapshot that is not complete never proves that something is absent: a
 /// missing registration may be exactly the unreadable one.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -630,13 +635,16 @@ pub fn registrations_with_timeout(
     {
         return registrations_from_metadata(repo, limit);
     }
+    let deadline = Instant::now() + limit;
     match porcelain_z(repo, limit)? {
-        // Git read every registration itself.
+        // Git exits 0 even when it skipped an admin entry it could not read,
+        // so the answer is complete only if it represents every admin entry.
         Some(registrations) => {
             PORCELAIN_Z.store(PORCELAIN_Z_WORKS, Ordering::Relaxed);
+            let complete = represents_every_admin_entry(repo, &registrations, deadline);
             Ok(RegistrationSnapshot {
                 registrations,
-                complete: true,
+                complete,
             })
         }
         None => {
@@ -644,6 +652,117 @@ pub fn registrations_with_timeout(
             registrations_from_metadata(repo, limit)
         }
     }
+}
+
+/// Whether a successful `-z` answer names a registration for every admin
+/// entry under `<common>/worktrees`.
+///
+/// Git skips an admin entry whose `gitdir` it cannot read (empty, say) and
+/// still exits 0, so its answer alone never proves absence. Each admin entry
+/// is matched by the checkout path its `gitdir` names; an entry whose `gitdir`
+/// cannot be read as a regular file, an entry that is not a plain directory
+/// (checked without following symlinks), an entry the answer does not name,
+/// a common dir that cannot be found, and running out of time all make the
+/// snapshot incomplete. Stray plain files and admin directories without any
+/// `gitdir` hold no registration, as for git (see [`admin_entries`]).
+fn represents_every_admin_entry(
+    repo: &Path,
+    registrations: &[Registration],
+    deadline: Instant,
+) -> bool {
+    let Ok(common) = common_dir(repo, deadline.saturating_duration_since(Instant::now())) else {
+        return false;
+    };
+    let Ok((entries, complete)) = admin_entries(&common, deadline) else {
+        return false;
+    };
+    complete
+        && entries.iter().all(|entry| {
+            let path = norm_listed(&entry.checkout);
+            registrations
+                .iter()
+                .any(|registration| registration.path == path)
+        })
+}
+
+/// One `<common>/worktrees/<id>` admin directory whose `gitdir` was read.
+struct AdminEntry {
+    /// The admin directory itself.
+    admin: PathBuf,
+    /// The checkout the `gitdir` names (its parent), not yet normalised.
+    checkout: PathBuf,
+}
+
+/// Every admin directory under `<common>/worktrees` with a readable `gitdir`,
+/// and whether every one could be read.
+///
+/// Bounded by `deadline`, checked per entry; running out of time stops the
+/// enumeration and reports it incomplete. A stray plain file, or an admin
+/// directory without any `gitdir`, holds no registration and is skipped as git
+/// skips it. An entry that is neither a directory nor a plain file (checked
+/// without following symlinks), or whose `gitdir` exists but cannot be read
+/// as a regular file of at most [`MAX_METADATA_BYTES`] (a symlink to one is
+/// followed, as git follows it), is empty, or names no parent, makes the
+/// answer incomplete: its registration is unknown. `Err` only when the
+/// directory itself cannot be listed.
+fn admin_entries(common: &Path, deadline: Instant) -> Result<(Vec<AdminEntry>, bool), String> {
+    let admin_root = common.join("worktrees");
+    let mut found = Vec::new();
+    let entries = match std::fs::read_dir(&admin_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok((found, true)),
+        Err(error) => return Err(format!("could not read {}: {error}", admin_root.display())),
+    };
+    let mut complete = true;
+    for entry in entries {
+        if Instant::now() >= deadline {
+            return Ok((found, false));
+        }
+        let admin = entry
+            .map_err(|error| format!("could not read {}: {error}", admin_root.display()))?
+            .path();
+        match admin.symlink_metadata() {
+            Ok(meta) if meta.is_dir() => {}
+            // A stray file holds no registration; git skips it too.
+            Ok(meta) if meta.is_file() => continue,
+            // A symlink, a FIFO, or an entry that vanished mid-read: unknown.
+            _ => {
+                complete = false;
+                continue;
+            }
+        }
+        let gitdir_file = admin.join("gitdir");
+        match gitdir_file.symlink_metadata() {
+            Ok(_) => {}
+            // No `gitdir` at all: git cannot list it either.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                complete = false;
+                continue;
+            }
+        }
+        // A real `gitdir` file is one short line. One that cannot be read as a
+        // regular file of at most 4 KiB is never followed, and its
+        // registration is unknown.
+        let Some(bytes) = read_bounded_following(&gitdir_file) else {
+            complete = false;
+            continue;
+        };
+        let gitdir = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+        if gitdir.is_empty() {
+            complete = false;
+            continue;
+        }
+        // Relative `gitdir` files (newer git's `worktree.useRelativePaths`)
+        // are relative to the admin directory; an absolute one replaces it.
+        let gitdir = admin.join(path_from_bytes(gitdir));
+        let Some(checkout) = gitdir.parent().map(Path::to_path_buf) else {
+            complete = false;
+            continue;
+        };
+        found.push(AdminEntry { admin, checkout });
+    }
+    Ok((found, complete))
 }
 
 /// `git worktree list --porcelain -z`, parsed; `Ok(None)` when this git
@@ -689,10 +808,12 @@ fn unsupported_porcelain_z(code: Option<i32>, stderr: &str) -> bool {
 /// without following symlinks: a symlink there is not a live checkout) makes
 /// the registration prunable. The main worktree is the parent of `<common>`
 /// for a non-bare repository; for a bare one the main registration is
-/// `<common>` itself with an unknown `HEAD`, as `-z` reports it (`bare`, no
-/// branch). Only regular files are read (see [`read_bounded`]); `gitdir` and
+/// `<common>` itself with an unknown `HEAD` and `bare` set, as `-z` reports it
+/// (`bare`, no branch). Only regular files are read (see [`read_bounded`]); `gitdir` and
 /// `HEAD` may be symlinks to a regular file, as git itself reads them. A
-/// `HEAD` that cannot be read or parsed is [`Head::Unknown`]. An admin entry
+/// `HEAD` that cannot be read or parsed, or that names the all-zero object id,
+/// is [`Head::Unknown`]. Admin entries are enumerated by [`admin_entries`],
+/// bounded by `limit`. An admin entry
 /// whose `gitdir` exists but cannot be read that way (not a regular file,
 /// oversized, unreadable, empty), or an admin entry that is neither a
 /// directory nor a plain file, makes the snapshot incomplete: its
@@ -706,9 +827,9 @@ pub(crate) fn registrations_from_metadata(
     repo: &Path,
     limit: Duration,
 ) -> Result<RegistrationSnapshot, String> {
+    let deadline = Instant::now() + limit;
     let common = common_dir(repo, limit)?;
     let mut registrations = Vec::new();
-    let mut complete = true;
     match common.parent() {
         Some(main) if common.file_name().is_some_and(|name| name == ".git") => {
             registrations.push(Registration {
@@ -716,6 +837,7 @@ pub(crate) fn registrations_from_metadata(
                 head: read_head(&common.join("HEAD")),
                 prunable: false,
                 locked: false,
+                bare: false,
             });
         }
         // A bare repository: `-z` lists the repository directory itself.
@@ -724,73 +846,22 @@ pub(crate) fn registrations_from_metadata(
             head: Head::Unknown,
             prunable: false,
             locked: false,
+            bare: true,
         }),
     }
-    let admin_root = common.join("worktrees");
-    let entries = match std::fs::read_dir(&admin_root) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(RegistrationSnapshot {
-                registrations,
-                complete,
-            });
-        }
-        Err(error) => return Err(format!("could not read {}: {error}", admin_root.display())),
-    };
-    for entry in entries {
-        let admin = entry
-            .map_err(|error| format!("could not read {}: {error}", admin_root.display()))?
-            .path();
-        match admin.symlink_metadata() {
-            Ok(meta) if meta.is_dir() => {}
-            // A stray file holds no registration; git skips it too.
-            Ok(meta) if meta.is_file() => continue,
-            // A symlink, a FIFO, or an entry that vanished mid-read: unknown.
-            _ => {
-                complete = false;
-                continue;
-            }
-        }
-        let gitdir_file = admin.join("gitdir");
-        match gitdir_file.symlink_metadata() {
-            Ok(_) => {}
-            // No `gitdir` at all: git cannot list it either.
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => {
-                complete = false;
-                continue;
-            }
-        }
-        // A real `gitdir` file is one short line. One that cannot be read as a
-        // regular file of at most 4 KiB is never followed, and its
-        // registration is unknown.
-        let Some(bytes) = read_bounded_following(&gitdir_file) else {
-            complete = false;
-            continue;
-        };
-        let gitdir = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
-        if gitdir.is_empty() {
-            complete = false;
-            continue;
-        }
-        let gitdir = path_from_bytes(gitdir);
-        // Relative `gitdir` files (newer git's `worktree.useRelativePaths`)
-        // are relative to the admin directory; an absolute one replaces it.
-        let gitdir = admin.join(gitdir);
-        let Some(path) = gitdir.parent() else {
-            complete = false;
-            continue;
-        };
+    let (entries, complete) = admin_entries(&common, deadline)?;
+    for AdminEntry { admin, checkout } in entries {
         // A symlink (or anything else that is not a real directory) where the
         // checkout was is not a live checkout: never follow it to decide.
-        let prunable = !path.symlink_metadata().is_ok_and(|meta| meta.is_dir());
+        let prunable = !checkout.symlink_metadata().is_ok_and(|meta| meta.is_dir());
         registrations.push(Registration {
-            path: norm_listed(path),
+            path: norm_listed(&checkout),
             head: read_head(&admin.join("HEAD")),
             prunable,
             // Presence alone locks, so a dangling symlink named `locked` is a
             // lock too.
             locked: admin.join("locked").symlink_metadata().is_ok(),
+            bare: false,
         });
     }
     Ok(RegistrationSnapshot {
@@ -886,9 +957,17 @@ fn read_head(path: &Path) -> Head {
                 .to_owned(),
         ),
         Some(_) => Head::Unknown,
-        None if is_object_id(text) => Head::Detached(text.to_owned()),
+        None if is_object_id(text) && !is_null_object_id(text) => Head::Detached(text.to_owned()),
         None => Head::Unknown,
     }
+}
+
+/// Whether `text` is the all-zero object id, of any length.
+///
+/// Git prints it for a detached `HEAD` it could not resolve; it never names a
+/// commit, so it is never "detached at a commit some ref reaches".
+fn is_null_object_id(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte == b'0')
 }
 
 /// Whether `text` is a full SHA-1 or SHA-256 object id.
@@ -903,7 +982,8 @@ fn is_object_id(text: &str) -> bool {
 /// one path rather than two lines, and is kept as is (never filtered); only
 /// the non-Unix fallback decodes lossily.
 /// A record with neither `branch` nor `detached` (and a detached one without
-/// its `HEAD` sha) has an unknown `HEAD`.
+/// its `HEAD` sha, or with the all-zero sha) has an unknown `HEAD`. A `bare`
+/// field marks a bare repository's main registration.
 pub fn parse_registrations(out: &[u8]) -> Vec<Registration> {
     /// One record while its fields are read.
     struct Partial {
@@ -913,12 +993,15 @@ pub fn parse_registrations(out: &[u8]) -> Vec<Registration> {
         detached: bool,
         prunable: bool,
         locked: bool,
+        bare: bool,
     }
     impl Partial {
         fn finish(self) -> Registration {
             let head = match (self.branch, self.sha, self.detached) {
                 (Some(branch), _, _) => Head::Branch(branch),
-                (None, Some(sha), true) if !sha.is_empty() => Head::Detached(sha),
+                (None, Some(sha), true) if !sha.is_empty() && !is_null_object_id(&sha) => {
+                    Head::Detached(sha)
+                }
                 _ => Head::Unknown,
             };
             Registration {
@@ -926,6 +1009,7 @@ pub fn parse_registrations(out: &[u8]) -> Vec<Registration> {
                 head,
                 prunable: self.prunable,
                 locked: self.locked,
+                bare: self.bare,
             }
         }
     }
@@ -952,6 +1036,7 @@ pub fn parse_registrations(out: &[u8]) -> Vec<Registration> {
                 detached: false,
                 prunable: false,
                 locked: false,
+                bare: false,
             });
             continue;
         }
@@ -970,6 +1055,8 @@ pub fn parse_registrations(out: &[u8]) -> Vec<Registration> {
             partial.sha = Some(String::from_utf8_lossy(value).trim().to_owned());
         } else if field == b"detached" {
             partial.detached = true;
+        } else if field == b"bare" {
+            partial.bare = true;
         } else if field.starts_with(b"prunable") {
             partial.prunable = true;
         } else if field == b"locked" || field.starts_with(b"locked ") {
