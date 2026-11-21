@@ -359,6 +359,7 @@ describe("forceCanFix", () => {
       "branch h4rn/sa-sym is a symbolic ref",
       "checkout removed, but branch h4rn/sa-x was left in place",
       "branch h4rn/sa-x could not be checked: warning: ignoring broken ref",
+      "the checkout was recreated during the clear",
     ]) {
       expect(forceCanFix(blocked), blocked).toBe(false);
     }

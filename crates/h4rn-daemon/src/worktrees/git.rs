@@ -119,15 +119,61 @@ const fn forced_metadata_fallback() -> bool {
     false
 }
 
+/// Variables that make git write traces to stderr (or elsewhere).
+///
+/// Several lookups read any stderr output on success as "inconclusive" (a
+/// broken-ref warning), so trace noise inherited from the daemon's environment
+/// must never reach them.
+const TRACE_VARS: &[&str] = &[
+    "GIT_TRACE",
+    "GIT_TRACE2",
+    "GIT_TRACE2_EVENT",
+    "GIT_TRACE2_PERF",
+    "GIT_TRACE_PACKET",
+    "GIT_TRACE_PERFORMANCE",
+    "GIT_TRACE_SETUP",
+    "GIT_CURL_VERBOSE",
+];
+
 fn command(dir: &Path) -> Command {
     let mut command = Command::new(program());
     // Read-only inspection must never wait on the index lock or a prompt.
     command
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .arg("-C")
-        .arg(dir);
+        .env("GIT_TERMINAL_PROMPT", "0");
+    for name in TRACE_VARS {
+        command.env_remove(name);
+    }
+    command.arg("-C").arg(dir);
     command
+}
+
+/// `ETXTBSY`: the program file is still open for writing somewhere.
+///
+/// Another thread that forks while a freshly written executable is open (a
+/// test's fake git, a git being upgraded in place) briefly holds its write
+/// descriptor until it execs, and `exec` of that file fails in that window.
+const ETXTBSY: i32 = 26;
+
+/// How many times a spawn that hit [`ETXTBSY`] is tried in all.
+const SPAWN_ATTEMPTS: u32 = 5;
+
+/// Spawns `command`, retrying a few times with a short sleep on [`ETXTBSY`].
+fn spawn(command: &mut Command) -> std::io::Result<std::process::Child> {
+    let mut attempt = 1;
+    loop {
+        match command.spawn() {
+            Err(error)
+                if cfg!(unix)
+                    && error.raw_os_error() == Some(ETXTBSY)
+                    && attempt < SPAWN_ATTEMPTS =>
+            {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(10 * u64::from(attempt)));
+            }
+            result => return result,
+        }
+    }
 }
 
 /// Runs git in `dir`, returning trimmed stdout or trimmed stderr on failure.
@@ -136,10 +182,15 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output = command(dir)
-        .args(args)
-        .output()
-        .map_err(|error| format!("could not run git: {error}"))?;
+    let output = spawn(
+        command(dir)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .and_then(std::process::Child::wait_with_output)
+    .map_err(|error| format!("could not run git: {error}"))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
     } else {
@@ -209,12 +260,13 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let mut child = command(dir)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("could not run git: {error}"))?;
+    let mut child = spawn(
+        command(dir)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .map_err(|error| format!("could not run git: {error}"))?;
     // Drain both pipes while the child runs: a command whose output fills the
     // pipe buffer would otherwise never exit and look like a timeout. Each
     // reader sends its bytes back when the pipe closes.
@@ -341,11 +393,15 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    command(dir)
-        .args(args)
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    spawn(
+        command(dir)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .and_then(|mut child| child.wait())
+    .is_ok_and(|status| status.success())
 }
 
 /// Normalises a path for comparison.
@@ -570,8 +626,10 @@ fn unsupported_porcelain_z(code: Option<i32>, stderr: &str) -> bool {
 /// makes the registration prunable. The main worktree is the parent of
 /// `<common>` for a non-bare repository; for a bare one it is `<common>`
 /// itself with an unknown `HEAD`, as `-z` reports it (`bare`, no branch). A
-/// `HEAD` that cannot be read or parsed is [`Head::Unknown`]. A path that is
-/// not valid UTF-8 is skipped.
+/// `HEAD` that cannot be read or parsed is [`Head::Unknown`]. Paths are kept
+/// byte-exact, valid UTF-8 or not, exactly as the `-z` parser keeps them:
+/// containment, the exact-registration lookup and branch occupancy must see
+/// every registration. Only what goes over the protocol is filtered to UTF-8.
 pub(crate) fn registrations_from_metadata(
     repo: &Path,
     limit: Duration,
@@ -608,9 +666,11 @@ pub(crate) fn registrations_from_metadata(
         let Ok(bytes) = std::fs::read(admin.join("gitdir")) else {
             continue;
         };
-        let Ok(gitdir) = path_output(bytes) else {
+        let gitdir = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
+        if gitdir.is_empty() {
             continue;
-        };
+        }
+        let gitdir = path_from_bytes(gitdir);
         // Relative `gitdir` files (newer git's `worktree.useRelativePaths`)
         // are relative to the admin directory; an absolute one replaces it.
         let gitdir = admin.join(gitdir);
@@ -655,7 +715,8 @@ fn is_object_id(text: &str) -> bool {
 ///
 /// Fields are NUL-separated and an empty field ends a record. The path is taken
 /// as bytes, so a directory name holding a newline or invalid UTF-8 is still
-/// one path rather than two lines; only the non-Unix fallback decodes lossily.
+/// one path rather than two lines, and is kept as is (never filtered); only
+/// the non-Unix fallback decodes lossily.
 /// A record with neither `branch` nor `detached` (and a detached one without
 /// its `HEAD` sha) has an unknown `HEAD`.
 pub fn parse_registrations(out: &[u8]) -> Vec<Registration> {
@@ -736,11 +797,24 @@ pub fn parse_registrations(out: &[u8]) -> Vec<Registration> {
     registrations
 }
 
+/// Largest `.git` file [`gitfile_target`] reads.
+const MAX_GITFILE_BYTES: u64 = 4 * 1024;
+
 /// Where a nested `.git` file points: its `gitdir:` target, resolved against
-/// the file's own directory when relative. `None` when the file cannot be read
-/// or is not a gitfile.
+/// the file's own directory when relative. `None` when the file cannot be read,
+/// is not a gitfile, or is larger than [`MAX_GITFILE_BYTES`] (a real gitfile is
+/// one short line; reading a huge one is never needed to refuse it).
 pub fn gitfile_target(file: &Path) -> Option<PathBuf> {
-    let bytes = std::fs::read(file).ok()?;
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(file)
+        .ok()?
+        .take(MAX_GITFILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_GITFILE_BYTES {
+        return None;
+    }
     let mut target = bytes.strip_prefix(b"gitdir: ")?;
     while let Some(rest) = target
         .strip_suffix(b"\n")
@@ -775,6 +849,21 @@ pub fn hidden_file(worktree: &Path, limit: Duration) -> Result<Option<PathBuf>, 
         }
     }
     Ok(None)
+}
+
+/// Every gitlink (mode `160000`, a submodule) in the index of the checkout at
+/// `worktree`, as paths relative to it. Bounded by `limit`.
+pub fn gitlinks(worktree: &Path, limit: Duration) -> Result<HashSet<PathBuf>, String> {
+    let out = run_bytes_with_timeout(worktree, ["ls-files", "-s", "-z"], limit)?;
+    Ok(out
+        .split(|byte| *byte == 0)
+        .filter_map(|record| {
+            // `<mode> <object> <stage>\t<path>`
+            let tab = record.iter().position(|byte| *byte == b'\t')?;
+            let (meta, name) = (&record[..tab], &record[tab + 1..]);
+            meta.starts_with(b"160000 ").then(|| path_from_bytes(name))
+        })
+        .collect())
 }
 
 /// A path from the raw bytes git printed.

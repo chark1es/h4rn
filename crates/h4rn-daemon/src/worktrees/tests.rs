@@ -16,10 +16,10 @@ use serde_json::json;
 
 use super::store::{StoredAccess, StoredWorktree};
 use super::{
-    BEFORE_UPDATE_REF, ClearOne, ListInput, NESTED_SCAN_LIMIT, NESTED_SCAN_UNKNOWN, RepoCaches,
-    ThreadInfo, WorktreeTracker, branch_tip, compute, contained_worktree, delete_owned_branch,
-    execute, git, is_busy, nested_checkout, open_snapshot, preflight, prepare, run_clear_entry,
-    select_entries,
+    BEFORE_UPDATE_REF, ClearOne, ListInput, NESTED_SCAN_LIMIT, NESTED_SCAN_UNKNOWN, RECREATED,
+    RepoCaches, ThreadInfo, WorktreeTracker, branch_tip, compute, contained_worktree,
+    delete_owned_branch, execute, git, is_busy, nested_checkout, open_snapshot, preflight, prepare,
+    run_clear_entry, select_entries,
 };
 use crate::harnesses::StaticHarnessCatalog;
 use crate::journal::SqliteJournal;
@@ -2074,10 +2074,19 @@ fn a_locked_missing_checkout_keeps_its_registration_and_branch() {
 /// Writes an executable `git` wrapper that runs `body` before handing every
 /// other call to the real git.
 #[cfg(unix)]
+///
+/// The file is written, synced and closed before it is made executable, so no
+/// write descriptor of ours is open when it is first run (`ETXTBSY`).
 fn fake_git(dir: &Path, body: &str) -> PathBuf {
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     let path = dir.join("fake-git");
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\nexec git \"$@\"\n")).expect("fake git");
+    {
+        let mut file = std::fs::File::create(&path).expect("fake git");
+        file.write_all(format!("#!/bin/sh\n{body}\nexec git \"$@\"\n").as_bytes())
+            .expect("write fake git");
+        file.sync_all().expect("sync fake git");
+    }
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
     path
 }
@@ -2947,5 +2956,433 @@ fn a_checkout_that_reappears_before_execute_gets_every_check() {
             .iter()
             .any(|registration| registration.path == linked),
         "the registration stays"
+    );
+}
+
+#[test]
+fn an_assume_unchanged_edit_just_before_execute_is_kept() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-hidden-exec", "hidden-exec-branch");
+    let target = entry(&linked, &fixture.repo, Some("hidden-exec-branch"), false);
+    let plan = preflight(&target, false).expect("preflight");
+    let prepared = prepare(&target, false).expect("prepare");
+
+    // Between the live activity check and the destructive call.
+    run(
+        &linked,
+        &["update-index", "--assume-unchanged", "README.md"],
+    );
+    std::fs::write(linked.join("README.md"), "hidden late edit").expect("edit");
+    assert_eq!(git::is_dirty(&linked), Some(false), "status hides the edit");
+    assert_eq!(
+        execute(&target, false, &fixture.data_dir(), &plan, &prepared)
+            .err()
+            .as_deref(),
+        Some("has files hidden from git status")
+    );
+    assert_eq!(
+        std::fs::read_to_string(linked.join("README.md")).expect("edit kept"),
+        "hidden late edit"
+    );
+}
+
+#[test]
+fn a_missing_registration_whose_last_ref_goes_before_execute_is_kept() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-temp-ref", "temp-ref-base");
+    run(&linked, &["checkout", "-q", "--detach"]);
+    run(
+        &linked,
+        &["commit", "-q", "--allow-empty", "-m", "detached work"],
+    );
+    // A temporary branch reaches the detached commit while prepare looks.
+    run(&linked, &["branch", "temp-ref"]);
+    std::fs::remove_dir_all(&linked).expect("remove the checkout");
+    let target = entry(&linked, &fixture.repo, None, false);
+    let plan = preflight(&target, false).expect("preflight");
+    let prepared = prepare(&target, false).expect("prepare");
+
+    // Gone again before the destructive step.
+    run(&fixture.repo, &["branch", "-D", "temp-ref"]);
+    assert_eq!(
+        execute(&target, false, &fixture.data_dir(), &plan, &prepared)
+            .err()
+            .as_deref(),
+        Some("detached HEAD has commits on no branch")
+    );
+    let registrations = git::registrations(&fixture.repo).expect("list");
+    assert!(
+        registrations
+            .iter()
+            .any(|registration| registration.path == linked),
+        "the registration stays: {registrations:?}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_owned_branch_checked_out_at_a_non_utf8_path_is_not_deleted() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    for fallback in [false, true] {
+        let fixture = Fixture::new();
+        let branch = "h4rn/sa-rawpath";
+        run(&fixture.repo, &["branch", branch]);
+        let holder = fixture
+            .root
+            .path()
+            .join(OsString::from_vec(b"holder-\xfe".to_vec()));
+        let output = std::process::Command::new("git")
+            .args(["worktree", "add", "-q"])
+            .arg(&holder)
+            .arg(branch)
+            .current_dir(&fixture.repo)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let missing = git::norm(&fixture.root.path().join("sa-rawpath-gone"));
+        let own = entry(&missing, &fixture.repo, Some(branch), true);
+
+        git::FORCE_METADATA_FALLBACK.with(|forced| forced.set(fallback));
+        let registrations = git::registrations(&fixture.repo);
+        let outcome = clear_one(&own, false, &fixture.data_dir());
+        git::FORCE_METADATA_FALLBACK.with(|forced| forced.set(false));
+
+        assert!(
+            registrations
+                .expect("registrations")
+                .iter()
+                .any(|registration| registration.path == git::norm(&holder)),
+            "fallback={fallback}: the raw path is in the snapshot"
+        );
+        assert!(
+            matches!(
+                &outcome,
+                Ok(ClearOne::RemovedWithBranchFailure(reason)) if reason.starts_with(
+                    "checkout removed, but branch h4rn/sa-rawpath could not be deleted: \
+                     it is checked out in "
+                )
+            ),
+            "fallback={fallback}: {outcome:?}"
+        );
+        assert!(
+            git::branch_exists(&fixture.repo, branch),
+            "fallback={fallback}"
+        );
+        assert!(holder.is_dir());
+    }
+}
+
+#[test]
+fn only_a_real_submodule_checkout_is_exempt_from_the_nested_scan() {
+    let fixture = Fixture::new();
+    ignore(&fixture, "vendor/");
+    let upstream = fixture.root.path().join("upstream-wt");
+    init_repo(&upstream);
+    let host = fixture.add_worktree("wt-sub-wt", "sub-wt-branch");
+    run(
+        &host,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            &upstream.to_string_lossy(),
+            "sub",
+        ],
+    );
+    run(&host, &["commit", "-q", "-m", "add a submodule"]);
+    let target = entry(&host, &fixture.repo, Some("sub-wt-branch"), false);
+    let refused = |nested: &Path| {
+        for force in [false, true] {
+            assert_eq!(
+                clear_one(&target, force, &fixture.data_dir())
+                    .err()
+                    .as_deref(),
+                Some(
+                    format!(
+                        "contains another git checkout at {}",
+                        git::norm(nested).display()
+                    )
+                    .as_str()
+                ),
+                "force={force}"
+            );
+            assert!(host.join("sub/.git").is_file() && nested.join(".git").is_file());
+        }
+    };
+
+    // A linked worktree of the submodule, inside the checkout: its gitdir is
+    // under `modules/` but names `worktrees` after it, and it is no gitlink.
+    let sub_worktree = host.join("vendor/sub-worktree");
+    run(
+        &host.join("sub"),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            &sub_worktree.to_string_lossy(),
+        ],
+    );
+    assert!(sub_worktree.join(".git").is_file());
+    refused(&sub_worktree);
+    run(
+        &host.join("sub"),
+        &["worktree", "remove", &sub_worktree.to_string_lossy()],
+    );
+
+    // A gitfile pointing at the submodule's own repository from a path that
+    // is not a gitlink in the index.
+    let target_dir = git::gitfile_target(&host.join("sub/.git")).expect("submodule gitdir");
+    let copy = host.join("vendor/copy");
+    std::fs::create_dir_all(&copy).expect("copy dir");
+    std::fs::write(
+        copy.join(".git"),
+        format!("gitdir: {}\n", target_dir.display()),
+    )
+    .expect("gitfile");
+    refused(&copy);
+    std::fs::remove_dir_all(&copy).expect("remove the copy");
+
+    // The real submodule alone is git's forceable refusal.
+    assert_eq!(
+        clear_one(&target, false, &fixture.data_dir())
+            .err()
+            .as_deref(),
+        Some("contains submodules")
+    );
+}
+
+#[test]
+fn a_submodule_of_a_submodule_is_judged_by_its_own_superproject() {
+    let fixture = Fixture::new();
+    // `inner` is a submodule of `middle`, which is a submodule of the host.
+    let inner = fixture.root.path().join("inner-up");
+    init_repo(&inner);
+    let middle = fixture.root.path().join("middle-up");
+    init_repo(&middle);
+    run(
+        &middle,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            &inner.to_string_lossy(),
+            "inner",
+        ],
+    );
+    run(
+        &middle,
+        &[
+            "-c",
+            "user.email=wt@h4rn.invalid",
+            "-c",
+            "user.name=wt",
+            "commit",
+            "-q",
+            "-m",
+            "add inner",
+        ],
+    );
+    let host = fixture.add_worktree("wt-recursive", "recursive-branch");
+    run(
+        &host,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            "-q",
+            &middle.to_string_lossy(),
+            "middle",
+        ],
+    );
+    run(
+        &host,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "-q",
+            "--init",
+            "--recursive",
+        ],
+    );
+    run(&host, &["commit", "-q", "-m", "add middle"]);
+    assert!(
+        host.join("middle/inner/.git").is_file(),
+        "an initialised nested submodule"
+    );
+    let target = entry(&host, &fixture.repo, Some("recursive-branch"), false);
+
+    // Nested submodules are this repository's own: git's forceable refusal,
+    // never the foreign-checkout refusal.
+    assert_eq!(
+        clear_one(&target, false, &fixture.data_dir())
+            .err()
+            .as_deref(),
+        Some("contains submodules")
+    );
+    assert!(host.join("middle/inner/.git").is_file());
+    assert!(matches!(
+        clear_one(&target, true, &fixture.data_dir()),
+        Ok(ClearOne::Removed)
+    ));
+    assert!(!host.exists());
+}
+
+#[test]
+fn a_gitfile_larger_than_four_kib_is_not_read() {
+    let dir = tempfile::tempdir().expect("dir");
+    let file = dir.path().join(".git");
+    let target = dir.path().join("target");
+    std::fs::write(&file, format!("gitdir: {}\n", target.display())).expect("gitfile");
+    assert_eq!(git::gitfile_target(&file), Some(git::norm(&target)));
+    let padded = format!("gitdir: {}{}\n", target.display(), "/x".repeat(4096));
+    std::fs::write(&file, padded).expect("large gitfile");
+    assert_eq!(git::gitfile_target(&file), None);
+}
+
+#[test]
+fn a_recreated_owned_checkout_without_a_branch_is_refused_even_with_force() {
+    for force in [false, true] {
+        let fixture = Fixture::new();
+        let path = git::norm(&fixture.root.path().join("sa-recreated"));
+        let own = entry(&path, &fixture.repo, None, true);
+        let plan = preflight(&own, force).expect("preflight");
+        let prepared = prepare(&own, force).expect("prepare saw it missing");
+
+        // Someone else's checkout at the same path, before execute.
+        run(
+            &fixture.repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "someone-else",
+                &path.to_string_lossy(),
+            ],
+        );
+        assert_eq!(
+            execute(&own, force, &fixture.data_dir(), &plan, &prepared)
+                .err()
+                .as_deref(),
+            Some(RECREATED),
+            "force={force}"
+        );
+        assert!(path.is_dir(), "force={force}");
+        assert!(git::branch_exists(&fixture.repo, "someone-else"));
+    }
+}
+
+#[test]
+fn an_owned_row_whose_repository_cannot_be_found_is_kept() {
+    let fixture = Fixture::new();
+    let path = fixture.root.path().join("data/subagents/sa_lost/worktree");
+    let view = subagent_view(
+        "sa_lost",
+        "th_parent",
+        &path,
+        "h4rn/sa-lost",
+        SubagentState::Completed,
+    );
+    let mut list_input = input(&fixture, vec![view]);
+    // The parent's workspace is gone too, and no repository was stored.
+    list_input.parent_workspaces.insert(
+        "th_parent".into(),
+        fixture
+            .root
+            .path()
+            .join("gone-parent")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let (entries, _) = compute(&list_input, false);
+    assert_eq!(entries.len(), 1, "the row is kept: {entries:?}");
+    let row = &entries[0];
+    assert!(!row.exists);
+    assert_eq!(row.repo, "");
+    assert_eq!(row.branch.as_deref(), Some("h4rn/sa-lost"));
+    for force in [false, true] {
+        assert_eq!(
+            preflight(row, force).err().as_deref(),
+            Some("its repository could not be found")
+        );
+    }
+}
+
+/// Every variable that makes git trace, set for a re-run of this binary.
+const GIT_TRACE_VARS: &[&str] = &[
+    "GIT_TRACE",
+    "GIT_TRACE2",
+    "GIT_TRACE2_EVENT",
+    "GIT_TRACE2_PERF",
+    "GIT_TRACE_PACKET",
+    "GIT_TRACE_PERFORMANCE",
+    "GIT_TRACE_SETUP",
+    "GIT_CURL_VERBOSE",
+];
+
+/// Re-runs [`branch_lookups_under_git_trace`] in a child process whose
+/// environment sets every trace variable, so this process's environment is
+/// never changed under its other tests.
+#[test]
+fn trace_variables_do_not_make_lookups_inconclusive() {
+    let mut command = std::process::Command::new(std::env::current_exe().expect("test binary"));
+    command.args([
+        "--exact",
+        "worktrees::tests::branch_lookups_under_git_trace",
+        "--ignored",
+        "--test-threads=1",
+    ]);
+    for name in GIT_TRACE_VARS {
+        command.env(name, "1");
+    }
+    let output = command.output().expect("run the traced test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore = "run by trace_variables_do_not_make_lookups_inconclusive with GIT_TRACE set"]
+fn branch_lookups_under_git_trace() {
+    assert!(
+        std::env::var_os("GIT_TRACE").is_some(),
+        "run through trace_variables_do_not_make_lookups_inconclusive"
+    );
+    let fixture = Fixture::new();
+    run(&fixture.repo, &["branch", "h4rn/sa-traced"]);
+    // The environment really does make a plain git call trace.
+    let traced = std::process::Command::new("git")
+        .args(["for-each-ref", "refs/heads/h4rn/"])
+        .current_dir(&fixture.repo)
+        .output()
+        .expect("run git");
+    assert!(
+        !traced.stderr.is_empty(),
+        "git traces under this environment"
+    );
+
+    let branches = git::h4rn_branches(&fixture.repo).expect("branch lookup");
+    assert!(branches.contains("h4rn/sa-traced"), "{branches:?}");
+    assert!(
+        branch_tip(&fixture.repo, "h4rn/sa-traced")
+            .expect("tip lookup")
+            .is_some()
     );
 }

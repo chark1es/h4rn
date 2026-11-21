@@ -185,9 +185,10 @@ Working tab's exit grace.
 
 `settled` means nothing running uses it, and `orphaned` means an owned
 worktree's subagent is finished but its directory is still on disk (cleanup
-failed, or the daemon restarted mid-run). An entry with nothing left to clear
-is not listed unless its own registration remains: its directory is gone, (for
-owned entries) its branch is gone, and no registration of its own is left. An
+failed, or the daemon restarted mid-run). An entry is not listed when its
+directory is gone, its branch (for owned entries) is gone and no registration of
+its own remains. While its exact registration remains it is still listed with
+`exists: false`. An
 owned entry whose directory and branch are both gone is still listed, with
 `exists: false` and no `branch` (so nothing promises a branch that is gone),
 while its exact registration remains in the repository's registration
@@ -196,7 +197,12 @@ as not tracked. A row is never hidden because git could not answer: an owned
 entry whose directory is missing is dropped only when a successful branch
 lookup shows its branch gone and a successful snapshot shows no registration.
 If either lookup fails (git errors, or `for-each-ref` warns on stderr about a
-ref it skipped), the row stays with its recorded branch.
+ref it skipped), the row stays with its recorded branch. The same holds when
+the owned entry's repository cannot be found at all (its directory is gone and
+neither the recorded repository, the parent's workspace nor
+`rev-parse --git-common-dir` leads to one): the row stays with its recorded
+branch and an empty `repo`, and clearing it is skipped as
+`its repository could not be found`.
 
 Paths are compared after normalisation: the path is canonicalised exactly as
 written before any `..` is folded, so a workspace spelled through a symlink
@@ -215,9 +221,15 @@ registration exists, and only after a successful snapshot proves the
 registration absent: a failed snapshot (a broken repository, a killed git)
 keeps the row with `exists: false` rather than guessing. A stored row whose
 repository directory itself no longer exists can never be cleared through git,
-so it is forgotten from the store (nothing on disk is touched). Paths are carried as
-strings, so a registration or observation whose path is not valid UTF-8 is
-skipped at listing time, never offered lossily and never stored.
+so it is forgotten from the store (nothing on disk is touched). Inside the
+daemon, registration snapshots (the `-z` parser and the metadata fallback alike)
+keep every path byte-exact, valid UTF-8 or not, and containment, the
+exact-registration lookup and branch occupancy all use that raw snapshot: a
+branch checked out in a worktree whose path is not UTF-8 is still seen as
+checked out and never deleted. Only at the protocol edge are paths filtered:
+the protocol carries paths as strings, so a row sent to a client, or an
+observation stored for one, whose path is not valid UTF-8 is skipped, never
+offered lossily and never stored.
 
 **How harness worktrees are observed.** The daemon snapshots
 `git worktree list --porcelain -z` for a thread's repository when a turn starts
@@ -249,7 +261,8 @@ non-bare repository; for a bare repository it is `<common>` itself with an
 unknown `HEAD`, exactly as `-z` lists it (`bare`, no branch). Which form works is remembered for the rest of the
 process, so the failed probe happens once. The NUL-delimited form is parsed as
 records, so a path containing a newline (or bytes that are not UTF-8 on Unix)
-stays one path; a path that is not valid UTF-8 is then skipped, because the
+stays one path; the metadata fallback keeps such paths byte-exact too. Only an
+observation of a path that is not valid UTF-8 is then skipped, because the
 protocol carries paths as strings and must never offer a lossy one. Every other
 path git prints (`rev-parse --show-toplevel`, `--git-dir`, `--git-common-dir`)
 is read as bytes with only git's single trailing newline stripped, never other
@@ -258,6 +271,16 @@ output that is not valid UTF-8 is skipped, never decoded lossily.
 h4rn's own
 `<data_dir>/subagents/*/worktree` paths and the main worktree are never recorded
 as `harness`. Write failures are logged and never interrupt the watcher.
+
+Every git command the tracker runs, for observation, listing or clearing, has
+`GIT_TRACE`, `GIT_TRACE2`, `GIT_TRACE2_EVENT`, `GIT_TRACE2_PERF`,
+`GIT_TRACE_PACKET`, `GIT_TRACE_PERFORMANCE`, `GIT_TRACE_SETUP` and
+`GIT_CURL_VERBOSE` removed from its environment. Several lookups treat any
+stderr output from a successful command as inconclusive (a broken-ref warning),
+so trace output inherited from the daemon's environment must never reach them.
+Spawning git is retried a few times, with a short sleep, when it fails with
+`ETXTBSY` (the executable is briefly held open for writing by a process that
+forked while it was being written, as with a git upgraded in place).
 
 A worktree-isolated child records the parent repository's main worktree at
 spawn, not the workspace it happened to start in. That matters for nested
@@ -295,12 +318,21 @@ backstop); the response listing asks for it.
   verification against a registration snapshot taken right there (then the
   directory is checked, so both readings postdate the activity check): for an
   existing checkout prepare also saw, containment against that snapshot, the
-  listed branch and detached reachability; if the directory appeared or
-  vanished since prepare, every check for the state that exists now (the
-  existing-checkout checks including the nested scan and hidden files, or the
-  missing registration's `HEAD`). A checkout switched to another branch, or a
-  nested worktree registered, in that window is therefore caught and both
-  checkouts are kept. A missing checkout with no registration in that snapshot
+  listed branch, detached reachability and files hidden from `git status`; for
+  a missing checkout, whether it was already missing at prepare or just
+  vanished, its registration's `HEAD` from that snapshot (unknown, or detached
+  and reachable from no ref, is skipped without force), so a temporary branch
+  that reached the detached commit during prepare and was deleted since does
+  not let the registration go; if the directory appeared or vanished since
+  prepare, every check for the state that exists now (the existing-checkout
+  checks including the nested scan, or the missing registration's `HEAD`). An
+  owned entry with no branch left whose directory reappeared since prepare is
+  refused outright as `the checkout was recreated during the clear` (not
+  forceable): prepare saw nothing on disk to protect, so the directory there
+  now is a new checkout that is not this entry's. A checkout switched to
+  another branch, an assume-unchanged file edited, or a nested worktree
+  registered, in that window is therefore caught and the checkouts are kept.
+  A missing checkout with no registration in that snapshot
   is reported removed only because both readings show nothing remains (no
   directory, no registration); anything that is there is handled as above.
   Two things are deliberately not changed. The live activity check stays
@@ -369,21 +401,31 @@ backstop); the response listing asks for it.
   without following symlinks, for a nested `.git` file or directory other than
   the checkout's own top-level one, so an ignored clone of any repository (not
   only a registered worktree) is found. One is skipped as
-  `contains another git checkout at <path>` (never forceable). A submodule of
-  this repository is not a foreign checkout: a nested `.git` *file* whose
-  `gitdir:` target (resolved against the file's directory when relative) lies
-  inside this repository's common dir (`<common>/modules/...` or
-  `<common>/worktrees/*/modules/...`) is let through. Git's own non-forced
-  `git worktree remove` then refuses a checkout holding submodules, reported as
-  `contains submodules` (forceable); with `force` git removes it. Any other
-  nested `.git`, including a gitfile pointing elsewhere or one that cannot be
-  read, is the never-forceable reason above. The scan is bounded by the
+  `contains another git checkout at <path>` (never forceable). Only a real
+  submodule checkout of this repository is exempt, and only when both hold: its
+  directory, relative to its superproject, is a gitlink (mode `160000`) in that
+  superproject's index (`git ls-files -s -z`, run once per superproject the first
+  time a nested `.git` file is met under it, bounded by the time left; the
+  superproject is the checkout itself, or the nearest submodule already found
+  exempt, so a submodule of a submodule is judged by its own parent), and it is a `.git`
+  *file* whose `gitdir:` target (resolved against the file's directory when
+  relative) is under `<common>/modules/` or `<common>/worktrees/<id>/modules/`
+  with no `worktrees` path component after `modules` (such a component would
+  make it a linked worktree *of* the submodule, a separate checkout). Git's own
+  non-forced `git worktree remove` then refuses a checkout holding submodules,
+  reported as `contains submodules` (forceable); with `force` git removes it.
+  Any other nested `.git` is the never-forceable reason above: a linked
+  worktree of a submodule placed inside the checkout, a gitfile at a path that
+  is not a gitlink, a gitfile pointing elsewhere, one that cannot be read or is
+  larger than 4 KiB (only that much of a `.git` file is ever read), or any
+  nested checkout when the gitlink lookup itself fails. The scan is bounded by the
   30-second per-command deadline, checked for every directory entry and once
   more before answering "nothing found"; running out of time, or a directory
   that cannot be read, is skipped as `could not check for nested checkouts`
   (forceable), never read as clean.
-- Without `force`, prepare (and a state flip before removal) also runs
-  `git ls-files -v` in an existing checkout, bounded like every other call. An
+- Without `force`, prepare, and the final verification immediately before
+  removal, also run `git ls-files -v` in an existing checkout, bounded like
+  every other call. An
   entry git tags as assume-unchanged (a lowercase tag) or skip-worktree (`S`)
   whose file exists on disk is skipped as `has files hidden from git status`
   (forceable): an edit to such a file never shows in `git status`, so neither

@@ -1056,29 +1056,30 @@ pub(crate) fn compute(input: &ListInput, with_dirty: bool) -> (Vec<TrackedWorktr
             continue;
         }
         let exists = path.is_dir();
-        // `Some(present)` once git answered; `None` when it could not.
-        let branch_known = match (&repo, &view.branch) {
-            (Some(repo), Some(branch)) => branch_lists
-                .entry(repo.clone())
-                .or_insert_with(|| git::h4rn_branches(repo).ok())
-                .as_ref()
-                .map(|branches| branches.contains(branch)),
-            _ => Some(false),
-        };
         let mut branch = view.branch.clone();
         // A missing checkout is dropped only when git proved there is nothing
         // left to clear: the branch lookup succeeded without it AND a
         // successful snapshot holds no registration of its own. A lookup git
-        // could not answer keeps the row with its recorded branch.
-        if !exists && branch_known == Some(false) {
-            let registered = repo
-                .as_ref()
-                .map(|repo| registration_exists(repo, &path, &mut registration_lists));
-            match registered {
-                // Only the registration is left; never promise the branch.
-                Some(Some(true)) => branch = None,
-                Some(None) => {}
-                Some(Some(false)) | None => continue,
+        // could not answer keeps the row with its recorded branch, and so does
+        // a repository that could not be found at all (the row is listed with
+        // an empty repo; clearing it says so).
+        if !exists && let Some(repo) = &repo {
+            // `Some(present)` once git answered; `None` when it could not.
+            let branch_known = match &view.branch {
+                Some(name) => branch_lists
+                    .entry(repo.clone())
+                    .or_insert_with(|| git::h4rn_branches(repo).ok())
+                    .as_ref()
+                    .map(|branches| branches.contains(name)),
+                None => Some(false),
+            };
+            if branch_known == Some(false) {
+                match registration_exists(repo, &path, &mut registration_lists) {
+                    // Only the registration is left; never promise the branch.
+                    Some(true) => branch = None,
+                    None => {}
+                    Some(false) => continue,
+                }
             }
         }
         let status = if !view.is_terminal() {
@@ -1526,6 +1527,10 @@ fn verify_missing_registration(
     }
 }
 
+/// The reason for an owned checkout that reappeared after prepare saw it gone
+/// with no branch left (never forceable).
+const RECREATED: &str = "the checkout was recreated during the clear";
+
 /// The reason for a missing checkout whose registration `HEAD` is unknown.
 const UNKNOWN_HEAD: &str = "could not read the registration's HEAD";
 
@@ -1627,37 +1632,53 @@ fn nested_scan_limit() -> Duration {
     CLEAR_GIT_TIMEOUT
 }
 
-/// Whether a nested `.git` file is a submodule of this repository.
+/// Whether a nested `.git` file's target is a submodule repository of this
+/// one.
 ///
 /// Git keeps a submodule's repository under the superproject's common dir:
 /// `<common>/modules/...`, or `<common>/worktrees/<id>/modules/...` for a
-/// submodule initialised in a linked worktree. A gitfile pointing anywhere
-/// else (or one that cannot be read) is another repository's checkout.
+/// submodule initialised in a linked worktree. A `worktrees` component after
+/// `modules` is a linked worktree *of* that submodule, a separate checkout. A
+/// gitfile pointing anywhere else (or one that cannot be read) is another
+/// repository's checkout.
 fn is_own_submodule(gitfile: &Path, common: &Path) -> bool {
     let Some(target) = git::gitfile_target(gitfile) else {
         return false;
     };
-    if target.starts_with(common.join("modules")) {
-        return true;
-    }
-    let Ok(rest) = target.strip_prefix(common.join("worktrees")) else {
-        return false;
+    let under_modules = match target.strip_prefix(common.join("modules")) {
+        Ok(rest) => rest,
+        Err(_) => {
+            let Ok(rest) = target.strip_prefix(common.join("worktrees")) else {
+                return false;
+            };
+            let mut parts = rest.components();
+            if parts.next().is_none()
+                || parts
+                    .next()
+                    .is_none_or(|part| part.as_os_str() != "modules")
+            {
+                return false;
+            }
+            parts.as_path()
+        }
     };
-    let mut parts = rest.components();
-    parts.next().is_some()
-        && parts
-            .next()
-            .is_some_and(|part| part.as_os_str() == "modules")
+    !under_modules.as_os_str().is_empty()
+        && under_modules
+            .components()
+            .all(|part| part.as_os_str() != "worktrees")
 }
 
 /// The first checkout nested inside `root`, of any repository.
 ///
 /// Walks the tree without following symlinks and looks for a `.git` file or
 /// directory other than the checkout's own top-level one, so an ignored clone
-/// of an unrelated repository is found too. A `.git` file whose `gitdir:`
-/// lies inside this repository's common dir (`common`) is a submodule of this
-/// checkout, not a hit; git itself refuses (without force) to remove a
-/// checkout holding one. Bounded by `limit`, checked for every directory entry
+/// of an unrelated repository is found too. A `.git` file is a submodule of
+/// this checkout, not a hit, only when both hold: its directory is a gitlink
+/// (mode `160000`) in the checkout's index (one `git ls-files -s`, run the
+/// first time a nested `.git` file is met and bounded by the time left), and
+/// its `gitdir:` is a submodule repository under this repository's common dir
+/// (`common`, see [`is_own_submodule`]). Git itself refuses (without force) to
+/// remove a checkout holding a submodule. Bounded by `limit`, checked for every directory entry
 /// and once more before answering "nothing found"; running out of time, or a
 /// directory that cannot be read, is "could not check", never "nothing
 /// found".
@@ -1665,6 +1686,16 @@ fn nested_checkout(root: &Path, common: &Path, limit: Duration) -> Result<Option
     let deadline = Instant::now() + limit;
     let expired = || Instant::now() >= deadline;
     let mut stack = vec![root.to_path_buf()];
+    // Checkouts whose index decides which nested `.git` files are submodules:
+    // the checkout itself, then every submodule already found exempt, so a
+    // submodule of a submodule is judged by its own superproject's index.
+    // The walk is depth-first and a directory's `.git` is seen before its
+    // subdirectories are popped, so a parent is exempt before its children.
+    let mut exempt: Vec<PathBuf> = vec![root.to_path_buf()];
+    // Asked for lazily, per superproject: most checkouts hold no nested `.git`
+    // at all. A failed lookup proves no gitlink, so the nested checkout is
+    // refused.
+    let mut gitlinks: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::new();
     while let Some(dir) = stack.pop() {
         let entries = std::fs::read_dir(&dir).map_err(|_| NESTED_SCAN_UNKNOWN.to_owned())?;
         for entry in entries {
@@ -1677,8 +1708,29 @@ fn nested_checkout(root: &Path, common: &Path, limit: Duration) -> Result<Option
                 .file_type()
                 .map_err(|_| NESTED_SCAN_UNKNOWN.to_owned())?;
             if entry.file_name() == ".git" {
-                if dir == root || (file_type.is_file() && is_own_submodule(&entry.path(), common)) {
+                if dir == root {
                     continue;
+                }
+                if file_type.is_file() {
+                    // The nearest enclosing checkout (the root or an exempt
+                    // submodule) whose index may list `dir` as a gitlink.
+                    let parent = exempt
+                        .iter()
+                        .filter(|candidate| dir != **candidate && dir.starts_with(candidate))
+                        .max_by_key(|candidate| candidate.components().count())
+                        .cloned()
+                        .unwrap_or_else(|| root.to_path_buf());
+                    let links = gitlinks.entry(parent.clone()).or_insert_with(|| {
+                        git::gitlinks(&parent, deadline.saturating_duration_since(Instant::now()))
+                            .unwrap_or_default()
+                    });
+                    let gitlink = dir
+                        .strip_prefix(&parent)
+                        .is_ok_and(|relative| links.contains(relative));
+                    if gitlink && is_own_submodule(&entry.path(), common) {
+                        exempt.push(dir.clone());
+                        continue;
+                    }
                 }
                 return Ok(Some(dir));
             }
@@ -1701,14 +1753,15 @@ const HIDDEN_FILES: &str = "has files hidden from git status";
 /// An existing checkout must hold no registered worktree (from
 /// `registrations`), and, when `thorough`, no nested checkout of any
 /// repository. Without force it must still be on its listed branch with no
-/// unreachable detached work and, when `thorough`, no file git hides from
-/// `status` (assume-unchanged or skip-worktree). For a missing checkout,
-/// without force, its own registration's `HEAD` must be known, and a detached
-/// one reachable from some ref.
+/// unreachable detached work and no file git hides from `status`
+/// (assume-unchanged or skip-worktree). For a missing checkout, without force,
+/// its own registration's `HEAD` must be known, and a detached one reachable
+/// from some ref.
 ///
-/// `thorough` gates the two tree-wide checks: they run in [`prepare`] and
-/// again on a state flip, never in the final pass before an unchanged
-/// checkout's removal, which must stay short.
+/// `thorough` gates only the nested-checkout scan, a whole tree walk: it runs
+/// in [`prepare`] and again on a state flip, never in the final pass before an
+/// unchanged checkout's removal, which must stay short. The hidden-file check
+/// is one `ls-files` and runs in every pass.
 fn verify_current(
     entry: &TrackedWorktree,
     registrations: &[git::Registration],
@@ -1736,16 +1789,14 @@ fn verify_current(
         }
         if !force {
             verify_checkout(&path, &repo, entry.branch.as_deref())?;
-            if thorough {
-                // An edit to an assume-unchanged or skip-worktree file never
-                // shows in `git status`, so neither our dirty check nor git's
-                // removal backstop would see it.
-                match git::hidden_file(&path, CLEAR_GIT_TIMEOUT) {
-                    Ok(None) => {}
-                    Ok(Some(_)) => return Err(HIDDEN_FILES.into()),
-                    Err(error) if git::timed_out(&error) => return Err(error),
-                    Err(_) => return Err("could not check for uncommitted changes".into()),
-                }
+            // An edit to an assume-unchanged or skip-worktree file never shows
+            // in `git status`, so neither our dirty check nor git's removal
+            // backstop would see it.
+            match git::hidden_file(&path, CLEAR_GIT_TIMEOUT) {
+                Ok(None) => {}
+                Ok(Some(_)) => return Err(HIDDEN_FILES.into()),
+                Err(error) if git::timed_out(&error) => return Err(error),
+                Err(_) => return Err("could not check for uncommitted changes".into()),
             }
         }
     } else if !force && let Some(registration) = exact_registration(registrations, &path) {
@@ -1913,9 +1964,12 @@ fn prepare(entry: &TrackedWorktree, force: bool) -> Result<Prepared, String> {
 /// the entry. Immediately before `git worktree remove` it takes a fresh
 /// registration snapshot and then reads whether the directory exists. For an
 /// existing checkout that prepare also saw, it re-checks containment, the
-/// listed branch and detached reachability against that snapshot; if the
-/// directory appeared or vanished since prepare, every check for the state
-/// that exists now (see [`verify_current`]). A missing checkout with no
+/// listed branch, detached reachability and hidden files against that
+/// snapshot; for a missing checkout, its registration's `HEAD` (unknown or
+/// detached and unreachable) from that snapshot; if the directory appeared or
+/// vanished since prepare, every check for the state that exists now (see
+/// [`verify_current`]), and an owned checkout with no branch that reappeared is
+/// refused outright. A missing checkout with no
 /// registration in that snapshot is reported removed only because both were
 /// read after the activity check: no directory and no registration remain.
 /// The branch delete that follows re-checks everything from another fresh
@@ -1936,11 +1990,17 @@ fn execute(
     // after this point, and the directory check below is newer still.
     let registrations = git::registrations_with_timeout(&repo, CLEAR_GIT_TIMEOUT)?;
     let exists = path.is_dir();
-    if exists != prepared.was_dir {
-        verify_current(entry, &registrations, exists, force, true)?;
-    } else if exists {
-        verify_current(entry, &registrations, true, force, false)?;
+    let flipped = exists != prepared.was_dir;
+    // An owned checkout with no branch left had nothing on disk to protect;
+    // a directory there now is someone else's new checkout, whatever force says.
+    if flipped && exists && entry.owned && entry.branch.is_none() {
+        return Err(RECREATED.into());
     }
+    // Every pass checks the state that exists now against this snapshot: a
+    // missing checkout's registration (already missing at prepare or just
+    // vanished) gets its HEAD checks here too, so a ref deleted since prepare
+    // is seen. Only a flip repeats the nested-checkout scan.
+    verify_current(entry, &registrations, exists, force, flipped)?;
     if exists {
         // Git's own remove semantics: without `--force` it refuses a checkout
         // with modifications, which is what we want. Ignored files go with the
