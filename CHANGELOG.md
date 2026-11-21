@@ -11,6 +11,21 @@ All notable changes to h4rn are recorded here. The format follows
   inspected a thread as idle now re-checks under the same lock as its detach that no turn became
   active in between. A Send that claimed the session keeps it, and the new proxy routing applies on
   the thread's next session start instead of shutting down an agent that is already writing.
+- **A Stop the person saw acknowledged never replays.** Stop is recorded on a turn even when its
+  prompt is already on the wire. If the session detaches before the cancel reaches it (a restart, a
+  shutdown, a model change), the write's later failure ends the turn as interrupted instead of
+  writing the stopped prompt again on a fresh session.
+- **An approval buffered behind a closed completion expires with the turn.** The turn's settlement
+  detaches the transport, so no session could receive an answer; the request was never published,
+  so it is dropped instead of becoming a cue nothing can resolve. Tool and text updates buffered in
+  the same window still reach the turn.
+- **A limit notification without a reset no longer ends the wait for the exit report.** Only the
+  process-exit report is terminal for a completion on a closed transport, and that report now
+  carries the provider reset itself. An ordinary limit that arrives first no longer detaches the
+  session and promotes queued work before the exit's reset has armed auto-resume.
+- **A closed stdout is reported as an EOF, not a write failure.** The ACP client carries the part
+  of the transport it observed closing on `Closed`, and the Antigravity prompt path uses it, so a
+  stdout death no longer looks like a dead writer in the turn's row.
 - **A prompt whose session was detached mid-write is delivered again.** When a write fails after a
   restart, a shutdown or a model change detached its session, the turn is still active and no other
   path owns it. The prompt now goes back to the queue and is written on a live session or a fresh

@@ -142,6 +142,13 @@ pub enum AcpError {
     Closed {
         /// What closed.
         message: String,
+        /// Which part of the transport the bridge observed closing.
+        ///
+        /// A stdout close is an EOF, a failed write is a write failure and a
+        /// reaped process is the exit report. The prompt path reports this kind
+        /// on its own death so a stdout close is never mistaken for a writer
+        /// failure.
+        kind: TransportCloseKind,
     },
     /// A frame did not match the protocol.
     #[error("ACP protocol error: {message}")]
@@ -411,6 +418,7 @@ impl AcpClient {
                     &shared,
                     AcpError::Closed {
                         message: "the ACP agent exited".into(),
+                        kind: TransportCloseKind::Exit,
                     },
                 );
                 // The agent's last diagnostic can still be in the pipe when the
@@ -806,6 +814,7 @@ impl AcpClient {
             &self.shared,
             AcpError::Closed {
                 message: "the ACP client was shut down".into(),
+                kind: TransportCloseKind::Write,
             },
         );
         Ok(())
@@ -815,6 +824,7 @@ impl AcpClient {
         if self.is_closed() {
             return Err(AcpError::Closed {
                 message: "the ACP client is shut down".into(),
+                kind: TransportCloseKind::Write,
             });
         }
         self.send_frame(
@@ -851,6 +861,7 @@ impl AcpClient {
         if self.is_closed() {
             return Err(AcpError::Closed {
                 message: "the ACP client is shut down".into(),
+                kind: TransportCloseKind::Write,
             });
         }
         #[cfg(test)]
@@ -873,6 +884,7 @@ impl AcpClient {
             if self.is_closed() {
                 return Err(AcpError::Closed {
                     message: "the ACP client is shut down".into(),
+                    kind: TransportCloseKind::Write,
                 });
             }
             pending.insert(key.clone(), sender);
@@ -935,7 +947,10 @@ impl AcpClient {
                     let message =
                         format!("the ACP writer failed before the request was written: {detail}");
                     teardown_transport(&self.shared, message.clone());
-                    return Err(AcpError::Closed { message });
+                    return Err(AcpError::Closed {
+                        message,
+                        kind: TransportCloseKind::Write,
+                    });
                 }
                 Ok(Err(_)) => {
                     lock(&self.shared.pending).remove(&key);
@@ -949,6 +964,7 @@ impl AcpClient {
                     );
                     return Err(AcpError::Closed {
                         message: "the ACP writer exited before the request was written".into(),
+                        kind: TransportCloseKind::Write,
                     });
                 }
                 Err(_) => {
@@ -1011,12 +1027,14 @@ impl AcpClient {
         let Some(sender) = sender else {
             return Err(AcpError::Closed {
                 message: "the ACP agent stdin is closed".into(),
+                kind: TransportCloseKind::Write,
             });
         };
         match tokio::time::timeout(PROMPT_WRITE_TIMEOUT, sender.send(outgoing)).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(_)) => Err(AcpError::Closed {
                 message: "the ACP writer task has exited".into(),
+                kind: TransportCloseKind::Write,
             }),
             Err(_) => {
                 teardown_transport(&self.shared, "the ACP agent stopped reading frames".into());
@@ -1105,6 +1123,7 @@ where
                     &shared,
                     AcpError::Closed {
                         message: format!("the ACP agent stdin stopped accepting frames: {detail}"),
+                        kind: TransportCloseKind::Write,
                     },
                 );
                 let _ = shared
@@ -1134,6 +1153,7 @@ where
                     &shared,
                     AcpError::Closed {
                         message: format!("the ACP agent stdin stopped accepting frames: {detail}"),
+                        kind: TransportCloseKind::Write,
                     },
                 );
                 let _ = shared
@@ -1228,6 +1248,7 @@ where
             &shared,
             AcpError::Closed {
                 message: "the ACP agent stdout closed".into(),
+                kind: TransportCloseKind::Eof,
             },
         );
         if !shared.shutting_down.load(Ordering::SeqCst) {
@@ -1342,6 +1363,7 @@ async fn send_from_reader(shared: &Arc<Shared>, frame: Value) -> Result<(), AcpE
     let Some(sender) = sender else {
         return Err(AcpError::Closed {
             message: "the ACP agent stdin is closed".into(),
+            kind: TransportCloseKind::Write,
         });
     };
     match tokio::time::timeout(
@@ -1356,6 +1378,7 @@ async fn send_from_reader(shared: &Arc<Shared>, frame: Value) -> Result<(), AcpE
         Ok(Ok(())) => Ok(()),
         Ok(Err(_)) => Err(AcpError::Closed {
             message: "the ACP writer task has exited".into(),
+            kind: TransportCloseKind::Write,
         }),
         Err(_) => {
             teardown_transport(
@@ -1395,6 +1418,7 @@ fn teardown_transport(shared: &Arc<Shared>, message: String) {
         shared,
         AcpError::Closed {
             message: message.clone(),
+            kind: TransportCloseKind::Write,
         },
     );
     if let Err(error) = shared.events_tx.try_send(AcpEvent::TransportClosed {
@@ -1446,8 +1470,9 @@ fn clone_error(error: &AcpError) -> AcpError {
             program: program.clone(),
             message: message.clone(),
         },
-        AcpError::Closed { message } => AcpError::Closed {
+        AcpError::Closed { message, kind } => AcpError::Closed {
             message: message.clone(),
+            kind: *kind,
         },
         AcpError::Protocol { message } => AcpError::Protocol {
             message: message.clone(),
@@ -2154,7 +2179,7 @@ mod tests {
             .expect("the dropped write returns instead of waiting for its deadline")
             .expect("prompt task");
         match outcome {
-            Err(AcpError::Closed { message }) => {
+            Err(AcpError::Closed { message, .. }) => {
                 assert_eq!(
                     message,
                     "the ACP writer exited before the request was written"
@@ -2202,6 +2227,7 @@ mod tests {
             &client.shared,
             AcpError::Closed {
                 message: "the ACP agent stdout closed".into(),
+                kind: TransportCloseKind::Eof,
             },
         );
         pause.resume.notify_one();
@@ -2278,7 +2304,7 @@ mod tests {
             Err(error) => error,
         };
         match error {
-            AcpError::Closed { message } => assert!(
+            AcpError::Closed { message, .. } => assert!(
                 message.contains("the agent's stdin is gone"),
                 "the writer's I/O error is kept: {message}"
             ),

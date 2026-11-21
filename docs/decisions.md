@@ -626,6 +626,18 @@ delivers it on the live session or a fresh startup instead of returning with the
 `agy-fixture` peer models the exit-only idle death by holding stdout open from a keeper process, so
 no EOF can announce the death.
 
+**Addendum: a Stop survives a lost session, and a buffered approval expires with its turn.** Stop is
+recorded on the turn's dispatch even when the prompt is already claimed: if the session detaches
+before the cancel can reach it, the failed write settles the turn interrupted instead of putting the
+prompt back, so a Stop the person saw acknowledged never replays on a fresh session. The prompt path
+now reports the close the client observed (stdout EOF, read error, writer failure or process exit)
+rather than always calling a stdout close a write failure. Inside the closed-completion window an
+approval that arrives behind the completion is dropped instead of published: it was never visible,
+and the turn's settlement detaches the transport, so no session could ever receive an answer.
+Finally, only the exit report ends that window, and it carries the provider reset itself: an ordinary
+limit notification without a reset no longer ends the wait before the exit's reset arrives to arm
+auto-resume.
+
 ## ADR-027: Push notifications are metadata-only wake signals
 
 **Status:** Proposed

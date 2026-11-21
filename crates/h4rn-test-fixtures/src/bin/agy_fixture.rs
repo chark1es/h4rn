@@ -228,7 +228,13 @@ fn main() {
                         .arg("5")
                         .stdin(Stdio::null())
                         .stderr(Stdio::null())
-                        .spawn();
+                        .spawn()
+                        .unwrap_or_else(|error| {
+                            eprintln!(
+                                "agy-fixture: could not start the stdout keeper process: {error}"
+                            );
+                            std::process::exit(3);
+                        });
                     eprintln!("agy-fixture: rate limit reached, resets at 2099-12-01T00:00:00Z");
                     std::process::exit(7);
                 }

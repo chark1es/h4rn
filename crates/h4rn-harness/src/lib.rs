@@ -212,6 +212,15 @@ pub enum HarnessEvent {
         retryable: bool,
         /// Which end of the transport reported the death.
         kind: TransportCloseKind,
+        /// The provider reset the exit report's stderr named, when it named
+        /// one.
+        ///
+        /// Only an [`Exit`](TransportCloseKind::Exit) report can carry this:
+        /// the daemon would otherwise have to infer the reset from a document
+        /// beside the report, and a death reported without the usual typed
+        /// limit notification would silently lose it.
+        #[serde(default)]
+        reset_at: Option<DateTime<Utc>>,
     },
 }
 

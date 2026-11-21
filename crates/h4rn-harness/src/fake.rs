@@ -166,27 +166,76 @@ pub struct FakeHarness {
 /// A shared count of prompts a fake session was asked to write.
 ///
 /// A test reads it to prove the daemon did (or did not) dispatch a prompt to
-/// the harness, without depending on event timing.
+/// the harness, without depending on event timing. It also notifies waiters, so
+/// a test can wait for the arrival itself instead of spinning on the count.
 #[derive(Clone, Debug, Default)]
-pub struct SendCount(Arc<AtomicUsize>);
+pub struct SendCount {
+    count: Arc<AtomicUsize>,
+    notify: Arc<tokio::sync::Notify>,
+}
 
 impl SendCount {
     /// How many prompts have reached the fake session so far.
     pub fn get(&self) -> usize {
-        self.0.load(Ordering::SeqCst)
+        self.count.load(Ordering::SeqCst)
+    }
+
+    /// Waits until at least `count` prompts have been written.
+    pub async fn wait_for(&self, count: usize) {
+        loop {
+            if self.get() >= count {
+                return;
+            }
+            let notified = self.notify.notified();
+            if self.get() >= count {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Counts one more prompt and wakes the waiters.
+    fn note(&self) {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        self.notify.notify_waiters();
     }
 }
 
 /// A shared count of sessions a fake harness has started.
 ///
-/// A test reads it to prove a dead session was replaced by a fresh one.
+/// A test reads it to prove a dead session was replaced by a fresh one. It also
+/// notifies waiters, so a test can wait for the start itself instead of spinning
+/// on the count.
 #[derive(Clone, Debug, Default)]
-pub struct SessionCount(Arc<AtomicUsize>);
+pub struct SessionCount {
+    count: Arc<AtomicUsize>,
+    notify: Arc<tokio::sync::Notify>,
+}
 
 impl SessionCount {
     /// How many sessions the fake harness has started so far.
     pub fn get(&self) -> usize {
-        self.0.load(Ordering::SeqCst)
+        self.count.load(Ordering::SeqCst)
+    }
+
+    /// Waits until at least `count` sessions have been started.
+    pub async fn wait_for(&self, count: usize) {
+        loop {
+            if self.get() >= count {
+                return;
+            }
+            let notified = self.notify.notified();
+            if self.get() >= count {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Counts one more session and wakes the waiters.
+    fn note(&self) {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        self.notify.notify_waiters();
     }
 }
 
@@ -657,7 +706,7 @@ impl Harness for FakeHarness {
             return Err(HarnessError::NotDetected { kind: self.kind });
         }
         if let Some(count) = &self.session_count {
-            count.0.fetch_add(1, Ordering::SeqCst);
+            count.note();
         }
         if let Some(models) = &self.session_models {
             models
@@ -835,7 +884,7 @@ impl HarnessSession for FakeSession {
         }
         self.sends += 1;
         if let Some(count) = &self.send_count {
-            count.0.fetch_add(1, Ordering::SeqCst);
+            count.note();
         }
 
         // The first send starts the thread; a test gates later turns so a
@@ -919,6 +968,7 @@ impl HarnessSession for FakeSession {
                 message: "the harness transport closed".into(),
                 retryable: false,
                 kind: TransportCloseKind::Write,
+                reset_at: None,
             });
             if let Some(gate) = self.generic_death_gate.clone() {
                 // The bridge's generic stdout-close notice is already on the
