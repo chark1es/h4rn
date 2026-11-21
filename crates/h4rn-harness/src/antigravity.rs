@@ -63,7 +63,8 @@ use crate::acp::{
 use crate::attachments::{self, AttachmentClass, AttachmentDelivery};
 use crate::{
     AttachmentRef, ENV_MCP_AUTH_TOKEN, ENV_MCP_BEARER_TOKEN, Harness, HarnessError, HarnessEvent,
-    HarnessInstall, HarnessSession, SessionSpec, TurnReport, UserInput, detect_limit,
+    HarnessInstall, HarnessSession, SessionSpec, TransportHealth, TurnReport, UserInput,
+    detect_limit,
 };
 
 mod stream;
@@ -721,15 +722,25 @@ impl HarnessSession for AcpSession {
                             })
                             .await;
                     } else {
-                        let _ = events_tx
-                            .send(HarnessEvent::Error {
-                                message: detail.trim().to_string(),
-                                retryable: !matches!(
-                                    error,
-                                    AcpError::Protocol { .. } | AcpError::OutsideWorkspace { .. }
-                                ),
-                            })
-                            .await;
+                        // A prompt that failed because the transport is gone is
+                        // the same death the bridge reports on its own stream:
+                        // tag it so the two are one row. Any other failure here
+                        // (a protocol or RPC error) stays an ordinary error and
+                        // is never collapsed with a transport death.
+                        let message = detail.trim().to_string();
+                        let retryable = !matches!(
+                            error,
+                            AcpError::Protocol { .. } | AcpError::OutsideWorkspace { .. }
+                        );
+                        let event = if matches!(
+                            error,
+                            AcpError::Closed { .. } | AcpError::Timeout { .. }
+                        ) {
+                            HarnessEvent::TransportClosed { message, retryable }
+                        } else {
+                            HarnessEvent::Error { message, retryable }
+                        };
+                        let _ = events_tx.send(event).await;
                     }
                     let _ = events_tx
                         .send(HarnessEvent::TurnCompleted {
@@ -810,6 +821,10 @@ impl HarnessSession for AcpSession {
 
     fn is_closed(&self) -> bool {
         self.closed || self.client.is_closed()
+    }
+
+    fn transport_health(&self) -> Option<TransportHealth> {
+        Some(self.client.transport_health())
     }
 
     fn agent_state(&self) -> AgentState {
@@ -998,7 +1013,7 @@ fn spawn_event_bridge(
                     if shutting_down.load(Ordering::SeqCst) {
                         Vec::new()
                     } else {
-                        vec![HarnessEvent::Error {
+                        vec![HarnessEvent::TransportClosed {
                             message,
                             retryable: true,
                         }]
@@ -1026,7 +1041,7 @@ fn spawn_event_bridge(
                         } else {
                             format!("agy exited ({status}): {}", stderr.trim())
                         };
-                        vec![HarnessEvent::Error {
+                        vec![HarnessEvent::TransportClosed {
                             message,
                             retryable: false,
                         }]
@@ -1034,6 +1049,9 @@ fn spawn_event_bridge(
                 }
                 AcpEvent::Error { message, retryable } => {
                     vec![HarnessEvent::Error { message, retryable }]
+                }
+                AcpEvent::TransportClosed { message, retryable } => {
+                    vec![HarnessEvent::TransportClosed { message, retryable }]
                 }
             };
             for event in mapped {
@@ -1823,7 +1841,7 @@ mod tests {
         .await
         .expect("send");
         match out_rx.recv().await.expect("event") {
-            HarnessEvent::Error { message, .. } => {
+            HarnessEvent::TransportClosed { message, .. } => {
                 assert!(
                     message.contains("agy exited (exited: 1)"),
                     "unexpected exit error: {message}"

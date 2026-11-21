@@ -1428,18 +1428,13 @@ impl ThreadManager {
                 // Clear the session this restart inspected, and only that one:
                 // a turn that ended while we waited may already have started a
                 // fresh session, which belongs to its own startup.
-                record
-                    .detach_session(generation)
-                    .map(|session| (session, record.pump.take()))
+                record.detach_session(generation)
             };
-            let Some((session, pump)) = detached else {
+            let Some(session) = detached else {
                 continue;
             };
             if let Err(error) = session.lock().await.shutdown().await {
                 tracing::warn!(%thread_id, %error, "harness shutdown before a proxy restart failed");
-            }
-            if let Some(pump) = pump {
-                pump.abort();
             }
             if was_running {
                 result.interrupted.push(thread_id.clone());
@@ -2088,7 +2083,7 @@ impl ThreadManager {
         };
 
         for handle in handles {
-            let (thread_id, session, pump) = {
+            let (thread_id, session) = {
                 let mut record = handle.lock().await;
                 record.closed = true;
                 if let Some(turn_id) = record.active.as_ref().map(|active| active.turn_id.clone()) {
@@ -2102,16 +2097,12 @@ impl ThreadManager {
                         .await;
                 }
                 let thread_id = record.meta.thread_id.clone();
+                // `detach_session` is the one place that stops the pump.
                 let session = record
                     .session
                     .generation()
                     .and_then(|generation| record.detach_session(generation));
-                let pump = if session.is_some() {
-                    record.pump.take()
-                } else {
-                    None
-                };
-                (thread_id, session, pump)
+                (thread_id, session)
             };
             if let Some(session) = session {
                 // The record lock is released first: a lock order of
@@ -2120,9 +2111,6 @@ impl ThreadManager {
                 if let Err(error) = session.shutdown().await {
                     tracing::warn!(%thread_id, %error, "harness shutdown failed");
                 }
-            }
-            if let Some(pump) = pump {
-                pump.abort();
             }
         }
     }
@@ -2442,6 +2430,12 @@ impl Inner {
         // prove, after the slow `start_session` call, that the slot is still
         // the one it claimed; the turn is used as captured, never re-read from
         // "whatever is active then".
+        //
+        // A startup with no turn to carry starts nothing. It was spawned for a
+        // turn that a Stop settled before this task reached the lock; starting
+        // an agent for nobody would leave a session no turn asked for, and a
+        // failure would be blamed on whichever turn arrived next. The slot stays
+        // `None`, so a Send that arrives now starts its own session.
         let (harness, mut spec, generation, turn) = {
             let mut record = handle.lock().await;
             if record.closed || self.closed.load(Ordering::Relaxed) {
@@ -2452,13 +2446,20 @@ impl Inner {
                 // deliver this turn's prompt when it is.
                 return;
             }
+            let Some(turn) = record
+                .active
+                .as_ref()
+                .map(|active| Arc::clone(&active.dispatch))
+            else {
+                return;
+            };
             let harness_kind = record.meta.harness;
             let Some(harness) = self.harnesses.get(harness_kind) else {
                 drop(record);
                 self.fail_session(
                     handle,
                     None,
-                    None,
+                    turn,
                     format!("no {harness_kind:?} adapter is available in this daemon build"),
                 )
                 .await;
@@ -2482,10 +2483,6 @@ impl Inner {
                 env_overrides,
                 attachments: Vec::new(),
             };
-            let turn = record
-                .active
-                .as_ref()
-                .map(|active| Arc::clone(&active.dispatch));
             let generation = record.next_session_gen();
             record.session = SessionSlot::Starting(generation);
             (harness, spec, generation, turn)
@@ -2529,6 +2526,7 @@ impl Inner {
         };
 
         let stream = session.events();
+        let health = session.transport_health();
         let session: SharedSession = Arc::new(Mutex::new(session));
         {
             let mut record = handle.lock().await;
@@ -2555,7 +2553,7 @@ impl Inner {
             let pump_session = Arc::clone(&session);
             record.pump = Some(tokio::spawn(async move {
                 inner
-                    .run_pump(pump_handle, generation, pump_session, stream)
+                    .run_pump(pump_handle, generation, pump_session, health, stream)
                     .await;
             }));
         }
@@ -2563,34 +2561,33 @@ impl Inner {
         // Claim the turn this startup carried: a Stop that won during startup
         // left its dispatch stopped, so its prompt is dropped and the queue
         // moves on instead.
-        if let Some(turn) = turn {
-            let still_active = {
-                let record = handle.lock().await;
-                record.dispatch_for(&turn.turn_id).is_some()
-            };
-            if still_active {
-                self.deliver(handle.clone(), turn, Arc::clone(&session))
-                    .await;
-            }
+        let still_active = {
+            let record = handle.lock().await;
+            record.dispatch_for(&turn.turn_id).is_some()
+        };
+        if still_active {
+            self.deliver(handle.clone(), turn, Arc::clone(&session))
+                .await;
         }
-        // The turn ended while the harness was booting (or nothing was active),
-        // so deliver whatever is waiting now on this live session.
+        // Whatever is waiting now (a queued turn, or none) is delivered on this
+        // live session.
         self.advance_queue(handle).await;
     }
 
-    /// Ends the active turn when a startup for `generation` failed.
+    /// Ends the turn a failed startup captured.
     ///
     /// A failure from a startup that no longer owns the slot (a restart, a
     /// shutdown) changes nothing: that startup's turn belongs to another path.
-    /// Everything else still advances the queue: a Stop can have ended the
-    /// captured turn and promoted its follow-up while this startup was booting,
-    /// and that follow-up must not be stranded behind the slot this failure
-    /// clears.
+    /// Only the captured dispatch is ever failed here. A turn that became active
+    /// after the capture (a Stop ended the captured one and promoted the next,
+    /// or a Send started another) was never this startup's to settle; it gets
+    /// its own startup attempt so it is not stranded behind the slot this
+    /// failure clears and is not failed for a session it never asked for.
     async fn fail_session(
         self: &Arc<Self>,
         handle: ThreadHandle,
         generation: Option<u64>,
-        turn: Option<Arc<TurnDispatch>>,
+        turn: Arc<TurnDispatch>,
         message: String,
     ) {
         let (turn_id, advance) = {
@@ -2602,16 +2599,13 @@ impl Inner {
                 }
                 record.session = SessionSlot::None;
             }
-            let turn_id = match &turn {
-                Some(turn) => record
-                    .dispatch_for(&turn.turn_id)
-                    .map(|_| turn.turn_id.clone()),
-                None => record.active.as_ref().map(|active| active.turn_id.clone()),
-            };
-            // Whatever turn owns the thread now was promoted while this
-            // startup still held the slot; `settle_turn` schedules its own
-            // advance, so only a settlement that did not happen needs one.
-            (turn_id, record.active.is_some())
+            let captured = record
+                .dispatch_for(&turn.turn_id)
+                .map(|_| turn.turn_id.clone());
+            // `settle_turn` spawns its own advance when it settles the captured
+            // turn; only a turn this failure leaves alone needs one.
+            let advance = record.active.is_some() && captured.is_none();
+            (captured, advance)
         };
         let settled = match turn_id {
             Some(turn_id) => {
@@ -2796,22 +2790,20 @@ impl Inner {
         handle: ThreadHandle,
         generation: u64,
         session: SharedSession,
+        health: Option<h4rn_harness::TransportHealth>,
         mut stream: futures::stream::BoxStream<'static, HarnessEvent>,
     ) {
         while let Some(event) = stream.next().await {
             if self.closed.load(Ordering::Relaxed) {
                 break;
             }
-            // Sampling the transport's health needs the session lock, so do it
-            // before the record lock (the same order Stop and delivery use).
-            let session_closed = if matches!(
-                &event,
-                HarnessEvent::TurnCompleted { .. } | HarnessEvent::Error { .. }
-            ) {
-                session.lock().await.is_closed()
-            } else {
-                false
-            };
+            // The transport's health is read from its lock-free flag, never
+            // through the session lock: a `send` may hold that lock for the
+            // length of a turn, waiting for a reply this pump's draining is what
+            // unblocks. Only a completion needs it; every transport failure is
+            // tagged where it happens.
+            let session_closed = matches!(&event, HarnessEvent::TurnCompleted { .. })
+                && health.as_ref().is_some_and(|health| health.is_closed());
             let mut record = handle.lock().await;
             // A pump serves exactly one session generation. Once the thread has
             // detached that session (a failed write, a restart, a model change),
@@ -3241,11 +3233,10 @@ impl Inner {
                     }
                 }
                 HarnessEvent::Error { message, retryable } => {
-                    // Every harness error gets its own row. The one exception is
-                    // a dead transport: the bridge reports the same writer death
-                    // that `fail_prompt_write` reports, so the first of those two
-                    // is the turn's row and the second is collapsed.
-                    let turn_id = record.turn_id_for_event();
+                    // Every harness error is its own row. Only the tagged
+                    // writer death below shares a row with the daemon's failed
+                    // prompt write, so a buffered diagnostic can never take
+                    // that slot and suppress the failure it followed.
                     if !record.session.is_live(&session) {
                         // This pump's session was already detached, so whoever
                         // detached it reported the failure. A late error from a
@@ -3255,7 +3246,30 @@ impl Inner {
                             thread_id = %thread_id,
                             "dropped a late error from a detached session"
                         );
-                    } else if session_closed && !record.note_transport_error(&turn_id) {
+                    } else {
+                        if record.active.is_some() {
+                            domain.push(ThreadEvent::FailureRaised { at: now });
+                        }
+                        wire.push(Event::Error {
+                            thread_id: Some(thread_id.clone()),
+                            message,
+                            hint: Some("Inspect the thread and retry when ready".into()),
+                            retryable,
+                        });
+                    }
+                }
+                HarnessEvent::TransportClosed { message, retryable } => {
+                    // The tagged writer death. `fail_prompt_write` reports the
+                    // same death for the turn it was writing, and the first of
+                    // the two reports is the turn's row; the second is
+                    // collapsed. Nothing untagged ever reaches this arm.
+                    let turn_id = record.turn_id_for_event();
+                    if !record.session.is_live(&session) {
+                        tracing::debug!(
+                            thread_id = %thread_id,
+                            "dropped a late transport failure from a detached session"
+                        );
+                    } else if !record.note_transport_error(&turn_id) {
                         tracing::debug!(
                             thread_id = %thread_id,
                             "collapsed a second report of the same transport failure"
@@ -3528,7 +3542,7 @@ impl Inner {
             Closed,
             Active,
             Stale,
-            Go(Option<SharedSession>, Option<JoinHandle<()>>),
+            Go(Option<SharedSession>),
         }
         let apply = {
             let mut record = handle.lock().await;
@@ -3544,7 +3558,7 @@ impl Inner {
                 Apply::Stale
             } else if let Some(failover) = &schedule.failover {
                 if record.meta.model == failover.model {
-                    Apply::Go(None, None)
+                    Apply::Go(None)
                 } else {
                     record.meta.model = failover.model.clone();
                     // A startup already booting the limited model is superseded
@@ -3559,20 +3573,16 @@ impl Inner {
                         record.session = SessionSlot::None;
                         None
                     } else {
+                        // `detach_session` stops this session's pump itself.
                         record
                             .session
                             .generation()
                             .and_then(|generation| record.detach_session(generation))
                     };
-                    let pump = if session.is_some() {
-                        record.pump.take()
-                    } else {
-                        None
-                    };
-                    Apply::Go(session, pump)
+                    Apply::Go(session)
                 }
             } else {
-                Apply::Go(None, None)
+                Apply::Go(None)
             }
         };
         match apply {
@@ -3601,15 +3611,12 @@ impl Inner {
                 );
                 return Ok(None);
             }
-            Apply::Go(session, pump) => {
+            Apply::Go(session) => {
                 if let Some(session) = session {
                     let mut session = session.lock().await;
                     if let Err(error) = session.shutdown().await {
                         tracing::warn!(%thread_id, %error, "harness shutdown before failover failed");
                     }
-                }
-                if let Some(pump) = pump {
-                    pump.abort();
                 }
             }
         }
@@ -4536,7 +4543,7 @@ mod tests {
         }])
         .boxed();
         Arc::clone(&manager.inner)
-            .run_pump(handle.clone(), generation, session, stream)
+            .run_pump(handle.clone(), generation, session, None, stream)
             .await;
 
         {
@@ -4663,7 +4670,7 @@ mod tests {
         };
         let stream = futures::stream::empty().boxed();
         Arc::clone(&manager.inner)
-            .run_pump(handle.clone(), generation, session, stream)
+            .run_pump(handle.clone(), generation, session, None, stream)
             .await;
 
         {
@@ -5130,5 +5137,226 @@ mod tests {
         assert_eq!(user_item_id(&turn), "item_user_abc");
         assert_eq!(assistant_item_id(&turn), "item_assistant_abc");
         assert!(fresh_item_id("user").starts_with("item_user_"));
+    }
+
+    /// The pump must apply events without the session lock.
+    ///
+    /// `send` holds that lock while the harness streams; an adapter with a
+    /// bounded event queue would stop reading its transport (and never answer
+    /// the write) if the pump waited for the lock to sample health.
+    #[tokio::test]
+    async fn the_pump_drains_events_while_a_send_holds_the_session() {
+        const DELTAS: usize = 1_100;
+        let workspace = tempfile::tempdir().expect("tempdir");
+        // More deltas than the ACP bridge's event queue holds, so the pump has
+        // to keep draining while the write is still in flight.
+        let (harness, send_done) = FakeHarness::new().with_streaming_send(DELTAS);
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+
+        // The fake's send has not returned (the gate is closed): a pump that
+        // waited for the session lock could publish nothing here.
+        let mut assistant = String::new();
+        let completed = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                match wire.event {
+                    Event::ItemCompleted {
+                        item:
+                            Item::Message {
+                                role: MessageRole::Assistant,
+                                text,
+                                ..
+                            },
+                        ..
+                    } => assistant = text,
+                    Event::TurnCompleted {
+                        turn_id, status, ..
+                    } => return (turn_id, status),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the pump applied the whole stream while send held the session");
+        assert_eq!(completed.0, created.turn_id);
+        assert_eq!(completed.1, TurnStatus::Completed);
+        assert_eq!(
+            assistant.chars().count(),
+            DELTAS,
+            "every streamed delta reached the turn"
+        );
+
+        send_done.release();
+        let _ = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await;
+    }
+
+    /// A startup that reached the lock after its turn was stopped starts no
+    /// session at all: it has nothing to carry, and a failure of it must never
+    /// be blamed on the turn that arrived next.
+    #[tokio::test]
+    async fn a_startup_with_no_turn_starts_no_session_and_leaves_the_next_turn_its_own() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, gate) = FakeHarness::new().with_start_gate();
+        let harness = harness.with_start_failure_once("the harness could not start");
+        let (harness, sessions) = harness.with_session_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert!(
+            wait_until(|| sessions.get() == 1).await,
+            "the thread's own startup is in flight"
+        );
+
+        // Stop the only turn while that startup is still booting, then let the
+        // startup fail: its captured turn is already gone.
+        manager
+            .interrupt(&created.thread_id)
+            .await
+            .expect("stop the first turn");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Interrupted);
+        gate.release();
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        {
+            let handle = manager
+                .inner
+                .handle(&created.thread_id)
+                .await
+                .expect("thread handle");
+            let record = handle.lock().await;
+            assert!(
+                record.active.is_none(),
+                "the failed startup did not resurrect the stopped turn"
+            );
+        }
+        assert_eq!(
+            sessions.get(),
+            1,
+            "the failed startup never created a session"
+        );
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        // The state a Stop between spawn and capture leaves: no turn to carry
+        // and no session. The startup that was spawned then must start nothing.
+        manager.inner.spawn_session(handle.clone());
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            sessions.get(),
+            1,
+            "a startup with no captured turn starts no session"
+        );
+        {
+            let record = handle.lock().await;
+            assert!(
+                matches!(record.session, SessionSlot::None),
+                "the slot is left free for the next turn's own startup"
+            );
+        }
+
+        // The next message gets its own startup, and that one succeeds.
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        let (turn, status) = next_turn_completion(&mut events).await;
+        assert_eq!(turn, second.turn_id, "the new message runs its own turn");
+        assert_eq!(
+            status,
+            TurnStatus::Completed,
+            "a startup with no turn cannot fail the next one"
+        );
+        assert_eq!(sessions.get(), 2, "the next turn started its own session");
+    }
+
+    /// A diagnostic the bridge buffered before the writer died is its own row,
+    /// and it must not stand in for the transport failure that follows it.
+    #[tokio::test]
+    async fn a_buffered_diagnostic_does_not_hide_the_transport_failure() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, death) = FakeHarness::new()
+            .with_dead_transport_after(1)
+            .with_buffered_diagnostic("an unrelated ACP diagnostic");
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        // The second write parks its diagnostic and then holds the session
+        // lock until the test has seen that row.
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        let mut errors = Vec::new();
+        loop {
+            let wire = next_event(&mut events).await;
+            if let Event::Error { message, .. } = wire.event {
+                errors.push(message);
+                break;
+            }
+        }
+        assert_eq!(errors, ["an unrelated ACP diagnostic"]);
+
+        // Now let the writer die. Its tagged row is the failure; the write
+        // failure's row for the same death is the one that collapses.
+        death.release();
+        loop {
+            let wire = next_event(&mut events).await;
+            match wire.event {
+                Event::Error { message, .. } => errors.push(message),
+                Event::TurnCompleted {
+                    turn_id, status, ..
+                } => {
+                    assert_eq!(turn_id, second.turn_id);
+                    assert_eq!(status, TurnStatus::Failed);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            errors.len(),
+            2,
+            "the diagnostic and the real failure are both rows: {errors:?}"
+        );
+        assert!(
+            errors[1].contains("transport"),
+            "the real transport failure was not hidden: {errors:?}"
+        );
+        assert!(
+            manager
+                .inner
+                .handle(&created.thread_id)
+                .await
+                .expect("handle")
+                .lock()
+                .await
+                .active
+                .is_none(),
+            "the turn ended once"
+        );
     }
 }

@@ -1,0 +1,23 @@
+[package]
+name = "h4rn-test-fixtures"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Test-only harness peers for h4rn's integration tests"
+publish = false
+
+# The ACP peer the Antigravity integration test runs as its agent.
+#
+# It lives here, in a test-only crate, so the daemon package has exactly one
+# binary: `cargo run -p h4rn-daemon` is unambiguous and `cargo build`/`install`
+# never ship the fixture. The daemon's test builds it on demand and reads the
+# executable path from Cargo's JSON output.
+[[bin]]
+name = "agy-fixture"
+path = "src/bin/agy_fixture.rs"
+test = false
+
+[dependencies]
+serde_json.workspace = true

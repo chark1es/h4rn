@@ -1043,6 +1043,46 @@ impl Utf8Stream {
     }
 }
 
+/// Turns one OpenCode event-stream chunk into complete lines.
+///
+/// The UTF-8 decoder and the line buffer are one step, so this is the function
+/// the stream loop calls: a character split across two chunks is decoded once,
+/// not two replacement characters, and a line split across chunks is joined
+/// before the parser sees it. The unfinished line stays buffered for the next
+/// chunk.
+#[derive(Default)]
+struct SseLines {
+    utf8: Utf8Stream,
+    buffer: String,
+}
+
+impl SseLines {
+    /// Decodes a chunk and returns the lines it completed.
+    fn push(&mut self, chunk: &[u8]) -> Vec<String> {
+        let text = self.utf8.push(chunk);
+        self.split(&text)
+    }
+
+    /// Finishes the stream. A truncated trailing character becomes one
+    /// replacement character; an unterminated last line is not dispatched, just
+    /// as it never was on a live stream.
+    fn finish(&mut self) -> Vec<String> {
+        let text = self.utf8.finish();
+        self.split(&text)
+    }
+
+    fn split(&mut self, text: &str) -> Vec<String> {
+        self.buffer.push_str(text);
+        let mut lines = Vec::new();
+        while let Some(position) = self.buffer.find('\n') {
+            let line = self.buffer[..position].to_string();
+            self.buffer.drain(..=position);
+            lines.push(line);
+        }
+        lines
+    }
+}
+
 fn spawn_sse(
     http: reqwest::Client,
     base_url: String,
@@ -1067,12 +1107,11 @@ fn spawn_sse(
             {
                 Ok(response) if response.status().is_success() => {
                     let mut stream = response.bytes_stream();
-                    let mut buffer = String::new();
-                    let mut decoder = Utf8Stream::default();
+                    let mut lines = SseLines::default();
                     let mut finished = false;
                     'stream: loop {
-                        let text = match stream.next().await {
-                            Some(Ok(bytes)) => decoder.push(&bytes),
+                        let complete = match stream.next().await {
+                            Some(Ok(bytes)) => lines.push(&bytes),
                             Some(Err(error)) => {
                                 if !shutting_down.load(Ordering::SeqCst) {
                                     let _ = events_tx
@@ -1088,14 +1127,11 @@ fn spawn_sse(
                             }
                             None if !finished => {
                                 finished = true;
-                                decoder.finish()
+                                lines.finish()
                             }
                             None => break 'stream,
                         };
-                        buffer.push_str(&text);
-                        while let Some(position) = buffer.find('\n') {
-                            let line = buffer[..position].to_string();
-                            buffer.drain(..=position);
+                        for line in complete {
                             let events = {
                                 let mut parser = lock(&parser);
                                 parser.push_line(&line)
@@ -1481,6 +1517,35 @@ mod tests {
         assert_eq!(parse_version("\n\n"), None);
         assert_eq!(parse_semver("2.2.7"), Some((2, 2, 7)));
         assert!(parse_semver("2.1.0") < parse_semver("2.2.6"));
+    }
+
+    #[test]
+    fn the_stream_loop_decodes_a_character_split_across_chunks() {
+        // Exactly the line the OpenCode event loop parses, split inside the
+        // emoji between two network chunks. The loop must join it and decode it
+        // once: reverting the read loop to per-chunk lossy decoding would turn
+        // the emoji into two replacement characters here.
+        let payload = "data: {\"type\":\"session.text.delta\",\"data\":{\"sessionID\":\"s1\",\"delta\":\"🚀日本\"}}\n";
+        let bytes = payload.as_bytes();
+        let split = payload.find('🚀').expect("the emoji") + 1;
+        assert!(split < payload.len());
+        let mut lines = SseLines::default();
+        let mut parser = OpenCodeParser::new();
+        let mut text = String::new();
+        let mut started = false;
+        for chunk in [&bytes[..split], &bytes[split..]] {
+            for line in lines.push(chunk) {
+                for event in parser.push_line(&line) {
+                    match event {
+                        HarnessEvent::TextDelta { text: delta } => text.push_str(&delta),
+                        HarnessEvent::SessionStarted { .. } => started = true,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(started, "the joined line named the session");
+        assert_eq!(text, "🚀日本", "the split character arrived intact");
     }
 
     #[test]

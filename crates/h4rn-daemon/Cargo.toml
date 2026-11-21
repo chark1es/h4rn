@@ -11,14 +11,6 @@ description = "The per-host h4rn daemon binary"
 name = "h4rnd"
 path = "src/main.rs"
 
-# The ACP peer the Antigravity integration test runs as its agent. Cargo builds
-# it for the test and hands its path over as `CARGO_BIN_EXE_agy-fixture`, so the
-# test never guesses a target directory or profile.
-[[bin]]
-name = "agy-fixture"
-path = "tests/fixtures/agy_fixture.rs"
-test = false
-
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true

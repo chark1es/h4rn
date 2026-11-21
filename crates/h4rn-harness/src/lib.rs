@@ -175,7 +175,24 @@ pub enum HarnessEvent {
         usage: Usage,
     },
     /// A transport, protocol or harness failure.
+    ///
+    /// This is the ordinary diagnostic row: it is always published as its own
+    /// error. A transport that died is reported as [`Self::TransportClosed`]
+    /// instead, so the two are never confused.
     Error {
+        /// What happened.
+        message: String,
+        /// Whether a retry is safe.
+        retryable: bool,
+    },
+    /// The session's write transport died under the turn.
+    ///
+    /// This is the same death the daemon reports when a prompt write fails, so
+    /// it is tagged where it is produced (the ACP bridge's writer-error path)
+    /// rather than inferred from the session's health afterwards: only these
+    /// two reports of one death are collapsed into one row, and any other
+    /// diagnostic still gets its own.
+    TransportClosed {
         /// What happened.
         message: String,
         /// Whether a retry is safe.
@@ -226,6 +243,34 @@ pub enum HarnessError {
     },
 }
 
+/// A lock-free view of a session's transport health.
+///
+/// The daemon's event pump must never wait on a session's own lock: `send` may
+/// hold that lock for the length of a harness turn, and an adapter with a
+/// bounded event queue would then be unable to deliver the reply `send` waits
+/// for. A session that can lose its transport mid-turn publishes that fact here
+/// when it happens, so the pump (and the daemon's other non-blocking readers)
+/// can see it without locking.
+#[derive(Clone, Debug, Default)]
+pub struct TransportHealth(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl TransportHealth {
+    /// A transport that is still healthy.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Marks the transport closed. Every later read sees it.
+    pub fn close(&self) {
+        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the transport has closed.
+    pub fn is_closed(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 /// A running harness session.
 #[async_trait]
 pub trait HarnessSession: Send {
@@ -260,8 +305,20 @@ pub trait HarnessSession: Send {
     /// A failed write can kill the transport without the event stream ending,
     /// so the daemon asks this before it detaches the session: the next
     /// message then starts a fresh one instead of writing to a dead pipe.
+    /// Callers that must not wait for the session lock read
+    /// [`Self::transport_health`] instead.
     fn is_closed(&self) -> bool {
         false
+    }
+
+    /// A lock-free view of this session's transport health.
+    ///
+    /// Adapters whose transport can die asynchronously (the ACP bridge, which
+    /// reports a writer failure on its own stream) publish it here. The daemon's
+    /// event pump samples this instead of [`Self::is_closed`], so draining an
+    /// adapter's events never waits on a `send` that holds the session lock.
+    fn transport_health(&self) -> Option<TransportHealth> {
+        None
     }
 
     /// The harness-native session id, once the harness reported it.

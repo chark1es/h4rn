@@ -518,16 +518,23 @@ once the call finishes.
 **Addendum: one pump, one session.** Each event pump carries the generation of the session it
 serves and drops every event once the record no longer holds that session live; every path that
 detaches a session also aborts its pump. A late completion from a dead transport therefore cannot
-settle the turn that replaced its own. A startup that fails still advances whatever turn now owns
-the thread, even when its captured turn was stopped in the meantime, and a stream that ends while
-the promoted turn's prompt was never written leaves that turn for a fresh session instead of
-failing it. Error rows are no longer collapsed per turn: only the bridge's writer-error row and the
-daemon's failed-write row for the same transport death are one row, and the session-ended row keeps
-its stderr hint. A writer I/O error marks the client closed and kills the agent's process group
-before any caller is woken, so an agent that closed stdin cannot outlive the failure. A failover
-that arrives while a startup is still booting the old model supersedes that startup, so the resume
-starts on the new model. A prompt result without a string `stopReason` is a failure, never an
-implicit `end_turn`.
+settle the turn that replaced its own. The pump reads a session's transport health from a
+lock-free flag the adapter publishes, never from the session lock: `send` may hold that lock for a
+whole turn, waiting for a reply that only the pump's draining can deliver, so waiting on it there
+would deadlock a harness with a bounded event queue. A startup that reached the thread after its
+turn was stopped starts no session at all and leaves the slot free for the next message, and a
+startup failure ends only the turn that startup captured; any turn that arrived later gets its own
+startup attempt instead of a failure for a session it never asked for. A stream that ends while the
+promoted turn's prompt was never written leaves that turn for a fresh session instead of failing
+it. Error rows are tagged where the death happens: the ACP writer-error path, a closed or exited
+agent, and a prompt that failed because the transport died report a distinct transport-death event,
+and only those reports and the daemon's failed-write row for the same turn collapse into one row,
+which keeps the agent's stderr text. Any other harness diagnostic is always its own row, so one
+buffered before a death can no longer take the failure's place. A writer I/O error marks the client
+closed and kills the agent's process group before any caller is woken, so an agent that closed
+stdin cannot outlive the failure. A failover that arrives while a startup is still booting the old
+model supersedes that startup, so the resume starts on the new model. A prompt result without a
+string `stopReason` is a failure, never an implicit `end_turn`.
 
 ## ADR-027: Push notifications are metadata-only wake signals
 

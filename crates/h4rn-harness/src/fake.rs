@@ -17,7 +17,8 @@ use futures::stream::{BoxStream, StreamExt};
 use h4rn_protocol::{ApprovalDecision, HarnessKind, ToolCall, ToolCallStatus, TurnStatus, Usage};
 
 use crate::{
-    Harness, HarnessError, HarnessEvent, HarnessInstall, HarnessSession, SessionSpec, UserInput,
+    Harness, HarnessError, HarnessEvent, HarnessInstall, HarnessSession, SessionSpec,
+    TransportHealth, UserInput,
 };
 
 /// A fake harness adapter.
@@ -65,6 +66,12 @@ pub struct FakeHarness {
     trailing_completion_gate: Option<Gate>,
     /// A test-only stderr tail the session reports with its failures.
     stderr: Option<String>,
+    /// A test-only count of events a send streams before holding the session
+    /// lock until its gate opens.
+    streaming_send: Option<(usize, Gate)>,
+    /// A test-only diagnostic the session parks on its stream just before a
+    /// dead send's transport failure, and the gate that holds that failure.
+    diagnostic_before_death: Option<(String, Gate)>,
 }
 
 /// A shared count of prompts a fake session was asked to write.
@@ -230,6 +237,8 @@ impl Default for FakeHarness {
             stream_end_gate: None,
             trailing_completion_gate: None,
             stderr: None,
+            streaming_send: None,
+            diagnostic_before_death: None,
         }
     }
 }
@@ -438,6 +447,32 @@ impl FakeHarness {
         self.dead_sends_after = Some(ok_sends);
         self
     }
+
+    /// Streams `count` text deltas and a completed turn from `send`, then holds
+    /// the send until the returned [`Gate`] is released.
+    ///
+    /// A test uses this to model a harness whose write does not return until
+    /// its own event queue has been drained (Codex's `turn/start` reply comes
+    /// after the events it may have queued): the daemon's pump has to apply
+    /// every event, including the completion, while `send` still holds the
+    /// session lock.
+    pub fn with_streaming_send(mut self, count: usize) -> (Self, Gate) {
+        let gate = Gate::new();
+        self.streaming_send = Some((count, gate.clone()));
+        (self, gate)
+    }
+
+    /// Parks `message` on the stream before a dead send's transport failure and
+    /// holds the send until the returned [`Gate`] is released.
+    ///
+    /// A test releases the gate once it has seen the diagnostic's row, so the
+    /// diagnostic is consumed before the death it precedes. A pump that waited
+    /// for the session lock could never publish it while this send holds it.
+    pub fn with_buffered_diagnostic(mut self, message: impl Into<String>) -> (Self, Gate) {
+        let gate = Gate::new();
+        self.diagnostic_before_death = Some((message.into(), gate.clone()));
+        (self, gate)
+    }
 }
 
 #[async_trait]
@@ -536,6 +571,9 @@ impl Harness for FakeHarness {
             trailing_completion_gate: self.trailing_completion_gate.clone(),
             stderr: self.stderr.clone().unwrap_or_default(),
             closed: false,
+            health: TransportHealth::new(),
+            streaming_send: self.streaming_send.clone(),
+            diagnostic_before_death: self.diagnostic_before_death.clone(),
         }))
     }
 }
@@ -585,6 +623,14 @@ pub struct FakeSession {
     /// The stderr tail this session reports.
     stderr: String,
     closed: bool,
+    /// The lock-free death flag the daemon's pump reads without this session's
+    /// lock.
+    health: TransportHealth,
+    /// A test-only count of events a send streams before waiting on its gate.
+    streaming_send: Option<(usize, Gate)>,
+    /// A test-only diagnostic parked on the stream before a dead send's
+    /// transport failure, and the gate that holds that failure.
+    diagnostic_before_death: Option<(String, Gate)>,
 }
 
 #[async_trait]
@@ -609,6 +655,20 @@ impl HarnessSession for FakeSession {
         self.has_answered = true;
         let gate_completion =
             self.completion_gate.is_some() && (self.completion_gate_first_send || !first_send);
+        if let Some((count, gate)) = self.streaming_send.clone() {
+            // The write does not return until the daemon's pump has applied
+            // every event it streamed, so a pump that waits for this session's
+            // lock can never see the completion that ends the turn.
+            for _ in 0..count {
+                self.emit(HarnessEvent::TextDelta { text: "x".into() });
+            }
+            self.emit(HarnessEvent::TurnCompleted {
+                status: TurnStatus::Completed,
+                usage: usage_for(&input.text),
+            });
+            gate.wait().await;
+            return Ok(());
+        }
         if let Some(gate) = &self.send_gate
             && !first_send
         {
@@ -620,9 +680,23 @@ impl HarnessSession for FakeSession {
         {
             // A write that failed mid-frame kills the transport; report it as
             // closed so the daemon detaches this session. A real adapter reports
-            // the transport failure on its own stream, so the fake does too.
+            // the transport failure on its own stream, so the fake does too,
+            // tagged as the transport death it is.
             self.closed = true;
-            self.emit(HarnessEvent::Error {
+            self.health.close();
+            if let Some((message, gate)) = self.diagnostic_before_death.clone() {
+                // The writer is already dead, and this diagnostic was buffered
+                // before that: the daemon consumes it after the transport is
+                // closed, exactly the order that used to let a diagnostic take
+                // the transport failure's row. The send holds the session until
+                // the test has seen this row.
+                self.emit(HarnessEvent::Error {
+                    message,
+                    retryable: false,
+                });
+                gate.wait().await;
+            }
+            self.emit(HarnessEvent::TransportClosed {
                 message: "the harness transport closed".into(),
                 retryable: false,
             });
@@ -832,8 +906,13 @@ impl HarnessSession for FakeSession {
         self.closed
     }
 
+    fn transport_health(&self) -> Option<TransportHealth> {
+        Some(self.health.clone())
+    }
+
     async fn shutdown(&mut self) -> Result<(), HarnessError> {
         self.closed = true;
+        self.health.close();
         if let Some(count) = &self.shutdown_count {
             count.0.fetch_add(1, Ordering::SeqCst);
         }

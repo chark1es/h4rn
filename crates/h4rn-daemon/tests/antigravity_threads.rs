@@ -1,12 +1,12 @@
 //! End-to-end: the Antigravity ACP adapter and the thread manager together.
 //!
-//! The agent is the `agy-fixture` binary this package builds: a minimal ACP
-//! peer that echoes prompts and can vanish mid-turn. That is the one thing the
-//! daemon-level fake cannot model, because only a real transport reports its
-//! own death through the adapter.
+//! The agent is the `agy-fixture` binary from the `h4rn-test-fixtures` crate: a
+//! minimal ACP peer that echoes prompts and can vanish mid-turn. That is the one
+//! thing the daemon-level fake cannot model, because only a real transport
+//! reports its own death through the adapter.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use h4rn_daemon::harnesses::{HarnessCatalog, StaticHarnessCatalog};
@@ -18,16 +18,69 @@ use tokio::sync::broadcast;
 
 const TURN_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The fixture is a `[[bin]]` target of this package, so Cargo builds it for
-/// the test and reports its path; no profile or target-directory guessing.
+/// The fixture peer, built on demand from its own test-only crate.
+///
+/// The fixture is deliberately not a binary of this package: that would make
+/// `cargo run -p h4rn-daemon` ambiguous and ship a test peer with every build
+/// and install. Cargo builds it into the test's own target directory and
+/// prints the executable path in its JSON output, so nothing here guesses a
+/// profile or a target layout.
 fn fixture_binary() -> PathBuf {
-    let path = PathBuf::from(env!("CARGO_BIN_EXE_agy-fixture"));
+    static BINARY: OnceLock<PathBuf> = OnceLock::new();
+    BINARY.get_or_init(build_fixture).clone()
+}
+
+fn build_fixture() -> PathBuf {
+    let target_dir = std::env::temp_dir().join("h4rn-agy-fixture");
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let output = std::process::Command::new(cargo)
+        .args([
+            "build",
+            "--package",
+            "h4rn-test-fixtures",
+            "--bin",
+            "agy-fixture",
+            "--manifest-path",
+        ])
+        .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+        .args(["--target-dir"])
+        .arg(&target_dir)
+        .args(["--message-format=json"])
+        .output()
+        .expect("run cargo to build the ACP fixture");
     assert!(
-        path.exists(),
-        "missing fixture binary at {}",
-        path.display()
+        output.status.success(),
+        "cargo could not build the ACP fixture: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
-    path
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if message.get("reason").and_then(serde_json::Value::as_str) != Some("compiler-artifact") {
+            continue;
+        }
+        if message
+            .get("target")
+            .and_then(|target| target.get("name"))
+            .and_then(serde_json::Value::as_str)
+            != Some("agy-fixture")
+        {
+            continue;
+        }
+        match message
+            .get("executable")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some(executable) => return PathBuf::from(executable),
+            None => panic!("cargo built the ACP fixture without an executable path"),
+        }
+    }
+    panic!(
+        "cargo did not report the ACP fixture's executable: {}",
+        stdout.lines().take(5).collect::<Vec<_>>().join("\n")
+    );
 }
 
 async fn manager() -> ThreadManager {
@@ -164,6 +217,11 @@ async fn a_closed_acp_transport_is_replaced_before_the_next_turn() {
         failed.errors.len(),
         1,
         "one error row for one dead transport: {:?}",
+        failed.errors
+    );
+    assert!(
+        failed.errors[0].contains("agy-fixture: the session died mid-turn"),
+        "the failure row keeps the agent's stderr detail: {:?}",
         failed.errors
     );
 

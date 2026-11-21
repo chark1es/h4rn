@@ -584,6 +584,34 @@ pub async fn connect_legacy_sse(
     discover(upstream, limits).await
 }
 
+/// Decodes one chunk of a legacy SSE byte stream into complete events.
+///
+/// The stream loop below calls this, so the UTF-8 decoder is on the path a
+/// reader actually takes: a character split between two chunks is decoded once
+/// (not two replacement characters) and an event split between two chunks is
+/// joined before it is dispatched. An unfinished event stays buffered.
+#[derive(Default)]
+struct SseChunks {
+    utf8: Utf8Stream,
+    decoder: SseDecoder,
+}
+
+impl SseChunks {
+    /// Decodes a chunk and returns the events it completed.
+    fn push(&mut self, chunk: &[u8]) -> Vec<SseEvent> {
+        let text = self.utf8.push(chunk);
+        self.decoder.push(&text)
+    }
+
+    /// Finishes the stream. A truncated trailing character becomes one
+    /// replacement character; an event without its terminating blank line is
+    /// not dispatched, just as it never was on a live stream.
+    fn finish(&mut self) -> Vec<SseEvent> {
+        let text = self.utf8.finish();
+        self.decoder.push(&text)
+    }
+}
+
 async fn read_sse_stream(
     response: reqwest::Response,
     pending: Pending,
@@ -593,13 +621,12 @@ async fn read_sse_stream(
     endpoint_tx: oneshot::Sender<Result<String, UpstreamError>>,
 ) {
     let mut endpoint_tx = Some(endpoint_tx);
-    let mut decoder = SseDecoder::default();
-    let mut utf8 = Utf8Stream::default();
+    let mut chunks = SseChunks::default();
     let mut stream = response.bytes_stream();
     let mut finished = false;
     loop {
-        let text = match stream.next().await {
-            Some(Ok(chunk)) => utf8.push(&chunk),
+        let complete = match stream.next().await {
+            Some(Ok(chunk)) => chunks.push(&chunk),
             Some(Err(error)) => {
                 if let Some(sender) = endpoint_tx.take() {
                     let _ = sender.send(Err(UpstreamError::Transport(error.to_string())));
@@ -608,11 +635,11 @@ async fn read_sse_stream(
             }
             None if !finished => {
                 finished = true;
-                utf8.finish()
+                chunks.finish()
             }
             None => break,
         };
-        for event in decoder.push(&text) {
+        for event in complete {
             match event.event.as_deref() {
                 Some("endpoint") | None if endpoint_tx.is_some() => {
                     if let Some(sender) = endpoint_tx.take() {
@@ -726,6 +753,20 @@ mod tests {
                 "split at byte {split}"
             );
         }
+    }
+
+    #[test]
+    fn the_reader_loop_decodes_a_character_split_across_chunks() {
+        // Drive the reader's own chunks -> events step: reverting the loop to
+        // per-chunk lossy decoding would leave two replacement characters here.
+        let text = "event: message\ndata: {\"text\":\"🚀日本\"}\n\n";
+        let bytes = text.as_bytes();
+        let split = text.find('🚀').expect("the emoji") + 1;
+        let mut chunks = SseChunks::default();
+        let mut events = chunks.push(&bytes[..split]);
+        events.extend(chunks.push(&bytes[split..]));
+        assert_eq!(events.len(), 1, "one event across the split");
+        assert_eq!(events[0].data, "{\"text\":\"🚀日本\"}");
     }
 
     #[test]

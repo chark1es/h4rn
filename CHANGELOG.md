@@ -47,16 +47,22 @@ All notable changes to h4rn are recorded here. The format follows
 - **A failed startup no longer strands the turn waiting behind it.** When a startup fails after its
   turn was stopped (or after the thread moved on), the message queued behind that turn, or sent
   after the stop, is still promoted and delivered on a fresh agent instead of staying Working with
-  no session.
+  no session. A startup that has no turn to carry (a Stop settled it before the startup reached the
+  thread) starts no session at all and leaves the next message its own startup; a startup failure
+  only ever ends the turn it captured, never one that arrived afterwards.
 - **A session's event pump speaks only for its own session.** Every pump carries the generation of
   the session it serves and drops its events once the thread has detached that session; every
   detach stops the pump. A late `TurnCompleted` from a dead transport can therefore no longer fail
   the turn that replaced it, and a stream that ends while a promoted turn's prompt was never
-  written leaves that turn for a fresh session instead of failing it.
-- **Only the same transport death is collapsed into one error row.** The ACP bridge's writer-error
-  row and the daemon's failed-write row for that death remain one failure, but an unrelated harness
-  error earlier in the turn no longer hides a later one, and the row published when a session ends
-  mid-turn keeps its stderr hint.
+  written leaves that turn for a fresh session instead of failing it. The pump reads the session's
+  transport health from a lock-free flag rather than the session lock, so a write that is still in
+  flight (waiting for its own reply) never stops the pump from draining the events that unblock it.
+- **A transport failure is tagged where it happens, so only it shares a row.** The ACP writer-error
+  path, a closed or exited agent, and a prompt that failed because the transport died report a
+  distinct transport-death event; the daemon collapses exactly those reports and the failed-write
+  row for the same turn into one failure, which keeps the agent's stderr text. Any other harness
+  diagnostic is always its own row, so one buffered before a death can no longer take the failure's
+  place and hide it.
 - **A writer I/O error closes the ACP client and kills the agent before waking a caller.** An agent
   that closed its stdin but stayed alive can no longer survive under a client the daemon still
   believes is open, so the prompt that observes the error always finds a closed, dead transport.
@@ -66,7 +72,7 @@ All notable changes to h4rn are recorded here. The format follows
 - **A missing `stopReason` is not a completed turn.** A prompt result without a string stop reason
   now ends the turn as a failure ("the agent ended the turn without a stop reason") instead of
   being treated as a normal `end_turn`.
-- **A turn stopped by `max_tokens` or `max_turn_requests` is no longer shown as completed.** The  turn footer says "Stopped: the agent hit its token limit" (or its turn-request limit) even when
+- **A turn stopped by `max_tokens` or `max_turn_requests` is no longer shown as completed.** The turn footer says "Stopped: the agent hit its token limit" (or its turn-request limit) even when
   the agent produced no output, and its Reply button puts the cursor back in the composer instead of
   resending the prompt (a message sent during the turn is already queued, so a resend would run it
   twice), as does a failed or interrupted turn, whose button no longer says "Retry" while only
@@ -82,6 +88,10 @@ All notable changes to h4rn are recorded here. The format follows
   UTF-8, UTF-16LE and UTF-16BE byte-order marks, so the text is embedded instead of falling back to
   a link. UTF-32 files and text containing NUL bytes stay links, and so do all text attachments on
   Claude Code, Codex and OpenCode, which pass a path reference.
+- **The ACP test peer is no longer a daemon binary.** `agy-fixture` lives in its own `publish =
+  false` workspace crate that the Antigravity test builds on demand and locates from Cargo's JSON
+  output, so `cargo run -p h4rn-daemon` is unambiguous again and `cargo build`/`install` ship only
+  `h4rnd`.
 
 ## 1.0.1 — 2026-11-19
 

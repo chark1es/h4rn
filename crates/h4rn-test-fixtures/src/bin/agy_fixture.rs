@@ -88,8 +88,11 @@ fn main() {
                     // Vanish mid-turn: stdout closes, the daemon's client sees a
                     // dead transport and never gets a prompt result. The death
                     // waits for a gate file the test creates, so the test can
-                    // first queue a follow-up behind this turn.
+                    // first queue a follow-up behind this turn. The stderr line
+                    // lets the test prove the failure row keeps the agent's own
+                    // diagnostic text.
                     wait_for_exit_gate();
+                    eprintln!("agy-fixture: the session died mid-turn");
                     std::process::exit(7);
                 }
                 let session_id = params

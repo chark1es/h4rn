@@ -22,6 +22,7 @@ use super::protocol::{
     ACP_PROTOCOL_VERSION, AcpPermissionRequest, AcpPromptResult, AcpServerInfo, AcpSessionInfo,
     AcpUpdate, AgentCapabilities, JSONRPC_VERSION, PromptContent, parse_session_update,
 };
+use crate::TransportHealth;
 
 const DEFAULT_EVENT_CAPACITY: usize = 1_024;
 const FRAME_CHANNEL_CAPACITY: usize = 256;
@@ -228,6 +229,17 @@ pub enum AcpEvent {
         /// Whether a retry is safe.
         retryable: bool,
     },
+    /// The write transport died (a writer I/O error, or a teardown).
+    ///
+    /// Distinct from [`Self::Error`] because the daemon reports this same death
+    /// once from the failed prompt write: the two are one row, while an
+    /// unrelated diagnostic must never be mistaken for it.
+    TransportClosed {
+        /// What happened.
+        message: String,
+        /// Whether a retry is safe.
+        retryable: bool,
+    },
 }
 
 type PendingMap = Mutex<HashMap<String, oneshot::Sender<Result<Value, AcpError>>>>;
@@ -273,10 +285,11 @@ struct Shared {
     stderr: StderrRing,
     pid: Option<u32>,
     shutting_down: AtomicBool,
-    /// Set as soon as the agent's stdout can no longer be read, so a pending
-    /// prompt that fails because of it can see the transport is dead even
-    /// before the process is reaped.
-    transport_closed: AtomicBool,
+    /// Whether the transport is dead, in a form the daemon's event pump can
+    /// read without taking this client's session lock. Set as soon as the
+    /// agent's stdin or stdout fails, so a pending prompt that fails because of
+    /// it can see the transport is dead even before the process is reaped.
+    health: TransportHealth,
     writer: Mutex<Option<tokio::task::JoinHandle<()>>>,
     reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
     supervisor: Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -349,6 +362,7 @@ impl AcpClient {
                 // this client ended it on purpose (a write deadline, a
                 // shutdown): that exit is not a second failure to report.
                 let deliberate = shared.shutting_down.swap(true, Ordering::SeqCst);
+                shared.health.close();
                 fail_pending(
                     &shared,
                     AcpError::Closed {
@@ -406,7 +420,7 @@ impl AcpClient {
             stderr,
             pid,
             shutting_down: AtomicBool::new(false),
-            transport_closed: AtomicBool::new(false),
+            health: TransportHealth::new(),
             writer: Mutex::new(None),
             reader: Mutex::new(None),
             supervisor: Mutex::new(None),
@@ -616,13 +630,19 @@ impl AcpClient {
 
     /// Whether the transport has closed.
     pub fn is_closed(&self) -> bool {
-        self.shared.shutting_down.load(Ordering::SeqCst)
-            || self.shared.transport_closed.load(Ordering::SeqCst)
+        self.shared.health.is_closed()
+    }
+
+    /// A lock-free view of the transport's health, for readers that must never
+    /// wait on the client's session lock (the daemon's event pump).
+    pub fn transport_health(&self) -> TransportHealth {
+        self.shared.health.clone()
     }
 
     /// Kills the process group immediately. Safe to call from `Drop`.
     pub fn kill(&self) {
         self.shared.shutting_down.store(true, Ordering::SeqCst);
+        self.shared.health.close();
         if let Some(pid) = self.shared.pid {
             signal_group(pid, GroupSignal::Kill);
         }
@@ -633,6 +653,7 @@ impl AcpClient {
         if self.shared.shutting_down.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
+        self.shared.health.close();
         // Closing the frame channel ends the writer task, which drops the
         // child's stdin and lets a cooperative agent exit between turns.
         *lock(&self.shared.stdin_tx) = None;
@@ -925,7 +946,7 @@ where
                 );
                 let _ = shared
                     .events_tx
-                    .send(AcpEvent::Error {
+                    .send(AcpEvent::TransportClosed {
                         message: format!("failed to write to the ACP agent: {error}"),
                         retryable: false,
                     })
@@ -942,7 +963,7 @@ where
                 );
                 let _ = shared
                     .events_tx
-                    .send(AcpEvent::Error {
+                    .send(AcpEvent::TransportClosed {
                         message: format!("failed to flush the ACP agent stdin: {error}"),
                         retryable: false,
                     })
@@ -970,7 +991,7 @@ where
                 Err(error) => {
                     let _ = shared
                         .events_tx
-                        .send(AcpEvent::Error {
+                        .send(AcpEvent::TransportClosed {
                             message: format!("failed to read the ACP agent stdout: {error}"),
                             retryable: false,
                         })
@@ -1022,7 +1043,7 @@ where
         // The agent's stdout is gone: no reply can ever come back. Mark the
         // transport dead before failing the pending calls, so a prompt that
         // fails because of this can see why.
-        shared.transport_closed.store(true, Ordering::SeqCst);
+        shared.health.close();
         fail_pending(
             &shared,
             AcpError::Closed {
@@ -1176,6 +1197,7 @@ async fn send_from_reader(shared: &Arc<Shared>, frame: Value) -> Result<(), AcpE
 /// writer task calls it on itself, so it never aborts the writer here.
 fn close_transport(shared: &Arc<Shared>) {
     shared.shutting_down.store(true, Ordering::SeqCst);
+    shared.health.close();
     *lock(&shared.stdin_tx) = None;
     if let Some(pid) = shared.pid {
         signal_group(pid, GroupSignal::Kill);
@@ -1195,7 +1217,7 @@ fn teardown_transport(shared: &Arc<Shared>, message: String) {
             message: message.clone(),
         },
     );
-    if let Err(error) = shared.events_tx.try_send(AcpEvent::Error {
+    if let Err(error) = shared.events_tx.try_send(AcpEvent::TransportClosed {
         message,
         retryable: false,
     }) {
@@ -1883,8 +1905,8 @@ mod tests {
         let _ = client.cancel("s-1").await;
         let event = events.recv().await.expect("event");
         assert!(
-            matches!(event, AcpEvent::Error { .. }),
-            "the write failure is reported: {event:?}"
+            matches!(event, AcpEvent::TransportClosed { .. }),
+            "the write failure is reported as the transport death it is: {event:?}"
         );
         assert!(
             client.is_closed(),
