@@ -7,6 +7,19 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A second Stop retries a cancel the harness did not take.** Stop used to record the intent
+  before sending the cancel and then treat every later Stop on that turn as already stopped. If the
+  first cancel failed while the session stayed open (a transient interrupt error), the turn kept
+  running while the UI showed it stopped. Every Stop on a still-claimed turn now tries the cancel
+  again; only a cancel that had nowhere to go counts as done.
+- **A failed write and a Stop can no longer leave a turn Working.** Whether a prompt whose session
+  went away goes back to the queue or the turn ends interrupted is now one decision under the
+  turn's dispatch lock. A Stop that landed between the old check and the requeue made the requeue
+  fail quietly, and the turn stayed Working with nobody delivering it.
+- **A closed transport's exit report always beats the wait's deadline.** The completion wait after
+  a dead transport now polls its stream before the deadline, matching the idle fallback, so an exit
+  report that is ready at the same moment is the row the turn keeps instead of the generic close
+  notice.
 - **A proxy restart no longer drops a session a new message just claimed.** A restart that
   inspected a thread as idle now re-checks under the same lock as its detach that no turn became
   active in between. A Send that claimed the session keeps it, and the new proxy routing applies on

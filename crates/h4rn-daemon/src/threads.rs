@@ -448,6 +448,24 @@ struct TurnDispatch {
     /// waiting" (start one fresh session for it). Without the distinction a
     /// harness whose sessions die at startup would be replaced forever.
     started_generation: AtomicU64,
+    /// Pauses a failing write just before it decides what to do with the
+    /// dispatch, so a test can land a Stop in that window.
+    ///
+    /// Test-only: the decision itself reads and writes the state under its one
+    /// lock, but a Stop arriving before that lock is the interleaving the
+    /// recovery must not split.
+    #[cfg(test)]
+    recover_pause: std::sync::Mutex<Option<Arc<RecoverPause>>>,
+}
+
+/// A test's hold on the failed-write recovery's inspect-to-decide window.
+#[cfg(test)]
+#[derive(Default)]
+struct RecoverPause {
+    /// Signalled once a failing write has inspected the dispatch.
+    inspected: tokio::sync::Notify,
+    /// The test's permission to act on it.
+    resume: tokio::sync::Notify,
 }
 
 /// `started_generation` has no generation yet.
@@ -489,10 +507,28 @@ enum DispatchState {
 enum StopOutcome {
     /// The prompt had not been claimed, so it will never be written.
     StoppedBeforeSend,
-    /// The prompt was claimed; the harness needs a cancel.
+    /// The prompt was claimed; the harness needs a cancel. A turn whose earlier
+    /// cancel failed is still claimed, so every Stop on it retries the cancel:
+    /// only a cancel that could not be delivered counts as done.
     AlreadySent,
-    /// An earlier Stop already ended this dispatch.
+    /// The turn's dispatch already ended.
     AlreadyStopped,
+}
+
+/// What a write that lost its session may do with the turn's dispatch.
+///
+/// It is one decision, taken under the dispatch's own lock, so a Stop that
+/// lands at any point leaves exactly one action: the prompt goes back to the
+/// queue, or the turn ends interrupted, never neither.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecoveryOutcome {
+    /// The prompt is back in the queue and must be delivered again.
+    Requeue,
+    /// A Stop already owns the turn: it ends interrupted, and the prompt must
+    /// never be written again.
+    Stopped,
+    /// Another path already ended this turn; publish nothing.
+    Settled,
 }
 
 /// The facts a turn-end path hands to [`Inner::settle_turn`].
@@ -635,6 +671,8 @@ impl TurnDispatch {
             input,
             state: std::sync::Mutex::new(DispatchState::Pending),
             started_generation: AtomicU64::new(NO_GENERATION),
+            #[cfg(test)]
+            recover_pause: std::sync::Mutex::new(None),
         }
     }
 
@@ -680,6 +718,11 @@ impl TurnDispatch {
     /// shutdown, a model change), and the failed write that follows must know
     /// the person already stopped this turn. It settles as interrupted instead
     /// of replaying the prompt on a fresh session.
+    ///
+    /// A turn that is already claimed-and-stopped is still claimed: if its
+    /// earlier cancel failed with the session open (a transient interrupt
+    /// error), the Stop the person pressed again must try that cancel again
+    /// rather than report success while the turn keeps running.
     fn stop(&self) -> StopOutcome {
         let mut state = self
             .state
@@ -690,26 +733,26 @@ impl TurnDispatch {
                 *state = DispatchState::Stopped;
                 StopOutcome::StoppedBeforeSend
             }
-            DispatchState::Claimed => {
+            DispatchState::Claimed | DispatchState::ClaimedStopped => {
                 *state = DispatchState::ClaimedStopped;
                 StopOutcome::AlreadySent
             }
-            DispatchState::ClaimedStopped | DispatchState::Stopped | DispatchState::Settled => {
-                StopOutcome::AlreadyStopped
-            }
+            DispatchState::Stopped | DispatchState::Settled => StopOutcome::AlreadyStopped,
         }
     }
 
-    /// Whether a Stop arrived after this turn's prompt was claimed.
-    fn stop_requested(&self) -> bool {
-        self.state() == DispatchState::ClaimedStopped
-    }
-
-    /// Returns a prompt to the queue after the session that held it went away.
+    /// Takes a prompt whose session went away back from its writer.
     ///
-    /// Only a claimed (or still pending) dispatch can be delivered again; a
-    /// stopped or settled turn is already ending and must not be revived.
-    fn release(&self) -> bool {
+    /// The Stop check and the requeue are one operation under this dispatch's
+    /// lock: a Stop arriving anywhere in it leaves exactly one owner of the
+    /// turn, either "the prompt is queued again" or "the turn ends interrupted".
+    /// Split into a check and a later mutation, a Stop landing between them
+    /// would leave the turn active with nobody delivering it.
+    async fn recover_lost_session(&self) -> RecoveryOutcome {
+        // Test-only interleaving point: in the two-step version this is exactly
+        // the window between its Stop check and its requeue.
+        #[cfg(test)]
+        self.pause_recovery().await;
         let mut state = self
             .state
             .lock()
@@ -717,11 +760,33 @@ impl TurnDispatch {
         match *state {
             DispatchState::Pending | DispatchState::Claimed => {
                 *state = DispatchState::Pending;
-                true
+                RecoveryOutcome::Requeue
             }
-            DispatchState::ClaimedStopped | DispatchState::Stopped | DispatchState::Settled => {
-                false
-            }
+            DispatchState::ClaimedStopped => RecoveryOutcome::Stopped,
+            DispatchState::Stopped | DispatchState::Settled => RecoveryOutcome::Settled,
+        }
+    }
+
+    /// Installs a test's hold on the recovery's inspect-to-decide window.
+    #[cfg(test)]
+    fn pause_recovery_at(&self, pause: Arc<RecoverPause>) {
+        *self
+            .recover_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pause);
+    }
+
+    /// Waits at that window when a test installed one.
+    #[cfg(test)]
+    async fn pause_recovery(&self) {
+        let pause = self
+            .recover_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(pause) = pause {
+            pause.inspected.notify_one();
+            pause.resume.notified().await;
         }
     }
 
@@ -3106,42 +3171,40 @@ impl Inner {
         // here, under the same lock that proves the turn is still ours.
         let retarget = {
             let mut record = handle.lock().await;
-            if record.dispatch_for(turn_id).is_none() {
+            let Some(dispatch) = record.dispatch_for(turn_id) else {
                 return;
-            }
+            };
             if record.session.is_live(session) {
                 None
-            } else if record
-                .dispatch_for(turn_id)
-                .is_some_and(|dispatch| dispatch.stop_requested())
-            {
-                let settled = self
-                    .settle_turn_locked(
-                        &mut record,
-                        turn_id,
-                        TurnEnd::new(TurnStatus::Interrupted, Usage::default()),
-                    )
-                    .await;
-                drop(record);
-                if settled {
-                    // The settlement may have promoted the next queued message
-                    // under the same lock.
-                    self.spawn_advance(handle);
-                }
-                return;
             } else {
-                let released = record
-                    .dispatch_for(turn_id)
-                    .is_some_and(|dispatch| dispatch.release());
-                if !released {
-                    // Stop or another end already settled this turn.
-                    return;
+                // Whether the prompt returns to the queue or the stopped turn
+                // ends is one dispatch-lock decision: a Stop that lands while
+                // this write waits cannot be observed by a check and then
+                // overwritten by a later requeue.
+                match dispatch.recover_lost_session().await {
+                    RecoveryOutcome::Stopped => {
+                        let settled = self
+                            .settle_turn_locked(
+                                &mut record,
+                                turn_id,
+                                TurnEnd::new(TurnStatus::Interrupted, Usage::default()),
+                            )
+                            .await;
+                        drop(record);
+                        if settled {
+                            // The settlement may have promoted the next queued
+                            // message under the same lock.
+                            self.spawn_advance(handle);
+                        }
+                        return;
+                    }
+                    RecoveryOutcome::Settled => return,
+                    RecoveryOutcome::Requeue => Some(match record.session {
+                        SessionSlot::None => DeliveryRetarget::Start,
+                        SessionSlot::Live { .. } => DeliveryRetarget::Live,
+                        SessionSlot::Starting(_) => DeliveryRetarget::Starting,
+                    }),
                 }
-                Some(match record.session {
-                    SessionSlot::None => DeliveryRetarget::Start,
-                    SessionSlot::Live { .. } => DeliveryRetarget::Live,
-                    SessionSlot::Starting(_) => DeliveryRetarget::Starting,
-                })
             }
         };
         if let Some(retarget) = retarget {
@@ -4123,6 +4186,11 @@ impl Inner {
         let mut reset_applied = false;
         loop {
             tokio::select! {
+                // A report that is already queued always beats the deadline,
+                // exactly as in the idle fallback: when both are ready at the
+                // same poll, the exit report must name the turn's row instead
+                // of the window expiring first.
+                biased;
                 event = stream.next() => match event {
                     None => return,
                     Some(HarnessEvent::LimitHit {
@@ -5154,6 +5222,63 @@ mod tests {
             .is_err(),
             "the turn ended exactly once"
         );
+    }
+
+    /// A cancel the harness rejected without closing the session is not a
+    /// stop: the next Stop must try again instead of reporting the turn as
+    /// already stopped while it keeps running.
+    #[tokio::test]
+    async fn a_second_stop_retries_a_failed_cancel() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, completion) = FakeHarness::new().with_completion_gate();
+        let (harness, sends) = harness.with_send_count();
+        let (harness, cancels) = harness.with_interrupt_count();
+        let harness = harness.with_interrupt_failure_once();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        sends.wait_for(1).await;
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+
+        // The first cancel fails with the session still open, so the turn is
+        // still live: the failure reaches the caller and nothing ended.
+        let error = manager
+            .interrupt(&created.thread_id)
+            .await
+            .expect_err("a failed cancel is reported, not acknowledged");
+        assert!(matches!(error, ManagerError::Internal(_)), "{error:?}");
+        assert_eq!(cancels.get(), 1, "the first Stop tried the cancel");
+        assert!(
+            handle.lock().await.active.is_some(),
+            "the turn is still running after a cancel that never arrived"
+        );
+
+        // The second Stop retries the cancel on the same claimed turn.
+        manager
+            .interrupt(&created.thread_id)
+            .await
+            .expect("the second Stop retries the cancel");
+        assert_eq!(cancels.get(), 2, "the second Stop sent the cancel again");
+        let (turn, status) = next_turn_completion(&mut events).await;
+        assert_eq!(turn, created.turn_id);
+        assert_eq!(
+            status,
+            TurnStatus::Interrupted,
+            "the retried cancel ended the turn"
+        );
+        assert!(
+            handle.lock().await.active.is_none(),
+            "the stopped turn is no longer active"
+        );
+        completion.release();
     }
 
     #[tokio::test]
@@ -6759,6 +6884,82 @@ mod tests {
         );
     }
 
+    /// A Stop that lands exactly in the failed write's inspect-to-requeue
+    /// window must still settle the turn.
+    ///
+    /// The recovery used to check the dispatch for a Stop and then requeue it
+    /// in two steps; a Stop between them made the requeue fail and the path
+    /// return, leaving the turn Working with nobody delivering it. The one
+    /// decision now either puts the prompt back or ends the turn interrupted.
+    #[tokio::test]
+    async fn a_stop_inside_the_failed_writes_recovery_window_settles_the_turn() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, gate) = FakeHarness::new().with_send_gate();
+        let harness = harness.with_dead_transport_after(1);
+        let (harness, sessions) = harness.with_session_count();
+        let (harness, sends) = harness.with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        // The second prompt is claimed and blocks in its write; its session
+        // detaches under it, so the write failure takes the recovery path.
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        sends.wait_for(2).await;
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        let dispatch = {
+            let record = handle.lock().await;
+            record
+                .dispatch_for(&second.turn_id)
+                .expect("the second turn's dispatch")
+        };
+        let detached = {
+            let mut record = handle.lock().await;
+            let generation = record.session.generation().expect("a live generation");
+            record.detach_session(generation)
+        };
+        assert!(detached.is_some(), "the writing session was detached");
+
+        // Hold the write failure between inspecting the dispatch and acting on
+        // it, and land the Stop in that window.
+        let pause = Arc::new(RecoverPause::default());
+        dispatch.pause_recovery_at(Arc::clone(&pause));
+        gate.release();
+        pause.inspected.notified().await;
+        assert!(
+            matches!(dispatch.stop(), StopOutcome::AlreadySent),
+            "the Stop lands on the claimed turn"
+        );
+        pause.resume.notify_one();
+
+        // The turn must end, not stay active with nobody delivering it.
+        let (turn, status) = next_turn_completion(&mut events).await;
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Interrupted);
+        assert_eq!(sends.get(), 2, "the stopped prompt was never written again");
+        assert_eq!(
+            sessions.get(),
+            1,
+            "no fresh session carried a stopped prompt"
+        );
+        assert!(
+            handle.lock().await.active.is_none(),
+            "the stopped turn ended instead of staying Working"
+        );
+    }
+
     /// A read error is non-retryable but it is not the exit report: the pump
     /// must keep waiting for the exit kind, so a reset that only that report
     /// carries still arms the schedule before the queue is promoted.
@@ -7308,6 +7509,140 @@ mod tests {
             row.starts_with("agy exited (exit status: 7)"),
             "the ready exit report beat the expired deadline: {row:?}"
         );
+    }
+
+    /// A harness stream that reports when its reader has parked.
+    ///
+    /// A test queues events only after that signal, so a report and an expired
+    /// deadline can be made ready at the same poll of a waiting select.
+    struct ParkedStream {
+        events: tokio::sync::mpsc::UnboundedReceiver<HarnessEvent>,
+        parked: Arc<tokio::sync::Notify>,
+    }
+
+    impl futures::Stream for ParkedStream {
+        type Item = HarnessEvent;
+
+        fn poll_next(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<HarnessEvent>> {
+            let this = self.get_mut();
+            match this.events.poll_recv(cx) {
+                std::task::Poll::Pending => {
+                    // Everything queued was read; only the test can make the
+                    // stream ready from here.
+                    this.parked.notify_one();
+                    std::task::Poll::Pending
+                }
+                ready => ready,
+            }
+        }
+    }
+
+    /// A closed-completion wait prefers a queued exit report over its deadline.
+    ///
+    /// The wait's select must poll the stream first when both are ready at the
+    /// same poll; otherwise the window expires without the exit report's status
+    /// and stderr, and the turn's one row keeps the generic close notice. The
+    /// rounds repeat the same ready-together poll, so a select without
+    /// `biased;` loses the race reliably instead of one time in two.
+    #[tokio::test]
+    async fn a_closed_completion_report_wins_over_an_expired_deadline() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(FakeHarness::new(), host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        let (session, generation, old_pump) = {
+            let mut record = handle.lock().await;
+            (
+                record.live_session().cloned().expect("a live session"),
+                record.session.generation().expect("a generation"),
+                record.pump.take().expect("this session's pump"),
+            )
+        };
+        // The session's own pump must not read this stream first.
+        old_pump.abort();
+        let _ = old_pump.await;
+
+        for round in 0..64 {
+            let (reports, queued) = tokio::sync::mpsc::unbounded_channel();
+            let parked = Arc::new(tokio::sync::Notify::new());
+            let mut stream: futures::stream::BoxStream<'static, HarnessEvent> =
+                Box::pin(ParkedStream {
+                    events: queued,
+                    parked: Arc::clone(&parked),
+                });
+            let inner = Arc::clone(&manager.inner);
+            let handle = handle.clone();
+            let session = session.clone();
+            let waiting = tokio::spawn(async move {
+                let mut reports_out = Vec::new();
+                let mut later = Vec::new();
+                inner
+                    .collect_closed_completion_report(
+                        &handle,
+                        generation,
+                        &session,
+                        &mut stream,
+                        &mut reports_out,
+                        &mut later,
+                    )
+                    .await;
+                (reports_out, later)
+            });
+            // The wait is parked with the deadline not yet expired.
+            parked.notified().await;
+            tokio::time::pause();
+            tokio::time::advance(IDLE_DEATH_DETAIL_WAIT + Duration::from_millis(100)).await;
+            // One harmless event makes the wait poll again, re-arming the
+            // expired deadline; the exit report is queued before that poll.
+            reports
+                .send(HarnessEvent::Usage {
+                    usage: Usage::default(),
+                })
+                .expect("queue an event that makes the wait poll again");
+            reports
+                .send(HarnessEvent::TransportClosed {
+                    message: "agy exited (exit status: 7): agy: the session ended".into(),
+                    retryable: false,
+                    kind: TransportCloseKind::Exit,
+                    reset_at: None,
+                })
+                .expect("queue the exit report");
+            tokio::time::resume();
+
+            let (reports, later) = tokio::time::timeout(Duration::from_secs(3), waiting)
+                .await
+                .expect("the wait ends")
+                .expect("the wait task did not panic");
+            assert!(
+                matches!(
+                    reports.first(),
+                    Some(HarnessEvent::TransportClosed {
+                        kind: TransportCloseKind::Exit,
+                        ..
+                    })
+                ),
+                "round {round}: the ready exit report beats the expired deadline: {reports:?}"
+            );
+            assert_eq!(
+                later.len(),
+                1,
+                "round {round}: the buffered event waits for the completion"
+            );
+        }
     }
 
     #[test]

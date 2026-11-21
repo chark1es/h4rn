@@ -638,6 +638,18 @@ Finally, only the exit report ends that window, and it carries the provider rese
 limit notification without a reset no longer ends the wait before the exit's reset arrives to arm
 auto-resume.
 
+**Addendum: a Stop that was not delivered is retried, and recovery is one decision.** A Stop records
+its intent on a claimed turn so a failed write can never replay the prompt, but a cancel that failed
+with the session still open is not a stop: every later Stop on that claimed turn tries the cancel
+again, and only a cancel that had no session left (or a session already closed) counts as done.
+Whether a prompt whose session detaches goes back to the queue or its stopped turn ends interrupted
+is one operation under the dispatch lock. Split into a check and a later requeue, a Stop landing
+between them made the requeue fail and returned without settling, leaving the turn Working with no
+delivery; now the same interleaving either requeues or settles, never neither. Finally, the wait for
+a closed transport's exit report prefers a ready report over its deadline, as the idle fallback does,
+so a completion whose report and deadline are ready at the same poll keeps the exit's status, stderr
+and rate-limit reset.
+
 ## ADR-027: Push notifications are metadata-only wake signals
 
 **Status:** Proposed

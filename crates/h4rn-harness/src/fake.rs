@@ -115,6 +115,9 @@ pub struct FakeHarness {
     send_count: Option<SendCount>,
     /// A test-only count of interrupts the session received.
     interrupt_count: Option<InterruptCount>,
+    /// Cancels still due to fail with a transient error (the session stays
+    /// open), so a test can prove a second Stop retries the cancel.
+    interrupt_failures: Option<Arc<AtomicUsize>>,
     /// A test-only latch before a session is returned from `start_session`.
     start_gate: Option<Gate>,
     /// A test-only message: after the start gate, `start_session` fails.
@@ -362,6 +365,7 @@ impl Default for FakeHarness {
             write_gate: None,
             send_count: None,
             interrupt_count: None,
+            interrupt_failures: None,
             start_gate: None,
             start_failure: None,
             start_failure_budget: None,
@@ -580,6 +584,16 @@ impl FakeHarness {
         (self, count)
     }
 
+    /// Makes the next cancel fail with a transient error, leaving the session
+    /// open the way a slow or briefly unavailable harness does.
+    ///
+    /// A test uses this to prove a Stop the harness did not take is retried by
+    /// the next Stop instead of being acknowledged as already stopped.
+    pub fn with_interrupt_failure_once(mut self) -> Self {
+        self.interrupt_failures = Some(Arc::new(AtomicUsize::new(1)));
+        self
+    }
+
     /// Lets the first `ok_sends` prompts succeed, then makes every later send
     /// fail as a dead transport whose session reports itself closed.
     ///
@@ -790,6 +804,7 @@ impl Harness for FakeHarness {
             send_gate: self.send_gate.clone(),
             send_count: self.send_count.clone(),
             interrupt_count: self.interrupt_count.clone(),
+            interrupt_failures: self.interrupt_failures.clone(),
             dead_sends_after: self.dead_sends_after,
             send_failure_after: self.send_failure_after.clone(),
             sends: 0,
@@ -832,6 +847,8 @@ pub struct FakeSession {
     send_count: Option<SendCount>,
     /// A shared count of cancels this session received.
     interrupt_count: Option<InterruptCount>,
+    /// Cancels still due to fail with a transient error.
+    interrupt_failures: Option<Arc<AtomicUsize>>,
     /// Sends after this many fail as a dead transport and close the session.
     dead_sends_after: Option<usize>,
     /// Sends after this many fail with this test-only failure.
@@ -1145,6 +1162,21 @@ impl HarnessSession for FakeSession {
     async fn interrupt(&mut self) -> Result<(), HarnessError> {
         if let Some(count) = &self.interrupt_count {
             count.0.fetch_add(1, Ordering::SeqCst);
+        }
+        if let Some(remaining) = &self.interrupt_failures {
+            // A `&mut self` session sends one cancel at a time, so the
+            // read-then-store cannot race another attempt.
+            let left = remaining.load(Ordering::SeqCst);
+            if left > 0 {
+                remaining.store(left - 1, Ordering::SeqCst);
+                // A transient cancel failure: the session (and with it the
+                // transport) stays open, so the caller may try the cancel
+                // again.
+                return Err(HarnessError::Transport {
+                    harness: self.kind,
+                    message: "the cancel request timed out".into(),
+                });
+            }
         }
         self.interrupted.store(true, Ordering::SeqCst);
         self.emit(HarnessEvent::TurnCompleted {
