@@ -246,8 +246,13 @@ type PendingMap = Mutex<HashMap<String, oneshot::Sender<Result<Value, AcpError>>
 
 struct OutgoingFrame {
     frame: Value,
-    /// Signalled once the writer has flushed the frame to the agent.
-    written: Option<oneshot::Sender<()>>,
+    /// Signalled once the writer has tried to write the frame to the agent.
+    ///
+    /// The payload carries the writer's own I/O error when it could not write
+    /// or flush the frame, so the caller can name what actually went wrong
+    /// instead of a generic "the writer exited". A dropped sender (an aborted
+    /// writer) is the same generic case.
+    written: Option<oneshot::Sender<Result<(), String>>>,
 }
 
 struct StartedCall {
@@ -791,7 +796,18 @@ impl AcpClient {
         };
         if let Some(written) = written {
             match tokio::time::timeout_at(deadline, written).await {
-                Ok(Ok(())) => {}
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(detail))) => {
+                    lock(&self.shared.pending).remove(&key);
+                    // The writer saw a real I/O failure on this frame. Keep
+                    // what it said: the daemon's one failure row is built from
+                    // this error, and "the writer exited" alone would lose the
+                    // reason the agent's stdin is gone.
+                    let message =
+                        format!("the ACP writer failed before the request was written: {detail}");
+                    teardown_transport(&self.shared, message.clone());
+                    return Err(AcpError::Closed { message });
+                }
                 Ok(Err(_)) => {
                     lock(&self.shared.pending).remove(&key);
                     // The writer that held this frame is gone without writing
@@ -848,7 +864,7 @@ impl AcpClient {
     async fn send_frame_tracked(
         &self,
         frame: Value,
-        written: oneshot::Sender<()>,
+        written: oneshot::Sender<Result<(), String>>,
         method: &str,
     ) -> Result<(), AcpError> {
         self.send_outgoing(
@@ -942,6 +958,7 @@ where
             };
             bytes.push(b'\n');
             if let Err(error) = stdin.write_all(&bytes).await {
+                let detail = error.to_string();
                 // Mark the transport closed and stop the process group before
                 // waking any caller: a prompt that observes this failure must
                 // never find an open client or a live agent behind it.
@@ -949,37 +966,46 @@ where
                 fail_pending(
                     &shared,
                     AcpError::Closed {
-                        message: format!("the ACP agent stdin stopped accepting frames: {error}"),
+                        message: format!("the ACP agent stdin stopped accepting frames: {detail}"),
                     },
                 );
                 let _ = shared
                     .events_tx
                     .send(AcpEvent::TransportClosed {
-                        message: format!("failed to write to the ACP agent: {error}"),
+                        message: format!("failed to write to the ACP agent: {detail}"),
                         retryable: false,
                     })
                     .await;
+                // The caller's one failure row is built from this: name the
+                // writer's own I/O error, not just that the writer left.
+                if let Some(written) = written {
+                    let _ = written.send(Err(detail));
+                }
                 break;
             }
             if let Err(error) = stdin.flush().await {
+                let detail = error.to_string();
                 close_transport(&shared);
                 fail_pending(
                     &shared,
                     AcpError::Closed {
-                        message: format!("the ACP agent stdin stopped accepting frames: {error}"),
+                        message: format!("the ACP agent stdin stopped accepting frames: {detail}"),
                     },
                 );
                 let _ = shared
                     .events_tx
                     .send(AcpEvent::TransportClosed {
-                        message: format!("failed to flush the ACP agent stdin: {error}"),
+                        message: format!("failed to flush the ACP agent stdin: {detail}"),
                         retryable: false,
                     })
                     .await;
+                if let Some(written) = written {
+                    let _ = written.send(Err(detail));
+                }
                 break;
             }
             if let Some(written) = written {
-                let _ = written.send(());
+                let _ = written.send(Ok(()));
             }
         }
         // Dropping `stdin` sends EOF.
@@ -2027,6 +2053,48 @@ mod tests {
             .shutdown()
             .await
             .expect("shutting down a dead writer is not an error");
+    }
+
+    /// A tracked write that fails carries the writer's own I/O error into the
+    /// caller's error, instead of a generic "the writer exited".
+    #[tokio::test]
+    async fn a_tracked_write_failure_keeps_the_writer_io_error() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (agent_write, client_read) = tokio::io::duplex(64);
+        let stderr = StderrRing::new();
+        stderr.push("agy-fixture: closing stdin before the next prompt");
+        let client = AcpClient::start(
+            config(workspace.path()),
+            workspace.path().to_path_buf(),
+            client_read,
+            BrokenWriter,
+            None,
+            stderr,
+        );
+        let _agent_write = agent_write;
+        let _events = client.take_events().expect("events");
+
+        let error = match client
+            .start_prompt("s-1", &[PromptContent::text("ping")])
+            .await
+        {
+            Ok(_) => panic!("the write failed, so the prompt cannot be pending"),
+            Err(error) => error,
+        };
+        match error {
+            AcpError::Closed { message } => assert!(
+                message.contains("the agent's stdin is gone"),
+                "the writer's I/O error is kept: {message}"
+            ),
+            other => panic!("expected a closed transport, got {other:?}"),
+        }
+        assert!(
+            client
+                .stderr_tail()
+                .contains("closing stdin before the next prompt"),
+            "the agent's stderr stays available for the one failure row"
+        );
+        assert!(client.is_closed(), "the failed write closed the transport");
     }
 
     /// A writer I/O error closes the client and kills the agent before it wakes

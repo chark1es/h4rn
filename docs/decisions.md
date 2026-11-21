@@ -491,8 +491,8 @@ written once the client has flushed the frame to the agent's stdin; an interrupt
 sends `session/cancel` after the prompt it cancels. Waiting for writer-queue space and waiting for
 the flush share one ten-second deadline, and every other frame (cancel, model and mode changes,
 approvals, notifications, `session/close`) waits under the same deadline; on expiry the writer task
-is stopped and the agent killed, so a blocked frame cannot reach it later and a full queue never
-stalls Stop. Replies the reader sends while answering the agent (`fs/*` responses,
+is stopped and the agent killed, so a blocked frame cannot reach it later and a full queue cannot
+stall Stop past that deadline. Replies the reader sends while answering the agent (`fs/*` responses,
 permission answers) go through that same bounded queue, so a full writer queue cannot park the
 reader either. Such a timeout ends the turn with exactly one failure row and detaches the dead
 session, so the next message starts a fresh one; an agent the client killed itself does not publish
@@ -547,7 +547,13 @@ stderr, an exit row): the first report is held for the turn's settlement, later 
 detail, and the settlement publishes the most specific of them as the turn's one row, so the generic
 notice can never hide the stderr. A frame the client's writer drops because the writer task exited
 tears the transport down before the caller is woken, so a prompt error never leaves an open client
-behind it.
+behind it. A writer that fails on an I/O error reports what the pipe said ("Broken pipe"), not just
+that the writer exited, so the daemon's one failure row for the write names the real cause; when the
+agent also left a diagnostic on stderr, the row keeps both. Detaching a dead session and settling the
+turn it leaves behind happen under one record lock, so no delivery can see the empty slot and start
+a replacement for a turn that is about to be marked failed. When the pump instead hands a still
+pending turn to a fresh startup, the dead session's held transport report is dropped with it: the
+retry must not inherit that session's death as its error row.
 
 ## ADR-027: Push notifications are metadata-only wake signals
 

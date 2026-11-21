@@ -28,4 +28,6 @@ libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# `test-util` is what lets the ACP client tests pause Tokio's clock
+# (`#[tokio::test(start_paused = true)]`); keep it while those exist.
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

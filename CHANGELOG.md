@@ -26,7 +26,8 @@ All notable changes to h4rn are recorded here. The format follows
   cancel: a Stop during startup drops that prompt even when a follow-up is already queued, and the
   follow-up is then delivered on the same newly started session instead of starting a second agent.
   A Stop that arrives for a turn that already ended no longer cancels the turn that replaced it, and
-  a Stop with a full writer queue returns instead of waiting for the queue to drain.
+  a Stop with a full writer queue waits at most ten seconds for it before the writer is stopped and
+  the agent killed, instead of waiting for the queue to drain.
 - **Every ended turn advances the queue, exactly once.** A completed turn, a stopped one, a failed
   prompt write, a failed startup and a dead session all end through one settlement: it checks the
   turn is still the active one, publishes exactly one `TurnCompleted` (and at most one error row, so
@@ -66,6 +67,15 @@ All notable changes to h4rn are recorded here. The format follows
 - **A writer I/O error closes the ACP client and kills the agent before waking a caller.** An agent
   that closed its stdin but stayed alive can no longer survive under a client the daemon still
   believes is open, so the prompt that observes the error always finds a closed, dead transport.
+  The error also keeps the writer's own I/O detail ("Broken pipe"), and the daemon's one failure row
+  for that write includes the agent's stderr tail too, so a diagnostic printed just before stdin
+  closed is not lost.
+- **Detaching a dead session and failing its turn are one step.** The pump no longer clears the
+  session slot and then re-locks to settle the turn it left behind: both happen under one record
+  lock, so a delivery cannot see the empty slot in between and start a replacement agent for a turn
+  that is about to be marked failed. When the pump instead leaves a still-pending turn for a fresh
+  startup, the dead session's held transport report is dropped with it, so the retry does not
+  inherit the old session's death as an error row on an otherwise successful turn.
 - **A model change during a startup discards that startup.** Failing over while a session is still
   booting the limited model supersedes the startup, so the resume runs on a session started with
   the new model instead of the one that was already on its way.

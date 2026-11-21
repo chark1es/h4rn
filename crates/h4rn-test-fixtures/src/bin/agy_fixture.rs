@@ -51,6 +51,10 @@ fn main() {
                 sessions += 1;
                 if let Some(cwd) = params.get("cwd").and_then(Value::as_str) {
                     log_start(cwd, "new");
+                    // A test can ask for a diagnostic before the handshake
+                    // completes, so it is surely buffered before any later
+                    // prompt write fails.
+                    write_startup_diagnostic(std::path::Path::new(cwd));
                 }
                 reply(
                     &mut stdout,
@@ -66,6 +70,7 @@ fn main() {
                     .to_string();
                 if let Some(cwd) = params.get("cwd").and_then(Value::as_str) {
                     log_start(cwd, &format!("load {session_id}"));
+                    write_startup_diagnostic(std::path::Path::new(cwd));
                 }
                 reply(&mut stdout, id, session_reply(&session_id));
             }
@@ -95,6 +100,7 @@ fn main() {
                     eprintln!("agy-fixture: the session died mid-turn");
                     std::process::exit(7);
                 }
+                let closing_stdin = text.contains("H4RN_FIXTURE_CLOSE_STDIN");
                 let session_id = params
                     .get("sessionId")
                     .and_then(Value::as_str)
@@ -121,6 +127,14 @@ fn main() {
                         "usage": {"inputTokens": 3, "outputTokens": 2}
                     }),
                 );
+                if closing_stdin {
+                    // Answer this turn, then shut this process's own stdin and
+                    // stay alive. The next prompt is never read: its write
+                    // fails on the closed pipe while the agent is still
+                    // running, which is the case the daemon's one failure row
+                    // must describe with both the I/O error and stderr.
+                    close_stdin_and_wait();
+                }
             }
             "session/cancel" => {}
             other => {
@@ -153,6 +167,39 @@ fn wait_for_exit_gate() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while !gate.exists() && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Writes the diagnostic a test opted into before the session handshake ends.
+///
+/// Writing it here, not at the moment the failure is provoked, puts it in the
+/// client's stderr buffer before any prompt can fail on the closed pipe.
+fn write_startup_diagnostic(workspace: &std::path::Path) {
+    if workspace.join(".agy-fixture-startup-stderr").exists() {
+        eprintln!("agy-fixture: closing stdin before the next prompt");
+    }
+}
+
+/// Closes this process's stdin, announces it, and stays alive.
+///
+/// Staying alive keeps stdout open: the only thing the daemon sees is its next
+/// prompt write failing on a closed pipe, which is exactly the death the test
+/// needs it to report once, with both the writer's I/O error and the stderr
+/// line above.
+fn close_stdin_and_wait() -> ! {
+    #[cfg(unix)]
+    {
+        // SAFETY: closing this process's own stdin descriptor is the point of
+        // the fixture, and no later code reads it.
+        unsafe {
+            libc::close(0);
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let _ = std::fs::write(cwd.join(".agy-fixture-stdin-closed"), b"");
+    }
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
     }
 }
 

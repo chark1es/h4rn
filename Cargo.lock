@@ -1861,6 +1861,7 @@ dependencies = [
 name = "h4rn-test-fixtures"
 version = "1.0.1"
 dependencies = [
+ "libc",
  "serde_json",
 ]
 

@@ -272,3 +272,79 @@ async fn a_closed_acp_transport_is_replaced_before_the_next_turn() {
 
     manager.shutdown().await;
 }
+
+/// An agent that leaves a diagnostic on stderr and closes its stdin before the
+/// next prompt is flushed leaves one failure row, and that row names both the
+/// writer's I/O error and the agent's own stderr line.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_closed_stdin_keeps_both_the_io_error_and_the_stderr_detail() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    // The fixture writes this diagnostic before its session handshake reply, so
+    // it is in the client's stderr buffer long before a prompt write fails.
+    std::fs::write(workspace.path().join(".agy-fixture-startup-stderr"), b"")
+        .expect("opt into the startup diagnostic");
+    let manager = manager().await;
+    let mut events = manager.subscribe();
+    let host = HostId::new("host_test");
+
+    let created = manager
+        .create_thread(new_thread(&host, workspace.path(), "first"))
+        .await
+        .expect("create");
+    let first = next_turn(&mut events).await;
+    assert_eq!(first.status, TurnStatus::Completed, "{:?}", first.errors);
+    assert_eq!(session_starts(workspace.path()), 1);
+
+    // This turn is answered, then the fixture closes its own stdin and keeps
+    // running: the next prompt is never read.
+    let thread_id: ThreadId = created.thread_id.clone();
+    manager
+        .send_message(
+            &thread_id,
+            "please H4RN_FIXTURE_CLOSE_STDIN".into(),
+            Vec::new(),
+        )
+        .await
+        .expect("send");
+    let closing = next_turn(&mut events).await;
+    assert_eq!(
+        closing.status,
+        TurnStatus::Completed,
+        "{:?}",
+        closing.errors
+    );
+    let closed = workspace.path().join(".agy-fixture-stdin-closed");
+    tokio::time::timeout(TURN_TIMEOUT, async {
+        while !closed.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the fixture closed its stdin");
+
+    let failed_write = manager
+        .send_message(&thread_id, "third".into(), Vec::new())
+        .await
+        .expect("send");
+    let failed = next_turn(&mut events).await;
+    assert_eq!(failed.turn_id, failed_write.turn_id);
+    assert_eq!(failed.status, TurnStatus::Failed);
+    assert_eq!(
+        failed.errors.len(),
+        1,
+        "one row for the failed write: {:?}",
+        failed.errors
+    );
+    let row = &failed.errors[0];
+    assert!(
+        row.contains("Broken pipe") || row.contains("os error 32"),
+        "the row keeps the writer's I/O error: {row}"
+    );
+    assert!(
+        row.contains("agy-fixture: closing stdin before the next prompt"),
+        "the row keeps the agent's stderr line: {row}"
+    );
+
+    manager.shutdown().await;
+}

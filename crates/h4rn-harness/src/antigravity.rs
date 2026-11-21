@@ -763,6 +763,9 @@ impl HarnessSession for AcpSession {
         }
         // `send` only returns once `session/prompt` was flushed, so a running
         // prompt is always on the wire by the time a cancel can reach here.
+        // That holds because the daemon serializes `send` and `interrupt` on
+        // this session's lock: a cancel can only run after the send that took
+        // the prompt slot has returned.
         if self.prompt_running.load(Ordering::SeqCst) {
             self.interrupt_requested.store(true, Ordering::SeqCst);
             self.client

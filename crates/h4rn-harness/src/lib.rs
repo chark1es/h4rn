@@ -278,6 +278,11 @@ pub trait HarnessSession: Send {
     async fn send(&mut self, input: UserInput) -> Result<(), HarnessError>;
 
     /// Interrupts the running turn without killing the session.
+    ///
+    /// The daemon holds this session's lock across both the claim and the wait
+    /// for `send` to return, so an adapter may keep issuing the cancel without
+    /// racing a prompt that is still being written: by the time `interrupt`
+    /// runs, a prompt whose `send` returned has already reached the harness.
     async fn interrupt(&mut self) -> Result<(), HarnessError>;
 
     /// Answers an approval request raised by the harness.
