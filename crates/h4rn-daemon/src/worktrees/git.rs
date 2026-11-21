@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -378,11 +379,16 @@ pub fn is_linked_worktree(workspace: &Path) -> bool {
 }
 
 /// Linked worktrees of `repo`, excluding its main worktree.
+///
+/// Registrations whose path is not valid UTF-8 are skipped: the protocol
+/// carries paths as strings, so offering one would mean offering a lossy path
+/// that can never name the directory it came from.
 pub fn list_worktrees(repo: &Path) -> Result<Vec<GitWorktree>, String> {
     let main = norm(repo);
     Ok(registrations(repo)?
         .into_iter()
         .filter(|registration| registration.path != main)
+        .filter(|registration| registration.path.to_str().is_some())
         .map(|registration| GitWorktree {
             path: registration.path,
             branch: registration.branch,
@@ -398,13 +404,110 @@ pub fn registrations(repo: &Path) -> Result<Vec<Registration>, String> {
     registrations_with_timeout(repo, OBSERVATION_GIT_TIMEOUT)
 }
 
+/// Whether `git worktree list --porcelain -z` works in this process.
+///
+/// The answer cannot change while the daemon runs, so the first call records
+/// it: after that, a repository with an old git never pays for the failed `-z`
+/// probe again.
+const PORCELAIN_Z_UNKNOWN: u8 = 0;
+const PORCELAIN_Z_WORKS: u8 = 1;
+const PORCELAIN_Z_UNSUPPORTED: u8 = 2;
+static PORCELAIN_Z: AtomicU8 = AtomicU8::new(PORCELAIN_Z_UNKNOWN);
+
 /// [`registrations`], with an explicit deadline for clearing.
+///
+/// `-z` (git 2.36+) is used when available. An older git rejects the switch
+/// with a usage error, and then the line-based `--porcelain` form is parsed
+/// instead; which form works is cached for the rest of the process.
 pub fn registrations_with_timeout(
     repo: &Path,
     limit: Duration,
 ) -> Result<Vec<Registration>, String> {
-    let out = run_bytes_with_timeout(repo, ["worktree", "list", "--porcelain", "-z"], limit)?;
-    Ok(parse_registrations(&out))
+    if PORCELAIN_Z.load(Ordering::Relaxed) == PORCELAIN_Z_UNSUPPORTED {
+        return registrations_line_based(repo, limit);
+    }
+    match run_bytes_with_timeout(repo, ["worktree", "list", "--porcelain", "-z"], limit) {
+        Ok(out) => {
+            PORCELAIN_Z.store(PORCELAIN_Z_WORKS, Ordering::Relaxed);
+            Ok(parse_registrations(&out))
+        }
+        Err(error) if unsupported_porcelain_z(&error) => {
+            PORCELAIN_Z.store(PORCELAIN_Z_UNSUPPORTED, Ordering::Relaxed);
+            registrations_line_based(repo, limit)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Whether a failed `-z` call means the installed git predates 2.36.
+///
+/// Old git prints its usage block (or `unknown switch`) and exits 129. A
+/// timeout or a repository error is not a fallback signal.
+fn unsupported_porcelain_z(error: &str) -> bool {
+    error.contains("unknown switch")
+        || error.contains("unknown option")
+        || error.contains("usage:")
+        || error.contains("exit status: 129")
+}
+
+/// The `git worktree list --porcelain` form for a git older than 2.36.
+fn registrations_line_based(repo: &Path, limit: Duration) -> Result<Vec<Registration>, String> {
+    let out = run_with_timeout(repo, ["worktree", "list", "--porcelain"], limit)?;
+    Ok(parse_registrations_lines(&out))
+}
+
+/// Parses line-based `git worktree list --porcelain` output.
+///
+/// Blocks are separated by blank lines and are read the same way the `-z`
+/// parser reads its fields. A path containing a newline cannot survive this
+/// form, which is exactly why it is only the fallback for old git.
+pub fn parse_registrations_lines(out: &str) -> Vec<Registration> {
+    let mut registrations = Vec::new();
+    let mut current: Option<Registration> = None;
+    for line in out.lines() {
+        if line.is_empty() {
+            if let Some(registration) = current.take() {
+                registrations.push(registration);
+            }
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("worktree ") {
+            // A field may only start a record, but flushing here also keeps a
+            // malformed stream from merging two worktrees into one.
+            if let Some(registration) = current.take() {
+                registrations.push(registration);
+            }
+            current = Some(Registration {
+                path: norm(Path::new(value)),
+                branch: None,
+                head: None,
+                detached: false,
+                prunable: false,
+            });
+            continue;
+        }
+        let Some(registration) = current.as_mut() else {
+            continue;
+        };
+        if let Some(value) = line.strip_prefix("branch ") {
+            registration.branch = Some(
+                value
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(value)
+                    .to_owned(),
+            );
+        } else if let Some(value) = line.strip_prefix("HEAD ") {
+            registration.head = Some(value.trim().to_owned());
+        } else if line == "detached" {
+            registration.detached = true;
+        } else if line.starts_with("prunable") {
+            registration.prunable = true;
+        }
+    }
+    if let Some(registration) = current.take() {
+        registrations.push(registration);
+    }
+    registrations
 }
 
 /// Parses `git worktree list --porcelain -z` output.

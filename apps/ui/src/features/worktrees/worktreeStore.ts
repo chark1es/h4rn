@@ -1,6 +1,6 @@
 import { useEffect, useRef, useSyncExternalStore } from "react";
 
-import type { ProtoError, SkippedWorktree, TrackedWorktree } from "@/gen";
+import type { ProtoError, SkippedWorktree, TrackedWorktree, WorktreeOrigin } from "@/gen";
 import type { H4rnClient } from "@/lib/client/client";
 import { toProtoError } from "@/lib/client/errors";
 import { getClient } from "@/lib/store/appStore";
@@ -99,6 +99,35 @@ export function settledWorktrees(rows: TrackedWorktree[]): TrackedWorktree[] {
   return rows.filter((row) => row.status !== "active");
 }
 
+/** The origin in words. */
+const ORIGIN_TEXT: Record<WorktreeOrigin, string> = {
+  subagent: "Subagent worktree",
+  thread: "Thread workspace",
+  harness: "Created by an agent",
+};
+
+/**
+ * Where it came from, who used it, and anything worth knowing before removal.
+ *
+ * A missing directory means different things by origin: an owned subagent
+ * checkout keeps its `h4rn/sa-*` branch, while any other origin is left only
+ * as a git registration.
+ */
+export function worktreeSubline(row: TrackedWorktree): string {
+  const users = [...new Set(row.accessed_by.map((access) => access.title).filter(Boolean))];
+  const parts = [ORIGIN_TEXT[row.origin]];
+  if (users.length > 0) parts.push(users.join(", "));
+  if (row.status === "orphaned") parts.push("Left behind after a restart");
+  else if (!row.exists)
+    parts.push(
+      row.origin === "subagent"
+        ? "Directory removed, branch kept"
+        : "Directory removed, registration left",
+    );
+  if (row.dirty) parts.push("Uncommitted changes");
+  return parts.join(" · ");
+}
+
 /**
  * What "Clear all" removes. Thread workspaces belong to whoever made them and
  * their thread may resume there, so the daemon only removes one by path.
@@ -129,12 +158,13 @@ export const WORKTREE_SKIP_REASONS = {
     "checkout removed, but branch",
     "contains another worktree at",
     "is the repository's main worktree",
+    "is locked",
     "its repository could not be found",
     "git timed out",
     "registration left in place",
   ],
   /** `branch <name> is a symbolic ref` — the ref is kept, target included. */
-  blockedSuffixes: ["is a symbolic ref"],
+  blockedSuffixes: ["is a symbolic ref", "was left in place"],
 } as const;
 
 /** Whether a forced clear could remove an entry the daemon skipped. */

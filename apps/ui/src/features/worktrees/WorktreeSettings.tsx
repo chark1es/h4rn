@@ -2,7 +2,7 @@ import { RefreshCwIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
-import type { TrackedWorktree, WorktreeOrigin } from "@/gen";
+import type { TrackedWorktree } from "@/gen";
 import { tildePath } from "@/lib/format";
 import { useApp } from "@/lib/store/appStore";
 
@@ -22,30 +22,14 @@ import {
   worktreeClientCurrent,
   worktreeOutcomeForClient,
   worktreePage,
+  worktreeSubline,
 } from "./worktreeStore";
-
-const ORIGIN_TEXT: Record<WorktreeOrigin, string> = {
-  subagent: "Subagent worktree",
-  thread: "Thread workspace",
-  harness: "Created by an agent",
-};
 
 /** The branch, or the folder name when the checkout is detached. */
 function worktreeTitle(row: TrackedWorktree): string {
   if (row.branch) return row.branch;
   const parts = row.path.split(/[\\/]/).filter(Boolean);
   return parts.at(-1) ?? row.path;
-}
-
-/** Where it came from, who used it, and anything worth knowing before removal. */
-function subline(row: TrackedWorktree): string {
-  const users = [...new Set(row.accessed_by.map((access) => access.title).filter(Boolean))];
-  const parts = [ORIGIN_TEXT[row.origin]];
-  if (users.length > 0) parts.push(users.join(", "));
-  if (row.status === "orphaned") parts.push("Left behind after a restart");
-  else if (!row.exists) parts.push("Directory removed, branch kept");
-  if (row.dirty) parts.push("Uncommitted changes");
-  return parts.join(" · ");
 }
 
 /** A path that keeps its last two folders when the row is narrow. */
@@ -82,7 +66,7 @@ function WorktreeRow({
         <div className="t q-mono" style={{ overflow: "hidden", textOverflow: "ellipsis" }}>
           {title}
         </div>
-        <div className="s">{subline(row)}</div>
+        <div className="s">{worktreeSubline(row)}</div>
       </div>
       <div className="ctl" style={{ flex: "0 1 auto", justifyContent: "flex-end" }}>
         <MiddlePath path={row.path} />

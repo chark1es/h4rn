@@ -16,8 +16,8 @@ use serde_json::json;
 
 use super::store::{StoredAccess, StoredWorktree};
 use super::{
-    ClearOne, ListInput, RepoCaches, ThreadInfo, WorktreeTracker, compute, git, is_busy,
-    open_snapshot, preflight, remove, run_clear_entry, select_entries,
+    ClearOne, ListInput, RepoCaches, ThreadInfo, WorktreeTracker, compute, delete_owned_branch,
+    execute, git, is_busy, open_snapshot, preflight, prepare, run_clear_entry, select_entries,
 };
 use crate::harnesses::StaticHarnessCatalog;
 use crate::journal::SqliteJournal;
@@ -104,7 +104,8 @@ fn entry(path: &Path, repo: &Path, branch: Option<&str>, owned: bool) -> Tracked
 /// The two blocking phases of a clear, for the unit tests below.
 fn clear_one(entry: &TrackedWorktree, force: bool, data_dir: &Path) -> Result<ClearOne, String> {
     let plan = preflight(entry, force)?;
-    remove(entry, force, data_dir, &plan)
+    let prepared = prepare(entry, force)?;
+    execute(entry, force, data_dir, &plan, &prepared)
 }
 
 fn subagent_view(
@@ -1707,16 +1708,405 @@ fn git_refusing_a_dirty_checkout_reads_as_uncommitted_changes() {
     // Preflight would catch this first; removal is called directly to prove
     // git's own refusal is reported in our words, not git's. With no verified
     // branch there is nothing for removal to do beyond the checkout.
+    let prepared = prepare(&entries[0], false).expect("prepare");
     assert_eq!(
-        remove(
+        execute(
             &entries[0],
             false,
             &fixture.data_dir(),
-            &super::Preflight { branch: None }
+            &super::Preflight { branch: None },
+            &prepared,
         )
         .err()
         .as_deref(),
         Some("has uncommitted changes")
     );
     assert!(linked.is_dir(), "git's refusal keeps the checkout");
+}
+
+#[test]
+fn the_line_based_parser_handles_a_git_without_porcelain_z() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let repo = root.path().join("repo");
+    let spaced = root.path().join("wt one");
+    let gone = root.path().join("wt-gone");
+    let out = format!(
+        "worktree {}\n\
+         HEAD 1111\n\
+         branch refs/heads/main\n\
+         \n\
+         worktree {}\n\
+         HEAD 2222\n\
+         detached\n\
+         \n\
+         worktree {}\n\
+         HEAD 3333\n\
+         branch refs/heads/gone\n\
+         prunable gitdir file points to non-existent location\n",
+        repo.display(),
+        spaced.display(),
+        gone.display()
+    );
+    let registrations = git::parse_registrations_lines(&out);
+    assert_eq!(registrations.len(), 3, "{registrations:?}");
+    assert_eq!(registrations[0].path, git::norm(&repo));
+    assert_eq!(registrations[0].branch.as_deref(), Some("main"));
+    assert_eq!(registrations[0].head.as_deref(), Some("1111"));
+    assert!(!registrations[0].detached && !registrations[0].prunable);
+    assert_eq!(registrations[1].path, git::norm(&spaced));
+    assert!(registrations[1].branch.is_none() && registrations[1].detached);
+    assert_eq!(registrations[1].head.as_deref(), Some("2222"));
+    assert_eq!(registrations[2].branch.as_deref(), Some("gone"));
+    assert!(registrations[2].prunable);
+}
+
+#[cfg(unix)]
+#[test]
+fn worktrees_with_paths_that_cannot_round_trip_are_skipped() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let fixture = Fixture::new();
+    let valid = fixture.add_worktree("wt-utf8", "utf8-branch");
+    let invalid = fixture
+        .root
+        .path()
+        .join(OsString::from_vec(b"wt-\xff".to_vec()));
+    let output = std::process::Command::new("git")
+        .args(["worktree", "add", "-q", "-b", "invalid-branch"])
+        .arg(&invalid)
+        .current_dir(&fixture.repo)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // The raw NUL-delimited snapshot still names the path as bytes.
+    let registrations = git::registrations(&fixture.repo).expect("registrations");
+    assert!(
+        registrations
+            .iter()
+            .any(|registration| registration.path == invalid),
+        "{registrations:?}"
+    );
+    // The protocol-facing list never offers the lossy string.
+    let listed = git::list_worktrees(&fixture.repo).expect("list");
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(listed[0].path, valid);
+    assert!(
+        listed
+            .iter()
+            .all(|worktree| worktree.path.to_str().is_some())
+    );
+}
+
+#[test]
+fn a_failed_registration_snapshot_keeps_a_missing_stored_row() {
+    let fixture = Fixture::new();
+    let missing = fixture.root.path().join("vanished-harness");
+    // A directory that is not a repository: the snapshot fails rather than
+    // proving the registration is gone.
+    let plain = tempfile::tempdir().expect("plain dir");
+    let stored = |repo: &Path| StoredWorktree {
+        path: missing.to_string_lossy().into_owned(),
+        repo: repo.to_string_lossy().into_owned(),
+        branch: Some("gone-branch".into()),
+        first_seen: Utc::now(),
+        last_seen: Utc::now(),
+        accesses: Vec::new(),
+    };
+
+    let mut list_input = input(&fixture, Vec::new());
+    list_input.stored = vec![stored(plain.path())];
+    let (entries, gone) = compute(&list_input, false);
+    assert!(gone.is_empty(), "a failed snapshot never forgets the row");
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert!(!entries[0].exists);
+
+    // A successful snapshot in a real repository that does not name the path
+    // is proof of absence, so the row can go.
+    list_input.stored = vec![stored(&fixture.repo)];
+    let (entries, gone) = compute(&list_input, false);
+    assert!(entries.is_empty(), "{entries:?}");
+    assert_eq!(gone, vec![missing.to_string_lossy().into_owned()]);
+}
+
+#[tokio::test]
+async fn a_nested_worktree_created_after_preflight_is_detected() {
+    let fixture = Fixture::new();
+    std::fs::write(fixture.repo.join(".gitignore"), ".claude/\n").expect("gitignore");
+    run(&fixture.repo, &["add", ".gitignore"]);
+    run(
+        &fixture.repo,
+        &["commit", "-q", "-m", "ignore nested checkouts"],
+    );
+    let parent = fixture.add_worktree("parent-late-nested", "parent-late-branch");
+    let (tracker, _threads, _subagents) = managers(&fixture, Vec::new()).await;
+    let target = entry(&parent, &fixture.repo, Some("parent-late-branch"), false);
+
+    let hook = {
+        let parent = parent.clone();
+        move |_path: String| {
+            let parent = parent.clone();
+            async move {
+                let child = parent.join(".claude/worktrees/late-child");
+                std::fs::create_dir_all(child.parent().expect("child parent")).expect("child dir");
+                run(
+                    &parent,
+                    &[
+                        "worktree",
+                        "add",
+                        "-q",
+                        "-b",
+                        "late-child-branch",
+                        &child.to_string_lossy(),
+                    ],
+                );
+            }
+        }
+    };
+    let outcome = run_clear_entry(&tracker.inner, target, false, hook).await;
+    let Err(reason) = outcome else {
+        panic!("a nested worktree created after preflight is never removed");
+    };
+    assert!(
+        reason.starts_with("contains another worktree at "),
+        "{reason}"
+    );
+    assert!(parent.is_dir(), "the parent checkout is kept");
+    assert!(
+        parent.join(".claude/worktrees/late-child").is_dir(),
+        "the nested checkout is kept"
+    );
+}
+
+#[tokio::test]
+async fn a_checkout_detached_and_moved_away_after_preflight_keeps_its_registration() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-late-moved", "late-moved-branch");
+    let (tracker, _threads, _subagents) = managers(&fixture, Vec::new()).await;
+    let target = entry(&linked, &fixture.repo, Some("late-moved-branch"), false);
+    let moved = git::norm(&fixture.root.path().join("wt-late-moved-away"));
+
+    // After preflight the checkout is detached, given a commit no ref reaches,
+    // and moved away: only the registration (and its HEAD) is left to inspect.
+    let hook = {
+        let linked = linked.clone();
+        let moved = moved.clone();
+        move |_path: String| {
+            let linked = linked.clone();
+            let moved = moved.clone();
+            async move {
+                run(&linked, &["checkout", "-q", "--detach"]);
+                run(
+                    &linked,
+                    &["commit", "-q", "--allow-empty", "-m", "detached then moved"],
+                );
+                std::fs::rename(&linked, &moved).expect("move the checkout away");
+            }
+        }
+    };
+    let outcome = run_clear_entry(&tracker.inner, target, false, hook).await;
+    assert_eq!(
+        outcome.err().as_deref(),
+        Some("detached HEAD has commits on no branch")
+    );
+    assert!(!linked.exists());
+    let registrations = git::registrations(&fixture.repo).expect("list");
+    assert!(
+        registrations
+            .iter()
+            .any(|registration| registration.path == linked && registration.detached),
+        "the detached registration stays: {registrations:?}"
+    );
+}
+
+#[test]
+fn a_branch_checked_out_after_the_checkout_is_removed_is_not_deleted() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("sa-occupied", "h4rn/sa-occupied");
+    let target = entry(&linked, &fixture.repo, Some("h4rn/sa-occupied"), true);
+    let plan = preflight(&target, false).expect("preflight");
+
+    // Execute's checkout removal.
+    run(
+        &fixture.repo,
+        &["worktree", "remove", &linked.to_string_lossy()],
+    );
+    // A second worktree takes the branch over before the delete step.
+    let elsewhere = fixture.root.path().join("sa-occupied-elsewhere");
+    run(
+        &fixture.repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            &elsewhere.to_string_lossy(),
+            "h4rn/sa-occupied",
+        ],
+    );
+
+    let outcome = delete_owned_branch(&fixture.repo, "h4rn/sa-occupied", &plan, false)
+        .expect("a checked-out branch is a reported skip");
+    assert!(
+        outcome
+            .as_deref()
+            .is_some_and(|reason| reason.contains("it is checked out in")),
+        "{outcome:?}"
+    );
+    assert!(
+        git::branch_exists(&fixture.repo, "h4rn/sa-occupied"),
+        "a branch another worktree has checked out survives"
+    );
+}
+
+#[tokio::test]
+async fn a_branch_rewound_after_preflight_is_kept_and_reported_as_unmerged() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("sa-rewound", "h4rn/sa-rewound");
+    run(
+        &linked,
+        &["commit", "-q", "--allow-empty", "-m", "child work"],
+    );
+    // Merge first, so preflight sees a merged tip; the hook then moves main's
+    // HEAD back and the tip stops being an ancestor.
+    run(
+        &fixture.repo,
+        &["merge", "-q", "--ff-only", "h4rn/sa-rewound"],
+    );
+    let (tracker, _threads, _subagents) = managers(&fixture, Vec::new()).await;
+    let target = entry(&linked, &fixture.repo, Some("h4rn/sa-rewound"), true);
+
+    let hook = {
+        let repo = fixture.repo.clone();
+        move |_path: String| {
+            let repo = repo.clone();
+            async move {
+                run(&repo, &["reset", "-q", "--hard", "HEAD~1"]);
+            }
+        }
+    };
+    let outcome = run_clear_entry(&tracker.inner, target, false, hook).await;
+    assert_eq!(
+        outcome.err().as_deref(),
+        Some("branch h4rn/sa-rewound has unmerged commits")
+    );
+    assert!(!linked.exists(), "the checkout itself is removed");
+    assert!(
+        git::branch_exists(&fixture.repo, "h4rn/sa-rewound"),
+        "the no-longer-merged branch is kept"
+    );
+}
+
+#[test]
+fn rebase_files_match_whole_lines_not_substrings() {
+    let fixture = Fixture::new();
+    run(&fixture.repo, &["branch", "h4rn/sa-abc"]);
+    let elsewhere = fixture.add_worktree("sa-rebase-longer", "rebase-longer");
+    let git_dir =
+        PathBuf::from(git::run(&elsewhere, ["rev-parse", "--absolute-git-dir"]).expect("git dir"));
+    std::fs::create_dir_all(git_dir.join("rebase-merge")).expect("rebase dir");
+    std::fs::write(
+        git_dir.join("rebase-merge/head-name"),
+        "refs/heads/h4rn/sa-abc2\n",
+    )
+    .expect("head-name");
+    std::fs::write(
+        git_dir.join("rebase-merge/update-refs"),
+        "update refs/heads/h4rn/sa-abc2\n",
+    )
+    .expect("update-refs");
+
+    let missing = fixture.root.path().join("sa-abc-gone");
+    let mut own = entry(&missing, &fixture.repo, Some("h4rn/sa-abc"), true);
+    own.dirty = None;
+    assert!(
+        matches!(
+            clear_one(&own, false, &fixture.data_dir()),
+            Ok(ClearOne::Removed)
+        ),
+        "a rebase on h4rn/sa-abc2 does not protect h4rn/sa-abc"
+    );
+    assert!(!git::branch_exists(&fixture.repo, "h4rn/sa-abc"));
+}
+
+#[test]
+fn a_bisect_naming_the_branch_blocks_its_deletion() {
+    let fixture = Fixture::new();
+    run(&fixture.repo, &["branch", "h4rn/sa-bisected"]);
+    let elsewhere = fixture.add_worktree("sa-bisect-elsewhere", "bisect-elsewhere");
+    let git_dir =
+        PathBuf::from(git::run(&elsewhere, ["rev-parse", "--absolute-git-dir"]).expect("git dir"));
+    std::fs::write(git_dir.join("BISECT_START"), "h4rn/sa-bisected\n").expect("bisect start");
+
+    let missing = fixture.root.path().join("sa-bisected-gone");
+    let mut own = entry(&missing, &fixture.repo, Some("h4rn/sa-bisected"), true);
+    own.dirty = None;
+    let outcome = clear_one(&own, false, &fixture.data_dir());
+    assert!(
+        matches!(
+            &outcome,
+            Ok(ClearOne::RemovedWithBranchFailure(reason))
+                if reason.contains("in use by a bisect")
+        ),
+        "{outcome:?}"
+    );
+    assert!(
+        git::branch_exists(&fixture.repo, "h4rn/sa-bisected"),
+        "a branch a bisect is using survives"
+    );
+}
+
+#[test]
+fn a_locked_worktree_is_reported_as_locked() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-locked", "locked-branch");
+    run(
+        &fixture.repo,
+        &["worktree", "lock", &linked.to_string_lossy()],
+    );
+    let target = entry(&linked, &fixture.repo, Some("locked-branch"), false);
+    assert_eq!(
+        clear_one(&target, false, &fixture.data_dir())
+            .err()
+            .as_deref(),
+        Some("is locked; unlock it first")
+    );
+    assert!(linked.is_dir(), "a locked checkout is kept");
+}
+
+#[test]
+fn a_locked_missing_checkout_keeps_its_registration_and_branch() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("sa-locked-missing", "h4rn/sa-locked-missing");
+    run(
+        &fixture.repo,
+        &["worktree", "lock", &linked.to_string_lossy()],
+    );
+    std::fs::remove_dir_all(&linked).expect("remove the checkout");
+    let mut own = entry(&linked, &fixture.repo, Some("h4rn/sa-locked-missing"), true);
+    own.dirty = None;
+
+    let outcome = clear_one(&own, false, &fixture.data_dir());
+    assert!(
+        matches!(
+            &outcome,
+            Err(reason) if reason.starts_with("registration left in place:")
+        ),
+        "{outcome:?}"
+    );
+    let registrations = git::registrations(&fixture.repo).expect("list");
+    assert!(
+        registrations
+            .iter()
+            .any(|registration| registration.path == linked),
+        "the locked registration stays: {registrations:?}"
+    );
+    assert!(
+        git::branch_exists(&fixture.repo, "h4rn/sa-locked-missing"),
+        "the branch is untouched while its registration remains"
+    );
 }

@@ -36,6 +36,7 @@ import {
   worktreeClientCurrent,
   worktreeOutcomeForClient,
   worktreePage,
+  worktreeSubline,
 } from "./worktreeStore";
 
 const request = harness.clientA.request;
@@ -344,13 +345,51 @@ describe("forceCanFix", () => {
       "checkout removed, but branch h4rn/sa-x could not be deleted: busy",
       "contains another worktree at /code/api/.claude/worktrees/child",
       "is the repository's main worktree",
+      "is locked; unlock it first",
       "its repository could not be found",
       "git timed out after 30s",
       "registration left in place: fatal: not a working tree",
       "branch h4rn/sa-sym is a symbolic ref",
+      "checkout removed, but branch h4rn/sa-x was left in place",
     ]) {
       expect(forceCanFix(blocked), blocked).toBe(false);
     }
+  });
+});
+
+describe("worktreeSubline", () => {
+  it("keeps the branch wording for a removed subagent checkout", () => {
+    const line = worktreeSubline(row({ exists: false }));
+    expect(line).toContain("Directory removed, branch kept");
+    expect(line).not.toContain("registration left");
+  });
+
+  it("says the registration is left for a removed non-subagent checkout", () => {
+    const line = worktreeSubline(row({ exists: false, origin: "harness", owned: false }));
+    expect(line).toContain("Directory removed, registration left");
+    expect(line).not.toContain("branch kept");
+  });
+
+  it("names the origin, its users and uncommitted work", () => {
+    const line = worktreeSubline(
+      row({
+        origin: "thread",
+        owned: false,
+        dirty: true,
+        accessed_by: [
+          {
+            thread_id: "th_a",
+            title: "Fix it",
+            subagent_id: null,
+            working: false,
+            last_seen: "2026-11-20T10:00:00Z",
+          },
+        ],
+      }),
+    );
+    expect(line).toContain("Thread workspace");
+    expect(line).toContain("Fix it");
+    expect(line).toContain("Uncommitted changes");
   });
 });
 

@@ -647,6 +647,11 @@ impl Inner {
         if worktree.path.starts_with(&self.subagents_root) || worktree.path == repo {
             return;
         }
+        // The protocol carries paths as strings. A path that cannot round-trip
+        // through UTF-8 is never offered lossily, so it is never stored either.
+        let (Some(path_text), Some(repo_text)) = (worktree.path.to_str(), repo.to_str()) else {
+            return;
+        };
         if self
             .thread_repo(thread)
             .await
@@ -654,10 +659,7 @@ impl Inner {
         {
             return;
         }
-        let key = (
-            worktree.path.to_string_lossy().into_owned(),
-            thread.as_str().to_owned(),
-        );
+        let key = (path_text.to_owned(), thread.as_str().to_owned());
         {
             let mut recent = lock(&self.recent);
             if recent
@@ -680,7 +682,7 @@ impl Inner {
             .store
             .record(
                 &key.0,
-                &repo.to_string_lossy(),
+                repo_text,
                 worktree.branch.as_deref(),
                 thread.as_str(),
                 subagent_id.as_ref().map(SubagentId::as_str),
@@ -986,22 +988,30 @@ fn access_of(
 
 /// Whether `path` still has its own registration in `repo`.
 ///
+/// `Some(true)` / `Some(false)` once the repository's snapshot was read;
+/// `None` when git could not answer. A caller must never treat `None` as
+/// absence: a failed snapshot says nothing about what is still registered.
+///
 /// `lists` caches one snapshot per repository for the listing, so a repository
 /// with many vanished observations is asked only once.
 fn registration_exists(
     repo: &str,
     path: &Path,
-    lists: &mut HashMap<PathBuf, Vec<git::Registration>>,
-) -> bool {
+    lists: &mut HashMap<PathBuf, Option<Vec<git::Registration>>>,
+) -> Option<bool> {
     if repo.is_empty() {
-        return false;
+        return Some(false);
     }
     let repo = PathBuf::from(repo);
     lists
         .entry(repo.clone())
-        .or_insert_with(|| git::registrations(&repo).unwrap_or_default())
-        .iter()
-        .any(|registration| registration.path == path)
+        .or_insert_with(|| git::registrations(&repo).ok())
+        .as_ref()
+        .map(|registrations| {
+            registrations
+                .iter()
+                .any(|registration| registration.path == path)
+        })
 }
 
 /// Computes the tracked list from plain data. Blocking (shells out to git).
@@ -1033,12 +1043,17 @@ pub(crate) fn compute(input: &ListInput, with_dirty: bool) -> (Vec<TrackedWorktr
     let mut branch_lists: HashMap<PathBuf, HashSet<String>> = HashMap::new();
     // Registrations are asked for only when a stored path's directory is gone,
     // and then only once per repository.
-    let mut registration_lists: HashMap<PathBuf, Vec<git::Registration>> = HashMap::new();
+    let mut registration_lists: HashMap<PathBuf, Option<Vec<git::Registration>>> = HashMap::new();
 
     // 1. Worktrees h4rn made for isolated subagents.
     for view in &input.subagents {
         let path = git::norm(Path::new(&view.workspace_path));
         let repo = subagent_repo(input, view, &path);
+        // The protocol carries paths as strings, so a path that cannot
+        // round-trip through UTF-8 is never listed.
+        if path.to_str().is_none() || repo.as_ref().is_some_and(|repo| repo.to_str().is_none()) {
+            continue;
+        }
         let exists = path.is_dir();
         let branch_exists = match (&repo, &view.branch) {
             (Some(repo), Some(branch)) => branch_lists
@@ -1119,6 +1134,9 @@ pub(crate) fn compute(input: &ListInput, with_dirty: bool) -> (Vec<TrackedWorktr
         let Some(repo) = git::repo_of(&path) else {
             continue;
         };
+        if path.to_str().is_none() || repo.to_str().is_none() {
+            continue;
+        }
         let list = repo_lists
             .entry(repo.clone())
             .or_insert_with(|| git::list_worktrees(&repo).unwrap_or_default());
@@ -1174,9 +1192,17 @@ pub(crate) fn compute(input: &ListInput, with_dirty: bool) -> (Vec<TrackedWorktr
         // A checkout whose directory is gone is still clearable while its own
         // registration remains: removing that registration is the only cleanup
         // left, and forgetting the row here would report it as untracked.
-        if !exists && !registration_exists(&stored.repo, &path, &mut registration_lists) {
-            gone.push(stored.path.clone());
-            continue;
+        // Only a successful snapshot that no longer names the path may forget
+        // it; a failed snapshot keeps the row (exists: false) for a later try.
+        if !exists {
+            match registration_exists(&stored.repo, &path, &mut registration_lists) {
+                Some(true) => {}
+                Some(false) => {
+                    gone.push(stored.path.clone());
+                    continue;
+                }
+                None => {}
+            }
         }
         let accesses: Vec<WorktreeAccess> = stored
             .accesses
@@ -1341,6 +1367,16 @@ struct Preflight {
     branch: Option<BranchDelete>,
 }
 
+/// What the removal phase verified against its own snapshot.
+///
+/// Prepared before the (async) live activity check, so the destructive command
+/// can run immediately after it. The snapshot is the one the missing
+/// checkout's registration lookup uses.
+struct Prepared {
+    /// The NUL-delimited registrations taken by [`prepare`].
+    registrations: Vec<git::Registration>,
+}
+
 /// The sha `refs/heads/<branch>` points at; `None` when the branch is gone.
 fn branch_tip(repo: &Path, branch: &str) -> Result<Option<String>, String> {
     match git::run_with_timeout(
@@ -1488,27 +1524,39 @@ fn branch_in_progress(repo: &Path, branch: &str) -> Result<Option<String>, Strin
         }
     }
     let reference = format!("refs/heads/{branch}");
+    // Git writes the checked-out ref to `head-name`, `update-refs` lines and
+    // `BISECT_START`; matching must be by whole line or whole token, never a
+    // substring, or a rebase on `h4rn/sa-abc2` would block `h4rn/sa-abc`.
+    let needles = [reference.as_str(), branch];
     for dir in dirs {
         for name in ["rebase-merge/head-name", "rebase-apply/head-name"] {
-            if file_mentions(&dir.join(name), &reference) {
+            if file_has_line(&dir.join(name), &needles) {
                 return Ok(Some("it is in use by a rebase".into()));
             }
         }
-        if file_mentions(&dir.join("rebase-merge/update-refs"), &reference) {
+        if file_has_token(&dir.join("rebase-merge/update-refs"), &needles) {
             return Ok(Some("it is in use by a rebase".into()));
         }
-        if let Ok(bisect) = std::fs::read_to_string(dir.join("BISECT_START"))
-            && (bisect.contains(branch) || bisect.contains(&reference))
-        {
+        if file_has_line(&dir.join("BISECT_START"), &needles) {
             return Ok(Some("it is in use by a bisect".into()));
         }
     }
     Ok(None)
 }
 
-/// Whether `path` exists and its text contains `needle`.
-fn file_mentions(path: &Path, needle: &str) -> bool {
-    std::fs::read_to_string(path).is_ok_and(|text| text.contains(needle))
+/// Whether `path` exists and has a whole (trimmed) line equal to a needle.
+fn file_has_line(path: &Path, needles: &[&str]) -> bool {
+    std::fs::read_to_string(path)
+        .is_ok_and(|text| text.lines().any(|line| needles.contains(&line.trim())))
+}
+
+/// Whether `path` exists and has a whole whitespace-separated token equal to a
+/// needle.
+fn file_has_token(path: &Path, needles: &[&str]) -> bool {
+    std::fs::read_to_string(path).is_ok_and(|text| {
+        text.split_whitespace()
+            .any(|token| needles.contains(&token))
+    })
 }
 
 /// The standard wording for a branch the checkout removal left behind.
@@ -1527,10 +1575,17 @@ fn remove_missing_registration(repo: &Path, path: &Path, force: bool) -> Result<
     git::run_with_timeout(repo, args, CLEAR_GIT_TIMEOUT).map(|_| ())
 }
 
-/// Runs one entry's clear: blocking preflight, live re-check, blocking removal.
+/// Runs one entry's clear: preflight, prepare, live re-check, destructive act.
 ///
-/// `after_preflight` runs between the two blocking phases; a test uses it to
-/// make the entry busy in that window and prove the re-check still runs.
+/// The order matters. Preflight refuses what can be refused cheaply; the test
+/// hook then runs; `prepare` takes the snapshot the removal will act on and
+/// re-runs every check that can go stale behind preflight (the checkout's
+/// branch, containment, detached reachability); only then does the async
+/// activity check run; and the destructive command is launched immediately
+/// afterwards, with no other blocking work in between.
+///
+/// `after_preflight` runs between preflight and prepare; a test uses it to
+/// change the checkout in that window and prove prepare still catches it.
 async fn run_clear_entry<F, Fut>(
     inner: &Arc<Inner>,
     entry: TrackedWorktree,
@@ -1552,11 +1607,24 @@ where
         }
     };
     after_preflight(path.clone()).await;
+    // The verification the removal relies on uses the snapshot taken here, so
+    // everything checked is checked against what is about to be acted on.
+    let prepare_entry = entry.clone();
+    let prepared = match tokio::task::spawn_blocking(move || prepare(&prepare_entry, force)).await {
+        Ok(Ok(prepared)) => prepared,
+        Ok(Err(reason)) => return Err(reason),
+        Err(error) => {
+            tracing::warn!(%error, %path, "worktree prepare task failed");
+            return Err("the clear task failed".into());
+        }
+    };
     if let Some(active) = inner.still_active(&entry).await {
         return Err(in_use_reason(&active));
     }
     let data_dir = inner.data_dir.clone();
-    match tokio::task::spawn_blocking(move || remove(&entry, force, &data_dir, &plan)).await {
+    match tokio::task::spawn_blocking(move || execute(&entry, force, &data_dir, &plan, &prepared))
+        .await
+    {
         Ok(result) => result,
         Err(error) => {
             tracing::warn!(%error, %path, "worktree clear task failed");
@@ -1641,31 +1709,55 @@ fn preflight(entry: &TrackedWorktree, force: bool) -> Result<Preflight, String> 
     Ok(Preflight { branch })
 }
 
-/// Removes one entry from disk. Blocking.
+/// The removal phase's own verification. Blocking.
 ///
-/// Runs only after [`preflight`] passed and the live re-check found nothing
-/// using the entry. Every git call is bounded by [`CLEAR_GIT_TIMEOUT`]; a
-/// timeout is a skip with that reason, or a branch failure once the checkout is
-/// already gone.
-fn remove(
+/// Takes the NUL-delimited snapshot the removal will use, then re-runs the
+/// checks that can go stale between preflight and the destructive command: a
+/// checkout replaced on another branch or detached with unreachable work, a
+/// nested worktree created in the meantime, and a missing checkout's detached
+/// registration. The live activity check runs after this, and only then does
+/// [`execute`] touch the disk.
+fn prepare(entry: &TrackedWorktree, force: bool) -> Result<Prepared, String> {
+    let path = PathBuf::from(&entry.path);
+    let repo = PathBuf::from(&entry.repo);
+    let registrations = git::registrations_with_timeout(&repo, CLEAR_GIT_TIMEOUT)?;
+    if path.is_dir() {
+        // A nested worktree created after preflight must still stop the
+        // removal: `git worktree remove` would leave its registration pointing
+        // into a directory that no longer exists.
+        if let Some(inner) = contained_worktree(&registrations, &path) {
+            return Err(format!("contains another worktree at {}", inner.display()));
+        }
+        if !force {
+            verify_checkout(&path, &repo, entry.branch.as_deref())?;
+        }
+    } else if !force && let Some(registration) = exact_registration(&registrations, &path) {
+        // Only the registration is left. Its HEAD may hold a commit that no
+        // branch, remote-tracking branch or tag reaches; deleting the
+        // registration would lose the only name for that work.
+        verify_missing_registration(&repo, registration)?;
+    }
+    Ok(Prepared { registrations })
+}
+
+/// Removes one entry from disk and settles its owned branch. Blocking.
+///
+/// Runs only after [`prepare`] passed and the live re-check found nothing using
+/// the entry. The destructive `git worktree remove` is the first thing it does;
+/// the branch delete that follows re-checks everything from a fresh snapshot
+/// (see [`delete_owned_branch`]). Every git call is bounded by
+/// [`CLEAR_GIT_TIMEOUT`]; a timeout is a skip with that reason, or a branch
+/// failure once the checkout is already gone.
+fn execute(
     entry: &TrackedWorktree,
     force: bool,
     data_dir: &Path,
     plan: &Preflight,
+    prepared: &Prepared,
 ) -> Result<ClearOne, String> {
     let path = PathBuf::from(&entry.path);
     let repo = PathBuf::from(&entry.repo);
-    // One snapshot per phase: the missing checkout's own registration and the
-    // branch's checked-out protection both read this one.
-    let registrations = git::registrations_with_timeout(&repo, CLEAR_GIT_TIMEOUT)?;
     if path.is_dir() {
-        // The checkout can change between preflight and now. Re-run the same
-        // checks immediately before removal: a detached HEAD whose new commit
-        // no ref reaches, or a checkout replaced on another branch, must not be
-        // deleted as if it were the lifecycle preflight verified.
-        if !force {
-            verify_checkout(&path, &repo, entry.branch.as_deref())?;
-        }
         // Git's own remove semantics: without `--force` it refuses a checkout
         // with modifications, which is what we want. Ignored files go with the
         // checkout either way; that is git's contract.
@@ -1676,6 +1768,9 @@ fn remove(
         }
         args.push(path_text.as_ref());
         if let Err(error) = git::run_with_timeout(&repo, args, CLEAR_GIT_TIMEOUT) {
+            if locked_worktree(&error) {
+                return Err("is locked; unlock it first".into());
+            }
             // Git can find work our own checks did not (a fresh write, a
             // submodule). Report it as the forceable dirty reason so the UI
             // offers the same retry as any other uncommitted work.
@@ -1684,7 +1779,7 @@ fn remove(
             }
             return Err(error);
         }
-    } else if exact_registration(&registrations, &path).is_some() {
+    } else if exact_registration(&prepared.registrations, &path).is_some() {
         // The directory is already gone (the supervisor removed it, or the user
         // did) but its own registration may still be there. Drop exactly that
         // registration; never prune the repository, which would also forget a
@@ -1718,77 +1813,7 @@ fn remove(
             }
         };
         if exists {
-            if force {
-                // Forced clears keep git's own command; it still refuses a
-                // branch checked out in any worktree.
-                if let Err(error) =
-                    git::run_with_timeout(&repo, ["branch", "-D", branch], CLEAR_GIT_TIMEOUT)
-                {
-                    tracing::warn!(%error, %branch, "could not delete the subagent branch");
-                    branch_failure = Some(branch_delete_failure(branch, &error));
-                }
-            } else {
-                match plan.branch.as_ref() {
-                    Some(BranchDelete::Symbolic) => {
-                        branch_failure = Some(format!("branch {branch} is a symbolic ref"));
-                    }
-                    Some(BranchDelete::Verified { sha, .. }) => {
-                        // Git's protections, applied explicitly: never delete a
-                        // branch another worktree has checked out, or one a
-                        // rebase or bisect is using. The selected checkout is
-                        // the one being removed, so its own registration — still
-                        // in this phase's snapshot — does not count as another.
-                        let selected = git::norm(&path);
-                        if let Some(holder) = registrations.iter().find(|registration| {
-                            registration.branch.as_deref() == Some(branch.as_str())
-                                && registration.path != selected
-                        }) {
-                            branch_failure = Some(branch_delete_failure(
-                                branch,
-                                &format!("it is checked out in {}", holder.path.display()),
-                            ));
-                        } else {
-                            match branch_in_progress(&repo, branch) {
-                                Ok(Some(why)) => {
-                                    branch_failure = Some(branch_delete_failure(branch, &why));
-                                }
-                                Ok(None) => {
-                                    if let Err(error) = git::run_with_timeout(
-                                        &repo,
-                                        [
-                                            "update-ref",
-                                            "--no-deref",
-                                            "-d",
-                                            &format!("refs/heads/{branch}"),
-                                            sha,
-                                        ],
-                                        CLEAR_GIT_TIMEOUT,
-                                    ) {
-                                        if git::timed_out(&error) {
-                                            branch_failure =
-                                                Some(branch_delete_failure(branch, &error));
-                                        } else {
-                                            // The ref no longer points at the sha
-                                            // preflight verified: work arrived
-                                            // since, so this is the same
-                                            // forceable skip as an unmerged tip.
-                                            return Err(format!(
-                                                "branch {branch} has unmerged commits"
-                                            ));
-                                        }
-                                    }
-                                }
-                                Err(error) => {
-                                    branch_failure = Some(branch_delete_failure(branch, &error));
-                                }
-                            }
-                        }
-                    }
-                    // No verified branch: nothing was there at preflight, so
-                    // there is nothing to delete at the verified tip.
-                    None => {}
-                }
-            }
+            branch_failure = delete_owned_branch(&repo, branch, plan, force)?;
         }
     }
     if let Some(subagent_id) = &entry.subagent_id {
@@ -1798,6 +1823,108 @@ fn remove(
     match branch_failure {
         Some(reason) => Ok(ClearOne::RemovedWithBranchFailure(reason)),
         None => Ok(ClearOne::Removed),
+    }
+}
+
+/// Whether git refused because the worktree is locked.
+fn locked_worktree(error: &str) -> bool {
+    error.contains("cannot remove a locked working tree") || error.contains("is locked")
+}
+
+/// Deletes one owned `h4rn/` branch after its checkout is gone. Blocking.
+///
+/// An ordinary clear re-checks everything immediately before `update-ref`,
+/// from a fresh registration snapshot: occupancy, an in-progress rebase or
+/// bisect, and the verified sha's ancestry in `HEAD`. A forced clear keeps
+/// git's own `branch -D`. `Err` is a forceable skip; `Ok(Some(reason))` is a
+/// branch left in place that force cannot fix.
+fn delete_owned_branch(
+    repo: &Path,
+    branch: &str,
+    plan: &Preflight,
+    force: bool,
+) -> Result<Option<String>, String> {
+    if force {
+        // Forced clears keep git's own command; it still refuses a branch
+        // checked out in any worktree.
+        return match git::run_with_timeout(repo, ["branch", "-D", branch], CLEAR_GIT_TIMEOUT) {
+            Ok(_) => Ok(None),
+            Err(error) => {
+                tracing::warn!(%error, %branch, "could not delete the subagent branch");
+                Ok(Some(branch_delete_failure(branch, &error)))
+            }
+        };
+    }
+    // The checkout just went away, so a fresh snapshot no longer contains its
+    // registration but does show any worktree that took the branch over.
+    let registrations = match git::registrations_with_timeout(repo, CLEAR_GIT_TIMEOUT) {
+        Ok(registrations) => registrations,
+        Err(error) => return Ok(Some(branch_delete_failure(branch, &error))),
+    };
+    match plan.branch.as_ref() {
+        // The branch did not exist at preflight. If it does now, someone made
+        // it after the checkout was removed; deleting it is not ours to do.
+        None => Ok(Some(format!(
+            "checkout removed, but branch {branch} was left in place"
+        ))),
+        Some(BranchDelete::Symbolic) => Ok(Some(format!("branch {branch} is a symbolic ref"))),
+        Some(BranchDelete::Verified { sha }) => {
+            if let Some(holder) = registrations
+                .iter()
+                .find(|registration| registration.branch.as_deref() == Some(branch))
+            {
+                return Ok(Some(branch_delete_failure(
+                    branch,
+                    &format!("it is checked out in {}", holder.path.display()),
+                )));
+            }
+            match branch_in_progress(repo, branch) {
+                Ok(Some(why)) => return Ok(Some(branch_delete_failure(branch, &why))),
+                Ok(None) => {}
+                Err(error) => return Ok(Some(branch_delete_failure(branch, &error))),
+            }
+            // The repository's HEAD can move behind an ordinary clear. If the
+            // verified tip is no longer an ancestor, the branch gained work
+            // that only force may discard.
+            match branch_is_merged(repo, sha) {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(format!("branch {branch} has unmerged commits"));
+                }
+                Err(error) => return Ok(Some(branch_delete_failure(branch, &error))),
+            }
+            if let Err(error) = git::run_with_timeout(
+                repo,
+                [
+                    "update-ref",
+                    "--no-deref",
+                    "-d",
+                    &format!("refs/heads/{branch}"),
+                    sha,
+                ],
+                CLEAR_GIT_TIMEOUT,
+            ) {
+                // The delete may have raced another writer. Re-read the ref:
+                // gone means the branch is gone, a different tip (or one no
+                // longer an ancestor) is unmerged work, and anything else is
+                // an ordinary branch failure.
+                return match branch_tip(repo, branch) {
+                    Ok(None) => Ok(None),
+                    Ok(Some(current)) if current != *sha => {
+                        Err(format!("branch {branch} has unmerged commits"))
+                    }
+                    Ok(Some(_)) => match branch_is_merged(repo, sha) {
+                        Ok(false) => Err(format!("branch {branch} has unmerged commits")),
+                        _ => Ok(Some(branch_delete_failure(branch, &error))),
+                    },
+                    Err(read_error) if git::timed_out(&read_error) => {
+                        Ok(Some(branch_delete_failure(branch, &read_error)))
+                    }
+                    Err(_) => Ok(Some(branch_delete_failure(branch, &error))),
+                };
+            }
+            Ok(None)
+        }
     }
 }
 

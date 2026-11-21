@@ -201,7 +201,11 @@ thread list, and the list is recomputed on every request. An observed worktree
 whose directory is missing is still listed, with `exists: false`, while its own
 registration remains in the repository's snapshot: its registration is exactly
 what a clear removes. It is forgotten only when neither the directory nor the
-registration exists.
+registration exists, and only after a successful snapshot proves the
+registration absent: a failed snapshot (a broken repository, a killed git)
+keeps the row with `exists: false` rather than guessing. Paths are carried as
+strings, so a registration or observation whose path is not valid UTF-8 is
+skipped at listing time, never offered lossily and never stored.
 
 **How harness worktrees are observed.** The daemon snapshots
 `git worktree list --porcelain -z` for a thread's repository when a turn starts
@@ -218,8 +222,13 @@ seconds, so tool calls do not shell out to git one by one. Every git call the
 watcher makes — resolving a thread's repository, its checkout top level, and
 listing a repository's worktrees — is bounded to ten seconds, so one wedged
 repository cannot stall observation for every thread; a timeout is logged and
-that event's work is dropped. The NUL-delimited form is parsed as records, so a
-path containing a newline (or bytes that are not UTF-8 on Unix) stays one path.
+that event's work is dropped. The NUL-delimited form requires git 2.36+; on an
+older git the daemon falls back to the line-based `--porcelain` parser and
+remembers which form works for the rest of the process, so the failed probe
+happens once. The NUL-delimited form is parsed as records, so a
+path containing a newline (or bytes that are not UTF-8 on Unix) stays one path;
+a path that is not valid UTF-8 is then skipped, because the protocol carries
+paths as strings and must never offer a lossy one.
 h4rn's own
 `<data_dir>/subagents/*/worktree` paths and the main worktree are never recorded
 as `harness`. Write failures are logged and never interrupt the watcher.
@@ -249,20 +258,21 @@ for it.
 **Clearing rules.**
 
 - Active worktrees are never removed, even with `force`. Each target is handled
-  in two blocking phases: a preflight (repository and main-worktree checks, a
+  in a fixed order: a blocking preflight (repository and main-worktree checks, a
   nested worktree, dirtiness, whether the checkout is still on its listed
-  branch, detached HEAD, unmerged owned branch) and the removal itself. Each
-  phase takes one NUL-delimited registration snapshot and answers containment
-  and the exact-registration lookup from it. The live re-check runs after
-  preflight and immediately before removal, so a thread that becomes busy in
-  that window still keeps the entry and its checkout stays on disk. That
-  re-check first collects every candidate — the accessors the listing named, the
-  accesses recorded for the path in the store, and every current thread
-  (children and snoozed included) whose workspace is the entry or inside it —
-  and then checks activity once, at the end, over the whole set. A thread found
-  by one source while it was idle is therefore not dropped before another source
-  would have seen it busy, and a busy thread keeps the entry and is named in the
-  reason.
+  branch, detached HEAD, unmerged owned branch); then a blocking prepare that
+  takes the removal registration snapshot and re-runs the checks that can go
+  stale (the listed branch and detached reachability, containment against that
+  snapshot, and the detached registration's `HEAD` when the directory is
+  already gone); then the async live activity check; and finally the
+  destructive `git worktree remove`, launched immediately afterwards with no
+  other blocking work in between. The live re-check collects every candidate —
+  the accessors the listing named, the accesses recorded for the path in the
+  store, and every current thread (children and snoozed included) whose
+  workspace is the entry or inside it — and then checks activity once, at the
+  end, over the whole set. A thread found by one source while it was idle is
+  therefore not dropped before another source would have seen it busy, and a
+  busy thread keeps the entry and is named in the reason.
 - A `thread` workspace is only removed when its path is named. It belongs to
   whoever created it, and its thread may be resumed there, so clearing
   everything leaves it alone.
@@ -280,11 +290,15 @@ for it.
   otherwise removing the checkout would leave that work unreachable. When the
   checkout's directory is already gone, the same check uses the detached
   registration's `HEAD` commit from the NUL-delimited snapshot.
-- Immediately before `git worktree remove` on an existing directory without
-  force, the detached-HEAD reachability check and the "still on its listed
-  branch" check run again. A checkout detached, replaced or given a new commit
-  after preflight is therefore skipped with the same reason it would have been
-  skipped at preflight, and its registration and commit stay.
+- The prepare step before the live activity check re-runs the detached-HEAD
+  reachability check, the "still on its listed branch" check and containment,
+  against the snapshot the removal will act on. A checkout detached, replaced
+  or given a new commit after preflight is therefore skipped with the same
+  reason it would have been skipped at preflight, and its registration and
+  commit stay. A nested worktree created after preflight is likewise still
+  detected, and both checkouts are kept.
+- A worktree git reports as locked is skipped as `is locked; unlock it first`
+  (not forceable); the checkout and its registration stay until it is unlocked.
 - An existing checkout that contains another registered worktree is never
   removed, with or without force: it is skipped as
   `contains another worktree at <path>` (not forceable). Git would otherwise
@@ -319,17 +333,29 @@ for it.
   and the empty `<data_dir>/subagents/<id>` directory is removed. A branch h4rn
   did not create is never deleted. Preflight resolves the branch to a sha first
   (after checking it is not a symbolic ref) and refuses an unmerged tip, so the
-  early skip reads `branch <b> has unmerged commits` (forceable). An ordinary
-  clear then deletes exactly that verified tip with
-  `git update-ref --no-deref -d refs/heads/<b> <verified-sha>`, which git
-  refuses atomically if the ref moved in the meantime; that refusal is reported
-  as the same forceable `branch <b> has unmerged commits`. Before deleting, git's
-  protections are applied explicitly: the branch is not deleted when any
-  registered worktree has it checked out, when any worktree's git directory (the
-  main `<common>` or `<common>/worktrees/*`) has `rebase-merge/head-name`,
-  `rebase-apply/head-name` or `rebase-merge/update-refs` naming
-  `refs/heads/<b>`, or when `BISECT_START` names the branch. Those refusals are
-  reported as
+  early skip reads `branch <b> has unmerged commits` (forceable). After the
+  checkout is gone, an ordinary clear re-checks everything immediately before
+  deleting: it takes a fresh registration snapshot (so a worktree that took the
+  branch over after the checkout went is seen), re-runs the rebase/bisect
+  checks, and re-runs `git merge-base --is-ancestor <verified-sha> HEAD`; a tip
+  that is no longer an ancestor is the same forceable
+  `branch <b> has unmerged commits`. It then deletes exactly that verified tip
+  with `git update-ref --no-deref -d refs/heads/<b> <verified-sha>`. If
+  `update-ref` fails, the ref is re-read: missing means the branch is already
+  gone and the path is reported as removed; a different tip, or one no longer
+  an ancestor, is the forceable unmerged reason; anything else is reported as
+  `checkout removed, but branch <b> could not be deleted: <git's message>`. If
+  the branch did not exist at preflight but exists now, it is left alone and
+  reported as `checkout removed, but branch <b> was left in place` (not
+  forceable). Before deleting, git's protections are applied explicitly: the
+  branch is not deleted when any registered worktree has it checked out, when
+  any worktree's git directory (the main `<common>` or `<common>/worktrees/*`)
+  has `rebase-merge/head-name`, `rebase-apply/head-name` or
+  `rebase-merge/update-refs` naming `refs/heads/<b>`, or when `BISECT_START`
+  names the branch. Those files are matched by whole whitespace-trimmed line
+  (and by whole whitespace-separated token for `update-refs`), never as
+  substrings, so a rebase on `h4rn/sa-abc2` does not protect `h4rn/sa-abc`.
+  Those refusals are reported as
   `checkout removed, but branch <b> could not be deleted: <why>`. A symbolic
   owned ref is never deleted: the checkout still goes, and the path is skipped
   as `branch <b> is a symbolic ref` with the symref and its target intact. A
