@@ -186,7 +186,11 @@ Working tab's exit grace.
 `settled` means nothing running uses it, and `orphaned` means an owned
 worktree's subagent is finished but its directory is still on disk (cleanup
 failed, or the daemon restarted mid-run). An entry with nothing left to clear
-(directory gone and, for owned entries, branch gone) is not listed.
+(directory gone and, for owned entries, branch gone) is not listed. An owned
+entry whose directory and branch are both gone is still listed, with
+`exists: false`, while its exact registration remains in the repository's
+snapshot, so a clear can remove that registration instead of reporting the path
+as not tracked.
 
 Paths are compared after normalisation: the path is canonicalised exactly as
 written before any `..` is folded, so a workspace spelled through a symlink
@@ -203,7 +207,9 @@ registration remains in the repository's snapshot: its registration is exactly
 what a clear removes. It is forgotten only when neither the directory nor the
 registration exists, and only after a successful snapshot proves the
 registration absent: a failed snapshot (a broken repository, a killed git)
-keeps the row with `exists: false` rather than guessing. Paths are carried as
+keeps the row with `exists: false` rather than guessing. A stored row whose
+repository directory itself no longer exists can never be cleared through git,
+so it is forgotten from the store (nothing on disk is touched). Paths are carried as
 strings, so a registration or observation whose path is not valid UTF-8 is
 skipped at listing time, never offered lossily and never stored.
 
@@ -222,13 +228,26 @@ seconds, so tool calls do not shell out to git one by one. Every git call the
 watcher makes — resolving a thread's repository, its checkout top level, and
 listing a repository's worktrees — is bounded to ten seconds, so one wedged
 repository cannot stall observation for every thread; a timeout is logged and
-that event's work is dropped. The NUL-delimited form requires git 2.36+; on an
-older git the daemon falls back to the line-based `--porcelain` parser and
-remembers which form works for the rest of the process, so the failed probe
-happens once. The NUL-delimited form is parsed as records, so a
-path containing a newline (or bytes that are not UTF-8 on Unix) stays one path;
-a path that is not valid UTF-8 is then skipped, because the protocol carries
-paths as strings and must never offer a lossy one.
+that event's work is dropped. The NUL-delimited form requires git 2.36+. Only
+a git that clearly rejects `-z` triggers the fallback: an `unknown switch` or
+`unknown option` error naming `z`, or exit status 129 (git's usage exit) with
+`worktree` in the usage text; a bare `usage:` from anything else, a timeout or a
+repository error is reported as a failure. On such a git the daemon reads git's
+registration metadata directly instead of parsing output, which is byte-exact on
+every version: `<common>/worktrees/*/gitdir` holds the path of the linked
+worktree's `.git` file (only its final newline is stripped; the worktree is its
+parent), `<admin>/HEAD` is `ref: refs/heads/<b>` or a detached sha,
+`<admin>/locked` marks a lock, a `gitdir` target that no longer exists makes the
+registration prunable, and the main worktree is the parent of `<common>` for a
+non-bare repository. Which form works is remembered for the rest of the
+process, so the failed probe happens once. The NUL-delimited form is parsed as
+records, so a path containing a newline (or bytes that are not UTF-8 on Unix)
+stays one path; a path that is not valid UTF-8 is then skipped, because the
+protocol carries paths as strings and must never offer a lossy one. Every other
+path git prints (`rev-parse --show-toplevel`, `--git-dir`, `--git-common-dir`)
+is read as bytes with only git's single trailing newline stripped, never other
+whitespace, so sibling checkouts named `checkout` and `checkout ` stay distinct;
+output that is not valid UTF-8 is skipped, never decoded lossily.
 h4rn's own
 `<data_dir>/subagents/*/worktree` paths and the main worktree are never recorded
 as `harness`. Write failures are logged and never interrupt the watcher.
@@ -252,8 +271,8 @@ still running, and the fresh list always reflects what actually happened.
 
 A clear lists twice: once to pick its targets, and once at the end for the
 response. The selection listing skips `git status` for every entry because each
-removal checks dirtiness itself at the last moment; the response listing asks
-for it.
+removal checks dirtiness itself in preflight (with git's own refusal as the
+backstop); the response listing asks for it.
 
 **Clearing rules.**
 
@@ -263,10 +282,15 @@ for it.
   branch, detached HEAD, unmerged owned branch); then a blocking prepare that
   takes the removal registration snapshot and re-runs the checks that can go
   stale (the listed branch and detached reachability, containment against that
-  snapshot, and the detached registration's `HEAD` when the directory is
-  already gone); then the async live activity check; and finally the
-  destructive `git worktree remove`, launched immediately afterwards with no
-  other blocking work in between. The live re-check collects every candidate —
+  snapshot, the nested-checkout scan, and the detached registration's `HEAD`
+  when the directory is already gone); then the async live activity check; and
+  finally, immediately before the destructive `git worktree remove`, one more
+  verification: for an existing checkout prepare also saw, the listed branch,
+  detached reachability and containment against prepare's snapshot; if the
+  directory appeared or vanished since prepare, a fresh snapshot and every check
+  for the state that exists now (the existing-checkout checks including the
+  nested scan, or the missing registration's detached reachability). A checkout
+  switched to another branch in that window is therefore kept. The live re-check collects every candidate —
   the accessors the listing named, the accesses recorded for the path in the
   store, and every current thread (children and snoozed included) whose
   workspace is the entry or inside it — and then checks activity once, at the
@@ -278,9 +302,13 @@ for it.
   everything leaves it alone.
 - Without `force`, a worktree with uncommitted changes, or an owned branch not
   merged into the repository's `HEAD`, is skipped. Dirtiness is asked of git
-  again at the last moment rather than trusted from the listing, and untracked
-  files always count, even when `status.showUntrackedFiles` says otherwise; a
-  failed check on an existing directory is a skip, not a removal.
+  again in preflight rather than trusted from the listing, and untracked files
+  always count, even when `status.showUntrackedFiles` says otherwise; a failed
+  check on an existing directory is a skip, not a removal. Anything written
+  after preflight is caught by git's own refusal inside `git worktree remove`,
+  which every invocation runs with `-c status.showUntrackedFiles=all
+  -c diff.ignoreSubmodules=none`, so that backstop counts untracked files and
+  submodules whatever the user's config says.
 - Without `force`, an existing checkout must still be on the branch the listing
   gave it. If the current branch differs, the entry is skipped as
   `checkout is no longer on <branch>`; force removes the replacement checkout
@@ -299,6 +327,8 @@ for it.
   detected, and both checkouts are kept.
 - A worktree git reports as locked is skipped as `is locked; unlock it first`
   (not forceable); the checkout and its registration stay until it is unlocked.
+  The same wording applies when the checkout's directory is already gone but
+  its registration is locked.
 - An existing checkout that contains another registered worktree is never
   removed, with or without force: it is skipped as
   `contains another worktree at <path>` (not forceable). Git would otherwise
@@ -307,6 +337,14 @@ for it.
   exists: a registration whose checkout is already gone has no nested working
   tree to protect, and removing that registration must leave the nested
   registration alone.
+- Before an existing checkout is removed (force or not), its tree is scanned,
+  without following symlinks, for a nested `.git` file or directory other than
+  the checkout's own top-level one, so an ignored clone of any repository (not
+  only a registered worktree) is found. One is skipped as
+  `contains another git checkout at <path>` (never forceable). The scan is
+  bounded by the 30-second per-command deadline; running out of time, or a
+  directory that cannot be read, is skipped as
+  `could not check for nested checkouts` (forceable), never read as clean.
 - Removal is plain `git worktree remove`, with `--force` only when the request
   asked for it, never merely because h4rn owns the checkout. Git's own contract
   applies: a removable checkout takes ignored files (build output, caches) with
@@ -342,9 +380,16 @@ for it.
   `branch <b> has unmerged commits`. It then deletes exactly that verified tip
   with `git update-ref --no-deref -d refs/heads/<b> <verified-sha>`. If
   `update-ref` fails, the ref is re-read: missing means the branch is already
-  gone and the path is reported as removed; a different tip, or one no longer
-  an ancestor, is the forceable unmerged reason; anything else is reported as
-  `checkout removed, but branch <b> could not be deleted: <git's message>`. If
+  gone and the path is reported as removed; a new tip already merged into
+  `HEAD` is the forceable `branch <b> changed during the clear`; a new tip that
+  is not merged is the forceable unmerged reason; anything else is reported as
+  `checkout removed, but branch <b> could not be deleted: <git's message>`.
+  Whether the branch exists is asked with
+  `git for-each-ref --format='%(objectname) %(refname)' refs/heads/<b>`, where
+  no exact `refs/heads/<b>` line means absent and only a git failure is an
+  error; if that lookup fails after the checkout was removed, the path is
+  reported as `checkout removed, but branch <b> could not be checked: <error>`
+  (not forceable), never as a silent removal. If
   the branch did not exist at preflight but exists now, it is left alone and
   reported as `checkout removed, but branch <b> was left in place` (not
   forceable). Before deleting, git's protections are applied explicitly: the
@@ -368,7 +413,7 @@ for it.
 - If git refuses, the entry is skipped. When `git worktree remove` reports
   `contains modified or untracked files`, that is reported as the standard
   `has uncommitted changes` reason, so a forced retry is offered exactly as for
-  our own last-moment dirty check.
+  our own preflight dirty check.
 
 An orphaned directory left by a restart shows up as `orphaned` and can be
 cleared; `restore` itself still folds a running child into `Failed` and does not

@@ -146,17 +146,22 @@ export const WORKTREE_SKIP_REASONS = {
     "has uncommitted changes",
     "could not check for uncommitted changes",
     "detached HEAD has commits on no branch",
+    "could not check for nested checkouts",
   ],
   /** `checkout is no longer on <branch>` — force removes the replacement. */
   forceablePrefixes: ["checkout is no longer on"],
-  /** `branch <name> has unmerged commits` — the only branch skip force fixes. */
-  forceableBranchSuffix: " has unmerged commits",
+  /**
+   * `branch <name> has unmerged commits` and `branch <name> changed during the
+   * clear` — the only branch skips force fixes.
+   */
+  forceableBranchSuffixes: [" has unmerged commits", " changed during the clear"],
   /** Force changes nothing here: the entry is in use, gone, or not ours. */
   blockedPrefixes: [
     "in use",
     "not tracked",
     "checkout removed, but branch",
     "contains another worktree at",
+    "contains another git checkout at",
     "is the repository's main worktree",
     "is locked",
     "its repository could not be found",
@@ -180,7 +185,8 @@ export function forceCanFix(reason: string): boolean {
     return true;
   }
   return (
-    reason.startsWith("branch ") && reason.endsWith(WORKTREE_SKIP_REASONS.forceableBranchSuffix)
+    reason.startsWith("branch ") &&
+    WORKTREE_SKIP_REASONS.forceableBranchSuffixes.some((suffix) => reason.endsWith(suffix))
   );
 }
 

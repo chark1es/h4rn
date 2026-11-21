@@ -339,11 +339,15 @@ describe("forceCanFix", () => {
     expect(forceCanFix("branch h4rn/sa-x has unmerged commits")).toBe(true);
     expect(forceCanFix("checkout is no longer on h4rn/sa-x")).toBe(true);
     expect(forceCanFix("detached HEAD has commits on no branch")).toBe(true);
+    expect(forceCanFix("could not check for nested checkouts")).toBe(true);
+    expect(forceCanFix("branch h4rn/sa-x changed during the clear")).toBe(true);
     for (const blocked of [
       "in use by Fix it",
       "not tracked",
       "checkout removed, but branch h4rn/sa-x could not be deleted: busy",
       "contains another worktree at /code/api/.claude/worktrees/child",
+      "contains another git checkout at /code/api/vendor/lib",
+      "checkout removed, but branch h4rn/sa-x could not be checked: fatal: bad ref",
       "is the repository's main worktree",
       "is locked; unlock it first",
       "its repository could not be found",

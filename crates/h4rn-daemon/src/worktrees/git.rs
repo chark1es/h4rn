@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::thread::JoinHandle;
@@ -64,10 +64,45 @@ pub struct Registration {
     pub detached: bool,
     /// Git considers the registration stale because the directory is gone.
     pub prunable: bool,
+    /// The registration is locked (`git worktree lock`).
+    pub locked: bool,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: the git program this thread runs instead of `git`.
+    pub static GIT_PROGRAM: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+    /// Test-only: read registrations from git's metadata on this thread, as
+    /// for a git that rejects `worktree list -z`.
+    pub static FORCE_METADATA_FALLBACK: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn program() -> std::ffi::OsString {
+    GIT_PROGRAM
+        .with(|program| program.borrow().clone())
+        .map_or_else(|| "git".into(), PathBuf::into_os_string)
+}
+
+#[cfg(not(test))]
+fn program() -> &'static str {
+    "git"
+}
+
+#[cfg(test)]
+fn forced_metadata_fallback() -> bool {
+    FORCE_METADATA_FALLBACK.with(std::cell::Cell::get)
+}
+
+#[cfg(not(test))]
+const fn forced_metadata_fallback() -> bool {
+    false
 }
 
 fn command(dir: &Path) -> Command {
-    let mut command = Command::new("git");
+    let mut command = Command::new(program());
     // Read-only inspection must never wait on the index lock or a prompt.
     command
         .env("GIT_OPTIONAL_LOCKS", "0")
@@ -125,6 +160,37 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    let (status, stdout, stderr) = run_raw(dir, args, limit)?;
+    if status.success() {
+        Ok(stdout)
+    } else {
+        Err(failure_message(status, &stderr))
+    }
+}
+
+/// Git's trimmed stderr, or its exit status when stderr is empty.
+fn failure_message(status: ExitStatus, stderr: &[u8]) -> String {
+    let stderr = String::from_utf8_lossy(stderr);
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        format!("git exited with {status}")
+    } else {
+        stderr.to_owned()
+    }
+}
+
+/// Runs git with a deadline and returns its exit status, stdout and stderr.
+///
+/// `Err` only when git could not be run or the deadline passed.
+fn run_raw<I, S>(
+    dir: &Path,
+    args: I,
+    limit: Duration,
+) -> Result<(ExitStatus, Vec<u8>, Vec<u8>), String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     let mut child = command(dir)
         .args(args)
         .stdout(Stdio::piped())
@@ -171,17 +237,32 @@ where
     let Some(status) = status else {
         return Err(timeout_message(limit));
     };
-    if status.success() {
-        Ok(stdout)
-    } else {
-        let stderr = String::from_utf8_lossy(&stderr);
-        let stderr = stderr.trim();
-        Err(if stderr.is_empty() {
-            format!("git exited with {status}")
-        } else {
-            stderr.to_owned()
-        })
+    Ok((status, stdout, stderr))
+}
+
+/// Runs git for one path-valued answer (`rev-parse --show-toplevel` and the
+/// like), keeping the path byte-exact.
+///
+/// Only the single trailing newline git adds is stripped, never other
+/// whitespace, so a directory named `checkout ` stays distinct from
+/// `checkout`. Output that is not valid UTF-8 is an error rather than a lossy
+/// path: the protocol carries paths as strings, so such a path is skipped.
+pub fn run_path_with_timeout<I, S>(dir: &Path, args: I, limit: Duration) -> Result<PathBuf, String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    path_output(run_bytes_with_timeout(dir, args, limit)?)
+}
+
+/// A path from git's stdout: one trailing newline stripped, UTF-8 required.
+fn path_output(mut bytes: Vec<u8>) -> Result<PathBuf, String> {
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
     }
+    String::from_utf8(bytes)
+        .map(PathBuf::from)
+        .map_err(|_| "git printed a path that is not valid UTF-8".to_owned())
 }
 
 /// How long output may still be arriving after the child is gone.
@@ -308,23 +389,7 @@ fn strip_verbatim(path: PathBuf) -> PathBuf {
 /// `None` for a non-repository, a bare repository or a submodule. Bounded by
 /// [`OBSERVATION_GIT_TIMEOUT`] because the observation watcher calls it.
 pub(crate) fn repo_of(workspace: &Path) -> Option<PathBuf> {
-    let common = match run_with_timeout(
-        workspace,
-        ["rev-parse", "--git-common-dir"],
-        OBSERVATION_GIT_TIMEOUT,
-    ) {
-        Ok(common) => common,
-        Err(error) => {
-            if timed_out(&error) {
-                tracing::debug!(
-                    %error,
-                    workspace = %workspace.display(),
-                    "repository lookup timed out"
-                );
-            }
-            return None;
-        }
-    };
+    let common = observed_path(workspace, "--git-common-dir")?;
     let common = norm(&workspace.join(common));
     if common.file_name()? == ".git" {
         common.parent().map(Path::to_path_buf)
@@ -333,12 +398,31 @@ pub(crate) fn repo_of(workspace: &Path) -> Option<PathBuf> {
     }
 }
 
+/// One `rev-parse` path for the observation watcher, byte-exact and bounded by
+/// [`OBSERVATION_GIT_TIMEOUT`]; `None` when git fails or the path is not UTF-8.
+fn observed_path(workspace: &Path, flag: &str) -> Option<PathBuf> {
+    match run_path_with_timeout(workspace, ["rev-parse", flag], OBSERVATION_GIT_TIMEOUT) {
+        Ok(path) => (!path.as_os_str().is_empty()).then_some(path),
+        Err(error) => {
+            if timed_out(&error) {
+                tracing::debug!(
+                    %error,
+                    workspace = %workspace.display(),
+                    flag,
+                    "git path lookup timed out"
+                );
+            }
+            None
+        }
+    }
+}
+
 /// The common git directory of `repo`, normalised.
 ///
 /// Bounded by the caller's deadline because clearing uses it to inspect the
 /// worktree admin directories for an in-progress rebase or bisect.
 pub fn common_dir(repo: &Path, limit: Duration) -> Result<PathBuf, String> {
-    let common = run_with_timeout(repo, ["rev-parse", "--git-common-dir"], limit)?;
+    let common = run_path_with_timeout(repo, ["rev-parse", "--git-common-dir"], limit)?;
     Ok(norm(&repo.join(common)))
 }
 
@@ -347,32 +431,18 @@ pub fn common_dir(repo: &Path, limit: Duration) -> Result<PathBuf, String> {
 /// Bounded by [`OBSERVATION_GIT_TIMEOUT`] because the observation watcher
 /// calls it.
 pub fn toplevel(workspace: &Path) -> Option<PathBuf> {
-    match run_with_timeout(
-        workspace,
-        ["rev-parse", "--show-toplevel"],
-        OBSERVATION_GIT_TIMEOUT,
-    ) {
-        Ok(top) => (!top.is_empty()).then(|| norm(Path::new(&top))),
-        Err(error) => {
-            if timed_out(&error) {
-                tracing::debug!(
-                    %error,
-                    workspace = %workspace.display(),
-                    "checkout top-level lookup timed out"
-                );
-            }
-            None
-        }
-    }
+    observed_path(workspace, "--show-toplevel").map(|top| norm(&top))
 }
 
 /// Whether `workspace` is a linked worktree rather than a main checkout.
+///
+/// The two directories are asked for separately so each path is read
+/// byte-exact; a combined answer would have to be split on newlines.
 pub fn is_linked_worktree(workspace: &Path) -> bool {
-    let Ok(out) = run(workspace, ["rev-parse", "--git-dir", "--git-common-dir"]) else {
-        return false;
-    };
-    let mut lines = out.lines();
-    let (Some(dir), Some(common)) = (lines.next(), lines.next()) else {
+    let (Some(dir), Some(common)) = (
+        observed_path(workspace, "--git-dir"),
+        observed_path(workspace, "--git-common-dir"),
+    ) else {
         return false;
     };
     norm(&workspace.join(dir)) != norm(&workspace.join(common))
@@ -416,98 +486,145 @@ static PORCELAIN_Z: AtomicU8 = AtomicU8::new(PORCELAIN_Z_UNKNOWN);
 
 /// [`registrations`], with an explicit deadline for clearing.
 ///
-/// `-z` (git 2.36+) is used when available. An older git rejects the switch
-/// with a usage error, and then the line-based `--porcelain` form is parsed
-/// instead; which form works is cached for the rest of the process.
+/// `-z` (git 2.36+) is used when available. An older git rejects the switch,
+/// and then git's own registration metadata is read instead (see
+/// [`registrations_from_metadata`]); which form works is cached for the rest
+/// of the process.
 pub fn registrations_with_timeout(
     repo: &Path,
     limit: Duration,
 ) -> Result<Vec<Registration>, String> {
-    if PORCELAIN_Z.load(Ordering::Relaxed) == PORCELAIN_Z_UNSUPPORTED {
-        return registrations_line_based(repo, limit);
+    if forced_metadata_fallback() || PORCELAIN_Z.load(Ordering::Relaxed) == PORCELAIN_Z_UNSUPPORTED
+    {
+        return registrations_from_metadata(repo, limit);
     }
-    match run_bytes_with_timeout(repo, ["worktree", "list", "--porcelain", "-z"], limit) {
-        Ok(out) => {
+    match porcelain_z(repo, limit)? {
+        Some(registrations) => {
             PORCELAIN_Z.store(PORCELAIN_Z_WORKS, Ordering::Relaxed);
-            Ok(parse_registrations(&out))
+            Ok(registrations)
         }
-        Err(error) if unsupported_porcelain_z(&error) => {
+        None => {
             PORCELAIN_Z.store(PORCELAIN_Z_UNSUPPORTED, Ordering::Relaxed);
-            registrations_line_based(repo, limit)
+            registrations_from_metadata(repo, limit)
         }
-        Err(error) => Err(error),
+    }
+}
+
+/// `git worktree list --porcelain -z`, parsed; `Ok(None)` when this git
+/// rejects `-z`.
+pub(crate) fn porcelain_z(
+    repo: &Path,
+    limit: Duration,
+) -> Result<Option<Vec<Registration>>, String> {
+    let (status, stdout, stderr) = run_raw(repo, ["worktree", "list", "--porcelain", "-z"], limit)?;
+    if status.success() {
+        return Ok(Some(parse_registrations(&stdout)));
+    }
+    let message = failure_message(status, &stderr);
+    if unsupported_porcelain_z(status.code(), &message) {
+        Ok(None)
+    } else {
+        Err(message)
     }
 }
 
 /// Whether a failed `-z` call means the installed git predates 2.36.
 ///
-/// Old git prints its usage block (or `unknown switch`) and exits 129. A
-/// timeout or a repository error is not a fallback signal.
-fn unsupported_porcelain_z(error: &str) -> bool {
-    error.contains("unknown switch")
-        || error.contains("unknown option")
-        || error.contains("usage:")
-        || error.contains("exit status: 129")
+/// Only an `unknown switch`/`unknown option` error naming `z`, or exit status
+/// 129 (git's usage exit) with `worktree` in the usage text, counts. A bare
+/// `usage:` from anything else, a timeout or a repository error is not a
+/// fallback signal.
+fn unsupported_porcelain_z(code: Option<i32>, stderr: &str) -> bool {
+    let names_z = stderr.lines().any(|line| {
+        (line.contains("unknown switch") || line.contains("unknown option"))
+            && (line.contains("`z'") || line.contains("'z'"))
+    });
+    names_z || (code == Some(129) && stderr.contains("worktree"))
 }
 
-/// The `git worktree list --porcelain` form for a git older than 2.36.
-fn registrations_line_based(repo: &Path, limit: Duration) -> Result<Vec<Registration>, String> {
-    let out = run_with_timeout(repo, ["worktree", "list", "--porcelain"], limit)?;
-    Ok(parse_registrations_lines(&out))
-}
-
-/// Parses line-based `git worktree list --porcelain` output.
+/// Every registration, read from git's metadata rather than parsed output.
 ///
-/// Blocks are separated by blank lines and are read the same way the `-z`
-/// parser reads its fields. A path containing a newline cannot survive this
-/// form, which is exactly why it is only the fallback for old git.
-pub fn parse_registrations_lines(out: &str) -> Vec<Registration> {
+/// The fallback for a git older than 2.36, and byte-exact on every version:
+/// `<common>/worktrees/<id>/gitdir` holds the absolute path of the linked
+/// worktree's `.git` file (only the final newline is stripped; the worktree is
+/// its parent), `<id>/HEAD` is `ref: refs/heads/<b>` or a detached sha,
+/// `<id>/locked` marks a lock, and a `gitdir` target that no longer exists
+/// makes the registration prunable. The main worktree is the parent of
+/// `<common>` for a non-bare repository. A path that is not valid UTF-8 is
+/// skipped.
+pub(crate) fn registrations_from_metadata(
+    repo: &Path,
+    limit: Duration,
+) -> Result<Vec<Registration>, String> {
+    let common = common_dir(repo, limit)?;
     let mut registrations = Vec::new();
-    let mut current: Option<Registration> = None;
-    for line in out.lines() {
-        if line.is_empty() {
-            if let Some(registration) = current.take() {
-                registrations.push(registration);
-            }
-            continue;
-        }
-        if let Some(value) = line.strip_prefix("worktree ") {
-            // A field may only start a record, but flushing here also keeps a
-            // malformed stream from merging two worktrees into one.
-            if let Some(registration) = current.take() {
-                registrations.push(registration);
-            }
-            current = Some(Registration {
-                path: norm(Path::new(value)),
-                branch: None,
-                head: None,
-                detached: false,
-                prunable: false,
-            });
-            continue;
-        }
-        let Some(registration) = current.as_mut() else {
+    if common.file_name().is_some_and(|name| name == ".git")
+        && let Some(main) = common.parent()
+    {
+        let (branch, head, detached) = read_head(&common.join("HEAD"));
+        registrations.push(Registration {
+            path: norm(main),
+            branch,
+            head,
+            detached,
+            prunable: false,
+            locked: false,
+        });
+    }
+    let admin_root = common.join("worktrees");
+    let entries = match std::fs::read_dir(&admin_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(registrations),
+        Err(error) => return Err(format!("could not read {}: {error}", admin_root.display())),
+    };
+    for entry in entries {
+        let admin = entry
+            .map_err(|error| format!("could not read {}: {error}", admin_root.display()))?
+            .path();
+        let Ok(bytes) = std::fs::read(admin.join("gitdir")) else {
             continue;
         };
-        if let Some(value) = line.strip_prefix("branch ") {
-            registration.branch = Some(
-                value
+        let Ok(gitdir) = path_output(bytes) else {
+            continue;
+        };
+        // Relative `gitdir` files (newer git's `worktree.useRelativePaths`)
+        // are relative to the admin directory; an absolute one replaces it.
+        let gitdir = admin.join(gitdir);
+        let Some(path) = gitdir.parent() else {
+            continue;
+        };
+        let (branch, head, detached) = read_head(&admin.join("HEAD"));
+        registrations.push(Registration {
+            path: norm(path),
+            branch,
+            head,
+            detached,
+            prunable: !gitdir.exists(),
+            locked: admin.join("locked").exists(),
+        });
+    }
+    Ok(registrations)
+}
+
+/// Reads a `HEAD` file: `(branch, detached sha, detached)`.
+fn read_head(path: &Path) -> (Option<String>, Option<String>, bool) {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return (None, None, false);
+    };
+    let text = text.trim();
+    match text.strip_prefix("ref: ") {
+        Some(reference) => (
+            Some(
+                reference
                     .strip_prefix("refs/heads/")
-                    .unwrap_or(value)
+                    .unwrap_or(reference)
                     .to_owned(),
-            );
-        } else if let Some(value) = line.strip_prefix("HEAD ") {
-            registration.head = Some(value.trim().to_owned());
-        } else if line == "detached" {
-            registration.detached = true;
-        } else if line.starts_with("prunable") {
-            registration.prunable = true;
-        }
+            ),
+            None,
+            false,
+        ),
+        None => (None, Some(text.to_owned()), true),
     }
-    if let Some(registration) = current.take() {
-        registrations.push(registration);
-    }
-    registrations
 }
 
 /// Parses `git worktree list --porcelain -z` output.
@@ -537,6 +654,7 @@ pub fn parse_registrations(out: &[u8]) -> Vec<Registration> {
                 head: None,
                 detached: false,
                 prunable: false,
+                locked: false,
             });
             continue;
         }
@@ -557,6 +675,8 @@ pub fn parse_registrations(out: &[u8]) -> Vec<Registration> {
             registration.detached = true;
         } else if field.starts_with(b"prunable") {
             registration.prunable = true;
+        } else if field == b"locked" || field.starts_with(b"locked ") {
+            registration.locked = true;
         }
     }
     if let Some(registration) = current.take() {
