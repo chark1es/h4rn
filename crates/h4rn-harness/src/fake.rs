@@ -7,8 +7,8 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -42,6 +42,12 @@ pub struct FakeHarness {
     start_gate: Option<Gate>,
     /// A test-only message: after the start gate, `start_session` fails.
     start_failure: Option<String>,
+    /// How many startups fail before one succeeds; `None` fails every one.
+    start_failure_budget: Option<usize>,
+    /// Startups attempted so far, so a budget can count down.
+    start_attempts: Option<Arc<AtomicUsize>>,
+    /// The model of every session this harness actually started.
+    session_models: Option<SessionModels>,
     /// A test-only latch between a `send`'s prompt and its completion.
     completion_gate: Option<Gate>,
     /// Whether the completion gate also holds the session's first send. Off
@@ -53,6 +59,12 @@ pub struct FakeHarness {
     shutdown_count: Option<ShutdownCount>,
     /// A test-only switch: prompts after the first `n` fail as a dead transport.
     dead_sends_after: Option<usize>,
+    /// A test-only latch before a session's event stream ends.
+    stream_end_gate: Option<Gate>,
+    /// A test-only latch before a dead send's trailing `TurnCompleted`.
+    trailing_completion_gate: Option<Gate>,
+    /// A test-only stderr tail the session reports with its failures.
+    stderr: Option<String>,
 }
 
 /// A shared count of prompts a fake session was asked to write.
@@ -93,6 +105,23 @@ impl ShutdownCount {
     /// How many sessions the fake harness has shut down so far.
     pub fn get(&self) -> usize {
         self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// The model every session a fake harness started was asked to run.
+///
+/// A test reads it to prove a model change superseded an in-flight startup
+/// instead of attaching the session that was booting the old model.
+#[derive(Clone, Debug, Default)]
+pub struct SessionModels(Arc<Mutex<Vec<String>>>);
+
+impl SessionModels {
+    /// The models of the sessions started so far, in order.
+    pub fn get(&self) -> Vec<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
@@ -190,11 +219,17 @@ impl Default for FakeHarness {
             interrupt_count: None,
             start_gate: None,
             start_failure: None,
+            start_failure_budget: None,
+            start_attempts: None,
+            session_models: None,
             completion_gate: None,
             completion_gate_first_send: true,
             session_count: None,
             shutdown_count: None,
             dead_sends_after: None,
+            stream_end_gate: None,
+            trailing_completion_gate: None,
+            stderr: None,
         }
     }
 }
@@ -319,6 +354,52 @@ impl FakeHarness {
         self
     }
 
+    /// Fails only the first `start_session` with `message`; later ones succeed.
+    ///
+    /// A test uses this to prove a failed startup does not strand the turn that
+    /// was queued behind it: the retry has to reach a working session.
+    pub fn with_start_failure_once(mut self, message: impl Into<String>) -> Self {
+        self.start_failure = Some(message.into());
+        self.start_failure_budget = Some(1);
+        self.start_attempts = Some(Arc::new(AtomicUsize::new(0)));
+        self
+    }
+
+    /// Records the model of every session this harness starts.
+    pub fn with_session_models(mut self) -> (Self, SessionModels) {
+        let models = SessionModels::default();
+        self.session_models = Some(models.clone());
+        (self, models)
+    }
+
+    /// Ends the session's event stream once the returned gate is released.
+    ///
+    /// A test uses this to order "the agent exits after this turn" against
+    /// something else it does first.
+    pub fn with_stream_end_gate(mut self) -> (Self, Gate) {
+        let gate = Gate::new();
+        self.stream_end_gate = Some(gate.clone());
+        (self, gate)
+    }
+
+    /// Emits a trailing `TurnCompleted{Failed}` on a dead send, once the
+    /// returned gate is released.
+    ///
+    /// The real ACP adapter reports both the writer error and, after it, a
+    /// failed completion from its stream. A test uses the gate to deliver that
+    /// second report after the daemon has already settled the turn.
+    pub fn with_trailing_failed_completion(mut self) -> (Self, Gate) {
+        let gate = Gate::new();
+        self.trailing_completion_gate = Some(gate.clone());
+        (self, gate)
+    }
+
+    /// Reports this stderr tail from the session's failures.
+    pub fn with_stderr_tail(mut self, tail: impl Into<String>) -> Self {
+        self.stderr = Some(tail.into());
+        self
+    }
+
     /// Holds a turn's completion until the returned [`Gate`] is released.
     ///
     /// `send` still returns and its prompt still counts, but the synthetic
@@ -379,14 +460,27 @@ impl Harness for FakeHarness {
         if let Some(count) = &self.session_count {
             count.0.fetch_add(1, Ordering::SeqCst);
         }
+        if let Some(models) = &self.session_models {
+            models
+                .0
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(spec.model.clone());
+        }
         if let Some(gate) = &self.start_gate {
             gate.wait().await;
         }
         if let Some(message) = &self.start_failure {
-            return Err(HarnessError::Transport {
-                harness: self.kind,
-                message: message.clone(),
-            });
+            let fail = match (self.start_attempts.as_ref(), self.start_failure_budget) {
+                (Some(attempts), Some(budget)) => attempts.fetch_add(1, Ordering::SeqCst) < budget,
+                _ => true,
+            };
+            if fail {
+                return Err(HarnessError::Transport {
+                    harness: self.kind,
+                    message: message.clone(),
+                });
+            }
         }
 
         let (sender, receiver) = unbounded();
@@ -394,7 +488,7 @@ impl Harness for FakeHarness {
             .resume_id
             .clone()
             .unwrap_or_else(|| format!("fake-{}", uuid_like(&spec.workspace)));
-        send(&sender, HarnessEvent::SessionStarted { session_id });
+        let _ = sender.unbounded_send(HarnessEvent::SessionStarted { session_id });
 
         let session_scripts = self.session_scripts.clone();
         let primed = session_scripts.is_some();
@@ -405,7 +499,7 @@ impl Harness for FakeHarness {
         let scripted = session_scripts.is_some() || self.script.is_some();
         if scripted {
             for event in &initial {
-                send(&sender, event.clone());
+                let _ = sender.unbounded_send(event.clone());
             }
         }
 
@@ -421,7 +515,7 @@ impl Harness for FakeHarness {
         Ok(Box::new(FakeSession {
             kind: self.kind,
             workspace: spec.workspace,
-            sender,
+            sender: Some(sender),
             receiver: Some(receiver),
             script: self.script.clone(),
             session_scripts,
@@ -438,6 +532,9 @@ impl Harness for FakeHarness {
             completion_gate_first_send: self.completion_gate_first_send,
             interrupted: Arc::new(AtomicBool::new(false)),
             shutdown_count: self.shutdown_count.clone(),
+            stream_end_gate: self.stream_end_gate.clone(),
+            trailing_completion_gate: self.trailing_completion_gate.clone(),
+            stderr: self.stderr.clone().unwrap_or_default(),
             closed: false,
         }))
     }
@@ -447,7 +544,9 @@ impl Harness for FakeHarness {
 pub struct FakeSession {
     kind: HarnessKind,
     workspace: PathBuf,
-    sender: UnboundedSender<HarnessEvent>,
+    /// The stream's producer. `None` (or dropped) ends the stream after the
+    /// events already queued.
+    sender: Option<UnboundedSender<HarnessEvent>>,
     receiver: Option<UnboundedReceiver<HarnessEvent>>,
     script: Option<Vec<HarnessEvent>>,
     session_scripts: Option<Arc<SessionScripts>>,
@@ -479,6 +578,12 @@ pub struct FakeSession {
     interrupted: Arc<AtomicBool>,
     /// A shared count of shutdowns this session reported.
     shutdown_count: Option<ShutdownCount>,
+    /// A test-controlled latch before the stream ends.
+    stream_end_gate: Option<Gate>,
+    /// A test-controlled latch before a dead send's trailing completion.
+    trailing_completion_gate: Option<Gate>,
+    /// The stderr tail this session reports.
+    stderr: String,
     closed: bool,
 }
 
@@ -517,13 +622,23 @@ impl HarnessSession for FakeSession {
             // closed so the daemon detaches this session. A real adapter reports
             // the transport failure on its own stream, so the fake does too.
             self.closed = true;
-            send(
-                &self.sender,
-                HarnessEvent::Error {
-                    message: "the harness transport closed".into(),
-                    retryable: false,
-                },
-            );
+            self.emit(HarnessEvent::Error {
+                message: "the harness transport closed".into(),
+                retryable: false,
+            });
+            if let Some(gate) = self.trailing_completion_gate.clone() {
+                let sender = self.sender.clone();
+                tokio::spawn(async move {
+                    gate.wait().await;
+                    send_opt(
+                        &sender,
+                        HarnessEvent::TurnCompleted {
+                            status: TurnStatus::Failed,
+                            usage: Usage::default(),
+                        },
+                    );
+                });
+            }
             return Err(HarnessError::Transport {
                 harness: self.kind,
                 message: "the harness transport closed".into(),
@@ -542,7 +657,7 @@ impl HarnessSession for FakeSession {
                 return Ok(());
             }
             for event in scripts.next_script() {
-                send(&self.sender, event);
+                self.emit(event);
             }
             return Ok(());
         }
@@ -565,22 +680,19 @@ impl HarnessSession for FakeSession {
             // the whole `send` call.
             let now = chrono::Utc::now();
             let tool_call_id = format!("fake-edit-{now}");
-            send(
-                &self.sender,
-                HarnessEvent::ToolCall {
-                    tool_call: ToolCall {
-                        tool_call_id: tool_call_id.clone(),
-                        name: "Edit".into(),
-                        status: ToolCallStatus::Running,
-                        summary: path.to_owned(),
-                        input: Some(serde_json::json!({ "path": path })),
-                        output: None,
-                        started_at: now,
-                        completed_at: None,
-                        stats: None,
-                    },
+            self.emit(HarnessEvent::ToolCall {
+                tool_call: ToolCall {
+                    tool_call_id: tool_call_id.clone(),
+                    name: "Edit".into(),
+                    status: ToolCallStatus::Running,
+                    summary: path.to_owned(),
+                    input: Some(serde_json::json!({ "path": path })),
+                    output: None,
+                    started_at: now,
+                    completed_at: None,
+                    stats: None,
                 },
-            );
+            });
             let sender = self.sender.clone();
             let workspace = self.workspace.clone();
             let usage = usage_for(&input.text);
@@ -594,7 +706,7 @@ impl HarnessSession for FakeSession {
                     None => tokio::time::sleep(std::time::Duration::from_millis(400)).await,
                 }
                 if let Some((written, stats)) = apply_write_directive(&workspace, &text) {
-                    send(
+                    send_opt(
                         &sender,
                         HarnessEvent::ToolCall {
                             tool_call: ToolCall {
@@ -610,26 +722,26 @@ impl HarnessSession for FakeSession {
                             },
                         },
                     );
-                    send(
+                    send_opt(
                         &sender,
                         HarnessEvent::TextDelta {
                             text: format!("wrote {written}"),
                         },
                     );
                 }
-                send(
+                send_opt(
                     &sender,
                     HarnessEvent::TextDelta {
                         text: format!("echo: {text}"),
                     },
                 );
-                send(
+                send_opt(
                     &sender,
                     HarnessEvent::Usage {
                         usage: usage.clone(),
                     },
                 );
-                send(
+                send_opt(
                     &sender,
                     HarnessEvent::TurnCompleted {
                         status: TurnStatus::Completed,
@@ -640,21 +752,15 @@ impl HarnessSession for FakeSession {
             return Ok(());
         }
 
-        send(
-            &self.sender,
-            HarnessEvent::TextDelta {
-                text: format!("echo: {}", input.text),
-            },
-        );
+        self.emit(HarnessEvent::TextDelta {
+            text: format!("echo: {}", input.text),
+        });
         // Deterministic, plausible numbers so the UI's token, cost and
         // throughput surfaces have something real to render in e2e tests.
         let usage = usage_for(&input.text);
-        send(
-            &self.sender,
-            HarnessEvent::Usage {
-                usage: usage.clone(),
-            },
-        );
+        self.emit(HarnessEvent::Usage {
+            usage: usage.clone(),
+        });
         // Tests opt into a limit with a prompt marker; the reset delay comes
         // from the environment so a test can keep the countdown on screen.
         if input.text.contains("[h4rn-limit]") {
@@ -662,15 +768,12 @@ impl HarnessSession for FakeSession {
                 .ok()
                 .and_then(|value| value.parse::<i64>().ok())
                 .unwrap_or(60_000);
-            send(
-                &self.sender,
-                HarnessEvent::LimitHit {
-                    reset_at: Some(
-                        chrono::Utc::now() + chrono::Duration::milliseconds(reset_ms.max(1)),
-                    ),
-                    auto_resume: true,
-                },
-            );
+            self.emit(HarnessEvent::LimitHit {
+                reset_at: Some(
+                    chrono::Utc::now() + chrono::Duration::milliseconds(reset_ms.max(1)),
+                ),
+                auto_resume: true,
+            });
         }
         self.complete(
             HarnessEvent::TurnCompleted {
@@ -687,13 +790,10 @@ impl HarnessSession for FakeSession {
             count.0.fetch_add(1, Ordering::SeqCst);
         }
         self.interrupted.store(true, Ordering::SeqCst);
-        send(
-            &self.sender,
-            HarnessEvent::TurnCompleted {
-                status: TurnStatus::Interrupted,
-                usage: Usage::default(),
-            },
-        );
+        self.emit(HarnessEvent::TurnCompleted {
+            status: TurnStatus::Interrupted,
+            usage: Usage::default(),
+        });
         Ok(())
     }
 
@@ -703,23 +803,27 @@ impl HarnessSession for FakeSession {
         decision: ApprovalDecision,
         option_id: Option<&str>,
     ) -> Result<(), HarnessError> {
-        send(
-            &self.sender,
-            HarnessEvent::TextDelta {
-                text: match option_id {
-                    Some(option) => {
-                        format!("approval {approval_id}: {decision:?} ({option})")
-                    }
-                    None => format!("approval {approval_id}: {decision:?}"),
-                },
+        self.emit(HarnessEvent::TextDelta {
+            text: match option_id {
+                Some(option) => {
+                    format!("approval {approval_id}: {decision:?} ({option})")
+                }
+                None => format!("approval {approval_id}: {decision:?}"),
             },
-        );
+        });
         Ok(())
     }
 
     fn events(&mut self) -> BoxStream<'static, HarnessEvent> {
         match self.receiver.take() {
-            Some(receiver) => receiver.boxed(),
+            // A test can hold the end of the stream open, so "the agent exited
+            // after this turn" is ordered against everything else it does.
+            Some(receiver) => match self.stream_end_gate.clone() {
+                Some(gate) => receiver
+                    .take_until(async move { gate.wait().await })
+                    .boxed(),
+                None => receiver.boxed(),
+            },
             None => futures::stream::empty().boxed(),
         }
     }
@@ -737,9 +841,18 @@ impl HarnessSession for FakeSession {
         // session is dropped so an in-flight event is not lost.
         Ok(())
     }
+
+    fn stderr_tail(&self) -> String {
+        self.stderr.clone()
+    }
 }
 
 impl FakeSession {
+    /// Queues one event on this session's stream.
+    fn emit(&self, event: HarnessEvent) {
+        send_opt(&self.sender, event);
+    }
+
     /// Sends a turn's completion, optionally behind the completion gate.
     ///
     /// A gated completion waits until the test releases it, and is dropped when
@@ -753,19 +866,21 @@ impl FakeSession {
                 tokio::spawn(async move {
                     gate.wait().await;
                     if !interrupted.load(Ordering::SeqCst) {
-                        send(&sender, event);
+                        send_opt(&sender, event);
                     }
                 });
             }
-            _ => send(&self.sender, event),
+            _ => self.emit(event),
         }
     }
 }
 
-fn send(sender: &UnboundedSender<HarnessEvent>, event: HarnessEvent) {
+fn send_opt(sender: &Option<UnboundedSender<HarnessEvent>>, event: HarnessEvent) {
     // A closed receiver means the consumer went away; that is not an error for
     // the fake session, and the daemon handles the same case by shutting down.
-    let _ = sender.unbounded_send(event);
+    if let Some(sender) = sender {
+        let _ = sender.unbounded_send(event);
+    }
 }
 
 fn uuid_like(path: &std::path::Path) -> String {

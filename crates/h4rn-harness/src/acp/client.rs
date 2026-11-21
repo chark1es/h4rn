@@ -913,16 +913,16 @@ where
             };
             bytes.push(b'\n');
             if let Err(error) = stdin.write_all(&bytes).await {
+                // Mark the transport closed and stop the process group before
+                // waking any caller: a prompt that observes this failure must
+                // never find an open client or a live agent behind it.
+                close_transport(&shared);
                 fail_pending(
                     &shared,
                     AcpError::Closed {
                         message: format!("the ACP agent stdin stopped accepting frames: {error}"),
                     },
                 );
-                // A half-written transport is dead: report the client closed so
-                // the daemon detaches it instead of writing into a broken pipe.
-                shared.shutting_down.store(true, Ordering::SeqCst);
-                *lock(&shared.stdin_tx) = None;
                 let _ = shared
                     .events_tx
                     .send(AcpEvent::Error {
@@ -933,14 +933,13 @@ where
                 break;
             }
             if let Err(error) = stdin.flush().await {
+                close_transport(&shared);
                 fail_pending(
                     &shared,
                     AcpError::Closed {
                         message: format!("the ACP agent stdin stopped accepting frames: {error}"),
                     },
                 );
-                shared.shutting_down.store(true, Ordering::SeqCst);
-                *lock(&shared.stdin_tx) = None;
                 let _ = shared
                     .events_tx
                     .send(AcpEvent::Error {
@@ -1170,16 +1169,25 @@ async fn send_from_reader(shared: &Arc<Shared>, frame: Value) -> Result<(), AcpE
     }
 }
 
+/// Marks a dead transport closed and kills the agent's process group.
+///
+/// Splitting this from [`fail_pending`] lets a caller publish the closed state
+/// and the process cleanup before any waiting call can observe its error. The
+/// writer task calls it on itself, so it never aborts the writer here.
+fn close_transport(shared: &Arc<Shared>) {
+    shared.shutting_down.store(true, Ordering::SeqCst);
+    *lock(&shared.stdin_tx) = None;
+    if let Some(pid) = shared.pid {
+        signal_group(pid, GroupSignal::Kill);
+    }
+}
+
 /// Tears a stuck transport down: no later frame may reach the agent, and the
 /// process is killed so nothing keeps talking to a pipe nobody drains.
 fn teardown_transport(shared: &Arc<Shared>, message: String) {
-    shared.shutting_down.store(true, Ordering::SeqCst);
-    *lock(&shared.stdin_tx) = None;
+    close_transport(shared);
     if let Some(writer) = lock(&shared.writer).take() {
         writer.abort();
-    }
-    if let Some(pid) = shared.pid {
-        signal_group(pid, GroupSignal::Kill);
     }
     fail_pending(
         shared,
@@ -1835,7 +1843,6 @@ mod tests {
 
     /// A writer whose stdin refuses every frame, like a pipe whose reader died.
     struct BrokenWriter;
-
     impl AsyncWrite for BrokenWriter {
         fn poll_write(
             self: std::pin::Pin<&mut Self>,
@@ -1891,6 +1898,59 @@ mod tests {
             .shutdown()
             .await
             .expect("shutting down a dead writer is not an error");
+    }
+
+    /// A writer I/O error closes the client and kills the agent before it wakes
+    /// a waiting caller: an agent that closed stdin but stayed alive must not
+    /// survive, and the daemon must never see an open client behind the error.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_writer_io_error_closes_the_client_and_kills_the_agent() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        // The agent closes its own stdin but keeps running, so the client's
+        // next write fails as a broken pipe while the process is still alive.
+        let config =
+            AcpClientConfig::new("/bin/sh", workspace.path()).args(["-c", "exec 0<&-; sleep 30"]);
+        let client = AcpClient::spawn(config).expect("spawn the agent");
+        let pid = client.pid().expect("a child process");
+        let _events = client.take_events().expect("events");
+
+        // Early frames fit in the pipe buffer, so keep writing until the shell
+        // has closed stdin and the writer sees the failure.
+        let mut failed = false;
+        for _ in 0..200 {
+            if client
+                .start_prompt("s-1", &[PromptContent::text("ping")])
+                .await
+                .is_err()
+            {
+                failed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(failed, "the writer must notice the closed stdin");
+        assert!(
+            client.is_closed(),
+            "the client is already closed when the caller sees the error"
+        );
+
+        // The process group is killed, not just the pipe abandoned.
+        let gone = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                // SAFETY: signal 0 only probes whether the process exists.
+                if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(
+            gone.is_ok(),
+            "the agent process is gone after the writer I/O error"
+        );
+        client.shutdown().await.expect("shutdown");
     }
 
     #[tokio::test(start_paused = true)]

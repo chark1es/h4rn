@@ -44,8 +44,29 @@ All notable changes to h4rn are recorded here. The format follows
   write deadline or a shutdown no longer adds a second exit-error row. Replies the ACP reader sends
   while answering the agent queue under the same deadline as every other frame, so a full writer
   queue cannot park the reader.
-- **A turn stopped by `max_tokens` or `max_turn_requests` is no longer shown as completed.** The
-  turn footer says "Stopped: the agent hit its token limit" (or its turn-request limit) even when
+- **A failed startup no longer strands the turn waiting behind it.** When a startup fails after its
+  turn was stopped (or after the thread moved on), the message queued behind that turn, or sent
+  after the stop, is still promoted and delivered on a fresh agent instead of staying Working with
+  no session.
+- **A session's event pump speaks only for its own session.** Every pump carries the generation of
+  the session it serves and drops its events once the thread has detached that session; every
+  detach stops the pump. A late `TurnCompleted` from a dead transport can therefore no longer fail
+  the turn that replaced it, and a stream that ends while a promoted turn's prompt was never
+  written leaves that turn for a fresh session instead of failing it.
+- **Only the same transport death is collapsed into one error row.** The ACP bridge's writer-error
+  row and the daemon's failed-write row for that death remain one failure, but an unrelated harness
+  error earlier in the turn no longer hides a later one, and the row published when a session ends
+  mid-turn keeps its stderr hint.
+- **A writer I/O error closes the ACP client and kills the agent before waking a caller.** An agent
+  that closed its stdin but stayed alive can no longer survive under a client the daemon still
+  believes is open, so the prompt that observes the error always finds a closed, dead transport.
+- **A model change during a startup discards that startup.** Failing over while a session is still
+  booting the limited model supersedes the startup, so the resume runs on a session started with
+  the new model instead of the one that was already on its way.
+- **A missing `stopReason` is not a completed turn.** A prompt result without a string stop reason
+  now ends the turn as a failure ("the agent ended the turn without a stop reason") instead of
+  being treated as a normal `end_turn`.
+- **A turn stopped by `max_tokens` or `max_turn_requests` is no longer shown as completed.** The  turn footer says "Stopped: the agent hit its token limit" (or its turn-request limit) even when
   the agent produced no output, and its Reply button puts the cursor back in the composer instead of
   resending the prompt (a message sent during the turn is already queued, so a resend would run it
   twice), as does a failed or interrupted turn, whose button no longer says "Retry" while only

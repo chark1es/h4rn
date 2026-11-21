@@ -54,7 +54,9 @@ pub use codex::{
     ENV_MODEL_PROVIDER, ENV_WIRE_API, approval_from_request, approval_response, build_turn_input,
     detect_codex,
 };
-pub use fake::{FakeHarness, FakeSession, Gate, InterruptCount, SendCount, test_spec};
+pub use fake::{
+    FakeHarness, FakeSession, Gate, InterruptCount, SendCount, SessionModels, test_spec,
+};
 pub use opencode::{
     ENV_CLIPROXY_API_KEY, ENV_CLIPROXY_BASE_URL, ENV_OPENCODE_API_KEY, ENV_OPENCODE_BASE_URL,
     ENV_OPENCODE_MODELS, ENV_OPENCODE_PACKAGE, ENV_OPENCODE_PROVIDER, MINIMUM_OPENCODE_VERSION,

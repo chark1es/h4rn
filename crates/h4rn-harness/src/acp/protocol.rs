@@ -1017,10 +1017,16 @@ pub struct AcpPromptResult {
 
 impl AcpPromptResult {
     /// Parses a `session/prompt` result.
+    ///
+    /// A missing or non-string `stopReason` becomes an empty string, which is
+    /// not a normal completion: the adapter reports it as a failure instead of
+    /// guessing that the turn ended.
     pub fn from_value(value: &Value) -> Self {
         Self {
-            stop_reason: string_field(value, &["stopReason", "stop_reason"])
-                .unwrap_or_else(|| "end_turn".into()),
+            stop_reason: field(value, &["stopReason", "stop_reason"])
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
             usage: field(value, &["usage"])
                 .map(AcpUsage::from_value)
                 .unwrap_or_default(),
@@ -1356,6 +1362,25 @@ mod tests {
         assert!(!refused.completed());
         assert!(!refused.cancelled());
         assert!(!refused.token_limited());
+    }
+
+    #[test]
+    fn a_missing_or_non_string_stop_reason_is_not_a_completion() {
+        for result in [
+            json!({}),
+            json!({"stopReason": 3}),
+            json!({"stopReason": null}),
+        ] {
+            let parsed = AcpPromptResult::from_value(&result);
+            assert_eq!(parsed.stop_reason, "", "{result}");
+            assert!(
+                !parsed.completed(),
+                "a turn without a stop reason must not count as completed: {result}"
+            );
+            assert!(!parsed.cancelled());
+            assert!(!parsed.token_limited());
+            assert!(!parsed.turn_limited());
+        }
     }
 
     #[test]

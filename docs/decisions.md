@@ -515,6 +515,20 @@ send) cannot colour the next turn.
 a status-only update never renames a tool or empties its expanded input, and the id is forgotten
 once the call finishes.
 
+**Addendum: one pump, one session.** Each event pump carries the generation of the session it
+serves and drops every event once the record no longer holds that session live; every path that
+detaches a session also aborts its pump. A late completion from a dead transport therefore cannot
+settle the turn that replaced its own. A startup that fails still advances whatever turn now owns
+the thread, even when its captured turn was stopped in the meantime, and a stream that ends while
+the promoted turn's prompt was never written leaves that turn for a fresh session instead of
+failing it. Error rows are no longer collapsed per turn: only the bridge's writer-error row and the
+daemon's failed-write row for the same transport death are one row, and the session-ended row keeps
+its stderr hint. A writer I/O error marks the client closed and kills the agent's process group
+before any caller is woken, so an agent that closed stdin cannot outlive the failure. A failover
+that arrives while a startup is still booting the old model supersedes that startup, so the resume
+starts on the new model. A prompt result without a string `stopReason` is a failure, never an
+implicit `end_turn`.
+
 ## ADR-027: Push notifications are metadata-only wake signals
 
 **Status:** Proposed

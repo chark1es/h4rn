@@ -646,7 +646,8 @@ impl HarnessSession for AcpSession {
                             duration_api_ms: 0,
                             cost_micros: 0,
                             is_error: status == TurnStatus::Failed,
-                            stop_reason: Some(prompt.stop_reason.clone()),
+                            stop_reason: (!prompt.stop_reason.is_empty())
+                                .then(|| prompt.stop_reason.clone()),
                             subtype: None,
                         });
                         shared.state = turn_state(status, limit.is_some());
@@ -667,12 +668,14 @@ impl HarnessSession for AcpSession {
                             .await;
                     }
                     if status == TurnStatus::Failed {
+                        let message = if prompt.stop_reason.trim().is_empty() {
+                            "the agent ended the turn without a stop reason".to_owned()
+                        } else {
+                            format!("Antigravity stopped the turn: {}", prompt.stop_reason)
+                        };
                         let _ = events_tx
                             .send(HarnessEvent::Error {
-                                message: format!(
-                                    "Antigravity stopped the turn: {}",
-                                    prompt.stop_reason
-                                ),
+                                message,
                                 retryable: true,
                             })
                             .await;
@@ -1932,6 +1935,62 @@ mod tests {
             next_turn_status(&mut events).await,
             TurnStatus::Completed,
             "a late Stop must not mark the next turn interrupted"
+        );
+
+        agent.await.expect("agent");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_missing_stop_reason_fails_the_turn() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            handshake(&mut reader, &mut writer).await;
+            let prompt = next_frame(&mut reader).await;
+            assert_eq!(prompt["method"], "session/prompt");
+            send_frame(
+                &mut writer,
+                json!({"jsonrpc": "2.0", "id": prompt["id"], "result": {}}),
+            )
+            .await;
+        });
+
+        let mut session = AcpSession::start_with(&client, &acp_spec(workspace.path()))
+            .await
+            .expect("start session");
+        let mut events = session.events();
+        session
+            .send(UserInput {
+                text: "hello".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect("send");
+
+        let (status, errors) = tokio::time::timeout(Duration::from_secs(5), async {
+            let mut errors = Vec::new();
+            loop {
+                match events.next().await.expect("event") {
+                    HarnessEvent::Error { message, .. } => errors.push(message),
+                    HarnessEvent::TurnCompleted { status, .. } => return (status, errors),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for the turn");
+        assert_eq!(status, TurnStatus::Failed);
+        assert!(
+            errors
+                .iter()
+                .any(|message| message == "the agent ended the turn without a stop reason"),
+            "the failure names the missing stop reason: {errors:?}"
+        );
+        assert_eq!(
+            session.last_turn().expect("a turn report").stop_reason,
+            None
         );
 
         agent.await.expect("agent");
