@@ -117,14 +117,14 @@ export function TurnBlock({
   turn,
   threadId,
   summary,
-  onRetry,
+  onReply,
   staleAt = null,
 }: {
   turn: StreamTurn;
   threadId: string;
   summary: ThreadSummary;
   /** Focus the composer so the person can reply to a stopped or failed turn. */
-  onRetry: () => void;
+  onReply: () => void;
   staleAt?: number | null;
 }) {
   const userItems = turn.items.filter(
@@ -150,7 +150,7 @@ export function TurnBlock({
           <div className={cn("q-live-line", "q-warn")}>
             <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             <span>{stopped}</span>
-            <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onRetry}>
+            <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onReply}>
               <CornerDownLeftIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
               Reply
             </button>
@@ -230,7 +230,7 @@ export function TurnBlock({
         <div className={cn("q-live-line", "q-warn")}>
           <CircleAlertIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           <span>{stopped}</span>
-          <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onRetry}>
+          <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onReply}>
             <CornerDownLeftIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
             Reply
           </button>
@@ -242,7 +242,7 @@ export function TurnBlock({
             {turn.status === "failed" ? "The turn failed" : "The turn was interrupted"}. Nothing
             after this ran.
           </span>
-          <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onRetry}>
+          <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onReply}>
             <CornerDownLeftIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
             Reply
           </button>

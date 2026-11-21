@@ -534,7 +534,9 @@ buffered before a death can no longer take the failure's place. A writer I/O err
 closed and kills the agent's process group before any caller is woken, so an agent that closed
 stdin cannot outlive the failure. A failover that arrives while a startup is still booting the old
 model supersedes that startup, so the resume starts on the new model. A prompt result without a
-string `stopReason` is a failure, never an implicit `end_turn`.
+string `stopReason` is a failure, never an implicit `end_turn`: ACP requires the field, and every
+Antigravity ACP recording in `crates/h4rn-harness/tests/fixtures` sends it, so a reply that omits it
+is malformed rather than a normal completion.
 
 **Addendum: a startup's death is the turn's, and a death has one row.** A turn may move off the
 previous turn's session once: if that agent exits while a promoted message is still waiting, the

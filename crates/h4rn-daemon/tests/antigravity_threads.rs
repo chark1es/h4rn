@@ -25,9 +25,20 @@ const TURN_TIMEOUT: Duration = Duration::from_secs(60);
 /// and install. Cargo builds it into the test's own target directory and
 /// prints the executable path in its JSON output, so nothing here guesses a
 /// profile or a target layout.
-fn fixture_binary() -> PathBuf {
-    static BINARY: OnceLock<PathBuf> = OnceLock::new();
+fn fixture_binary() -> Option<PathBuf> {
+    static BINARY: OnceLock<Option<PathBuf>> = OnceLock::new();
     BINARY.get_or_init(build_fixture).clone()
+}
+
+/// The message a test prints when the fixture cannot be built.
+///
+/// A checkout without Cargo on `PATH` (or with a broken build) skips the
+/// end-to-end tests instead of failing them: the fixture is a test aid, not a
+/// product binary, and a missing one says nothing about the daemon.
+fn skip_without_fixture() {
+    eprintln!(
+        "skipping: the ACP fixture could not be built (cargo is unavailable on PATH or the build failed)"
+    );
 }
 
 /// A build directory owned by this test process.
@@ -59,7 +70,7 @@ fn fixture_target_dir() -> &'static PathBuf {
     })
 }
 
-fn build_fixture() -> PathBuf {
+fn build_fixture() -> Option<PathBuf> {
     let target_dir = fixture_target_dir().clone();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let output = std::process::Command::new(cargo)
@@ -76,12 +87,14 @@ fn build_fixture() -> PathBuf {
         .arg(&target_dir)
         .args(["--message-format=json"])
         .output()
-        .expect("run cargo to build the ACP fixture");
-    assert!(
-        output.status.success(),
-        "cargo could not build the ACP fixture: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+        .ok()?;
+    if !output.status.success() {
+        eprintln!(
+            "skipping: cargo could not build the ACP fixture: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return None;
+    }
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
         let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -98,28 +111,26 @@ fn build_fixture() -> PathBuf {
         {
             continue;
         }
-        match message
+        return message
             .get("executable")
             .and_then(serde_json::Value::as_str)
-        {
-            Some(executable) => return PathBuf::from(executable),
-            None => panic!("cargo built the ACP fixture without an executable path"),
-        }
+            .map(PathBuf::from);
     }
-    panic!(
-        "cargo did not report the ACP fixture's executable: {}",
+    eprintln!(
+        "skipping: cargo did not report the ACP fixture's executable: {}",
         stdout.lines().take(5).collect::<Vec<_>>().join("\n")
     );
+    None
 }
 
-async fn manager() -> ThreadManager {
+async fn manager() -> Option<ThreadManager> {
     let harness = AntigravityHarness::with_install(HarnessInstall {
-        path: fixture_binary(),
+        path: fixture_binary()?,
         version: "fixture".into(),
     });
     let catalog = StaticHarnessCatalog::new().and(Arc::new(harness));
     assert!(catalog.get(HarnessKind::Antigravity).is_some());
-    ThreadManager::open(
+    let manager = ThreadManager::open(
         Arc::new(SqliteJournal::in_memory().await.expect("journal")),
         Arc::new(catalog),
         HostId::new("host_test"),
@@ -131,7 +142,13 @@ async fn manager() -> ThreadManager {
         None,
     )
     .await
-    .expect("manager")
+    .expect("manager");
+    // Attach a meter so a limit hit really arms and persists an auto-resume
+    // schedule, as it does in the daemon.
+    manager.set_meter(Arc::new(
+        h4rn_meter::MeterHub::in_memory().await.expect("meter"),
+    ));
+    Some(manager)
 }
 
 fn new_thread(host: &HostId, workspace: &std::path::Path, prompt: &str) -> NewThread {
@@ -208,7 +225,9 @@ fn session_starts(workspace: &std::path::Path) -> usize {
 #[tokio::test]
 async fn a_closed_acp_transport_is_replaced_before_the_next_turn() {
     let workspace = tempfile::tempdir().expect("tempdir");
-    let manager = manager().await;
+    let Some(manager) = manager().await else {
+        return skip_without_fixture();
+    };
     let mut events = manager.subscribe();
     let host = HostId::new("host_test");
 
@@ -293,7 +312,9 @@ async fn a_closed_acp_transport_is_replaced_before_the_next_turn() {
 #[tokio::test]
 async fn a_closed_stdin_keeps_both_the_io_error_and_the_stderr_detail() {
     let workspace = tempfile::tempdir().expect("tempdir");
-    let manager = manager().await;
+    let Some(manager) = manager().await else {
+        return skip_without_fixture();
+    };
     let mut events = manager.subscribe();
     let host = HostId::new("host_test");
 
@@ -366,7 +387,9 @@ async fn a_closed_stdin_keeps_both_the_io_error_and_the_stderr_detail() {
 #[tokio::test]
 async fn an_exit_report_after_the_stdout_eof_still_names_the_stderr() {
     let workspace = tempfile::tempdir().expect("tempdir");
-    let manager = manager().await;
+    let Some(manager) = manager().await else {
+        return skip_without_fixture();
+    };
     let mut events = manager.subscribe();
     let host = HostId::new("host_test");
 
@@ -410,7 +433,9 @@ async fn an_exit_report_after_the_stdout_eof_still_names_the_stderr() {
 #[tokio::test]
 async fn an_exit_report_after_the_stdout_eof_still_schedules_the_resume() {
     let workspace = tempfile::tempdir().expect("tempdir");
-    let manager = manager().await;
+    let Some(manager) = manager().await else {
+        return skip_without_fixture();
+    };
     let mut events = manager.subscribe();
     let host = HostId::new("host_test");
 
@@ -440,6 +465,103 @@ async fn an_exit_report_after_the_stdout_eof_still_schedules_the_resume() {
         failed.limits.iter().any(|(reset, auto)| *reset && *auto),
         "the exit report's rate limit reached the auto-resume path: {:?}",
         failed.limits
+    );
+    let meter = manager.meter().expect("the test manager has a meter");
+    let schedules = meter.schedules().await.expect("read schedules");
+    assert_eq!(schedules.len(), 1, "one persisted schedule: {schedules:?}");
+    assert_eq!(schedules[0].thread_id, thread_id);
+    assert_eq!(
+        schedules[0].state,
+        h4rn_protocol::ResumeState::Waiting,
+        "a reset beyond the policy's max wait is retried at the cap: {schedules:?}"
+    );
+
+    manager.shutdown().await;
+}
+
+/// A prompt whose write fails before it reaches the agent's stdin still
+/// carries the rate-limit reset the agent printed on stderr: the turn reports a
+/// limit with a reset time and auto-resume, the schedule is persisted, and the
+/// message queued behind the failed write is not promoted past the pause.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_pre_flush_write_failure_still_schedules_the_resume() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let Some(manager) = manager().await else {
+        return skip_without_fixture();
+    };
+    let mut events = manager.subscribe();
+    let host = HostId::new("host_test");
+
+    let created = manager
+        .create_thread(new_thread(&host, workspace.path(), "first"))
+        .await
+        .expect("create");
+    let first = next_turn(&mut events).await;
+    assert_eq!(first.status, TurnStatus::Completed, "{:?}", first.errors);
+
+    // This turn is answered, then the fixture prints its reset and closes its
+    // own stdin while staying alive: the next prompt never reaches it.
+    let thread_id: ThreadId = created.thread_id.clone();
+    manager
+        .send_message(
+            &thread_id,
+            "please H4RN_FIXTURE_STDIN_RATE_LIMITED".into(),
+            Vec::new(),
+        )
+        .await
+        .expect("send");
+    let closing = next_turn(&mut events).await;
+    assert_eq!(
+        closing.status,
+        TurnStatus::Completed,
+        "{:?}",
+        closing.errors
+    );
+    let closed = workspace.path().join(".agy-fixture-stdin-closed");
+    tokio::time::timeout(TURN_TIMEOUT, async {
+        while !closed.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the fixture closed its stdin");
+
+    let failed_write = manager
+        .send_message(&thread_id, "second".into(), Vec::new())
+        .await
+        .expect("send");
+    let queued = manager
+        .send_message(&thread_id, "third".into(), Vec::new())
+        .await
+        .expect("send");
+    let failed = next_turn(&mut events).await;
+    assert_eq!(failed.turn_id, failed_write.turn_id);
+    assert_eq!(failed.status, TurnStatus::Failed);
+    assert!(
+        failed.limits.iter().any(|(reset, auto)| *reset && *auto),
+        "the failed write's stderr carried the rate limit: {:?}",
+        failed.limits
+    );
+
+    let meter = manager.meter().expect("the test manager has a meter");
+    let schedules = meter.schedules().await.expect("read schedules");
+    assert_eq!(schedules.len(), 1, "one persisted schedule: {schedules:?}");
+    assert_eq!(schedules[0].thread_id, thread_id);
+
+    // The thread is paused by the limit, so the queued message must stay
+    // queued: promoting it would start a fresh agent at once.
+    assert_eq!(
+        session_starts(workspace.path()),
+        1,
+        "the queued turn did not start a new agent"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), next_turn(&mut events))
+            .await
+            .is_err(),
+        "the queued turn ({}) started past a usage limit",
+        queued.turn_id
     );
 
     manager.shutdown().await;

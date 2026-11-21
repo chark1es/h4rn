@@ -108,12 +108,6 @@ export function ThreadPane({ threadId }: { threadId: string }) {
     setApprovalSheetOpen(false);
   }, [threadId]);
 
-  // A stopped or failed turn has no single prompt to repeat safely: a queued
-  // follow-up would be sent twice. Put the cursor back in the composer.
-  const replyToTurn = () => {
-    requestComposerFocus();
-  };
-
   // The delegated row in the stream opens the right panel's Subagents tab on
   // desktop, or the sheet's Subagents segment on a phone.
   useEffect(() => {
@@ -353,7 +347,10 @@ export function ThreadPane({ threadId }: { threadId: string }) {
           summary={summary}
           turns={turns}
           pending={pending}
-          onRetry={replyToTurn}
+          // A stopped or failed turn has no single prompt to repeat safely: a
+          // queued follow-up would be sent twice. Put the cursor back in the
+          // composer instead.
+          onRetry={requestComposerFocus}
           staleAt={offline ? lastSyncAt : null}
         />
       )}

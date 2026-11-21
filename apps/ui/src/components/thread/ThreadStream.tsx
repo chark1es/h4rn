@@ -138,7 +138,7 @@ export function ThreadStream({
                   turn={row.turn}
                   threadId={threadId}
                   summary={summary}
-                  onRetry={onRetry}
+                  onReply={onRetry}
                   staleAt={item.index === rows.length - 1 ? staleAt : null}
                 />
               ) : (

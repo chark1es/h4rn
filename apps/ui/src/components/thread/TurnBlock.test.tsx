@@ -61,7 +61,7 @@ function userOnlyTurn(status: StreamTurn["status"]): StreamTurn {
 
 function render(turn: StreamTurn): string {
   return renderToStaticMarkup(
-    <TurnBlock turn={turn} threadId="thread_1" summary={summary} onRetry={() => {}} />,
+    <TurnBlock turn={turn} threadId="thread_1" summary={summary} onReply={() => {}} />,
   );
 }
 

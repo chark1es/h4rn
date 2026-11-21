@@ -64,7 +64,7 @@ use crate::attachments::{self, AttachmentClass, AttachmentDelivery};
 use crate::{
     AttachmentRef, ENV_MCP_AUTH_TOKEN, ENV_MCP_BEARER_TOKEN, Harness, HarnessError, HarnessEvent,
     HarnessInstall, HarnessSession, SessionSpec, TransportHealth, TurnReport, UserInput,
-    detect_limit,
+    detect_limit, most_specific_detail,
 };
 
 mod stream;
@@ -617,7 +617,41 @@ impl HarnessSession for AcpSession {
             Ok(pending) => pending,
             Err(error) => {
                 self.prompt_running.store(false, Ordering::SeqCst);
-                return Err(map_acp_error(error));
+                // A prompt that failed before its frame reached the agent is
+                // the same death the prompt task would report: name the I/O
+                // error, the agent's stderr and its exit, so the daemon's one
+                // failure row keeps the agent's last words and any rate-limit
+                // reset in them.
+                let detail = if matches!(error, AcpError::Closed { .. }) {
+                    prompt_write_detail(&client, error.to_string()).await
+                } else {
+                    error.to_string()
+                };
+                let limit = detect_limit(&detail, Utc::now());
+                {
+                    let mut shared = lock(&self.shared);
+                    shared.state = if limit.is_some() {
+                        AgentState::RateLimited
+                    } else {
+                        AgentState::Error
+                    };
+                    shared.last_turn = Some(TurnReport {
+                        num_turns: 0,
+                        duration_ms: millis(started.elapsed()),
+                        duration_api_ms: 0,
+                        cost_micros: 0,
+                        is_error: true,
+                        stop_reason: None,
+                        subtype: Some("error".into()),
+                    });
+                }
+                return Err(match map_acp_error(error) {
+                    HarnessError::Transport { harness, .. } => HarnessError::Transport {
+                        harness,
+                        message: detail,
+                    },
+                    other => other,
+                });
             }
         };
 
@@ -1090,6 +1124,23 @@ fn spawn_event_bridge(
     })
 }
 
+/// Names what a prompt that never reached the agent's stdin left behind.
+///
+/// The writer has already waited for the stderr reader to drain, so the
+/// ring's tail is available; a supervised client may also have reaped the
+/// process, and that exit report's stderr and status are the most specific
+/// detail the row can carry.
+async fn prompt_write_detail(client: &AcpClient, detail: String) -> String {
+    let mut detail = detail;
+    if client.is_supervised()
+        && let Some(report) = client.wait_for_exit(DEATH_DETAIL_WAIT).await
+    {
+        detail = merged_detail(detail, &report.stderr);
+        return merged_detail(detail, &format!("agy exited ({})", report.status));
+    }
+    merged_detail(detail, &client.stderr_tail())
+}
+
 /// Adds `extra` to a failure's detail when it says something new.
 ///
 /// The agent's stderr and the exit status describe the same death as the
@@ -1100,28 +1151,6 @@ fn merged_detail(detail: String, extra: &str) -> String {
         return detail;
     }
     most_specific_detail(detail.clone(), format!("{detail}\n{extra}"))
-}
-
-/// The more specific of two messages that describe one failure.
-///
-/// The agent's stderr is the most specific detail either report can add and it
-/// always spans an extra line, so a multi-line message wins; between equally
-/// detailed notices the longer one is kept. This is the daemon's rule too, so
-/// the adapter's merged row and the daemon's merge pick the same text.
-fn most_specific_detail(first: String, second: String) -> String {
-    let first_lines = first.lines().count();
-    let second_lines = second.lines().count();
-    match second_lines.cmp(&first_lines) {
-        std::cmp::Ordering::Greater => second,
-        std::cmp::Ordering::Less => first,
-        std::cmp::Ordering::Equal => {
-            if second.len() > first.len() {
-                second
-            } else {
-                first
-            }
-        }
-    }
 }
 
 fn register_approval(

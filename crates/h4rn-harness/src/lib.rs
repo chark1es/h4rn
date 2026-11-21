@@ -200,6 +200,28 @@ pub enum HarnessEvent {
     },
 }
 
+/// The more specific of two messages that describe one failure.
+///
+/// The agent's stderr is the most specific detail either report can add and it
+/// always spans an extra line, so a multi-line message wins; between equally
+/// detailed notices the longer one is kept. The adapter and the daemon share
+/// this rule so their merged failure rows pick the same text.
+pub fn most_specific_detail(first: String, second: String) -> String {
+    let first_lines = first.lines().count();
+    let second_lines = second.lines().count();
+    match second_lines.cmp(&first_lines) {
+        std::cmp::Ordering::Greater => second,
+        std::cmp::Ordering::Less => first,
+        std::cmp::Ordering::Equal => {
+            if second.len() > first.len() {
+                second
+            } else {
+                first
+            }
+        }
+    }
+}
+
 /// Harness adapter failures.
 #[derive(Debug, thiserror::Error)]
 pub enum HarnessError {

@@ -27,6 +27,7 @@ use h4rn_core::{
 };
 use h4rn_harness::{
     AttachmentRef, HarnessEvent, HarnessInstall, HarnessSession, SessionSpec, UserInput,
+    detect_limit, most_specific_detail,
 };
 use h4rn_meter::{LimitHit, MeterHub, TurnContext, TurnMeter};
 use h4rn_protocol::{
@@ -541,27 +542,6 @@ impl TransportReport {
             hint: Some("Inspect the thread and retry when ready".into()),
             retryable: self.retryable,
             transport: true,
-        }
-    }
-}
-
-/// The more specific of two messages that describe one failure.
-///
-/// The agent's stderr is the most specific detail either report can add and it
-/// always spans an extra line, so a multi-line message wins; between equally
-/// detailed notices the longer one is kept.
-fn most_specific_detail(first: String, second: String) -> String {
-    let first_lines = first.lines().count();
-    let second_lines = second.lines().count();
-    match second_lines.cmp(&first_lines) {
-        std::cmp::Ordering::Greater => second,
-        std::cmp::Ordering::Less => first,
-        std::cmp::Ordering::Equal => {
-            if second.len() > first.len() {
-                second
-            } else {
-                first
-            }
         }
     }
 }
@@ -2800,6 +2780,71 @@ impl Inner {
         }
     }
 
+    /// Records one usage limit and arms its auto-resume schedule.
+    ///
+    /// The pump's live limit event and the failed-write path share this: the
+    /// failed write detects a limit in its merged failure detail before it
+    /// settles the turn, and arming the schedule under the same record lock
+    /// keeps the settlement from promoting queued work past it. Returns the
+    /// row to publish when arming fails.
+    async fn apply_limit_hit(
+        &self,
+        record: &mut ThreadRecord,
+        reset_at: Option<DateTime<Utc>>,
+        auto_resume: bool,
+        now: DateTime<Utc>,
+    ) -> Option<Event> {
+        let thread_id = record.meta.thread_id.clone();
+        record.limit = Some(LimitBrief {
+            harness: Some(record.meta.harness),
+            reset_at,
+            message: None,
+        });
+        let meter = self.meter.get()?;
+        let hit = LimitHit {
+            thread_id: Some(thread_id.clone()),
+            harness: Some(record.meta.harness),
+            account: None,
+            provider: provider_for_model(&record.meta.model),
+            model: Some(record.meta.model.clone()),
+            reset_at,
+            message: None,
+            consumed: None,
+            limit: None,
+            source: LimitSource::Harness,
+        };
+        if let Err(error) = meter.record_limit(hit).await {
+            tracing::warn!(%error, "could not record the usage limit");
+        }
+        // The ledger row itself is written on TurnCompleted; the schedule
+        // survives the summary re-projection.
+        if !auto_resume {
+            return None;
+        }
+        let prompt = meter.policy().prompt;
+        match meter
+            .arm_schedule(&thread_id, reset_at, prompt, None, now)
+            .await
+        {
+            Ok(schedule) => {
+                record.resume_at = Some(schedule.resume_at);
+                record.scheduled_limit = Some(ScheduledLimit {
+                    reset_at,
+                    auto_resume,
+                });
+                None
+            }
+            Err(error) => Some(Event::Error {
+                thread_id: Some(thread_id),
+                message: "could not schedule the automatic resume".into(),
+                hint: Some(format!(
+                    "The usage limit is still recorded; retry manually ({error})"
+                )),
+                retryable: true,
+            }),
+        }
+    }
+
     /// Ends `turn_id` after its prompt could not be written, at most once.
     ///
     /// The pump can notice the same dead session, and Stop or a queued turn can
@@ -2835,7 +2880,8 @@ impl Inner {
         // completion either way. A write that failed on a live transport is an
         // ordinary failure, never a death the bridge also reports.
         let hint = Some("Check the harness installation with `h4rnd doctor`".into());
-        let end = if dead {
+        let limit = detect_limit(&message, self.now());
+        let mut end = if dead {
             TurnEnd::transport_failed(message, hint, false)
         } else {
             TurnEnd::failed(message, hint, false)
@@ -2845,7 +2891,31 @@ impl Inner {
         // this prompt before the turn is marked failed.
         let (settled, detached) = {
             let mut record = handle.lock().await;
+            let now = self.now();
+            // A prompt that never reached the agent's stdin still reports the
+            // limit the agent left in its stderr: the schedule is armed here,
+            // before settlement, so the queued turn behind this one cannot be
+            // promoted past a paused thread.
             let mut detached = None;
+            if let Some(signal) = limit {
+                let auto_resume = signal.reset_at.is_some();
+                if let Some(event) = self
+                    .apply_limit_hit(&mut record, signal.reset_at, auto_resume, now)
+                    .await
+                {
+                    end.wire.push(event);
+                }
+                end.wire.push(Event::UsageLimitHit {
+                    thread_id: record.meta.thread_id.clone(),
+                    reset_at: signal.reset_at,
+                    auto_resume,
+                });
+                end.domain.push(ThreadEvent::UsageLimitHit {
+                    reset_at: signal.reset_at,
+                    auto_resume,
+                    at: now,
+                });
+            }
             if dead
                 && record.session.is_live(session)
                 && let Some(generation) = record.session.generation()
@@ -3201,55 +3271,11 @@ impl Inner {
                     reset_at,
                     auto_resume,
                 } => {
-                    record.limit = Some(LimitBrief {
-                        harness: Some(record.meta.harness),
-                        reset_at,
-                        message: None,
-                    });
-                    if let Some(meter) = self.meter.get() {
-                        let hit = LimitHit {
-                            thread_id: Some(thread_id.clone()),
-                            harness: Some(record.meta.harness),
-                            account: None,
-                            provider: provider_for_model(&record.meta.model),
-                            model: Some(record.meta.model.clone()),
-                            reset_at,
-                            message: None,
-                            consumed: None,
-                            limit: None,
-                            source: LimitSource::Harness,
-                        };
-                        if let Err(error) = meter.record_limit(hit).await {
-                            tracing::warn!(%error, "could not record the usage limit");
-                        }
-                        if auto_resume {
-                            let prompt = meter.policy().prompt;
-                            match meter
-                                .arm_schedule(&thread_id, reset_at, prompt, None, now)
-                                .await
-                            {
-                                Ok(schedule) => {
-                                    record.resume_at = Some(schedule.resume_at);
-                                    record.scheduled_limit = Some(ScheduledLimit {
-                                        reset_at,
-                                        auto_resume,
-                                    });
-                                }
-                                Err(error) => {
-                                    let wire = vec![Event::Error {
-                                        thread_id: Some(thread_id.clone()),
-                                        message: "could not schedule the automatic resume".into(),
-                                        hint: Some(format!(
-                                            "The usage limit is still recorded; retry manually ({error})"
-                                        )),
-                                        retryable: true,
-                                    }];
-                                    let _ = self.emit(&mut record, Vec::new(), wire).await;
-                                }
-                            }
-                        }
-                        // The ledger row itself is written on TurnCompleted;
-                        // the schedule survives the summary re-projection.
+                    if let Some(event) = self
+                        .apply_limit_hit(&mut record, reset_at, auto_resume, now)
+                        .await
+                    {
+                        let _ = self.emit(&mut record, Vec::new(), vec![event]).await;
                     }
                     domain.push(ThreadEvent::UsageLimitHit {
                         reset_at,

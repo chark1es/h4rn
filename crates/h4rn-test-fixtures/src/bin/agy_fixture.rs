@@ -117,6 +117,7 @@ fn main() {
                     std::process::exit(7);
                 }
                 let closing_stdin = text.contains("H4RN_FIXTURE_CLOSE_STDIN");
+                let limited_stdin = text.contains("H4RN_FIXTURE_STDIN_RATE_LIMITED");
                 let session_id = params
                     .get("sessionId")
                     .and_then(Value::as_str)
@@ -143,13 +144,22 @@ fn main() {
                         "usage": {"inputTokens": 3, "outputTokens": 2}
                     }),
                 );
+                if limited_stdin {
+                    // Answer this turn, then leave a rate-limit reset on
+                    // stderr and close stdin while staying alive: the next
+                    // prompt's write fails before it reaches the agent, and
+                    // stderr is the only place the reset appears.
+                    close_stdin_and_wait(Some(
+                        "agy-fixture: rate limit reached, resets at 2099-12-01T00:00:00Z",
+                    ));
+                }
                 if closing_stdin {
                     // Answer this turn, then shut this process's own stdin and
                     // stay alive. The next prompt is never read: its write
                     // fails on the closed pipe while the agent is still
                     // running, which is the case the daemon's one failure row
                     // must describe with both the I/O error and stderr.
-                    close_stdin_and_wait();
+                    close_stdin_and_wait(None);
                 }
             }
             "session/cancel" => {}
@@ -192,8 +202,11 @@ fn wait_for_exit_gate() {
 /// fails on the closed pipe, and the row it publishes must wait for this line
 /// to reach the client's stderr buffer instead of assuming a handshake-time
 /// line.
-fn close_stdin_and_wait() -> ! {
-    eprintln!("agy-fixture: closing stdin before the next prompt");
+fn close_stdin_and_wait(diagnostic: Option<&str>) -> ! {
+    match diagnostic {
+        Some(line) => eprintln!("{line}"),
+        None => eprintln!("agy-fixture: closing stdin before the next prompt"),
+    }
     #[cfg(unix)]
     {
         // SAFETY: closing this process's own stdin descriptor is the point of

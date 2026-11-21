@@ -86,6 +86,11 @@ All notable changes to h4rn are recorded here. The format follows
   reaches the limit and auto-resume handling, and the writer that sees stdin close waits for the
   stderr reader to drain the pipe before it wakes a caller, so a diagnostic printed in the same step
   as the close is not lost.
+- **A prompt that never reached the agent still reports its rate limit.** When the agent closed
+  stdin before the next prompt could be flushed, the failure row now carries the agent's stderr and
+  exit detail, and a reset time printed there reaches the usage-limit path: the thread records the
+  limit, persists an auto-resume schedule and leaves the message queued behind the failed write
+  paused instead of starting it at once.
 - **A model change during a startup discards that startup.** Failing over while a session is still
   booting the limited model supersedes the startup, so the resume runs on a session started with
   the new model instead of the one that was already on its way.
