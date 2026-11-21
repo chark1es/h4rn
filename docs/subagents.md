@@ -338,7 +338,8 @@ stderr output from a successful command as inconclusive (a broken-ref warning),
 so trace output inherited from the daemon's environment must never reach them.
 The repository-location variables `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`,
 `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`,
-`GIT_NAMESPACE` and `GIT_PREFIX` are removed too: every call names its
+`GIT_NAMESPACE` and `GIT_PREFIX` are removed too (also for the subagent
+worktree's own `git worktree add`/`remove`/`branch -D` calls): every call names its
 repository with `-C`/`--git-dir`, and an inherited `GIT_INDEX_FILE` (a daemon
 started from a hook or `git rebase --exec`) would otherwise make the staged-work
 check read a different index. Spawning git is retried a few times, with a short sleep, when it fails with
@@ -503,9 +504,15 @@ selection does no filesystem work at all.
 - Every git call that decides whether work would be lost (the dirty check, the
   hidden-files `git ls-files -v`, and `git worktree remove` with the `git
   status` it runs) also runs with `-c core.fsmonitor=false
-  -c core.untrackedCache=false`. A filesystem monitor hook that reports nothing
-  changed, or a stale untracked cache, would otherwise let git trust its index
-  and miss an edit or a new file.
+  -c core.untrackedCache=false -c core.trustctime=true
+  -c core.checkStat=default`. A filesystem monitor hook that reports nothing
+  changed, a stale untracked cache, or reduced stat checks (a same-size edit
+  that kept its indexed mtime) would otherwise let git trust its index and miss
+  an edit or a new file.
+- Every git call runs with `GIT_NO_REPLACE_OBJECTS=1` (and without
+  `GIT_REPLACE_REF_BASE`): a replacement ref (`refs/replace/*`) could otherwise
+  make an unmerged owned branch pass the ancestry check, or a detached commit
+  look reachable.
 - Without `force`, an existing checkout must still be on the branch the listing
   gave it. If the current branch differs, the entry is skipped as
   `checkout is no longer on <branch>`; force removes the replacement checkout
@@ -549,9 +556,11 @@ selection does no filesystem work at all.
   from another walk of `<common>/worktrees`. A registration the snapshot lists
   but whose admin dir the (complete) mapping does not hold is skipped as
   `the registration could no longer be located` (forceable). A timeout while
-  enumerating the admin entries is skipped with the timeout reason,
-  `git timed out after 30s`, which stays blocked like every timeout (force does
-  not help). Any other failure to read the admin entries, or an admin dir that
+  enumerating the admin entries is blocked: the timed-out enumeration also
+  makes the snapshot incomplete, so the entry is usually refused first as
+  `could not read every worktree registration`; where the mapping is asked
+  directly the reason is `git timed out after 30s`. Both stay blocked (force
+  does not help). Any other failure to read the admin entries, or an admin dir that
   cannot be read, is skipped as `has a git operation in progress`. The check
   runs in preflight and again in prepare and the final verification
   immediately before removal; a forced clear removes the checkout and its admin

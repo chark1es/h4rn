@@ -249,24 +249,46 @@ const LOCATION_VARS: &[&str] = &[
 /// A filesystem monitor (`core.fsmonitor`) or the untracked cache lets git
 /// skip looking at files it was told have not changed. A hook that reports
 /// nothing, or a stale cache, would then hide an edit or a new file, so these
-/// calls always look at the disk themselves. `-c` reaches the `git status` that
+/// calls always look at the disk themselves. Reduced stat checks
+/// (`core.trustctime=false`, `core.checkStat=minimal`) would likewise let a
+/// same-size edit that kept its indexed mtime read as clean, so the full stat
+/// comparison is forced. `-c` reaches the `git status` that
 /// `git worktree remove` runs in a child process too.
-pub const SAFETY_CONFIG: [&str; 4] = [
+pub const SAFETY_CONFIG: [&str; 8] = [
     "-c",
     "core.fsmonitor=false",
     "-c",
     "core.untrackedCache=false",
+    "-c",
+    "core.trustctime=true",
+    "-c",
+    "core.checkStat=default",
 ];
 
-fn command(dir: &Path) -> Command {
-    let mut command = Command::new(program());
+/// Strips inherited variables that would redirect git or add noise, and sets
+/// the ones every tracker call relies on. Also used for the subagent worktree
+/// commands, which must target the repository they name.
+pub(crate) fn sanitize(command: &mut Command) {
     // Read-only inspection must never wait on the index lock or a prompt.
     command
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_TERMINAL_PROMPT", "0");
-    for name in TRACE_VARS.iter().chain(LOCATION_VARS) {
+        .env("GIT_TERMINAL_PROMPT", "0")
+        // A replacement ref (`refs/replace/*`) can make history look like it
+        // contains a commit it does not: an unmerged branch would pass the
+        // ancestry check and a detached commit would look reachable.
+        .env("GIT_NO_REPLACE_OBJECTS", "1");
+    for name in TRACE_VARS
+        .iter()
+        .chain(LOCATION_VARS)
+        .chain(["GIT_REPLACE_REF_BASE"].iter())
+    {
         command.env_remove(name);
     }
+}
+
+fn command(dir: &Path) -> Command {
+    let mut command = Command::new(program());
+    sanitize(&mut command);
     command.arg("-C").arg(dir);
     command
 }
@@ -1430,7 +1452,7 @@ pub fn hidden_file(worktree: &Path, limit: Duration) -> Result<Option<PathBuf>, 
 /// For a registration whose checkout directory is gone: git skips its own
 /// cleanliness check then, and removing the registration deletes the admin dir
 /// and the index with it, so anything staged there would be lost. Runs
-/// `git --git-dir=<admin> diff-index --cached --quiet <treeish> --`, bounded by
+/// `git -C <admin> --git-dir=. diff-index --cached --quiet <treeish> --`, bounded by
 /// `limit` (trace variables stripped like every call here). `Ok(true)` when
 /// git exits 0, or when there is no `index` file at all (nothing is staged);
 /// `Ok(false)` when it exits 1. Anything else (an index that is not a regular

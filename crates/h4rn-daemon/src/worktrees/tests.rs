@@ -3625,6 +3625,10 @@ fn branch_lookups_under_git_trace() {
 
 #[test]
 fn an_inherited_index_file_does_not_hide_staged_work() {
+    // A real, clean index: every fixture commits the same README, so this
+    // index matches the child's HEAD tree exactly. An unstripped
+    // `diff-index --cached` reading it would answer "clean".
+    let clean = Fixture::new();
     let mut command = std::process::Command::new(std::env::current_exe().expect("test binary"));
     command.args([
         "--exact",
@@ -3632,12 +3636,7 @@ fn an_inherited_index_file_does_not_hide_staged_work() {
         "--ignored",
         "--test-threads=1",
     ]);
-    // Points at a file that does not exist: git would read it as an empty
-    // index, so the staged check must not see it.
-    command.env(
-        "GIT_INDEX_FILE",
-        std::env::temp_dir().join("h4rn-no-such-index"),
-    );
+    command.env("GIT_INDEX_FILE", clean.repo.join(".git/index"));
     let output = command.output().expect("run the child test");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -3650,18 +3649,24 @@ fn an_inherited_index_file_does_not_hide_staged_work() {
 #[test]
 #[ignore = "run by an_inherited_index_file_does_not_hide_staged_work with GIT_INDEX_FILE set"]
 fn staged_check_under_an_inherited_index_file() {
-    assert!(
-        std::env::var_os("GIT_INDEX_FILE").is_some(),
-        "run through an_inherited_index_file_does_not_hide_staged_work"
-    );
+    let inherited = std::env::var_os("GIT_INDEX_FILE")
+        .expect("run through an_inherited_index_file_does_not_hide_staged_work");
+    // The fixture helpers run plain git, so build the scenario without the
+    // inherited index. This test runs alone in its own process.
+    // SAFETY: single-threaded child process (`--test-threads=1`).
+    unsafe { std::env::remove_var("GIT_INDEX_FILE") };
     let fixture = Fixture::new();
     let linked = fixture.add_worktree("wt-inherited-index", "inherited-index-branch");
     let admin =
         PathBuf::from(git::run(&linked, ["rev-parse", "--absolute-git-dir"]).expect("admin dir"));
     std::fs::write(linked.join("README.md"), "staged change\n").expect("edit");
-    // `run` goes through the tracker's own command builder, which strips the
-    // inherited variable, so this really stages into the worktree's index.
-    git::run(&linked, ["add", "README.md"]).expect("stage");
+    run(&linked, &["add", "README.md"]);
+    assert!(
+        admin.join("index").is_file(),
+        "the worktree's own index exists"
+    );
+    // SAFETY: as above.
+    unsafe { std::env::set_var("GIT_INDEX_FILE", &inherited) };
     assert!(
         !git::index_matches(
             &admin,
@@ -3669,7 +3674,7 @@ fn staged_check_under_an_inherited_index_file() {
             Duration::from_secs(30)
         )
         .expect("index check"),
-        "the worktree's own index holds staged work"
+        "the worktree's own index holds staged work, whatever the daemon inherited"
     );
 }
 
@@ -5424,4 +5429,98 @@ fn bareness_is_asked_once_per_common_dir() {
         2,
         "once for the repo_of cache, once for the clear"
     );
+}
+
+#[test]
+fn reduced_stat_checks_do_not_hide_a_same_size_edit() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-reduced-stat", "reduced-stat-branch");
+    run(&linked, &["config", "core.trustctime", "false"]);
+    run(&linked, &["config", "core.checkStat", "minimal"]);
+    let file = linked.join("README.md");
+    let past = std::time::SystemTime::now() - Duration::from_secs(120);
+    let backdate = |file: &Path| {
+        std::fs::File::options()
+            .write(true)
+            .open(file)
+            .expect("open")
+            .set_modified(past)
+            .expect("set mtime");
+    };
+    // The index records the backdated mtime, well clear of git's racy window.
+    backdate(&file);
+    run(&linked, &["update-index", "--refresh"]);
+    // Git compares ctime in whole seconds: let the edit's ctime land in a
+    // later second than the one the index recorded.
+    std::thread::sleep(Duration::from_millis(1100));
+    // A same-size edit that keeps the indexed mtime.
+    std::fs::write(&file, "# WT\n").expect("edit");
+    backdate(&file);
+    let plain = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&linked)
+        .output()
+        .expect("plain status");
+    assert!(
+        plain.stdout.is_empty(),
+        "with reduced stat checks plain git misses the edit"
+    );
+
+    let target = entry(&linked, &fixture.repo, Some("reduced-stat-branch"), false);
+    assert_eq!(
+        clear_one(&target, false, &fixture.data_dir())
+            .err()
+            .as_deref(),
+        Some("has uncommitted changes")
+    );
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("still there"),
+        "# WT\n"
+    );
+}
+
+#[test]
+fn a_replacement_ref_does_not_make_an_unmerged_branch_look_merged() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("sa-replaced", "h4rn/sa-replaced");
+    std::fs::write(linked.join("work.txt"), "child work\n").expect("work");
+    run(&linked, &["add", "work.txt"]);
+    run(&linked, &["commit", "-q", "-m", "child work"]);
+    let tip = git::run(&linked, ["rev-parse", "HEAD"]).expect("tip");
+    let main_head = git::run(&fixture.repo, ["rev-parse", "HEAD"]).expect("main head");
+    // Replace main's HEAD commit with one whose parent is the child's tip:
+    // history now appears to contain the unmerged commit.
+    let fake = git::run(
+        &fixture.repo,
+        [
+            "-c",
+            "user.email=wt@h4rn.invalid",
+            "-c",
+            "user.name=wt",
+            "commit-tree",
+            "HEAD^{tree}",
+            "-p",
+            &tip,
+            "-m",
+            "replacement",
+        ],
+    )
+    .expect("fake commit");
+    run(&fixture.repo, &["replace", &main_head, &fake]);
+    let plain = std::process::Command::new("git")
+        .args(["merge-base", "--is-ancestor", &tip, "HEAD"])
+        .current_dir(&fixture.repo)
+        .status()
+        .expect("plain merge-base");
+    assert!(plain.success(), "plain git is fooled by the replacement");
+
+    let target = entry(&linked, &fixture.repo, Some("h4rn/sa-replaced"), true);
+    assert_eq!(
+        clear_one(&target, false, &fixture.data_dir())
+            .err()
+            .as_deref(),
+        Some("branch h4rn/sa-replaced has unmerged commits")
+    );
+    assert!(linked.is_dir());
+    assert!(git::branch_exists(&fixture.repo, "h4rn/sa-replaced"));
 }

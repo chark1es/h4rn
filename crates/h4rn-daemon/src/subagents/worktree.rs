@@ -11,9 +11,18 @@ use std::process::Command;
 
 use h4rn_protocol::SubagentFileChange;
 
+/// A `git` command that ignores inherited repository-location variables
+/// (`GIT_DIR`, `GIT_INDEX_FILE`, ...), so it always acts on the repository it
+/// names with `-C` (a daemon started from a hook would otherwise inherit them).
+fn git_command() -> Command {
+    let mut command = Command::new("git");
+    crate::worktrees::git::sanitize(&mut command);
+    command
+}
+
 /// Whether `path` is inside a git work tree.
 pub fn is_git_repo(path: &Path) -> bool {
-    Command::new("git")
+    git_command()
         .arg("-C")
         .arg(path)
         .args(["rev-parse", "--is-inside-work-tree"])
@@ -32,7 +41,7 @@ pub fn create(repo: &Path, dest: &Path, branch: &str) -> Result<(), String> {
             )
         })?;
     }
-    let output = Command::new("git")
+    let output = git_command()
         .arg("-C")
         .arg(repo)
         .args(["worktree", "add", "-b", branch])
@@ -56,7 +65,7 @@ pub fn create(repo: &Path, dest: &Path, branch: &str) -> Result<(), String> {
 /// Best-effort: cleanup failures are logged by the caller rather than turning a
 /// finished delegation into a failure the user cannot act on.
 pub fn remove(repo: &Path, dest: &Path, branch: Option<&str>) {
-    let _ = Command::new("git")
+    let _ = git_command()
         .arg("-C")
         .arg(repo)
         .args(["worktree", "remove", "--force"])
@@ -64,13 +73,13 @@ pub fn remove(repo: &Path, dest: &Path, branch: Option<&str>) {
         .output();
     // A worktree directory that was already removed still leaves git metadata;
     // prune keeps the parent repository's `git worktree list` honest.
-    let _ = Command::new("git")
+    let _ = git_command()
         .arg("-C")
         .arg(repo)
         .args(["worktree", "prune"])
         .output();
     if let Some(branch) = branch {
-        let _ = Command::new("git")
+        let _ = git_command()
             .arg("-C")
             .arg(repo)
             .args(["branch", "-D", branch])
@@ -85,7 +94,7 @@ pub fn remove(repo: &Path, dest: &Path, branch: Option<&str>) {
 ///
 /// Call this **before** [`remove`]; it is what the parent's result card shows.
 pub fn changes(worktree: &Path) -> Vec<SubagentFileChange> {
-    let output = Command::new("git")
+    let output = git_command()
         .arg("-C")
         .arg(worktree)
         .args(["status", "--porcelain"])
