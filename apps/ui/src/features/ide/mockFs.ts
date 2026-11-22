@@ -489,6 +489,9 @@ export class MockFs {
         size_bytes: 0,
         binary: false,
         truncated: false,
+        bytes_base64: null,
+        bytes_omitted: null,
+        content_omitted: null,
         modified_at: null,
         hint: `${path} no longer exists. It may have been deleted by the agent or another client.`,
       };
@@ -502,6 +505,9 @@ export class MockFs {
         size_bytes: 2_408,
         binary: true,
         truncated: false,
+        bytes_base64: null,
+        bytes_omitted: null,
+        content_omitted: null,
         modified_at: new Date().toISOString(),
         hint: "This looks like a binary file. h4rn does not edit binaries; use a terminal or your IDE.",
       };
@@ -514,6 +520,9 @@ export class MockFs {
       size_bytes: content.length,
       binary: false,
       truncated: false,
+      bytes_base64: null,
+      bytes_omitted: null,
+      content_omitted: null,
       modified_at: new Date().toISOString(),
       hint: null,
     };

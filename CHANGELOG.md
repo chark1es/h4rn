@@ -7,6 +7,37 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Preview HTML files in the right panel.** A report, chart or mockup the agent wrote can be
+  opened from the Files tab's new action on `.html`/`.htm` rows, or from a relative HTML link in
+  an agent message. The Preview tab reads the file through the daemon, inlines its relative CSS,
+  JS, images and fonts from inside the workspace, and renders it in a `sandbox="allow-scripts"`
+  iframe with a `default-src 'none'` CSP, so page scripts run without gaining access to h4rn, its
+  cookies or its storage. The desktop and mobile shells serve the prepared page from their own
+  `h4rn-preview` origin (a `srcdoc` frame would inherit the window's `script-src 'self'`); the
+  browser build keeps `srcdoc`. The prepared document starts with a trusted doctype and the policy,
+  so no malformed comment in the workspace file can put its markup ahead of the CSP. Limits are a
+  400 KiB text read for the page and its stylesheets and scripts (one secure-transport frame,
+  escaping included, so a smaller file that needs more than the frame once serialized is refused
+  as too large instead of closing the session), 360 KiB per binary asset and 10 MB for all embedded
+  copies. That frame bound applies to the secure transport, which closes a session on an oversized
+  frame; the plain loopback connection has no frame bound, so large listings and the editor's 2 MiB
+  reads are delivered whole there. The budget is charged for each copy as it is inserted, including
+  a file reached again through an imported stylesheet, and an insertion that would not fit is left
+  out and reported, so the page is never built past the cap; fetching stops once the budget is
+  spent. References cover styles, scripts, images, every `srcset` candidate (workspace candidates
+  inlined or removed, `data:` and `https:` ones kept), `<video>/<audio>/<track>`, `<source>`,
+  `<iframe>`, `<object>`, `<embed>`, SVG `href`/`xlink:href` and CSS `@import` of a workspace
+  stylesheet, which is inlined as CSS text. Links in the page ask in an inline bar before opening
+  in the system browser, and that bar freezes its URL until the user answers. It reloads when the
+  file or an asset changes on disk (the workspace watch is shared with the IDE and re-sent after a
+  reconnect), expands to full
+  width in the main area, and opens in the phone panel sheet. Files outside the workspace, over a
+  size limit, or not UTF-8 show a plain message instead, and the selected file is still watched so
+  recreating it reloads the preview. On an Android WebView without document-start script support,
+  where Wry's fallback would add script hashes to the CSP and silently block every page script, the
+  preview turns itself off with a plain message asking for an updated System WebView instead of
+  showing a page without its scripts. MCP Apps, a headless browser and dev-server proxying are not
+  part of this change.
 - **Bitbucket Cloud and Azure DevOps pull requests.** The forge layer now understands two more
   providers. Bitbucket Cloud takes an Atlassian API token (account email plus token, HTTP Basic) or
   a workspace, project or repository access token (Bearer); app passwords were retired in July 2026
@@ -118,6 +149,24 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **An oversized filesystem response no longer closes the paired session.** JSON escaping of
+  quotes, backslashes, newlines and control characters can push a 400 KiB text read past the
+  secure transport's 512 KiB frame, and the transport answers an oversized frame with
+  `FrameTooLarge` by closing the session. The daemon now measures the serialized response with
+  headroom and answers a text or base64 read with a typed `content_omitted: too_large` /
+  `bytes_omitted: too_large` and an honest hint, and the response path keeps a last guard so no
+  filesystem response can exceed one frame. Copy and docs say 400 KiB is a read bound rather than
+  a promise that every file under it opens, and the too-large message uses one unit (KiB) for the
+  file size and the limit.
+- **Workspace watches survive a connection restart.** Signing in, pairing, switching machines or
+  recovering from offline replaces the transport client, and the file watcher's held watches were
+  tied to the old client instance, so live reload stopped until a view was remounted. The counts
+  and owners now live outside the client, and every held watch is re-sent on the connection that
+  replaces it, after a transport reconnect and on a new client's first ready notice.
+- **The mobile shell's Rust tests are compiled on the host.** The Android and iOS CI jobs build
+  for their own targets, so the mobile crate's unit tests (the preview store and its origin) were
+  never compiled. The Linux job that already installs Tauri's WebKitGTK packages now runs
+  `cargo check --tests` for `apps/mobile/src-tauri`.
 - **A parked prompt survives a shutdown while the ledger cannot be read.** If the startup ledger
   read failed after a parked prompt was restored, a shutdown used to settle that turn and erase the
   saved prompt while the resume schedule stayed armed; the next launch then ran the policy's

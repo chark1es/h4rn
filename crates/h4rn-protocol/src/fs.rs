@@ -130,10 +130,41 @@ pub struct FsFileContent {
     pub binary: bool,
     /// True when the file is over the edit size limit.
     pub truncated: bool,
+    /// Raw bytes as standard base64, when the read asked for them.
+    ///
+    /// This is how the HTML preview inlines binary assets such as images and
+    /// fonts. A `bytes_base64` read returns these bytes **instead of** decoded
+    /// text, so one large asset cannot exceed a transport frame by carrying
+    /// both forms. Ordinary reads send neither.
+    #[serde(default)]
+    pub bytes_base64: Option<String>,
+    /// Why the requested raw bytes were not returned.
+    ///
+    /// A `bytes_base64` read is capped so one response fits the secure
+    /// transport's frame; a larger file comes back with its metadata and this
+    /// reason, and the preview shows the asset as skipped instead of failing
+    /// the whole page.
+    #[serde(default)]
+    pub bytes_omitted: Option<FsOmitted>,
+    /// Why the requested decoded text was not returned.
+    ///
+    /// A read that asked for `max_bytes` is capped at that many bytes so one
+    /// response fits the secure transport's frame. A larger file comes back
+    /// with its metadata and this reason instead of its content.
+    #[serde(default)]
+    pub content_omitted: Option<FsOmitted>,
     /// Last modification time, when available.
     pub modified_at: Option<DateTime<Utc>>,
     /// What to do about a refusal, when there is one.
     pub hint: Option<String>,
+}
+
+/// Why a requested payload (text or raw bytes) was not returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum FsOmitted {
+    /// The file is larger than the limit that applies to the request.
+    TooLarge,
 }
 
 /// A save that lost the race against another writer.
@@ -333,6 +364,9 @@ mod tests {
             size_bytes: 12,
             binary: false,
             truncated: false,
+            bytes_base64: None,
+            bytes_omitted: None,
+            content_omitted: None,
             modified_at: None,
             hint: None,
         };
