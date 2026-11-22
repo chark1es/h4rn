@@ -206,6 +206,12 @@ impl h4rn_daemon::threads::Clock for ManualClock {
     fn now(&self) -> chrono::DateTime<chrono::Utc> {
         ManualClock::now(self)
     }
+
+    /// This integration clock only drives wall-time lifecycle windows; no test
+    /// here waits on a retry deadline, so a real monotonic reading is enough.
+    fn monotonic(&self) -> std::time::Instant {
+        std::time::Instant::now()
+    }
 }
 
 /// Options that read `clock`, so every derived placement is the test's call.

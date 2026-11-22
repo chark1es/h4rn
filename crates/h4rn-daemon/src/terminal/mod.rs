@@ -28,7 +28,8 @@ use tokio::sync::broadcast;
 
 pub use audit::{AuditEntry, AuditSink, FileAudit, TracingAudit};
 pub use session::{
-    OUTPUT_CHUNK_BYTES, OUTPUT_RING_CAPACITY, OutputChunk, Snapshot, Viewer, ViewerId, run_viewer,
+    OUTPUT_CHUNK_BYTES, OUTPUT_RING_CAPACITY, OutputChunk, QueryReply, Snapshot, Viewer, ViewerId,
+    run_viewer,
 };
 
 use crate::server::Outbound;
@@ -229,6 +230,7 @@ impl TerminalManager {
         tx: tokio::sync::mpsc::Sender<Outbound>,
         cols: Option<u16>,
         rows: Option<u16>,
+        reply_positions: bool,
     ) -> Result<Attached, TerminalError> {
         let session = self.session(terminal_id)?;
         let current = session.info();
@@ -237,10 +239,10 @@ impl TerminalManager {
 
         let output = session.subscribe();
         let viewer = Arc::new(Viewer::new(tx));
-        session.add_viewer(viewer_id, cols, rows, Arc::clone(&viewer));
+        session.add_viewer(viewer_id, cols, rows, reply_positions, Arc::clone(&viewer));
         let snapshot = session.snapshot();
         // The snapshot replaces everything older, so the window starts empty.
-        viewer.reset_credit();
+        viewer.reset_credit(snapshot.seq);
 
         Ok(Attached {
             terminal: session.info(),
@@ -277,15 +279,17 @@ impl TerminalManager {
     /// connection that never attached (or is not allowed to) is refused with
     /// the same error as an unknown stream.
     ///
-    /// A marked `reply` is xterm's answer to a terminal query. At most one
-    /// attached viewer may answer, so replies from the others are dropped; the
-    /// role passes to another viewer when the owner detaches.
+    /// A marked reply is xterm's answer to a terminal query. When it names the
+    /// output position and the answer's ordinal within that chunk, the first
+    /// viewer to answer that pair is written and exact duplicates are dropped.
+    /// A position the viewer was never sent is ignored. A reply from an older
+    /// client names no position and keeps the previous single-owner rule.
     pub fn input_by_stream(
         &self,
         stream_id: u32,
         viewer_id: ViewerId,
         data: &[u8],
-        reply: bool,
+        reply: QueryReply,
     ) -> Result<(), TerminalError> {
         let terminal_id = lock(&self.stream_ids).get(&stream_id).cloned();
         let not_found = || TerminalError::NotFound(TerminalId::new(format!("stream {stream_id}")));

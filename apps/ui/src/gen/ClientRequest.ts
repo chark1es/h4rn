@@ -246,7 +246,15 @@ cols: number | null,
 /**
  * Viewer height, when known.
  */
-rows: number | null, } | { "type": "terminal_list", 
+rows: number | null, 
+/**
+ * Whether this client names the output position on every marked reply.
+ *
+ * A client that omits it is an older build. While one is attached the
+ * terminal keeps the legacy single-owner reply rule, because its
+ * answers cannot be correlated with a query position.
+ */
+reply_positions: boolean, } | { "type": "terminal_list", 
 /**
  * Filter to one thread, or every terminal when `None`.
  */
