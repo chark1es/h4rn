@@ -130,7 +130,9 @@ All notable changes to h4rn are recorded here. The format follows
   after the hangup ends as soon as the shell exits (bounded at two seconds), so a loaded machine no
   longer needs a fixed pause long enough for the shell to forward it; the two-second wait now runs
   only when a hangup was actually delivered, so closing a terminal on Windows does not pause. If the
-  close wait reaped the shell, the exit report keeps that status instead of reporting `-1`.
+  close wait reaped the shell, it captures the status under the child lock and the reader thread
+  reads it under the same lock order, so the exit report keeps that status instead of reporting
+  `-1` from a second failed wait.
 - **Only one attached viewer answers terminal queries.** Two xterm instances each answered device,
   cursor and colour queries, so a shell with a desktop and a phone attached received duplicate
   replies. The UI now marks xterm's own answers to just-asked queries with the output position that
@@ -143,11 +145,18 @@ All notable changes to h4rn are recorded here. The format follows
   lock so accepted replies cannot reach the shell out of order. An answer's ordinal is counted per
   chunk, so a viewer that attached mid-query numbers answers differently; the daemon records the
   first output chunk each viewer was sent after its snapshot and drops a reply for a chunk whose
-  predecessor that viewer never parsed, leaving the answer to an earlier-attached viewer. A query
+  predecessor that viewer never parsed, leaving the answer to an earlier-attached viewer. That rule
+  exists only to keep two parsers from numbering one chunk differently, so it is relaxed when no
+  other attached viewer could answer the position: a sole viewer that attached at a snapshot, or
+  resynced after falling behind, still answers its first raw chunk. The client no longer drops a
+  reply below its own floor; it always sends and the daemon decides. A query
   spanning more than two 64 KiB chunks is out of scope. The sent bound advances only when a frame
   is really handed to the outbound channel, so a blocked send cannot let a reply name unseen output.
   Clients declare reply-position support when they attach; while any attached viewer does not, every
-  reply keeps the legacy single-owner rule, whichever client's reply arrives first. A stalled or
+  reply keeps the legacy single-owner rule, whichever client's reply arrives first. Only a reply
+  that is actually written takes the owner role, so a bogus positioned claim cannot suppress the old
+  client's next valid answer, and another legacy viewer attaching or detaching no longer resets the
+  owner while a query is in flight. A stalled or
   backgrounded viewer no longer holds an owner role that blocks the others. The per-answer record
   keeps 64 recent chunks with 1024 answers each by design, and older chunks collapse to a high-water
   mark, so memory stays constant.

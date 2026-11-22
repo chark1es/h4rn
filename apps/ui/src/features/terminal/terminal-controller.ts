@@ -75,16 +75,6 @@ export class TerminalController {
   private status: TerminalStatus = { phase: "opening" };
   /** Answers xterm owes the program since the last data chunk. */
   private readonly queryTracker = new TerminalQueryTracker();
-  /**
-   * Earliest output position this viewer may answer (ADR-007).
-   *
-   * A viewer starts parsing from its attach snapshot. A query can start in the
-   * chunk just before the one it answers, so only a viewer that attached at
-   * position zero may answer its first chunk; every later attach starts two
-   * positions on. The daemon enforces the same rule; dropping here saves the
-   * frame and keeps a sole late viewer's misnumbered answers off the wire.
-   */
-  private replyFloor = 1;
 
   async start(options: TerminalControllerOptions): Promise<void> {
     this.client = options.client;
@@ -180,7 +170,6 @@ export class TerminalController {
       if (this.disposed) return;
       this.streamId = attached.terminal.stream_id;
       this.tracker = new AckTracker(attached.start_seq);
-      this.replyFloor = attached.start_seq === 0 ? 1 : attached.start_seq + 2;
       term.write(attached.snapshot);
 
       const queued = this.pending.splice(0);
@@ -202,16 +191,13 @@ export class TerminalController {
    *
    * `reply` names the output position that carried the query xterm is
    * answering and the answer's ordinal within that chunk, or null for typed
-   * input. The daemon writes one answer per `(position, ordinal)`. A reply for
-   * a position before this viewer's attach floor is dropped: it cannot number
-   * the answers the way a viewer that saw the whole chunk would.
+   * input. The daemon writes one answer per `(position, ordinal)` and decides
+   * whether this viewer may answer it: a reply is never dropped here, because
+   * a sole viewer that attached at a snapshot has no other parser to collide
+   * with and may answer its first raw chunk.
    */
   send(data: string, reply: TerminalQueryReply | null = null): void {
     if (!this.client || this.streamId === 0) return;
-    // A reply for a chunk whose predecessor this viewer never parsed would
-    // number the answers differently from an earlier viewer. Drop it; the
-    // daemon applies the same rule but has no need to see the frame.
-    if (reply !== null && reply.position < this.replyFloor) return;
     const payload = new TextEncoder().encode(data);
     const seq =
       reply === null
@@ -442,9 +428,6 @@ export class TerminalController {
       if (frame.seq <= this.tracker.position) return;
       term.reset();
       this.tracker.reset(frame.seq);
-      // The snapshot restarts this viewer's parser, so its answering window
-      // moves to the chunks that follow it.
-      this.replyFloor = frame.seq === 0 ? 1 : frame.seq + 2;
       this.queryTracker.beginChunk(frame.seq);
       term.write(new TextDecoder().decode(frame.payload), () => {
         this.queryTracker.endChunk();

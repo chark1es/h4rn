@@ -159,8 +159,17 @@ const payload = (frame: BinaryFrame) => new TextDecoder().decode(frame.payload);
 
 /** Delivers one PTY output chunk the way the client does. */
 function pushOutput(binary: BinarySink, seq: number, text: string): void {
+  pushFrame(binary, BinaryKind.PtyOutput, seq, text);
+}
+
+/** Delivers a snapshot frame the way a resync does. */
+function pushSnapshot(binary: BinarySink, seq: number, text = ""): void {
+  pushFrame(binary, BinaryKind.PtySnapshot, seq, text);
+}
+
+function pushFrame(binary: BinarySink, kind: BinaryFrame["kind"], seq: number, text: string): void {
   const bytes = encodeBinaryFrame({
-    kind: BinaryKind.PtyOutput,
+    kind,
     streamId: TERMINAL_INFO.stream_id,
     seq,
     payload: new TextEncoder().encode(text),
@@ -301,7 +310,7 @@ describe("terminal controller query replies", () => {
     controller.dispose();
   });
 
-  it("answers a split query once when a second viewer attached mid-query", async () => {
+  it("lets the daemon drop a late viewer's answer when another viewer saw the query", async () => {
     // The early viewer parses chunks 7 and 8. The late one attaches with
     // chunk 7 already folded into its snapshot, so it parses only chunk 8 and
     // numbers its answers differently.
@@ -331,9 +340,45 @@ describe("terminal controller query replies", () => {
       [ptyInputReplySeq(8, 0), "\x1b[?12;2$y"],
       [ptyInputReplySeq(8, 1), "\x1b[?25;2$y"],
     ]);
-    expect(lateSent.map((frame) => [frame.seq, payload(frame)])).toEqual([[0, "ls\r"]]);
+    // The client always sends its answer and lets the daemon decide: here the
+    // early viewer has the position, so the late one's frame is dropped
+    // daemon-side, not silently in the client.
+    expect(lateSent.map((frame) => [frame.seq, payload(frame)])).toEqual([
+      [ptyInputReplySeq(8, 0), "\x1b[?25;2$y"],
+      [0, "ls\r"],
+    ]);
 
     early.controller.dispose();
     late.controller.dispose();
+  });
+
+  it("sends a sole viewer's answer for its first chunk after an attach snapshot", async () => {
+    const sent: BinaryFrame[] = [];
+    // Attached with chunk 5 folded into the snapshot; chunk 6 is the first
+    // raw output this viewer parses.
+    const { controller, term, binary } = await startController(sent, 5);
+
+    pushOutput(binary, 6, "\x1b[?12;2$y");
+    expect(term.query({ prefix: "?", intermediates: "$", final: "p" }, [12])).toBe(false);
+    term.input("\x1b[?12;2$y");
+
+    expect(sent.map((frame) => frame.seq)).toEqual([ptyInputReplySeq(6)]);
+    controller.dispose();
+  });
+
+  it("keeps sending a sole viewer's answers after a resync snapshot", async () => {
+    const sent: BinaryFrame[] = [];
+    const { controller, term, binary } = await startController(sent, 0);
+
+    pushOutput(binary, 4, "");
+    term.finishWrite();
+    pushSnapshot(binary, 5);
+    term.finishWrite();
+    pushOutput(binary, 6, "\x1b[?12;2$y");
+    expect(term.query({ prefix: "?", intermediates: "$", final: "p" }, [12])).toBe(false);
+    term.input("\x1b[?12;2$y");
+
+    expect(sent.map((frame) => frame.seq)).toEqual([ptyInputReplySeq(6)]);
+    controller.dispose();
   });
 });

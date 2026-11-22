@@ -447,14 +447,15 @@ impl Session {
         let status = {
             // `wait_for_shell_exit` may already have reaped the child while
             // closing the terminal; a second `wait` would then fail and lose
-            // the real status.
+            // the real status. It stores that status while still holding the
+            // child lock, so taking both locks in the same order (child, then
+            // captured status) makes the captured status visible here and
+            // closes the race where the child is reaped between the two steps.
+            let mut child = lock(&self.child);
             let captured = lock(&self.reaped_status).take();
             match captured {
                 Some(status) => Some(status),
-                None => {
-                    let mut child = lock(&self.child);
-                    child.wait().ok()
-                }
+                None => child.wait().ok(),
             }
         };
         let exit = match status {
@@ -509,12 +510,7 @@ impl Session {
     ) {
         let previous = {
             let mut viewers = lock(&self.viewers);
-            if !reply_positions {
-                // The reply owner is chosen afresh while a legacy client is
-                // present; an earlier owner's role must not outlive it.
-                clear_legacy_owners(&mut viewers);
-            }
-            viewers.insert(
+            let previous = viewers.insert(
                 id,
                 ViewerEntry {
                     viewer,
@@ -523,7 +519,17 @@ impl Session {
                     reply_positions,
                     legacy_owner: false,
                 },
-            )
+            );
+            // Attaching a legacy client must not take the reply role away from
+            // an owner that is still attached: a viewer may attach while an
+            // answer is in flight. The role moves only when its owner is gone
+            // (including a replaced viewer) or legacy mode ends.
+            let owner_replaced = previous.as_ref().is_some_and(|entry| entry.legacy_owner);
+            let any_legacy = viewers.values().any(|entry| !entry.reply_positions);
+            if owner_replaced || !any_legacy {
+                clear_legacy_owners(&mut viewers);
+            }
+            previous
         };
         if let Some(previous) = previous {
             previous.viewer.close();
@@ -558,11 +564,17 @@ impl Session {
             if !matches {
                 return;
             }
-            // Dropping the entry also drops the legacy owner for replies with
-            // no position, so another old client can take over.
+            // Dropping the entry may drop the legacy owner for replies with
+            // no position. The role passes on only when its owner leaves or
+            // when the last legacy client does; a legacy viewer attaching or
+            // detaching elsewhere must not move it while a query is in flight.
             let removed = viewers.remove(&id);
-            if removed.as_ref().is_some_and(|entry| !entry.reply_positions) {
-                clear_legacy_owners(&mut viewers);
+            if let Some(entry) = &removed {
+                let owner_gone = entry.legacy_owner;
+                let legacy_gone = !viewers.values().any(|entry| !entry.reply_positions);
+                if owner_gone || legacy_gone {
+                    clear_legacy_owners(&mut viewers);
+                }
             }
             removed
         };
@@ -715,26 +727,23 @@ impl Session {
 
     /// Waits until the shell exits, or `limit` passes.
     ///
-    /// `try_wait` reaps the shell when it has exited; the status is kept so
-    /// `finish` can still report it when the reader thread notices the close.
+    /// `try_wait` reaps the shell when it has exited; the status is stored
+    /// while the child lock is still held so `finish` can never see the child
+    /// as reaped without also seeing its status. Both take the child lock
+    /// before the captured-status lock.
     async fn wait_for_shell_exit(&self, limit: Duration) {
         let deadline = Instant::now() + limit;
         loop {
-            let status = {
+            {
                 let mut child = lock(&self.child);
                 match child.try_wait() {
-                    Ok(Some(status)) => Some(Some(status)),
-                    Err(_) => Some(None),
-                    Ok(None) => None,
+                    Ok(Some(status)) => {
+                        *lock(&self.reaped_status) = Some(status);
+                        return;
+                    }
+                    Err(_) => return,
+                    Ok(None) => {}
                 }
-            };
-            match status {
-                Some(Some(status)) => {
-                    *lock(&self.reaped_status) = Some(status);
-                    return;
-                }
-                Some(None) => return,
-                None => {}
             }
             if Instant::now() >= deadline {
                 return;
@@ -802,20 +811,33 @@ fn accepts_reply(
             .iter()
             .find(|(_, entry)| entry.legacy_owner)
             .map(|(id, _)| *id);
-        match owner {
-            Some(owner) if owner != viewer_id => return false,
-            Some(_) => {}
-            None => match viewers.get_mut(&viewer_id) {
-                Some(entry) => entry.legacy_owner = true,
-                None => return false,
-            },
+        if let Some(owner) = owner
+            && owner != viewer_id
+        {
+            return false;
         }
-        return match reply {
+        let accepted = match reply {
             QueryReply::No | QueryReply::Unpositioned => true,
-            QueryReply::At { position, ordinal } => {
-                accept_position(answers, position, ordinal, latest, answer_from)
-            }
+            QueryReply::At { position, ordinal } => accept_position(
+                &viewers,
+                viewer_id,
+                answers,
+                position,
+                ordinal,
+                latest,
+                answer_from,
+            ),
         };
+        // Only a reply that passed validation takes the role. A bogus claim
+        // must not suppress the old client's next valid reply, and ownership
+        // is not reset by a legacy viewer merely attaching or detaching.
+        if accepted
+            && owner.is_none()
+            && let Some(entry) = viewers.get_mut(&viewer_id)
+        {
+            entry.legacy_owner = true;
+        }
+        return accepted;
     }
     match reply {
         QueryReply::No => true,
@@ -823,9 +845,15 @@ fn accepts_reply(
         // breaks that contract and names no answer: writing it could duplicate
         // a query another viewer already answered.
         QueryReply::Unpositioned => false,
-        QueryReply::At { position, ordinal } => {
-            accept_position(answers, position, ordinal, latest, answer_from)
-        }
+        QueryReply::At { position, ordinal } => accept_position(
+            &viewers,
+            viewer_id,
+            answers,
+            position,
+            ordinal,
+            latest,
+            answer_from,
+        ),
     }
 }
 
@@ -837,20 +865,34 @@ fn clear_legacy_owners(viewers: &mut HashMap<ViewerId, ViewerEntry>) {
 }
 
 /// Records an answer for `(position, ordinal)` if it is new to this viewer.
+///
+/// A viewer cannot answer a query from output it was never sent, nor from a
+/// chunk whose predecessor it never parsed: an answer's ordinal is counted
+/// from the start of the chunk, so a viewer that attached mid-query would
+/// number the same answers differently. That last rule protects the other
+/// viewers' numbering, so it only applies while another attached viewer could
+/// answer the position. A sole viewer (or a viewer whose neighbours all
+/// attached later too) has nothing to collide with and may answer its first
+/// raw chunk after a snapshot. A rejected reply is dropped without advancing
+/// the record, so it cannot suppress the answer of a viewer that really saw
+/// the query.
 fn accept_position(
+    viewers: &HashMap<ViewerId, ViewerEntry>,
+    viewer_id: ViewerId,
     answers: &Mutex<AnsweredQueries>,
     position: u64,
     ordinal: u64,
     latest: u64,
     answer_from: u64,
 ) -> bool {
-    // A viewer cannot answer a query from output it was never sent, nor from
-    // a chunk whose predecessor it never parsed: an answer's ordinal is counted
-    // from the start of the chunk, so a viewer that attached mid-query would
-    // number the same answers differently. Drop the reply without advancing
-    // the record, so it cannot suppress the answer of a viewer that really saw
-    // the query.
-    if position == 0 || position > latest || position < answer_from {
+    if position == 0 || position > latest {
+        return false;
+    }
+    if position < answer_from
+        && viewers
+            .iter()
+            .any(|(id, entry)| *id != viewer_id && entry.viewer.answer_from() <= position)
+    {
         return false;
     }
     lock(answers).accept(position, ordinal)
@@ -1352,6 +1394,99 @@ mod tests {
         assert_eq!(
             exit.status, 7,
             "the remove path keeps the reaped status instead of reporting -1"
+        );
+    }
+
+    /// A child that reaps and then keeps the `try_wait` caller (and the child
+    /// lock) busy long enough for the test to start `finish` in between.
+    #[derive(Debug)]
+    struct SlowReapChild {
+        reaping: Option<std::sync::mpsc::Sender<()>>,
+        status: u32,
+    }
+
+    impl portable_pty::ChildKiller for SlowReapChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn portable_pty::ChildKiller + Send + Sync> {
+            Box::new(SlowReapChild {
+                reaping: None,
+                status: self.status,
+            })
+        }
+    }
+
+    impl portable_pty::Child for SlowReapChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            if let Some(reaping) = self.reaping.take() {
+                let _ = reaping.send(());
+                // Finish starts while this call still holds the child lock;
+                // without the captured status it would then wait again.
+                std::thread::sleep(Duration::from_millis(150));
+            }
+            Ok(Some(portable_pty::ExitStatus::with_exit_code(self.status)))
+        }
+
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            Err(std::io::Error::other("the child was already reaped"))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn finish_sees_the_status_while_the_close_wait_is_still_reaping() {
+        let pty = portable_pty::native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open pty");
+        let writer = pty.master.take_writer().expect("pty writer");
+        let (reaping_tx, reaping_rx) = std::sync::mpsc::channel();
+        let session = Arc::new(Session::new(
+            TerminalId::new("term_interleaved"),
+            1,
+            None,
+            HostId::new("host_test"),
+            "/tmp".into(),
+            "/bin/sh".into(),
+            80,
+            24,
+            pty.master,
+            Box::new(SlowReapChild {
+                reaping: Some(reaping_tx),
+                status: 9,
+            }),
+            writer,
+        ));
+
+        let waiting = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move {
+                session.wait_for_shell_exit(Duration::from_secs(2)).await;
+            }
+        });
+        reaping_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the close wait must reach try_wait");
+
+        // The reader thread's exit report now runs while the close wait still
+        // holds the child lock. It must block until the status is stored and
+        // then report it, not race ahead and lose it to a failed second wait.
+        session.finish();
+        waiting.await.expect("close wait joins");
+
+        let exit = session.info().exit.expect("exit status");
+        assert_eq!(
+            exit.status, 9,
+            "finish must see the status reaped by the close wait"
         );
     }
     #[test]

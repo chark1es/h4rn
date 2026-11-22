@@ -148,8 +148,10 @@ to its jobs and skips `nohup`'d and `disown`'d ones, so background jobs end with
 `nohup`, and a job that called `setsid` has left the session and survives. Walking `ps` for session
 members is deliberately not done: `sess` is not portable and signalling every member reaches jobs the
 user detached. The two-second wait runs only when a hangup was actually delivered; Windows has no
-POSIX signals, so closing a terminal there does not pause. When the close wait reaps the shell, the
-reader thread's exit report reuses that status rather than reporting `-1` from a second failed wait.
+POSIX signals, so closing a terminal there does not pause. When the close wait reaps the shell, it
+stores the status while still holding the child lock, and the reader thread's exit report takes the
+same locks in the same order, so it reuses that status rather than reporting `-1` from a second
+failed wait; the reap and the captured status can no longer be observed apart.
 
 Attached viewers share one PTY, so the UI marks xterm's answer to a query the program just asked
 (through parser hooks for DA, DSR, DECRQM, XTWINOPS and OSC colour queries) in the input frame's
@@ -168,27 +170,37 @@ by viewers that began parsing the chunk at the same place. The daemon records, p
 first raw output chunk it was sent after a snapshot; a reply naming chunk P is accepted only if
 that viewer also received chunk P-1, which means it attached at or before P-1 and parsed any query
 that started in the previous chunk. A viewer that attached at position 0 is the exception, because
-there is no earlier chunk, so its first chunk is answerable. A viewer that attached mid-query is
-dropped rather than allowed to renumber another viewer's answers, and the earlier-attached viewer
-writes them. A query spanning more than two 64 KiB chunks is out of scope: only the previous chunk
-is known to the daemon, and such a query is already unanswerable by a parser that attaches between
-its start and end. The sent bound also advances only when a frame is actually handed to the viewer's
-outbound channel, so a blocked send leaves it unchanged.
+there is no earlier chunk, so its first chunk is answerable. The rule protects the other viewers'
+numbering rather than the viewer itself: a reply below that viewer's floor is accepted when no
+other attached viewer could answer P (no other viewer has its floor at or below P), because then
+there is nothing to collide with. A sole viewer that attached at a snapshot — or that resynced
+after falling behind — therefore still answers its first raw chunk. The client never drops a reply
+below its own floor; it always sends and lets the daemon decide. When another viewer could answer
+the position, a viewer that attached mid-query is dropped rather than allowed to renumber that
+viewer's answers, and the earlier-attached viewer writes them. A query spanning more than two
+64 KiB chunks is out of scope: only the previous chunk is known to the daemon, and such a query is
+already unanswerable by a parser that attaches between its start and end. The sent bound also
+advances only when a frame is actually handed to the viewer's outbound channel, so a blocked send
+leaves it unchanged.
 
 Clients declare reply-position support in the attach request (default false, so an older build is
 recognised immediately). While any attached viewer has not declared it, every reply follows the
-legacy single-owner rule: the first viewer to send a marked reply owns them all, and its positioned
-replies are still validated and deduplicated. Both arrival orders therefore write exactly one
-answer. When every attached viewer has declared positions, each answer is decided by its
-`(position, ordinal)` alone. Acceptance and the PTY write happen under the same writer lock, so two
-connections cannot be accepted in one order and write out of order. Recent chunks keep a bounded
-bitset of answered ordinals: 64 chunks with 1024 answers each, deliberately fixed so memory stays
-constant; the tail of a larger chunk collapses to a single high-water ordinal, and chunks older than
-the window collapse into the evicted high-water mark. Those limits are deliberate, not a missing
-feature: a 1024-answer batch in one 64 KiB chunk is already far beyond real queries, and the
-collapse can only drop answers for a chunk that has left the window. A stalled or backgrounded
-viewer therefore never blocks another viewer's answer, and two active viewers never both answer.
-The client never gives up reconnecting: after
+legacy single-owner rule: the first viewer to send a marked reply that is actually written owns
+them all, and its positioned replies are still validated and deduplicated. A rejected claim — a
+position the daemon never sent, or one that fails the attach boundary — does not take the role, so
+it cannot suppress the old client's next valid reply. The role moves only when its owner detaches
+or is replaced, or when the last legacy viewer leaves and the per-answer rule resumes; another
+legacy viewer attaching or detaching does not reset it while an answer may be in flight. Both
+arrival orders therefore write exactly one answer. When every attached viewer has declared
+positions, each answer is decided by its `(position, ordinal)` alone. Acceptance and the PTY write
+happen under the same writer lock, so two connections cannot be accepted in one order and write out
+of order. Recent chunks keep a bounded bitset of answered ordinals: 64 chunks with 1024 answers
+each, deliberately fixed so memory stays constant; the tail of a larger chunk collapses to a
+single high-water ordinal, and chunks older than the window collapse into the evicted high-water
+mark. Those limits are deliberate, not a missing feature: a 1024-answer batch in one 64 KiB chunk
+is already far beyond real queries, and the collapse can only drop answers for a chunk that has
+left the window. A stalled or backgrounded viewer therefore never blocks another viewer's answer,
+and two active viewers never both answer. The client never gives up reconnecting: after
 the fast backoff it retries at the capped interval, and an online, focus or visibility event retries
 at once, except during the very first connect, which is not yet a retry, and while an attempt that
 started less than a second ago is still opening.

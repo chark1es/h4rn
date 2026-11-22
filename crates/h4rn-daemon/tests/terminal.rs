@@ -1189,6 +1189,81 @@ async fn a_viewer_that_attached_mid_query_cannot_answer_that_chunk() {
     drop(cwd);
 }
 
+/// With no other viewer able to answer the position, a viewer that attached
+/// at a snapshot is the only parser and may answer its first raw chunk.
+#[tokio::test]
+async fn a_sole_viewer_that_attached_at_a_snapshot_answers_its_first_chunk() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (viewer_id, mut rx, attached) = attach_viewer(&manager, &terminal, true);
+    // The snapshot covers chunk 5; this viewer parses chunk 6 onward.
+    attached.viewer.reset_credit(5);
+    mark_sent(&attached, 6);
+
+    manager
+        .input_by_stream(terminal.stream_id, viewer_id, b"iFIRST", at(6, 0))
+        .expect("the sole viewer answers its first raw chunk");
+    manager
+        .input_by_stream(terminal.stream_id, viewer_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut rx,
+        &manager,
+        &terminal.terminal_id,
+        viewer_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches("iFIRST").count(),
+        1,
+        "a sole viewer's first answer has no other parser to collide with: {output:?}"
+    );
+
+    drop(attached);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
+}
+
+/// A resync snapshot moves the answering window exactly like an attach
+/// snapshot, and a sole viewer is still the only parser that can answer.
+#[tokio::test]
+async fn a_sole_viewer_answers_after_a_resync_snapshot() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (viewer_id, mut rx, attached) = attach_viewer(&manager, &terminal, true);
+    // Resync at position 5: the snapshot replaces chunk 5.
+    attached.viewer.begin_resync();
+    attached.viewer.record_snapshot_sent(5);
+    mark_sent(&attached, 6);
+
+    manager
+        .input_by_stream(terminal.stream_id, viewer_id, b"iRESYNC", at(6, 0))
+        .expect("the sole viewer answers after a resync snapshot");
+    manager
+        .input_by_stream(terminal.stream_id, viewer_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut rx,
+        &manager,
+        &terminal.terminal_id,
+        viewer_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches("iRESYNC").count(),
+        1,
+        "a sole viewer still answers after a resync snapshot: {output:?}"
+    );
+
+    drop(attached);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
+}
+
 /// A viewer that never received chunk 3 cannot claim its first answer and
 /// suppress the viewer that did receive it.
 #[tokio::test]
@@ -1404,6 +1479,124 @@ async fn mixed_versions_new_client_answers_first_writes_once() {
 
     drop(first);
     drop(second);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
+}
+
+/// In mixed mode a rejected positioned claim must not take the legacy role.
+/// The old client's next valid unpositioned reply is still written.
+#[tokio::test]
+async fn a_rejected_reply_does_not_claim_the_legacy_owner() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (old_id, _old_rx, old) = attach_viewer_declaring(&manager, &terminal, false, false);
+    mark_sent(&old, 10);
+    let (new_id, mut new_rx, new) = attach_viewer(&manager, &terminal, true);
+    mark_sent(&new, 10);
+
+    // The new client claims output it was never sent; the reply is rejected,
+    // so it must not own the terminal's answers.
+    manager
+        .input_by_stream(terminal.stream_id, new_id, b"iBOGUS", at(99, 0))
+        .expect("a bogus claim is rejected");
+    manager
+        .input_by_stream(
+            terminal.stream_id,
+            old_id,
+            b"iOLD",
+            QueryReply::Unpositioned,
+        )
+        .expect("the old client's valid reply is written");
+    manager
+        .input_by_stream(terminal.stream_id, new_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut new_rx,
+        &manager,
+        &terminal.terminal_id,
+        new_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches("iOLD").count(),
+        1,
+        "a rejected claim must not suppress the old client's reply: {output:?}"
+    );
+    assert!(
+        !output.contains("iBOGUS"),
+        "the rejected claim must not reach the shell: {output:?}"
+    );
+
+    drop(old);
+    drop(new);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
+}
+
+/// A legacy viewer attaching or detaching elsewhere must not move the reply
+/// role while an answer is in flight.
+#[tokio::test]
+async fn another_legacy_viewer_cannot_reset_the_owner() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (owner_id, _owner_rx, owner) = attach_viewer_declaring(&manager, &terminal, false, false);
+    mark_sent(&owner, 10);
+    let (new_id, mut new_rx, new) = attach_viewer(&manager, &terminal, true);
+    mark_sent(&new, 10);
+
+    // The old client owns the replies after a written answer.
+    manager
+        .input_by_stream(
+            terminal.stream_id,
+            owner_id,
+            b"iOWNER",
+            QueryReply::Unpositioned,
+        )
+        .expect("the old client owns the first reply");
+
+    // Another old client comes and goes. Neither event may hand the role to
+    // the new client or clear it while the owner is still attached.
+    let (other_id, _other_rx, other) = attach_viewer_declaring(&manager, &terminal, false, false);
+    mark_sent(&other, 10);
+    manager.detach_viewer(other_id);
+
+    // The new client's reply is the one that must be dropped: the owner is
+    // unchanged and can still answer the query.
+    manager
+        .input_by_stream(
+            terminal.stream_id,
+            new_id,
+            b"iNEW",
+            QueryReply::Unpositioned,
+        )
+        .expect("a non-owner's reply is dropped");
+    manager
+        .input_by_stream(terminal.stream_id, new_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut new_rx,
+        &manager,
+        &terminal.terminal_id,
+        new_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches("iOWNER").count(),
+        1,
+        "the owner's reply stays the only one written: {output:?}"
+    );
+    assert!(
+        !output.contains("iNEW"),
+        "attaching and detaching an old client must not reset the owner: {output:?}"
+    );
+
+    drop(owner);
+    drop(new);
+    drop(other);
     manager.close(&terminal.terminal_id).await.expect("close");
     manager.shutdown().await;
     drop(cwd);
