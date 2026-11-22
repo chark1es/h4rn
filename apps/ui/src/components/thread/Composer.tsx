@@ -316,6 +316,8 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     // history and what the box held before recall started.
     const recalled = historyIndex.current >= 0;
     const preservedDraft = historyDraft.current;
+    /** Where in history this send started; a newer recall replaces the restore. */
+    const submittedHistoryIndex = historyIndex.current;
     // Store the draft before the send waits so a second tab's edit during the
     // request is not hidden behind this tab's pending write.
     flushDrafts();
@@ -334,7 +336,10 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
       shownThread.current.host === submittedHost &&
       shownThread.current.threadId === submittedThread;
     if (!stillShowing) return;
-    const stillRecalled = recalled && historyIndex.current >= 0;
+    // A recall the person made while the send waited is their newer intent:
+    // its text stays on screen instead of the draft recall had preserved.
+    const stillRecalled =
+      recalled && historyIndex.current >= 0 && historyIndex.current === submittedHistoryIndex;
     historyIndex.current = -1;
     historyDraft.current = "";
     if (stillRecalled) {
@@ -431,7 +436,10 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
       focusCaret(applied.caret);
       return;
     }
-    const command = commandResults.find((entry) => entry.id === row.id);
+    const command = rankCommands(commands, trigger.query)[index];
+    // Nothing is ranked for this query: keep the typed text rather than run a
+    // row the previous query left behind.
+    if (!command) return;
     const applied = applyCompletion(visibleText, trigger, "");
     update(applied.value);
     dismissed.current = null;

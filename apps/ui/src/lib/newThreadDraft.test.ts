@@ -128,6 +128,16 @@ describe("NewThreadDraftSession", () => {
     expect(snapshot.text).toBe("api work");
   });
 
+  it("does not remember a folder nobody picked", () => {
+    const store = makeStore(memoryStorage());
+    const session = new NewThreadDraftSession(store);
+
+    session.adoptHost("host_a");
+
+    expect(session.snapshot().workspace).toBe(DEFAULT_NEW_THREAD_WORKSPACE);
+    expect(store.readLastWorkspace("host_a")).toBe("");
+  });
+
   it("remembers the last folder per host across sessions", () => {
     const storage = memoryStorage();
     const store = makeStore(storage);
@@ -206,10 +216,37 @@ describe("NewThreadDraftSession", () => {
     session.setText("start me");
     store.flush();
 
-    session.clearSubmitted(submit(session, DEFAULT_NEW_THREAD_WORKSPACE));
+    expect(session.clearSubmitted(submit(session, DEFAULT_NEW_THREAD_WORKSPACE))).toBe(true);
 
     expect(session.snapshot().text).toBe("");
     expect(store.readNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE)).toBe("");
+  });
+
+  it("reports that it cleared nothing when newer text replaced the send", () => {
+    const store = makeStore(memoryStorage());
+    const session = new NewThreadDraftSession(store);
+    session.adoptHost("host_a");
+    session.setText("start me");
+    store.flush();
+    const submission = submit(session, DEFAULT_NEW_THREAD_WORKSPACE);
+    store.writeNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE, "newer from another tab");
+    store.flush();
+
+    expect(session.clearSubmitted(submission)).toBe(false);
+  });
+
+  it("re-reads the visible slot when another writer changed it", () => {
+    const store = makeStore(memoryStorage());
+    const session = new NewThreadDraftSession(store);
+    session.adoptHost("host_a");
+    session.setText("in the dialog");
+    store.flush();
+
+    const dialog = new NewThreadDraftSession(store);
+    dialog.adoptHost("host_a");
+    dialog.setText("typed in the dialog");
+
+    expect(session.reloadSlot().text).toBe("typed in the dialog");
   });
 
   it("sends the visible text to the folder on screen without moving it", () => {

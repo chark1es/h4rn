@@ -245,6 +245,43 @@ function option(pattern: RegExp): HTMLElement | null {
   return screen.queryByRole("option", { name: pattern });
 }
 
+type TextareaHandlers = {
+  onChange: (event: { target: HTMLTextAreaElement }) => void;
+  onKeyDown: (event: {
+    key: string;
+    shiftKey: boolean;
+    nativeEvent: { isComposing: boolean };
+    currentTarget: HTMLTextAreaElement;
+    preventDefault: () => void;
+  }) => void;
+};
+
+/** The handlers React last rendered the textarea with. */
+function textareaHandlers(element: HTMLTextAreaElement): TextareaHandlers {
+  const key = Object.keys(element).find((name) => name.startsWith("__reactProps$"));
+  if (!key) throw new Error("The textarea has no React props");
+  return (element as unknown as Record<string, TextareaHandlers>)[key] as TextareaHandlers;
+}
+
+/**
+ * Type and press a key in one batch: the key is handled before React
+ * re-renders the rows for the new text. RTL's per-event `act` flush would
+ * otherwise hide the stale-row race the composer has to survive in a browser.
+ */
+function typeAndPressInOneBatch(input: HTMLTextAreaElement, value: string, key: string): void {
+  const handlers = textareaHandlers(input);
+  input.value = value;
+  input.setSelectionRange(value.length, value.length);
+  handlers.onChange({ target: input });
+  handlers.onKeyDown({
+    key,
+    shiftKey: false,
+    nativeEvent: { isComposing: false },
+    currentTarget: input,
+    preventDefault: () => undefined,
+  });
+}
+
 beforeEach(() => {
   flushDrafts();
   window.localStorage.clear();
@@ -459,6 +496,40 @@ describe("Composer drafts and history", () => {
     );
     await waitFor(() => expect(input.value).toBe("half typed"));
     // The recalled prompt was sent; the unsent draft it replaced was not.
+    expect(readThreadDraft(HOST, THREAD)).toBe("half typed");
+  });
+
+  it("keeps a newer recall on screen when a recalled send finishes", async () => {
+    mock.state.logs[THREAD] = log(["older prompt", "newer prompt"]);
+    let finish: (ok: boolean) => void = () => undefined;
+    mock.sendMessage.mockReturnValue(
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    renderComposer();
+    const input = textarea();
+
+    fireEvent.change(input, { target: { value: "half typed" } });
+    input.setSelectionRange(0, 0);
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    runAnimationFrames();
+    expect(input.value).toBe("newer prompt");
+
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await waitFor(() => expect(mock.sendMessage).toHaveBeenCalledWith(THREAD, "newer prompt", []));
+
+    // The person recalls farther back while the send waits. That text is their
+    // newer intent, so the send must not put the old preserved draft back.
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    runAnimationFrames();
+    expect(input.value).toBe("older prompt");
+
+    await act(async () => {
+      finish(true);
+    });
+
+    expect(input.value).toBe("older prompt");
     expect(readThreadDraft(HOST, THREAD)).toBe("half typed");
   });
 
@@ -787,8 +858,7 @@ describe("Composer @ file picker", () => {
     // re-rendered between the two events. The rank for the new query must be
     // used - a different file from the one highlighted under the old query.
     act(() => {
-      typeInto(input, "@doc");
-      fireEvent.keyDown(input, { key: "Enter" });
+      typeAndPressInOneBatch(input, "@doc", "Enter");
     });
     runAnimationFrames();
 
@@ -932,6 +1002,53 @@ describe("Composer @ file picker", () => {
     expect(getPropertyValue).not.toHaveBeenCalledWith("fontFamily");
   });
 
+  it("opens below the caret by the measured line height", async () => {
+    // The composer's line height is not the 21 px fallback.
+    vi.spyOn(window, "getComputedStyle").mockReturnValue({
+      getPropertyValue: (property: string) => (property === "line-height" ? "34px" : ""),
+      lineHeight: "34px",
+    } as unknown as CSSStyleDeclaration);
+    // The caret sits 120 px down a 200 px composer; a 200 px menu above it
+    // does not fit, so it opens below the caret line.
+    vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      return this.tagName === "SPAN" ? 120 : 0;
+    });
+    vi.spyOn(Element.prototype, "clientHeight", "get").mockImplementation(function (this: Element) {
+      return this.classList.contains("q-comp-in") ? 200 : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      return this.classList.contains("q-comp-menu") ? 200 : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, "offsetWidth", "get").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      return this.classList.contains("q-comp-menu") ? 200 : 0;
+    });
+    vi.spyOn(HTMLElement.prototype, "offsetParent", "get").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      return this.classList.contains("q-comp-menu") ? document.body : null;
+    });
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (
+      this: Element,
+    ) {
+      return this === document.body ? domRect(0, 0, 400, 200) : domRect(0, 0, 0, 0);
+    });
+    vi.spyOn(window, "innerHeight", "get").mockReturnValue(600);
+
+    renderComposer();
+    typeInto(textarea(), "@read");
+
+    const menu = (await screen.findByRole("listbox", { name: "Files" })).parentElement;
+    await waitFor(() => expect((menu as HTMLElement).style.top).toBe("158px"));
+    // 120 (caret) + 34 (line) + 4, not 120 + 21 + 4.
+    expect((menu as HTMLElement).style.top).not.toBe("145px");
+  });
+
   it("shows the read error instead of claiming an empty workspace", async () => {
     fileLister = async () => {
       throw new Error("The workspace could not be read.");
@@ -985,6 +1102,42 @@ describe("Composer / command menu", () => {
     expect(input.value).toBe("");
     expect(readThreadDraft(HOST, THREAD)).toBe("");
     expect(mock.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("runs the command ranked for the query on screen, not the old row", async () => {
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "/");
+    // Under the empty query the highlighted row is Stop the turn.
+    await waitFor(() => expect(option(/Stop the turn/)).not.toBeNull());
+
+    // Type the rest of the query and press Enter before React re-renders.
+    act(() => {
+      typeAndPressInOneBatch(input, "/term", "Enter");
+    });
+    runAnimationFrames();
+
+    expect(mock.toggleTerminal).toHaveBeenCalledTimes(1);
+    expect(mock.interruptThread).not.toHaveBeenCalled();
+    expect(input.value).toBe("");
+    expect(readThreadDraft(HOST, THREAD)).toBe("");
+  });
+
+  it("keeps the slash text when nothing matches the query on screen", async () => {
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "/");
+    await waitFor(() => expect(option(/Stop the turn/)).not.toBeNull());
+
+    act(() => {
+      typeAndPressInOneBatch(input, "/zzz", "Enter");
+    });
+    runAnimationFrames();
+
+    expect(mock.interruptThread).not.toHaveBeenCalled();
+    expect(mock.toggleTerminal).not.toHaveBeenCalled();
+    expect(input.value).toBe("/zzz");
+    expect(readThreadDraft(HOST, THREAD)).toBe("/zzz");
   });
 
   it("offers Stop the turn only while the thread is working", async () => {

@@ -166,6 +166,17 @@ All notable changes to h4rn are recorded here. The format follows
   a decomposed accent (`e` + U+0301); switching workspaces clears the picker instead of flashing
   the previous workspace's files; and the flip-below fallback uses the caret line's measured
   height. The dead single-blob draft migration was removed: no released build wrote that format.
+- **The empty-inbox Start box starts from what is on screen.** Pressing Start blurs the folder
+  field on the way to the button, and that blur used to swap the task box to the typed folder's
+  draft before the send; Start now carries the visible task to the folder as typed. The box also
+  restores the folder and draft last used on the host, instead of always opening on `~/code` and
+  ignoring them. The automatic first-project choice is only a view: it is not committed to the
+  box's slot, is not remembered as the last folder, and is skipped while the box holds unsent
+  text. The box is blanked only when the draft it sent was actually cleared, and it re-reads the
+  slot when the New thread dialog closes or another tab writes it, so the dialog's text appears in
+  the inbox. In the composer, `↵` in the `/` menu runs the command ranked for the query on screen
+  (and keeps the text when nothing matches), and a recall made while a recalled prompt is sending
+  stays on screen instead of the draft recall had preserved.
 - **An oversized filesystem response no longer closes the paired session.** JSON escaping of
   quotes, backslashes, newlines and control characters can push a 400 KiB text read past the
   secure transport's 512 KiB frame, and the transport answers an oversized frame with
