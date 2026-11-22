@@ -1,6 +1,6 @@
 import { ArrowRightIcon, GitBranchIcon, PaperclipIcon, PlusIcon } from "lucide-react";
 import type * as React from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChipSelect } from "@/components/common/ChipSelect";
 
 import { ENTER, Kbd, MOD } from "@/components/common/Kbd";
@@ -28,6 +28,7 @@ import {
 } from "@/features/proxy/proxyStore";
 import type { HarnessKind, HostId, RuntimeMode } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
+import { clearNewThreadDraft, readNewThreadDraft, writeNewThreadDraft } from "@/lib/drafts";
 import { HARNESS_LABELS, HARNESS_SLUGS } from "@/lib/entities";
 import { detectedHarnesses, HARNESS_MODELS } from "@/lib/models";
 import { closeNewThread, createThread, useApp } from "@/lib/store/appStore";
@@ -88,9 +89,19 @@ export function NewThreadDialog() {
   const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("approval_required");
   const [prompt, setPrompt] = useState("");
   const [starting, setStarting] = useState(false);
+  /** Which host + folder slot the prompt box currently shows. */
+  const loadedDraftKey = useRef<string | null>(null);
+  /** The preset is applied once per open; later host-list refreshes must not reset the form. */
+  const appliedPreset = useRef(false);
+  /** Read by the host effect without making every workspace keystroke reopen the dialog. */
+  const workspaceRef = useRef(workspace);
+  workspaceRef.current = workspace;
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      loadedDraftKey.current = null;
+      return;
+    }
     // A new thread can only run on this daemon's host for now; prefer it even
     // when another online host sorts first.
     const firstId = defaultThreadHostId(onlineHosts, localHostId);
@@ -103,6 +114,10 @@ export function NewThreadDialog() {
         detectedHarnesses(HARNESSES, installed, first.harnesses)[0] ?? "claude_code";
       setHarness(nextHarness);
       setModel(proxyDefaultModel(nextHarness) ?? DEFAULT_MODELS[nextHarness]);
+      if (loadedDraftKey.current === null) {
+        loadedDraftKey.current = `${first.host_id}\u0000${workspaceRef.current.trim()}`;
+        setPrompt(readNewThreadDraft(first.host_id, workspaceRef.current));
+      }
     }
     setStarting(false);
   }, [open, onlineHosts, localHostId, installed]);
@@ -110,9 +125,17 @@ export function NewThreadDialog() {
   // "New thread in <project>" starts in that project's folder.
   const preset = useApp((state) => state.ui.newThreadPreset);
   useEffect(() => {
-    if (!open || !preset) return;
+    if (!open) {
+      appliedPreset.current = false;
+      return;
+    }
+    if (!preset || appliedPreset.current) return;
+    appliedPreset.current = true;
     if (hosts[preset.host]?.online) setHost(preset.host);
     setWorkspace(preset.workspace);
+    const key = `${preset.host}\u0000${preset.workspace.trim()}`;
+    loadedDraftKey.current = key;
+    setPrompt(readNewThreadDraft(preset.host, preset.workspace));
   }, [open, preset, hosts]);
 
   // The catalogue can arrive after the dialog opens; adopt its default only
@@ -173,6 +196,7 @@ export function NewThreadDialog() {
     });
     setStarting(false);
     if (ok) {
+      clearNewThreadDraft(host, workspace);
       closeNewThread();
       setPrompt("");
       attachments.clear();
@@ -218,6 +242,10 @@ export function NewThreadDialog() {
                 if (nextHarness) {
                   setHarness(nextHarness);
                   setModel(DEFAULT_MODELS[nextHarness]);
+                }
+                if (value && value !== host) {
+                  loadedDraftKey.current = `${value}\u0000${workspace.trim()}`;
+                  setPrompt(readNewThreadDraft(value, workspace));
                 }
               }}
             />
@@ -353,7 +381,11 @@ export function NewThreadDialog() {
             id="new-thread-task"
             autoFocus
             value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
+            onChange={(event) => {
+              const value = event.target.value;
+              setPrompt(value);
+              if (host) writeNewThreadDraft(host, workspace, value);
+            }}
             onPaste={(event) => {
               const files = Array.from(event.clipboardData.files);
               if (files.length > 0) {

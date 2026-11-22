@@ -5,6 +5,20 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **Unsent composer text survives a reload, an app restart or Android killing the webview.** Drafts
+  are stored per host and thread (and the new-thread box has one per host and folder), written after
+  a short debounce and flushed when the page hides. A sent message clears its draft; a failed send
+  keeps it. Thread drafts for deleted threads are dropped when the list loads, and the store keeps
+  at most 200 drafts, dropping the oldest. Attachment bytes are never persisted: a restored draft
+  is its text, and files must be attached again.
+- **The composer recalls earlier prompts.** With the caret on the first line and nothing selected,
+  `↑` walks back through the prompts already sent in this thread and `↓` walks forward, finally
+  restoring the text that was in progress. The history is read from the thread's own user messages,
+  so it needs no separate copy and works on any device that can see the thread. Typing leaves
+  history mode, and an open menu or IME composition leaves the arrow keys alone.
+
 ### Fixed
 
 - **Closing a terminal ends its background jobs.** With job control, `sleep 1000 &` runs in its own

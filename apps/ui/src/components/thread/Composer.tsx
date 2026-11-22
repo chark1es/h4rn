@@ -20,21 +20,27 @@ import {
 } from "@/features/proxy/proxyStore";
 import type { ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
+import { caretOnFirstLine, sentPrompts, stepPromptHistory } from "@/lib/composerHistory";
+import { clearThreadDraft, readThreadDraft, writeThreadDraft } from "@/lib/drafts";
 import { harnessLabel } from "@/lib/entities";
-import { sendMessage, useApp } from "@/lib/store/appStore";
+import { getState, sendMessage, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
-
-const drafts = new Map<string, string>();
 
 export function Composer({ summary }: { summary: ThreadSummary }) {
   const focusNonce = useApp((state) => state.ui.focusComposerNonce);
   const connection = useApp((state) => state.connection.status);
   const hostOnline = useApp((state) => state.hosts[summary.host]?.online ?? false);
   const hostName = useApp((state) => state.hosts[summary.host]?.name ?? summary.host);
-  const [text, setText] = useState(() => drafts.get(summary.thread_id) ?? "");
+  const [text, setText] = useState(() => readThreadDraft(summary.host, summary.thread_id));
   const [sending, setSending] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const ref = useRef<HTMLTextAreaElement | null>(null);
+  /** -1 while the in-progress text is showing; otherwise an index into sent prompts. */
+  const historyIndex = useRef(-1);
+  /** The in-progress text captured before the first ArrowUp. */
+  const historyDraft = useRef("");
+
   useProxyCatalog();
   useProxy((state) => state.profiles);
   const proxyActive = proxyOverrideFor(summary.harness);
@@ -53,14 +59,16 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   });
 
   useEffect(() => {
-    setText(drafts.get(summary.thread_id) ?? "");
+    setText(readThreadDraft(summary.host, summary.thread_id));
+    historyIndex.current = -1;
+    historyDraft.current = "";
     requestAnimationFrame(() => {
       const element = ref.current;
       if (!element) return;
       element.style.height = "auto";
       element.style.height = `${Math.min(element.scrollHeight, 132)}px`;
     });
-  }, [summary.thread_id]);
+  }, [summary.host, summary.thread_id]);
 
   useEffect(() => {
     if (focusNonce > 0) ref.current?.focus();
@@ -77,8 +85,32 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   };
 
   const update = (value: string) => {
+    historyIndex.current = -1;
+    historyDraft.current = "";
     setText(value);
-    drafts.set(summary.thread_id, value);
+    writeThreadDraft(summary.host, summary.thread_id, value);
+  };
+
+  const recall = (direction: "backward" | "forward"): boolean => {
+    const element = ref.current;
+    if (!element) return false;
+    const step = stepPromptHistory({
+      direction,
+      prompts: sentPrompts(getState().logs[summary.thread_id]),
+      state: { index: historyIndex.current, draft: historyDraft.current },
+      current: element.value,
+    });
+    if (!step) return false;
+    historyIndex.current = step.index;
+    historyDraft.current = step.draft;
+    setText(step.text);
+    writeThreadDraft(summary.host, summary.thread_id, step.text);
+    requestAnimationFrame(() => {
+      element.focus();
+      element.setSelectionRange(step.text.length, step.text.length);
+      autosize();
+    });
+    return true;
   };
 
   const insertMention = () => {
@@ -102,7 +134,9 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     const ok = await sendMessage(summary.thread_id, value, attachments.attachments);
     setSending(false);
     if (ok) {
-      drafts.delete(summary.thread_id);
+      clearThreadDraft(summary.host, summary.thread_id);
+      historyIndex.current = -1;
+      historyDraft.current = "";
       setText("");
       attachments.clear();
       requestAnimationFrame(autosize);
@@ -145,7 +179,30 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
         if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
           event.preventDefault();
           void submit();
+          return;
         }
+        if (
+          (event.key !== "ArrowUp" && event.key !== "ArrowDown") ||
+          event.nativeEvent.isComposing ||
+          menuOpen ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.altKey ||
+          event.shiftKey
+        ) {
+          return;
+        }
+        const element = event.currentTarget;
+        if (event.key === "ArrowUp") {
+          if (
+            !caretOnFirstLine(element.value, element.selectionStart ?? 0, element.selectionEnd ?? 0)
+          ) {
+            return;
+          }
+          if (recall("backward")) event.preventDefault();
+          return;
+        }
+        if (historyIndex.current >= 0 && recall("forward")) event.preventDefault();
       }}
     />
   );
@@ -298,7 +355,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
           </button>
           <span className="grow" />
 
-          <DropdownMenu>
+          <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
             <DropdownMenuTrigger asChild>
               <button
                 type="button"
