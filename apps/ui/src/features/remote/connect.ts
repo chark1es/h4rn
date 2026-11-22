@@ -356,7 +356,10 @@ export class ConnectClient {
         // The access token may still be valid; let the request decide.
       }
     }
-    const proof = await this.proof(method, path);
+    // The relay verifies the proof over `parts.uri.path()`, which never
+    // includes the query string. A path such as `/v1/machines?linked=true`
+    // must still be fetched with its query, but signed without it.
+    const proof = await this.proof(method, path.split("?")[0] ?? path);
     const response = await fetch(join(this.connectUrl, path), {
       method,
       headers: {
@@ -387,8 +390,9 @@ export class ConnectClient {
     return this.authorizedJson<ConnectMeResponse>("GET", "/v1/me");
   }
 
-  async machines(): Promise<MachineSummary[]> {
-    return this.authorizedJson<MachineSummary[]>("GET", "/v1/machines");
+  async machines(options: { linked?: boolean } = {}): Promise<MachineSummary[]> {
+    const query = options.linked ? "?linked=true" : "";
+    return this.authorizedJson<MachineSummary[]>("GET", `/v1/machines${query}`);
   }
 
   async devices(): Promise<ConnectDevice[]> {

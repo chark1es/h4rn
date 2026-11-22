@@ -59,9 +59,11 @@ durable, daemon-global, monotonically increasing number shared by every thread. 
 returns its events as `SeqEvent { seq, event }` and `Subscribe` accepts an optional `since_seq`;
 a reconnecting client passes the last sequence it applied and the daemon replays every thread's
 gap while holding its append lock, so replay is a prefix with no hole between the journal and
-live frames. Keeping one global order is what lets a single socket resume all threads at once;
-the alternative (per-thread cursors) would multiply resume state by thread count and still leave
-cross-thread ordering unspecified.
+live frames. The subscribe answer carries `replay_through`, the journal head it served: a client
+tells history from news by sequence instead of by arrival order, because a live frame can land
+before the answer does. Keeping one global order is what lets a single socket resume all threads at
+once; the alternative (per-thread cursors) would multiply resume state by thread count and still
+leave cross-thread ordering unspecified.
 
 ## ADR-004: Thread tabs are Working / Done / Settled
 
