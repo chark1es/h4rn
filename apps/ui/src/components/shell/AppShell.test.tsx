@@ -350,6 +350,27 @@ describe("inbox start composer drafts", () => {
     expect(readNewThreadDraft("host_ui", "~/code")).toBe("visible task!");
   });
 
+  it("clears the draft the box came from when the box is emptied on another folder", async () => {
+    render(<InboxDetailEmpty />);
+    await waitFor(() => expect(taskBox().disabled).toBe(false));
+
+    fireEvent.change(taskBox(), { target: { value: "hello" } });
+    fireEvent.change(folderField(), { target: { value: "~/code/web" } });
+
+    const start = screen.getByRole("button", { name: "Start thread" });
+    fireEvent.blur(folderField(), { relatedTarget: start });
+    fireEvent.focus(start);
+    fireEvent.blur(start, { relatedTarget: taskBox() });
+
+    // Deleting everything empties the slot "hello" was saved in; it must not
+    // come back the next time that folder's draft loads.
+    fireEvent.change(taskBox(), { target: { value: "" } });
+    flushDrafts();
+
+    expect(readNewThreadDraft("host_ui", "~/code")).toBe("");
+    expect(readNewThreadDraft("host_ui", "~/code/web")).toBe("");
+  });
+
   it("commits the typed folder when Start loses focus outside the composer", async () => {
     writeNewThreadDraft("host_ui", "~/code/api", "saved api draft");
     flushDrafts();

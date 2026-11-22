@@ -221,9 +221,14 @@ export function InboxDetailEmpty() {
     // keystroke — but only while that folder's slot is empty. A typed folder
     // that already holds a saved draft is somebody else's unsent text: the
     // keystroke stays with the slot on screen instead of replacing it. That is
-    // still not a folder choice to remember.
+    // still not a folder choice to remember. Clearing the box is not text for
+    // the shown folder either: it empties the slot the cleared text came from.
     const target = normalizeWorkspace(workspace) || DEFAULT_NEW_THREAD_WORKSPACE;
-    if (target !== session.snapshot().workspace && session.slotIsEmpty(target)) {
+    if (
+      value.length > 0 &&
+      target !== session.snapshot().workspace &&
+      session.slotIsEmpty(target)
+    ) {
       session.showWorkspace(target);
     }
     session.setText(value);
