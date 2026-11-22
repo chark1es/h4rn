@@ -819,8 +819,12 @@ export class H4rnClient {
     for (const envelope of pending) {
       if (envelope.seq <= this.lastSeq) continue;
       this.lastSeq = envelope.seq;
+      // These frames were sent while the subscribe replay was still open, so
+      // they are history from before this client caught up. Tagging them is
+      // what lets the notifier tell a burst of old approvals from a live one.
+      const replayed: EventEnvelope = { ...envelope, replayed: true };
       for (const listener of this.eventListeners) {
-        listener(envelope);
+        listener(replayed);
       }
     }
   }

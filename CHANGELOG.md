@@ -9,18 +9,26 @@ All notable changes to h4rn are recorded here. The format follows
 
 - **Notifications, Open at login and the tray are real settings.** Settings → Notifications now
   controls OS notifications on the desktop app (the Tauri notification plugin) and in the browser
-  (the Web Notification API, asked for only when a switch is turned on). Approvals and waiting
-  questions, finished and failed turns, and a paired machine going offline notify only when the
-  window is not focused or a different thread is open; a burst in one thread becomes one
-  notification with the latest message, and clicking it focuses h4rn and opens the thread. The
-  choices persist per device (`h4rn.notifications`): approvals and finished turns on, host
-  offline off. A denied OS permission is shown as “Blocked in system settings” instead of a
-  switch that looks on.
+  (the Web Notification API, asked for only when a switch is turned on; there is no separate
+  Allow button). Approvals and waiting questions, finished and failed turns, and a paired machine
+  going offline notify only when the window is not focused or a different thread is open.
+  Finished and failed turns follow the daemon's thread summary: a turn that hands off to a queued
+  turn says nothing, an interrupted turn that lands in Done notifies, and a token or turn limit
+  reads as “Stopped”, never “Finished”. A burst in one thread waits for a quiet period (1 s of no
+  new event, capped at 3 s) and announces the latest message. Clicking a notification focuses h4rn
+  and opens the thread. Events replayed after a reconnect are history and stay quiet. The choices
+  persist per device (`h4rn.notifications`): approvals and finished turns on, host offline off.
+  In the browser a denied OS permission is shown as “Blocked in system settings”; the desktop
+  notification plugin cannot detect a blocked permission, so Settings says nothing about it there
+  rather than claiming a state it does not know. Host offline uses the same live presence the
+  hosts list shows: the connection to the active host wins over the relay's report, and other
+  paired machines are watched while this client is connected.
 - **Open at login** registers the desktop app as a login item through the autostart plugin.
 - **Keep running in tray** adds an Open h4rn / Quit tray icon and makes the window's close button
   hide h4rn instead of quitting while agents keep working; the shell stores the choice so the
-  close handler knows it before the UI loads. With it off, closing the window quits as before.
-  Both startup rows are hidden in the browser and on mobile.
+  close handler knows it before the UI loads. Hide-on-close is only enabled when the tray icon was
+  actually created: if the shell cannot add one, closing quits as before and Settings disables the
+  switch with an explanation. Both startup rows are hidden in the browser and on mobile.
 - The mobile build does not send notifications yet, and Settings says so instead of offering
   switches that do nothing.
 

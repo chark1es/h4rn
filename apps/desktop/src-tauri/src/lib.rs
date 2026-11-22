@@ -26,7 +26,7 @@ mod updates;
 use tauri::{Manager, RunEvent};
 
 pub use daemon::DaemonState;
-pub use settings::{ShellSettings, ShellSettingsState};
+pub use settings::{ShellSettings, ShellSettingsState, TrayAvailability};
 pub use updates::UpdateState;
 
 /// Build and run the desktop shell.
@@ -87,9 +87,18 @@ pub fn run() {
                 "keep running in tray is off"
             });
             app.manage(ShellSettingsState(std::sync::Mutex::new(shell_settings)));
-            if let Err(error) = tray::create(&handle) {
-                diagnostics::warn(&format!("could not create the tray icon: {error}"));
-            }
+            // Only a created tray may hide the window: without one, closing
+            // would leave the app running with no way to bring it back.
+            let tray_available = match tray::create(&handle) {
+                Ok(()) => true,
+                Err(error) => {
+                    diagnostics::warn(&format!("could not create the tray icon: {error}"));
+                    false
+                }
+            };
+            app.manage(TrayAvailability(std::sync::atomic::AtomicBool::new(
+                tray_available,
+            )));
             tray::watch_window(&handle);
 
             #[cfg(desktop)]

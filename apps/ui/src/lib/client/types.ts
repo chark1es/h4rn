@@ -47,6 +47,13 @@ export type ReadyInfo = {
 export type EventEnvelope = {
   seq: number;
   event: Event;
+  /**
+   * True when the client delivered this envelope from the subscribe replay
+   * after a reconnect. Replayed events are history: the projection still
+   * applies them, but anything that responds to "news" (OS notifications)
+   * must stay quiet.
+   */
+  replayed?: boolean;
 };
 
 export type TransportHandlers = {

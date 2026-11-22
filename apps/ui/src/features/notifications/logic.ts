@@ -6,8 +6,16 @@
  * the same functions directly.
  */
 
-import type { ApprovalKind, Event, ThreadId, ThreadSummary } from "@/gen";
-import type { ConnectionStatus } from "@/lib/client/types";
+import type {
+  ApprovalKind,
+  Event,
+  HostSummary,
+  MachineSummary,
+  ThreadId,
+  ThreadSummary,
+  TurnStatus,
+} from "@/gen";
+import type { ConnectionStatus, EventEnvelope } from "@/lib/client/types";
 
 import type { NotificationSettings } from "./settings";
 
@@ -29,18 +37,24 @@ export type FocusSnapshot = {
   connection: ConnectionStatus;
 };
 
-/** A queued message and the moment it becomes due. */
-export type PendingNotification = NotificationDraft & { dueAt: number };
+/** A queued message, when its quiet period began, and when it becomes due. */
+export type PendingNotification = NotificationDraft & { firstAt: number; dueAt: number };
 
 export type NotificationQueue = Record<string, PendingNotification>;
 
 /**
- * How long a thread's messages wait before one is shown.
+ * How long a thread has to stay quiet before one message is shown.
  *
- * Ten approvals in a second still become one notification for that thread,
- * and the last thing the agent asked wins.
+ * A burst does not wait for a fixed window to close: every new event starts
+ * the quiet period again, and the last thing the agent asked wins.
  */
-export const COALESCE_MS = 900;
+export const COALESCE_MS = 1_000;
+
+/**
+ * However busy a thread is, its message is announced within this long of the
+ * first event. The quiet period cannot postpone it forever.
+ */
+export const COALESCE_MAX_MS = 3_000;
 
 /** A thread with no loaded summary still gets a readable title. */
 export function threadTitle(threads: Record<ThreadId, ThreadSummary>, threadId: ThreadId): string {
@@ -65,15 +79,31 @@ export function alreadyVisible(draft: NotificationDraft, focus: FocusSnapshot): 
   return draft.threadId !== null && focus.openThreadId === draft.threadId;
 }
 
-/** The draft for a protocol event, or `null` when it should stay silent. */
+/**
+ * The draft for a live protocol event, or `null` when it should stay silent.
+ *
+ * Replayed events are history and never produce a notification; the caller
+ * keeps applying them to its own state.
+ */
+export function draftForEnvelope(
+  envelope: EventEnvelope,
+  options: {
+    threads: Record<ThreadId, ThreadSummary>;
+    settings: NotificationSettings;
+    focus: FocusSnapshot;
+  },
+): NotificationDraft | null {
+  if (envelope.replayed) return null;
+  return draftForEvent(envelope.event, options);
+}
+
+/** The draft for a live protocol event, or `null` when it should stay silent. */
 export function draftForEvent(
   event: Event,
   options: {
     threads: Record<ThreadId, ThreadSummary>;
     settings: NotificationSettings;
     focus: FocusSnapshot;
-    /** The most recent error message for a thread, for "Failed: …". */
-    lastError?: string | null;
   },
 ): NotificationDraft | null {
   const { threads, settings, focus } = options;
@@ -90,41 +120,126 @@ export function draftForEvent(
     return alreadyVisible(draft, focus) ? null : draft;
   }
 
-  if (event.type === "turn_completed") {
-    if (!settings.finishedTurns) return null;
-    // A turn the person stopped is not news they need.
-    if (event.status === "interrupted") return null;
-    const draft: NotificationDraft = {
-      key: threadKey(event.thread_id),
-      kind: "finished",
-      title: threadTitle(threads, event.thread_id),
-      body:
-        event.status === "failed"
-          ? `Failed: ${options.lastError?.trim() || "the turn ended with an error."}`
-          : "Finished: the turn is done.",
-      threadId: event.thread_id,
-    };
-    return alreadyVisible(draft, focus) ? null : draft;
-  }
-
   return null;
+}
+
+/** What the last completed turn did, for the finished/failed wording. */
+export type LastTurn = { status: TurnStatus; error: string | null };
+
+/**
+ * The body for a completed turn.
+ *
+ * The daemon is authoritative about when a thread is Done; this only says how
+ * it got there. Limits are stops, not finishes.
+ */
+export function finishedBody(lastTurn: LastTurn | null): string {
+  if (!lastTurn) return "Finished: the turn is done.";
+  switch (lastTurn.status) {
+    case "failed":
+      return `Failed: ${lastTurn.error?.trim() || "the turn ended with an error."}`;
+    case "token_limit":
+      return "Stopped: the agent hit its token limit.";
+    case "turn_limit":
+      return "Stopped: the agent hit its turn limit.";
+    default:
+      return "Finished: the turn is done.";
+  }
+}
+
+/**
+ * Whether this summary update is the authoritative end of a turn.
+ *
+ * `done` is the ordinary landing. `failure` is a thread that raises its hand
+ * while still settling (for example a host that went unreachable at the same
+ * time); the turn is over even though the tab has not reached Done yet.
+ */
+export type FinishedTransition = "done" | "failure";
+
+export function finishedTransition(
+  previous: Pick<ThreadSummary, "tab" | "needs_attention" | "agent_state"> | undefined,
+  next: Pick<ThreadSummary, "tab" | "needs_attention" | "agent_state">,
+): FinishedTransition | null {
+  if (!previous) return null;
+  if (next.tab === "done" && previous.tab !== "done") return "done";
+  if (
+    !previous.needs_attention &&
+    next.needs_attention &&
+    next.agent_state === "error" &&
+    next.tab !== "done"
+  ) {
+    return "failure";
+  }
+  return null;
+}
+
+/**
+ * A notification for a thread whose turn has just ended.
+ *
+ * This follows the daemon's thread summary, not the raw `turn_completed`
+ * event: a turn that completes while the next queued turn starts in the same
+ * update stays Working and says nothing, and an interrupted turn that lands
+ * in Done still notifies. A failure announced while the thread settles is not
+ * repeated when it reaches Done.
+ */
+export function finishedDraft(
+  previous: Pick<ThreadSummary, "tab" | "needs_attention" | "agent_state"> | undefined,
+  next: ThreadSummary,
+  options: {
+    settings: NotificationSettings;
+    focus: FocusSnapshot;
+    lastTurn: LastTurn | null;
+    /** A failure for this same turn was already announced. */
+    announcedFailure?: boolean;
+  },
+): NotificationDraft | null {
+  const transition = finishedTransition(previous, next);
+  if (!transition) return null;
+  if (!options.settings.finishedTurns) return null;
+  if (transition === "done" && options.announcedFailure) return null;
+  if (transition === "failure" && !isFailureStatus(options.lastTurn)) return null;
+  const draft: NotificationDraft = {
+    key: threadKey(next.thread_id),
+    kind: "finished",
+    title: next.title,
+    body: finishedBody(options.lastTurn),
+    threadId: next.thread_id,
+  };
+  return alreadyVisible(draft, options.focus) ? null : draft;
+}
+
+function isFailureStatus(lastTurn: LastTurn | null): boolean {
+  return (
+    lastTurn !== null &&
+    (lastTurn.status === "failed" ||
+      lastTurn.status === "token_limit" ||
+      lastTurn.status === "turn_limit")
+  );
 }
 
 function threadKey(threadId: ThreadId): string {
   return `thread:${threadId}`;
 }
 
-/** Adds a draft to the queue, keeping the burst's original deadline. */
+/**
+ * Adds a draft to the queue and restarts its quiet period.
+ *
+ * `dueAt` is the earlier of "quiet since this event" and the burst's hard
+ * deadline, so a non-stop stream of events cannot postpone a notification
+ * forever.
+ */
 export function enqueue(
   queue: NotificationQueue,
   draft: NotificationDraft,
   now: number,
   windowMs = COALESCE_MS,
+  maxMs = COALESCE_MAX_MS,
 ): NotificationQueue {
   const existing = queue[draft.key];
+  const firstAt = existing?.firstAt ?? now;
+  const dueAt = Math.min(now + windowMs, firstAt + maxMs);
   return {
     ...queue,
-    [draft.key]: { ...draft, dueAt: existing?.dueAt ?? now + windowMs },
+    [draft.key]: { ...draft, firstAt, dueAt },
   };
 }
 
@@ -162,6 +277,49 @@ export function nextDeadline(queue: NotificationQueue): number | null {
 
 /** What the hosts poll knows about one host. */
 export type HostState = { name: string; online: boolean };
+
+/** Everything the sidebar's presence rows read, in one snapshot. */
+export type PresenceSource = {
+  connection: ConnectionStatus;
+  signedIn: boolean;
+  /** Connect machines, when this device is signed in to a relay. */
+  machines: MachineSummary[];
+  activeMachineId: string | null;
+  /** Hosts the connected daemon reported in its hello. */
+  hosts: Record<string, HostSummary>;
+  localHostId: string | null;
+};
+
+/**
+ * The same presence the sidebar shows, shaped for the notifier.
+ *
+ * The live transport is authoritative for the host this client is connected
+ * to, so the relay can never report our own working host as offline. Other
+ * machines keep connect's presence; a direct session uses the daemon's host
+ * list. With no working transport the client learns nothing and returns
+ * `null`, which resets the baseline instead of inventing a transition.
+ */
+export function hostPresence(source: PresenceSource): Record<string, HostState> | null {
+  if (source.connection !== "online") return null;
+  const next: Record<string, HostState> = {};
+
+  if (source.signedIn && source.machines.length > 0) {
+    for (const machine of source.machines) {
+      const online =
+        machine.id === source.activeMachineId ? source.connection === "online" : machine.online;
+      const hosts =
+        machine.hosts.length > 0 ? machine.hosts : [{ id: machine.id, name: machine.name }];
+      for (const host of hosts) next[host.id] = { name: host.name, online };
+    }
+  } else {
+    for (const host of Object.values(source.hosts)) {
+      const active = source.localHostId !== null && host.host_id === source.localHostId;
+      next[host.host_id] = { name: host.name, online: active ? true : host.online };
+    }
+  }
+
+  return Object.keys(next).length > 0 ? next : null;
+}
 
 /**
  * Hosts that went from online to offline between two polls.

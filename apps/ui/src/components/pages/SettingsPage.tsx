@@ -34,7 +34,7 @@ import {
   shortcutText,
   useKeybindingsVersion,
 } from "@/lib/keybindings";
-import { desktopShellBridge } from "@/lib/platform/desktopShell";
+import { desktopShellBridge, type ShellSettings } from "@/lib/platform/desktopShell";
 import { secretShell } from "@/lib/platform/secrets";
 import { setTheme, setUi, type Theme, useApp } from "@/lib/store/appStore";
 import { setTerminalMatchesApp, useTerminalMatchesApp } from "@/lib/terminalTheme";
@@ -82,7 +82,7 @@ function describeError(error: unknown): string {
 function GeneralForm() {
   const shell = useMemo(desktopShellBridge, []);
   const [autostart, setAutostart] = useState<boolean | null>(null);
-  const [keepInTray, setKeepInTray] = useState<boolean | null>(null);
+  const [shellSettings, setShellSettings] = useState<ShellSettings | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -99,7 +99,7 @@ function GeneralForm() {
     void shell
       .shellSettings()
       .then((settings) => {
-        if (!cancelled) setKeepInTray(settings.keep_in_tray);
+        if (!cancelled) setShellSettings(settings);
       })
       .catch((cause: unknown) => {
         if (!cancelled) setError(describeError(cause));
@@ -124,12 +124,14 @@ function GeneralForm() {
     if (!shell) return;
     setError(null);
     try {
-      const settings = await shell.setKeepInTray(next);
-      setKeepInTray(settings.keep_in_tray);
+      setShellSettings(await shell.setKeepInTray(next));
     } catch (cause) {
       setError(describeError(cause));
     }
   };
+
+  const trayAvailable = shellSettings?.tray_available === true;
+  const keepInTray = trayAvailable && shellSettings?.keep_in_tray === true;
 
   return (
     <div className="q-form">
@@ -156,15 +158,17 @@ function GeneralForm() {
             <div className="lab">
               <div className="t">Keep running in tray</div>
               <div className="s">
-                {keepInTray
-                  ? "Closing the window keeps h4rn in the tray"
-                  : "Closing the window quits h4rn"}
+                {shellSettings !== null && !trayAvailable
+                  ? "No tray icon was created, so closing the window quits h4rn"
+                  : keepInTray
+                    ? "Closing the window keeps h4rn in the tray"
+                    : "Closing the window quits h4rn"}
               </div>
             </div>
             <div className="ctl">
               <Toggle
-                checked={keepInTray ?? false}
-                disabled={keepInTray === null}
+                checked={keepInTray}
+                disabled={shellSettings === null || !trayAvailable}
                 label="Keep running in tray"
                 onChange={(next) => void changeTray(next)}
               />
@@ -286,7 +290,10 @@ function NotificationsForm() {
         if (!cancelled) setPermission(state);
       })
       .catch((cause: unknown) => {
-        if (!cancelled) setError(describeError(cause));
+        if (!cancelled) {
+          setPermission("unknown");
+          setError(describeError(cause));
+        }
       });
     return () => {
       cancelled = true;
@@ -300,7 +307,10 @@ function NotificationsForm() {
       try {
         const state = await channel.requestPermission();
         setPermission(state);
-        if (state !== "granted") {
+        // The desktop shell cannot report a permission; the OS still decides
+        // whether a notification appears, so the switch is allowed to mean
+        // "ask for this" there. A browser that refused stays off.
+        if (state !== "granted" && state !== "unknown") {
           setNotificationSetting(key, false);
           return;
         }
@@ -310,16 +320,6 @@ function NotificationsForm() {
       }
     }
     setNotificationSetting(key, next);
-  };
-
-  const allow = async () => {
-    if (!channel) return;
-    setError(null);
-    try {
-      setPermission(await channel.requestPermission());
-    } catch (cause) {
-      setError(describeError(cause));
-    }
   };
 
   return (
@@ -336,7 +336,9 @@ function NotificationsForm() {
                 <div className="s">{row.subtitle}</div>
               </div>
               <div className="ctl">
-                {permission === "denied" ? (
+                {permission === null ? (
+                  <span className="q-faint">Checking…</span>
+                ) : permission === "denied" ? (
                   <span className="q-muted">Blocked in system settings</span>
                 ) : (
                   <Toggle
@@ -348,19 +350,6 @@ function NotificationsForm() {
               </div>
             </div>
           ))}
-          {permission === "default" ? (
-            <div className="q-field">
-              <div className="lab">
-                <div className="t">System permission</div>
-                <div className="s">h4rn needs your permission before it can notify you</div>
-              </div>
-              <div className="ctl">
-                <button type="button" className="q-btn secondary" onClick={() => void allow()}>
-                  Allow
-                </button>
-              </div>
-            </div>
-          ) : null}
           {error ? (
             <p className="s" role="alert" style={{ color: "var(--danger)" }}>
               {error}

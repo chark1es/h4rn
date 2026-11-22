@@ -3,12 +3,14 @@
 //! With "Keep running in tray" on, the close button hides the window and the
 //! daemon (and every running turn) stays alive. With it off, closing the window
 //! quits the app as before. The tray menu always offers Open h4rn and Quit.
+//! If this icon could not be created, closing always quits: hiding the only
+//! window would leave no way back.
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, WindowEvent};
 
-use crate::settings::{self, ShellSettingsState};
+use crate::settings::{self, ShellSettingsState, TrayAvailability};
 
 /// Brings the main window back from the tray.
 pub fn show_main(app: &AppHandle) {
@@ -63,7 +65,8 @@ pub fn watch_window(app: &AppHandle) {
     window.on_window_event(move |event| {
         if let WindowEvent::CloseRequested { api, .. } = event {
             let state = handle.state::<ShellSettingsState>();
-            if settings::keep_in_tray(&state) {
+            let tray = handle.state::<TrayAvailability>();
+            if settings::keep_in_tray(&state, &tray) {
                 api.prevent_close();
                 let _ = target.hide();
             }

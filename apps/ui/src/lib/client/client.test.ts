@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-
+import { draftForEnvelope } from "@/features/notifications/logic";
+import { NOTIFICATION_DEFAULTS } from "@/features/notifications/settings";
 import type {
   ClientFrame,
   ClientRequest,
@@ -232,6 +233,72 @@ describe("H4rnClient", () => {
     transport.emit(4, { type: "agent_state_changed", thread_id: "t1", state: "done" });
 
     expect(events.map((envelope) => envelope.seq)).toEqual([3, 4]);
+  });
+
+  it("tags frames held for a slow subscribe as replayed history", async () => {
+    vi.useFakeTimers();
+    try {
+      let answerSubscribe: Reply | null = null;
+      const { client, events, transports } = harness(
+        () =>
+          new FakeTransport((frame, reply) => {
+            if (frame.body.type !== "subscribe") return false;
+            answerSubscribe = reply;
+            return true;
+          }),
+      );
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(client.getSnapshot().status).toBe("online");
+
+      // The person's device was away while this approval happened. The
+      // subscribe has not answered, so the frame belongs to the replay.
+      const approval: Event = {
+        type: "approval_requested",
+        thread_id: "t1",
+        turn_id: "turn_1",
+        approval_id: "ap_1",
+        subagent_id: null,
+        kind: "command",
+        prompt: "npm test",
+        options: [],
+      };
+      const transport = transports[0];
+      if (!transport) throw new Error("transport was not created");
+      transport.emit(7, approval);
+
+      // A slow replay is exactly the case the old wall-clock grace guessed at.
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(events).toHaveLength(0);
+      (answerSubscribe as Reply | null)?.({
+        type: "ack",
+      });
+      await settle();
+
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ seq: 7, replayed: true });
+
+      const notificationOptions = {
+        threads: {},
+        settings: NOTIFICATION_DEFAULTS,
+        focus: { windowFocused: false, openThreadId: null, connection: "online" as const },
+      };
+      const replayed = events[0];
+      if (!replayed) throw new Error("replay was not delivered");
+      expect(draftForEnvelope(replayed, notificationOptions)).toBeNull();
+
+      // One second later, the same kind of event is live news.
+      await vi.advanceTimersByTimeAsync(1_000);
+      transport.emit(8, { ...approval, approval_id: "ap_2" } as Event);
+      expect(events).toHaveLength(2);
+      expect(events[1]?.replayed).toBeUndefined();
+      const live = events[1];
+      if (!live) throw new Error("live event was not delivered");
+      expect(draftForEnvelope(live, notificationOptions)).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reports degraded while reconnecting and returns online", async () => {

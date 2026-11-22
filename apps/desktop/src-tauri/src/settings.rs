@@ -5,9 +5,15 @@
 //! writes the same value through `shell_settings` and
 //! `shell_set_keep_in_tray`. The other startup switch, "Open at login", is the
 //! autostart plugin's own registration and needs no file here.
+//!
+//! A tray icon can fail to be created (no appindicator, a locked-down desktop,
+//! an unsupported session). Hiding the window when there is no tray would
+//! leave the app with no window and no way back, so the shell records whether
+//! the tray exists and only honours the choice when it does.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use serde::{Deserialize, Serialize};
@@ -26,17 +32,37 @@ pub struct ShellSettings {
     pub keep_in_tray: bool,
 }
 
+/// What the view reads: the persisted choice plus live shell capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ShellSettingsView {
+    pub keep_in_tray: bool,
+    /// Whether this run actually created a tray icon.
+    pub tray_available: bool,
+}
+
 /// The copy the window handler reads on every close request.
 #[derive(Default)]
 pub struct ShellSettingsState(pub Mutex<ShellSettings>);
+
+/// Whether the tray icon was created during setup.
+#[derive(Default)]
+pub struct TrayAvailability(pub AtomicBool);
 
 fn lock(state: &ShellSettingsState) -> MutexGuard<'_, ShellSettings> {
     state.0.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Whether the close button should hide the window instead of quitting.
-pub fn keep_in_tray(state: &ShellSettingsState) -> bool {
-    lock(state).keep_in_tray
+///
+/// Both the choice and a working tray are required; otherwise the window
+/// would disappear with no way to bring it back.
+pub fn hides_on_close(keep_in_tray: bool, tray_available: bool) -> bool {
+    keep_in_tray && tray_available
+}
+
+/// Whether the close button should hide the window in this run.
+pub fn keep_in_tray(state: &ShellSettingsState, tray: &TrayAvailability) -> bool {
+    hides_on_close(lock(state).keep_in_tray, tray.0.load(Ordering::Relaxed))
 }
 
 fn file_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -80,10 +106,20 @@ pub fn load(app: &AppHandle) -> ShellSettings {
         .unwrap_or_default()
 }
 
+fn view(settings: ShellSettings, tray: &TrayAvailability) -> ShellSettingsView {
+    ShellSettingsView {
+        keep_in_tray: settings.keep_in_tray,
+        tray_available: tray.0.load(Ordering::Relaxed),
+    }
+}
+
 /// What the view reads on mount.
 #[tauri::command]
-pub fn shell_settings(state: State<'_, ShellSettingsState>) -> ShellSettings {
-    *lock(&state)
+pub fn shell_settings(
+    state: State<'_, ShellSettingsState>,
+    tray: State<'_, TrayAvailability>,
+) -> ShellSettingsView {
+    view(*lock(&state), &tray)
 }
 
 /// Persists the tray choice and returns what is now in force.
@@ -91,8 +127,17 @@ pub fn shell_settings(state: State<'_, ShellSettingsState>) -> ShellSettings {
 pub fn shell_set_keep_in_tray(
     app: AppHandle,
     state: State<'_, ShellSettingsState>,
+    tray: State<'_, TrayAvailability>,
     enabled: bool,
-) -> Result<ShellSettings, String> {
+) -> Result<ShellSettingsView, String> {
+    if enabled && !tray.0.load(Ordering::Relaxed) {
+        // Enabling this without a tray would make the close button hide the
+        // only window. Refuse instead of persisting a trap.
+        return Err(
+            "No tray icon is available in this session, so closing the window would leave no way back."
+                .into(),
+        );
+    }
     let next = ShellSettings {
         keep_in_tray: enabled,
     };
@@ -103,7 +148,7 @@ pub fn shell_set_keep_in_tray(
     } else {
         "closing the window now quits h4rn"
     });
-    Ok(next)
+    Ok(view(next, &tray))
 }
 
 #[cfg(test)]
@@ -147,5 +192,20 @@ mod tests {
         fs::write(&path, "{}\n").expect("write");
         assert!(!read_from(&path).keep_in_tray);
         let _ = fs::remove_dir_all(path.parent().expect("parent"));
+    }
+
+    #[test]
+    fn a_missing_tray_never_hides_the_only_window() {
+        assert!(!hides_on_close(true, false));
+        assert!(hides_on_close(true, true));
+        assert!(!hides_on_close(false, true));
+    }
+
+    #[test]
+    fn the_view_reports_what_the_shell_can_do() {
+        let tray = TrayAvailability(AtomicBool::new(false));
+        assert!(!view(ShellSettings { keep_in_tray: true }, &tray).tray_available);
+        tray.0.store(true, Ordering::Relaxed);
+        assert!(view(ShellSettings { keep_in_tray: true }, &tray).tray_available);
     }
 }

@@ -12,6 +12,11 @@ import { tauriInternals } from "@/lib/platform/tauri";
 
 export type ShellSettings = {
   keep_in_tray: boolean;
+  /**
+   * Whether the shell actually created its tray icon. Without one, closing
+   * the window must quit and the tray switch is not offered.
+   */
+  tray_available: boolean;
 };
 
 export type DesktopShellBridge = {

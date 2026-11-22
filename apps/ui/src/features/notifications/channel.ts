@@ -5,7 +5,9 @@
  *
  * - desktop: `tauri-plugin-notification`, whose `notify` command shows the
  *   notification and whose Rust `on_action` handler forwards a click back as
- *   `h4rn://notification-click`;
+ *   `h4rn://notification-click`; its permission answer is a hard-coded
+ *   "granted" on desktop, so this reports `unknown` instead of claiming a
+ *   state it cannot see;
  * - browser: the Web Notification API, with `onclick` focusing the tab and
  *   opening the thread;
  * - mobile: not wired yet, so there is no channel and Settings does not offer
@@ -16,7 +18,14 @@ import type { ThreadId } from "@/gen";
 import { secretShell } from "@/lib/platform/secrets";
 import { listenOnShell, tauriInternals } from "@/lib/platform/tauri";
 
-export type NotificationPermissionState = "granted" | "denied" | "default" | "unsupported";
+/**
+ * What this shell can honestly say about the OS permission.
+ *
+ * `unknown` is the desktop app: the pinned Tauri notification plugin always
+ * answers "granted" there, so the view cannot tell a blocked notification
+ * from a working one and should not claim either.
+ */
+export type NotificationPermissionState = "granted" | "denied" | "default" | "unknown";
 
 export type NotificationMessage = {
   /** A stable positive id for the desktop plugin. */
@@ -126,16 +135,12 @@ function desktopChannel(): NotificationChannel | null {
 
   return {
     kind: "desktop",
-    permission: async () => {
-      const granted = await shell.invoke<boolean | null>(
-        "plugin:notification|is_permission_granted",
-      );
-      return granted === null ? "default" : granted ? "granted" : "denied";
-    },
-    requestPermission: async () => {
-      const state = await shell.invoke<unknown>("plugin:notification|request_permission");
-      return normalizePermission(state);
-    },
+    // The pinned plugin's desktop `permission_state()` returns Granted
+    // unconditionally, so asking it would only repeat a claim the shell cannot
+    // verify. The OS still decides whether the notification appears; Settings
+    // says nothing about a permission it cannot detect.
+    permission: async () => "unknown",
+    requestPermission: async () => "unknown",
     show: (message) => {
       ensureListener();
       void shell

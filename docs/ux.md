@@ -246,10 +246,18 @@ Quiet hours collapse pushes into one digest. Every push deep-links to the thread
 
 On the desktop app and in the browser, a notification stays quiet while the person is already
 looking at the thing it names: the window is focused and that thread is open, or the app is focused
-for a host going offline. A burst of approvals in one thread becomes one notification with the
-latest message. Choices are stored per device, and a denied OS permission is shown as “Blocked in
-system settings” rather than a switch that looks on. The mobile build does not send notifications
-yet and says so.
+for a host going offline. A burst in one thread waits for a quiet period (1 s without another
+event, capped at 3 s) and then announces the latest message. Events replayed after a reconnect are
+history and stay quiet. Finished and failed turns follow the daemon's thread summary, so a turn
+that hands off to a queued turn says nothing and an interrupted turn that lands in Done notifies;
+token and turn limits say “Stopped”, never “Finished”. Choices are stored per device.
+
+Host offline uses the hosts list's own presence: the live transport decides the active host, so a
+working connection is never announced as offline, and the other paired machines are watched while
+this client is connected. In the browser a denied OS permission is shown as “Blocked in system
+settings” rather than a switch that looks on; the desktop notification plugin always reports
+granted, so the desktop app does not claim to know the permission state. The mobile build does not
+send notifications yet and says so.
 
 ---
 
@@ -1322,8 +1330,8 @@ Covered structurally in flow (d). Additional rules:
 - **Devices** table: device name + platform icon, scopes (View, Approve, Terminal, Files, Admin), last seen, presence, `Revoke`. Revoke is a confirm that names the device and says what stops immediately.
 - **Account & relay:** OrbitID issuer, signed-in identity, relay status, sign out (hosts stay paired), connection diagnostics. The issuer is configuration, never hardcoded; show it verbatim so self-hosters can verify.
 - **Appearance:** theme (System / Light / Dark), density (Comfortable / Compact desktop only), reduced motion (follow OS / force on), terminal theme (dark / light).
-- **Notifications:** approvals and questions, finished and failed turns, and host offline, each with a per-device switch (approvals and finished turns on, host offline off). Notifications stay quiet for the thread that is open in a focused window, coalesce per thread, and open the thread when clicked. A denied OS permission is shown as “Blocked in system settings”. The mobile build does not send notifications yet and says so.
-- **General:** Open at login registers the desktop app as a login item, and Keep running in tray adds an Open h4rn / Quit tray icon and makes the close button hide the window. Both rows are desktop-only; the browser and phone hide them.
+- **Notifications:** approvals and questions, finished and failed turns, and host offline, each with a per-device switch (approvals and finished turns on, host offline off). Notifications stay quiet for the thread that is open in a focused window, coalesce per thread after a 1 s quiet period (at most 3 s), and open the thread when clicked. Turning a switch on is the only permission prompt. In the browser a denied OS permission is shown as “Blocked in system settings”; on the desktop the permission is not detectable and no state is claimed. The mobile build does not send notifications yet and says so.
+- **General:** Open at login registers the desktop app as a login item, and Keep running in tray adds an Open h4rn / Quit tray icon and makes the close button hide the window. Keep running in tray is disabled with an explanation when the tray icon could not be created, because hiding the only window would leave no way back. Both rows are desktop-only; the browser and phone hide them.
 - **Shortcuts:** the full map, searchable, with reset-to-default and conflict warnings on rebind.
 - **Phone:** Hosts is a bottom-nav destination with a list; host detail is a pushed screen with collapsible sections. Devices live under More → Settings → Devices. Pairing is a prominent row at the top of Hosts.
 
