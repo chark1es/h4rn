@@ -154,6 +154,13 @@ export type AppState = {
   serverVersion: string | null;
   /** Daemon host id of the machine this client is talking to. */
   localHostId: HostId | null;
+  /**
+   * The connect machine the connected daemon owns, from its `hello`.
+   *
+   * A direct socket reaches exactly this daemon, so this is the machine the
+   * notifier must keep online. It is never this UI's own device row.
+   */
+  daemonMachineId: string | null;
   pendingCreates: PendingCreate[];
   pendingActions: Record<ThreadId, string | undefined>;
   toasts: Toast[];
@@ -193,6 +200,7 @@ function createInitialState(): AppState {
     lastSyncAt: null,
     serverVersion: null,
     localHostId: null,
+    daemonMachineId: null,
     pendingCreates: [],
     pendingActions: {},
     toasts: [],
@@ -667,6 +675,7 @@ export function startConnection(): void {
       hosts,
       serverVersion: info.serverVersion,
       localHostId: info.localHostId,
+      daemonMachineId: info.daemonMachineId,
       connection: { ...state.connection, error: null },
     });
     void loadThreads().then(() => {

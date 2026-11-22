@@ -11,7 +11,7 @@ import type {
 } from "@/gen";
 
 import { H4rnClient } from "./client";
-import type { EventEnvelope, Transport, TransportHandlers } from "./types";
+import type { EventEnvelope, ReadyInfo, Transport, TransportHandlers } from "./types";
 import { isProtocolToken } from "./ws";
 
 type Reply = (body: ResponseBody) => void;
@@ -45,6 +45,7 @@ class FakeTransport implements Transport {
         protocol_version: 1,
         server_version: "test",
         device_id: "dev_test",
+        daemon_machine_id: null,
         local_host: "host_test",
         hosts: [],
       });
@@ -190,6 +191,38 @@ function createBody(): Omit<Extract<ClientRequest, { type: "create_thread" }>, "
 }
 
 describe("H4rnClient", () => {
+  it("reports the daemon's connect machine from hello", async () => {
+    type HelloBody = Extract<ResponseBody, { type: "hello" }>;
+    const hello = (daemonMachineId: string | null): HelloBody => ({
+      type: "hello",
+      protocol_version: 1,
+      server_version: "test",
+      device_id: "dev_test",
+      daemon_machine_id: daemonMachineId,
+      local_host: "host_test",
+      hosts: [],
+    });
+    const readyWith = async (body: ResponseBody): Promise<ReadyInfo> => {
+      const { client } = harness(
+        () =>
+          new FakeTransport((frame, reply) => {
+            if (frame.body.type !== "hello") return false;
+            reply(body);
+            return true;
+          }),
+      );
+      const ready = new Promise<ReadyInfo>((resolve) => client.onReady(resolve));
+      client.start();
+      return ready;
+    };
+
+    expect((await readyWith(hello("m_atlas"))).daemonMachineId).toBe("m_atlas");
+    // An older daemon omits the field; the client reports no machine rather
+    // than an undefined value reaching the notifier.
+    const { daemon_machine_id: _omitted, ...older } = hello("m_atlas");
+    expect((await readyWith(older as ResponseBody)).daemonMachineId).toBeNull();
+  });
+
   it("correlates responses by frame id regardless of arrival order", async () => {
     const pending: Array<{ reply: Reply }> = [];
     const { client, transports } = harness(
@@ -711,6 +744,7 @@ describe("H4rnClient", () => {
       protocol_version: 1,
       server_version: "test",
       device_id: "dev_test",
+      daemon_machine_id: null,
       local_host: "host_test",
       hosts: [],
     });

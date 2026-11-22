@@ -64,10 +64,11 @@ All notable changes to h4rn are recorded here. The format follows
   a state it does not know. Host offline covers only the machines this device is linked to through
   the relay; the machine the live transport reaches is always online. That machine comes from the
   peer, not the account's device rows: a relay link names the machine pairing recorded from
-  `machine_devices`, and a direct connection names the daemon this device is registered as. Only
-  when neither exists does `hello`'s local host name stand in, narrowed to the one host it names; a
-  shared name can no longer say which machine the transport reached and matches neither. A
-  verified machine keeps all of its hosts online, including WSL siblings. A
+  `machine_devices`, and a direct connection uses the connect machine the daemon reports in `hello`
+  from its own signed-in session. Only when neither exists does `hello`'s local host name stand in,
+  narrowed to the one host it names; a shared name can no longer say which machine the transport
+  reached and matches neither. A verified machine keeps all of its hosts online, including WSL
+  siblings. A
   due alert fetches linked presence once more before delivery and is
   dropped if the host came back, the fetch failed or the client disconnected. A direct-only session
   hides the row and says why. On Linux the desktop notification plugin passes `replaces_id = 0`, so
@@ -137,14 +138,14 @@ All notable changes to h4rn are recorded here. The format follows
   browsers). A client that sees no marker treats the list as unsupported, keeps its presence rows
   off and says the relay is too old, instead of announcing hosts on the whole account.
 - **Presence identifies the connected machine by the peer the transport reached.** A relay link
-  names the machine pairing recorded from `machine_devices`; a direct connection names the daemon
-  this device is registered as. Neither comes from the account's device rows, where a paired
-  client's `machine_id` is empty and a daemon device's id names a different thing. A verified
-  machine keeps all of its hosts online, including WSL siblings, because the transport reached the
-  machine rather than one row of it. The local host's name is only the fallback when there is no
-  id; it matches one host, so working in one WSL distribution does not mark the Windows host or
-  its siblings online. A name shared by two machines matches neither, so a new same-named machine
-  cannot announce the one in use offline.
+  names the machine pairing recorded from `machine_devices`; a direct connection uses the connect
+  machine the daemon reports in `hello` from its own signed-in session. Neither comes from the
+  account's device rows, where a paired client's `machine_id` is empty and a daemon device's row
+  names a different thing. A verified machine keeps all of its hosts online, including WSL
+  siblings, because the transport reached the machine rather than one row of it. The local host's
+  name is only the fallback when there is no id; it matches one host, so working in one WSL
+  distribution does not mark the Windows host or its siblings online. A name shared by two
+  machines matches neither, so a new same-named machine cannot announce the one in use offline.
 - **A failed tab move leaves no placement note.** The notifier hears about a manual move into Done
   or Settled only after the daemon accepts it, so a rejected move cannot spend a remembered live
   completion.
@@ -164,13 +165,14 @@ All notable changes to h4rn are recorded here. The format follows
   instead of telling the person to update a relay that may be current, and a cached sign-in that is
   `signed_in` before `refresh()` answers waits the same way.
 - **A machine this client is connected to is never announced offline.** The connected machine is
-  the peer the live transport actually reached: the relay link's machine, or the daemon's own
-  machine on a direct connection. The account's device rows are not consulted, because a paired
-  client has no machine id there and a daemon device's row names a different thing. The local
-  host's name is only the fallback, and a name shared by two machines now leaves those hosts out of
-  presence entirely instead of feeding them the relay's answer. Adding a second same-named machine
-  can no longer raise an offline alert for the first, and every host of a verified machine —
-  including WSL siblings — stays online while the transport is up.
+  the peer the live transport actually reached: the relay link's machine, or the connect machine
+  the daemon reports in `hello` from its own signed-in session on a direct connection. The
+  account's device rows are not consulted, because a paired client has no machine id there and a
+  daemon device's row names a different thing. The local host's name is only the fallback, and a
+  name shared by two machines now leaves those hosts out of presence entirely instead of feeding
+  them the relay's answer. Adding a second same-named machine can no longer raise an offline alert
+  for the first, and every host of a verified machine — including WSL siblings — stays online
+  while the transport is up.
 - **A live frame queued just behind the subscribe reply still notifies.** The journal head named by
   the reply is kept as an acknowledged cursor for the next reconnect, separate from the position of
   frames actually delivered. A first-connect approval that reaches the socket after the reply, with
@@ -188,10 +190,11 @@ All notable changes to h4rn are recorded here. The format follows
   the stream has spoken about, so the live upsert that follows is still the endpoint the finish
   announces.
 - **A failure waits for its thread to be known.** A live failed turn can arrive before any summary
-  names the thread. The alert now waits for that summary: an ordinary thread still gets its
-  failure, while a subagent child's pending failure is cancelled because the parent mirrors the
-  moment. A first-connect child failure therefore stays quiet instead of alerting on a thread the
-  notifier cannot yet place.
+  names the thread. The alert now waits for that summary, keeping the failed turn's outcome by turn
+  id: a queued turn that starts in the meantime does not erase it. An ordinary thread still gets
+  its failure, while a subagent child's pending failure is cancelled because the parent mirrors
+  the moment. A first-connect child failure therefore stays quiet instead of alerting on a thread
+  the notifier cannot yet place.
 - **A browser notification failure is one page state.** Settings and delivery share the fact that
   the `Notification` constructor stopped working on this page. Settings says notifications stopped
   working there and need a reload, separately from the OS permission, which is still reported as it
@@ -199,7 +202,8 @@ All notable changes to h4rn are recorded here. The format follows
 - **Open at login keeps real read failures visible.** The toggle is hidden only for the confirmed
   missing-plugin or missing-command answer from the shell. Any other failure — including a
   capability denial from a plugin that is installed — keeps the row and shows an error line
-  instead of pretending the setting does not exist.
+  instead of pretending the setting does not exist. The reason belongs to that row, so changing
+  the tray setting or anything else on the page does not erase it.
 - **Large Azure DevOps pull requests load within the page deadline.** Azure needs file contents to
   build a diff, so a 30-file page could not finish inside the UI's ten-second budget once the
   account's local request allowance ran out. A diff page now holds at most eight files (eighteen
@@ -282,12 +286,13 @@ All notable changes to h4rn are recorded here. The format follows
   host ids when a machine registers, so its `MachineHost.id` never equals the id `hello` reports
   for the local host. The notifier compared those ids, decided its own working host was offline,
   and could announce a host the person was actively using. It now names the connected machine from
-  the peer the transport actually reached — the relay link's machine, or the daemon's own machine
-  on a direct connection — and falls back to `hello`'s local host name through the daemon's host
-  list (the same pairing the sidebar uses, case ignored) only when there is no such id and exactly
-  one linked machine owns a host of that name. A verified machine keeps all of its hosts online,
-  including WSL siblings; two machines sharing a name match neither, so neither can mask the other
-  or be announced offline while the transport is talking to it.
+  the peer the transport actually reached — the relay link's machine, or the connect machine the
+  daemon reports in `hello` from its own signed-in session on a direct connection — and falls back
+  to `hello`'s local host name through the daemon's host list (the same pairing the sidebar uses,
+  case ignored) only when there is no such id and exactly one linked machine owns a host of that
+  name. A verified machine keeps all of its hosts online, including WSL siblings; two machines
+  sharing a name match neither, so neither can mask the other or be announced offline while the
+  transport is talking to it.
 - **A first-connect subscribe is replay-free whatever its success answer looks like.** An older
   daemon may answer a live-edge subscribe with the protocol's plain `{type:"ack"}`, or with
   `subscribed` and no boundary. Both are successful acceptances of `since_seq: null`, so the
@@ -309,7 +314,8 @@ All notable changes to h4rn are recorded here. The format follows
   proof against `parts.uri.path()`, which excludes the query string, so signing
   `/v1/machines?linked=true` was rejected with 401 and took the whole account and machine refresh
   down with it. The client now signs `/v1/machines` and still fetches with `?linked=true`; a
-  presence failure falls back to an empty linked list instead of aborting the refresh.
+  presence failure keeps the last known linked list (empty before the first successful fetch)
+  instead of aborting the refresh.
 - **Closing a terminal ends its background jobs.** With job control, `sleep 1000 &` runs in its own
   process group, so the old group-only signal left it running after the shell was gone. Closing a
   terminal now sends SIGHUP to the shell's own process id, waits for it to forward the hangup, keeps

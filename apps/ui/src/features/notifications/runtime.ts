@@ -10,7 +10,7 @@
 
 import { getRemoteState, type RemoteState, remoteStore } from "@/features/remote/remoteStore";
 import { currentConnectClient } from "@/features/remote/session";
-import type { ConnectDevice, MachineSummary, ThreadId, ThreadSummary } from "@/gen";
+import type { ConnectDevice, MachineSummary, ThreadId, ThreadSummary, TurnId } from "@/gen";
 import type { ConnectionStatus, EventEnvelope } from "@/lib/client/types";
 import {
   type AppState,
@@ -40,6 +40,7 @@ import {
   finishedTransition,
   type HostState,
   hostPresence,
+  type LastTurn,
   type NotificationDraft,
   type NotificationKind,
   type NotificationQueue,
@@ -66,7 +67,7 @@ const PERMISSION_RETRY_MS = 5_000;
 /** The bits of app state the notifier reads. */
 export type RuntimeState = Pick<
   AppState,
-  "connection" | "threads" | "hosts" | "lastSyncAt" | "localHostId"
+  "connection" | "threads" | "hosts" | "lastSyncAt" | "localHostId" | "daemonMachineId"
 >;
 
 /** The parts of a thread summary a transition is measured against. */
@@ -89,7 +90,12 @@ export type RuntimeRemote = {
    * addresses alike.
    */
   activeMachineId: string | null;
-  /** This device as connect registered it, for the daemon's own identity. */
+  /**
+   * This device as connect registered it.
+   *
+   * Never a source for the peer's machine: a web or desktop device's row has
+   * no machine id, and even a daemon row would name a different thing.
+   */
   device: ConnectDevice | null;
 };
 
@@ -159,8 +165,14 @@ export class NotificationRuntime {
   private readonly listed = new Map<ThreadId, SummaryBaseline>();
   /** Threads the daemon reported as subagent children. */
   private readonly childThreads = new Set<ThreadId>();
-  /** Live failure reports waiting for a summary to name their thread. */
-  private readonly pendingFailures = new Set<ThreadId>();
+  /**
+   * Live failure reports waiting for a summary to name their thread.
+   *
+   * Keyed by turn id, not just thread: a queued turn can start before the
+   * summary arrives, and its `turn_started` must not erase the failed turn's
+   * outcome before the thread is known not to be a child.
+   */
+  private readonly pendingFailures = new Map<ThreadId, { turnId: TurnId; lastTurn: LastTurn }>();
   /** What each thread's most recent turn did, until the next turn starts. */
   private readonly memory = new NotificationMemory();
   private lastConnection: string | null = null;
@@ -423,7 +435,12 @@ export class NotificationRuntime {
     }
     if (event.type === "turn_started") {
       this.memory.startTurn(event.thread_id);
-      this.pendingFailures.delete(event.thread_id);
+      // Only this same turn starting is news that erases its own pending
+      // failure. A queued turn starts with a new id; waiting for the summary
+      // must not be cancelled by the turn behind it.
+      if (this.pendingFailures.get(event.thread_id)?.turnId === event.turn_id) {
+        this.pendingFailures.delete(event.thread_id);
+      }
     }
     if (event.type === "turn_completed") {
       this.memory.completeTurn(event.thread_id, event.status, this.now(), !envelope.replayed);
@@ -434,10 +451,14 @@ export class NotificationRuntime {
       if (!envelope.replayed) {
         const threadId = event.thread_id;
         if (event.status === "failed" && !this.summaryKnown(threadId)) {
-          // A failure can arrive before any summary names its thread. Wait for
-          // the summary: if it turns out to be a subagent child, the parent
-          // already mirrors the moment and there must be no alert.
-          this.pendingFailures.add(threadId);
+          // A failure can arrive before any summary names its thread. Keep the
+          // outcome by turn id: if it turns out to be a subagent child, the
+          // parent already mirrors the moment and there must be no alert, but
+          // a queued turn starting meanwhile must not lose the failure.
+          const lastTurn = this.memory.lastTurn(threadId);
+          if (lastTurn !== null) {
+            this.pendingFailures.set(threadId, { turnId: event.turn_id, lastTurn });
+          }
         } else {
           this.announceOutcomeFailure(threadId);
         }
@@ -445,7 +466,8 @@ export class NotificationRuntime {
     }
 
     if (event.type === "thread_upserted") {
-      const deferredFailure = this.pendingFailures.delete(event.thread_id);
+      const deferredFailure = this.pendingFailures.get(event.thread_id) ?? null;
+      this.pendingFailures.delete(event.thread_id);
       if (event.parent_thread_id) {
         // An approval can arrive before the summary that names the child. The
         // parent mirrors it, so withdraw the queued child draft now.
@@ -462,10 +484,14 @@ export class NotificationRuntime {
         needs_attention: event.needs_attention,
         agent_state: event.agent_state,
       });
-      if (deferredFailure && !event.parent_thread_id) {
+      if (deferredFailure !== null && !event.parent_thread_id) {
         // The summary is the first thing to name this thread. It is not a
-        // child, so its live failure still needs the person.
-        this.announceOutcomeFailure(event.thread_id, event.title);
+        // child, so its live failure still needs the person, even when a
+        // queued turn started in the meantime.
+        this.announceOutcomeFailure(event.thread_id, {
+          lastTurn: deferredFailure.lastTurn,
+          title: event.title,
+        });
       }
       if (envelope.replayed) return;
       const liveCompletion = this.memory.hasLiveCompletion(event.thread_id);
@@ -521,7 +547,10 @@ export class NotificationRuntime {
   }
 
   /** Queues a live failure outcome once the thread is known not to be a child. */
-  private announceOutcomeFailure(threadId: ThreadId, title?: string): void {
+  private announceOutcomeFailure(
+    threadId: ThreadId,
+    options: { lastTurn?: LastTurn; title?: string } = {},
+  ): void {
     const isChild =
       this.childThreads.has(threadId) ||
       this.deps.state().threads[threadId]?.parent_thread_id != null;
@@ -529,16 +558,20 @@ export class NotificationRuntime {
       threads: this.deps.state().threads,
       settings: this.deps.settings(),
       focus: this.deps.focus(),
-      lastTurn: this.memory.lastTurn(threadId),
+      lastTurn: options.lastTurn ?? this.memory.lastTurn(threadId),
       announcedFailure: this.memory.failureAnnounced(threadId),
       childThread: isChild,
-      ...(title === undefined ? {} : { title }),
+      ...(options.title === undefined ? {} : { title: options.title }),
     });
     if (failed !== null) {
       // The outcome was the announcement: a later Done summary for the
-      // same turn has nothing left to say.
-      this.memory.announceFailure(threadId);
+      // same turn has nothing left to say. Only the turn this memory still
+      // holds may be marked: a queued turn's `turn_started` already cleared
+      // the live completion, and marking it would silence that turn's own
+      // failure later.
+      const sameTurn = this.memory.hasLiveCompletion(threadId);
       this.memory.announceFinished(threadId);
+      if (sameTurn) this.memory.announceFailure(threadId);
     }
     this.queueDraft(failed);
   }
@@ -622,11 +655,16 @@ export class NotificationRuntime {
   private resolvePendingFailures(): void {
     if (this.pendingFailures.size === 0) return;
     const threads = this.deps.state().threads;
-    for (const threadId of [...this.pendingFailures]) {
+    for (const [threadId, deferred] of [...this.pendingFailures]) {
       const summary = threads[threadId];
       if (!summary) continue;
       this.pendingFailures.delete(threadId);
-      if (summary.parent_thread_id == null) this.announceOutcomeFailure(threadId, summary.title);
+      if (summary.parent_thread_id == null) {
+        this.announceOutcomeFailure(threadId, {
+          lastTurn: deferred.lastTurn,
+          title: summary.title,
+        });
+      }
     }
   }
 
@@ -670,24 +708,24 @@ export class NotificationRuntime {
 /**
  * The machine the live transport is actually reaching.
  *
- * It never comes from the account's device rows: a paired client's
- * `ConnectDevice.machine_id` is empty and, even when set, names the daemon
- * device, not the machine this socket reached. The active descriptor is the
- * peer the transport dials — pairing wrote the relay's `machine_devices` id
- * there, and a manual pick wrote the chosen machine. A direct loopback with no
- * active descriptor reaches the daemon this device is registered as, so its
- * own machine id is the peer. Otherwise the local host's name is the only
- * fallback, and it is narrowed to the one host it names.
+ * A relay link with no recorded machine cannot say which one it reached: the
+ * account's device rows are this UI's own registrations, not the peer, so they
+ * never stand in. A direct socket reaches exactly the daemon that answered
+ * `hello`, and that daemon reports the connect machine it owns from its own
+ * signed-in session (`daemon_machine_id`). That verified id is what keeps all
+ * of the machine's hosts online, WSL siblings included. `null` (no active
+ * link, a signed-out daemon or an older daemon) leaves the local host name as
+ * the only fallback, narrowed to the one host it names.
  */
 export function connectedMachineId(
-  state: Pick<RuntimeState, "connection">,
+  state: Pick<RuntimeState, "connection" | "daemonMachineId">,
   remote: Pick<RuntimeRemote, "activeMachineId" | "device">,
 ): string | null {
   if (remote.activeMachineId !== null) return remote.activeMachineId;
-  if (state.connection.transport !== "relay" && remote.device?.kind === "daemon") {
-    return remote.device.machine_id ?? null;
-  }
-  return null;
+  // `remote.device` is deliberately ignored: it is this UI's own device, and
+  // its `machine_id` (if any) names a different thing from the peer.
+  if (state.connection.transport === "relay") return null;
+  return state.daemonMachineId;
 }
 
 function focusSnapshot(): FocusSnapshot {

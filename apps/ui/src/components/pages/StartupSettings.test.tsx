@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { DesktopShellBridge } from "@/lib/platform/desktopShell";
@@ -86,6 +86,35 @@ describe("Startup settings", () => {
     expect(await screen.findByText("Open at login")).toBeTruthy();
     expect(screen.queryByRole("switch", { name: "Open at login" })).toBeNull();
     expect((await screen.findByRole("alert")).textContent).toContain(
+      "permission denied by the login item service",
+    );
+  });
+
+  it("keeps the autostart read error when the tray setting changes", async () => {
+    bridge.current = shell({
+      autostartEnabled: async () => {
+        throw new Error("permission denied by the login item service");
+      },
+      setKeepInTray: async () => ({ keep_in_tray: true, tray_available: true }),
+    });
+    render(<StartupSettings />);
+
+    expect((await screen.findByRole("alert")).textContent).toContain(
+      "permission denied by the login item service",
+    );
+
+    const tray = await screen.findByRole("switch", { name: "Keep running in tray" });
+    await waitFor(() => expect(tray.hasAttribute("disabled")).toBe(false));
+    fireEvent.click(tray);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("switch", { name: "Keep running in tray" }).getAttribute("aria-checked"),
+      ).toBe("true"),
+    );
+
+    // The read failure belongs to the Open at login row; toggling the tray is
+    // a different setting and must not clear it.
+    expect(screen.getByRole("alert").textContent).toContain(
       "permission denied by the login item service",
     );
   });

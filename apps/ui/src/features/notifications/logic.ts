@@ -375,8 +375,9 @@ export type PresenceSource = {
    * It comes from the peer, never from the account's device rows: a relay
    * link names the machine its URL was minted for (pairing writes the relay's
    * `machine_devices` id, a manual pick writes the chosen machine), and a
-   * direct loopback reaches the daemon this device is registered as. When
-   * neither exists the id is `null` and the local host name is the fallback.
+   * direct connection names the connect machine the daemon owns, which `hello`
+   * reports from the daemon's own signed-in session. When neither exists the
+   * id is `null` and the local host name is the fallback.
    */
   connectedMachineId: string | null;
   /**
@@ -397,9 +398,10 @@ export type PresenceSource = {
  * The live transport is authoritative for the machine this client is
  * connected to, so the relay can never report our own working machine as
  * offline. Which machine that is comes from the peer: a verified machine id
- * from the transport (a relay link's machine, or the daemon's own registration
- * on a direct loopback). That id keeps every host of the machine online, so a
- * Windows host and its WSL siblings are not split by a stale relay answer.
+ * from the transport (a relay link's machine, or the connect machine the
+ * daemon reports in `hello` on a direct connection). That id keeps every host
+ * of the machine online, so a Windows host and its WSL siblings are not split
+ * by a stale relay answer.
  * Only when there is no such id does the local host's name stand in, because
  * connect mints its own machine and host ids; a name match is then narrow, per
  * host, so working in one WSL distribution does not mark the others online.

@@ -118,7 +118,7 @@ type AutostartState =
   | { status: "loading" }
   | { status: "ready"; enabled: boolean }
   | { status: "unsupported" }
-  | { status: "error" };
+  | { status: "error"; error: string };
 
 /**
  * Whether an autostart read failed because this shell simply has no plugin.
@@ -172,9 +172,10 @@ export function StartupSettings() {
           return;
         }
         // Anything else (a blocked permission, a refused command) is a real
-        // failure: keep the row and say what went wrong.
-        setAutostart({ status: "error" });
-        setError(reason);
+        // failure: keep the row and say what went wrong. The reason lives on
+        // this row's state, so toggling the tray or a later autostart write
+        // does not erase why the read failed.
+        setAutostart({ status: "error", error: reason });
       });
     void shell
       .shellSettings()
@@ -222,7 +223,13 @@ export function StartupSettings() {
         <div className="q-field">
           <div className="lab">
             <div className="t">Open at login</div>
-            <div className="s">Start h4rn when you sign in to this computer</div>
+            {autostart.status === "error" ? (
+              <div className="s" role="alert" style={{ color: "var(--danger)" }}>
+                {autostart.error}
+              </div>
+            ) : (
+              <div className="s">Start h4rn when you sign in to this computer</div>
+            )}
           </div>
           <div className="ctl">
             {autostart.status === "loading" ? (

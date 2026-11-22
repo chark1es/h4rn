@@ -763,6 +763,9 @@ export class H4rnClient {
         localHostId: hello.local_host,
         serverVersion: hello.server_version,
         deviceId: hello.device_id,
+        // A daemon older than this field answers without it, and a signed-out
+        // daemon has no machine to name.
+        daemonMachineId: hello.daemon_machine_id ?? null,
       };
       for (const listener of this.readyListeners) listener(ready);
     } catch (error) {

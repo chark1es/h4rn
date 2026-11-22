@@ -151,11 +151,12 @@ function approvalResolved(threadId: ThreadId, approvalId = "ap_1"): Event {
 function turnCompleted(
   threadId: ThreadId,
   status: "completed" | "interrupted" | "failed" = "completed",
+  turnId = "turn_1",
 ): Event {
   return {
     type: "turn_completed",
     thread_id: threadId,
-    turn_id: "turn_1",
+    turn_id: turnId,
     usage: {
       input_tokens: 0,
       output_tokens: 0,
@@ -166,6 +167,15 @@ function turnCompleted(
       tps: 0,
     },
     status,
+  };
+}
+
+function turnStarted(threadId: ThreadId, turnId = "turn_1"): Event {
+  return {
+    type: "turn_started",
+    thread_id: threadId,
+    turn_id: turnId,
+    started_at: "2026-11-21T00:00:00Z",
   };
 }
 
@@ -206,6 +216,7 @@ function harness(options: {
     hosts: {},
     lastSyncAt: 1,
     localHostId: null,
+    daemonMachineId: null,
     ...options.state,
   };
   let remote: RuntimeRemote = {
@@ -331,18 +342,23 @@ describe("notification runtime wiring", () => {
     expect(h.shown[0]?.body).toBe("Finished: the turn is done.");
   });
 
-  it("keeps the streamed baseline when a refresh returns Done before the upsert", async () => {
+  it("keeps the streamed baseline when a refresh returns Done before the completion", async () => {
     vi.useFakeTimers();
-    const h = harness({});
+    // The thread was already Done when the page loaded...
+    const h = harness({
+      threads: { [THREAD]: threadSummary(THREAD, { tab: "done", agent_state: "done" }) },
+    });
     h.runtime.start();
+    // ...and the stream then named it Working for a new turn.
+    h.emit(threadUpserted(threadSummary(THREAD, { tab: "working" })));
 
-    h.emit(turnCompleted(THREAD));
     // The list refresh answers first, and it already says Done. Adopting that
     // as the baseline would swallow the live upsert that is about to arrive.
     h.updateState({
       threads: { [THREAD]: threadSummary(THREAD, { tab: "done", agent_state: "done" }) },
       lastSyncAt: 2,
     });
+    h.emit(turnCompleted(THREAD));
     h.emit(threadUpserted(threadSummary(THREAD, { tab: "done", agent_state: "done" })));
 
     await vi.advanceTimersByTimeAsync(1_000);
@@ -350,19 +366,21 @@ describe("notification runtime wiring", () => {
     expect(h.shown[0]?.body).toBe("Finished: the turn is done.");
   });
 
-  it("announces a live finish when the list answered Done before the completion", async () => {
+  it("announces a live finish when the completion arrives before the refresh", async () => {
     vi.useFakeTimers();
-    const h = harness({});
+    // Same baseline: a listed Done thread whose stream then said Working.
+    const h = harness({
+      threads: { [THREAD]: threadSummary(THREAD, { tab: "done", agent_state: "done" }) },
+    });
     h.runtime.start();
+    h.emit(threadUpserted(threadSummary(THREAD, { tab: "working" })));
 
-    // The list reply outruns the stream and already says Done. The baseline
-    // stays the streamed placement (Working), so the completion and its
-    // upsert still announce the finish.
+    // The completion arrives before the list refresh answers Done.
+    h.emit(turnCompleted(THREAD));
     h.updateState({
       threads: { [THREAD]: threadSummary(THREAD, { tab: "done", agent_state: "done" }) },
       lastSyncAt: 2,
     });
-    h.emit(turnCompleted(THREAD));
     h.emit(threadUpserted(threadSummary(THREAD, { tab: "done", agent_state: "done" })));
 
     await vi.advanceTimersByTimeAsync(1_000);
@@ -470,6 +488,43 @@ describe("notification runtime wiring", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(h.shown).toHaveLength(1);
     expect(h.shown[0]?.body).toBe("Failed: the turn ended with an error.");
+  });
+
+  it("keeps a deferred failure when a queued turn starts before the summary", async () => {
+    vi.useFakeTimers();
+    const h = harness({ threads: {} });
+    h.runtime.start();
+
+    // A live failure whose thread nothing has named yet is held back.
+    h.emit(turnCompleted(THREAD, "failed"));
+    // The daemon starts the next queued turn with a new id before the summary
+    // names the thread. That start belongs to a different turn and must not
+    // erase the failed turn's outcome.
+    h.emit(turnStarted(THREAD, "turn_2"));
+    h.emit(threadUpserted(threadSummary(THREAD, { tab: "working" })));
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.shown).toHaveLength(1);
+    expect(h.shown[0]?.body).toBe("Failed: the turn ended with an error.");
+  });
+
+  it("still alerts when the queued turn that started later fails", async () => {
+    vi.useFakeTimers();
+    const h = harness({ threads: {} });
+    h.runtime.start();
+
+    h.emit(turnCompleted(THREAD, "failed"));
+    h.emit(turnStarted(THREAD, "turn_2"));
+    h.emit(threadUpserted(threadSummary(THREAD, { tab: "working" })));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.shown).toHaveLength(1);
+
+    // The queued turn fails on its own. Announcing the earlier turn must not
+    // have spent this one's failure.
+    h.emit(turnCompleted(THREAD, "failed", "turn_2"));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.shown).toHaveLength(2);
+    expect(h.shown[1]?.body).toBe("Failed: the turn ended with an error.");
   });
 
   it("stays quiet when a first-connect failure belongs to a subagent child", async () => {
@@ -650,7 +705,7 @@ describe("host offline delivery", () => {
     expect(linkedMachines).not.toHaveBeenCalled();
   });
 
-  it("names a direct daemon's own machine from its device registration", async () => {
+  it("keeps a directly connected daemon's machine and its WSL sibling online", async () => {
     vi.useFakeTimers();
     const linkedMachines = vi.fn(async () => ({ supported: true, machines: [windowsOffline] }));
     const h = harness({
@@ -658,13 +713,16 @@ describe("host offline delivery", () => {
       state: {
         localHostId: "h_windows",
         hosts: { h_windows: host("h_windows", "atlas") },
+        // `hello` reported the machine this daemon owns. A desktop app has no
+        // active remote; the daemon's own signed-in session names the peer.
+        daemonMachineId: "m_atlas",
       },
-      // A desktop app on its own machine: no active remote, but connect
-      // records the daemon's machine on its device.
       remote: {
         linkedMachines: [windowsOnline],
         activeMachineId: null,
-        device: device("m_atlas", "daemon"),
+        // The account row is this UI's desktop device, not the daemon. It must
+        // not be where the peer's machine comes from.
+        device: device(null, "desktop"),
       },
       client: { linkedMachines },
     });
@@ -672,12 +730,18 @@ describe("host offline delivery", () => {
     h.updateRemote({ linkedMachines: [windowsOffline] });
 
     await vi.advanceTimersByTimeAsync(5_000);
+    // The transport reached the machine, so its Windows host and the WSL
+    // distro on it are both online: nothing to alert, and no delivery recheck.
     expect(h.shown).toHaveLength(0);
     expect(linkedMachines).not.toHaveBeenCalled();
   });
 
   it("does not announce a shared-name machine when a second one appears", async () => {
     vi.useFakeTimers();
+    // A live relay answer that would confirm both machines offline if it were
+    // ever asked. The suppression has to stand before any recheck.
+    const bothOffline = [machine("m_one", "atlas", false), machine("m_two", "atlas", false)];
+    const linkedMachines = vi.fn(async () => ({ supported: true, machines: bothOffline }));
     const h = harness({
       settings: { hostOffline: true },
       state: {
@@ -686,18 +750,19 @@ describe("host offline delivery", () => {
       },
       // The connected machine is only known by the local host's name.
       remote: { linkedMachines: [machine("m_one", "atlas", true)], device: null },
+      client: { linkedMachines },
     });
     h.runtime.start();
 
     // A second machine with the same hostname registers. The name no longer
     // says which machine the transport reached, so neither may take the
     // relay's offline presence for the machine in active use.
-    h.updateRemote({
-      linkedMachines: [machine("m_one", "atlas", false), machine("m_two", "atlas", false)],
-    });
+    h.updateRemote({ linkedMachines: bothOffline });
 
     await vi.advanceTimersByTimeAsync(5_000);
     expect(h.shown).toHaveLength(0);
+    // No alert means no delivery recheck: the request is only for a due alert.
+    expect(linkedMachines).not.toHaveBeenCalled();
   });
 
   it("drops an alert when a fresh presence fetch says the host is back", async () => {
@@ -773,33 +838,50 @@ describe("connected machine identity", () => {
     // relay's `machine_devices` id is the active remote it dials.
     expect(
       connectedMachineId(
-        { connection: relay },
+        { connection: relay, daemonMachineId: null },
         { activeMachineId: "m_atlas", device: device(null) },
       ),
     ).toBe("m_atlas");
   });
 
-  it("names the daemon itself on a direct connection", () => {
+  it("names the daemon's own machine on a direct connection", () => {
+    // `hello` reports the connect machine from the daemon's own session, so a
+    // desktop app reaches it without any account device row standing in.
     expect(
       connectedMachineId(
-        { connection: direct },
-        { activeMachineId: null, device: device("m_atlas", "daemon") },
+        { connection: direct, daemonMachineId: "m_atlas" },
+        { activeMachineId: null, device: device(null, "desktop") },
       ),
     ).toBe("m_atlas");
   });
 
-  it("does not borrow a web device's empty machine id", () => {
+  it("does not borrow this device's own machine row", () => {
     expect(
-      connectedMachineId({ connection: relay }, { activeMachineId: null, device: device(null) }),
+      connectedMachineId(
+        { connection: direct, daemonMachineId: null },
+        { activeMachineId: null, device: device(null) },
+      ),
     ).toBeNull();
   });
 
-  it("prefers the peer actually dialled over this device's own machine", () => {
-    // A daemon signed in on atlas can still select another machine; the
-    // selected remote is what the transport reaches.
+  it("does not name a daemon device row on a relay link with no active machine", () => {
+    // GLM P2: a relay link that recorded no machine cannot say which one it
+    // reached. A daemon row in the account belongs to some machine (possibly
+    // this UI's own local daemon), so it must never stand in.
     expect(
       connectedMachineId(
-        { connection: relay },
+        { connection: relay, daemonMachineId: null },
+        { activeMachineId: null, device: device("m_other", "daemon") },
+      ),
+    ).toBeNull();
+  });
+
+  it("prefers the peer actually dialled over the daemon's own machine", () => {
+    // A daemon signed in on atlas can still reach a selected machine; the
+    // selected remote is what the transport dials.
+    expect(
+      connectedMachineId(
+        { connection: relay, daemonMachineId: "m_atlas" },
         { activeMachineId: "m_orion", device: device("m_atlas", "daemon") },
       ),
     ).toBe("m_orion");
