@@ -510,9 +510,12 @@ selection does no filesystem work at all.
   that kept its indexed mtime) would otherwise let git trust its index and miss
   an edit or a new file.
 - Every git call runs with `GIT_NO_REPLACE_OBJECTS=1` (and without
-  `GIT_REPLACE_REF_BASE`): a replacement ref (`refs/replace/*`) could otherwise
-  make an unmerged owned branch pass the ancestry check, or a detached commit
-  look reachable.
+  `GIT_REPLACE_REF_BASE`) and with `GIT_GRAFT_FILE` pointed at an empty file: a
+  replacement ref (`refs/replace/*`) or a graft (`<common>/info/grafts`, or an
+  inherited `GIT_GRAFT_FILE`) could otherwise rewrite parent links so an
+  unmerged owned branch passes the ancestry check, or a detached commit looks
+  reachable. Inherited `GIT_CONFIG_PARAMETERS`/`GIT_CONFIG_COUNT` config is
+  dropped too; the safety-relevant keys are forced with `-c` regardless.
 - Without `force`, an existing checkout must still be on the branch the listing
   gave it. If the current branch differs, the entry is skipped as
   `checkout is no longer on <branch>`; force removes the replacement checkout
@@ -634,7 +637,8 @@ selection does no filesystem work at all.
   30-second per-command deadline, checked for every directory entry and once
   more before answering "nothing found"; running out of time, or a directory
   that cannot be read, is skipped as `could not check for nested checkouts`
-  (forceable), never read as clean.
+  (not forceable: the scan must finish even for a forced clear), never read as
+  clean.
 - Without `force`, prepare, and the final verification immediately before
   removal, also run `git ls-files -v` in an existing checkout, bounded like
   every other call. An
@@ -730,6 +734,12 @@ disconnects mid-spawn) can still finish creating its checkout and `h4rn/sa-*`
 branch inside `spawn_blocking`, which cannot be aborted, before any subagent
 record exists. Such a checkout is not listed (subagent rows come only from
 recorded subagents) and has to be removed with `git worktree remove`.
+
+Known limitation: git compares a file's ctime in whole seconds. An edit made in
+the same second as the index last recorded that file, with its mtime forged
+back, is invisible to any stat comparison, so neither h4rn's dirty check nor
+git's removal backstop can see it (the forced `core.trustctime=true` and
+`core.checkStat=default` close every case with a later ctime).
 
 ## Tests
 

@@ -155,7 +155,6 @@ export const WORKTREE_SKIP_REASONS = {
     "has uncommitted changes",
     "could not check for uncommitted changes",
     "detached HEAD has commits on no branch",
-    "could not check for nested checkouts",
     "contains submodules",
     "could not read the registration's HEAD",
     "has files hidden from git status",
@@ -177,6 +176,8 @@ export const WORKTREE_SKIP_REASONS = {
     "checkout removed, but branch",
     "contains another worktree at",
     "contains another git checkout at",
+    // The daemon requires the nested scan to finish even on a forced clear.
+    "could not check for nested checkouts",
     "is the repository's main worktree",
     "is locked",
     "its repository could not be found",

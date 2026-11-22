@@ -5524,3 +5524,97 @@ fn a_replacement_ref_does_not_make_an_unmerged_branch_look_merged() {
     assert!(linked.is_dir());
     assert!(git::branch_exists(&fixture.repo, "h4rn/sa-replaced"));
 }
+
+/// Writes `<repo>/.git/info/grafts` so `child` appears to have `parent` as its
+/// only parent.
+fn graft(repo: &Path, child: &str, parent: &str) {
+    let info = repo.join(".git/info");
+    std::fs::create_dir_all(&info).expect("info dir");
+    std::fs::write(info.join("grafts"), format!("{child} {parent}\n")).expect("grafts");
+}
+
+#[test]
+fn grafts_do_not_make_an_unmerged_branch_look_merged() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("sa-grafted", "h4rn/sa-grafted");
+    std::fs::write(linked.join("work.txt"), "child work\n").expect("work");
+    run(&linked, &["add", "work.txt"]);
+    run(&linked, &["commit", "-q", "-m", "child work"]);
+    let tip = git::run(&linked, ["rev-parse", "HEAD"]).expect("tip");
+    let main_head = git::run(&fixture.repo, ["rev-parse", "HEAD"]).expect("main head");
+    graft(&fixture.repo, &main_head, &tip);
+    let plain = std::process::Command::new("git")
+        .args(["merge-base", "--is-ancestor", &tip, "HEAD"])
+        .current_dir(&fixture.repo)
+        .status()
+        .expect("plain merge-base");
+    assert!(plain.success(), "plain git is fooled by the graft");
+
+    let target = entry(&linked, &fixture.repo, Some("h4rn/sa-grafted"), true);
+    assert_eq!(
+        clear_one(&target, false, &fixture.data_dir())
+            .err()
+            .as_deref(),
+        Some("branch h4rn/sa-grafted has unmerged commits")
+    );
+    assert!(linked.is_dir());
+    assert!(git::branch_exists(&fixture.repo, "h4rn/sa-grafted"));
+}
+
+#[test]
+fn grafts_do_not_make_a_detached_commit_look_reachable() {
+    let fixture = Fixture::new();
+    let linked = git::norm(&fixture.root.path().join("wt-grafted-detached"));
+    run(
+        &fixture.repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            &linked.to_string_lossy(),
+        ],
+    );
+    std::fs::write(linked.join("work.txt"), "detached work\n").expect("work");
+    run(&linked, &["add", "work.txt"]);
+    run(
+        &linked,
+        &[
+            "-c",
+            "user.email=wt@h4rn.invalid",
+            "-c",
+            "user.name=wt",
+            "commit",
+            "-q",
+            "-m",
+            "detached work",
+        ],
+    );
+    let detached = git::run(&linked, ["rev-parse", "HEAD"]).expect("detached tip");
+    let main_head = git::run(&fixture.repo, ["rev-parse", "HEAD"]).expect("main head");
+    graft(&fixture.repo, &main_head, &detached);
+    let plain = std::process::Command::new("git")
+        .args([
+            "for-each-ref",
+            "--contains",
+            &detached,
+            "--format=%(refname)",
+            "refs/heads",
+        ])
+        .current_dir(&fixture.repo)
+        .output()
+        .expect("plain for-each-ref");
+    assert!(
+        !plain.stdout.is_empty(),
+        "plain git thinks a branch reaches the detached commit"
+    );
+
+    let target = entry(&linked, &fixture.repo, None, false);
+    assert_eq!(
+        clear_one(&target, false, &fixture.data_dir())
+            .err()
+            .as_deref(),
+        Some("detached HEAD has commits on no branch")
+    );
+    assert!(linked.is_dir());
+}

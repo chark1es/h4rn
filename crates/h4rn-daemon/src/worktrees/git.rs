@@ -276,15 +276,31 @@ pub(crate) fn sanitize(command: &mut Command) {
         // A replacement ref (`refs/replace/*`) can make history look like it
         // contains a commit it does not: an unmerged branch would pass the
         // ancestry check and a detached commit would look reachable.
-        .env("GIT_NO_REPLACE_OBJECTS", "1");
-    for name in TRACE_VARS
-        .iter()
-        .chain(LOCATION_VARS)
-        .chain(["GIT_REPLACE_REF_BASE"].iter())
-    {
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        // Grafts (`<common>/info/grafts`, or an inherited `GIT_GRAFT_FILE`)
+        // rewrite parent links the same way and are honoured regardless of
+        // `GIT_NO_REPLACE_OBJECTS`; point git at an empty graft file.
+        .env("GIT_GRAFT_FILE", EMPTY_FILE);
+    for name in TRACE_VARS.iter().chain(LOCATION_VARS).chain(
+        [
+            "GIT_REPLACE_REF_BASE",
+            // Inherited `-c` / `GIT_CONFIG_KEY_n` config. The safety-relevant
+            // keys are forced with `-c` and would win anyway; dropping these
+            // keeps everything else at the repository's own configuration.
+            "GIT_CONFIG_PARAMETERS",
+            "GIT_CONFIG_COUNT",
+        ]
+        .iter(),
+    ) {
         command.env_remove(name);
     }
 }
+
+/// A path that always reads as an empty file.
+#[cfg(not(windows))]
+const EMPTY_FILE: &str = "/dev/null";
+#[cfg(windows)]
+const EMPTY_FILE: &str = "NUL";
 
 fn command(dir: &Path) -> Command {
     let mut command = Command::new(program());

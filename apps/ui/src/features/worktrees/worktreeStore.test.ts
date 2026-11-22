@@ -388,7 +388,7 @@ describe("forceCanFix", () => {
     expect(forceCanFix("branch h4rn/sa-x has unmerged commits")).toBe(true);
     expect(forceCanFix("checkout is no longer on h4rn/sa-x")).toBe(true);
     expect(forceCanFix("detached HEAD has commits on no branch")).toBe(true);
-    expect(forceCanFix("could not check for nested checkouts")).toBe(true);
+    expect(forceCanFix("could not check for nested checkouts")).toBe(false);
     expect(forceCanFix("branch h4rn/sa-x changed during the clear")).toBe(true);
     expect(forceCanFix("contains submodules")).toBe(true);
     expect(forceCanFix("could not read the registration's HEAD")).toBe(true);

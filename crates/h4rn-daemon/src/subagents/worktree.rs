@@ -94,10 +94,14 @@ pub fn remove(repo: &Path, dest: &Path, branch: Option<&str>) {
 ///
 /// Call this **before** [`remove`]; it is what the parent's result card shows.
 pub fn changes(worktree: &Path) -> Vec<SubagentFileChange> {
+    // The same overrides as the clearing checks, so the result card does not
+    // under-report under `status.showUntrackedFiles=no` or a filesystem
+    // monitor.
     let output = git_command()
         .arg("-C")
         .arg(worktree)
-        .args(["status", "--porcelain"])
+        .args(crate::worktrees::git::SAFETY_CONFIG)
+        .args(["status", "--porcelain", "--untracked-files=all"])
         .output();
     let Ok(output) = output else {
         return Vec::new();
