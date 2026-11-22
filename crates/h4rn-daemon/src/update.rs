@@ -1078,24 +1078,18 @@ pub fn rollback_binary(current: &Path) -> Result<()> {
     // a working installation.
     check_previous_binary(&previous)?;
     let parent = current.parent();
-    if cfg!(windows) {
-        rollback_binary_windows(current, &previous)?;
-    } else {
-        // One rename over the target: an interruption cannot leave the install
-        // path empty.
-        std::fs::rename(&previous, current)
-            .with_context(|| format!("restore {}", current.display()))?;
-    }
+    #[cfg(windows)]
+    rollback_binary_windows(current, &previous)?;
+    #[cfg(not(windows))]
+    // One rename over the target: an interruption cannot leave the install
+    // path empty.
+    std::fs::rename(&previous, current)
+        .with_context(|| format!("restore {}", current.display()))?;
     remove_backup_checksum(&previous);
     if let Some(parent) = parent {
         fsync_dir(parent);
     }
     Ok(())
-}
-
-#[cfg(not(windows))]
-fn rollback_binary_windows(_current: &Path, _previous: &Path) -> Result<()> {
-    unreachable!("the Windows rollback path is only compiled on Windows")
 }
 
 #[cfg(windows)]
