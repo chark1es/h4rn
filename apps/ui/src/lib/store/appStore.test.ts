@@ -14,7 +14,7 @@ vi.mock("@/lib/client/config", () => ({
 
 import { onManualPlacement } from "@/features/notifications/placement";
 import { drafts, flushDrafts, readThreadDraft } from "@/lib/drafts";
-import { createThread, getState, loadThreads, setThreadTab, store } from "./appStore";
+import { applyEvent, createThread, getState, loadThreads, setThreadTab, store } from "./appStore";
 
 function hostSummary(hostId: string): HostSummary {
   return {
@@ -107,6 +107,68 @@ describe("loadThreads", () => {
 
     expect(readThreadDraft("load_host_b", "not_in_the_list")).toBe("still unsent");
     expect(readThreadDraft("load_host_other", "another_machine")).toBe("keep for later");
+  });
+});
+
+describe("a create reply and a generated title in either order", () => {
+  const created = { ...threadSummary({ threadId: "th_race", host: "host_race" }) };
+  created.title = "Fix the build";
+
+  function generatedUpsert() {
+    return {
+      seq: 9,
+      event: {
+        type: "thread_upserted" as const,
+        ...threadSummary({ threadId: "th_race", host: "host_race" }),
+        title: "Generated title",
+      },
+    };
+  }
+
+  function createInput() {
+    return {
+      host: "host_race" as never,
+      harness: "claude_code" as const,
+      workspacePath: "~/code",
+      model: "claude-sonnet-4-5",
+      prompt: "Fix the build",
+    };
+  }
+
+  beforeEach(() => {
+    fake.response.current = null;
+    fake.request.mockClear();
+    seedHosts(["host_race"]);
+  });
+
+  it("keeps the upsert when the generated title was projected first", async () => {
+    // The event wins the race and is projected before the reply arrives.
+    store.setState(applyEvent(getState(), generatedUpsert()));
+    fake.response.current = {
+      type: "thread_created",
+      thread_id: "th_race",
+      turn_id: "turn_race",
+      summary: created,
+    };
+
+    await createThread(createInput());
+
+    expect(getState().threads.th_race?.title).toBe("Generated title");
+  });
+
+  it("lets the upsert replace the create reply when it arrives second", async () => {
+    fake.response.current = {
+      type: "thread_created",
+      thread_id: "th_race",
+      turn_id: "turn_race",
+      summary: created,
+    };
+
+    await createThread(createInput());
+    expect(getState().threads.th_race?.title).toBe("Fix the build");
+
+    store.setState(applyEvent(getState(), generatedUpsert()));
+    expect(getState().threads.th_race?.title).toBe("Generated title");
   });
 });
 

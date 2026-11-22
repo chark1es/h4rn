@@ -89,6 +89,8 @@ async fn boot_with_devices(
         clock: None,
     };
     let mut builder = DaemonBuilder::new(config)
+        // Titles never spawn the machine's own claude or codex.
+        .without_title_agents()
         .with_harness(Arc::new(FakeHarness::new()))
         .with_lifecycle(options);
     if let Some(secure) = secure {

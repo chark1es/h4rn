@@ -71,6 +71,8 @@ async fn boot_in(dir: tempfile::TempDir, network_enabled: bool, port: u16) -> Te
         clock: None,
     };
     let daemon = DaemonBuilder::new(config)
+        // Titles never spawn the machine's own claude or codex.
+        .without_title_agents()
         .with_harness(Arc::new(FakeHarness::new()))
         .with_lifecycle(options)
         .build()
