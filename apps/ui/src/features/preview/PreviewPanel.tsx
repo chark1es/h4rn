@@ -39,9 +39,13 @@ export function PreviewFrame({
 }) {
   const frame = useRef<HTMLIFrameElement | null>(null);
   const [pending, setPending] = useState<{ url: string; host: string } | null>(null);
+  const frozen = useRef(false);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: a new document must dismiss an old confirmation
-  useEffect(() => setPending(null), [srcdoc, url]);
+  useEffect(() => {
+    frozen.current = false;
+    setPending(null);
+  }, [srcdoc, url]);
 
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
@@ -49,17 +53,28 @@ export function PreviewFrame({
       const data = event.data as { type?: unknown; token?: unknown; href?: unknown } | null;
       if (data?.type !== "h4rn:preview-open") return;
       if (data.token !== token) return;
+      // Once the bar is up its URL is frozen: another message from the page —
+      // which controls the whole frame — cannot retarget the confirmation.
+      if (frozen.current) return;
       const request = previewOpenRequest(data.href);
-      if (request) setPending(request);
+      if (request) {
+        frozen.current = true;
+        setPending(request);
+      }
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
   }, [token]);
 
+  const dismiss = () => {
+    frozen.current = false;
+    setPending(null);
+  };
+
   const open = () => {
     if (!pending) return;
     void openExternalUrl(pending.url);
-    setPending(null);
+    dismiss();
   };
 
   return (
@@ -70,7 +85,7 @@ export function PreviewFrame({
             Open <span className="q-mono">{pending.host}</span> in your browser?
           </span>
           <span className="grow" />
-          <button type="button" className="q-btn secondary" onClick={() => setPending(null)}>
+          <button type="button" className="q-btn secondary" onClick={dismiss}>
             Cancel
           </button>
           <button type="button" className="q-btn primary" onClick={open}>

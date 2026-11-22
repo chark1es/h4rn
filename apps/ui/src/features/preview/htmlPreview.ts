@@ -24,7 +24,7 @@ export const PREVIEW_SANDBOX = "allow-scripts";
 
 /** The page's policy. `default-src 'none'` is the floor everything else adds to. */
 export const PREVIEW_CSP =
-  "default-src 'none'; img-src data: https:; style-src 'unsafe-inline' https:; script-src 'unsafe-inline' https:; font-src data: https:; connect-src https:";
+  "default-src 'none'; img-src data: https:; media-src data: https:; object-src data:; style-src 'unsafe-inline' https:; script-src 'unsafe-inline' https:; font-src data: https:; connect-src https:";
 
 /** The CSP `<meta>` the document starts with. */
 export const PREVIEW_CSP_META = `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">`;
@@ -32,8 +32,17 @@ export const PREVIEW_CSP_META = `<meta http-equiv="Content-Security-Policy" cont
 /** Total workspace bytes the preview will inline, including the HTML itself. */
 export const PREVIEW_MAX_TOTAL_BYTES = 10 * 1024 * 1024;
 
-/** The daemon's own text read limit: a larger HTML file cannot be previewed. */
-export const PREVIEW_MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;
+/**
+ * The largest text read the preview asks the daemon for (400 KiB).
+ *
+ * The secure transport refuses a frame over 512 KiB, and the JSON envelope
+ * around a decoded document or stylesheet needs headroom. The daemon is asked
+ * for this bound rather than reading a larger file and failing to send it.
+ */
+export const PREVIEW_MAX_TEXT_BYTES = 400 * 1024;
+
+/** The largest HTML document the preview will read, bounded by one frame. */
+export const PREVIEW_MAX_DOCUMENT_BYTES = PREVIEW_MAX_TEXT_BYTES;
 
 /**
  * The largest asset the daemon embeds as base64 in one response (360 KiB).
@@ -315,6 +324,37 @@ function upsertAttr(attrs: Attr[], name: string, value: string): Attr[] {
   ];
 }
 
+function dropAttrs(attrs: Attr[], names: string[]): Attr[] {
+  const lowered = new Set(names.map((name) => name.toLowerCase()));
+  return attrs.filter((entry) => !lowered.has(entry.name.toLowerCase()));
+}
+
+/** One `srcset` candidate: a URL and its width/density descriptor. */
+export type SrcsetCandidate = { url: string; descriptor: string };
+
+/**
+ * Splits a `srcset` value into its candidates.
+ *
+ * A `data:` candidate is left alone by the caller: its commas are part of the
+ * URL, not separators, and it never needs the workspace.
+ */
+export function parseSrcset(value: string): SrcsetCandidate[] {
+  const candidates: SrcsetCandidate[] = [];
+  for (const part of value.split(",")) {
+    const trimmed = part.trim();
+    if (!trimmed) continue;
+    const match = /^(\S+)(?:\s+([\s\S]*))?$/.exec(trimmed);
+    if (!match) continue;
+    candidates.push({ url: match[1] ?? "", descriptor: (match[2] ?? "").trim() });
+  }
+  return candidates;
+}
+
+/** True when a `srcset` carries a `data:` URL whose commas cannot be split. */
+function srcsetHasDataUrl(value: string): boolean {
+  return /(^|,)\s*data:/i.test(value);
+}
+
 /** Finds the closing tag for a raw-text element, starting at `from`. */
 function findClosing(source: string, name: string, from: number): number {
   const pattern = new RegExp(`</${name}\\s*>`, "i");
@@ -437,6 +477,37 @@ export function scanPreviewReferences(html: string, docPath: string): PreviewSca
       if (name === "img" || name === "source") {
         const src = attr(tag, "src");
         if (src) add(classify(docPath, src, "bytes", scan));
+        const srcset = attr(tag, "srcset");
+        if (srcset) {
+          for (const candidate of parseSrcset(srcset)) {
+            add(classify(docPath, candidate.url, "bytes", scan));
+          }
+        }
+        return null;
+      }
+      if (name === "video" || name === "audio" || name === "track" || name === "iframe") {
+        const src = attr(tag, "src");
+        if (src) add(classify(docPath, src, "bytes", scan));
+        if (name === "video") {
+          const poster = attr(tag, "poster");
+          if (poster) add(classify(docPath, poster, "bytes", scan));
+        }
+        return null;
+      }
+      if (name === "object") {
+        const data = attr(tag, "data");
+        if (data) add(classify(docPath, data, "bytes", scan));
+        return null;
+      }
+      if (name === "embed") {
+        const src = attr(tag, "src");
+        if (src) add(classify(docPath, src, "bytes", scan));
+        return null;
+      }
+      if (name === "svg" || name === "image" || name === "use") {
+        for (const value of [attr(tag, "href"), attr(tag, "xlink:href")]) {
+          if (value) add(classify(docPath, value, "bytes", scan));
+        }
         return null;
       }
       return null;
@@ -451,22 +522,44 @@ export function scanPreviewReferences(html: string, docPath: string): PreviewSca
   return scan;
 }
 
-/** Finds `url(...)` assets in a stylesheet, resolved from the sheet's folder. */
+/** Matches one `@import` at-rule, including its optional media condition. */
+const AT_IMPORT =
+  /@import\s+(?:url\(\s*)?(?:"([^"]*)"|'([^']*)'|([^)'"\s;]+))\s*\)?\s*([^;]*)(?:;|$)/gi;
+
+/**
+ * Finds `url(...)` assets and `@import`ed stylesheets in a stylesheet.
+ *
+ * Imports are text: the preview inlines the imported sheet's CSS rather than
+ * turning it into a `data:` URL. The import rules are removed before the
+ * `url()` scan so the same reference is not counted twice.
+ */
 export function scanCssReferences(css: string, cssPath: string): PreviewScan {
   const scan: PreviewScan = { refs: [], external: [], rejected: [] };
   const seen = new Map<string, PreviewReference>();
-  for (const match of css.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)'"\s]+))\s*\)/gi)) {
-    const url = match[1] ?? match[2] ?? match[3] ?? "";
-    const ref = classify(cssPath, url, "bytes", scan);
-    if (!ref) continue;
-    const existing = seen.get(ref.path);
+  const add = (ref: PreviewTarget | null) => {
+    if (!ref) return;
+    const key = `${ref.kind}:${ref.path}`;
+    const existing = seen.get(key);
     if (existing) {
       existing.count += 1;
-      continue;
+      return;
     }
     const entry = { ...ref, count: 1 };
-    seen.set(entry.path, entry);
+    seen.set(key, entry);
     scan.refs.push(entry);
+  };
+
+  const stripped = css.replace(
+    AT_IMPORT,
+    (_whole, doubleQuoted: string, singleQuoted: string, bare: string) => {
+      add(classify(cssPath, doubleQuoted ?? singleQuoted ?? bare ?? "", "text", scan));
+      return " ";
+    },
+  );
+
+  for (const match of stripped.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)'"\s]+))\s*\)/gi)) {
+    const url = match[1] ?? match[2] ?? match[3] ?? "";
+    add(classify(cssPath, url, "bytes", scan));
   }
   return scan;
 }
@@ -488,6 +581,17 @@ export function previewMimeType(path: string): string {
     woff2: "font/woff2",
     ttf: "font/ttf",
     otf: "font/otf",
+    mp4: "video/mp4",
+    m4v: "video/mp4",
+    webm: "video/webm",
+    ogv: "video/ogg",
+    ogg: "audio/ogg",
+    mp3: "audio/mpeg",
+    wav: "audio/wav",
+    m4a: "audio/mp4",
+    vtt: "text/vtt",
+    srt: "application/x-subrip",
+    pdf: "application/pdf",
   };
   return known[extension] ?? "application/octet-stream";
 }
@@ -503,8 +607,38 @@ function inlineCss(
   cssPath: string,
   assets: PreviewAssetMap,
   missing?: Set<string>,
+  seen: Set<string> = new Set(),
 ): string {
-  const rewritten = css.replace(
+  if (seen.has(cssPath)) return "";
+  seen.add(cssPath);
+
+  // An `@import` of a workspace stylesheet becomes that stylesheet's own CSS,
+  // wrapped in its media condition; it is never a `data:` URL or a relative
+  // request against the preview origin. External imports are the page's own
+  // business and stay as written.
+  const imported = css.replace(
+    AT_IMPORT,
+    (_whole, doubleQuoted: string, singleQuoted: string, bare: string, media: string) => {
+      const raw = (doubleQuoted ?? singleQuoted ?? bare ?? "").trim();
+      if (!raw || /^(data|blob):/i.test(raw)) return "";
+      if (isExternalPreviewUrl(raw) || /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw)) return _whole;
+      const path = resolvePreviewAsset(cssPath, raw);
+      if (!path) {
+        missing?.add(raw);
+        return "";
+      }
+      const asset = assets[path];
+      if (asset?.kind !== "text") {
+        missing?.add(path);
+        return "";
+      }
+      const nested = inlineCss(asset.text, path, assets, missing, seen);
+      const condition = (media ?? "").trim();
+      return condition ? `@media ${condition} {${nested}}` : nested;
+    },
+  );
+
+  const rewritten = imported.replace(
     /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)'"\s]+))\s*\)/gi,
     (whole, doubleQuoted: string, singleQuoted: string, bare: string) => {
       const raw = (doubleQuoted ?? singleQuoted ?? bare ?? "").trim();
@@ -538,16 +672,43 @@ function inlineCss(
  * Injects the policy as the document's first bytes.
  *
  * There is no `<head>` matching: untrusted markup cannot make the policy land
- * anywhere but the implicit head. The one exception is a doctype at byte 0 —
- * a meta before it would switch the page into quirks mode — so the policy goes
- * directly after it.
+ * anywhere but the implicit head. The one exception is a doctype — a meta
+ * before it would switch the page into quirks mode — so leading whitespace and
+ * comments are skipped while locating it, and the policy goes directly after it.
  */
 export function injectCsp(html: string): string {
-  const doctype = /^<!doctype\b[^>]*>/i.exec(html);
-  if (doctype) {
-    return `${doctype[0]}${PREVIEW_CSP_META}${html.slice(doctype[0].length)}`;
+  const index = doctypeIndex(html);
+  if (index >= 0) {
+    const doctype = /^<!doctype\b[^>]*>/i.exec(html.slice(index));
+    if (doctype) {
+      return `${html.slice(0, index)}${doctype[0]}${PREVIEW_CSP_META}${html.slice(
+        index + doctype[0].length,
+      )}`;
+    }
   }
   return `${PREVIEW_CSP_META}${html}`;
+}
+
+/** The offset of a leading doctype, skipping only whitespace and comments. */
+function doctypeIndex(html: string): number {
+  let index = 0;
+  while (index < html.length) {
+    while (index < html.length && /\s/.test(html[index] ?? "")) index += 1;
+    if (html.startsWith("<!--", index)) {
+      const close = html.indexOf("-->", index + 4);
+      if (close < 0) return -1;
+      index = close + 3;
+      continue;
+    }
+    if (html.startsWith("<?", index)) {
+      const close = html.indexOf(">", index + 2);
+      if (close < 0) return -1;
+      index = close + 1;
+      continue;
+    }
+    break;
+  }
+  return /^<!doctype\b/i.test(html.slice(index)) ? index : -1;
 }
 
 /**
@@ -623,6 +784,55 @@ export function buildPreviewDocument(options: {
 
   const isLocal = (raw: string): boolean => classifyLocal(raw).state === "local";
 
+  /** A `data:` URL for a local reference, or `null` when it cannot be inlined. */
+  const inlineBytes = (raw: string, allowUnknownType = true): string | null => {
+    const found = take(raw);
+    if (!found) return null;
+    if (!allowUnknownType && previewMimeType(found.path) === "application/octet-stream") {
+      missing.add(found.path);
+      return null;
+    }
+    const replacement = dataUrl(found.asset, found.path);
+    if (!replacement) missing.add(found.path);
+    return replacement;
+  };
+
+  /** Rewrites one `srcset`; `null` means the attribute must go. */
+  const inlineSrcset = (value: string): string | null | undefined => {
+    if (srcsetHasDataUrl(value)) return undefined;
+    const kept: string[] = [];
+    let changed = false;
+    for (const candidate of parseSrcset(value)) {
+      if (!isLocal(candidate.url)) {
+        kept.push(
+          candidate.descriptor ? `${candidate.url} ${candidate.descriptor}` : candidate.url,
+        );
+        continue;
+      }
+      changed = true;
+      const replacement = inlineBytes(candidate.url);
+      if (!replacement) continue;
+      kept.push(candidate.descriptor ? `${replacement} ${candidate.descriptor}` : replacement);
+    }
+    return changed ? (kept.length > 0 ? kept.join(", ") : null) : undefined;
+  };
+
+  /** Inlines a local `src`/`data`/`href`, or drops the attribute. */
+  const inlineAttribute = (
+    tag: Tag,
+    attrs: Attr[],
+    name: string,
+    options: { allowUnknownType?: boolean } = {},
+  ): { attrs: Attr[]; changed: boolean } => {
+    const value = attr(tag, name);
+    if (!value || !isLocal(value)) return { attrs, changed: false };
+    const replacement = inlineBytes(value, options.allowUnknownType ?? false);
+    return {
+      attrs: replacement ? upsertAttr(attrs, name, replacement) : dropAttrs(attrs, [name]),
+      changed: true,
+    };
+  };
+
   const body = walk(
     html,
     (incoming) => {
@@ -684,19 +894,66 @@ export function buildPreviewDocument(options: {
 
       if (name === "img" || name === "source") {
         const src = attr(tag, "src");
-        if (!src) return null;
-        const found = take(src);
-        if (!found) {
-          return isLocal(src) ? { replacement: "" } : null;
+        const srcset = attr(tag, "srcset");
+        if (!src && !srcset) return null;
+        let attrs = tag.attrs;
+        if (src && isLocal(src)) {
+          const replacement = inlineBytes(src);
+          if (!replacement) return { replacement: "" };
+          attrs = upsertAttr(attrs, "src", replacement);
         }
-        const replacement = dataUrl(found.asset, found.path);
-        if (!replacement) {
-          missing.add(found.path);
-          return { replacement: "" };
+        if (srcset) {
+          const next = inlineSrcset(srcset);
+          if (next === null) attrs = dropAttrs(attrs, ["srcset"]);
+          else if (next !== undefined) attrs = upsertAttr(attrs, "srcset", next);
         }
-        return {
-          replacement: formatTag(tag, upsertAttr(tag.attrs, "src", replacement)),
-        };
+        return { replacement: formatTag(tag, attrs) };
+      }
+
+      if (name === "video" || name === "audio" || name === "track" || name === "iframe") {
+        let attrs = tag.attrs;
+        let changed = false;
+        const names = name === "video" ? ["src", "poster"] : ["src"];
+        for (const attribute of names) {
+          const result = inlineAttribute(tag, attrs, attribute);
+          attrs = result.attrs;
+          changed = changed || result.changed;
+        }
+        return changed || styleValue ? { replacement: formatTag(tag, attrs) } : null;
+      }
+
+      if (name === "object") {
+        const result = inlineAttribute(tag, tag.attrs, "data");
+        return result.changed || styleValue ? { replacement: formatTag(tag, result.attrs) } : null;
+      }
+
+      if (name === "embed") {
+        const result = inlineAttribute(tag, tag.attrs, "src");
+        return result.changed || styleValue ? { replacement: formatTag(tag, result.attrs) } : null;
+      }
+
+      if (name === "svg" || name === "image" || name === "use") {
+        let attrs = tag.attrs;
+        let changed = false;
+        for (const attribute of ["href", "xlink:href"]) {
+          const value = attr(tag, attribute);
+          // A fragment names something already in this document.
+          if (!value || value.trim().startsWith("#")) continue;
+          const target = classifyLocal(value);
+          if (target.state !== "local") continue;
+          changed = true;
+          const replacement = target.path ? inlineBytes(value, false) : null;
+          if (!replacement) {
+            if (!target.path) missing.add(value.trim());
+            attrs = dropAttrs(attrs, [attribute]);
+            continue;
+          }
+          // `use href="icons.svg#gear"` keeps its fragment on the data URL.
+          const hash = value.indexOf("#");
+          const fragment = hash >= 0 ? value.slice(hash) : "";
+          attrs = upsertAttr(attrs, attribute, `${replacement}${fragment}`);
+        }
+        return changed || styleValue ? { replacement: formatTag(tag, attrs) } : null;
       }
 
       if (name === "a") return { replacement: rewriteAnchor(tag) };

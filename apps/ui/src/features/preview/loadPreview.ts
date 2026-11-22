@@ -4,6 +4,7 @@ import {
   isHtmlPath,
   PREVIEW_MAX_ASSET_BYTES,
   PREVIEW_MAX_DOCUMENT_BYTES,
+  PREVIEW_MAX_TEXT_BYTES,
   PREVIEW_MAX_TOTAL_BYTES,
   type PreviewAsset,
   type PreviewAssetMap,
@@ -20,7 +21,11 @@ import {
 export type PreviewFailure = { title: string; detail: string };
 
 /** One workspace read, injected so the loader is testable without a daemon. */
-export type PreviewReader = (path: string, bytes: boolean) => Promise<FsFileContent>;
+export type PreviewReader = (
+  path: string,
+  bytes: boolean,
+  maxBytes?: number,
+) => Promise<FsFileContent>;
 
 export type PreviewLoad = {
   document: PreviewDocument | null;
@@ -33,12 +38,16 @@ function megabytes(bytes: number): string {
   return (bytes / 1_048_576).toFixed(1);
 }
 
+function kilobytes(bytes: number): string {
+  return `${Math.round(bytes / 1024)} KiB`;
+}
+
 function documentTooLarge(size: number): PreviewFailure {
   return {
     title: "This file is too large to preview.",
-    detail: `${megabytes(size)} MiB is over the ${megabytes(
+    detail: `${megabytes(size)} MiB is over the ${kilobytes(
       PREVIEW_MAX_DOCUMENT_BYTES,
-    )} MiB the daemon reads as text. Open it in a terminal or split the report.`,
+    )} the preview reads at a time so one response fits a transport frame. Open it in a terminal or split the report.`,
   };
 }
 
@@ -55,11 +64,12 @@ function pageTooLarge(size: number): PreviewFailure {
  * Reads one HTML file and everything it needs from the workspace, then builds
  * the sandboxed document.
  *
- * Only references that resolve inside the workspace are fetched. One asset
- * over the per-response cap, missing, non-UTF-8 or outside the workspace is
- * skipped; the page still renders and reports the skipped count. The 10 MB
- * budget counts every embedded copy, so a page that repeats a large image
- * cannot slip past it.
+ * Only references that resolve inside the workspace are fetched, and text is
+ * read with a frame-sized bound so one response always fits the secure
+ * transport. The 10 MB budget is charged as each asset arrives: once it is
+ * spent, later references are not fetched at all and are reported as skipped.
+ * One asset over the per-response cap, missing, non-UTF-8 or outside the
+ * workspace is skipped; the page still renders and reports the skipped count.
  */
 export async function loadPreview(options: {
   path: string;
@@ -71,7 +81,9 @@ export async function loadPreview(options: {
 
   let file: FsFileContent;
   try {
-    file = await read(path, false);
+    // The selected file stays watched on every outcome, so recreating it (or
+    // fixing an encoding) reloads the preview without closing the tab.
+    file = await read(path, false, PREVIEW_MAX_TEXT_BYTES);
   } catch (cause) {
     return {
       document: null,
@@ -79,12 +91,16 @@ export async function loadPreview(options: {
         title: "This file is no longer in the workspace.",
         detail: cause instanceof Error ? cause.message : String(cause),
       },
-      watched: [],
+      watched: [path],
     };
   }
 
-  if (file.truncated || file.size_bytes > PREVIEW_MAX_DOCUMENT_BYTES) {
-    return { document: null, failure: documentTooLarge(file.size_bytes), watched: [] };
+  if (
+    file.truncated ||
+    file.content_omitted === "too_large" ||
+    file.size_bytes > PREVIEW_MAX_DOCUMENT_BYTES
+  ) {
+    return { document: null, failure: documentTooLarge(file.size_bytes), watched: [path] };
   }
   if (file.content === null) {
     return {
@@ -95,21 +111,22 @@ export async function loadPreview(options: {
           ? "Only text HTML files can be previewed."
           : (file.hint ?? "The daemon could not decode it as text."),
       },
-      watched: [],
+      watched: [path],
     };
   }
 
   const html = file.content;
   const htmlBytes = new TextEncoder().encode(html).length;
   if (htmlBytes > PREVIEW_MAX_DOCUMENT_BYTES) {
-    return { document: null, failure: documentTooLarge(htmlBytes), watched: [] };
+    return { document: null, failure: documentTooLarge(htmlBytes), watched: [path] };
   }
 
   const scanned = scanPreviewReferences(html, path);
   const watched = new Set<string>([path, ...scanned.refs.map((ref) => ref.path)]);
 
-  // Breadth-first through the document and its stylesheets, fetching one copy
-  // per unique path while counting how many times each path is embedded.
+  // Breadth-first through the document and its stylesheets. Each asset is
+  // charged to the budget as it arrives, so the budget stops the network of
+  // reads instead of being checked after everything has already been fetched.
   type Queued = { path: string; kind: "text" | "bytes"; count: number };
   const queue: Queued[] = scanned.refs.map((ref) => ({
     path: ref.path,
@@ -119,6 +136,8 @@ export async function loadPreview(options: {
   const copies = new Map<string, number>();
   const order: { path: string; asset: PreviewAsset }[] = [];
   const fetched = new Set<string>();
+  let total = htmlBytes;
+  let exhausted = total >= PREVIEW_MAX_TOTAL_BYTES;
 
   while (queue.length > 0) {
     const item = queue.shift();
@@ -128,39 +147,52 @@ export async function loadPreview(options: {
     if (fetched.has(key)) continue;
     fetched.add(key);
 
-    const asset = await read(item.path, item.kind === "bytes").catch(() => null);
+    // Once nothing more fits, the rest of the queue is reported as skipped
+    // without another read: the budget stops the network of requests.
+    if (exhausted) continue;
+
+    const asset = await read(
+      item.path,
+      item.kind === "bytes",
+      item.kind === "bytes" ? undefined : PREVIEW_MAX_TEXT_BYTES,
+    ).catch(() => null);
     if (!asset) continue;
     watched.add(item.path);
-    if (asset.bytes_omitted) continue;
+    if (asset.bytes_omitted || asset.content_omitted) continue;
+
+    let loaded: PreviewAsset | null = null;
     if (item.kind === "bytes") {
       if (!asset.bytes_base64 || asset.size_bytes > PREVIEW_MAX_ASSET_BYTES) continue;
-      order.push({
-        path: item.path,
-        asset: { kind: "bytes", base64: asset.bytes_base64, mime: previewMimeType(item.path) },
-      });
+      loaded = {
+        kind: "bytes",
+        base64: asset.bytes_base64,
+        mime: previewMimeType(item.path),
+      };
+    } else if (asset.content !== null) {
+      loaded = { kind: "text", text: asset.content };
+    }
+    if (!loaded) continue;
+
+    const count = copies.get(item.path) ?? 1;
+    const cost = previewEmbeddedBytes(loaded) * count;
+    if (!previewAssetFits(total, cost)) {
+      exhausted = true;
       continue;
     }
-    if (asset.content === null) continue;
-    order.push({ path: item.path, asset: { kind: "text", text: asset.content } });
-    if (/\.css$/i.test(item.path)) {
-      for (const nested of scanCssReferences(asset.content, item.path).refs) {
+    total += cost;
+    order.push({ path: item.path, asset: loaded });
+    if (total >= PREVIEW_MAX_TOTAL_BYTES) exhausted = true;
+
+    if (loaded.kind === "text" && /\.css$/i.test(item.path)) {
+      for (const nested of scanCssReferences(loaded.text, item.path).refs) {
         watched.add(nested.path);
         queue.push({ path: nested.path, kind: nested.kind, count: nested.count * item.count });
       }
     }
   }
 
-  // The budget counts what the document actually embeds: one copy per
-  // reference occurrence, in the serialized form (base64 included).
-  let total = htmlBytes;
   const assets: PreviewAssetMap = {};
-  for (const entry of order) {
-    const count = copies.get(entry.path) ?? 1;
-    const cost = previewEmbeddedBytes(entry.asset) * count;
-    if (!previewAssetFits(total, cost)) continue;
-    total += cost;
-    assets[entry.path] = entry.asset;
-  }
+  for (const entry of order) assets[entry.path] = entry.asset;
 
   const built = buildPreviewDocument({
     html,

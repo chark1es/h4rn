@@ -32,6 +32,7 @@ async function readFile(
   workspace: string,
   path: string,
   bytes: boolean,
+  maxBytes?: number,
 ): Promise<FsFileContent> {
   const response = await getClient().request({
     type: "fs_read",
@@ -39,6 +40,7 @@ async function readFile(
     workspace,
     path,
     bytes_base64: bytes,
+    ...(maxBytes === undefined ? {} : { max_bytes: maxBytes }),
   });
   if (response.type !== "fs_file") {
     throw new Error("The daemon returned no file.");
@@ -91,7 +93,7 @@ export function useHtmlPreview(thread: ThreadSummary | null, path: string | null
       try {
         const loaded = await loadPreview({
           path,
-          read: (target, bytes) => readFile(host, workspace, target, bytes),
+          read: (target, bytes, maxBytes) => readFile(host, workspace, target, bytes, maxBytes),
         });
         if (cancelled) return;
         watchedRef.current = new Set(loaded.watched);
@@ -102,7 +104,12 @@ export function useHtmlPreview(thread: ThreadSummary | null, path: string | null
           return;
         }
         const frame = await preparePreviewFrame(loaded.document.srcdoc);
-        if (cancelled) return;
+        if (cancelled) {
+          // The load was replaced or the panel closed while the shell was
+          // storing the document: release the URL instead of leaking it.
+          void releasePreviewFrame(frame?.url ?? null);
+          return;
+        }
         const released = frameUrlRef.current;
         frameUrlRef.current = frame?.url ?? null;
         if (released && released !== frameUrlRef.current) void releasePreviewFrame(released);

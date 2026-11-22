@@ -110,6 +110,41 @@ describe("HTML preview scanning", () => {
     expect(scan.refs).toEqual([{ url: "logo.png", path: "logo.png", kind: "bytes", count: 3 }]);
   });
 
+  it("finds srcset, media, object, embed and SVG references", () => {
+    const html = `<img srcset="a.png 1x, b.png 2x">
+      <video src="clip.mp4" poster="thumb.jpg"></video>
+      <audio src="sound.mp3"></audio>
+      <track src="captions.vtt">
+      <object data="doc.pdf"></object>
+      <embed src="widget.swf">
+      <svg><image href="icon.png"></image><use xlink:href="icons.svg#gear"></use></svg>
+      <iframe src="frame.html"></iframe>`;
+    const scan = scanPreviewReferences(html, "reports/index.html");
+    expect(scan.refs.map((ref) => ref.path)).toEqual([
+      "reports/a.png",
+      "reports/b.png",
+      "reports/clip.mp4",
+      "reports/thumb.jpg",
+      "reports/sound.mp3",
+      "reports/captions.vtt",
+      "reports/doc.pdf",
+      "reports/widget.swf",
+      "reports/icon.png",
+      "reports/icons.svg",
+      "reports/frame.html",
+    ]);
+  });
+
+  it("finds imported stylesheets as CSS text", () => {
+    const css = `@import "base.css"; @import url(print.css) print; .x { background: url(bg.png) }`;
+    const scan = scanCssReferences(css, "assets/site.css");
+    expect(scan.refs).toEqual([
+      { url: "base.css", path: "assets/base.css", kind: "text", count: 1 },
+      { url: "print.css", path: "assets/print.css", kind: "text", count: 1 },
+      { url: "bg.png", path: "assets/bg.png", kind: "bytes", count: 1 },
+    ]);
+  });
+
   it("does not mistake markup inside script bodies for tags", () => {
     const html = `<script>const template = '<img src="not-an-asset.png">';</script><img src="real.png">`;
     const scan = scanPreviewReferences(html, "index.html");
@@ -303,6 +338,103 @@ describe("HTML preview document", () => {
     const many = previewEmbeddedBytes(asset) * 3;
     expect(previewAssetFits(PREVIEW_MAX_TOTAL_BYTES - 16, many)).toBe(true);
     expect(previewAssetFits(PREVIEW_MAX_TOTAL_BYTES - 16, many * 2)).toBe(false);
+  });
+
+  it("inlines srcset candidates and drops the ones it cannot", () => {
+    const built = buildPreviewDocument({
+      html: `<img srcset="a.png 1x, b.png 2x, gone.png 3x, https://cdn.example.com/c.png 4x">`,
+      docPath: "reports/index.html",
+      assets: {
+        "reports/a.png": { kind: "bytes" as const, base64: "AAAA", mime: "image/png" },
+        "reports/b.png": { kind: "bytes" as const, base64: "BBBB", mime: "image/png" },
+      },
+      token: "t1",
+    });
+    expect(built.srcdoc).toContain(
+      'srcset="data:image/png;base64,AAAA 1x, data:image/png;base64,BBBB 2x, https://cdn.example.com/c.png 4x"',
+    );
+    expect(built.srcdoc).not.toContain("gone.png");
+    expect(built.missing).toEqual(["reports/gone.png"]);
+  });
+
+  it("drops a srcset attribute when no candidate can be inlined", () => {
+    const built = buildPreviewDocument({
+      html: `<picture><source srcset="gone.png 1x"></picture>`,
+      docPath: "index.html",
+      assets: {},
+      token: "t1",
+    });
+    expect(built.srcdoc).not.toContain("srcset");
+    expect(built.srcdoc).not.toContain("gone.png");
+    expect(built.missing).toEqual(["gone.png"]);
+  });
+
+  it("inlines media, object, embed and SVG references", () => {
+    const built = buildPreviewDocument({
+      html: `<video src="clip.mp4" poster="thumb.jpg"></video>
+        <audio src="sound.mp3"></audio>
+        <track src="captions.vtt">
+        <object data="doc.pdf"></object>
+        <embed src="widget.swf">
+        <svg><image href="icon.png"></image><use xlink:href="icons.svg#gear"></use>
+        <use href="#local"></use></svg>
+        <iframe src="frame.html"></iframe>`,
+      docPath: "reports/index.html",
+      assets: {
+        "reports/clip.mp4": { kind: "bytes" as const, base64: "VklE", mime: "video/mp4" },
+        "reports/thumb.jpg": { kind: "bytes" as const, base64: "SlBH", mime: "image/jpeg" },
+        "reports/sound.mp3": { kind: "bytes" as const, base64: "QVVESU8=", mime: "audio/mpeg" },
+        "reports/captions.vtt": { kind: "bytes" as const, base64: "V0VCVlRU", mime: "text/vtt" },
+        "reports/doc.pdf": { kind: "bytes" as const, base64: "UERG", mime: "application/pdf" },
+        "reports/icon.png": { kind: "bytes" as const, base64: "SU1H", mime: "image/png" },
+        "reports/icons.svg": { kind: "bytes" as const, base64: "U1ZH", mime: "image/svg+xml" },
+      },
+      token: "t1",
+    });
+    expect(built.srcdoc).toContain('src="data:video/mp4;base64,VklE"');
+    expect(built.srcdoc).toContain('poster="data:image/jpeg;base64,SlBH"');
+    expect(built.srcdoc).toContain('src="data:audio/mpeg;base64,QVVESU8="');
+    expect(built.srcdoc).toContain('src="data:text/vtt;base64,V0VCVlRU"');
+    expect(built.srcdoc).toContain('data="data:application/pdf;base64,UERG"');
+    expect(built.srcdoc).toContain('href="data:image/png;base64,SU1H"');
+    expect(built.srcdoc).toContain('xlink:href="data:image/svg+xml;base64,U1ZH#gear"');
+    expect(built.srcdoc).toContain('<use href="#local"></use>');
+    // A local iframe document is not a supported inline asset: its reference
+    // is removed and counted, never left as a relative request.
+    expect(built.srcdoc).toContain("<iframe></iframe>");
+    expect(built.srcdoc).not.toContain("frame.html");
+    expect(built.srcdoc).not.toContain("widget.swf");
+    expect(built.missing.sort()).toEqual(["reports/frame.html", "reports/widget.swf"]);
+  });
+
+  it("inlines an imported workspace stylesheet as CSS text", () => {
+    const built = buildPreviewDocument({
+      html: `<link rel="stylesheet" href="style.css">`,
+      docPath: "reports/index.html",
+      assets: {
+        "reports/style.css": {
+          kind: "text" as const,
+          text: `@import "base.css";\n@import url(print.css) print;\n.x { color: red }`,
+        },
+        "reports/base.css": { kind: "text" as const, text: `.base { margin: 0 }` },
+        "reports/print.css": { kind: "text" as const, text: `.print { display: none }` },
+      },
+      token: "t1",
+    });
+    expect(built.srcdoc).toContain(".base { margin: 0 }");
+    expect(built.srcdoc).toContain("@media print {.print { display: none }}");
+    expect(built.srcdoc).not.toContain("@import");
+    expect(built.srcdoc).not.toContain("base.css");
+    expect(built.missing).toEqual([]);
+  });
+
+  it("puts the policy after a doctype behind leading whitespace and comments", () => {
+    const injected = injectCsp("\n  <!-- generated -->\n<!doctype html><p>hello</p>");
+    const doctype = injected.indexOf("<!doctype html>");
+    expect(doctype).toBeGreaterThan(-1);
+    expect(doctype).toBeLessThan(injected.indexOf(PREVIEW_CSP_META));
+    expect(injected.indexOf(PREVIEW_CSP_META)).toBeLessThan(injected.indexOf("<p>hello</p>"));
+    expect(injected.startsWith("\n  <!-- generated -->\n<!doctype html><meta")).toBe(true);
   });
 
   it("names images and fonts by type, with a safe fallback", () => {

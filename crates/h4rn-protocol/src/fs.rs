@@ -145,18 +145,25 @@ pub struct FsFileContent {
     /// reason, and the preview shows the asset as skipped instead of failing
     /// the whole page.
     #[serde(default)]
-    pub bytes_omitted: Option<FsBytesOmitted>,
+    pub bytes_omitted: Option<FsOmitted>,
+    /// Why the requested decoded text was not returned.
+    ///
+    /// A read that asked for `max_bytes` is capped at that many bytes so one
+    /// response fits the secure transport's frame. A larger file comes back
+    /// with its metadata and this reason instead of its content.
+    #[serde(default)]
+    pub content_omitted: Option<FsOmitted>,
     /// Last modification time, when available.
     pub modified_at: Option<DateTime<Utc>>,
     /// What to do about a refusal, when there is one.
     pub hint: Option<String>,
 }
 
-/// Why a `bytes_base64` read returned no bytes.
+/// Why a requested payload (text or raw bytes) was not returned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
-pub enum FsBytesOmitted {
-    /// The file is larger than one response may carry.
+pub enum FsOmitted {
+    /// The file is larger than the limit that applies to the request.
     TooLarge,
 }
 
@@ -359,6 +366,7 @@ mod tests {
             truncated: false,
             bytes_base64: None,
             bytes_omitted: None,
+            content_omitted: None,
             modified_at: None,
             hint: None,
         };

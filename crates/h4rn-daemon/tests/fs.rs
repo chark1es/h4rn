@@ -125,7 +125,7 @@ fn read_returns_raw_bytes_only_when_asked() {
 
     let raw = fixture
         .service
-        .read_with(fixture.workspace(), "pixel.png", true)
+        .read_with(fixture.workspace(), "pixel.png", true, None)
         .expect("read as bytes");
     assert_eq!(raw.bytes_base64.as_deref(), Some("iVBORwD/"));
     assert!(raw.binary);
@@ -136,7 +136,7 @@ fn read_returns_raw_bytes_only_when_asked() {
     fixture.write("style.css", ".panel { color: red }");
     let css = fixture
         .service
-        .read_with(fixture.workspace(), "style.css", true)
+        .read_with(fixture.workspace(), "style.css", true, None)
         .expect("read css as bytes");
     assert!(css.content.is_none());
     assert!(!css.binary);
@@ -146,7 +146,7 @@ fn read_returns_raw_bytes_only_when_asked() {
 #[test]
 fn an_embedded_asset_fits_one_secure_frame() {
     use h4rn_daemon::fs::MAX_INLINE_BYTES;
-    use h4rn_protocol::{FsBytesOmitted, ResponseBody, ServerFrame};
+    use h4rn_protocol::{FsOmitted, ResponseBody, ServerFrame};
 
     let fixture = Fixture::new();
     // The largest asset the preview embeds must still fit a 512 KiB frame
@@ -155,7 +155,7 @@ fn an_embedded_asset_fits_one_secure_frame() {
     fs::write(fixture.workspace.join("big.bin"), &bytes).expect("write asset");
     let read = fixture
         .service
-        .read_with(fixture.workspace(), "big.bin", true)
+        .read_with(fixture.workspace(), "big.bin", true, None)
         .expect("read as bytes");
     let base64 = read.bytes_base64.as_deref().expect("base64 present");
     assert_eq!(base64.len(), (MAX_INLINE_BYTES as usize).div_ceil(3) * 4);
@@ -177,11 +177,68 @@ fn an_embedded_asset_fits_one_secure_frame() {
     fs::write(fixture.workspace.join("too-big.bin"), &too_big).expect("write large asset");
     let skipped = fixture
         .service
-        .read_with(fixture.workspace(), "too-big.bin", true)
+        .read_with(fixture.workspace(), "too-big.bin", true, None)
         .expect("large assets are a result, not an error");
-    assert_eq!(skipped.bytes_omitted, Some(FsBytesOmitted::TooLarge));
+    assert_eq!(skipped.bytes_omitted, Some(FsOmitted::TooLarge));
     assert!(skipped.bytes_base64.is_none());
     assert!(skipped.content.is_none());
+}
+
+#[test]
+fn a_preview_text_read_fits_one_secure_frame() {
+    use h4rn_protocol::{FsOmitted, ResponseBody, ServerFrame};
+
+    /// The preview's own text cap; `loadPreview` asks for the same bound.
+    const PREVIEW_TEXT_BYTES: u64 = 400 * 1024;
+
+    let fixture = Fixture::new();
+    // A document at the cap comes back whole, and its serialized frame still
+    // fits the secure transport.
+    let text = format!("<p>{}</p>", "a".repeat(PREVIEW_TEXT_BYTES as usize - 8));
+    fixture.write("report.html", &text);
+    let read = fixture
+        .service
+        .read_with(
+            fixture.workspace(),
+            "report.html",
+            false,
+            Some(PREVIEW_TEXT_BYTES),
+        )
+        .expect("read a bounded document");
+    assert_eq!(read.content.as_deref(), Some(text.as_str()));
+    assert!(read.content_omitted.is_none());
+
+    let frame = ServerFrame::Response {
+        id: 1,
+        result: Ok(ResponseBody::FsFile { file: read }),
+    };
+    let encoded = serde_json::to_vec(&frame).expect("serialize frame");
+    assert!(
+        encoded.len() <= h4rn_transport::DEFAULT_MAX_FRAME_BYTES,
+        "{} bytes over the {} byte frame limit",
+        encoded.len(),
+        h4rn_transport::DEFAULT_MAX_FRAME_BYTES
+    );
+
+    // One byte over the requested cap is a typed result, not a failed read,
+    // and its hint names the limit honestly.
+    let larger = "a".repeat(PREVIEW_TEXT_BYTES as usize + 1);
+    fixture.write("larger.html", &larger);
+    let omitted = fixture
+        .service
+        .read_with(
+            fixture.workspace(),
+            "larger.html",
+            false,
+            Some(PREVIEW_TEXT_BYTES),
+        )
+        .expect("over-cap text is a result, not an error");
+    assert_eq!(omitted.content_omitted, Some(FsOmitted::TooLarge));
+    assert!(omitted.content.is_none());
+    assert!(!omitted.truncated, "a preview cap is not the editor limit");
+    assert_eq!(omitted.size_bytes, PREVIEW_TEXT_BYTES + 1);
+    let hint = omitted.hint.unwrap_or_default();
+    assert!(hint.contains("400 KiB"), "hint names the cap: {hint}");
 }
 
 #[cfg(unix)]

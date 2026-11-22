@@ -14,7 +14,6 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::http::{Response, StatusCode, header};
@@ -24,7 +23,7 @@ pub const PREVIEW_SCHEME: &str = "h4rn-preview";
 
 /// The policy the document is served with. The page may run scripts and load
 /// images, styles, scripts and fonts over `https:`; nothing talks to h4rn.
-const PREVIEW_CSP: &str = "default-src 'none'; img-src data: https:; style-src 'unsafe-inline' https:; script-src 'unsafe-inline' https:; font-src data: https:; connect-src https:";
+const PREVIEW_CSP: &str = "default-src 'none'; img-src data: https:; media-src data: https:; object-src data:; style-src 'unsafe-inline' https:; script-src 'unsafe-inline' https:; font-src data: https:; connect-src https:";
 
 /// Largest prepared document the shell stores, in bytes. The UI caps the
 /// embedded workspace at 10 MB; base64 expansion and markup need headroom.
@@ -61,7 +60,7 @@ impl PreviewStore {
                 MAX_DOCUMENT_BYTES / 1_048_576
             ));
         }
-        let token = new_token();
+        let token = new_token()?;
         let mut documents = self
             .0
             .lock()
@@ -117,25 +116,12 @@ fn token_from_url(url: &str) -> Option<&str> {
     Some(token)
 }
 
-/// 128 bits from the OS-random hasher keys, enough to make tokens unguessable
-/// to a page that only knows its own.
-fn new_token() -> String {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_nanos())
-        .unwrap_or(0);
-    let mut parts = [0_u64; 2];
-    for (index, part) in parts.iter_mut().enumerate() {
-        let state = RandomState::new();
-        let mut hasher = state.build_hasher();
-        hasher.write_usize(index);
-        hasher.write_u128(nanos);
-        *part = hasher.finish();
-    }
-    format!("{:016x}{:016x}", parts[0], parts[1])
+/// 128 bits from the operating system's random source, so a page that learns
+/// one token cannot guess another preview's URL.
+fn new_token() -> Result<String, String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).map_err(|error| format!("no random source: {error}"))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 /// Stores one prepared document; answers with the URL to frame it.
@@ -234,15 +220,15 @@ mod tests {
             store.insert(format!("doc {index}")).expect("store");
         }
         assert!(store.get(&first.token).is_none());
-        assert_eq!(store.get(&new_token()).is_none(), None);
+        assert!(store.get(&new_token().expect("random source")).is_none());
     }
 
     #[test]
     fn tokens_are_random_hex_and_urls_follow_the_platform_form() {
-        let token = new_token();
+        let token = new_token().expect("random source");
         assert_eq!(token.len(), 32);
         assert!(token.chars().all(|ch| ch.is_ascii_hexdigit()));
-        assert_ne!(token, new_token());
+        assert_ne!(token, new_token().expect("random source"));
         assert!(preview_url(&token).contains(&token));
     }
 }

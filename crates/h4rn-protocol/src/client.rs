@@ -272,6 +272,15 @@ pub enum ClientRequest {
         /// other binary assets as `data:` URLs. Text reads leave it unset.
         #[serde(default)]
         bytes_base64: bool,
+        /// Refuse a text read larger than this many bytes.
+        ///
+        /// The preview asks for a preview-sized cap so one decoded document or
+        /// stylesheet fits a secure-transport frame. A larger file is not an
+        /// error: it comes back with `content_omitted` and its size. Raw-byte
+        /// reads keep their own frame-sized cap.
+        #[serde(default)]
+        #[ts(optional, type = "number")]
+        max_bytes: Option<u64>,
     },
     /// Write one file, refusing to overwrite a version the client did not see.
     FsWrite {

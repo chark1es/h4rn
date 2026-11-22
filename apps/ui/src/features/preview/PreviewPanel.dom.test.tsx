@@ -139,6 +139,47 @@ describe("preview link bridge", () => {
     expect(container.querySelector(".q-pv-link")).toBeNull();
   });
 
+  it("freezes the confirmation URL until the user answers", () => {
+    const { root, container } = render(
+      <PreviewFrame srcdoc="<p>hi</p>" url={null} token="t1" title="Preview" />,
+    );
+    roots.push(root);
+    const source = frame(container).contentWindow;
+
+    message(source, "t1", "https://first.example/page");
+    expect(container.querySelector(".q-pv-link")?.textContent).toContain("first.example");
+
+    // The page controls the whole frame, so a later message cannot retarget
+    // a confirmation the user is already looking at.
+    message(source, "t1", "https://second.example/other");
+    expect(container.querySelector(".q-pv-link")?.textContent).toContain("first.example");
+
+    const open = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Open",
+    );
+    act(() => open?.click());
+    expect(openExternalUrl).toHaveBeenCalledTimes(1);
+    expect(openExternalUrl).toHaveBeenCalledWith("https://first.example/page");
+  });
+
+  it("asks again after the bar is dismissed", () => {
+    const { root, container } = render(
+      <PreviewFrame srcdoc="<p>hi</p>" url={null} token="t1" title="Preview" />,
+    );
+    roots.push(root);
+    const source = frame(container).contentWindow;
+
+    message(source, "t1", "https://first.example/page");
+    const cancel = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent === "Cancel",
+    );
+    act(() => cancel?.click());
+    expect(container.querySelector(".q-pv-link")).toBeNull();
+
+    message(source, "t1", "https://second.example/other");
+    expect(container.querySelector(".q-pv-link")?.textContent).toContain("second.example");
+  });
+
   it("renders the shell URL as src and keeps srcdoc when there is none", () => {
     const first = render(
       <PreviewFrame

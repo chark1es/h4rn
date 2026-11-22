@@ -38,9 +38,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use h4rn_protocol::{
-    DiffAgainst, FileEntry, FileEntryKind, FsBytesOmitted, FsCreateKind, FsDeleteResult, FsDiff,
-    FsFileContent, FsListing, FsSearchBatch, FsTurnChanges, FsWriteConflict, FsWriteResult,
-    ProtoError, ProtoErrorCode, ThreadId, TurnId,
+    DiffAgainst, FileEntry, FileEntryKind, FsCreateKind, FsDeleteResult, FsDiff, FsFileContent,
+    FsListing, FsOmitted, FsSearchBatch, FsTurnChanges, FsWriteConflict, FsWriteResult, ProtoError,
+    ProtoErrorCode, ThreadId, TurnId,
 };
 use tokio::sync::mpsc;
 
@@ -240,18 +240,22 @@ impl FsService {
 
     /// Reads one file with size, binary and encoding detection.
     pub fn read(&self, workspace: &str, rel: &str) -> Result<FsFileContent, FsError> {
-        self.read_with(workspace, rel, false)
+        self.read_with(workspace, rel, false, None)
     }
 
     /// Reads one file, optionally including the raw bytes as base64.
     ///
     /// The HTML preview asks for the bytes so it can inline a relative image
-    /// or font as a `data:` URL. Text reads keep the previous shape.
+    /// or font as a `data:` URL. Text reads keep the previous shape, with
+    /// `max_bytes` as an optional preview-sized cap instead of the editor's
+    /// full read limit; either way one response stays inside the secure
+    /// transport's frame.
     pub fn read_with(
         &self,
         workspace: &str,
         rel: &str,
         bytes_base64: bool,
+        max_bytes: Option<u64>,
     ) -> Result<FsFileContent, FsError> {
         let root = self.workspace(workspace)?;
         let path = resolve_inside(&root, rel, ResolveMode::Existing)?;
@@ -263,50 +267,74 @@ impl FsService {
         let modified_at = metadata.modified().ok().map(to_utc);
         let rel_path = relative_of(&root, &path);
 
-        // A base64 copy must fit one secure-transport frame. Larger assets
-        // still report their metadata so the preview can skip them and keep
-        // rendering the rest of the page.
-        if bytes_base64 && size > MAX_INLINE_BYTES {
+        // Both payload kinds are read with a hard bound: `cap + 1` bytes is
+        // enough to tell an over-limit file from a file that fits, and a file
+        // that grows while it is being read can never exceed the cap. Metadata
+        // is only used for the message, never to decide how much to read.
+        let text_cap = max_bytes.map_or(MAX_READ_BYTES, |requested| requested.min(MAX_READ_BYTES));
+        let cap = if bytes_base64 {
+            MAX_INLINE_BYTES
+        } else {
+            text_cap
+        };
+        let bytes = read_bounded(&path, cap)?;
+        let read_size = bytes.len() as u64;
+        let reported_size = size.max(read_size);
+
+        if bytes_base64 && read_size > cap {
             return Ok(FsFileContent {
                 path: rel_path,
                 content: None,
                 etag: None,
                 encoding: "unknown".into(),
-                size_bytes: size,
+                size_bytes: reported_size,
                 binary: false,
                 truncated: false,
                 bytes_base64: None,
-                bytes_omitted: Some(FsBytesOmitted::TooLarge),
+                bytes_omitted: Some(FsOmitted::TooLarge),
+                content_omitted: None,
                 modified_at,
                 hint: Some(format!(
                     "This asset is {:.1} MiB; the preview embeds files up to {} KiB, so it was skipped.",
-                    size as f64 / 1_048_576.0,
+                    reported_size as f64 / 1_048_576.0,
                     MAX_INLINE_BYTES / 1024
                 )),
             });
         }
 
-        if size > MAX_READ_BYTES {
+        if !bytes_base64 && read_size > cap {
+            // A preview-sized cap keeps the decoded text inside one frame. The
+            // editor's own limit reports the same typed result; only the hint
+            // differs.
+            let preview_cap = text_cap < MAX_READ_BYTES;
             return Ok(FsFileContent {
                 path: rel_path,
                 content: None,
                 etag: None,
                 encoding: "unknown".into(),
-                size_bytes: size,
+                size_bytes: reported_size,
                 binary: false,
-                truncated: true,
+                truncated: !preview_cap,
                 bytes_base64: None,
                 bytes_omitted: None,
+                content_omitted: Some(FsOmitted::TooLarge),
                 modified_at,
-                hint: Some(format!(
-                    "This file is {:.1} MiB; the editor refuses files over {} MiB. Open it in a terminal instead.",
-                    size as f64 / 1_048_576.0,
-                    MAX_READ_BYTES / 1_048_576
-                )),
+                hint: Some(if preview_cap {
+                    format!(
+                        "This file is {:.1} MiB; a preview reads at most {} KiB of text so one response fits a transport frame.",
+                        reported_size as f64 / 1_048_576.0,
+                        text_cap / 1024
+                    )
+                } else {
+                    format!(
+                        "This file is {:.1} MiB; the editor refuses files over {} MiB. Open it in a terminal instead.",
+                        reported_size as f64 / 1_048_576.0,
+                        MAX_READ_BYTES / 1_048_576
+                    )
+                }),
             });
         }
 
-        let bytes = fs::read(&path).map_err(|error| FsError::Io(error.to_string()))?;
         let etag = text::etag(&bytes);
         let raw = bytes_base64.then(|| {
             use base64::Engine as _;
@@ -327,11 +355,12 @@ impl FsService {
                 content: None,
                 etag: Some(etag),
                 encoding,
-                size_bytes: size,
+                size_bytes: read_size,
                 binary: !has_text,
                 truncated: false,
                 bytes_base64: raw,
                 bytes_omitted: None,
+                content_omitted: None,
                 modified_at,
                 hint: None,
             });
@@ -342,11 +371,12 @@ impl FsService {
                 content: Some(decoded.text),
                 etag: Some(etag),
                 encoding: decoded.encoding.into(),
-                size_bytes: size,
+                size_bytes: read_size,
                 binary: false,
                 truncated: false,
                 bytes_base64: None,
                 bytes_omitted: None,
+                content_omitted: None,
                 modified_at,
                 hint: None,
             }),
@@ -355,11 +385,12 @@ impl FsService {
                 content: None,
                 etag: Some(etag),
                 encoding: "binary".into(),
-                size_bytes: size,
+                size_bytes: read_size,
                 binary: true,
                 truncated: false,
                 bytes_base64: None,
                 bytes_omitted: None,
+                content_omitted: None,
                 modified_at,
                 hint: Some(
                     "This looks like a binary file. h4rn does not edit binaries; use a terminal or your IDE."
@@ -802,6 +833,19 @@ fn entry_at(root: &Path, path: &Path) -> Option<FileEntry> {
         modified_at: metadata.modified().ok().map(to_utc),
         git_status: None,
     })
+}
+
+/// Reads at most `cap + 1` bytes, so callers can tell an over-limit file from
+/// one that fits without ever loading more than the cap into memory.
+fn read_bounded(path: &Path, cap: u64) -> Result<Vec<u8>, FsError> {
+    use std::io::Read as _;
+
+    let file = fs::File::open(path).map_err(|error| FsError::Io(error.to_string()))?;
+    let mut bytes = Vec::new();
+    file.take(cap.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| FsError::Io(error.to_string()))?;
+    Ok(bytes)
 }
 
 fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), FsError> {

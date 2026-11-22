@@ -1,17 +1,30 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const requests: unknown[] = [];
-
-vi.mock("@/lib/store/appStore", () => ({
-  getClient: () => ({
+const { client, requests, readyListeners } = vi.hoisted(() => {
+  const requests: unknown[] = [];
+  const readyListeners = new Set<(info: { reconnected: boolean }) => void>();
+  const client = {
     request: async (request: unknown) => {
       requests.push(request);
       return { type: "ack" };
     },
-  }),
+    onReady: (listener: (info: { reconnected: boolean }) => void) => {
+      readyListeners.add(listener);
+      return () => readyListeners.delete(listener);
+    },
+  };
+  return { client, requests, readyListeners };
+});
+
+vi.mock("@/lib/store/appStore", () => ({
+  getClient: () => client,
 }));
 
 import { retainWorkspaceWatch, watchedWorkspaces } from "./fsWatch";
+
+function ready(reconnected: boolean): void {
+  for (const listener of readyListeners) listener({ reconnected });
+}
 
 describe("workspace watch refcount", () => {
   beforeEach(() => {
@@ -51,5 +64,29 @@ describe("workspace watch refcount", () => {
       "fs_watch",
       "fs_unwatch",
     ]);
+  });
+
+  it("re-sends held watches after a reconnect, and only then", () => {
+    const release = retainWorkspaceWatch("host_1", "/work");
+    requests.length = 0;
+
+    ready(false);
+    expect(requests).toEqual([]);
+
+    ready(true);
+    expect(requests).toEqual([{ type: "fs_watch", host: "host_1", workspace: "/work", paths: [] }]);
+
+    release();
+    requests.length = 0;
+    ready(true);
+    expect(requests).toEqual([]);
+  });
+
+  it("subscribes to the ready notice once per client", () => {
+    const first = retainWorkspaceWatch("host_1", "/a");
+    const second = retainWorkspaceWatch("host_1", "/b");
+    expect(readyListeners.size).toBe(1);
+    first();
+    second();
   });
 });

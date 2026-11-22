@@ -14,12 +14,18 @@ All notable changes to h4rn are recorded here. The format follows
   iframe with a `default-src 'none'` CSP, so page scripts run without gaining access to h4rn, its
   cookies or its storage. The desktop and mobile shells serve the prepared page from their own
   `h4rn-preview` origin (a `srcdoc` frame would inherit the window's `script-src 'self'`); the
-  browser build keeps `srcdoc`. Limits are the daemon's 2 MiB HTML read, 360 KiB per binary asset
-  and 10 MB for all embedded copies. Links in the page ask in an inline bar before opening in the
-  system browser. It reloads when the file or an asset changes on disk (the workspace watch is
-  shared with the IDE), expands to full width in the main area, and opens in the phone panel
-  sheet. Files outside the workspace, over a size limit, or not UTF-8 show a plain message
-  instead. MCP Apps, a headless browser and dev-server proxying are not part of this change.
+  browser build keeps `srcdoc`. Limits are a 400 KiB text read for the page and its stylesheets and
+  scripts (one secure-transport frame), 360 KiB per binary asset and 10 MB for all embedded copies,
+  charged as each asset arrives so a spent budget stops the fetching. References cover styles,
+  scripts, images, `srcset`, `<video>/<audio>/<track>`, `<source>`, `<iframe>`, `<object>`,
+  `<embed>`, SVG `href`/`xlink:href` and CSS `@import` of a workspace stylesheet, which is inlined
+  as CSS text. Links in the page ask in an inline bar before opening in the system browser, and
+  that bar freezes its URL until the user answers. It reloads when the file or an asset changes on
+  disk (the workspace watch is shared with the IDE and re-sent after a reconnect), expands to full
+  width in the main area, and opens in the phone panel sheet. Files outside the workspace, over a
+  size limit, or not UTF-8 show a plain message instead, and the selected file is still watched so
+  recreating it reloads the preview. MCP Apps, a headless browser and dev-server proxying are not
+  part of this change.
 - **Notifications, Open at login and the tray are real settings.** Settings → Notifications now
   controls OS notifications on the desktop app (the Tauri notification plugin) and in the browser
   (the Web Notification API, asked for only when a switch is turned on; there is no separate

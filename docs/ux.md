@@ -174,21 +174,27 @@ without leaving h4rn.
   or one of its assets changes on disk.
 - The file is read through the daemon's fs read request and drawn in an
   `<iframe sandbox="allow-scripts">` (never `allow-same-origin`) with a CSP of
-  `default-src 'none'; img-src data: https:; style-src 'unsafe-inline' https:; script-src
-  'unsafe-inline' https:; font-src data: https:; connect-src https:`. The policy is the
+  `default-src 'none'; img-src data: https:; media-src data: https:; object-src data:; style-src
+  'unsafe-inline' https:; script-src 'unsafe-inline' https:; font-src data: https:; connect-src
+  https:`. The policy is the
   document's first bytes, so no markup can move it out of the head. Page scripts run; the page
   cannot read h4rn, its cookies, its storage or its origin.
 - The desktop and mobile shells serve the prepared document from their own `h4rn-preview` origin
   with that policy as a response header. A `srcdoc` frame would inherit the window's
   `script-src 'self'`, so page scripts would never run in a packaged build. The browser build has
   no such origin (and no CSP that blocks inline scripts), so it keeps `srcdoc`.
-- Relative CSS, JS, images and fonts from the same folder or elsewhere inside the workspace are
-  inlined as `<style>`, `<script>` or `data:` URLs. The HTML file itself may be up to the daemon's
-  2 MiB read limit; each binary asset may be up to 360 KiB (one secure-transport frame); all
-  embedded copies together may be up to 10 MB. A repeated image counts every time it is embedded.
-  Anything missing, outside the workspace root, or over a size limit is removed from the page (it
-  is never left as a relative URL that would hit the preview origin) and the tab says how many
-  files were skipped. Absolute `https:` assets load from their CDN.
+- Relative CSS, JS, images, fonts and media from the same folder or elsewhere inside the workspace
+  are inlined as `<style>`, `<script>` or `data:` URLs. That covers `srcset` candidates, `<img>`,
+  `<source>`, `<video>/<audio>/<track>`, `<object data>`, `<embed src>`, SVG `href`/`xlink:href` and
+  `url()` in styles. A workspace stylesheet reached through CSS `@import` is inlined as CSS text,
+  keeping its media condition. The HTML file itself may be up to 400 KiB, the largest text read
+  that leaves room for the response envelope inside the secure transport's 512 KiB frame; each
+  binary asset may be up to 360 KiB; all embedded copies together may be up to 10 MB. The budget is
+  charged as each asset arrives, so once it is spent the preview stops fetching and reports the
+  rest as skipped. A repeated image counts every time it is embedded. Anything missing, outside
+  the workspace root, or over a size limit is removed from the page (it is never left as a relative
+  URL that would hit the preview origin) and the tab says how many files were skipped. Absolute
+  `https:` assets load from their CDN.
 - A link clicked in the page never opens by itself. The tab shows an inline bar — "Open
   example.com in your browser?" with **Open** and **Cancel** — and only that click hands an
   `http:`/`https:` URL to the system browser. The page controls everything inside the frame,
@@ -198,8 +204,10 @@ without leaving h4rn.
 - **Expand** opens the preview full-width in the main area; **Back to thread** returns it to the
   panel. On a phone it opens in the existing panel sheet, which gains a Preview segment while a
   file is open.
-- A missing file, a file that is not UTF-8, or one over the 2 MiB read limit gets a plain inline
-  message with Reload; the panel never crashes.
+- A missing file, a file that is not UTF-8, or one over the 400 KiB text read limit gets a plain
+  inline message with Reload. The selected file stays watched on every outcome, so recreating it
+  (or fixing its encoding) reloads the preview without closing the tab; after a reconnect the
+  workspace watch is sent again.
 - Not supported yet: MCP Apps rendering, a headless browser, and proxying a page's own development
   server. A page that needs a dev server must use absolute `https:` URLs for its assets.
 

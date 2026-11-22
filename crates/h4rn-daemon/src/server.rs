@@ -1052,14 +1052,17 @@ impl Connection {
                     workspace,
                     path,
                     bytes_base64,
+                    max_bytes,
                 } => {
                     if let Some(error) = self.local_host_error(&host) {
                         return Some(error_frame(id, error));
                     }
                     let fs = Arc::clone(&self.state.fs);
-                    fs_block(fs, move |fs| fs.read_with(&workspace, &path, bytes_base64))
-                        .await
-                        .map(|file| ResponseBody::FsFile { file })
+                    fs_block(fs, move |fs| {
+                        fs.read_with(&workspace, &path, bytes_base64, max_bytes)
+                    })
+                    .await
+                    .map(|file| ResponseBody::FsFile { file })
                 }
                 ClientRequest::FsWrite {
                     host,

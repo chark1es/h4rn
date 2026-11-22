@@ -24,6 +24,7 @@ const thread: ThreadSummary = {
   workspace_path: "/work",
   model: "claude-sonnet",
   tab: "working",
+  placed_by_user: false,
   pinned: false,
   snoozed_until: null,
   last_activity: "2026-01-01T00:00:00Z",
