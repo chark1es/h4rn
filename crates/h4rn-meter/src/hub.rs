@@ -321,6 +321,11 @@ impl MeterHub {
         self.inner.store.schedules().await
     }
 
+    /// One persisted schedule by its ledger id, if it still exists.
+    pub async fn schedule(&self, schedule_id: &str) -> Result<Option<ResumeSchedule>, StoreError> {
+        self.inner.store.schedule(schedule_id).await
+    }
+
     /// Limits and the current policy.
     pub async fn limits_report(&self) -> Result<LimitsReport, StoreError> {
         Ok(LimitsReport {

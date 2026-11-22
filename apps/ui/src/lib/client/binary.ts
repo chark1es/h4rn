@@ -38,6 +38,57 @@ export type BinaryKindValue = (typeof BinaryKind)[keyof typeof BinaryKind];
  */
 export const PTY_INPUT_REPLY = 1;
 
+/** Shift of the output position in a reply input frame's `seq` flag word. */
+export const PTY_INPUT_POSITION_SHIFT = 1;
+
+/** Bits the output position occupies after the reply flag. */
+export const PTY_INPUT_POSITION_BITS = 32;
+
+/** Largest output position the flag word can carry. */
+export const PTY_INPUT_POSITION_MAX = 2 ** PTY_INPUT_POSITION_BITS - 1;
+
+/**
+ * Shift of the answer ordinal in a reply input frame's `seq` flag word.
+ *
+ * One chunk can carry several queries and xterm answers each separately, so
+ * the ordinal keeps two answers for the same chunk distinct.
+ */
+export const PTY_INPUT_ORDINAL_SHIFT = PTY_INPUT_POSITION_SHIFT + PTY_INPUT_POSITION_BITS;
+
+/** Bits the answer ordinal occupies after the position. */
+export const PTY_INPUT_ORDINAL_BITS = 20;
+
+/** Largest answer ordinal the flag word can carry. */
+export const PTY_INPUT_ORDINAL_MAX = 2 ** PTY_INPUT_ORDINAL_BITS - 1;
+
+/**
+ * Packs a marked reply's output position and answer ordinal into an input
+ * frame's `seq` field.
+ *
+ * `position` is the output chunk whose bytes xterm was parsing when it saw the
+ * query; a query split across chunks uses the chunk that contained its end.
+ * `ordinal` is the answer's index among the answers expected for that chunk.
+ * Both fields stay within `Number.MAX_SAFE_INTEGER`.
+ *
+ * A value outside the encoding's range falls back to an unpositioned reply
+ * rather than wrapping into another field; that only happens after four
+ * billion output chunks or a million answers in one chunk, where the old
+ * single-reply behaviour is the safe choice.
+ */
+export function ptyInputReplySeq(position: number, ordinal = 0): number {
+  if (
+    !Number.isInteger(position) ||
+    position <= 0 ||
+    position > PTY_INPUT_POSITION_MAX ||
+    !Number.isInteger(ordinal) ||
+    ordinal < 0 ||
+    ordinal > PTY_INPUT_ORDINAL_MAX
+  ) {
+    return PTY_INPUT_REPLY;
+  }
+  return ordinal * 2 ** PTY_INPUT_ORDINAL_SHIFT + position * 2 ** PTY_INPUT_POSITION_SHIFT + 1;
+}
+
 export type BinaryFrame = {
   kind: BinaryKindValue;
   streamId: number;

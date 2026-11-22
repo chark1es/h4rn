@@ -61,6 +61,22 @@ type Expectation = {
   /** Monotonic position, so a finished chunk can settle only its own queries. */
   mark: number;
   pattern: RegExp;
+  /** Output chunk whose bytes were being parsed when the query was seen. */
+  position: number;
+  /** The answer's index among the answers expected for that chunk. */
+  ordinal: number;
+};
+
+/** One answer xterm owes: the chunk that carried the query and its ordinal. */
+export type TerminalQueryReply = {
+  position: number;
+  ordinal: number;
+};
+
+/** Output chunks waiting to be parsed, with their next answer ordinal. */
+type ParsingChunk = {
+  seq: number;
+  nextOrdinal: number;
 };
 
 /**
@@ -80,11 +96,33 @@ type Expectation = {
  */
 export class TerminalQueryTracker {
   private readonly expected: Expectation[] = [];
+  /** Output chunks waiting to be parsed, oldest first. */
+  private readonly chunks: ParsingChunk[] = [];
   private nextMark = 0;
+
+  /** Records that output chunk `seq` is about to be parsed by xterm. */
+  beginChunk(seq: number): void {
+    this.chunks.push({ seq, nextOrdinal: 0 });
+  }
+
+  /** Records that xterm finished parsing the oldest outstanding chunk. */
+  endChunk(): void {
+    this.chunks.shift();
+  }
 
   /** Records that xterm is about to send one `pattern`-shaped answer. */
   expect(pattern: RegExp): void {
-    this.expected.push({ mark: ++this.nextMark, pattern });
+    const chunk = this.chunks[0];
+    this.expected.push({
+      mark: ++this.nextMark,
+      pattern,
+      position: chunk?.seq ?? 0,
+      // The ordinal counts answers within the chunk, not the expectations
+      // still pending: an answer already consumed must not renumber the next
+      // query in the same chunk.
+      ordinal: chunk?.nextOrdinal ?? 0,
+    });
+    if (chunk) chunk.nextOrdinal += 1;
   }
 
   /** The position to settle from once xterm finishes the chunk being written. */
@@ -107,17 +145,28 @@ export class TerminalQueryTracker {
   }
 
   /**
+   * The answer `data` gives, or null for input.
+   *
+   * Consumes the expectation. Returns null for every other chunk, including
+   * answer-shaped sequences the person typed or pasted.
+   */
+  takeReply(data: string): TerminalQueryReply | null {
+    if (this.expected.length === 0) return null;
+    const index = this.expected.findIndex((entry) => entry.pattern.test(data));
+    if (index === -1) return null;
+    const [entry] = this.expected.splice(index, 1);
+    if (!entry) return null;
+    return { position: entry.position, ordinal: entry.ordinal };
+  }
+
+  /**
    * Whether `data` is xterm's answer to a pending query, consuming it.
    *
    * Returns false for every other chunk, including answer-shaped sequences
    * the person typed or pasted.
    */
   take(data: string): boolean {
-    if (this.expected.length === 0) return false;
-    const index = this.expected.findIndex((entry) => entry.pattern.test(data));
-    if (index === -1) return false;
-    this.expected.splice(index, 1);
-    return true;
+    return this.takeReply(data) !== null;
   }
 }
 
