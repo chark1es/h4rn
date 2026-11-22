@@ -9,6 +9,7 @@ import {
   PREVIEW_MAX_TOTAL_BYTES,
   PREVIEW_SANDBOX,
   previewAssetFits,
+  previewBridge,
   previewEmbeddedBytes,
   previewLinkOpens,
   previewMimeType,
@@ -376,6 +377,35 @@ describe("HTML preview document", () => {
     expect(built.missing).toEqual([]);
   });
 
+  it("treats a trailing comma as the boundary after a descriptorless candidate", () => {
+    const built = buildPreviewDocument({
+      html: `<img srcset="data:image/png;base64,AAAA, small.png 2x">`,
+      docPath: "index.html",
+      assets: {
+        "small.png": { kind: "bytes" as const, base64: "BBBB", mime: "image/png" },
+      },
+      token: "t1",
+    });
+    // The data URL has no descriptor, so its trailing comma ends it. The
+    // workspace candidate after the comma is still rewritten and inlined.
+    expect(built.srcdoc).toContain(
+      'srcset="data:image/png;base64,AAAA, data:image/png;base64,BBBB 2x"',
+    );
+    expect(built.missing).toEqual([]);
+  });
+
+  it("removes the workspace candidate that follows a descriptorless one when it is missing", () => {
+    const built = buildPreviewDocument({
+      html: `<img srcset="data:image/png;base64,AAAA, gone.png 2x">`,
+      docPath: "index.html",
+      assets: {},
+      token: "t1",
+    });
+    expect(built.srcdoc).toContain('srcset="data:image/png;base64,AAAA"');
+    expect(built.srcdoc).not.toContain("gone.png");
+    expect(built.missing).toEqual(["gone.png"]);
+  });
+
   it("removes a missing workspace srcset candidate and keeps the data: one", () => {
     const built = buildPreviewDocument({
       html: `<img srcset="data:image/png;base64,AAAA 1x, gone.png 2x, https://cdn.example.com/c.png 3x">`,
@@ -478,12 +508,15 @@ describe("HTML preview document", () => {
     };
     const bytes = (text: string) => new TextEncoder().encode(text).length;
     const dataUrl = `data:image/png;base64,${pixel}`;
-    // Room for the page, both stylesheets and exactly one copy of the image.
+    // Room for the page, both stylesheets, exactly one copy of the image, and
+    // the fixed prefix and bridge every document carries.
     const maxBytes =
       bytes(html) +
       bytes(assets["theme.css"].text) +
       bytes(assets["colors.css"].text) +
       bytes(dataUrl) +
+      bytes(injectCsp("")) +
+      bytes(previewBridge("t1")) +
       512;
     const built = buildPreviewDocument({
       html,

@@ -248,6 +248,35 @@ describe("loadPreview assets", () => {
     expect(size).toBeLessThanOrEqual(PREVIEW_MAX_TOTAL_BYTES);
   });
 
+  it("skips the excess asset on a near-cap page instead of refusing the page", async () => {
+    const copies = 22;
+    const base64 = "A".repeat(90_000);
+    const html = Array.from({ length: copies }, () => `<img src="pixel.png">`).join("");
+    const htmlBytes = new TextEncoder().encode(html).length;
+    // Only the base64 payloads and a few hundred bytes of headroom fit. The
+    // document also contains the CSP prefix, the bridge and one data-URL
+    // prefix per image, which the old budget did not reserve: the page was
+    // built just past the cap and reported as too large.
+    const cap = htmlBytes + copies * base64.length + 512;
+    const load = await loadPreview({
+      path: "page.html",
+      maxTotalBytes: cap,
+      read: reader({
+        "page.html": textFile("page.html", html),
+        "pixel.png": byteFile("pixel.png", base64, base64.length),
+      }),
+    });
+
+    expect(load.failure).toBeNull();
+    expect(load.document).not.toBeNull();
+    const srcdoc = load.document?.srcdoc ?? "";
+    // One image no longer fits once the fixed prefix, the bridge and the
+    // generated markup are counted, so it is skipped and reported.
+    expect(srcdoc.split("data:image/png;base64,").length - 1).toBe(copies - 1);
+    expect(load.document?.missing).toEqual(["pixel.png"]);
+    expect(new TextEncoder().encode(srcdoc).length).toBeLessThanOrEqual(cap);
+  });
+
   it("stops fetching once the total budget is spent", async () => {
     const fetched: string[] = [];
     const names = Array.from({ length: 40 }, (_, index) => `asset-${index}.png`);

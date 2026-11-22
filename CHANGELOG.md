@@ -149,6 +149,22 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Preview follow-ups from the HTML preview review.** A descriptorless `srcset` candidate followed
+  by a comma (`data:image/png;base64,AAAA, local.png 2x`) no longer swallows the candidate after
+  it: the trailing comma ends the candidate, so the workspace image is inlined or removed and
+  reported like any other. The 10 MB budget now covers the whole serialized document — the trusted
+  doctype and CSP prefix, the bridge script and the markup generated for each insertion are
+  reserved — so a near-cap page renders with its excess asset skipped instead of failing as too
+  large. The "update Android System WebView" notice appears only when the shell reports an Android
+  WebView without document-start script support; on desktop, or on Android where that feature
+  exists, a missing bridge message (for example an unterminated comment that swallowed the bridge)
+  shows a plain "preview scripts didn’t start" note with Reload. The ready-message deadline scales
+  with the prepared document instead of a fixed 800 ms, so a big page is not mistaken for blocked
+  scripts. Every held workspace watch is re-sent on a replacement connection by workspace, so
+  retaining a second workspace before the new client is ready no longer leaves the first
+  unwatched. The frame-limit choice is covered by end-to-end reads over a plain and a secure
+  connection, and the shell now returns only the frame URL so one preview token — the one already
+  written into the document — is used everywhere.
 - **An oversized filesystem response no longer closes the paired session.** JSON escaping of
   quotes, backslashes, newlines and control characters can push a 400 KiB text read past the
   secure transport's 512 KiB frame, and the transport answers an oversized frame with

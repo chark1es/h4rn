@@ -12,7 +12,7 @@ const state = vi.hoisted(() => ({
   onEvent: null as ((envelope: EventEnvelope) => void) | null,
   appListeners: new Set<(envelope: EventEnvelope) => void>(),
   read: null as null | ((path: string) => FsFileContent | Error),
-  prepare: null as null | ((html: string) => Promise<{ url: string; token: string } | null>),
+  prepare: null as null | ((html: string) => Promise<{ url: string } | null>),
   release: null as null | ((url: string | null) => Promise<void>),
 }));
 
@@ -143,7 +143,7 @@ beforeEach(() => {
   state.onEvent = null;
   state.appListeners.clear();
   state.read = (path) => htmlFile(path, "<p>hi</p>");
-  state.prepare = async () => ({ url: "h4rn-preview://localhost/abc", token: "t1" });
+  state.prepare = async () => ({ url: "h4rn-preview://localhost/abc" });
   state.release = async () => undefined;
 });
 
@@ -157,7 +157,7 @@ afterEach(() => {
 
 describe("useHtmlPreview document lifetime", () => {
   it("releases a prepared URL when the load is cancelled while the shell answers", async () => {
-    let resolvePrepare: ((frame: { url: string; token: string }) => void) | null = null;
+    let resolvePrepare: ((frame: { url: string }) => void) | null = null;
     state.prepare = () =>
       new Promise((resolve) => {
         resolvePrepare = resolve;
@@ -173,7 +173,7 @@ describe("useHtmlPreview document lifetime", () => {
     act(() => root.unmount());
     roots = [];
 
-    act(() => resolvePrepare?.({ url: "h4rn-preview://localhost/abc", token: "t1" }));
+    act(() => resolvePrepare?.({ url: "h4rn-preview://localhost/abc" }));
     await flush();
     expect(release).toHaveBeenCalledWith("h4rn-preview://localhost/abc");
   });

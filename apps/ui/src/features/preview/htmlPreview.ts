@@ -29,7 +29,15 @@ export const PREVIEW_CSP =
 /** The CSP `<meta>` the document starts with. */
 export const PREVIEW_CSP_META = `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">`;
 
-/** Total workspace bytes the preview will inline, including the HTML itself. */
+/**
+ * Total workspace bytes the preview will inline, including the HTML itself.
+ *
+ * The fixed prefix (doctype plus CSP meta) and the bridge script are part of
+ * the serialized document too, so they are reserved before any insertion is
+ * charged; each insertion also pays for the markup it generates (a `<style>`
+ * or `<script>` wrapper, a `url("...")` pair). A near-cap page therefore
+ * skips its last asset instead of growing past the cap.
+ */
 export const PREVIEW_MAX_TOTAL_BYTES = 10 * 1024 * 1024;
 
 /**
@@ -340,8 +348,11 @@ export type SrcsetCandidate = { url: string; descriptor: string };
  *
  * Follows the HTML parser's shape rather than splitting on commas: a candidate
  * URL is a run of non-whitespace, so the commas inside `data:` URLs stay part
- * of the URL, and descriptors run to the next top-level comma. That is what
- * lets a mixed list keep its `data:` candidate and inline the workspace ones.
+ * of the URL, and descriptors run to the next top-level comma. A URL's
+ * trailing commas are delimiters, not part of it: the parser drops them, so
+ * `data:image/png;base64,AAAA, local.png 2x` is a descriptorless `data:`
+ * candidate followed by a workspace one. That is what lets a mixed list keep
+ * its `data:` candidate and still rewrite the workspace candidates after it.
  */
 export function parseSrcset(value: string): SrcsetCandidate[] {
   const candidates: SrcsetCandidate[] = [];
@@ -356,7 +367,16 @@ export function parseSrcset(value: string): SrcsetCandidate[] {
     if (index >= length) break;
     const urlStart = index;
     while (index < length && !/\s/.test(value[index] ?? "")) index += 1;
-    const url = value.slice(urlStart, index);
+    const raw = value.slice(urlStart, index);
+    // The HTML parser removes every trailing comma from the candidate URL.
+    // When that happens the candidate had no descriptor, and the commas
+    // already ended it, so parsing resumes at the next non-space character.
+    const url = raw.replace(/,+$/, "");
+    if (!url) continue;
+    if (url !== raw) {
+      candidates.push({ url, descriptor: "" });
+      continue;
+    }
     let depth = 0;
     let descriptorEnd = index;
     while (descriptorEnd < length) {
@@ -368,7 +388,7 @@ export function parseSrcset(value: string): SrcsetCandidate[] {
     }
     const descriptor = value.slice(index, descriptorEnd).trim();
     index = descriptorEnd + 1;
-    if (url) candidates.push({ url, descriptor });
+    candidates.push({ url, descriptor });
   }
   return candidates;
 }
@@ -659,13 +679,15 @@ function inlineCss(
         return "";
       }
       // The imported sheet's text is inserted here, once per import, so it is
-      // charged here. The nested `url()` replacements charge themselves.
-      if (charge && !charge(utf8Length(asset.text))) {
+      // charged here. The nested `url()` replacements charge themselves, and
+      // the media condition's `@media ... {}` wrapper is charged with it.
+      const condition = (media ?? "").trim();
+      const wrapper = condition ? utf8Length(`@media ${condition} {}`) : 0;
+      if (charge && !charge(utf8Length(asset.text) + wrapper)) {
         missing?.add(path);
         return "";
       }
       const nested = inlineCss(asset.text, path, assets, missing, seen, charge);
-      const condition = (media ?? "").trim();
       return condition ? `@media ${condition} {${nested}}` : nested;
     },
   );
@@ -689,11 +711,13 @@ function inlineCss(
         return "none";
       }
       const replacement = dataUrl(asset, path);
-      if (!replacement || (charge && !charge(utf8Length(replacement)))) {
+      // The generated `url("...")` pair is part of the serialized sheet.
+      const wrapped = replacement ? `url("${replacement}")` : "";
+      if (!replacement || (charge && !charge(utf8Length(wrapped)))) {
         missing?.add(path);
         return "none";
       }
-      return `url("${replacement}")`;
+      return wrapped;
     },
   );
   // A stylesheet cannot close its own element.
@@ -756,11 +780,14 @@ function rewriteAnchor(tag: Tag): string {
  * inline (so the preview origin never receives a relative request), rewrites
  * anchors for the bridge script, prepends the CSP and appends the bridge.
  *
- * `maxBytes` bounds the prepared document. The budget is charged for every
- * copy at the moment it is inserted — the page's own text first, then each
- * stylesheet, script and `data:` URL, including one reached again through an
- * imported stylesheet. An insertion that would go over is left out and
- * reported as skipped, so an oversized document is never built.
+ * `maxBytes` bounds the prepared document. The fixed prefix (doctype and CSP
+ * meta) and the bridge script are reserved before anything else is charged,
+ * because they are serialized too; every generated wrapper is charged with the
+ * insertion that creates it. Insertions are charged in document order — the
+ * page's own text first, then each stylesheet, script and `data:` URL,
+ * including one reached again through an imported stylesheet. An insertion
+ * that would go over is left out and reported as skipped, so an oversized
+ * document is never built.
  */
 export function buildPreviewDocument(options: {
   html: string;
@@ -770,9 +797,15 @@ export function buildPreviewDocument(options: {
   maxBytes?: number;
 }): PreviewDocument {
   const { html, docPath, assets, token } = options;
+  const prefix = injectCsp("");
+  const bridge = previewBridge(token);
   const inlined = new Set<string>();
   const missing = new Set<string>();
-  let remaining = (options.maxBytes ?? PREVIEW_MAX_TOTAL_BYTES) - utf8Length(html);
+  let remaining =
+    (options.maxBytes ?? PREVIEW_MAX_TOTAL_BYTES) -
+    utf8Length(prefix) -
+    utf8Length(bridge) -
+    utf8Length(html);
   const charge: PreviewCharge = (bytes) => {
     if (bytes > remaining) return false;
     remaining -= bytes;
@@ -900,7 +933,9 @@ export function buildPreviewDocument(options: {
         if (found.asset.kind !== "text") {
           return { replacement: "" };
         }
-        if (!charge(utf8Length(found.asset.text))) {
+        // The stylesheet text and the `<style></style>` that replaces the
+        // `<link>` are both new bytes in the document.
+        if (!charge(utf8Length(found.asset.text) + utf8Length("<style></style>"))) {
           missing.add(found.path);
           return { replacement: "" };
         }
@@ -919,13 +954,14 @@ export function buildPreviewDocument(options: {
         if (found.asset.kind !== "text") {
           return { replacement: "", skipBody: true };
         }
-        if (!charge(utf8Length(found.asset.text))) {
-          missing.add(found.path);
-          return { replacement: "", skipBody: true };
-        }
         // JSON-LD, import maps, templates and modules all keep their type.
         const type = attr(tag, "type");
         const typeAttr = type ? ` type="${escapeAttr(type)}"` : "";
+        // The script text and its generated wrapper are both new bytes.
+        if (!charge(utf8Length(found.asset.text) + utf8Length(`<script${typeAttr}></script>`))) {
+          missing.add(found.path);
+          return { replacement: "", skipBody: true };
+        }
         inlined.add(found.path);
         return {
           replacement: `<script${typeAttr}>${found.asset.text.replace(/<\/script/gi, "<\\/script")}</script>`,
@@ -1007,8 +1043,9 @@ export function buildPreviewDocument(options: {
   );
 
   // The policy is the document's first bytes; the bridge is appended after the
-  // document so no `</body>` inside a script or comment can split it.
-  const document = injectCsp(body) + previewBridge(token);
+  // document so no `</body>` inside a script or comment can split it. Both
+  // were reserved in `remaining` before the first insertion was charged.
+  const document = prefix + stripLeadingDoctype(body) + bridge;
 
   return {
     srcdoc: document,
