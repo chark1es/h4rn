@@ -524,6 +524,29 @@ pub enum ResponseBody {
         /// One row per harness, in stable order.
         harnesses: Vec<crate::HarnessVersionInfo>,
     },
+    /// Local ACP agents configured on this daemon.
+    AcpAgents {
+        /// Configured agents, in creation order.
+        agents: Vec<crate::AcpAgent>,
+    },
+    /// One configured ACP agent after an add or update.
+    AcpAgent {
+        /// The stored agent with its installation facts.
+        agent: crate::AcpAgent,
+    },
+    /// One configured ACP agent's writable configuration.
+    ///
+    /// Only the admin-scoped get request returns this shape, because `env`
+    /// carries real values.
+    AcpAgentSpec {
+        /// Configuration exactly as stored.
+        agent: crate::AcpAgentSpec,
+    },
+    /// What one configured ACP agent advertises.
+    AcpAgentProbe {
+        /// The probe result.
+        probe: crate::AcpAgentProbe,
+    },
     /// Tracked git worktrees.
     Worktrees {
         /// Active first, then orphaned, then settled; newest first within each.
@@ -695,6 +718,15 @@ pub enum Event {
         turn_id: TurnId,
         /// Current tool-call state.
         tool_call: ToolCall,
+    },
+    /// The agent published a plan, replacing any earlier one.
+    Plan {
+        /// Thread.
+        thread_id: ThreadId,
+        /// Turn the plan belongs to.
+        turn_id: TurnId,
+        /// Every step, in the agent's order.
+        entries: Vec<crate::PlanStep>,
     },
     /// The harness is waiting for a decision.
     ApprovalRequested {

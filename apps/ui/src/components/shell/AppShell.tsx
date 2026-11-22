@@ -65,6 +65,7 @@ const START_MODELS: Record<HarnessKind, string> = {
   codex: "gpt-5.1-codex",
   opencode: "claude-sonnet-5-5",
   antigravity: "gemini-4-argon-medium",
+  acp: "default",
 };
 
 const HARNESSES: HarnessKind[] = ["claude_code", "codex", "opencode", "antigravity"];
@@ -174,8 +175,8 @@ export function InboxDetailEmpty() {
   const selectedFolder = folderChoices.find((choice) => choice.path === workspace);
   // Start in the first project once the list arrives, unless a path was typed,
   // the person has a folder remembered on this host, or the box holds unsent
-  // text. This is a convenience choice, not one to commit: it does not switch
-  // the draft slot or become the folder the next open remembers.
+  // text. This is a convenience choice, not one to commit: it shows that
+  // folder's draft but does not become the folder the next open remembers.
   useEffect(() => {
     if (customFolder || selectedFolder) return;
     const first = folderChoices[0];
@@ -188,7 +189,13 @@ export function InboxDetailEmpty() {
     setWorkspace(draft.workspace);
     setPrompt(draft.text);
   }, [customFolder, selectedFolder, folderChoices, workspace, prompt, host, draftSession]);
-  const harnessChoices = selectedHost?.harnesses.length ? selectedHost.harnesses : HARNESSES;
+  const harnessChoices = (
+    selectedHost?.harnesses.length ? selectedHost.harnesses : HARNESSES
+  ).filter(
+    // A local ACP command needs its instance id; the quick start has no such
+    // picker, so it never offers the bare kind.
+    (kind) => kind !== "acp",
+  );
   const hostName = selectedHost?.name ?? "a host";
   const offline = connection !== "online";
   const writable = !offline && Boolean(host);
@@ -255,7 +262,9 @@ export function InboxDetailEmpty() {
     setHost(nextHostId);
     setWorkspace(draft.workspace);
     setPrompt(draft.text);
-    const nextHarness = hosts[nextHostId]?.harnesses[0];
+    // Never default to the bare ACP kind: it is not startable without an
+    // instance id, which this quick start does not choose.
+    const nextHarness = hosts[nextHostId]?.harnesses.find((kind) => kind !== "acp");
     if (nextHarness) {
       setHarness(nextHarness);
       setModel(START_MODELS[nextHarness]);

@@ -7,6 +7,91 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **The daemon can run as a per-user service.** `h4rnd service install` writes the
+  shipped systemd user unit (or launch agent, or Windows scheduled task) with the
+  running binary's absolute path and current data directory, then enables and
+  starts it. `status` reports installed/active/enabled, `restart` and `logs` work
+  on every platform, and `uninstall` stops and removes the service without touching
+  the data directory. Installation is idempotent, refuses a binary under
+  `target/debug` or a temp directory unless `--force`, and mentions
+  `loginctl enable-linger` on Linux when lingering is off. Reinstalling an
+  unchanged launch agent that is already running leaves it alone. On Windows the
+  task is named per account (`h4rn-<user>`) and uses an inline launcher that
+  waits up to 30 seconds for the updater's installation lock and repairs a
+  missing `h4rnd.exe` itself before starting the daemon, so it starts after an
+  interrupted update even when the binary there is an older image without
+  `--recover-only`. A task that an older release registered under
+  the machine-wide `h4rn` name is removed by the next install or uninstall. The
+  systemd unit keeps a `$` in the executable path literal (systemd does not
+  expand variables there) while still escaping `$$` in arguments.
+- **`h4rnd update` installs signed daemon releases.** It finds the latest GitHub
+  release for the repository baked in at build time, downloads the archive for
+  this target triple and `SHA256SUMS`, verifies the hash and a minisign signature
+  over `SHA256SUMS` against the compiled `H4RN_UPDATER_PUBKEY`, and replaces the
+  binary atomically. The previous binary is kept for `h4rnd update --rollback`; a
+  running service is restarted, and an active turn stops the update unless
+  `--force`. Builds without a public key refuse to self-update and print manual
+  steps instead. Release builds with the signing key now publish
+  `SHA256SUMS.sig`; an archive signature alone is not accepted.
+- **The updater secrets are a pair.** `H4RN_UPDATER_PUBKEY` gives a build the key
+  it verifies with, and `TAURI_SIGNING_PRIVATE_KEY` produces `SHA256SUMS.sig`. A
+  release with the public key but no private key now fails in the release
+  workflow instead of publishing archives every daemon refuses to install.
+- **Updates are one-at-a-time and interruption-safe.** An advisory lock beside the
+  binary serializes updates, rollbacks and startup recovery, and staging files are
+  created exclusively with unique names. On Unix the replace and the rollback are
+  each a single `rename` over the install path; on Windows the moved-aside binary
+  is restored by the next start (or by the scheduled task's recovery step).
+- **A backup and its checksum are published together.** The rollback copy no
+  longer goes straight to `h4rnd.previous`: it is copied into a unique temp file
+  beside it, and its sidecar is staged the same way. Only after both are ready
+  are they renamed into place, so a failed publication leaves the previous
+  backup and its checksum untouched and still rollbackable. `--rollback` and
+  startup recovery both refuse a backup that is missing, empty, not executable
+  on Unix or does not match that record, so an interrupted copy can never replace
+  the installed binary; recovery leaves the files in place and says what to do.
+  On Windows `h4rnd update` rewrites the registered task's launcher before it
+  renames anything, and the launcher waits for the installation lock and repairs
+  a missing binary itself, so an interrupted update or rollback comes back up
+  even from a task registered by an older release. The update releases the lock
+  before it dispatches the restart, so the launcher never waits for the update
+  that started it.
+- **A turn that starts during the final step is not cut off.** The idle check is
+  repeated after the new binary is in place and immediately before the restart.
+  If a turn started, the binary stays installed, the restart is skipped, and the
+  update says to run `h4rnd service restart` when the turn finishes. Release
+  metadata requests keep a short total timeout; asset downloads use a 30 s
+  idle timeout and no total limit, so a large archive on a slow link can finish.
+  On Windows a failed `/End` when the task is not running is harmless and only
+  the start step must succeed.
+- **`h4rnd update` probes the daemon it will actually restart.** The guard
+  resolves the registered unit, plist or task first and uses that service's own
+  endpoint, in the daemon's order: a `--bind` in the registered command line,
+  then `H4RN_BIND` from its environment (systemd `Environment=`,
+  `EnvironmentFile=` and the user manager; launchd `EnvironmentVariables`; or
+  the account-wide Windows environment), then the compiled default. The
+  updater's own `--bind` is never used, so an idle second daemon on the CLI's
+  port cannot make a busy service look safe. A source that cannot be read (the
+  systemd user manager environment or the account-wide Windows environment)
+  leaves the service unverified, and the update and `--rollback` refuse unless
+  `--force` is passed. The guard is checked again
+  right before the binary is replaced and again just before the restart, and it
+  fails closed: a daemon that is active or listening but does not answer
+  `/healthz` blocks the update, as does a health response without `active_turns`.
+  The update only restarts the service when that unit/plist/task runs the binary
+  being replaced; a failed restart is a warning, not a failed update. The Linux
+  command line comes from `systemctl --user show -p ExecStart --value`, which
+  includes runtime drop-ins, and the unit files (with reset-and-override
+  drop-ins and `%h`) are read only when systemctl cannot answer.
+- **Windows service reporting has two limits.** `h4rnd service status` reports
+  `enabled: unknown` there, because Task Scheduler's states do not map cleanly to
+  "starts at logon", and `h4rnd service logs` prints guidance instead of following
+  a file because the task runs without a console and the daemon writes no log
+  file. Task names are per account, and a task installed by an older release
+  (which started `h4rnd.exe` directly) keeps working and is migrated the next
+  time `h4rnd service install` runs. macOS service status reports
+  `enabled: unknown` unless `launchctl print-disabled` could be read, instead of
+  assuming the agent is enabled.
 - **Preview HTML files in the right panel.** A report, chart or mockup the agent wrote can be
   opened from the Files tab's new action on `.html`/`.htm` rows, or from a relative HTML link in
   an agent message. The Preview tab reads the file through the daemon, inlines its relative CSS,
@@ -163,6 +248,16 @@ All notable changes to h4rn are recorded here. The format follows
   prompts keep stepping with the caret at their first line. The history is read from the thread's
   own user messages, so it needs no separate copy and works on any device that can see the thread.
   Typing leaves history mode, and an open menu or IME composition leaves the arrow keys alone.
+- **Harnesses: run any ACP agent as a local command.** Settings → Harnesses can now store any
+  number of local ACP agents (display name, unique instance id, executable, literal arguments,
+  environment overrides and a thread-workspace or fixed working directory). A new `acp` harness
+  kind reuses the shared ACP session runtime, so prompts, tool calls, plans, permission requests,
+  cancel and `session/load` resume behave exactly as they do for Antigravity; the Antigravity
+  fallback transport and limit parsing stay in its own adapter. The new-thread picker lists
+  configured agents and reads the models each one advertises. Writes need the `admin` scope and are
+  persisted in `acp-agents.json`. Installed state comes from resolving the executable, and a version
+  is shown only when the agent reports one during `initialize`; h4rn does not install or update it.
+  See [docs/acp.md](docs/acp.md).
 
 ### Fixed
 
@@ -192,6 +287,33 @@ All notable changes to h4rn are recorded here. The format follows
   writes it, so the dialog's text appears in the inbox. In the composer, `↵` in the `/` menu runs the command ranked for the query on screen
   (and keeps the text when nothing matches), and a recall made while a recalled prompt is sending
   stays on screen instead of the draft recall had preserved.
+- **Preview follow-ups from the HTML preview review.** A descriptorless `srcset` candidate followed
+  by a comma (`data:image/png;base64,AAAA, local.png 2x`) no longer swallows the candidate after
+  it: the trailing comma ends the candidate, so the workspace image is inlined or removed and
+  reported like any other. The 10 MB budget now covers the whole serialized document — the trusted
+  doctype and CSP prefix, the bridge script and the markup generated for each insertion are
+  reserved — so a near-cap page renders with its excess asset skipped instead of failing as too
+  large. The "update Android System WebView" notice appears only when the shell reports an Android
+  WebView without document-start script support; on desktop, or on Android where that feature
+  exists, a missing bridge message (for example an unterminated comment that swallowed the bridge)
+  shows a plain "preview scripts didn’t start" note with Reload. The ready-message deadline scales
+  with the prepared document instead of a fixed 800 ms, so a big page is not mistaken for blocked
+  scripts. Every held workspace watch is re-sent on a replacement connection by workspace, so
+  retaining a second workspace before the new client is ready no longer leaves the first
+  unwatched. The frame-limit choice is covered by end-to-end reads over a plain and a secure
+  connection, and the shell now returns only the frame URL so one preview token — the one already
+  written into the document — is used everywhere.
+- **Preview: the budget, Reload and the Android capability check are honest.** The 10 MB budget
+  now charges the bytes the builder itself adds: the `target`/`rel` an anchor rewrite appends, the
+  quotes and escaping that a rewritten `img`, `source`, `video`, `svg` or style-bearing tag grows
+  by, and the backslash that escaping `</script` or `</style` adds to inlined text. A near-cap page
+  with many rewritten links renders with its excess image skipped instead of failing as too large;
+  an anchor that cannot pay for its rewrite keeps its original tag. Reload re-asks the shell for the
+  preview WebView's capabilities — including from the Android notice, which now has its own Reload
+  — so updating System WebView clears the notice without closing the tab. The capability command
+  runs off the main thread, and a failed or unparseable WebView version is reported as unknown and
+  treated as unsupported, showing the generic "preview scripts didn’t start" note with Reload
+  instead of defaulting to supported. See [docs/ux.md](docs/ux.md).
 - **A first connect no longer calls its own handshake history.** `since_seq: null` makes the daemon
   send no replay, so every frame held between `hello` and the subscribe answer is live news, even
   when its sequence already sits at or below the journal head named by the answer. Only a resumed
@@ -535,6 +657,71 @@ All notable changes to h4rn are recorded here. The format follows
   proof against `parts.uri.path()`, which excludes the query string, so signing
   `/v1/machines?linked=true` was rejected with 401 and took the whole account and machine refresh
   down with it. The client now signs `/v1/machines` and still fetches with `?linked=true`; a
+  presence failure falls back to an empty linked list instead of aborting the refresh.
+- **Local ACP agents: credentials stay off view-scoped devices.** `ListAcpAgents` now masks every
+  environment value and omits the literal argument list, which can also carry a secret; the edit form
+  reads the real configuration through a new admin-scoped `GetAcpAgent`. The last successful probe's
+  models, modes and version are stored and returned to every device, so the model picker no longer
+  needs to start the agent.
+- **Local ACP agents: absolute, same-file resolution and fresh restarts.** A configured command now
+  resolves to an absolute executable before the child starts (relative `PATH` entries are ignored;
+  Windows `.bat`/`.cmd` are refused), so detection, `Check` and launch name the same file. A stored
+  session id is replaced by a fresh session when the agent does not advertise `session/load`, and a
+  thread's stored id is cleared when its agent's command line or effective working directory changes
+  — in the thread itself, so a start that fails before the agent opens a session cannot leave the old
+  id to be replayed by the next attempt. Plans are forwarded and shown in the turn as a quiet
+  checklist, ACP v1 `configOptions` supply model and mode choices, and a view-only model picker shows
+  the last probe or its error instead of spinning.
+- **Local ACP agents are not a startable harness by themselves.** Host summaries and the new-thread,
+  quick-start and delegate pickers no longer offer the bare `acp` kind, so no request can create an
+  ACP thread or subagent without an instance; the daemon rejects both paths explicitly. Delegating
+  from an ACP thread starts the child on the fallback harness's own default model instead of sending
+  it a model id only the ACP agent knew.
+- **Antigravity is unchanged by the shared ACP runtime.** Its non-`auto` default-model aliases are
+  case-sensitive again, its "Antigravity stopped the turn" / "Antigravity is requesting permission"
+  wording is back, its unknown-model error still says "the account offers", and the UTF-16 attachment
+  test covers the shared prompt builder.
+- **ACP agent form saves and checks line up with the daemon.** Instance ids are capped at 64
+  characters, the form accepts either platform's absolute path form (`/dir`, `C:\dir`, UNC) because
+  the daemon's platform decides, and the display-name cap counts characters rather than bytes on both
+  sides. Explicitly added empty arguments are kept, and `Check` stays available and refreshes the
+  list after the binary is installed. Any edit clears the cached version, a probe whose configuration
+  changed while it ran stores nothing, a failed probe leaves the last good models in place, and an
+  invalid entry loaded from `acp-agents.json` is dropped with one log line instead of failing at
+  spawn.
+- **Local ACP agents: a probe is one conversation, and editing one never loses work.** A probe whose
+  configuration changed while it ran now reports a conflict instead of success, its answer is
+  discarded by the client even if it arrives after the edit, and the picker never starts a second
+  probe for an agent already handshaking. A probe also answers on its own task, so an agent that is
+  slow to start no longer holds the connection: other requests on the same socket keep answering
+  while the handshake runs. A probe answer that carries the agent's own error falls back to the
+  daemon's cached models instead of emptying the picker. The delegate dialog's erased task, summary
+  and budget survive a parent summary refresh while the dialog is open, and the environment editor
+  stacks its name, value and Remove controls with 44 px targets on a phone. A plan step that is in
+  progress now carries a neutral mark rather than the accent: blue still means the person is needed.
+- **Local ACP agents: the method the agent actually advertises.** `session/resume` is no longer read
+  as `session/load` support: an agent that advertises only resume is continued with
+  `session/resume`, one that advertises load replays with `session/load`, and one that advertises
+  neither starts a fresh session. A generic agent that advertises both a legacy `models`/`modes`
+  catalogue and v1 `configOptions` now uses `configOptions` and selects with
+  `session/set_config_option`; Antigravity keeps its own account catalogue. A command-line
+  fingerprint is structured (JSON), so an edit from no arguments to one empty argument starts a new
+  session instead of replaying the old id. Two entries with the same instance id in
+  `acp-agents.json` keep the first and drop the second with a warning.
+- **Local ACP agents: one answer for the catalogue, the resume and the process.** `Check` now reads
+  the same v1 `configOptions` catalogue a thread start selects from, so the picker no longer offers
+  legacy ids the agent would reject, and the model stays `default` until you choose one. The client
+  waits 45 s for a probe, covering the daemon's 30 s exchange plus its shutdown grace, instead of
+  abandoning it at the default 10 s. A `session/resume` or `session/load` reply that names no catalogue keeps the thread's saved
+  model and mode and still sends the prompt. A load's replayed history is consumed before the new
+  turn, so a conversation longer than the event queue no longer stalls the load and the old messages
+  are not shown twice. A probe edited while it ran reports the same conflict whether it succeeded or
+  failed, and the Check control stays busy until the original probe settles, so an edit cannot start
+  a second one. The resume fingerprint and the launch now come from one resolved configuration, so
+  an edit in between cannot hand the new command the old session id. The new-thread mode picker
+  offers only modes h4rn can map onto the agent's advertised ids and otherwise says
+  **Mode is managed by the agent**; a fixed working directory is shown before Start and becomes the
+  thread's workspace for Files and Changes.
   presence failure keeps the last known linked list (empty before the first successful fetch)
   instead of aborting the refresh.
 - **Closing a terminal ends its background jobs.** With job control, `sleep 1000 &` runs in its own

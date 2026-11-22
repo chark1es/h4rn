@@ -9,6 +9,7 @@ import type {
   HarnessKind,
   HostId,
   MessageRole,
+  PlanStep,
   SubagentId,
   SubagentState,
   ToolCall,
@@ -71,13 +72,21 @@ export type DelegatedItem = {
   agentState: AgentState;
 };
 
+export type PlanItem = {
+  kind: "plan";
+  itemId: string;
+  /** Every step, in the agent's order; a new plan replaces the whole list. */
+  entries: PlanStep[];
+};
+
 export type TurnItem =
   | MessageItem
   | ToolItem
   | ApprovalItem
   | LimitItem
   | ErrorItem
-  | DelegatedItem;
+  | DelegatedItem
+  | PlanItem;
 
 export type StreamTurn = {
   id: TurnId;
@@ -352,6 +361,25 @@ export function foldEvent(
     case "tool_call": {
       const turn = ensureTurn(log, event.turn_id, event.tool_call.started_at);
       upsertTool(turn, event.tool_call);
+      return log;
+    }
+
+    case "plan": {
+      // ACP sends the whole plan on every update, so the newest list replaces
+      // the previous one instead of appending another block per step.
+      const turn = ensureTurn(log, event.turn_id, at);
+      const item: PlanItem = {
+        kind: "plan",
+        itemId: `plan:${event.turn_id}`,
+        entries: event.entries,
+      };
+      const index = turn.items.findIndex((candidate) => candidate.kind === "plan");
+      if (index >= 0) {
+        turn.items[index] = item;
+      } else {
+        turn.items.push(item);
+      }
+      turn.status = "running";
       return log;
     }
 

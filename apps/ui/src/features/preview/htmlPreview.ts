@@ -29,7 +29,18 @@ export const PREVIEW_CSP =
 /** The CSP `<meta>` the document starts with. */
 export const PREVIEW_CSP_META = `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">`;
 
-/** Total workspace bytes the preview will inline, including the HTML itself. */
+/**
+ * Total workspace bytes the preview will inline, including the HTML itself.
+ *
+ * The fixed prefix (doctype plus CSP meta) and the bridge script are part of
+ * the serialized document too, so they are reserved before any insertion is
+ * charged; each insertion also pays for the markup it generates (a `<style>`
+ * or `<script>` wrapper, a `url("...")` pair) and for the bytes a rewritten
+ * tag grows by (an anchor's `target`/`rel`, the quotes around a `data:` URL,
+ * the escape in an attribute value or in inlined script and style text). A
+ * near-cap page therefore skips its last asset instead of growing past the
+ * cap.
+ */
 export const PREVIEW_MAX_TOTAL_BYTES = 10 * 1024 * 1024;
 
 /**
@@ -340,8 +351,11 @@ export type SrcsetCandidate = { url: string; descriptor: string };
  *
  * Follows the HTML parser's shape rather than splitting on commas: a candidate
  * URL is a run of non-whitespace, so the commas inside `data:` URLs stay part
- * of the URL, and descriptors run to the next top-level comma. That is what
- * lets a mixed list keep its `data:` candidate and inline the workspace ones.
+ * of the URL, and descriptors run to the next top-level comma. A URL's
+ * trailing commas are delimiters, not part of it: the parser drops them, so
+ * `data:image/png;base64,AAAA, local.png 2x` is a descriptorless `data:`
+ * candidate followed by a workspace one. That is what lets a mixed list keep
+ * its `data:` candidate and still rewrite the workspace candidates after it.
  */
 export function parseSrcset(value: string): SrcsetCandidate[] {
   const candidates: SrcsetCandidate[] = [];
@@ -356,7 +370,16 @@ export function parseSrcset(value: string): SrcsetCandidate[] {
     if (index >= length) break;
     const urlStart = index;
     while (index < length && !/\s/.test(value[index] ?? "")) index += 1;
-    const url = value.slice(urlStart, index);
+    const raw = value.slice(urlStart, index);
+    // The HTML parser removes every trailing comma from the candidate URL.
+    // When that happens the candidate had no descriptor, and the commas
+    // already ended it, so parsing resumes at the next non-space character.
+    const url = raw.replace(/,+$/, "");
+    if (!url) continue;
+    if (url !== raw) {
+      candidates.push({ url, descriptor: "" });
+      continue;
+    }
     let depth = 0;
     let descriptorEnd = index;
     while (descriptorEnd < length) {
@@ -368,7 +391,7 @@ export function parseSrcset(value: string): SrcsetCandidate[] {
     }
     const descriptor = value.slice(index, descriptorEnd).trim();
     index = descriptorEnd + 1;
-    if (url) candidates.push({ url, descriptor });
+    candidates.push({ url, descriptor });
   }
   return candidates;
 }
@@ -659,13 +682,15 @@ function inlineCss(
         return "";
       }
       // The imported sheet's text is inserted here, once per import, so it is
-      // charged here. The nested `url()` replacements charge themselves.
-      if (charge && !charge(utf8Length(asset.text))) {
+      // charged here. The nested `url()` replacements charge themselves, and
+      // the media condition's `@media ... {}` wrapper is charged with it.
+      const condition = (media ?? "").trim();
+      const wrapper = condition ? utf8Length(`@media ${condition} {}`) : 0;
+      if (charge && !charge(utf8Length(asset.text) + wrapper)) {
         missing?.add(path);
         return "";
       }
       const nested = inlineCss(asset.text, path, assets, missing, seen, charge);
-      const condition = (media ?? "").trim();
       return condition ? `@media ${condition} {${nested}}` : nested;
     },
   );
@@ -689,15 +714,21 @@ function inlineCss(
         return "none";
       }
       const replacement = dataUrl(asset, path);
-      if (!replacement || (charge && !charge(utf8Length(replacement)))) {
+      // The generated `url("...")` pair is part of the serialized sheet.
+      const wrapped = replacement ? `url("${replacement}")` : "";
+      if (!replacement || (charge && !charge(utf8Length(wrapped)))) {
         missing?.add(path);
         return "none";
       }
-      return `url("${replacement}")`;
+      return wrapped;
     },
   );
-  // A stylesheet cannot close its own element.
-  return rewritten.replace(/<\/style/gi, "<\\/style");
+  // A stylesheet cannot close its own element. The backslash is a new byte in
+  // the document, so the escape growth is charged with the sheet's text.
+  const escaped = rewritten.replace(/<\/style/gi, "<\\/style");
+  const escapeGrowth = utf8Length(escaped) - utf8Length(rewritten);
+  if (escapeGrowth > 0 && charge && !charge(escapeGrowth)) return "";
+  return escaped;
 }
 
 /**
@@ -739,14 +770,20 @@ export function previewBridge(token: string): string {
   return `<script>(function(){var token=${JSON.stringify(safe)};parent.postMessage({type:"h4rn:preview-ready",token:token},"*");document.addEventListener("click",function(event){var node=event.target;while(node&&node.tagName!=="A"){node=node.parentNode}if(!node)return;var href=node.getAttribute("href")||"";if(!href||href.charAt(0)==="#")return;event.preventDefault();parent.postMessage({type:"h4rn:preview-open",token:token,href:href},"*")},true);document.addEventListener("submit",function(event){event.preventDefault()},true)})();</script>`;
 }
 
-function rewriteAnchor(tag: Tag): string {
+/**
+ * The attributes that make an anchor inert and report its link.
+ *
+ * `null` means the anchor is left alone: no `href`, or one that scrolls inside
+ * the frame (a new target would lose the fragment).
+ */
+function anchorAttrs(tag: Tag): Attr[] | null {
   const href = attr(tag, "href");
-  if (!href) return tag.raw;
+  if (!href) return null;
   // Same-page links scroll inside the frame; a new target would lose the anchor.
-  if (href.trim().startsWith("#")) return tag.raw;
+  if (href.trim().startsWith("#")) return null;
   let attrs = upsertAttr(tag.attrs, "target", "_blank");
   attrs = upsertAttr(attrs, "rel", "noopener noreferrer");
-  return formatTag(tag, attrs);
+  return attrs;
 }
 
 /**
@@ -756,11 +793,16 @@ function rewriteAnchor(tag: Tag): string {
  * inline (so the preview origin never receives a relative request), rewrites
  * anchors for the bridge script, prepends the CSP and appends the bridge.
  *
- * `maxBytes` bounds the prepared document. The budget is charged for every
- * copy at the moment it is inserted — the page's own text first, then each
- * stylesheet, script and `data:` URL, including one reached again through an
- * imported stylesheet. An insertion that would go over is left out and
- * reported as skipped, so an oversized document is never built.
+ * `maxBytes` bounds the prepared document. The fixed prefix (doctype and CSP
+ * meta) and the bridge script are reserved before anything else is charged,
+ * because they are serialized too; every generated wrapper is charged with the
+ * insertion that creates it, and a rewritten tag pays for the bytes it adds
+ * beyond the payload inserted into it (an anchor's `target` and `rel`, the
+ * quotes around a `data:` URL, escaped text). Insertions are charged in
+ * document order — the page's own text first, then each stylesheet, script and
+ * `data:` URL, including one reached again through an imported stylesheet. An
+ * insertion that would go over is left out and reported as skipped, so an
+ * oversized document is never built.
  */
 export function buildPreviewDocument(options: {
   html: string;
@@ -770,14 +812,31 @@ export function buildPreviewDocument(options: {
   maxBytes?: number;
 }): PreviewDocument {
   const { html, docPath, assets, token } = options;
+  const prefix = injectCsp("");
+  const bridge = previewBridge(token);
   const inlined = new Set<string>();
   const missing = new Set<string>();
-  let remaining = (options.maxBytes ?? PREVIEW_MAX_TOTAL_BYTES) - utf8Length(html);
+  let remaining =
+    (options.maxBytes ?? PREVIEW_MAX_TOTAL_BYTES) -
+    utf8Length(prefix) -
+    utf8Length(bridge) -
+    utf8Length(html);
   const charge: PreviewCharge = (bytes) => {
     if (bytes > remaining) return false;
     remaining -= bytes;
     return true;
   };
+  // What the current tag's own insertions already paid. A rewritten tag is
+  // charged for its serialized growth minus this, so a payload is never paid
+  // for twice. It is reset when a new tag is visited.
+  let paidForTag = 0;
+  const trackCharge: PreviewCharge = (bytes) => {
+    if (!charge(bytes)) return false;
+    paidForTag += bytes;
+    return true;
+  };
+  /** Assets inserted into the tag being visited, for a fallback that drops it. */
+  let inlinedInTag: string[] = [];
 
   // `leave` keeps the reference as written (external, `data:`, a fragment);
   // `local` means the document was asking the workspace for the file.
@@ -819,11 +878,12 @@ export function buildPreviewDocument(options: {
       return null;
     }
     const replacement = dataUrl(found.asset, found.path);
-    if (!replacement || !charge(utf8Length(replacement))) {
+    if (!replacement || !trackCharge(utf8Length(replacement))) {
       missing.add(found.path);
       return null;
     }
     inlined.add(found.path);
+    inlinedInTag.push(found.path);
     return replacement;
   };
 
@@ -865,10 +925,48 @@ export function buildPreviewDocument(options: {
     };
   };
 
+  /**
+   * Serializes a rewritten tag and charges the bytes it adds.
+   *
+   * The `data:` URLs inserted into the tag paid for themselves through
+   * `inlineBytes`; what is left is markup the rewrite itself grows: the
+   * anchor's `target` and `rel`, the quotes around an inlined value, escaped
+   * attribute text, a re-quoted attribute. `null` means the growth no longer
+   * fits.
+   */
+  const rewriteTag = (tag: Tag, attrs: Attr[]): string | null => {
+    const text = formatTag(tag, attrs);
+    const growth = utf8Length(text) - utf8Length(tag.raw) - paidForTag;
+    if (growth > 0 && !charge(growth)) return null;
+    return text;
+  };
+
+  /**
+   * A tag whose rewrite could not be paid for is kept without the references
+   * it would have inlined, so the preview origin still never receives a
+   * relative request, and those assets are reported as skipped. If even that
+   * form would grow the document, the element is left out entirely — the one
+   * form that cannot add bytes.
+   */
+  const dropRewritten = (tag: Tag, names: string[]): string => {
+    for (const path of inlinedInTag) {
+      inlined.delete(path);
+      missing.add(path);
+    }
+    inlinedInTag = [];
+    const fallback = formatTag(tag, dropAttrs(tag.attrs, names));
+    const growth = utf8Length(fallback) - utf8Length(tag.raw);
+    if (growth > 0 && !charge(growth)) return "";
+    return fallback;
+  };
+
   const body = walk(
     html,
     (incoming) => {
       if (incoming.closing) return null;
+      // Each tag starts a new accounting window.
+      paidForTag = 0;
+      inlinedInTag = [];
       const styleValue = attr(incoming, "style");
       const tag = styleValue
         ? {
@@ -876,7 +974,7 @@ export function buildPreviewDocument(options: {
             attrs: upsertAttr(
               incoming.attrs,
               "style",
-              inlineCss(styleValue, docPath, assets, missing, new Set(), charge),
+              inlineCss(styleValue, docPath, assets, missing, new Set(), trackCharge),
             ),
           }
         : incoming;
@@ -900,7 +998,9 @@ export function buildPreviewDocument(options: {
         if (found.asset.kind !== "text") {
           return { replacement: "" };
         }
-        if (!charge(utf8Length(found.asset.text))) {
+        // The stylesheet text and the `<style></style>` that replaces the
+        // `<link>` are both new bytes in the document.
+        if (!charge(utf8Length(found.asset.text) + utf8Length("<style></style>"))) {
           missing.add(found.path);
           return { replacement: "" };
         }
@@ -919,16 +1019,20 @@ export function buildPreviewDocument(options: {
         if (found.asset.kind !== "text") {
           return { replacement: "", skipBody: true };
         }
-        if (!charge(utf8Length(found.asset.text))) {
-          missing.add(found.path);
-          return { replacement: "", skipBody: true };
-        }
         // JSON-LD, import maps, templates and modules all keep their type.
         const type = attr(tag, "type");
         const typeAttr = type ? ` type="${escapeAttr(type)}"` : "";
+        // A `</script` in the text would end the element early; escaping adds a
+        // backslash to each one, and those bytes count too.
+        const escaped = found.asset.text.replace(/<\/script/gi, "<\\/script");
+        // The script text and its generated wrapper are both new bytes.
+        if (!charge(utf8Length(escaped) + utf8Length(`<script${typeAttr}></script>`))) {
+          missing.add(found.path);
+          return { replacement: "", skipBody: true };
+        }
         inlined.add(found.path);
         return {
-          replacement: `<script${typeAttr}>${found.asset.text.replace(/<\/script/gi, "<\\/script")}</script>`,
+          replacement: `<script${typeAttr}>${escaped}</script>`,
           skipBody: true,
         };
       }
@@ -948,7 +1052,9 @@ export function buildPreviewDocument(options: {
           if (next === null) attrs = dropAttrs(attrs, ["srcset"]);
           else if (next !== undefined) attrs = upsertAttr(attrs, "srcset", next);
         }
-        return { replacement: formatTag(tag, attrs) };
+        return {
+          replacement: rewriteTag(tag, attrs) ?? dropRewritten(tag, ["src", "srcset"]),
+        };
       }
 
       if (name === "video" || name === "audio" || name === "track" || name === "iframe") {
@@ -960,17 +1066,23 @@ export function buildPreviewDocument(options: {
           attrs = result.attrs;
           changed = changed || result.changed;
         }
-        return changed || styleValue ? { replacement: formatTag(tag, attrs) } : null;
+        return changed || styleValue
+          ? { replacement: rewriteTag(tag, attrs) ?? dropRewritten(tag, names) }
+          : null;
       }
 
       if (name === "object") {
         const result = inlineAttribute(tag, tag.attrs, "data");
-        return result.changed || styleValue ? { replacement: formatTag(tag, result.attrs) } : null;
+        return result.changed || styleValue
+          ? { replacement: rewriteTag(tag, result.attrs) ?? dropRewritten(tag, ["data"]) }
+          : null;
       }
 
       if (name === "embed") {
         const result = inlineAttribute(tag, tag.attrs, "src");
-        return result.changed || styleValue ? { replacement: formatTag(tag, result.attrs) } : null;
+        return result.changed || styleValue
+          ? { replacement: rewriteTag(tag, result.attrs) ?? dropRewritten(tag, ["src"]) }
+          : null;
       }
 
       if (name === "svg" || name === "image" || name === "use") {
@@ -994,21 +1106,29 @@ export function buildPreviewDocument(options: {
           const fragment = hash >= 0 ? value.slice(hash) : "";
           attrs = upsertAttr(attrs, attribute, `${replacement}${fragment}`);
         }
-        return changed || styleValue ? { replacement: formatTag(tag, attrs) } : null;
+        return changed || styleValue
+          ? { replacement: rewriteTag(tag, attrs) ?? dropRewritten(tag, ["href", "xlink:href"]) }
+          : null;
       }
 
-      if (name === "a") return { replacement: rewriteAnchor(tag) };
+      if (name === "a") {
+        const attrs = anchorAttrs(tag);
+        // An anchor that cannot pay for `target`/`rel` keeps its original form.
+        return attrs ? { replacement: rewriteTag(tag, attrs) ?? tag.raw } : null;
+      }
 
       // Nothing else changes, but an inline style may now carry a data URL.
-      return styleValue ? { replacement: formatTag(tag) } : null;
+      if (!styleValue) return null;
+      return { replacement: rewriteTag(tag, tag.attrs) ?? dropRewritten(tag, ["style"]) };
     },
     (name, text) =>
       name === "style" ? inlineCss(text, docPath, assets, missing, new Set(), charge) : text,
   );
 
   // The policy is the document's first bytes; the bridge is appended after the
-  // document so no `</body>` inside a script or comment can split it.
-  const document = injectCsp(body) + previewBridge(token);
+  // document so no `</body>` inside a script or comment can split it. Both
+  // were reserved in `remaining` before the first insertion was charged.
+  const document = prefix + stripLeadingDoctype(body) + bridge;
 
   return {
     srcdoc: document,

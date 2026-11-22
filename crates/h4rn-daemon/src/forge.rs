@@ -881,6 +881,7 @@ impl ForgeService {
                         subagent_id: None,
                         host: target.host,
                         harness: target.harness,
+                        agent_id: None,
                         workspace_path: target.workspace_path,
                         model: target.model,
                         prompt: context.clone(),
