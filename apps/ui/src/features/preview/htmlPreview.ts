@@ -338,24 +338,39 @@ export type SrcsetCandidate = { url: string; descriptor: string };
 /**
  * Splits a `srcset` value into its candidates.
  *
- * A `data:` candidate is left alone by the caller: its commas are part of the
- * URL, not separators, and it never needs the workspace.
+ * Follows the HTML parser's shape rather than splitting on commas: a candidate
+ * URL is a run of non-whitespace, so the commas inside `data:` URLs stay part
+ * of the URL, and descriptors run to the next top-level comma. That is what
+ * lets a mixed list keep its `data:` candidate and inline the workspace ones.
  */
 export function parseSrcset(value: string): SrcsetCandidate[] {
   const candidates: SrcsetCandidate[] = [];
-  for (const part of value.split(",")) {
-    const trimmed = part.trim();
-    if (!trimmed) continue;
-    const match = /^(\S+)(?:\s+([\s\S]*))?$/.exec(trimmed);
-    if (!match) continue;
-    candidates.push({ url: match[1] ?? "", descriptor: (match[2] ?? "").trim() });
+  const length = value.length;
+  let index = 0;
+  while (index < length) {
+    while (index < length) {
+      const ch = value[index] ?? "";
+      if (ch === "," || /\s/.test(ch)) index += 1;
+      else break;
+    }
+    if (index >= length) break;
+    const urlStart = index;
+    while (index < length && !/\s/.test(value[index] ?? "")) index += 1;
+    const url = value.slice(urlStart, index);
+    let depth = 0;
+    let descriptorEnd = index;
+    while (descriptorEnd < length) {
+      const ch = value[descriptorEnd] ?? "";
+      if (ch === "(") depth += 1;
+      else if (ch === ")") depth = Math.max(0, depth - 1);
+      else if (ch === "," && depth === 0) break;
+      descriptorEnd += 1;
+    }
+    const descriptor = value.slice(index, descriptorEnd).trim();
+    index = descriptorEnd + 1;
+    if (url) candidates.push({ url, descriptor });
   }
   return candidates;
-}
-
-/** True when a `srcset` carries a `data:` URL whose commas cannot be split. */
-function srcsetHasDataUrl(value: string): boolean {
-  return /(^|,)\s*data:/i.test(value);
 }
 
 /** Finds the closing tag for a raw-text element, starting at `from`. */
@@ -605,12 +620,20 @@ function dataUrl(asset: PreviewAsset, path: string): string | null {
   return `data:${mime};base64,${asset.base64}`;
 }
 
+/** Charges one insertion against the document budget; false when it will not fit. */
+export type PreviewCharge = (bytes: number) => boolean;
+
+function utf8Length(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
 function inlineCss(
   css: string,
   cssPath: string,
   assets: PreviewAssetMap,
   missing?: Set<string>,
   seen: Set<string> = new Set(),
+  charge?: PreviewCharge,
 ): string {
   if (seen.has(cssPath)) return "";
   seen.add(cssPath);
@@ -635,7 +658,13 @@ function inlineCss(
         missing?.add(path);
         return "";
       }
-      const nested = inlineCss(asset.text, path, assets, missing, seen);
+      // The imported sheet's text is inserted here, once per import, so it is
+      // charged here. The nested `url()` replacements charge themselves.
+      if (charge && !charge(utf8Length(asset.text))) {
+        missing?.add(path);
+        return "";
+      }
+      const nested = inlineCss(asset.text, path, assets, missing, seen, charge);
       const condition = (media ?? "").trim();
       return condition ? `@media ${condition} {${nested}}` : nested;
     },
@@ -660,7 +689,7 @@ function inlineCss(
         return "none";
       }
       const replacement = dataUrl(asset, path);
-      if (!replacement) {
+      if (!replacement || (charge && !charge(utf8Length(replacement)))) {
         missing?.add(path);
         return "none";
       }
@@ -674,44 +703,21 @@ function inlineCss(
 /**
  * Injects the policy as the document's first bytes.
  *
- * There is no `<head>` matching: untrusted markup cannot make the policy land
- * anywhere but the implicit head. The one exception is a doctype — a meta
- * before it would switch the page into quirks mode — so leading whitespace and
- * comments are skipped while locating it, and the policy goes directly after it.
+ * The prefix is trusted and fixed: a doctype of our own (so the page is never
+ * in quirks mode) followed by the CSP meta. The workspace document follows it
+ * with any leading doctype removed; leading comments stay where they are, now
+ * after the policy. This never scans the untrusted document for a doctype or
+ * comment terminator, so a malformed prefix (`<!-->`, `<!--->`, `<!-- x --!>`)
+ * can never put workspace bytes ahead of the CSP.
  */
 export function injectCsp(html: string): string {
-  const index = doctypeIndex(html);
-  if (index >= 0) {
-    const doctype = /^<!doctype\b[^>]*>/i.exec(html.slice(index));
-    if (doctype) {
-      return `${html.slice(0, index)}${doctype[0]}${PREVIEW_CSP_META}${html.slice(
-        index + doctype[0].length,
-      )}`;
-    }
-  }
-  return `${PREVIEW_CSP_META}${html}`;
+  return `<!doctype html>${PREVIEW_CSP_META}${stripLeadingDoctype(html)}`;
 }
 
-/** The offset of a leading doctype, skipping only whitespace and comments. */
-function doctypeIndex(html: string): number {
-  let index = 0;
-  while (index < html.length) {
-    while (index < html.length && /\s/.test(html[index] ?? "")) index += 1;
-    if (html.startsWith("<!--", index)) {
-      const close = html.indexOf("-->", index + 4);
-      if (close < 0) return -1;
-      index = close + 3;
-      continue;
-    }
-    if (html.startsWith("<?", index)) {
-      const close = html.indexOf(">", index + 2);
-      if (close < 0) return -1;
-      index = close + 1;
-      continue;
-    }
-    break;
-  }
-  return /^<!doctype\b/i.test(html.slice(index)) ? index : -1;
+/** Removes one leading doctype (behind whitespace only), if there is one. */
+function stripLeadingDoctype(html: string): string {
+  const match = /^\s*<!doctype\b[^>]*>/i.exec(html);
+  return match ? html.slice(match[0].length) : html;
 }
 
 /**
@@ -725,7 +731,12 @@ function doctypeIndex(html: string): number {
  */
 export function previewBridge(token: string): string {
   const safe = token.replace(/[^a-zA-Z0-9-]/g, "");
-  return `<script>(function(){var token=${JSON.stringify(safe)};document.addEventListener("click",function(event){var node=event.target;while(node&&node.tagName!=="A"){node=node.parentNode}if(!node)return;var href=node.getAttribute("href")||"";if(!href||href.charAt(0)==="#")return;event.preventDefault();parent.postMessage({type:"h4rn:preview-open",token:token,href:href},"*")},true);document.addEventListener("submit",function(event){event.preventDefault()},true)})();</script>`;
+  // The ready message is the panel's proof that page scripts actually run. A
+  // WebView that injects its own scripts into the response can add hashes to
+  // the CSP, which makes browsers ignore `'unsafe-inline'`; this script would
+  // then never run, and the panel shows an honest notice instead of a page
+  // that silently lost its scripts.
+  return `<script>(function(){var token=${JSON.stringify(safe)};parent.postMessage({type:"h4rn:preview-ready",token:token},"*");document.addEventListener("click",function(event){var node=event.target;while(node&&node.tagName!=="A"){node=node.parentNode}if(!node)return;var href=node.getAttribute("href")||"";if(!href||href.charAt(0)==="#")return;event.preventDefault();parent.postMessage({type:"h4rn:preview-open",token:token,href:href},"*")},true);document.addEventListener("submit",function(event){event.preventDefault()},true)})();</script>`;
 }
 
 function rewriteAnchor(tag: Tag): string {
@@ -744,16 +755,29 @@ function rewriteAnchor(tag: Tag): string {
  * Inlines the assets in `assets`, removes every local reference it could not
  * inline (so the preview origin never receives a relative request), rewrites
  * anchors for the bridge script, prepends the CSP and appends the bridge.
+ *
+ * `maxBytes` bounds the prepared document. The budget is charged for every
+ * copy at the moment it is inserted — the page's own text first, then each
+ * stylesheet, script and `data:` URL, including one reached again through an
+ * imported stylesheet. An insertion that would go over is left out and
+ * reported as skipped, so an oversized document is never built.
  */
 export function buildPreviewDocument(options: {
   html: string;
   docPath: string;
   assets: PreviewAssetMap;
   token: string;
+  maxBytes?: number;
 }): PreviewDocument {
   const { html, docPath, assets, token } = options;
   const inlined = new Set<string>();
   const missing = new Set<string>();
+  let remaining = (options.maxBytes ?? PREVIEW_MAX_TOTAL_BYTES) - utf8Length(html);
+  const charge: PreviewCharge = (bytes) => {
+    if (bytes > remaining) return false;
+    remaining -= bytes;
+    return true;
+  };
 
   // `leave` keeps the reference as written (external, `data:`, a fragment);
   // `local` means the document was asking the workspace for the file.
@@ -781,7 +805,6 @@ export function buildPreviewDocument(options: {
       missing.add(target.path);
       return null;
     }
-    inlined.add(target.path);
     return { path: target.path, asset };
   };
 
@@ -796,15 +819,21 @@ export function buildPreviewDocument(options: {
       return null;
     }
     const replacement = dataUrl(found.asset, found.path);
-    if (!replacement) missing.add(found.path);
+    if (!replacement || !charge(utf8Length(replacement))) {
+      missing.add(found.path);
+      return null;
+    }
+    inlined.add(found.path);
     return replacement;
   };
 
   /** Rewrites one `srcset`; `null` means the attribute must go. */
   const inlineSrcset = (value: string): string | null | undefined => {
-    if (srcsetHasDataUrl(value)) return undefined;
     const kept: string[] = [];
     let changed = false;
+    // Every candidate is parsed, including `data:` and `https:` ones, which
+    // stay as written. A workspace candidate is inlined, or removed and
+    // counted as skipped when its bytes are not available.
     for (const candidate of parseSrcset(value)) {
       if (!isLocal(candidate.url)) {
         kept.push(
@@ -847,7 +876,7 @@ export function buildPreviewDocument(options: {
             attrs: upsertAttr(
               incoming.attrs,
               "style",
-              inlineCss(styleValue, docPath, assets, missing),
+              inlineCss(styleValue, docPath, assets, missing, new Set(), charge),
             ),
           }
         : incoming;
@@ -871,9 +900,13 @@ export function buildPreviewDocument(options: {
         if (found.asset.kind !== "text") {
           return { replacement: "" };
         }
-        return {
-          replacement: `<style>${inlineCss(found.asset.text, found.path, assets, missing)}</style>`,
-        };
+        if (!charge(utf8Length(found.asset.text))) {
+          missing.add(found.path);
+          return { replacement: "" };
+        }
+        const css = inlineCss(found.asset.text, found.path, assets, missing, new Set(), charge);
+        inlined.add(found.path);
+        return { replacement: `<style>${css}</style>` };
       }
 
       if (name === "script") {
@@ -886,9 +919,14 @@ export function buildPreviewDocument(options: {
         if (found.asset.kind !== "text") {
           return { replacement: "", skipBody: true };
         }
+        if (!charge(utf8Length(found.asset.text))) {
+          missing.add(found.path);
+          return { replacement: "", skipBody: true };
+        }
         // JSON-LD, import maps, templates and modules all keep their type.
         const type = attr(tag, "type");
         const typeAttr = type ? ` type="${escapeAttr(type)}"` : "";
+        inlined.add(found.path);
         return {
           replacement: `<script${typeAttr}>${found.asset.text.replace(/<\/script/gi, "<\\/script")}</script>`,
           skipBody: true,
@@ -964,7 +1002,8 @@ export function buildPreviewDocument(options: {
       // Nothing else changes, but an inline style may now carry a data URL.
       return styleValue ? { replacement: formatTag(tag) } : null;
     },
-    (name, text) => (name === "style" ? inlineCss(text, docPath, assets, missing) : text),
+    (name, text) =>
+      name === "style" ? inlineCss(text, docPath, assets, missing, new Set(), charge) : text,
   );
 
   // The policy is the document's first bytes; the bridge is appended after the

@@ -39,20 +39,50 @@ export function PreviewFrame({
 }) {
   const frame = useRef<HTMLIFrameElement | null>(null);
   const [pending, setPending] = useState<{ url: string; host: string } | null>(null);
+  const [scriptsBlocked, setScriptsBlocked] = useState(false);
+  const ready = useRef(false);
+  const readyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const frozen = useRef(false);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: a new document must dismiss an old confirmation
   useEffect(() => {
     frozen.current = false;
+    ready.current = false;
+    setScriptsBlocked(false);
     setPending(null);
   }, [srcdoc, url]);
+
+  useEffect(
+    () => () => {
+      if (readyTimer.current) clearTimeout(readyTimer.current);
+    },
+    [],
+  );
+
+  // Some Android WebViews inject the shell's initialization scripts into
+  // custom-protocol HTML and add their hashes to the CSP header, which makes
+  // browsers ignore `script-src 'unsafe-inline'`. The page's scripts — and
+  // this panel's bridge — then never run. The bridge's ready message is the
+  // proof they do; without it the preview is turned off with a plain notice
+  // rather than shown with silently dead scripts.
+  const onFrameLoad = () => {
+    if (readyTimer.current) clearTimeout(readyTimer.current);
+    readyTimer.current = setTimeout(() => {
+      if (!ready.current) setScriptsBlocked(true);
+    }, 800);
+  };
 
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
       if (event.source !== frame.current?.contentWindow) return;
       const data = event.data as { type?: unknown; token?: unknown; href?: unknown } | null;
-      if (data?.type !== "h4rn:preview-open") return;
-      if (data.token !== token) return;
+      if (data?.token !== token) return;
+      if (data.type === "h4rn:preview-ready") {
+        ready.current = true;
+        if (readyTimer.current) clearTimeout(readyTimer.current);
+        return;
+      }
+      if (data.type !== "h4rn:preview-open") return;
       // Once the bar is up its URL is frozen: another message from the page —
       // which controls the whole frame — cannot retarget the confirmation.
       if (frozen.current) return;
@@ -93,14 +123,25 @@ export function PreviewFrame({
           </button>
         </div>
       ) : null}
-      <iframe
-        ref={frame}
-        className="q-pv-frame"
-        title={title}
-        sandbox={PREVIEW_SANDBOX}
-        {...(url ? { src: url } : { srcDoc: srcdoc })}
-        referrerPolicy="no-referrer"
-      />
+      {scriptsBlocked ? (
+        <div className="q-sub-empty q-pv-state" role="alert">
+          <p className="q-pv-state-t">This device can’t run scripts in a preview.</p>
+          <p>
+            Its WebView blocks a sandboxed page’s own scripts, so the preview was turned off instead
+            of showing the page without them. Update Android System WebView, then reload.
+          </p>
+        </div>
+      ) : (
+        <iframe
+          ref={frame}
+          className="q-pv-frame"
+          title={title}
+          sandbox={PREVIEW_SANDBOX}
+          {...(url ? { src: url } : { srcDoc: srcdoc })}
+          referrerPolicy="no-referrer"
+          onLoad={onFrameLoad}
+        />
+      )}
     </>
   );
 }

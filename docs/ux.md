@@ -212,6 +212,17 @@ without leaving h4rn.
   Reload. The selected file stays watched on every outcome, so recreating it (or fixing its
   encoding) reloads the preview without closing the tab; after a reconnect, a sign-in or a machine
   switch the workspace watch is re-sent on the new connection.
+- **Android WebViews without document-start scripts.** Wry 0.57 injects the shell's
+  initialization scripts into HTML served from a custom protocol when the WebView lacks
+  `DOCUMENT_START_SCRIPT`, and prepends their hashes to `script-src`; a CSP with hashes ignores
+  `'unsafe-inline'`, so the page's scripts and the link bridge never run. The preview cannot opt
+  out of that fallback from the shell side, so it detects it: the bridge posts
+  `h4rn:preview-ready` when it runs, and if the frame loads without that message the preview is
+  turned off with a plain notice asking for an updated Android System WebView. This was verified by
+  reading Wry 0.57.2's Android `inject_scripts_into_html` path, by the shell's unit test that the
+  served policy is the documented `script-src 'unsafe-inline' https:` header with no hashes (all
+  desktop and current Android WebViews keep the frame), and by the panel test that a frame without
+  a ready message is replaced by the notice. It cannot be verified on an old WebView in CI.
 - Not supported yet: MCP Apps rendering, a headless browser, and proxying a page's own development
   server. A page that needs a dev server must use absolute `https:` URLs for its assets.
 

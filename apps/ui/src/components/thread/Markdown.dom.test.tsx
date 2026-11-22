@@ -56,7 +56,8 @@ describe("markdown HTML links", () => {
 
   it("leaves the link alone outside thread messages", () => {
     const container = render("[report](reports/report.html)", false);
-    click(container, { metaKey: true });
+    const event = click(container);
+    expect(event.defaultPrevented).toBe(false);
     expect(getState().ui.preview).toBeNull();
   });
 

@@ -105,6 +105,17 @@ describe("preview link bridge", () => {
     });
   }
 
+  function ready(source: Window | null, token: string) {
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: { type: "h4rn:preview-ready", token },
+          source,
+        }),
+      );
+    });
+  }
+
   it("asks before opening a link and opens only on the click", () => {
     const { root, container } = render(
       <PreviewFrame srcdoc="<p>hi</p>" url={null} token="t1" title="Preview" />,
@@ -178,6 +189,44 @@ describe("preview link bridge", () => {
 
     message(source, "t1", "https://second.example/other");
     expect(container.querySelector(".q-pv-link")?.textContent).toContain("second.example");
+  });
+
+  it("turns the preview off when the frame never reports its bridge running", () => {
+    vi.useFakeTimers();
+    try {
+      const { root, container } = render(
+        <PreviewFrame srcdoc="<p>hi</p>" url={null} token="t1" title="Preview" />,
+      );
+      roots.push(root);
+      act(() => frame(container).dispatchEvent(new Event("load")));
+      act(() => {
+        vi.advanceTimersByTime(900);
+      });
+      expect(container.querySelector("iframe")).toBeNull();
+      expect(container.textContent).toContain("can’t run scripts in a preview");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps the frame when the bridge reports that scripts run", () => {
+    vi.useFakeTimers();
+    try {
+      const { root, container } = render(
+        <PreviewFrame srcdoc="<p>hi</p>" url={null} token="t1" title="Preview" />,
+      );
+      roots.push(root);
+      const iframe = frame(container);
+      ready(iframe.contentWindow, "t1");
+      act(() => iframe.dispatchEvent(new Event("load")));
+      act(() => {
+        vi.advanceTimersByTime(900);
+      });
+      expect(container.querySelector("iframe")).not.toBeNull();
+      expect(container.textContent).not.toContain("can’t run scripts in a preview");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("renders the shell URL as src and keeps srcdoc when there is none", () => {

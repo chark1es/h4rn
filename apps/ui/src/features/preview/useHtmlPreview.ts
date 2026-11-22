@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { FsFileContent, ThreadSummary } from "@/gen";
 import { retainWorkspaceWatch } from "@/lib/client/fsWatch";
-import { getClient } from "@/lib/store/appStore";
+import { getClient, onAppEvent } from "@/lib/store/appStore";
 import { isHtmlPath, type PreviewDocument } from "./htmlPreview";
 import { loadPreview, type PreviewFailure } from "./loadPreview";
 import { preparePreviewFrame, releasePreviewFrame } from "./previewFrame";
@@ -150,10 +150,14 @@ export function useHtmlPreview(thread: ThreadSummary | null, path: string | null
     return retainWorkspaceWatch(host, workspace);
   }, [host, workspace, path]);
 
+  // The app-level bus survives a client rebuild (sign-in, pairing, a machine
+  // switch, offline recovery), so the mounted preview keeps reloading after
+  // the transport is replaced. A listener on the client captured at mount
+  // would stop seeing changes with that client.
   useEffect(() => {
     if (!workspace || !path) return;
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const off = getClient().onEvent((envelope) => {
+    const off = onAppEvent((envelope) => {
       const event = envelope.event;
       if (event.type !== "fs_changed") return;
       if (event.workspace !== workspace) return;

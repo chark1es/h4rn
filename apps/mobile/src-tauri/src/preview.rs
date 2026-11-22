@@ -23,6 +23,14 @@ pub const PREVIEW_SCHEME: &str = "h4rn-preview";
 
 /// The policy the document is served with. The page may run scripts and load
 /// images, styles, scripts and fonts over `https:`; nothing talks to h4rn.
+///
+/// This header is also why page scripts work on Android at all: the document's
+/// own `<meta>` policy is enough on its own, but Android WebViews without
+/// `DOCUMENT_START_SCRIPT` make Wry inject the shell's initialization scripts
+/// into this HTML and prepend their hashes to `script-src`, and a CSP with
+/// hashes ignores `'unsafe-inline'`. A hash in that header cannot come from
+/// here, so the UI treats a frame that never runs its bridge as unsupported
+/// and turns the preview off (see `docs/ux.md`).
 const PREVIEW_CSP: &str = "default-src 'none'; img-src data: https:; media-src data: https:; object-src data:; style-src 'unsafe-inline' https:; script-src 'unsafe-inline' https:; font-src data: https:; connect-src https:";
 
 /// Largest prepared document the shell stores, in bytes. The UI caps the
@@ -210,6 +218,32 @@ mod tests {
             respond(&store, &request("/not-a-token")).status(),
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[test]
+    fn the_header_policy_allows_inline_scripts_and_adds_no_hashes() {
+        // Wry's Android fallback for WebViews without document-start scripts
+        // rewrites `script-src` with hashes, which makes browsers ignore
+        // `'unsafe-inline'`. This server must never do that itself: the policy
+        // it serves is the documented one, and the only place hashes can come
+        // from is that external fallback (which the UI detects at runtime).
+        let store = PreviewStore::default();
+        let prepared = store.insert("<p>hi</p>".into()).expect("store");
+        let response = respond(&store, &request(&format!("/{}", prepared.token)));
+        let csp = response
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .and_then(|value| value.to_str().ok())
+            .expect("policy header");
+        assert_eq!(csp, PREVIEW_CSP);
+        let script_src = csp
+            .split(';')
+            .map(str::trim)
+            .find(|part| part.starts_with("script-src"))
+            .expect("script-src present");
+        assert!(script_src.contains("'unsafe-inline'"), "{script_src}");
+        assert!(!csp.contains("'sha256-"), "{csp}");
+        assert_eq!(String::from_utf8_lossy(response.body()), "<p>hi</p>");
     }
 
     #[test]

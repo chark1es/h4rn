@@ -233,8 +233,9 @@ describe("HTML preview document", () => {
       assets: {},
       token: "t1",
     });
-    // The policy is the document's first bytes, before the fake-head comment.
-    expect(built.srcdoc.startsWith(PREVIEW_CSP_META)).toBe(true);
+    // The trusted doctype and policy are the document's first bytes, before
+    // the fake-head comment.
+    expect(built.srcdoc.startsWith(`<!doctype html>${PREVIEW_CSP_META}`)).toBe(true);
     expect(built.srcdoc.indexOf(PREVIEW_CSP_META)).toBeLessThan(
       built.srcdoc.indexOf("<!-- <head> -->"),
     );
@@ -255,13 +256,15 @@ describe("HTML preview document", () => {
     );
   });
 
-  it("keeps the policy ahead of markup but behind a doctype", () => {
+  it("emits a trusted doctype and policy before the workspace document", () => {
     const injected = injectCsp("<p>hello</p>");
-    expect(injected.startsWith(PREVIEW_CSP_META)).toBe(true);
+    expect(injected.startsWith(`<!doctype html>${PREVIEW_CSP_META}`)).toBe(true);
+    expect(injected).toContain(PREVIEW_CSP);
 
+    // The document's own doctype is dropped; ours is the only one.
     const withDoctype = injectCsp("<!doctype html><p>hello</p>");
-    expect(withDoctype.startsWith("<!doctype html><meta")).toBe(true);
-    expect(withDoctype).toContain(PREVIEW_CSP);
+    expect(withDoctype.startsWith(`<!doctype html>${PREVIEW_CSP_META}<p>hello</p>`)).toBe(true);
+    expect(withDoctype.match(/<!doctype/gi)).toHaveLength(1);
   });
 
   it("removes local references it could not inline", () => {
@@ -357,6 +360,36 @@ describe("HTML preview document", () => {
     expect(built.missing).toEqual(["reports/gone.png"]);
   });
 
+  it("keeps a data: srcset candidate while inlining a workspace one", () => {
+    const built = buildPreviewDocument({
+      html: `<img srcset="data:image/png;base64,AAAA 1x, small.png 2x">`,
+      docPath: "index.html",
+      assets: {
+        "small.png": { kind: "bytes" as const, base64: "BBBB", mime: "image/png" },
+      },
+      token: "t1",
+    });
+    // The data URL's own comma is part of its URL, not a candidate boundary.
+    expect(built.srcdoc).toContain(
+      'srcset="data:image/png;base64,AAAA 1x, data:image/png;base64,BBBB 2x"',
+    );
+    expect(built.missing).toEqual([]);
+  });
+
+  it("removes a missing workspace srcset candidate and keeps the data: one", () => {
+    const built = buildPreviewDocument({
+      html: `<img srcset="data:image/png;base64,AAAA 1x, gone.png 2x, https://cdn.example.com/c.png 3x">`,
+      docPath: "index.html",
+      assets: {},
+      token: "t1",
+    });
+    expect(built.srcdoc).toContain(
+      'srcset="data:image/png;base64,AAAA 1x, https://cdn.example.com/c.png 3x"',
+    );
+    expect(built.srcdoc).not.toContain("gone.png");
+    expect(built.missing).toEqual(["gone.png"]);
+  });
+
   it("drops a srcset attribute when no candidate can be inlined", () => {
     const built = buildPreviewDocument({
       html: `<picture><source srcset="gone.png 1x"></picture>`,
@@ -428,13 +461,42 @@ describe("HTML preview document", () => {
     expect(built.missing).toEqual([]);
   });
 
-  it("puts the policy after a doctype behind leading whitespace and comments", () => {
+  it("keeps leading comments after the policy instead of scanning for a doctype", () => {
     const injected = injectCsp("\n  <!-- generated -->\n<!doctype html><p>hello</p>");
-    const doctype = injected.indexOf("<!doctype html>");
-    expect(doctype).toBeGreaterThan(-1);
-    expect(doctype).toBeLessThan(injected.indexOf(PREVIEW_CSP_META));
-    expect(injected.indexOf(PREVIEW_CSP_META)).toBeLessThan(injected.indexOf("<p>hello</p>"));
-    expect(injected.startsWith("\n  <!-- generated -->\n<!doctype html><meta")).toBe(true);
+    expect(injected.startsWith(`<!doctype html>${PREVIEW_CSP_META}`)).toBe(true);
+    expect(injected.indexOf(PREVIEW_CSP_META)).toBeLessThan(injected.indexOf("<!-- generated -->"));
+    expect(injected.indexOf("<!-- generated -->")).toBeLessThan(injected.indexOf("<p>hello</p>"));
+  });
+
+  it("charges an asset again when an imported stylesheet embeds it", () => {
+    const pixel = "A".repeat(36 * 1024);
+    const html = `<link rel="stylesheet" href="theme.css"><img src="logo.png">`;
+    const assets = {
+      "theme.css": { kind: "text" as const, text: `@import url("colors.css");` },
+      "colors.css": { kind: "text" as const, text: `.x { background: url(logo.png) }` },
+      "logo.png": { kind: "bytes" as const, base64: pixel, mime: "image/png" },
+    };
+    const bytes = (text: string) => new TextEncoder().encode(text).length;
+    const dataUrl = `data:image/png;base64,${pixel}`;
+    // Room for the page, both stylesheets and exactly one copy of the image.
+    const maxBytes =
+      bytes(html) +
+      bytes(assets["theme.css"].text) +
+      bytes(assets["colors.css"].text) +
+      bytes(dataUrl) +
+      512;
+    const built = buildPreviewDocument({
+      html,
+      docPath: "page.html",
+      assets,
+      token: "t1",
+      maxBytes,
+    });
+    // The image is inserted once through the imported stylesheet. The second
+    // copy, asked for by the <img>, does not fit and is not inlined or counted
+    // as missing silently: it is reported as skipped.
+    expect(built.srcdoc.split("data:image/png;base64,").length - 1).toBe(1);
+    expect(built.missing).toEqual(["logo.png"]);
   });
 
   it("names images and fonts by type, with a safe fallback", () => {

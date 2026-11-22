@@ -71,17 +71,21 @@ function pageTooLarge(size: number): PreviewFailure {
  * transport. That bound is the raw text, not a promise that every file under
  * it opens: JSON escaping of quotes, newlines and control characters can push
  * the serialized response past the frame, and the daemon then answers with
- * `content_omitted: too_large`. The 10 MB budget is charged as each asset
- * arrives: once it is spent, later references are not fetched at all and are
- * reported as skipped. One asset over the per-response cap, missing,
- * non-UTF-8 or outside the workspace is skipped; the page still renders and
- * reports the skipped count.
+ * `content_omitted: too_large`. The 10 MB budget stops the fetching once it is
+ * spent, and the document builder charges every copy again as it is inserted
+ * (including a file reached through an imported stylesheet), leaving out an
+ * insertion that would not fit rather than building an oversized page. One
+ * asset over the per-response cap, missing, non-UTF-8 or outside the workspace
+ * is skipped; the page still renders and reports the skipped count.
  */
 export async function loadPreview(options: {
   path: string;
   read: PreviewReader;
+  /** Total embedded-size bound; the production value is the exported cap. */
+  maxTotalBytes?: number;
 }): Promise<PreviewLoad> {
   const { path, read } = options;
+  const cap = options.maxTotalBytes ?? PREVIEW_MAX_TOTAL_BYTES;
   const none: PreviewLoad = { document: null, failure: null, watched: [] };
   if (!isHtmlPath(path)) return none;
 
@@ -143,14 +147,25 @@ export async function loadPreview(options: {
   const order: { path: string; asset: PreviewAsset }[] = [];
   const fetched = new Set<string>();
   let total = htmlBytes;
-  let exhausted = total >= PREVIEW_MAX_TOTAL_BYTES;
+  let exhausted = total >= cap;
+  const loadedByKey = new Map<string, PreviewAsset>();
 
   while (queue.length > 0) {
     const item = queue.shift();
     if (!item) break;
     copies.set(item.path, (copies.get(item.path) ?? 0) + item.count);
     const key = `${item.kind}:${item.path}`;
-    if (fetched.has(key)) continue;
+    if (fetched.has(key)) {
+      // The asset is already in hand, but a later reference (for example from
+      // an imported stylesheet) inserts another copy, so it is charged too.
+      const known = loadedByKey.get(key);
+      if (known) {
+        const cost = previewEmbeddedBytes(known) * item.count;
+        if (previewAssetFits(total, cost, cap)) total += cost;
+        else exhausted = true;
+      }
+      continue;
+    }
     fetched.add(key);
 
     // Once nothing more fits, the rest of the queue is reported as skipped
@@ -179,15 +194,16 @@ export async function loadPreview(options: {
     }
     if (!loaded) continue;
 
+    loadedByKey.set(key, loaded);
     const count = copies.get(item.path) ?? 1;
     const cost = previewEmbeddedBytes(loaded) * count;
-    if (!previewAssetFits(total, cost)) {
+    if (!previewAssetFits(total, cost, cap)) {
       exhausted = true;
       continue;
     }
     total += cost;
     order.push({ path: item.path, asset: loaded });
-    if (total >= PREVIEW_MAX_TOTAL_BYTES) exhausted = true;
+    if (total >= cap) exhausted = true;
 
     if (loaded.kind === "text" && /\.css$/i.test(item.path)) {
       for (const nested of scanCssReferences(loaded.text, item.path).refs) {
@@ -205,9 +221,10 @@ export async function loadPreview(options: {
     docPath: path,
     assets,
     token: previewToken(),
+    maxBytes: cap,
   });
   const size = new TextEncoder().encode(built.srcdoc).length;
-  if (size > PREVIEW_MAX_TOTAL_BYTES) {
+  if (size > cap) {
     return { document: null, failure: pageTooLarge(size), watched: [...watched] };
   }
   return { document: built, failure: null, watched: [...watched] };

@@ -10,6 +10,7 @@ import { useHtmlPreview } from "./useHtmlPreview";
 const state = vi.hoisted(() => ({
   requests: [] as unknown[],
   onEvent: null as ((envelope: EventEnvelope) => void) | null,
+  appListeners: new Set<(envelope: EventEnvelope) => void>(),
   read: null as null | ((path: string) => FsFileContent | Error),
   prepare: null as null | ((html: string) => Promise<{ url: string; token: string } | null>),
   release: null as null | ((url: string | null) => Promise<void>),
@@ -24,6 +25,8 @@ vi.mock("@/lib/store/appStore", () => ({
       if (!file) throw new Error("no reader");
       return { type: "fs_file", file };
     },
+    // A client's own listeners die with that client when the transport is
+    // rebuilt; the app-level ones below do not.
     onEvent: (listener: (envelope: EventEnvelope) => void) => {
       state.onEvent = listener;
       return () => {
@@ -31,7 +34,23 @@ vi.mock("@/lib/store/appStore", () => ({
       };
     },
   }),
+  onAppEvent: (listener: (envelope: EventEnvelope) => void) => {
+    state.appListeners.add(listener);
+    return () => {
+      state.appListeners.delete(listener);
+    };
+  },
 }));
+
+/** Replaces the transport client the way a sign-in or machine switch does. */
+function replaceClient(): void {
+  state.onEvent = null;
+}
+
+/** Delivers an event on the app bus, which outlives every client. */
+function appEvent(event: EventEnvelope): void {
+  for (const listener of [...state.appListeners]) listener(event);
+}
 
 vi.mock("@/lib/client/fsWatch", () => ({
   retainWorkspaceWatch: () => () => undefined,
@@ -122,6 +141,7 @@ beforeEach(() => {
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   state.requests.length = 0;
   state.onEvent = null;
+  state.appListeners.clear();
   state.read = (path) => htmlFile(path, "<p>hi</p>");
   state.prepare = async () => ({ url: "h4rn-preview://localhost/abc", token: "t1" });
   state.release = async () => undefined;
@@ -171,7 +191,7 @@ describe("useHtmlPreview recovery", () => {
 
       missing = false;
       act(() => {
-        state.onEvent?.({
+        appEvent({
           seq: 1,
           event: { type: "fs_changed", workspace: "/work", path: "reports/page.html" },
           replayed: false,
@@ -181,6 +201,36 @@ describe("useHtmlPreview recovery", () => {
         vi.advanceTimersByTime(250);
       });
       await flush();
+      expect(container.querySelector('[data-testid="state"]')?.textContent).toBe("loaded");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps reloading after the client that loaded it is replaced", async () => {
+    vi.useFakeTimers();
+    try {
+      const { container } = render("reports/page.html");
+      await flush();
+      const before = state.requests.length;
+      expect(before).toBeGreaterThan(0);
+
+      // The transport is rebuilt (sign-in, pairing, machine switch, recovery):
+      // the old client and its listeners are gone.
+      replaceClient();
+      state.read = (path) => htmlFile(path, "<p>changed</p>");
+      act(() => {
+        appEvent({
+          seq: 2,
+          event: { type: "fs_changed", workspace: "/work", path: "reports/page.html" },
+          replayed: false,
+        } as EventEnvelope);
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(250);
+      });
+      await flush();
+      expect(state.requests.length).toBeGreaterThan(before);
       expect(container.querySelector('[data-testid="state"]')?.textContent).toBe("loaded");
     } finally {
       vi.useRealTimers();
