@@ -222,6 +222,10 @@ pub enum AcpEvent {
     Closed {
         /// Human-readable reason.
         message: String,
+        /// What the reader observed: the stdout ending (an EOF) or a failed
+        /// read. A failed read is not the same death, and the bridge reports
+        /// the kind it is given instead of assuming an EOF.
+        kind: TransportCloseKind,
     },
     /// The agent process exited.
     Exited {
@@ -1267,6 +1271,7 @@ where
                 .events_tx
                 .send(AcpEvent::Closed {
                     message: "the ACP agent stdout closed".into(),
+                    kind: close_kind,
                 })
                 .await;
         }
@@ -2285,12 +2290,17 @@ mod tests {
         let mut events = client.take_events().expect("events");
         // The agent's stdout ends; the reader closes the transport for it.
         drop(agent_write);
-        loop {
+        let kind = loop {
             let event = events.recv().await.expect("the reader reports its close");
-            if matches!(event, AcpEvent::Closed { .. }) {
-                break;
+            if let AcpEvent::Closed { kind, .. } = event {
+                break kind;
             }
-        }
+        };
+        assert_eq!(
+            kind,
+            TransportCloseKind::Eof,
+            "the close event carries the EOF the reader observed"
+        );
 
         match client.call("test/ping", json!({}), None).await {
             Err(AcpError::Closed { kind, .. }) => assert_eq!(
@@ -2310,12 +2320,17 @@ mod tests {
         let client =
             AcpClient::start_for_test(config(workspace.path()), BrokenReader, tokio::io::sink());
         let mut events = client.take_events().expect("events");
-        loop {
+        let kind = loop {
             let event = events.recv().await.expect("the reader reports its close");
-            if matches!(event, AcpEvent::Closed { .. }) {
-                break;
+            if let AcpEvent::Closed { kind, .. } = event {
+                break kind;
             }
-        }
+        };
+        assert_eq!(
+            kind,
+            TransportCloseKind::Read,
+            "the close event carries the failed read the reader observed"
+        );
 
         match client.call("test/ping", json!({}), None).await {
             Err(AcpError::Closed { kind, .. }) => assert_eq!(

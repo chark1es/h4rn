@@ -662,6 +662,15 @@ already closed now names the close the client observed (stdout EOF, a failed rea
 or the process exit) rather than always blaming a write, so the daemon's one failure row says what
 actually ended the agent.
 
+**Addendum: a cancelled resume stays cancelled, and a Stop outranks the death that follows it.** The
+reset a turn already applied is kept on the turn's own record, not only in the live schedule, so the
+exit report's repeat of that reset cannot arm a new schedule after the person cancelled the resume
+while the report was still arriving; a different, newer reset still arms one. When a stopped turn's
+session dies before the cancel can be delivered, the turn ends interrupted and the transport report
+that arrives behind the Stop is dropped instead of becoming an error row: the person already ended
+the turn, and a limit the report carried was applied on its own event. The generic stdout-close
+notice also keeps the kind the reader observed, so a failed read is not reported as an EOF.
+
 ## ADR-027: Push notifications are metadata-only wake signals
 
 **Status:** Proposed

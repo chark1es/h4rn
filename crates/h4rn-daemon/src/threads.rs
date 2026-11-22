@@ -377,6 +377,15 @@ struct ActiveTurn {
     /// The turn's one dispatch record, shared with every would-be writer and
     /// with Stop.
     dispatch: Arc<TurnDispatch>,
+    /// The reset this turn already armed a schedule for, when it armed one.
+    ///
+    /// This belongs to the turn, not to `scheduled_limit`: a person can cancel
+    /// the resume while a dead transport's exit report is still arriving, and
+    /// that report repeats the same reset. Reading the live schedule would find
+    /// it empty after the cancellation and arm the pause again; the turn's own
+    /// record still knows the reset was already applied. A different reset is a
+    /// newer pause and may still arm.
+    applied_limit_reset: Option<Option<DateTime<Utc>>>,
 }
 
 /// The thread's harness session, or the fact that one is being started.
@@ -940,6 +949,7 @@ impl ThreadRecord {
             tools: HashMap::new(),
             last_tick: None,
             dispatch: Arc::clone(&dispatch),
+            applied_limit_reset: None,
         });
         self.last_turn_id = Some(turn_id);
         dispatch
@@ -3099,6 +3109,12 @@ impl Inner {
                     reset_at,
                     auto_resume,
                 });
+                if let Some(active) = record.active.as_mut() {
+                    // The completing turn remembers what it applied, even if
+                    // the person cancels the schedule before the exit report
+                    // repeats it.
+                    active.applied_limit_reset = Some(reset_at);
+                }
                 None
             }
             Err(error) => Some(Event::Error {
@@ -3422,8 +3438,9 @@ impl Inner {
         // arrive and sharpen the row.
         let mut idle_deadline: Option<tokio::time::Instant> = None;
         // Events read while waiting on a dead transport's report, in the order
-        // they arrived. They are applied after the event that wait belonged
-        // to, exactly as the pump would have applied them itself.
+        // they arrived. They are applied before the completing event that
+        // opened the wait, because the completion settles the turn: an event
+        // behind it would land on a turn that has already ended.
         let mut pending: VecDeque<HarnessEvent> = VecDeque::new();
         // A completion that was already deferred for its exit report. It is
         // applied as-is when it reaches the front of `pending` instead of
@@ -4076,6 +4093,14 @@ impl Inner {
                     // replacement and write the prompt before this turn is
                     // marked failed, running a turn that never can.
                     let end = if interrupted {
+                        // A Stop owns this turn: it ends interrupted, not as a
+                        // failure. The death the transport reported behind the
+                        // Stop is incidental (the agent went away while its
+                        // cancel was in flight), so its held report is dropped
+                        // rather than taking the turn's one error row. A limit
+                        // the report carried was applied on its own event and
+                        // keeps its schedule.
+                        record.take_transport_report(&turn_id);
                         TurnEnd::new(TurnStatus::Interrupted, Usage::default())
                     } else {
                         TurnEnd::transport_failed(message.into(), Some(hint), true)
@@ -4193,7 +4218,9 @@ impl Inner {
     /// travels on the exit report that follows it.
     /// The exit/status report goes to `reports` because the turn's settlement
     /// must merge it into its one row; every other event goes to `later` and is
-    /// applied after the completion, in the order it arrived.
+    /// applied before the completion, in the order it arrived, because the
+    /// completion settles the turn and an update behind it would never reach
+    /// the turn it describes.
     async fn collect_closed_completion_report(
         self: &Arc<Self>,
         handle: &ThreadHandle,
@@ -4271,20 +4298,24 @@ impl Inner {
                 _ = tokio::time::sleep_until(deadline) => break,
             }
         }
-        // Arm once, before the completion settles the turn: the exit report's
-        // reset when it carried one, otherwise the last notification that
-        // named a reset, otherwise the last one (which may be a reset-less
-        // limit that only needs its row).
-        let signal = exit_reset
-            .and_then(|reset| reset.map(|reset| (Some(reset), true)))
-            .or_else(|| {
-                limits
-                    .iter()
-                    .rev()
-                    .find(|(reset, _)| reset.is_some())
-                    .copied()
-            })
-            .or_else(|| limits.last().copied());
+        // Arm once, before the completion settles the turn.
+        let signal = if let Some(Some(reset)) = exit_reset {
+            // The exit report names the pause itself. That is the most specific
+            // account, so wait for its reset even when a notification read
+            // before it named another.
+            Some((Some(reset), true))
+        } else {
+            // A reset-less exit report (or no exit report before the deadline)
+            // falls back to the notifications collected in the window: the last
+            // one that named a reset, otherwise the last one, which may be a
+            // reset-less limit that only needs its row.
+            limits
+                .iter()
+                .rev()
+                .find(|(reset, _)| reset.is_some())
+                .copied()
+                .or_else(|| limits.last().copied())
+        };
         if let Some((reset_at, auto_resume)) = signal {
             self.apply_completion_limit(handle, generation, session, reset_at, auto_resume)
                 .await;
@@ -4310,6 +4341,20 @@ impl Inner {
         let now = self.now();
         let mut record = handle.lock().await;
         if !record.session.is_live(session) || record.session.generation() != Some(generation) {
+            return;
+        }
+        if auto_resume
+            && record
+                .active
+                .as_ref()
+                .is_some_and(|active| active.applied_limit_reset == Some(reset_at))
+        {
+            // The turn already applied this exact reset (the typed limit that
+            // arrived before its completion). The person may have cancelled
+            // the resume while this report was still on its way: arming the
+            // same reset again would undo that cancellation. The turn's record
+            // knows what it applied; the live schedule does not survive a
+            // cancellation, so it cannot be the guard here.
             return;
         }
         if let Some(scheduled) = &record.scheduled_limit
@@ -6999,6 +7044,83 @@ mod tests {
         );
     }
 
+    /// A Stop followed by the session's death ends the turn interrupted, not as
+    /// a transport failure: the person already ended the turn, so the death
+    /// that followed the cancel must not raise an error row.
+    #[tokio::test]
+    async fn a_session_death_after_a_stop_raises_no_error_row() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, sends) = FakeHarness::new().with_send_count();
+        // The fake agent's own completion is held so the Stop lands on a turn
+        // that is still claimed; the session's death is reported below.
+        let (harness, completion) = harness.with_later_completion_gate();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        sends.wait_for(2).await;
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        let (session, generation, dispatch) = {
+            let record = handle.lock().await;
+            (
+                record.live_session().cloned().expect("a live session"),
+                record.session.generation().expect("a generation"),
+                record
+                    .dispatch_for(&second.turn_id)
+                    .expect("the turn's dispatch"),
+            )
+        };
+        assert_eq!(
+            dispatch.stop(),
+            StopOutcome::AlreadySent,
+            "the Stop lands on the claimed turn"
+        );
+
+        // The session reports its death on the way out, then its stream ends.
+        let stream = futures::stream::iter(vec![HarnessEvent::TransportClosed {
+            message: "the harness transport closed".into(),
+            retryable: true,
+            kind: TransportCloseKind::Eof,
+            reset_at: None,
+        }])
+        .boxed();
+        Arc::clone(&manager.inner)
+            .run_pump(handle.clone(), generation, session, None, stream)
+            .await;
+
+        let mut errors = Vec::new();
+        let (turn, status) = loop {
+            let wire = next_event(&mut events).await;
+            match wire.event {
+                Event::Error { message, .. } => errors.push(message),
+                Event::TurnCompleted {
+                    turn_id, status, ..
+                } => break (turn_id, status),
+                _ => {}
+            }
+        };
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Interrupted);
+        assert!(
+            errors.is_empty(),
+            "the stopped turn published a transport error row: {errors:?}"
+        );
+        completion.release();
+    }
+
     /// A read error is non-retryable but it is not the exit report: the pump
     /// must keep waiting for the exit kind, so a reset that only that report
     /// carries still arms the schedule before the queue is promoted.
@@ -7368,6 +7490,134 @@ mod tests {
         assert!(
             started.is_err(),
             "queued work did not start past the provider's reset: {started:?}"
+        );
+        completion.release();
+    }
+
+    /// A duplicate reset on the exit report must not undo a cancelled resume.
+    ///
+    /// The bridge can report one provider pause twice: the typed limit before
+    /// the closed completion, then the same reset on the exit report after it.
+    /// The person can cancel the resume while the pump waits for that exit
+    /// report; applying the duplicated reset again would arm a new schedule
+    /// behind the cancellation.
+    #[tokio::test]
+    async fn a_duplicate_exit_reset_does_not_rearm_a_cancelled_resume() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(12);
+        let (harness, harness_events) = FakeHarness::new().with_event_injector();
+        let (harness, completion) = harness.with_later_completion_gate();
+        let (harness, sends) = harness.with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        manager
+            .send_message(&created.thread_id, "third".into(), Vec::new())
+            .await
+            .expect("queue third");
+        sends.wait_for(2).await;
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        let (session, pump) = {
+            let mut record = handle.lock().await;
+            (
+                record.live_session().cloned().expect("a live session"),
+                record.pump.take().expect("this session's pump"),
+            )
+        };
+        session
+            .lock()
+            .await
+            .shutdown()
+            .await
+            .expect("close the fake session");
+        drop(session);
+
+        // The typed limit lands first, while the turn is still active, and arms
+        // its schedule before the completion is even reported.
+        harness_events.emit(HarnessEvent::LimitHit {
+            reset_at: Some(reset_at),
+            auto_resume: true,
+        });
+        loop {
+            let wire = next_event(&mut events).await;
+            if matches!(wire.event, Event::UsageLimitHit { .. }) {
+                break;
+            }
+        }
+        manager
+            .cancel_resume(&created.thread_id)
+            .await
+            .expect("cancel the armed resume");
+        assert!(
+            !meter
+                .schedules()
+                .await
+                .expect("read schedules")
+                .iter()
+                .any(|schedule| matches!(
+                    schedule.state,
+                    ResumeState::Scheduled | ResumeState::Waiting
+                )),
+            "the cancellation removed the schedule the limit armed"
+        );
+
+        // The completion waits for the exit report, which repeats the same
+        // reset. It must not arm a new schedule behind the cancellation.
+        harness_events.emit(HarnessEvent::TurnCompleted {
+            status: TurnStatus::Completed,
+            usage: Usage::default(),
+        });
+        harness_events.emit(HarnessEvent::TransportClosed {
+            message: "agy exited (exit status: 7): agy: the session ended".into(),
+            retryable: false,
+            kind: TransportCloseKind::Exit,
+            reset_at: Some(reset_at),
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), pump)
+            .await
+            .expect("the pump ends with the completion")
+            .expect("the pump task did not panic");
+        let (turn, status) = next_turn_completion(&mut events).await;
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+        assert!(
+            !meter
+                .schedules()
+                .await
+                .expect("read schedules")
+                .iter()
+                .any(|schedule| matches!(
+                    schedule.state,
+                    ResumeState::Scheduled | ResumeState::Waiting
+                )),
+            "the duplicated exit reset re-armed a resume the person cancelled"
+        );
+        let summary = manager
+            .thread_summary(&created.thread_id)
+            .await
+            .expect("summary");
+        assert_ne!(
+            summary.agent_state,
+            AgentState::Scheduled,
+            "the cancelled resume left the thread scheduled"
         );
         completion.release();
     }

@@ -1117,14 +1117,17 @@ fn spawn_event_bridge(
                         })
                         .unwrap_or_default()
                 }
-                AcpEvent::Closed { message } => {
+                AcpEvent::Closed { message, kind } => {
                     if shutting_down.load(Ordering::SeqCst) {
                         Vec::new()
                     } else {
                         vec![HarnessEvent::TransportClosed {
                             message,
                             retryable: true,
-                            kind: TransportCloseKind::Eof,
+                            // The reader observed whether the stdout ended or a
+                            // read failed; carry that instead of calling every
+                            // close an EOF.
+                            kind,
                             reset_at: None,
                         }]
                     }
@@ -2070,6 +2073,37 @@ mod tests {
                 );
             }
             other => panic!("the exit report is still the death: {other:?}"),
+        }
+        bridge.abort();
+    }
+
+    /// The generic stdout-close notice keeps the close the reader observed: a
+    /// failed read is not reported as an EOF.
+    #[tokio::test]
+    async fn a_failed_stdout_read_is_not_reported_as_an_eof() {
+        let (tx, rx) = mpsc::channel(8);
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let bridge = spawn_event_bridge(
+            rx,
+            out_tx,
+            Arc::new(Mutex::new(AcpShared::new())),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        tx.send(AcpEvent::Closed {
+            message: "the ACP agent stdout closed".into(),
+            kind: TransportCloseKind::Read,
+        })
+        .await
+        .expect("send");
+
+        match out_rx.recv().await.expect("event") {
+            HarnessEvent::TransportClosed { kind, .. } => assert_eq!(
+                kind,
+                TransportCloseKind::Read,
+                "the bridge keeps the read error the reader observed"
+            ),
+            other => panic!("unexpected event {other:?}"),
         }
         bridge.abort();
     }

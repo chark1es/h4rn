@@ -44,9 +44,17 @@ All notable changes to h4rn are recorded here. The format follows
   process-exit report is terminal for a completion on a closed transport, and that report now
   carries the provider reset itself. An ordinary limit that arrives first no longer detaches the
   session and promotes queued work before the exit's reset has armed auto-resume.
+- **A duplicate exit reset no longer undoes a cancelled auto-resume.** The reset a turn already
+  applied is remembered on the turn itself, not only in the live schedule, so the exit report's
+  repeat of that same reset cannot arm a new schedule after the person cancelled the resume while
+  the report was still arriving. A different, newer reset still arms.
+- **A Stop followed by the session's death ends interrupted, not with an error row.** The death the
+  transport reports behind the Stop is incidental to the cancel, so its held report is dropped
+  instead of taking the stopped turn's one row; a limit it carried was already applied on its own.
 - **A closed stdout is reported as an EOF, not a write failure.** The ACP client carries the part
   of the transport it observed closing on `Closed`, and the Antigravity prompt path uses it, so a
-  stdout death no longer looks like a dead writer in the turn's row.
+  stdout death no longer looks like a dead writer in the turn's row. The generic stdout-close
+  notice carries the same kind, so a failed read is not reported as an EOF either.
 - **A prompt whose session was detached mid-write is delivered again.** When a write fails after a
   restart, a shutdown or a model change detached its session, the turn is still active and no other
   path owns it. The prompt now goes back to the queue and is written on a live session or a fresh
