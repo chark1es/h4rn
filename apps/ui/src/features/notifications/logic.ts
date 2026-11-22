@@ -146,6 +146,8 @@ export function finishedBody(lastTurn: LastTurn | null): string {
   switch (lastTurn.status) {
     case "failed":
       return `Failed: ${lastTurn.error?.trim() || "the turn ended with an error."}`;
+    case "interrupted":
+      return "Stopped: the turn was interrupted.";
     case "token_limit":
       return "Stopped: the agent hit its token limit.";
     case "turn_limit":
@@ -389,6 +391,25 @@ export function offlineTransitions(
     if (!alreadyVisible(draft, focus)) drafts.push(draft);
   }
   return drafts;
+}
+
+/**
+ * Drops a thread's queued approval when the thread turns out to be a child.
+ *
+ * The approval can arrive before the summary that names its parent. The parent
+ * mirrors a child's approval, so the queued child draft is withdrawn rather
+ * than delivered once the wire says it is a child.
+ */
+export function dropThreadApproval(
+  queue: NotificationQueue,
+  threadId: ThreadId,
+): NotificationQueue {
+  const key = threadKey(threadId);
+  const pending = queue[key];
+  if (pending?.kind !== "approval") return queue;
+  const next = { ...queue };
+  delete next[key];
+  return next;
 }
 
 /**

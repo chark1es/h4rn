@@ -412,6 +412,121 @@ describe("H4rnClient", () => {
     }
   });
 
+  it("keeps holding frames when the subscribe outlives its own timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      let answerSubscribe: Reply | null = null;
+      const { client, events, transports } = harness(
+        () =>
+          new FakeTransport((frame, reply) => {
+            if (frame.body.type !== "subscribe") return false;
+            answerSubscribe = reply;
+            return true;
+          }),
+      );
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      const transport = transports[0];
+      if (!transport) throw new Error("transport was not created");
+
+      // Held while the subscribe is open, and still held after its request
+      // times out: without the answer's boundary there is no honest tag yet.
+      transport.emit(7, approvalEvent("ap_replay"));
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(client.getSnapshot().status).toBe("online");
+      expect(events).toHaveLength(0);
+
+      transport.emit(8, approvalEvent("ap_live"));
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(events).toHaveLength(0);
+
+      (answerSubscribe as Reply | null)?.({
+        type: "subscribed",
+        replay_through: 7,
+      });
+      await settle();
+
+      expect(events).toHaveLength(2);
+      expect(events[0]).toMatchObject({ seq: 7, replayed: true });
+      expect(events[1]?.replayed).toBeUndefined();
+      const live = events[1];
+      if (!live) throw new Error("live event was not delivered");
+      expect(draftForEnvelope(live, notificationOptions())).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drops frames held for a socket that closes before the subscribe answer", async () => {
+    vi.useFakeTimers();
+    try {
+      let answerSubscribe: Reply | null = null;
+      const { client, events, transports } = harness(
+        (context) =>
+          new FakeTransport((frame, reply) => {
+            if (frame.body.type !== "subscribe") return false;
+            if (context.attempt === 0) {
+              answerSubscribe = reply;
+              return true;
+            }
+            reply({ type: "subscribed", replay_through: 0 });
+            return true;
+          }),
+      );
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      transports[0]?.emit(7, approvalEvent("ap_held"));
+      transports[0]?.drop();
+      await vi.advanceTimersByTimeAsync(20);
+
+      // The next socket re-subscribes from the same cursor, so the held copy
+      // must not also be delivered live.
+      expect(events).toHaveLength(0);
+      expect(answerSubscribe).not.toBeNull();
+      expect(
+        transports[1]?.sent.find((frame) => frame.body.type === "subscribe")?.body,
+      ).toMatchObject({ type: "subscribe", since_seq: null });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("delivers live-edge frames untagged when an older daemon names no boundary", async () => {
+    vi.useFakeTimers();
+    try {
+      let answerSubscribe: Reply | null = null;
+      const { client, events, transports } = harness(
+        () =>
+          new FakeTransport((frame, reply) => {
+            if (frame.body.type !== "subscribe") return false;
+            answerSubscribe = reply;
+            return true;
+          }),
+      );
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      const transport = transports[0];
+      if (!transport) throw new Error("transport was not created");
+
+      // A first connect asks from the live edge; an older daemon accepts it
+      // without a boundary and sends nothing itself, so the frame is news.
+      transport.emit(3, approvalEvent("ap_live"));
+      (answerSubscribe as Reply | null)?.({ type: "subscribed" } as never);
+      await settle();
+
+      expect(events).toHaveLength(1);
+      expect(events[0]?.replayed).toBeUndefined();
+      const live = events[0];
+      if (!live) throw new Error("live event was not delivered");
+      expect(draftForEnvelope(live, notificationOptions())).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reports degraded while reconnecting and returns online", async () => {
     vi.useFakeTimers();
     try {

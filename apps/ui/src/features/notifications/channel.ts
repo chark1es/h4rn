@@ -45,7 +45,16 @@ export type NotificationChannel = {
   onClick(listener: (threadId: ThreadId | null) => void): () => void;
 };
 
-/** A deterministic 31-bit id, so a repeat for the same key replaces the old one. */
+/**
+ * A deterministic 31-bit id, so a repeat for the same key replaces the old one.
+ *
+ * On macOS and Windows the desktop plugin replaces the notification with the
+ * same id. On Linux and the BSDs it does not: the plugin builds
+ * `notify_rust::Notification::new()` without `id(...)`, so the freedesktop
+ * server always receives `replaces_id = 0` and a repeat stacks below the old
+ * one. Coalescing still keeps same-key repeats to one message per quiet
+ * period; only the OS-side replacement differs by platform.
+ */
 export function notificationId(key: string): number {
   let hash = 2166136261;
   for (let index = 0; index < key.length; index += 1) {
@@ -152,7 +161,11 @@ function desktopChannel(): NotificationChannel | null {
             extra: { threadId: message.threadId },
           },
         })
-        .catch(() => undefined);
+        .catch((error: unknown) => {
+          // A shell without a notification host (or with the plugin missing)
+          // must not take the page down, but the reason belongs in the log.
+          console.warn("h4rn: the desktop notification shell rejected a message.", error);
+        });
     },
     onClick: (listener) => {
       ensureListener();

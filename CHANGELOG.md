@@ -14,24 +14,35 @@ All notable changes to h4rn are recorded here. The format follows
   going offline notify only when the window is not focused or a different thread is open.
   Replay follows the journal-head boundary named by the subscribe answer, so a live approval that
   arrives while the handshake is still in flight notifies on a first connect and after a reconnect,
-  while events at or below the boundary stay quiet. Finished and failed turns follow the daemon's
+  while events at or below the boundary stay quiet. A subscribe that outlives its own 6 s request
+  keeps holding the buffer until its answer closes the replay at that boundary (or the socket
+  drops it for the next subscribe to replay); an older daemon that accepts a live-edge subscribe
+  without naming a boundary delivers those frames untagged, because nothing was replayed. Finished
+  and failed turns follow the daemon's
   thread summary and need a live completion for the current turn: a thread moved to Done by another
-  client, or a replayed completion followed by a live tick, says nothing. The list re-seeds the
+  client, or a replayed completion followed by a live tick, says nothing. A live completion is spent
+  on the one daemon transition it caused: a manual tab move by the person discards it, and a
+  re-seeded baseline clears every remembered completion. The list re-seeds the
   baseline whenever the client becomes ready, so a gap healed by a list cannot announce history. A
-  turn that hands off to a queued turn says nothing, an interrupted turn that lands in Done
-  notifies, and a token or turn limit reads as “Stopped”, never “Finished”. A burst in one thread
+  turn that hands off to a queued turn says nothing, an interrupted turn that lands in Done reads
+  “Stopped: the turn was interrupted.”, and a token or turn limit reads as “Stopped”, never
+  “Finished”. A burst in one thread
   waits for a quiet period (1 s of no new event, capped at 3 s) and announces the latest message.
   Clicking a notification focuses h4rn and opens the thread. Subagent child threads stay quiet (the
-  parent's mirrored approval already covers them), and an answered approval cancels that thread's
-  queued notification unless a newer approval replaced it. The choices persist per device
+  parent's mirrored approval already covers them); an approval that arrives before the summary
+  names the child is withdrawn when that summary arrives, and an answered approval cancels that
+  thread's queued notification unless a newer approval replaced it. The choices persist per device
   (`h4rn.notifications`): approvals and finished turns on, host offline off. In the browser a
   denied OS permission is shown as “Blocked in system settings”, and a still-undecided permission
   renders the switches off without forgetting the stored choice; the desktop notification plugin
   cannot detect a blocked permission, so Settings says nothing about it there rather than claiming
   a state it does not know. Host offline covers only the machines this device is linked to through
   the relay; the live transport is always online, matched through `hello`'s local host even when no
-  machine was picked, and a queued alert is re-checked before delivery. A direct-only session hides
-  the row and says why.
+  machine was picked, and a due alert fetches linked presence once more before delivery and is
+  dropped if the host came back, the fetch failed or the client disconnected. A direct-only session
+  hides the row and says why. On Linux the desktop notification plugin passes `replaces_id = 0`, so
+  a later message for the same key stacks instead of replacing; coalescing still limits it to one
+  message per quiet period.
 - **Open at login** registers the desktop app as a login item through the autostart plugin.
 - **Keep running in tray** adds an Open h4rn / Quit tray icon and makes the window's close button
   hide h4rn instead of quitting while agents keep working; the shell stores the choice so the
@@ -45,6 +56,11 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **The linked-machine presence request is signed over its pathname.** Connect verifies the DPoP
+  proof against `parts.uri.path()`, which excludes the query string, so signing
+  `/v1/machines?linked=true` was rejected with 401 and took the whole account and machine refresh
+  down with it. The client now signs `/v1/machines` and still fetches with `?linked=true`; a
+  presence failure falls back to an empty linked list instead of aborting the refresh.
 - **A Send during an idle agent's death starts a fresh agent.** When a stdout read failed or EOF
   arrived between turns, the session stayed in the slot for the bounded wait for the exit report, and
   a message sent in that window claimed it and failed on a dead write. The session now leaves the

@@ -59,4 +59,16 @@ describe("notifier memory", () => {
     memory.startTurn("thr_1");
     expect(memory.hasLiveCompletion("thr_1")).toBe(false);
   });
+
+  it("forgets every live completion when the baseline is re-seeded", () => {
+    const memory = new NotificationMemory();
+    memory.completeTurn("thr_1", "completed", 1_000);
+    memory.completeTurn("thr_2", "completed", 1_000);
+    memory.clearCompletions();
+    expect(memory.hasLiveCompletion("thr_1")).toBe(false);
+    expect(memory.hasLiveCompletion("thr_2")).toBe(false);
+    // The wording for a later turn survives; only the permission to notify
+    // from a pre-baseline completion is gone.
+    expect(memory.lastTurn("thr_1")).toEqual({ status: "completed", error: null });
+  });
 });

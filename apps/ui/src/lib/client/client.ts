@@ -315,6 +315,10 @@ export class H4rnClient {
   /** Events between socket open and the subscribe reply, sorted on flush. */
   private replaying = false;
   private replayBuffer: EventEnvelope[] = [];
+  /** The id of the subscribe answer this socket is still owed, if any. */
+  private subscribeId: number | null = null;
+  /** `since_seq` of that subscribe; null means it started at the live edge. */
+  private subscribeSince: number | null = null;
   private attempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -543,6 +547,13 @@ export class H4rnClient {
 
     const id = ++this.frameId;
     const frame: ClientFrame = { id, body };
+    if (body.type === "subscribe") {
+      // Remember the request so a late answer (after the request's own
+      // timeout) can still close the replay at the boundary it names.
+      const subscribe = body as Extract<ClientRequest, { type: "subscribe" }>;
+      this.subscribeId = id;
+      this.subscribeSince = subscribe.since_seq ?? null;
+    }
     const timeoutMs = options.timeoutMs ?? this.options.requestTimeoutMs;
     const pending: Pending = {
       id,
@@ -675,14 +686,13 @@ export class H4rnClient {
       });
       this.startPing();
 
-      let replayThrough: number | null = null;
       try {
         // On the first connection `lastSeq` is 0, so start at the live edge;
         // after a reconnect ask for the gap and let the daemon replay it
         // before going live (ADR-003). The answer names the journal head it
         // served, which is the only honest replay boundary: a live event can
         // arrive before this answer and must not be mistaken for history.
-        const subscribed = await this.request(
+        await this.request(
           {
             type: "subscribe",
             topics: ["all"],
@@ -690,15 +700,15 @@ export class H4rnClient {
           },
           { timeoutMs: 6_000 },
         );
-        replayThrough = subscribed.type === "subscribed" ? subscribed.replay_through : null;
       } catch {
-        // Subscriptions are best-effort; list and detail requests still work.
-        // Without a boundary everything held here is treated as history.
+        // The request timed out, but its answer may still arrive. Keep the
+        // held frames buffered: `handleMessage` flushes them with the answer's
+        // boundary, and a dropped socket discards them so the next subscribe
+        // replays the same range. Reads and lists still work meanwhile.
       } finally {
-        this.flushReplay(replayThrough);
+        this.handshaken = true;
+        this.settleHandshakeWaiters(null);
       }
-      this.handshaken = true;
-      this.settleHandshakeWaiters(null);
 
       const ready: ReadyInfo = {
         reconnected,
@@ -764,6 +774,19 @@ export class H4rnClient {
     }
 
     if (frame.kind === "response") {
+      // The subscribe answer closes the replay even when its request already
+      // timed out: the timeout only stops the handshake from waiting, it does
+      // not make the held frames older or newer than they are.
+      if (frame.id === this.subscribeId) {
+        this.subscribeId = null;
+        if ("Ok" in frame.result && frame.result.Ok.type === "subscribed") {
+          this.finishSubscribe(frame.result.Ok.replay_through ?? null, true);
+        } else {
+          // A refused subscribe has no boundary. Held frames cannot be the
+          // gap replay the daemon declined to send, so treat them as history.
+          this.finishSubscribe(null, false);
+        }
+      }
       const pending = this.pending.get(frame.id);
       if (!pending) return;
       clearTimeout(pending.timer);
@@ -830,8 +853,12 @@ export class H4rnClient {
    * envelopes at or below it are the replay (history), and anything above it
    * arrived live after the daemon went live and must be treated as news. When
    * the subscribe failed there is no boundary, so everything held is history.
+   *
+   * `liveEdge` says the subscribe asked from the live edge (`since_seq: null`)
+   * and an older daemon answered without a boundary. Nothing was replayed in
+   * that case, so the held frames can be delivered untagged.
    */
-  private flushReplay(replayThrough: number | null): void {
+  private flushReplay(replayThrough: number | null, liveEdge = false): void {
     if (!this.replaying) return;
     this.replaying = false;
     const pending = this.replayBuffer.splice(0).sort((left, right) => left.seq - right.seq);
@@ -841,9 +868,10 @@ export class H4rnClient {
       // These frames were sent while the subscribe replay was still open, so
       // they are history from before this client caught up. Tagging them is
       // what lets the notifier tell a burst of old approvals from a live one.
+      const isReplay = replayThrough !== null ? envelope.seq <= replayThrough : !liveEdge;
       const replayed: EventEnvelope = {
         ...envelope,
-        ...(replayThrough === null || envelope.seq <= replayThrough ? { replayed: true } : {}),
+        ...(isReplay ? { replayed: true } : {}),
       };
       for (const listener of this.eventListeners) {
         listener(replayed);
@@ -856,11 +884,27 @@ export class H4rnClient {
     }
   }
 
+  /** Closes the replay window with the subscribe answer's boundary. */
+  private finishSubscribe(replayThrough: number | null, accepted: boolean): void {
+    // An older daemon can accept a live-edge subscribe without naming a
+    // boundary; nothing was replayed then, so the held frames are live. A
+    // refused subscribe gets no such benefit of the doubt.
+    const liveEdge = accepted && replayThrough === null && this.subscribeSince === null;
+    this.subscribeSince = null;
+    this.flushReplay(replayThrough, liveEdge);
+  }
+
   private handleClose(code: number, reason: string): void {
     this.socketOpen = false;
     this.transport = null;
     this.stopPing();
     this.handshaken = false;
+    // Frames held for this socket's subscribe die with it: the next socket
+    // asks from `lastSeq` again, so the daemon replays the same range with a
+    // boundary instead of this client guessing at their provenance.
+    this.replayBuffer = [];
+    this.subscribeId = null;
+    this.subscribeSince = null;
     const dropped = new H4rnRequestError(
       protoError(
         "internal",

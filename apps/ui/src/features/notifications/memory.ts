@@ -60,6 +60,16 @@ export class NotificationMemory {
     this.live.delete(threadId);
   }
 
+  /**
+   * A fresh baseline: no remembered completion may explain a later summary.
+   *
+   * Called when the thread list re-seeds after a ready handshake or a healed
+   * gap, and when a person places a thread by hand.
+   */
+  clearCompletions(): void {
+    this.live.clear();
+  }
+
   lastError(threadId: ThreadId, now: number): string | null {
     const remembered = this.errors.get(threadId);
     if (!remembered) return null;

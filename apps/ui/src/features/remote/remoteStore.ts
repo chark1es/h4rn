@@ -523,8 +523,9 @@ export async function refresh(): Promise<void> {
       client.me(),
       client.machines(),
       // This device's links decide which machines can appear in presence
-      // rows; the full list feeds the machine picker.
-      client.machines({ linked: true }),
+      // rows; the full list feeds the machine picker. Presence is an extra: a
+      // proof or relay failure here must not throw away the account refresh.
+      client.machines({ linked: true }).catch(() => [] as MachineSummary[]),
       client.listPairings().catch(() => [] as PairingInfo[]),
     ]);
     const device =

@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { noteManualPlacement } from "@/features/notifications/placement";
 import type {
   ApprovalDecision,
   Attachment,
@@ -1001,6 +1002,10 @@ async function runThreadAction(
   label: string,
   body: Extract<ClientRequest, { type: "set_thread_tab" | "snooze" | "interrupt" }>,
 ): Promise<boolean> {
+  // A tab move is the person's placement, not the daemon finishing a turn.
+  // Tell the notifier before the move so it cannot pin a remembered live
+  // completion on the Done update that follows.
+  if (body.type === "set_thread_tab") noteManualPlacement(threadId);
   const state = getState();
   setState({
     ...state,

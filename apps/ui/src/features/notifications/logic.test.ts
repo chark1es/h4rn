@@ -16,6 +16,7 @@ import {
   draftForEnvelope,
   draftForEvent,
   dropResolvedApproval,
+  dropThreadApproval,
   dueNotifications,
   enqueue,
   type FocusSnapshot,
@@ -240,11 +241,11 @@ describe("finished-turn notifications", () => {
     expect(finished(summary(THREAD, { tab: "working" }))).toBeNull();
   });
 
-  it("announces an interrupted turn that lands in Done", () => {
+  it("announces an interrupted turn as stopped, not finished", () => {
     const draft = finished(summary(THREAD, { tab: "done" }), {
       lastTurn: lastTurn("interrupted"),
     });
-    expect(draft?.body).toBe("Finished: the turn is done.");
+    expect(draft?.body).toBe("Stopped: the turn was interrupted.");
   });
 
   it("names the error when the turn failed", () => {
@@ -450,6 +451,22 @@ describe("resolved approvals", () => {
   it("keeps a newer approval that re-queued the same thread", () => {
     const queue = dropResolvedApproval(queued("ap_2", "npm run build"), THREAD, "ap_1");
     expect(queue[`thread:${THREAD}`]?.body).toBe("Wants to run: npm run build");
+  });
+
+  it("withdraws a queued approval once the thread is named a child", () => {
+    const queue = dropThreadApproval(queued("ap_1", "npm test"), THREAD);
+    expect(queue).toEqual({});
+  });
+
+  it("leaves a queued finished message alone when a child is named", () => {
+    const finished = draftForEvent(approval(THREAD), {
+      threads: threads(),
+      settings: settings(),
+      focus: focus(),
+    });
+    if (!finished) throw new Error("expected an approval draft");
+    const queue = enqueue({}, { ...finished, kind: "finished" }, 1_000);
+    expect(dropThreadApproval(queue, THREAD)).toBe(queue);
   });
 });
 

@@ -7,7 +7,7 @@ afterEach(() => {
 });
 
 function desktopWindow() {
-  const invoke = vi.fn(async (command: string) => {
+  const invoke = vi.fn(async (command: string, _args?: Record<string, unknown>) => {
     // The pinned plugin answers this unconditionally; if the view asked, it
     // would be repeating a claim it cannot verify.
     if (command === "plugin:notification|is_permission_granted") return true;
@@ -44,5 +44,59 @@ describe("notification channel permission", () => {
     const channel = notificationChannel();
     expect(channel?.kind).toBe("browser");
     await expect(channel?.permission()).resolves.toBe("denied");
+  });
+});
+
+describe("desktop notification delivery", () => {
+  it("shows through the plugin with the thread as click data", async () => {
+    const win = desktopWindow();
+    vi.stubGlobal("window", win);
+    const channel = notificationChannel();
+
+    channel?.show({
+      id: 42,
+      key: "thread:t1",
+      title: "Fix the flaky auth test",
+      body: "Wants to run: npm test",
+      threadId: "t1",
+    });
+    await Promise.resolve();
+
+    const call = win.__TAURI_INTERNALS__.invoke.mock.calls.find(
+      ([command]) => command === "plugin:notification|notify",
+    );
+    expect(call?.[1]).toEqual({
+      options: {
+        id: 42,
+        title: "Fix the flaky auth test",
+        body: "Wants to run: npm test",
+        extra: { threadId: "t1" },
+      },
+    });
+  });
+
+  it("logs a rejected notification instead of swallowing it", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const win = desktopWindow();
+    win.__TAURI_INTERNALS__.invoke.mockImplementation(async (command: string) => {
+      if (command === "plugin:notification|notify") throw new Error("no notification host");
+      return null;
+    });
+    vi.stubGlobal("window", win);
+
+    notificationChannel()?.show({
+      id: 7,
+      key: "thread:t1",
+      title: "A thread",
+      body: "Needs an approval.",
+      threadId: "t1",
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(warning).toHaveBeenCalledWith(
+      expect.stringContaining("desktop notification"),
+      expect.any(Error),
+    );
   });
 });
