@@ -1,0 +1,36 @@
+[
+  {
+    "commitId": "cccc1111dddd2222eeee3333ffff4444aaaa5555",
+    "comment": "Fix the panic\n\nReproduces the panic on empty input.",
+    "author": {
+      "name": "Alice Example",
+      "email": "alice@example.test",
+      "date": "2024-05-01T11:00:00.000Z"
+    },
+    "committer": {
+      "name": "Alice Example",
+      "email": "alice@example.test",
+      "date": "2024-05-01T11:00:00.000Z"
+    },
+    "parents": ["dddd1111eeee2222ffff3333aaaa4444bbbb5555"],
+    "url": "https://dev.azure.com/acme/platform/_apis/git/repositories/widget/commits/cccc1111dddd2222eeee3333ffff4444aaaa5555",
+    "remoteUrl": "https://dev.azure.com/acme/platform/_git/widget/commit/cccc1111dddd2222eeee3333ffff4444aaaa5555"
+  },
+  {
+    "commitId": "dddd1111eeee2222ffff3333aaaa4444bbbb5555",
+    "comment": "Add a test",
+    "author": {
+      "name": "Alice Example",
+      "email": "alice@example.test",
+      "date": "2024-05-01T10:00:00.000Z"
+    },
+    "committer": {
+      "name": "Alice Example",
+      "email": "alice@example.test",
+      "date": "2024-05-01T10:00:00.000Z"
+    },
+    "parents": ["bbbb1111cccc2222dddd3333eeee4444ffff5555"],
+    "url": "https://dev.azure.com/acme/platform/_apis/git/repositories/widget/commits/dddd1111eeee2222ffff3333aaaa4444bbbb5555",
+    "remoteUrl": "https://dev.azure.com/acme/platform/_git/widget/commit/dddd1111eeee2222ffff3333aaaa4444bbbb5555"
+  }
+]

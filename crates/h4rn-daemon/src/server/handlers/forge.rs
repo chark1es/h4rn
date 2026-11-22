@@ -59,10 +59,11 @@ pub(super) async fn handle(
             token,
             username,
             source,
+            repository,
         } => conn
             .state
             .forge
-            .add_account(forge, &base_url, &token, username, source)
+            .add_account(forge, &base_url, &token, username, source, repository)
             .await
             .map(|account| ResponseBody::ForgeAccount { account })
             .map_err(ForgeServiceError::into_proto),
