@@ -14,8 +14,6 @@ import type { HostId, ThreadId } from "@/gen";
  * webview keeps working with drafts in memory only.
  */
 
-/** Drafts written by builds that kept one JSON blob; migrated on first load. */
-export const LEGACY_DRAFTS_STORAGE_KEY = "h4rn.drafts";
 export const DRAFT_KEY_PREFIX = "h4rn.draft.v2.";
 export const DRAFT_WRITE_DELAY_MS = 300;
 export const MAX_STORED_DRAFTS = 200;
@@ -36,7 +34,22 @@ export type DraftStoreOptions = {
   now?: () => number;
   /** Identifies this tab inside a revision; generated once per store by default. */
   nonce?: string;
+  /**
+   * Called when a queued write loses to newer text another tab saved. The
+   * open composer uses it to show that text instead of the edit it lost.
+   */
+  onAdopt?: (change: DraftChange) => void;
 };
+
+/**
+ * Optimistic threads exist only while the daemon starts them. Their ids must
+ * never reach storage: another session could reuse the same temporary id.
+ */
+export const LOCAL_THREAD_PREFIX = "local-thread-";
+
+export function isLocalThreadId(threadId: string): boolean {
+  return threadId.startsWith(LOCAL_THREAD_PREFIX);
+}
 
 /**
  * Identifies one saved draft: when it was written, and which tab wrote it.
@@ -66,11 +79,6 @@ export type DraftEntry = {
 };
 
 export type DraftChange = DraftTarget & DraftEntry;
-
-type LegacyDraft = DraftTarget & {
-  text: string;
-  updatedAt: number;
-};
 
 export type DraftStore = ReturnType<typeof createDraftStore>;
 
@@ -117,35 +125,6 @@ export function parseDraftValue(raw: string | null): StoredDraft | null {
   }
 }
 
-function parseLegacyDrafts(raw: string | null): LegacyDraft[] {
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== "object") return [];
-    const record = parsed as Record<string, unknown>;
-    if (record.version !== 1 || !Array.isArray(record.drafts)) return [];
-    const drafts: LegacyDraft[] = [];
-    for (const value of record.drafts) {
-      if (!value || typeof value !== "object") continue;
-      const entry = value as Record<string, unknown>;
-      if (entry.scope !== "thread" && entry.scope !== "new-thread") continue;
-      if (typeof entry.host !== "string" || typeof entry.target !== "string") continue;
-      if (typeof entry.text !== "string" || entry.text.length === 0) continue;
-      if (typeof entry.updatedAt !== "number" || !Number.isFinite(entry.updatedAt)) continue;
-      drafts.push({
-        scope: entry.scope,
-        host: entry.host,
-        target: entry.target,
-        text: entry.text,
-        updatedAt: entry.updatedAt,
-      });
-    }
-    return drafts;
-  } catch {
-    return [];
-  }
-}
-
 export function revisionOf(value: StoredDraft): DraftRevision {
   return { updatedAt: value.updatedAt, nonce: value.nonce };
 }
@@ -163,6 +142,16 @@ function isNewerRevision(a: DraftRevision, b: DraftRevision | null): boolean {
   if (b === null) return true;
   if (a.updatedAt !== b.updatedAt) return a.updatedAt > b.updatedAt;
   return a.nonce !== b.nonce;
+}
+
+/**
+ * Whether `a` is definitely later than `b`. Two revisions written in the same
+ * millisecond by different tabs have no order, so neither wins by comparison;
+ * on a tie the flush that runs later lands and the other tab re-renders to it.
+ * Both edits do not survive.
+ */
+function isStrictlyNewerRevision(a: DraftRevision, b: DraftRevision): boolean {
+  return a.updatedAt > b.updatedAt;
 }
 
 function randomNonce(): string {
@@ -257,11 +246,10 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
   /** Keys changed by this tab and not yet written to storage. */
   const pendingWrites = new Map<string, StoredDraft>();
   /**
-   * The stored revision each pending write was based on (null: nothing was
-   * stored yet). If storage moves past it before the debounce fires, another
-   * tab saved newer text and this tab's write must not replace it.
+   * Pending writes storage refused (a full quota, typically). They hold the
+   * text in memory but do not reserve room under the cap: nothing was stored.
    */
-  const pendingBases = new Map<string, DraftRevision | null>();
+  const failedWrites = new Set<string>();
   /** Keys this tab removed, with the revision it meant to remove. */
   const pendingRemoves = new Map<string, DraftRevision>();
   let loaded = false;
@@ -271,12 +259,24 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
   function forgetCorrupt(key: string): void {
     memory.delete(key);
     pendingWrites.delete(key);
-    pendingBases.delete(key);
+    failedWrites.delete(key);
     try {
       storage?.removeItem(key);
     } catch {
       // The next load tries again; nothing usable is lost either way.
     }
+  }
+
+  /** Tell the open composer that newer text replaced a queued edit. */
+  function adopted(key: string, value: StoredDraft | null): void {
+    if (!options.onAdopt) return;
+    const target = parseDraftStorageKey(key);
+    if (!target) return;
+    options.onAdopt({
+      ...target,
+      text: value?.text ?? "",
+      revision: value ? revisionOf(value) : null,
+    });
   }
 
   function dropBehindCap(): void {
@@ -306,7 +306,14 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
       if (read.state === "missing") continue;
       entries.push({ key, updatedAt: read.value.updatedAt });
     }
-    const allowed = Math.max(0, maxDrafts - pendingWrites.size - unreadable);
+    // A write storage refused is not taking up a slot: only queued writes
+    // that can still land reserve room, so a full quota cannot evict a stored
+    // draft for text that never made it into storage.
+    let reserving = 0;
+    for (const key of pendingWrites.keys()) {
+      if (!failedWrites.has(key)) reserving += 1;
+    }
+    const allowed = Math.max(0, maxDrafts - reserving - unreadable);
     if (entries.length <= allowed) return;
     entries.sort((a, b) => a.updatedAt - b.updatedAt);
     for (const entry of entries.slice(0, entries.length - allowed)) {
@@ -316,7 +323,6 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
         // Leave it; the next flush tries again.
       }
       memory.delete(entry.key);
-      pendingBases.delete(entry.key);
       pendingRemoves.delete(entry.key);
     }
   }
@@ -360,45 +366,30 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
       }
       memory.delete(key);
       pendingWrites.delete(key);
-      pendingBases.delete(key);
     }
   }
 
-  /** Moves drafts from the single JSON blob older builds wrote, then removes it. */
-  function migrateLegacy(): void {
+  /** Temporary ids never belong in storage; drop any a development build left. */
+  function dropPersistedTemporaryIds(): void {
     if (!storage) return;
-    let raw: string | null = null;
-    try {
-      raw = storage.getItem(LEGACY_DRAFTS_STORAGE_KEY);
-    } catch {
-      return;
-    }
-    if (!raw) return;
-    for (const draft of parseLegacyDrafts(raw)) {
-      const key = draftStorageKey(draft.scope, draft.host, draft.target);
-      const read = readStored(storage, key);
-      if (read.state === "unreadable") return;
-      if (read.state === "ok" && read.value.updatedAt >= draft.updatedAt) continue;
-      const value: StoredDraft = { text: draft.text, updatedAt: draft.updatedAt, nonce: "" };
+    for (const key of storageDraftKeys(storage)) {
+      const target = parseDraftStorageKey(key);
+      if (target?.scope !== "thread" || !isLocalThreadId(target.target)) continue;
+      memory.delete(key);
+      pendingWrites.delete(key);
+      failedWrites.delete(key);
       try {
-        storage.setItem(key, JSON.stringify(value));
-        memory.set(key, value);
+        storage.removeItem(key);
       } catch {
-        // Keep what we can; the legacy blob is only removed once it is handled.
-        return;
+        // The next load tries again; the value is unreadable to us either way.
       }
-    }
-    try {
-      storage.removeItem(LEGACY_DRAFTS_STORAGE_KEY);
-    } catch {
-      // It will be migrated again next time; no draft is lost either way.
     }
   }
 
   function load(): void {
     if (loaded) return;
     loaded = true;
-    migrateLegacy();
+    dropPersistedTemporaryIds();
     dropExpired();
     dropBehindCap();
   }
@@ -407,19 +398,23 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
     if (!storage) {
       pendingWrites.clear();
       pendingRemoves.clear();
+      failedWrites.clear();
       dropBehindCap();
       return;
     }
     for (const [key, value] of [...pendingWrites]) {
       const read = readStored(storage, key);
-      if (read.state === "ok" && pendingBases.has(key)) {
-        const base = pendingBases.get(key) ?? null;
-        // Another tab saved after this write was queued. Its revision is
-        // newer than the one this tab saw, so the remote text wins.
-        if (isNewerRevision(revisionOf(read.value), base)) {
+      if (read.state === "ok") {
+        // Storage may hold text written after this edit was queued. Compare
+        // the two revisions rather than the queued write's base: a queued edit
+        // that really is later must land instead of being dropped, and one
+        // that is definitely older must give way to the other tab's text.
+        const storedRevision = revisionOf(read.value);
+        if (isStrictlyNewerRevision(storedRevision, revisionOf(value))) {
           memory.set(key, read.value);
           pendingWrites.delete(key);
-          pendingBases.delete(key);
+          failedWrites.delete(key);
+          adopted(key, read.value);
           continue;
         }
       }
@@ -427,9 +422,11 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
         storage.setItem(key, JSON.stringify(value));
         memory.set(key, value);
         pendingWrites.delete(key);
-        pendingBases.delete(key);
+        failedWrites.delete(key);
       } catch {
-        // Keep the draft pending and retry on the next write or flush.
+        // The value stays in memory and pending; it just must not hold a slot
+        // in the cap, because storage never received it.
+        failedWrites.add(key);
       }
     }
     for (const [key, expected] of [...pendingRemoves]) {
@@ -451,6 +448,7 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
         storage.removeItem(key);
         memory.delete(key);
         pendingRemoves.delete(key);
+        failedWrites.delete(key);
       } catch {
         // Keep it pending; the next flush retries while the revision matches.
       }
@@ -479,6 +477,11 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
     load();
     const key = draftStorageKey(scope, host, target);
     if (pendingRemoves.has(key)) return { text: "", revision: null };
+    if (scope === "thread" && isLocalThreadId(target)) {
+      // Temporary ids are memory-only, so a missing storage key says nothing.
+      const known = memory.get(key);
+      return { text: known?.text ?? "", revision: known ? revisionOf(known) : null };
+    }
     const pending = pendingWrites.get(key);
     if (pending) return { text: pending.text, revision: revisionOf(pending) };
     if (!storage) {
@@ -525,6 +528,22 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
       remove(scope, host, target);
       return null;
     }
+    if (scope === "thread" && isLocalThreadId(target)) {
+      // The daemon is still starting this thread. Keep the text for the
+      // composer, but never write a temporary id to storage: another session
+      // could hand the same id to an unrelated thread later.
+      const previous = memory.get(key)?.updatedAt ?? 0;
+      const value: StoredDraft = {
+        text,
+        updatedAt: Math.max(now(), previous + 1),
+        nonce,
+      };
+      memory.set(key, value);
+      pendingWrites.delete(key);
+      failedWrites.delete(key);
+      pendingRemoves.delete(key);
+      return revisionOf(value);
+    }
     // A revision must change with every write, even two in the same
     // millisecond or two tabs writing at once, so a finish cannot clear a
     // draft saved just after Start. The nonce keeps two tabs apart.
@@ -540,7 +559,6 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
     };
     memory.set(key, value);
     pendingWrites.set(key, value);
-    pendingBases.set(key, base);
     pendingRemoves.delete(key);
     schedule();
     return revisionOf(value);
@@ -558,6 +576,16 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
     expected: DraftRevision | null,
   ): boolean {
     const key = draftStorageKey(scope, host, target);
+    if (scope === "thread" && isLocalThreadId(target)) {
+      const current = entry(scope, host, target).revision;
+      if (!sameRevision(current, expected)) return false;
+      if (current === null) return true;
+      memory.delete(key);
+      pendingWrites.delete(key);
+      failedWrites.delete(key);
+      pendingRemoves.delete(key);
+      return true;
+    }
     if (storage) {
       const read = readStored(storage, key);
       // Storage may already hold another tab's newer text. Flushing this
@@ -567,7 +595,6 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
         const pending = pendingWrites.get(key);
         if (pending !== undefined && sameRevision(revisionOf(pending), expected)) {
           pendingWrites.delete(key);
-          pendingBases.delete(key);
           memory.set(key, read.value);
         }
         return false;
@@ -601,6 +628,25 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
 
   function writeThread(host: HostId, threadId: ThreadId, text: string): DraftRevision | null {
     return write("thread", host, threadId, text);
+  }
+
+  /**
+   * The daemon named the optimistic thread. Carry whatever is still in its
+   * box to the real id, and write it now: the user may reload before the
+   * debounce fires.
+   */
+  function moveThreadDraft(host: HostId, fromThreadId: ThreadId, toThreadId: ThreadId): void {
+    if (fromThreadId === toThreadId) return;
+    load();
+    const fromKey = draftStorageKey("thread", host, fromThreadId);
+    const text = entry("thread", host, fromThreadId).text;
+    memory.delete(fromKey);
+    pendingWrites.delete(fromKey);
+    failedWrites.delete(fromKey);
+    pendingRemoves.delete(fromKey);
+    if (text.length === 0) return;
+    write("thread", host, toThreadId, text);
+    flush();
   }
 
   function clearThread(host: HostId, threadId: ThreadId): void {
@@ -683,9 +729,21 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
     }
     const value = parseDraftValue(newValue);
     if (!value) {
-      // Another tab wrote something that does not parse: drop it rather than
-      // leave a value no reader can use in storage.
-      forgetCorrupt(key);
+      // The event may be stale: another tab can have repaired this key between
+      // the bad write and this delivery. Re-read before deleting anything; a
+      // valid value now on disk is what the composer should show.
+      if (storage) {
+        const current = readStored(storage, key);
+        if (current.state === "ok") {
+          memory.set(key, current.value);
+          return { ...target, text: current.value.text, revision: revisionOf(current.value) };
+        }
+        if (current.state === "missing") memory.delete(key);
+        if (current.state === "corrupt") forgetCorrupt(key);
+        if (current.state === "unreadable") return null;
+      } else {
+        memory.delete(key);
+      }
       return { ...target, text: "", revision: null };
     }
     memory.set(key, value);
@@ -696,6 +754,7 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
     readThreadDraft: readThread,
     readThreadDraftEntry: readThreadEntry,
     writeThreadDraft: writeThread,
+    moveThreadDraft,
     clearThreadDraft: clearThread,
     readThreadDraftRevision: threadRevision,
     clearThreadDraftIfRevision: clearThreadIfRevision,
@@ -712,18 +771,11 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
   };
 }
 
-export const drafts = createDraftStore(readBrowserStorage());
-
-export const readThreadDraft = drafts.readThreadDraft;
-export const readThreadDraftEntry = drafts.readThreadDraftEntry;
-export const writeThreadDraft = drafts.writeThreadDraft;
-export const clearThreadDraftIfRevision = drafts.clearThreadDraftIfRevision;
-export const readNewThreadDraft = drafts.readNewThreadDraft;
-export const readNewThreadDraftEntry = drafts.readNewThreadDraftEntry;
-export const writeNewThreadDraft = drafts.writeNewThreadDraft;
-export const flushDrafts = drafts.flush;
-
 const draftChangeListeners = new Set<(change: DraftChange) => void>();
+
+function emitDraftChange(change: DraftChange): void {
+  for (const listener of draftChangeListeners) listener(change);
+}
 
 /** Notifies the open composer when another tab changes one of its drafts. */
 export function subscribeDraftChanges(listener: (change: DraftChange) => void): () => void {
@@ -733,11 +785,23 @@ export function subscribeDraftChanges(listener: (change: DraftChange) => void): 
   };
 }
 
+export const drafts = createDraftStore(readBrowserStorage(), { onAdopt: emitDraftChange });
+
+export const readThreadDraft = drafts.readThreadDraft;
+export const readThreadDraftEntry = drafts.readThreadDraftEntry;
+export const writeThreadDraft = drafts.writeThreadDraft;
+export const moveLocalThreadDraft = drafts.moveThreadDraft;
+export const clearThreadDraftIfRevision = drafts.clearThreadDraftIfRevision;
+export const readNewThreadDraft = drafts.readNewThreadDraft;
+export const readNewThreadDraftEntry = drafts.readNewThreadDraftEntry;
+export const writeNewThreadDraft = drafts.writeNewThreadDraft;
+export const flushDrafts = drafts.flush;
+
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (event) => {
     const change = drafts.applyStorageEvent(event.key, event.newValue);
     if (!change) return;
-    for (const listener of draftChangeListeners) listener(change);
+    emitDraftChange(change);
   });
   installDraftFlushHandlers(
     window,

@@ -277,11 +277,15 @@ All notable changes to h4rn are recorded here. The format follows
   h4rn and h4rn defines no skill invocation of its own.
 - **Unsent composer text survives a reload, an app restart or Android killing the webview.** Every
   draft is stored under its own key for a host and thread, so one tab never erases another
-  thread's draft; for the same thread the most recent edit wins. Writes happen after a short
-  debounce and are flushed when the page hides. Drafts
-  from the previous single-blob store are migrated on first launch. A sent message clears only the
+  thread's draft; for the same thread the most recent edit wins, including when both tabs type
+  inside one debounce window — the later edit is saved and the tab whose queued edit lost updates
+  to the text that won. Writes happen after a short debounce and are flushed when the page hides.
+  A sent message clears only the
   text that was sent: a newer draft written in another tab while the message was in flight stays,
-  and a failed send keeps the text so it can be retried. Every write carries its own revision (a
+  and a failed send keeps the text so it can be retried. Sending a prompt recalled with `↑` does
+  not clear the unsent draft recall preserved; it comes back when the send finishes. A draft for a
+  thread the daemon is still starting stays in memory under its temporary id and moves to the real
+  thread id once it exists, and is never written under the temporary id. Every write carries its own revision (a
   timestamp plus a per-tab id), so two tabs writing in the same moment cannot be confused, and a
   send clears only the revision the composer was showing rather than whatever storage holds when
   the reply finishes; a removal that failed is retried only while storage still holds that
@@ -319,6 +323,40 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Composer drafts survive recall, two tabs and a full quota.** Sending a recalled prompt puts the
+  draft that recall preserved back in the box instead of clearing it. Two tabs editing the same
+  thread inside one 300 ms window no longer lose the later edit, and a tab whose queued write was
+  superseded shows the text that actually won. A storage event carrying a corrupt value re-reads
+  the key first, so a value repaired in the meantime is kept, and a write that failed on a full
+  quota no longer counts against the 200-draft cap and evicts stored drafts. Drafts for a
+  `local-thread-*` id stay in memory and move to the real thread id once the daemon returns it;
+  temporary ids are never persisted. The empty-inbox Start a thread box now keeps its draft per
+  host and folder like the New thread dialog. The file walk checks its ignore list before the
+  depth cap, so a deep `node_modules` no longer marks the index truncated; `@` stays closed after
+  a decomposed accent (`e` + U+0301); switching workspaces clears the picker instead of flashing
+  the previous workspace's files or claiming the new one is empty before its index lands; and the
+  flip-below fallback uses the caret line's measured height. The dead single-blob draft migration
+  was removed: no released build wrote that format.
+- **The empty-inbox Start box starts from what is on screen.** Pressing Start — clicked or
+  reached with Tab — blurs the folder field on the way to the button, and that blur used to swap
+  the task box to the typed folder's draft before the send; Start now carries the visible task to
+  the folder as typed. The box also restores the folder and draft last used on the host, instead
+  of always opening on `~/code` and ignoring them. The automatic first-project choice is not
+  remembered as the last folder; it shows that folder's draft, and text typed while it is on
+  screen is saved with that folder, so a reload brings back the same folder and text. It is
+  skipped while the box holds unsent text, and a typed folder that already has its own saved
+  draft keeps it: the keystroke stays with the slot it was typed in rather than replacing text
+  nobody is looking at. When Start loses focus without being pressed and focus leaves the
+  composer, the folder field's skipped commit runs then, so the box shows that folder's draft
+  before the next keystroke can land anywhere. The box is blanked only when the draft it sent was
+  actually cleared and it is still on the slot it sent, so a Start that finishes after the person
+  switched folders leaves that folder's draft in the box and in storage; it re-reads the slot when
+  the New thread dialog closes or another tab writes it, so the dialog's text appears in the inbox.
+  In the composer, `↵` in the `/` menu runs the command ranked for the query on screen
+  (and keeps the text when nothing matches), never a row left from a menu whose trigger the same
+  keystroke replaced, and a recall made while a recalled prompt is sending
+  stays on screen instead of the draft recall had preserved. A thread whose create fails no longer
+  leaves the text typed into its optimistic box behind under the temporary id.
 - **Preview follow-ups from the HTML preview review.** A descriptorless `srcset` candidate followed
   by a comma (`data:image/png;base64,AAAA, local.png 2x`) no longer swallows the candidate after
   it: the trailing comma ends the candidate, so the workspace image is inlined or removed and
