@@ -5,6 +5,21 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **Bitbucket Cloud and Azure DevOps pull requests.** The forge layer now understands two more
+  providers. Bitbucket Cloud takes an app password (username plus token, HTTP Basic) or a workspace
+  access token (Bearer), lists open, merged and declined pull requests, reads the raw PR diff,
+  rebuilds comment threads from `parent` chains, and maps build statuses onto checks. Azure DevOps
+  Services takes a personal access token (Basic with an empty username), lists active, completed and
+  abandoned pull requests, reads commits and iteration changes, builds a unified diff locally from
+  the base and source file contents, maps thread statuses (`fixed`, `closed`, `wontFix`, `byDesign`)
+  to resolved, and combines PR statuses with blocking policy evaluations as checks. Remote detection
+  understands `bitbucket.org`, `dev.azure.com`, `ssh.dev.azure.com` and legacy
+  `*.visualstudio.com` URLs. Bitbucket Server/Data Center and Azure DevOps Server are explicitly
+  unsupported. Neither provider can re-run checks from this surface, and the UI shows that reason
+  the same way it does for Gitea.
+
 ### Fixed
 
 - **Closing a terminal ends its background jobs.** With job control, `sleep 1000 &` runs in its own

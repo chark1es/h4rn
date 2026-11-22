@@ -1,0 +1,34 @@
+{
+  "pagelen": 100,
+  "size": 2,
+  "values": [
+    {
+      "hash": "aaaa1111bbbb2222cccc3333dddd4444eeee5555",
+      "message": "Fix the panic\n\nReproduces the panic on empty input.",
+      "author": {
+        "raw": "Alice Example <alice@example.test>",
+        "user": { "display_name": "Alice Example", "nickname": "alice" }
+      },
+      "date": "2024-05-01T11:00:00Z",
+      "links": {
+        "html": {
+          "href": "https://bitbucket.org/acme/widget/commits/aaaa1111bbbb2222cccc3333dddd4444eeee5555"
+        }
+      }
+    },
+    {
+      "hash": "cccc1111dddd2222eeee3333ffff4444aaaa5555",
+      "message": "Add a test",
+      "author": {
+        "raw": "Alice Example <alice@example.test>",
+        "user": { "display_name": "Alice Example", "nickname": "alice" }
+      },
+      "date": "2024-05-01T11:30:00Z",
+      "links": {
+        "html": {
+          "href": "https://bitbucket.org/acme/widget/commits/cccc1111dddd2222eeee3333ffff4444aaaa5555"
+        }
+      }
+    }
+  ]
+}

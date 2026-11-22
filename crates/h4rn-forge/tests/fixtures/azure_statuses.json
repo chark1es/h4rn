@@ -1,0 +1,23 @@
+{
+  "count": 2,
+  "value": [
+    {
+      "id": "status-1",
+      "state": "succeeded",
+      "description": "all tests passed",
+      "context": { "name": "Build validation", "genre": "continuous-integration" },
+      "targetUrl": "https://dev.azure.com/acme/platform/_build/results?buildId=12",
+      "creationDate": "2024-05-01T10:00:00Z",
+      "updatedDate": "2024-05-01T10:05:00Z"
+    },
+    {
+      "id": "status-2",
+      "state": "failed",
+      "description": "lint failed",
+      "context": { "name": "ci/lint", "genre": "continuous-integration" },
+      "targetUrl": "https://ci.example.test/lint/12",
+      "creationDate": "2024-05-01T10:00:00Z",
+      "updatedDate": "2024-05-01T10:01:00Z"
+    }
+  ]
+}

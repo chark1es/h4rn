@@ -20,7 +20,8 @@ use std::time::Duration;
 use chrono::Utc;
 use h4rn_forge::{
     Forge, ForgeError, ForgeHosts, ForgeViewer, PrPage, auth, client_for_with_budget, detect_repos,
-    pr_context_for_agent, remote::validate_base_url,
+    pr_context_for_agent, remote::validate_base_url, remote::validate_base_url_for,
+    remote::validate_cloud_base_url,
 };
 use h4rn_protocol::{
     ForgeAccount, ForgeAgentTarget, ForgeCapabilityEntry, ForgeChecks, ForgeComment,
@@ -350,13 +351,20 @@ impl ForgeService {
         if token.is_empty() {
             return Err(ForgeError::InvalidRequest("the token is empty".into()).into());
         }
-        let base_url = validate_base_url(base_url)?;
+        let base_url = validate_base_url_for(forge, base_url)?;
+        validate_cloud_base_url(forge, &base_url)?;
         let account_id = format!("acct_{}", uuid::Uuid::now_v7().simple());
+        let username = username
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        // Bitbucket's auth scheme is decided once, here, and recorded so a
+        // restart does not turn a Bearer token into a Basic credential.
+        let (source, username) = bitbucket_auth_source(forge, source, username);
         let mut account = ForgeAccount {
             account_id: account_id.clone(),
             forge,
             base_url,
-            username: username.map(|value| value.trim().to_owned()),
+            username,
             display_name: None,
             scopes: Vec::new(),
             source,
@@ -367,7 +375,18 @@ impl ForgeService {
         // credential behind.
         let client = client_for_with_budget(&account, token, self.requests_per_minute)?;
         let viewer: ForgeViewer = client.viewer().await?;
-        account.username = Some(viewer.login.clone());
+        // Bitbucket keeps the username the user supplied for an app password
+        // (Basic needs it) and leaves it unset for a workspace/OAuth token,
+        // which is not tied to a person.
+        let keep_bitbucket_username = forge == ForgeKind::Bitbucket
+            && matches!(
+                account.source,
+                ForgeCredentialSource::BitbucketAppPassword
+                    | ForgeCredentialSource::BitbucketAccessToken
+            );
+        if !keep_bitbucket_username {
+            account.username = Some(viewer.login.clone());
+        }
         account.display_name = viewer.display_name;
         account.scopes = viewer.scopes;
 
@@ -1141,6 +1160,27 @@ async fn push_branch(
     Ok(())
 }
 
+/// Chooses the Bitbucket credential scheme from what the user supplied.
+///
+/// A username means an app password/API token (HTTP Basic). Without one the
+/// token is an OAuth or workspace access token (Bearer). The chosen source is
+/// stored so later client construction makes the same decision.
+fn bitbucket_auth_source(
+    forge: ForgeKind,
+    source: ForgeCredentialSource,
+    username: Option<String>,
+) -> (ForgeCredentialSource, Option<String>) {
+    match (forge, source, username) {
+        (ForgeKind::Bitbucket, ForgeCredentialSource::Pat, Some(username)) => {
+            (ForgeCredentialSource::BitbucketAppPassword, Some(username))
+        }
+        (ForgeKind::Bitbucket, ForgeCredentialSource::Pat, None) => {
+            (ForgeCredentialSource::BitbucketAccessToken, None)
+        }
+        (_, source, username) => (source, username),
+    }
+}
+
 fn checks_signature(checks: &ForgeChecks) -> String {
     let mut signature = format!(
         "{:?}:{}:{}:{}:{}",
@@ -1210,6 +1250,24 @@ mod tests {
         });
         let second = checks_signature(&changed);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn bitbucket_auth_scheme_is_chosen_from_the_username() {
+        use h4rn_protocol::ForgeCredentialSource as Source;
+        assert_eq!(
+            bitbucket_auth_source(ForgeKind::Bitbucket, Source::Pat, Some("alice".into())),
+            (Source::BitbucketAppPassword, Some("alice".into()))
+        );
+        assert_eq!(
+            bitbucket_auth_source(ForgeKind::Bitbucket, Source::Pat, None),
+            (Source::BitbucketAccessToken, None)
+        );
+        // Other forges keep the source the client sent.
+        assert_eq!(
+            bitbucket_auth_source(ForgeKind::GitHub, Source::Pat, Some("alice".into())),
+            (Source::Pat, Some("alice".into()))
+        );
     }
 
     #[test]

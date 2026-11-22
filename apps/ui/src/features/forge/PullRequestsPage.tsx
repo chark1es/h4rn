@@ -97,7 +97,14 @@ function repoFromQuery(): ForgeRepoRef | null {
   const forge = query.get("forge");
   const base = query.get("base");
   if (!owner || !repo || !forge || !base) return null;
-  if (forge !== "github" && forge !== "gitlab" && forge !== "gitea" && forge !== "forgejo") {
+  if (
+    forge !== "github" &&
+    forge !== "gitlab" &&
+    forge !== "gitea" &&
+    forge !== "forgejo" &&
+    forge !== "bitbucket" &&
+    forge !== "azure_devops"
+  ) {
     return null;
   }
   return { forge, base_url: base.replace(/\/$/, ""), owner, repo };
@@ -196,8 +203,8 @@ function EmptyForge({ onSettings }: { onSettings: () => void }) {
           <GitPullRequestIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
           <h3>Connect a forge</h3>
           <p>
-            Pull requests live on GitHub, GitLab, Gitea or Forgejo. Add an account and the token
-            stays on this host.
+            Pull requests live on GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud or Azure DevOps.
+            Add an account and the token stays on this host.
           </p>
           <button type="button" className="q-btn primary" onClick={onSettings}>
             Add a forge account
@@ -216,8 +223,8 @@ function NoRepo({ onSettings }: { onSettings: () => void }) {
           <GitPullRequestIcon className="q-icon s22 q-faint" strokeWidth={1.5} aria-hidden />
           <h3>No repository detected</h3>
           <p>
-            Open a thread in a git checkout with a GitHub, GitLab, Gitea or Forgejo remote, or add a
-            self-hosted host in Settings.
+            Open a thread in a git checkout with a GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud
+            or Azure DevOps remote, or add a self-hosted host in Settings.
           </p>
           <button type="button" className="q-btn secondary" onClick={onSettings}>
             Open forge settings

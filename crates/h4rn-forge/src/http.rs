@@ -415,6 +415,7 @@ pub fn redact(value: &str) -> String {
             || word.starts_with("gho_")
             || word.starts_with("glpat-")
             || word.starts_with("github_pat_")
+            || word.starts_with("ATBB")
         {
             output.push_str("[redacted]");
         } else {
@@ -545,6 +546,17 @@ pub fn auth_header(name: &'static str, value: &str) -> Option<(HeaderName, Strin
     Some((name, value.to_owned()))
 }
 
+/// An HTTP Basic credential header, base64-encoded as the RFC requires.
+///
+/// Bitbucket Cloud app passwords use `username:app-password`; Azure DevOps
+/// personal access tokens use an empty username (`:pat`).
+pub fn basic_auth_header(username: &str, secret: &str) -> Option<(HeaderName, String)> {
+    use base64::Engine as _;
+    let credentials = format!("{username}:{secret}");
+    let encoded = base64::engine::general_purpose::STANDARD.encode(credentials.as_bytes());
+    auth_header("authorization", &format!("Basic {encoded}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,5 +592,26 @@ mod tests {
             "bad token [redacted] here"
         );
         assert_eq!(redact("glpat-xyz"), "[redacted]");
+        assert_eq!(redact("ATBBtoken"), "[redacted]");
+    }
+
+    #[test]
+    fn basic_auth_encodes_both_parts() {
+        use base64::Engine as _;
+        let (_, value) = basic_auth_header("alice", "s3cret").unwrap();
+        let encoded = value.trim_start_matches("Basic ");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap(),
+            b"alice:s3cret"
+        );
+        let (_, azure) = basic_auth_header("", "pat").unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(azure.trim_start_matches("Basic "))
+                .unwrap(),
+            b":pat"
+        );
     }
 }

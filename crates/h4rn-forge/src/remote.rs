@@ -55,6 +55,21 @@ impl Default for ForgeHosts {
         hosts.insert("gitlab.com", ForgeKind::GitLab, "https://gitlab.com");
         hosts.insert("codeberg.org", ForgeKind::Forgejo, "https://codeberg.org");
         hosts.insert("gitea.com", ForgeKind::Gitea, "https://gitea.com");
+        hosts.insert(
+            "bitbucket.org",
+            ForgeKind::Bitbucket,
+            "https://bitbucket.org",
+        );
+        hosts.insert(
+            "dev.azure.com",
+            ForgeKind::AzureDevOps,
+            "https://dev.azure.com",
+        );
+        hosts.insert(
+            "ssh.dev.azure.com",
+            ForgeKind::AzureDevOps,
+            "https://dev.azure.com",
+        );
         hosts
     }
 }
@@ -127,10 +142,36 @@ impl ForgeHosts {
                     entry.host
                 )));
             };
-            validate_base_url(&base_url)?;
+            let base_url = validate_base_url_for(entry.forge, &base_url)?;
+            validate_cloud_base_url(entry.forge, &base_url)?;
             hosts.insert(&entry.host, entry.forge, &base_url);
         }
         Ok(hosts)
+    }
+}
+
+/// Rejects a Bitbucket or Azure DevOps base URL that is not the cloud service.
+/// Their on-premises products use different APIs and are not supported by this
+/// crate.
+pub fn validate_cloud_base_url(kind: ForgeKind, base_url: &str) -> Result<()> {
+    let host = Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
+        .unwrap_or_default();
+    match kind {
+        ForgeKind::Bitbucket if host != "bitbucket.org" => {
+            Err(ForgeError::InvalidRequest(format!(
+                "Bitbucket Server and Data Center are not supported; use Bitbucket Cloud (bitbucket.org), not {base_url}"
+            )))
+        }
+        ForgeKind::AzureDevOps
+            if host != "dev.azure.com" && !host.ends_with(".visualstudio.com") =>
+        {
+            Err(ForgeError::InvalidRequest(format!(
+                "Azure DevOps Server is not supported; use Azure DevOps Services (dev.azure.com), not {base_url}"
+            )))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -155,6 +196,48 @@ pub fn validate_base_url(value: &str) -> Result<String> {
         )));
     }
     Ok(value.trim_end_matches('/').to_owned())
+}
+
+/// Validates a public base URL for one forge.
+///
+/// Only Azure DevOps keeps a path in its base URL: the organization for
+/// `https://dev.azure.com/acme`, or `DefaultCollection` on the legacy
+/// `https://acme.visualstudio.com/DefaultCollection` host. Every other forge
+/// must be hosted at the origin.
+pub fn validate_base_url_for(kind: ForgeKind, value: &str) -> Result<String> {
+    if kind != ForgeKind::AzureDevOps {
+        return validate_base_url(value);
+    }
+    let trimmed = value.trim().trim_end_matches('/');
+    let parsed = Url::parse(trimmed).map_err(|error| {
+        ForgeError::InvalidRequest(format!("invalid base URL {value:?}: {error}"))
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(ForgeError::InvalidRequest(format!(
+            "base URL {value:?} must use http or https"
+        )));
+    }
+    if parsed.host_str().is_none() {
+        return Err(ForgeError::InvalidRequest(format!(
+            "base URL {value:?} has no host"
+        )));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(ForgeError::InvalidRequest(format!(
+            "base URL {value:?} must not include a query or fragment"
+        )));
+    }
+    let segments: Vec<&str> = parsed
+        .path()
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    if segments.len() > 1 || segments.iter().any(|part| *part == "." || *part == "..") {
+        return Err(ForgeError::InvalidRequest(format!(
+            "Azure DevOps base URL {value:?} must be the host and at most one organization or collection segment"
+        )));
+    }
+    Ok(trimmed.to_owned())
 }
 
 /// The API root for one forge and web base URL.
@@ -185,13 +268,40 @@ pub fn api_base_url(kind: ForgeKind, base_url: &str) -> String {
                 format!("{base}/api/v1")
             }
         }
+        ForgeKind::Bitbucket => {
+            if base.eq_ignore_ascii_case("https://bitbucket.org") {
+                "https://api.bitbucket.org/2.0".to_owned()
+            } else {
+                // An explicit Cloud-compatible endpoint (tests and proxies).
+                // Bitbucket Server and Data Center use a different API and are
+                // not supported.
+                format!("{base}/2.0")
+            }
+        }
+        // Azure DevOps paths are built from the organization base, not a
+        // separate API host.
+        ForgeKind::AzureDevOps => base.to_owned(),
     }
 }
 
 /// Detects the forge from one remote URL.
 pub fn detect_remote(remote: &str, url: &str, hosts: &ForgeHosts) -> Option<ForgeRemote> {
     let parsed = parse_remote(url)?;
-    let host = hosts.get(&parsed.host)?;
+    let host = match hosts.get(&parsed.host) {
+        Some(host) => host.clone(),
+        // Legacy Azure DevOps organizations use a per-organization cloud host.
+        // It is still a well-known cloud service, never a guessed self-hosted
+        // one, so it is recognised without a forge-hosts.json entry.
+        None if is_visualstudio_cloud_host(&parsed.host) => ForgeHost {
+            host: parsed.host.clone(),
+            kind: ForgeKind::AzureDevOps,
+            base_url: format!("https://{}", parsed.host),
+        },
+        None => return None,
+    };
+    if host.kind == ForgeKind::AzureDevOps {
+        return detect_azure_remote(remote, url, &parsed, &host);
+    }
     let segments: Vec<&str> = parsed
         .path
         .split('/')
@@ -205,8 +315,8 @@ pub fn detect_remote(remote: &str, url: &str, hosts: &ForgeHosts) -> Option<Forg
     if owner.is_empty() || repo.is_empty() {
         return None;
     }
-    // GitHub, Gitea and Forgejo have exactly two path segments. GitLab is the
-    // only supported forge with nested namespaces.
+    // GitHub, Gitea, Forgejo and Bitbucket Cloud have exactly two path
+    // segments. GitLab is the only supported forge with nested namespaces.
     if host.kind != ForgeKind::GitLab && segments.len() != 2 {
         return None;
     }
@@ -216,6 +326,101 @@ pub fn detect_remote(remote: &str, url: &str, hosts: &ForgeHosts) -> Option<Forg
             forge: host.kind,
             base_url: host.base_url.clone(),
             owner,
+            repo,
+        },
+        url: redact_url(url),
+    })
+}
+
+fn is_visualstudio_cloud_host(host: &str) -> bool {
+    host.strip_suffix(".visualstudio.com")
+        .is_some_and(|organization| !organization.is_empty() && !organization.contains('.'))
+}
+
+/// Parses the Azure DevOps remote forms into an organization base URL, project
+/// and repository.
+fn detect_azure_remote(
+    remote: &str,
+    url: &str,
+    parsed: &ParsedRemote,
+    host: &ForgeHost,
+) -> Option<ForgeRemote> {
+    let segments: Vec<&str> = parsed
+        .path
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect();
+    if segments.iter().any(|part| *part == "." || *part == "..") {
+        return None;
+    }
+
+    // SSH form: `v3/<org>/<project>/<repo>`.
+    let (base_url, project, repo) = if segments.first() == Some(&"v3") && segments.len() == 4 {
+        let organization = segments[1];
+        let base = if parsed.host == "dev.azure.com"
+            || parsed.host == "ssh.dev.azure.com"
+            || host.base_url == "https://dev.azure.com"
+        {
+            format!("https://dev.azure.com/{organization}")
+        } else if host.base_url.ends_with(&format!("/{organization}")) {
+            host.base_url.clone()
+        } else if host
+            .base_url
+            .trim_end_matches('/')
+            .ends_with("/dev.azure.com")
+        {
+            format!("{}/{}", host.base_url.trim_end_matches('/'), organization)
+        } else {
+            host.base_url.clone()
+        };
+        (base, segments[2].to_string(), segments[3].to_string())
+    } else {
+        // HTTPS form: `[<org>|DefaultCollection/]<project>/_git/<repo>`.
+        if segments.len() < 3 || segments[segments.len() - 2] != "_git" {
+            return None;
+        }
+        let repo = segments.last()?.to_string();
+        let project = segments[segments.len() - 3].to_string();
+        let prefix = &segments[..segments.len() - 3];
+        let base_url = if parsed.host == "dev.azure.com" {
+            if prefix.len() != 1 {
+                return None;
+            }
+            let organization = prefix[0];
+            format!("https://dev.azure.com/{organization}")
+        } else if prefix.is_empty() {
+            host.base_url.clone()
+        } else if host
+            .base_url
+            .trim_end_matches('/')
+            .ends_with(parsed.host.as_str())
+        {
+            format!(
+                "{}/{}",
+                host.base_url.trim_end_matches('/'),
+                prefix.join("/")
+            )
+        } else {
+            host.base_url.clone()
+        };
+        (base_url, project, repo)
+    };
+
+    if project.is_empty()
+        || repo.is_empty()
+        || project == "."
+        || project == ".."
+        || repo == "."
+        || repo == ".."
+    {
+        return None;
+    }
+    Some(ForgeRemote {
+        remote: remote.to_owned(),
+        repo: ForgeRepoRef {
+            forge: ForgeKind::AzureDevOps,
+            base_url,
+            owner: project,
             repo,
         },
         url: redact_url(url),
@@ -398,6 +603,65 @@ mod tests {
     }
 
     #[test]
+    fn bitbucket_remote_forms() {
+        for url in [
+            "git@bitbucket.org:acme/widget.git",
+            "https://acme@bitbucket.org/acme/widget.git",
+            "ssh://git@bitbucket.org/acme/widget.git",
+        ] {
+            let detected = detect(url).unwrap();
+            assert_eq!(detected.repo.forge, ForgeKind::Bitbucket, "{url}");
+            assert_eq!(detected.repo.owner, "acme");
+            assert_eq!(detected.repo.repo, "widget");
+            assert_eq!(detected.repo.base_url, "https://bitbucket.org");
+        }
+        let with_credentials = detect("https://user:secret@bitbucket.org/acme/widget.git").unwrap();
+        assert!(!with_credentials.url.contains("secret"));
+    }
+
+    #[test]
+    fn azure_devops_remote_forms() {
+        let expected = |detected: Option<ForgeRemote>, base: &str| {
+            let detected = detected.expect("azure remote");
+            assert_eq!(detected.repo.forge, ForgeKind::AzureDevOps);
+            assert_eq!(detected.repo.base_url, base);
+            assert_eq!(detected.repo.owner, "platform");
+            assert_eq!(detected.repo.repo, "widget");
+        };
+
+        expected(
+            detect("git@ssh.dev.azure.com:v3/acme/platform/widget"),
+            "https://dev.azure.com/acme",
+        );
+        expected(
+            detect("https://acme@dev.azure.com/acme/platform/_git/widget"),
+            "https://dev.azure.com/acme",
+        );
+        expected(
+            detect("https://acme.visualstudio.com/platform/_git/widget"),
+            "https://acme.visualstudio.com",
+        );
+        expected(
+            detect("https://acme.visualstudio.com/DefaultCollection/platform/_git/widget"),
+            "https://acme.visualstudio.com/DefaultCollection",
+        );
+        // An ssh alias is still explicit: it must be declared as an Azure host.
+        let mut hosts = hosts();
+        hosts.insert("ado", ForgeKind::AzureDevOps, "https://dev.azure.com");
+        let aliased = detect_remote("origin", "git@ado:v3/acme/platform/widget", &hosts).unwrap();
+        assert_eq!(aliased.repo.base_url, "https://dev.azure.com/acme");
+        assert_eq!(aliased.repo.owner, "platform");
+    }
+
+    #[test]
+    fn azure_requires_the_organization_and_project() {
+        assert!(detect("https://dev.azure.com/acme/platform").is_none());
+        assert!(detect("https://dev.azure.com/acme/_git/widget").is_none());
+        assert!(detect("https://dev.azure.com/acme/platform/extra/_git/widget").is_none());
+        assert!(detect("https://acme.visualstudio.com/widget").is_none());
+    }
+
+    #[test]
     fn unknown_hosts_and_local_paths_are_rejected() {
         assert!(detect("https://example.org/owner/repo.git").is_none());
         assert!(detect("/srv/git/repo.git").is_none());
@@ -428,6 +692,29 @@ mod tests {
     }
 
     #[test]
+    fn only_cloud_bitbucket_and_azure_hosts_may_be_declared() {
+        let cloud = br#"{"hosts":[
+            {"host":"bitbucket.org","forge":"bitbucket","base_url":"https://bitbucket.org"},
+            {"host":"ado","forge":"azure_devops","base_url":"https://dev.azure.com"},
+            {"host":"legacy","forge":"azure_devops","base_url":"https://acme.visualstudio.com"}
+        ]}"#;
+        assert!(ForgeHosts::from_json(cloud).is_ok());
+
+        let server = br#"{"hosts":[{"host":"bb.example.com","forge":"bitbucket","base_url":"https://bb.example.com"}]}"#;
+        assert!(ForgeHosts::from_json(server).is_err());
+        let on_prem = br#"{"hosts":[{"host":"ado.example.com","forge":"azure_devops","base_url":"https://ado.example.com"}]}"#;
+        assert!(ForgeHosts::from_json(on_prem).is_err());
+        assert!(validate_cloud_base_url(ForgeKind::Bitbucket, "https://bb.example.com").is_err());
+        assert!(
+            validate_cloud_base_url(ForgeKind::AzureDevOps, "https://ado.example.com").is_err()
+        );
+        assert!(
+            validate_cloud_base_url(ForgeKind::AzureDevOps, "https://acme.visualstudio.com")
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn api_bases_follow_each_forge() {
         assert_eq!(
             api_base_url(ForgeKind::GitHub, "https://github.com"),
@@ -445,5 +732,30 @@ mod tests {
             api_base_url(ForgeKind::Forgejo, "https://codeberg.org"),
             "https://codeberg.org/api/v1"
         );
+        assert_eq!(
+            api_base_url(ForgeKind::Bitbucket, "https://bitbucket.org"),
+            "https://api.bitbucket.org/2.0"
+        );
+        assert_eq!(
+            api_base_url(ForgeKind::AzureDevOps, "https://dev.azure.com/acme"),
+            "https://dev.azure.com/acme"
+        );
+    }
+
+    #[test]
+    fn azure_base_urls_keep_the_organization() {
+        assert_eq!(
+            validate_base_url_for(ForgeKind::AzureDevOps, "https://dev.azure.com/acme/").unwrap(),
+            "https://dev.azure.com/acme"
+        );
+        assert!(validate_base_url_for(ForgeKind::AzureDevOps, "https://dev.azure.com").is_ok());
+        assert!(
+            validate_base_url_for(
+                ForgeKind::AzureDevOps,
+                "https://dev.azure.com/acme/platform"
+            )
+            .is_err()
+        );
+        assert!(validate_base_url_for(ForgeKind::GitHub, "https://ghe.example.com/acme").is_err());
     }
 }

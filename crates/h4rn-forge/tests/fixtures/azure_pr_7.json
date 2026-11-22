@@ -1,0 +1,48 @@
+{
+  "pullRequestId": 7,
+  "title": "Fix the widget",
+  "status": "active",
+  "isDraft": false,
+  "createdBy": {
+    "displayName": "Alice Example",
+    "uniqueName": "alice@example.test",
+    "id": "alice-guid"
+  },
+  "creationDate": "2024-05-01T09:00:00.000Z",
+  "sourceRefName": "refs/heads/alice/fix",
+  "targetRefName": "refs/heads/main",
+  "mergeStatus": "succeeded",
+  "lastMergeSourceCommit": { "commitId": "aaaa1111bbbb2222cccc3333dddd4444eeee5555" },
+  "lastMergeTargetCommit": { "commitId": "bbbb1111cccc2222dddd3333eeee4444ffff5555" },
+  "lastMergeCommit": {
+    "commitId": "cccc1111dddd2222eeee3333ffff4444aaaa5555",
+    "author": { "date": "2024-05-01T12:00:00.000Z" }
+  },
+  "description": "Fixes the widget and adds a regression test.",
+  "labels": [{ "name": "bug", "id": "label-1" }],
+  "reviewers": [
+    {
+      "displayName": "Bob Reviewer",
+      "uniqueName": "bob@example.test",
+      "vote": 10,
+      "isRequired": true
+    },
+    {
+      "displayName": "Carole",
+      "uniqueName": "carol@example.test",
+      "vote": -10,
+      "isRequired": false
+    },
+    {
+      "displayName": "Dan",
+      "uniqueName": "dan@example.test",
+      "vote": 0,
+      "isRequired": true
+    }
+  ],
+  "_links": {
+    "web": {
+      "href": "https://dev.azure.com/acme/platform/_git/widget/pullrequest/7"
+    }
+  }
+}

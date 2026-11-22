@@ -1,0 +1,19 @@
+{
+  "pagelen": 100,
+  "values": [
+    {
+      "status": "modified",
+      "old": { "path": "src/lib.rs" },
+      "new": { "path": "src/lib.rs" },
+      "lines_added": 2,
+      "lines_deleted": 1
+    },
+    {
+      "status": "added",
+      "old": null,
+      "new": { "path": "src/new.rs" },
+      "lines_added": 3,
+      "lines_deleted": 0
+    }
+  ]
+}

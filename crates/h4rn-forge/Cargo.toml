@@ -5,10 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Provider-agnostic forge (GitHub, GitLab, Gitea, Forgejo) operations"
+description = "Provider-agnostic forge (GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud, Azure DevOps) operations"
 
 [dependencies]
 async-trait.workspace = true
+base64.workspace = true
 chrono.workspace = true
 h4rn-protocol.workspace = true
 reqwest.workspace = true

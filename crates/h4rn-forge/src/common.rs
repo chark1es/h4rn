@@ -246,6 +246,46 @@ pub fn gitea_check_status(status: &str) -> ForgeCheckStatus {
     }
 }
 
+/// Maps a Bitbucket Cloud build status.
+pub fn bitbucket_check_status(status: &str) -> ForgeCheckStatus {
+    match status.to_ascii_uppercase().as_str() {
+        "SUCCESSFUL" => ForgeCheckStatus::Success,
+        "FAILED" => ForgeCheckStatus::Failure,
+        "INPROGRESS" => ForgeCheckStatus::InProgress,
+        "STOPPED" => ForgeCheckStatus::Cancelled,
+        "PENDING" => ForgeCheckStatus::Queued,
+        _ => ForgeCheckStatus::Unknown,
+    }
+}
+
+/// Maps an Azure DevOps PR status.
+pub fn azure_check_status(status: &str) -> ForgeCheckStatus {
+    match status {
+        "succeeded" => ForgeCheckStatus::Success,
+        "failed" | "error" => ForgeCheckStatus::Failure,
+        "pending" | "queued" => ForgeCheckStatus::Queued,
+        "inProgress" | "running" => ForgeCheckStatus::InProgress,
+        "notApplicable" => ForgeCheckStatus::Skipped,
+        _ => ForgeCheckStatus::Unknown,
+    }
+}
+
+/// Maps an Azure DevOps policy evaluation status.
+pub fn azure_policy_status(status: &str) -> ForgeCheckStatus {
+    match status {
+        "approved" => ForgeCheckStatus::Success,
+        "rejected" | "broken" => ForgeCheckStatus::Failure,
+        "queued" => ForgeCheckStatus::Queued,
+        "running" => ForgeCheckStatus::InProgress,
+        _ => ForgeCheckStatus::Unknown,
+    }
+}
+
+/// Whether an Azure DevOps thread status means the conversation is resolved.
+pub fn azure_thread_resolved(status: &str) -> bool {
+    matches!(status, "fixed" | "closed" | "wontFix" | "byDesign")
+}
+
 /// Milliseconds between two timestamps, when both exist.
 pub fn duration_ms(start: Option<&DateTime<Utc>>, end: Option<&DateTime<Utc>>) -> Option<u64> {
     let start = start?;
@@ -296,6 +336,26 @@ mod tests {
         assert!(context_matches("ci/*", "ci/lint"));
         assert!(context_matches("*-build", "linux-build"));
         assert!(!context_matches("ci/*", "other/lint"));
+    }
+
+    #[test]
+    fn bitbucket_and_azure_states_map_honestly() {
+        assert_eq!(
+            bitbucket_check_status("SUCCESSFUL"),
+            ForgeCheckStatus::Success
+        );
+        assert_eq!(
+            bitbucket_check_status("STOPPED"),
+            ForgeCheckStatus::Cancelled
+        );
+        assert_eq!(
+            azure_check_status("inProgress"),
+            ForgeCheckStatus::InProgress
+        );
+        assert_eq!(azure_policy_status("rejected"), ForgeCheckStatus::Failure);
+        assert!(azure_thread_resolved("fixed"));
+        assert!(azure_thread_resolved("wontFix"));
+        assert!(!azure_thread_resolved("active"));
     }
 
     #[test]

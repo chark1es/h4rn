@@ -3,4 +3,4 @@
 /**
  * Where a stored credential came from.
  */
-export type ForgeCredentialSource = "pat" | "o_auth_device" | "gh_cli" | "glab_cli";
+export type ForgeCredentialSource = "pat" | "o_auth_device" | "gh_cli" | "glab_cli" | "bitbucket_app_password" | "bitbucket_access_token";

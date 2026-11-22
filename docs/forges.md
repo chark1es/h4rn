@@ -1,9 +1,10 @@
 # Forges
 
 `h4rn-forge` is the provider-agnostic pull-request layer behind the PR view. It
-talks to GitHub, GitLab, Gitea and Forgejo, normalises their answers into the
-types in `h4rn-protocol::forge`, and keeps credentials and writes inside the
-daemon. The UI never sees a token and never speaks a forge API directly.
+talks to GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud and Azure DevOps
+Services, normalises their answers into the types in `h4rn-protocol::forge`, and
+keeps credentials and writes inside the daemon. The UI never sees a token and
+never speaks a forge API directly.
 
 ## Supported forges
 
@@ -13,6 +14,8 @@ daemon. The UI never sees a token and never speaks a forge API directly.
 | GitLab | `gitlab.com` | GitLab CE/EE | `https://<host>/api/v4` |
 | Gitea | `gitea.com` | any Gitea 1.18+ | `https://<host>/api/v1` |
 | Forgejo | `codeberg.org` | any Forgejo | `https://<host>/api/v1` |
+| Bitbucket Cloud | `bitbucket.org` | no (Server/Data Center unsupported) | `https://api.bitbucket.org/2.0` |
+| Azure DevOps Services | `dev.azure.com`, `<org>.visualstudio.com` | no (Azure DevOps Server unsupported) | `https://dev.azure.com/<org>/<project>/_apis/git/repositories/<repo>` |
 
 GitHub uses REST for lists, detail, diffs, comments and checks, and GraphQL only
 for `reviewThreads` because the REST review-comment endpoint does not expose
@@ -31,9 +34,36 @@ PR view needs. Two differences are handled explicitly:
 - there is no nested-reply endpoint, so a reply is posted as a general PR
   comment. `capabilities().nested_replies` is `false`, and the UI can say so.
 
-Diffs are fetched as the raw unified patch (`pull/<n>.diff`) and parsed locally,
-which works across versions and does not depend on a newer JSON files endpoint.
-If that endpoint fails the client falls back to `pull/<n>/files`.
+Bitbucket Cloud uses API v2. It accepts an app password (or API token) as HTTP
+Basic with the account username, or a workspace/OAuth access token as Bearer.
+The client lists PRs and their states, reads the PR's raw unified diff, rebuilds
+threads from the comment `parent` chain, and maps the commit's build statuses
+onto checks. A root comment's `resolution` object marks a thread resolved when
+the workspace reports it; otherwise threads are unresolved. There is no
+resolution write API in this surface, so `resolve_threads` is `false`. Diffs are
+paginated locally.
+
+Azure DevOps Services uses REST 7.1. `ForgeRepoRef.base_url` carries the
+organization (`https://dev.azure.com/acme`) and `owner` carries the project.
+Pull requests map `active`/`completed`/`abandoned` onto open/merged/closed.
+Azure returns changed files per iteration rather than a patch, so the diff is
+built by downloading the base and source content of every changed text file and
+running a local unified-diff generator; this is the documented approach and it
+also supplies the detail view's additions/deletions (capped at 100 files for
+detail, 500 for the diff tab). `/pullrequests/{id}/threads` supplies both general
+comments and inline threads; thread statuses `fixed`, `closed`, `wontFix` and
+`byDesign` are resolved. Checks are PR statuses plus policy evaluations, with
+blocking policies marked required.
+
+Bitbucket Server / Data Center and Azure DevOps Server are not supported: they
+use different APIs and hosts, and this build only detects and speaks the cloud
+services.
+
+Diffs for Gitea/Forgejo are fetched as the raw unified patch (`pull/<n>.diff`)
+and parsed locally, which works across versions and does not depend on a newer
+JSON files endpoint. If that endpoint fails the client falls back to
+`pull/<n>/files`. Bitbucket returns its patch from
+`/pullrequests/{id}/diff`; Azure is described above.
 
 ## Detecting a repository
 
@@ -45,10 +75,18 @@ git@github.com:owner/repo.git
 ssh://git@gitlab.example.com/group/subgroup/repo.git
 https://user:token@gitea.example.com/owner/repo.git
 git://codeberg.org/owner/repo
+git@bitbucket.org:workspace/repo.git
+https://user@bitbucket.org/workspace/repo.git
+git@ssh.dev.azure.com:v3/org/project/repo
+https://org@dev.azure.com/org/project/_git/repo
+https://org.visualstudio.com/project/_git/repo
+https://org.visualstudio.com/DefaultCollection/project/_git/repo
 ```
 
 Credentials in an HTTPS remote are stripped before anything is stored or logged.
-Local paths and file remotes are rejected.
+Local paths and file remotes are rejected. Azure DevOps remotes keep the
+organization in `base_url` and the project in `owner`; the browser URL inserts
+the `_git` segment.
 
 Unknown hosts are never guessed, because an ssh alias such as `work` could send a
 token to the wrong server. Declare custom hosts in
@@ -60,15 +98,21 @@ token to the wrong server. Declare custom hosts in
     { "host": "ghe.example.com", "forge": "github", "base_url": "https://ghe.example.com" },
     { "host": "gitlab.example.com", "forge": "gitlab", "base_url": "https://gitlab.example.com" },
     { "host": "work", "forge": "gitlab", "base_url": "https://gitlab.example.com" },
-    { "host": "code.example.com", "forge": "forgejo", "base_url": "https://code.example.com" }
+    { "host": "code.example.com", "forge": "forgejo", "base_url": "https://code.example.com" },
+    { "host": "ado", "forge": "azure_devops", "base_url": "https://dev.azure.com" }
   ]
 }
 ```
 
 `host` is the name that appears in the remote (or the ssh alias), lowercased;
-`base_url` is required and is the public web URL without a path or trailing
-slash. The well-known hosts `github.com`, `gitlab.com`, `codeberg.org` and
-`gitea.com` are preloaded and can be overridden.
+`base_url` is required and is the public web URL without a trailing slash. An
+Azure DevOps base URL may include one organization segment
+(`https://dev.azure.com/acme`). A Bitbucket or Azure host may only be declared
+for the cloud services; Server/Data Center and Azure DevOps Server are rejected
+when the host file is read because their APIs differ. The well-known hosts
+`github.com`, `gitlab.com`, `codeberg.org`, `gitea.com`, `bitbucket.org`,
+`dev.azure.com` and `ssh.dev.azure.com` are preloaded and can be overridden, and
+every `<org>.visualstudio.com` host is recognised as Azure DevOps.
 
 The data directory is `$H4RN_DATA_DIR`, or the platform default
 (`$XDG_DATA_HOME/h4rn`, `~/Library/Application Support/h4rn`,
@@ -98,10 +142,19 @@ the full PR view (list, detail, diff, threads, checks, comment, reply) is:
 | GitHub (public repos only) | `public_repo`, `read:user` |
 | GitLab | `api` (or `read_api` + `read_user` for a read-only account) |
 | Gitea / Forgejo | `read:user`, `read:repository`, `write:repository`, `read:issue`, `write:issue` |
+| Bitbucket Cloud (app password) | Repositories: read, Pull requests: read/write |
+| Bitbucket Cloud (workspace token) | `repository:write`, `pullrequest:write` |
+| Azure DevOps | Code: read & write (PAT) |
 
 `repo` covers check runs and commit statuses. A read-only account cannot use
 `ForgeReply`, `ForgeComment` or `ForgeOpenPr`; the forge will return 403 and the
 daemon reports it as an auth error instead of retrying.
+
+Bitbucket app passwords are sent as HTTP Basic with the account username; a
+workspace or OAuth access token is sent as Bearer and needs no username. Azure
+DevOps personal access tokens use HTTP Basic with an empty username. Bitbucket
+accounts record which scheme validated (`bitbucket_app_password` or
+`bitbucket_access_token`) so a restart keeps the same credential type.
 
 The daemon compares the scopes the forge reports with the least-privilege set
 and surfaces extras in the account row (`ForgeAccount.scopes`), so an
@@ -124,8 +177,9 @@ The default scopes are `repo read:user`; public-only use can pass
 `oauth_device`.
 
 GitLab does not offer a device grant for this use case, and Gitea/Forgejo have
-no OAuth device flow in their public API, so those accounts use a personal
-access token. `capabilities().device_flow` is `false` for them.
+no OAuth device flow in their public API. Bitbucket Cloud and Azure DevOps use
+app passwords, workspace tokens or personal access tokens instead.
+`capabilities().device_flow` is `false` for all of them.
 
 ### Importing from gh or glab
 
@@ -140,22 +194,22 @@ missing or has no token, the error is reported and nothing is stored.
 `ForgeListAccounts` returns one `ForgeCapabilityEntry` per forge. Clients should
 read the flags instead of assuming all forges behave alike.
 
-| Capability | GitHub | GitLab | Gitea | Forgejo |
-| --- | --- | --- | --- | --- |
-| OAuth device flow | yes | no | no | no |
-| Review threads | yes | yes | yes | yes |
-| Resolve threads | yes | yes | no | no |
-| Nested replies | yes | yes | no | no |
-| Inline review comments | yes | yes | yes | yes |
-| Checks / statuses | yes | yes (pipelines/jobs) | yes | yes |
-| Pipeline view | no | yes | no | no |
-| Server-side diff pagination | yes | yes | no | no |
-| GraphQL used | yes | no | no | no |
-| Re-run failed checks | yes (check suites) | yes (pipeline retry) | no | no |
+| Capability | GitHub | GitLab | Gitea | Forgejo | Bitbucket Cloud | Azure DevOps |
+| --- | --- | --- | --- | --- | --- | --- |
+| OAuth device flow | yes | no | no | no | no | no |
+| Review threads | yes | yes | yes | yes | yes | yes |
+| Resolve threads | yes | yes | no | no | no (read only) | no (read only) |
+| Nested replies | yes | yes | no | no | yes | yes |
+| Inline review comments | yes | yes | yes | yes | yes | yes |
+| Checks / statuses | yes | yes (pipelines/jobs) | yes | yes | yes (build statuses) | yes (statuses + policies) |
+| Pipeline view | no | yes | no | no | no | no |
+| Server-side diff pagination | yes | yes | no | no | no | no |
+| GraphQL used | yes | no | no | no | no | no |
+| Re-run failed checks | yes (check suites) | yes (pipeline retry) | no | no | no | no |
 
-Diff pagination on Gitea/Forgejo is applied locally: the whole patch is parsed
-and sliced by `page`/`per_page`, and `has_more` reports whether more files
-exist.
+Diff pagination on Gitea/Forgejo, Bitbucket Cloud and Azure DevOps is applied
+locally: the provider's diff (or changed-file list) is read and sliced by
+`page`/`per_page`, and `has_more` reports whether more files exist.
 
 ## Checks, logs, re-run and commits
 
@@ -169,14 +223,21 @@ Each `ForgeCheck` carries `details_url` (the page that shows the log; the UI's
 - **GitLab:** a job is required unless `allow_failure` is set.
 - **Gitea/Forgejo:** from the branch protection rule's status-check contexts
   (wildcards allowed); reading it needs repository admin, otherwise `null`.
+- **Bitbucket Cloud:** commit statuses have no required marker, so `required`
+  is always `null` (unknown) rather than a guess.
+- **Azure DevOps:** PR statuses are merged with policy evaluations; a blocking
+  policy is `required: true` and a non-blocking one `required: false`.
 
 `ForgeRerunChecks` re-runs the failed checks and returns the refreshed checks.
 GitHub re-requests each check suite that has a failed run
 (`POST /check-suites/{id}/rerequest`); GitLab retries the head pipeline
 (`POST /pipelines/{id}/retry`, which re-queues only failed jobs). Gitea and
-Forgejo (1.22 / 9) report CI as commit statuses and expose no re-run API, so
-`ForgeChecks.rerun` says `supported: false` with the reason, and the UI keeps
-the button disabled with that reason as its tooltip.
+Forgejo (1.22 / 9) report CI as commit statuses and expose no re-run API, and
+Bitbucket Cloud exposes no build-status re-run either, so `ForgeChecks.rerun`
+says `supported: false` with the reason, and the UI keeps the button disabled
+with that reason as its tooltip. Azure DevOps could re-queue a pipeline through
+the Builds API, but that needs extra scopes; this surface marks it unsupported
+and says so.
 
 `ForgeListPrCommits` lists a PR's commits oldest first (title, body, author,
 date, link) for the Commits tab; forges that answer newest first are reversed.
@@ -246,9 +307,12 @@ also checks the Commits tab and the disabled re-run reason against Docker Gitea.
 
 The client tests are wiremock tests with realistic JSON for each API shape:
 GitHub REST + GraphQL, ETag/304, 429 `retry-after`; GitLab MR, changes, diffs,
-discussions and jobs; Gitea/Forgejo PRs, raw diff, comments, reviews, statuses.
-They also cover the remote-URL parsing matrix, diff parsing and pagination, and
-the agent-context renderer.
+discussions and jobs; Gitea/Forgejo PRs, raw diff, comments, reviews, statuses;
+Bitbucket Cloud PRs, diffstat, raw diff, comment `parent` chains, build
+statuses and basic/bearer auth; Azure DevOps PRs, iterations, changed-file
+contents, threads, statuses, policy evaluations and PAT auth. They also cover
+the remote-URL parsing matrix, diff parsing and pagination, the local
+unified-diff builder, and the agent-context renderer.
 
 Two live tests are ignored by default:
 

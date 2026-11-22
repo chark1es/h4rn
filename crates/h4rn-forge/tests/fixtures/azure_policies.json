@@ -1,0 +1,23 @@
+{
+  "count": 2,
+  "value": [
+    {
+      "evaluationId": "eval-1",
+      "status": "approved",
+      "configuredPolicy": {
+        "isBlocking": true,
+        "type": { "displayName": "Build" },
+        "settings": { "displayName": "Build validation" }
+      }
+    },
+    {
+      "evaluationId": "eval-2",
+      "status": "rejected",
+      "configuredPolicy": {
+        "isBlocking": false,
+        "type": { "displayName": "Reviewers" },
+        "settings": { "displayName": "Minimum reviewers" }
+      }
+    }
+  ]
+}

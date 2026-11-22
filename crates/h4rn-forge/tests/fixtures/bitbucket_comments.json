@@ -1,0 +1,49 @@
+{
+  "pagelen": 100,
+  "values": [
+    {
+      "id": 9001,
+      "content": { "raw": "Looks good overall." },
+      "user": { "display_name": "Carole", "nickname": "carol" },
+      "created_on": "2024-05-01T10:00:00Z",
+      "updated_on": null,
+      "deleted": false,
+      "links": {
+        "html": {
+          "href": "https://bitbucket.org/acme/widget/pull-requests/42#comment-9001"
+        }
+      }
+    },
+    {
+      "id": 9100,
+      "content": { "raw": "This can panic." },
+      "user": { "display_name": "Bob Reviewer", "nickname": "bob" },
+      "created_on": "2024-05-01T11:00:00Z",
+      "deleted": false,
+      "inline": { "path": "src/lib.rs", "from": null, "to": 12 },
+      "resolution": {
+        "user": { "display_name": "Alice Example", "nickname": "alice" },
+        "created_on": "2024-05-01T11:30:00Z"
+      },
+      "links": {
+        "html": {
+          "href": "https://bitbucket.org/acme/widget/pull-requests/42#comment-9100"
+        }
+      }
+    },
+    {
+      "id": 9101,
+      "parent": { "id": 9100 },
+      "content": { "raw": "Good catch, fixed." },
+      "user": { "display_name": "Alice Example", "nickname": "alice" },
+      "created_on": "2024-05-01T11:05:00Z",
+      "deleted": false,
+      "inline": { "path": "src/lib.rs", "from": null, "to": 12 },
+      "links": {
+        "html": {
+          "href": "https://bitbucket.org/acme/widget/pull-requests/42#comment-9101"
+        }
+      }
+    }
+  ]
+}

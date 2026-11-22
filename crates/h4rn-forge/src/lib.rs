@@ -4,7 +4,8 @@
 //! implements the same normalised operations — list PRs, read detail and diff,
 //! read comments and threads, read checks, write a reply or comment, open a PR
 //! — so the protocol and the UI never branch on GitHub versus GitLab versus
-//! Gitea/Forgejo (ADR-001, ADR-002).
+//! Gitea/Forgejo versus Bitbucket Cloud versus Azure DevOps (ADR-001,
+//! ADR-002).
 //!
 //! Credentials stay on the host that holds them (ADR-016). A [`Forge`] client
 //! is constructed with a token the daemon loaded from its secret store; this
@@ -13,6 +14,8 @@
 #![deny(missing_docs)]
 
 pub mod auth;
+mod azure;
+mod bitbucket;
 mod common;
 pub mod context;
 mod diff;
@@ -28,19 +31,24 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use h4rn_protocol::{
     ForgeAccount, ForgeCapabilities, ForgeChecks, ForgeComment, ForgeCommentPage, ForgeCommits,
-    ForgeDiffPage, ForgeKind, ForgeNewPr, ForgePrFilter, ForgePrSummary, ForgePullRequest,
-    ForgeRepoRef, ForgeReviewComment,
+    ForgeCredentialSource, ForgeDiffPage, ForgeKind, ForgeNewPr, ForgePrFilter, ForgePrSummary,
+    ForgePullRequest, ForgeRepoRef, ForgeReviewComment,
 };
 
+pub use azure::AzureDevOpsClient;
+pub use bitbucket::BitbucketClient;
 pub use common::{finish_checks, validate_repo};
 pub use context::pr_context_for_agent;
-pub use diff::{paginate, parse_unified_diff};
+pub use diff::{paginate, parse_unified_diff, unified_diff};
 pub use error::{ForgeError, Result};
 pub use gitea::GiteaClient;
 pub use github::GitHubClient;
 pub use gitlab::GitLabClient;
 pub use http::{DEFAULT_REQUESTS_PER_MINUTE, ForgeHttp, HttpResponse, next_link, page_of, redact};
-pub use remote::{ForgeHost, ForgeHosts, api_base_url, detect_remote, detect_repos, parse_remote};
+pub use remote::{
+    ForgeHost, ForgeHosts, api_base_url, detect_remote, detect_repos, parse_remote,
+    validate_base_url_for, validate_cloud_base_url,
+};
 
 /// The authenticated identity behind one account.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -184,6 +192,29 @@ pub fn client_for_with_budget(
             token,
             requests_per_minute,
         )?),
+        ForgeKind::Bitbucket => {
+            // The source remembers which scheme validated at add time, so a
+            // workspace access token stays Bearer after a daemon restart even
+            // though the account row also carries the viewer login.
+            let basic = matches!(account.source, ForgeCredentialSource::BitbucketAppPassword)
+                || (matches!(account.source, ForgeCredentialSource::Pat)
+                    && account.username.is_some());
+            Arc::new(BitbucketClient::new(
+                &account.base_url,
+                token,
+                if basic {
+                    account.username.as_deref()
+                } else {
+                    None
+                },
+                requests_per_minute,
+            )?)
+        }
+        ForgeKind::AzureDevOps => Arc::new(AzureDevOpsClient::new(
+            &account.base_url,
+            token,
+            requests_per_minute,
+        )?),
     };
     Ok(client)
 }
@@ -239,6 +270,33 @@ pub fn capabilities(kind: ForgeKind) -> ForgeCapabilities {
             graphql: false,
             rerun_checks: false,
         },
+        ForgeKind::Bitbucket => ForgeCapabilities {
+            device_flow: false,
+            review_threads: true,
+            // Resolution is read from the comment when the API reports it,
+            // but Bitbucket exposes no write API for it here.
+            resolve_threads: false,
+            nested_replies: true,
+            inline_review_comments: true,
+            checks: true,
+            pipelines: false,
+            diff_pagination: false,
+            graphql: false,
+            rerun_checks: false,
+        },
+        ForgeKind::AzureDevOps => ForgeCapabilities {
+            device_flow: false,
+            review_threads: true,
+            resolve_threads: false,
+            nested_replies: true,
+            inline_review_comments: true,
+            checks: true,
+            pipelines: false,
+            diff_pagination: false,
+            graphql: false,
+            // Re-queuing a pipeline needs the Builds API and a broader token.
+            rerun_checks: false,
+        },
     }
 }
 
@@ -253,6 +311,10 @@ pub fn rerun_support(kind: ForgeKind) -> h4rn_protocol::ForgeRerunSupport {
                 kind.display_name(),
                 kind.display_name()
             ),
+            ForgeKind::Bitbucket => "Bitbucket Cloud has no API to re-run build statuses; re-run the pipeline in Bitbucket"
+                .to_owned(),
+            ForgeKind::AzureDevOps => "Azure DevOps can only re-queue a pipeline through the Builds API with extra scopes; re-run it in Azure Pipelines"
+                .to_owned(),
             _ => format!("{} has no API to re-run checks", kind.display_name()),
         }),
     }
@@ -265,6 +327,8 @@ pub fn capability_entries() -> Vec<h4rn_protocol::ForgeCapabilityEntry> {
         ForgeKind::GitLab,
         ForgeKind::Gitea,
         ForgeKind::Forgejo,
+        ForgeKind::Bitbucket,
+        ForgeKind::AzureDevOps,
     ]
     .into_iter()
     .map(|forge| h4rn_protocol::ForgeCapabilityEntry {
@@ -289,27 +353,41 @@ mod tests {
     #[test]
     fn capability_matrix_is_complete() {
         let entries = capability_entries();
-        assert_eq!(entries.len(), 4);
+        assert_eq!(entries.len(), 6);
         assert!(capabilities(ForgeKind::GitHub).device_flow);
         assert!(!capabilities(ForgeKind::GitLab).device_flow);
         assert!(capabilities(ForgeKind::GitLab).pipelines);
         assert!(!capabilities(ForgeKind::Gitea).nested_replies);
+        assert!(capabilities(ForgeKind::Bitbucket).nested_replies);
+        assert!(!capabilities(ForgeKind::Bitbucket).resolve_threads);
+        assert!(capabilities(ForgeKind::AzureDevOps).inline_review_comments);
     }
 
     #[test]
     fn rerun_is_offered_only_where_the_forge_has_an_api() {
         assert!(rerun_support(ForgeKind::GitHub).supported);
         assert!(rerun_support(ForgeKind::GitLab).supported);
-        for kind in [ForgeKind::Gitea, ForgeKind::Forgejo] {
+        for kind in [
+            ForgeKind::Gitea,
+            ForgeKind::Forgejo,
+            ForgeKind::Bitbucket,
+            ForgeKind::AzureDevOps,
+        ] {
             let support = rerun_support(kind);
             assert!(!support.supported);
             assert!(
                 support
                     .reason
                     .as_deref()
-                    .is_some_and(|reason| reason.contains("commit statuses")),
+                    .is_some_and(|reason| !reason.is_empty()),
                 "{support:?}"
             );
         }
+        assert!(
+            rerun_support(ForgeKind::Gitea)
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("commit statuses"))
+        );
     }
 }

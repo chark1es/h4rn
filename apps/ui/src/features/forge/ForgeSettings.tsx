@@ -10,13 +10,15 @@ import { getClient, pushToast } from "@/lib/store/appStore";
 
 const api = () => new ForgeApi((request) => getClient().request(request));
 
-const FORGES: ForgeKind[] = ["github", "gitlab", "gitea", "forgejo"];
+const FORGES: ForgeKind[] = ["github", "gitlab", "gitea", "forgejo", "bitbucket", "azure_devops"];
 
 const DEFAULT_BASE: Record<ForgeKind, string> = {
   github: "https://github.com",
   gitlab: "https://gitlab.com",
   gitea: "https://gitea.example.com",
   forgejo: "https://forgejo.example.com",
+  bitbucket: "https://bitbucket.org",
+  azure_devops: "https://dev.azure.com",
 };
 
 /** The forge's smallest useful token, in the words of its own settings page. */
@@ -25,6 +27,9 @@ const SCOPES: Record<ForgeKind, string> = {
   gitlab: "a project access token with read_api and write to merge requests",
   gitea: "a token with repo scope on the repositories you want to see",
   forgejo: "a token with repo scope on the repositories you want to see",
+  bitbucket:
+    "an app password with Repositories: read and Pull requests: write, or a workspace token",
+  azure_devops: "a personal access token with Code: read & write",
 };
 
 /** OAuth device flow is a GitHub dotcom feature in this build. */
@@ -45,6 +50,10 @@ function sourceLabel(source: ForgeCredentialSource): string {
       return "Imported from gh";
     case "glab_cli":
       return "Imported from glab";
+    case "bitbucket_app_password":
+      return "App password";
+    case "bitbucket_access_token":
+      return "Access token";
   }
 }
 
@@ -139,6 +148,7 @@ function AccountsTable({
 function AddAccountForm({ onAdded }: { onAdded: () => void }) {
   const [forge, setForge] = useState<ForgeKind>("github");
   const [baseUrl, setBaseUrl] = useState(DEFAULT_BASE.github);
+  const [username, setUsername] = useState("");
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -150,14 +160,18 @@ function AddAccountForm({ onAdded }: { onAdded: () => void }) {
     setForge(next);
   };
 
+  const missingOrganization =
+    forge === "azure_devops" && baseUrl.trim().replace(/\/$/, "") === "https://dev.azure.com";
+
   const submit = async () => {
-    if (token.trim() === "" || baseUrl.trim() === "" || busy) return;
+    if (token.trim() === "" || baseUrl.trim() === "" || busy || missingOrganization) return;
     setBusy(true);
     try {
       const account = await api().addAccount(
         forge,
         baseUrl.trim().replace(/\/$/, ""),
         token.trim(),
+        forge === "bitbucket" ? username.trim() || null : null,
       );
       // The token is written once and never read back.
       setToken("");
@@ -188,7 +202,7 @@ function AddAccountForm({ onAdded }: { onAdded: () => void }) {
           <ChipSelect
             label="Forge"
             value={forge}
-            width={160}
+            width={190}
             options={FORGES.map((kind) => ({ value: kind, label: forgeLabel(kind) }))}
             onChange={changeForge}
           />
@@ -200,7 +214,13 @@ function AddAccountForm({ onAdded }: { onAdded: () => void }) {
       <div className="q-field">
         <div className="lab">
           <div className="t">Base URL</div>
-          <div className="s">Point a self-hosted forge at its own host</div>
+          <div className="s">
+            {forge === "azure_devops"
+              ? "Include the organization, e.g. https://dev.azure.com/acme"
+              : forge === "bitbucket"
+                ? "Bitbucket Cloud only, at bitbucket.org"
+                : "Point a self-hosted forge at its own host"}
+          </div>
         </div>
         <div className="ctl">
           <input
@@ -213,6 +233,25 @@ function AddAccountForm({ onAdded }: { onAdded: () => void }) {
           />
         </div>
       </div>
+      {forge === "bitbucket" ? (
+        <div className="q-field">
+          <div className="lab">
+            <div className="t">Username</div>
+            <div className="s">Needed for an app password; leave empty for a workspace token</div>
+          </div>
+          <div className="ctl">
+            <input
+              className="q-input q-mono"
+              style={{ maxWidth: 300, fontSize: 12 }}
+              autoComplete="username"
+              aria-label="Bitbucket username"
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              placeholder="Bitbucket account username"
+            />
+          </div>
+        </div>
+      ) : null}
       <div className="q-field">
         <div className="lab">
           <div className="t">Token</div>
@@ -232,12 +271,17 @@ function AddAccountForm({ onAdded }: { onAdded: () => void }) {
           <button
             type="button"
             className="q-btn primary"
-            disabled={busy || token.trim() === "" || baseUrl.trim() === ""}
+            disabled={busy || token.trim() === "" || baseUrl.trim() === "" || missingOrganization}
             onClick={() => void submit()}
           >
             <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             {busy ? "Checking…" : "Add account"}
           </button>
+          {missingOrganization ? (
+            <span className="q-warn" style={{ fontSize: 12 }}>
+              Add the organization to the base URL.
+            </span>
+          ) : null}
         </div>
       </div>
     </div>
@@ -466,8 +510,9 @@ export function ForgeSettings() {
         <div style={{ flex: 1 }}>
           <h1>Forges</h1>
           <p className="lead">
-            GitHub, GitLab, Gitea and Forgejo accounts used for pull requests, checks and reviews.
-            Tokens stay on this host and every call goes through the daemon.
+            GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud and Azure DevOps accounts used for pull
+            requests, checks and reviews. Tokens stay on this host and every call goes through the
+            daemon.
           </p>
         </div>
         <button type="button" className="q-btn secondary" onClick={load} disabled={loading}>

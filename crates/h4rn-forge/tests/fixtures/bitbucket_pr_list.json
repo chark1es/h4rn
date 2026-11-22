@@ -1,0 +1,65 @@
+{
+  "pagelen": 50,
+  "values": [
+    {
+      "id": 42,
+      "title": "Fix the widget",
+      "state": "OPEN",
+      "draft": false,
+      "author": { "display_name": "Alice Example", "nickname": "alice" },
+      "reviewers": [
+        { "display_name": "Bob Reviewer", "nickname": "bob" }
+      ],
+      "source": {
+        "branch": { "name": "alice/fix" },
+        "commit": { "hash": "aaaa1111bbbb2222cccc3333dddd4444eeee5555" }
+      },
+      "destination": {
+        "branch": { "name": "main" },
+        "commit": { "hash": "bbbb1111cccc2222dddd3333eeee4444ffff5555" }
+      },
+      "updated_on": "2024-05-01T12:00:00Z",
+      "links": {
+        "html": { "href": "https://bitbucket.org/acme/widget/pull-requests/42" }
+      }
+    },
+    {
+      "id": 41,
+      "title": "Merged change",
+      "state": "MERGED",
+      "draft": false,
+      "author": { "display_name": "Alice Example", "nickname": "alice" },
+      "source": {
+        "branch": { "name": "alice/old" },
+        "commit": { "hash": "dddd1111eeee2222ffff3333aaaa4444bbbb5555" }
+      },
+      "destination": {
+        "branch": { "name": "main" },
+        "commit": { "hash": "bbbb1111cccc2222dddd3333eeee4444ffff5555" }
+      },
+      "updated_on": "2024-04-30T12:00:00Z",
+      "links": {
+        "html": { "href": "https://bitbucket.org/acme/widget/pull-requests/41" }
+      }
+    },
+    {
+      "id": 40,
+      "title": "Declined change",
+      "state": "DECLINED",
+      "draft": false,
+      "author": { "display_name": "Alice Example", "nickname": "alice" },
+      "source": {
+        "branch": { "name": "alice/no" },
+        "commit": { "hash": "eeee1111ffff2222aaaa3333bbbb4444cccc5555" }
+      },
+      "destination": {
+        "branch": { "name": "main" },
+        "commit": { "hash": "bbbb1111cccc2222dddd3333eeee4444ffff5555" }
+      },
+      "updated_on": "2024-04-29T12:00:00Z",
+      "links": {
+        "html": { "href": "https://bitbucket.org/acme/widget/pull-requests/40" }
+      }
+    }
+  ]
+}

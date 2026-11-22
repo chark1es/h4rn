@@ -1,0 +1,69 @@
+{
+  "count": 3,
+  "value": [
+    {
+      "id": 101,
+      "status": "active",
+      "threadContext": {
+        "filePath": "/src/lib.rs",
+        "rightFileStart": { "line": 12, "offset": 1 },
+        "rightFileEnd": { "line": 12, "offset": 5 }
+      },
+      "comments": [
+        {
+          "id": 1,
+          "parentCommentId": 0,
+          "author": { "displayName": "Bob Reviewer" },
+          "content": "This can panic.",
+          "publishedDate": "2024-05-01T11:00:00Z",
+          "lastUpdatedDate": "2024-05-01T11:00:00Z",
+          "commentType": "text",
+          "isDeleted": false
+        },
+        {
+          "id": 2,
+          "parentCommentId": 1,
+          "author": { "displayName": "Alice Example" },
+          "content": "Fixed.",
+          "publishedDate": "2024-05-01T11:05:00Z",
+          "lastUpdatedDate": "2024-05-01T11:05:00Z",
+          "commentType": "text",
+          "isDeleted": false
+        }
+      ]
+    },
+    {
+      "id": 102,
+      "status": "fixed",
+      "threadContext": null,
+      "comments": [
+        {
+          "id": 3,
+          "parentCommentId": 0,
+          "author": { "displayName": "Carole" },
+          "content": "Thanks!",
+          "publishedDate": "2024-05-01T10:00:00Z",
+          "lastUpdatedDate": "2024-05-01T10:00:00Z",
+          "commentType": "text",
+          "isDeleted": false
+        }
+      ]
+    },
+    {
+      "id": 103,
+      "status": "active",
+      "threadContext": null,
+      "comments": [
+        {
+          "id": 4,
+          "parentCommentId": 0,
+          "author": { "displayName": "Azure DevOps" },
+          "content": "Alice updated the pull request.",
+          "publishedDate": "2024-05-01T09:30:00Z",
+          "commentType": "system",
+          "isDeleted": false
+        }
+      ]
+    }
+  ]
+}

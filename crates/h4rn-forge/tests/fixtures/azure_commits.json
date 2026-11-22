@@ -1,0 +1,23 @@
+{
+  "count": 2,
+  "value": [
+    {
+      "commitId": "cccc1111dddd2222eeee3333ffff4444aaaa5555",
+      "comment": "Fix the panic\n\nReproduces the panic on empty input.",
+      "author": {
+        "name": "Alice Example",
+        "email": "alice@example.test",
+        "date": "2024-05-01T11:00:00Z"
+      }
+    },
+    {
+      "commitId": "dddd1111eeee2222ffff3333aaaa4444bbbb5555",
+      "comment": "Add a test",
+      "author": {
+        "name": "Alice Example",
+        "email": "alice@example.test",
+        "date": "2024-05-01T10:00:00Z"
+      }
+    }
+  ]
+}

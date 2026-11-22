@@ -1,0 +1,25 @@
+{
+  "changeEntries": [
+    {
+      "changeTrackingId": 1,
+      "changeType": "edit",
+      "item": { "path": "/src/lib.rs", "gitObjectType": "blob" }
+    },
+    {
+      "changeTrackingId": 2,
+      "changeType": "add",
+      "item": { "path": "/src/new.rs", "gitObjectType": "blob" }
+    },
+    {
+      "changeTrackingId": 3,
+      "changeType": "delete",
+      "item": { "path": "/src/old.rs", "gitObjectType": "blob" }
+    },
+    {
+      "changeTrackingId": 4,
+      "changeType": "rename",
+      "originalPath": "/src/old_name.rs",
+      "item": { "path": "/src/new_name.rs", "gitObjectType": "blob" }
+    }
+  ]
+}

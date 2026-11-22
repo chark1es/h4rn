@@ -125,12 +125,11 @@ describe("account matching", () => {
 
 describe("labels", () => {
   test("names every forge", () => {
-    expect((["github", "gitlab", "gitea", "forgejo"] as const).map(forgeLabel)).toEqual([
-      "GitHub",
-      "GitLab",
-      "Gitea",
-      "Forgejo",
-    ]);
+    expect(
+      (["github", "gitlab", "gitea", "forgejo", "bitbucket", "azure_devops"] as const).map(
+        forgeLabel,
+      ),
+    ).toEqual(["GitHub", "GitLab", "Gitea", "Forgejo", "Bitbucket Cloud", "Azure DevOps"]);
   });
 
   test("maps state to a tone", () => {

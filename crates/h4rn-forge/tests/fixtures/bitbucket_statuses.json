@@ -1,0 +1,23 @@
+{
+  "pagelen": 100,
+  "values": [
+    {
+      "key": "{pipeline-result}",
+      "name": "Pipeline #12",
+      "state": "SUCCESSFUL",
+      "url": "https://bitbucket.org/acme/widget/addon/pipelines/home#!/results/12",
+      "description": "Pipeline succeeded",
+      "created_on": "2024-05-01T10:00:00Z",
+      "updated_on": "2024-05-01T10:05:00Z"
+    },
+    {
+      "key": "ci/lint",
+      "name": "ci/lint",
+      "state": "FAILED",
+      "url": "https://ci.example.test/lint/12",
+      "description": "lint failed",
+      "created_on": "2024-05-01T10:00:00Z",
+      "updated_on": "2024-05-01T10:01:00Z"
+    }
+  ]
+}
