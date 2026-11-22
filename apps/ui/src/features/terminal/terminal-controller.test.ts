@@ -4,6 +4,7 @@ import {
   BinaryKind,
   decodeBinaryFrame,
   encodeBinaryFrame,
+  ptyInputReplySeq,
 } from "@/lib/client/binary";
 import type { H4rnClient } from "@/lib/client/client";
 
@@ -107,19 +108,22 @@ const TERMINAL_INFO = {
 
 type BinarySink = { handler: ((data: ArrayBuffer) => void) | null };
 
-function fakeClient(sent: BinaryFrame[], binary: BinarySink) {
+function fakeClient(sent: BinaryFrame[], binary: BinarySink, startSeq = 0) {
   return {
     getSnapshot: () => ({ status: "online" }),
-    request: async (body: { type: string }) => {
+    request: async (body: { type: string; reply_positions?: boolean }) => {
       if (body.type === "terminal_open") {
         return { type: "terminal_opened", terminal: TERMINAL_INFO };
       }
       if (body.type === "terminal_attach") {
+        if (body.reply_positions !== true) {
+          throw new Error("attach must declare that replies carry positions");
+        }
         return {
           type: "terminal_attached",
           terminal: TERMINAL_INFO,
           snapshot: "",
-          start_seq: 0,
+          start_seq: startSeq,
         };
       }
       return { type: "ack" };
@@ -136,11 +140,11 @@ function fakeClient(sent: BinaryFrame[], binary: BinarySink) {
   } as unknown as H4rnClient;
 }
 
-async function startController(sent: BinaryFrame[]) {
+async function startController(sent: BinaryFrame[], startSeq = 0) {
   const controller = new TerminalController();
   const binary: BinarySink = { handler: null };
   await controller.start({
-    client: fakeClient(sent, binary),
+    client: fakeClient(sent, binary, startSeq),
     threadId: null,
     host: "host_test",
     cwd: "/tmp",
@@ -155,8 +159,17 @@ const payload = (frame: BinaryFrame) => new TextDecoder().decode(frame.payload);
 
 /** Delivers one PTY output chunk the way the client does. */
 function pushOutput(binary: BinarySink, seq: number, text: string): void {
+  pushFrame(binary, BinaryKind.PtyOutput, seq, text);
+}
+
+/** Delivers a snapshot frame the way a resync does. */
+function pushSnapshot(binary: BinarySink, seq: number, text = ""): void {
+  pushFrame(binary, BinaryKind.PtySnapshot, seq, text);
+}
+
+function pushFrame(binary: BinarySink, kind: BinaryFrame["kind"], seq: number, text: string): void {
   const bytes = encodeBinaryFrame({
-    kind: BinaryKind.PtyOutput,
+    kind,
     streamId: TERMINAL_INFO.stream_id,
     seq,
     payload: new TextEncoder().encode(text),
@@ -204,8 +217,10 @@ describe("terminal controller query replies", () => {
 
   it("marks xterm's answer on the wire and forwards the same bytes as input without a query", async () => {
     const sent: BinaryFrame[] = [];
-    const { controller, term } = await startController(sent);
+    const { controller, term, binary } = await startController(sent);
 
+    // A query always arrives in output; give the parser chunk 1 to answer in.
+    pushOutput(binary, 1, "");
     // The program asks for the cursor position; xterm answers.
     expect(term.query({ final: "n" }, [6])).toBe(false);
     term.input("\x1b[12;40R");
@@ -215,7 +230,7 @@ describe("terminal controller query replies", () => {
     term.input("ls\r");
 
     expect(sent.map((frame) => [frame.seq, payload(frame)])).toEqual([
-      [1, "\x1b[12;40R"],
+      [ptyInputReplySeq(1), "\x1b[12;40R"],
       [0, "\x1b[1;2R"],
       [0, "ls\r"],
     ]);
@@ -224,14 +239,18 @@ describe("terminal controller query replies", () => {
 
   it("marks device attribute and colour answers", async () => {
     const sent: BinaryFrame[] = [];
-    const { controller, term } = await startController(sent);
+    const { controller, term, binary } = await startController(sent);
 
+    pushOutput(binary, 1, "");
     term.query({ final: "c" });
     term.input("\x1b[?1;2c");
     term.query({ prefix: "?", intermediates: "$", final: "p" }, [12]);
     term.input("\x1b[?12;2$y");
 
-    expect(sent.map((frame) => frame.seq)).toEqual([1, 1]);
+    expect(sent.map((frame) => frame.seq)).toEqual([
+      ptyInputReplySeq(1, 0),
+      ptyInputReplySeq(1, 1),
+    ]);
     controller.dispose();
   });
 
@@ -250,13 +269,116 @@ describe("terminal controller query replies", () => {
     expect(sent.map((frame) => [frame.seq, payload(frame)])).toEqual([[0, "\x1b[8;24;80t"]]);
 
     // An answer that arrives while its own chunk is still being parsed is
-    // still marked, and the chunk's end does not double-count it.
+    // still marked with that chunk's position, and the chunk's end does not
+    // double-count it.
     pushOutput(binary, 2, "\x1b[18t");
     expect(term.query({ final: "t" }, [18])).toBe(false);
     term.input("\x1b[8;24;80t");
     term.finishWrite();
-    expect(sent.map((frame) => frame.seq)).toEqual([0, 1]);
+    expect(sent.map((frame) => frame.seq)).toEqual([0, ptyInputReplySeq(2)]);
 
+    controller.dispose();
+  });
+
+  it("sends the output position of the frame that carried the query", async () => {
+    const sent: BinaryFrame[] = [];
+    const { controller, term, binary } = await startController(sent);
+
+    pushOutput(binary, 41, "\x1b[?12;2$y");
+    expect(term.query({ prefix: "?", intermediates: "$", final: "p" }, [12])).toBe(false);
+    term.input("\x1b[?12;2$y");
+
+    expect(sent.map((frame) => [frame.seq, payload(frame)])).toEqual([
+      [ptyInputReplySeq(41), "\x1b[?12;2$y"],
+    ]);
+    controller.dispose();
+  });
+
+  it("names the chunk where a query split across frames ends", async () => {
+    const sent: BinaryFrame[] = [];
+    const { controller, term, binary } = await startController(sent);
+
+    // The query starts in chunk 7 and its final byte arrives in chunk 8.
+    pushOutput(binary, 7, "\x1b[?12");
+    term.finishWrite();
+    pushOutput(binary, 8, ";2$y");
+    expect(term.query({ prefix: "?", intermediates: "$", final: "p" }, [12])).toBe(false);
+    term.input("\x1b[?12;2$y");
+    term.finishWrite();
+
+    expect(sent.map((frame) => frame.seq)).toEqual([ptyInputReplySeq(8)]);
+    controller.dispose();
+  });
+
+  it("lets the daemon drop a late viewer's answer when another viewer saw the query", async () => {
+    // The early viewer parses chunks 7 and 8. The late one attaches with
+    // chunk 7 already folded into its snapshot, so it parses only chunk 8 and
+    // numbers its answers differently.
+    const earlySent: BinaryFrame[] = [];
+    const early = await startController(earlySent, 0);
+    const lateSent: BinaryFrame[] = [];
+    const late = await startController(lateSent, 7);
+
+    pushOutput(early.binary, 7, "\x1b[?12");
+    early.term.finishWrite();
+    pushOutput(early.binary, 8, ";2$y");
+    expect(early.term.query({ prefix: "?", intermediates: "$", final: "p" }, [12])).toBe(false);
+    early.term.input("\x1b[?12;2$y");
+    expect(early.term.query({ prefix: "?", intermediates: "$", final: "p" }, [25])).toBe(false);
+    early.term.input("\x1b[?25;2$y");
+    early.term.finishWrite();
+
+    // The late viewer sees only the tail of the split query and the second
+    // query, which it numbers as ordinal 0.
+    pushOutput(late.binary, 8, ";2$y");
+    expect(late.term.query({ prefix: "?", intermediates: "$", final: "p" }, [25])).toBe(false);
+    late.term.input("\x1b[?25;2$y");
+    late.term.finishWrite();
+    late.term.input("ls\r");
+
+    expect(earlySent.map((frame) => [frame.seq, payload(frame)])).toEqual([
+      [ptyInputReplySeq(8, 0), "\x1b[?12;2$y"],
+      [ptyInputReplySeq(8, 1), "\x1b[?25;2$y"],
+    ]);
+    // The client always sends its answer and lets the daemon decide: here the
+    // early viewer has the position, so the late one's frame is dropped
+    // daemon-side, not silently in the client.
+    expect(lateSent.map((frame) => [frame.seq, payload(frame)])).toEqual([
+      [ptyInputReplySeq(8, 0), "\x1b[?25;2$y"],
+      [0, "ls\r"],
+    ]);
+
+    early.controller.dispose();
+    late.controller.dispose();
+  });
+
+  it("sends a sole viewer's answer for its first chunk after an attach snapshot", async () => {
+    const sent: BinaryFrame[] = [];
+    // Attached with chunk 5 folded into the snapshot; chunk 6 is the first
+    // raw output this viewer parses.
+    const { controller, term, binary } = await startController(sent, 5);
+
+    pushOutput(binary, 6, "\x1b[?12;2$y");
+    expect(term.query({ prefix: "?", intermediates: "$", final: "p" }, [12])).toBe(false);
+    term.input("\x1b[?12;2$y");
+
+    expect(sent.map((frame) => frame.seq)).toEqual([ptyInputReplySeq(6)]);
+    controller.dispose();
+  });
+
+  it("keeps sending a sole viewer's answers after a resync snapshot", async () => {
+    const sent: BinaryFrame[] = [];
+    const { controller, term, binary } = await startController(sent, 0);
+
+    pushOutput(binary, 4, "");
+    term.finishWrite();
+    pushSnapshot(binary, 5);
+    term.finishWrite();
+    pushOutput(binary, 6, "\x1b[?12;2$y");
+    expect(term.query({ prefix: "?", intermediates: "$", final: "p" }, [12])).toBe(false);
+    term.input("\x1b[?12;2$y");
+
+    expect(sent.map((frame) => frame.seq)).toEqual([ptyInputReplySeq(6)]);
     controller.dispose();
   });
 });

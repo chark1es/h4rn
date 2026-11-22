@@ -10,6 +10,7 @@ import { useIsPhone } from "@/hooks/use-media-query";
 import { glyphForAgentState } from "@/lib/agent";
 import { harnessLabel } from "@/lib/entities";
 import { absoluteTime } from "@/lib/format";
+import { onPhonePanel } from "@/lib/phonePanels";
 import {
   ensureThread,
   interruptThread,
@@ -117,6 +118,13 @@ export function ThreadPane({ threadId }: { threadId: string }) {
     };
     window.addEventListener("h4rn:subagents", handler);
     return () => window.removeEventListener("h4rn:subagents", handler);
+  }, [isPhone]);
+
+  // The composer's `/` menu asks for the phone sheet by event: it does not own
+  // the sheet's state, and on a phone the desktop panel tab would go nowhere.
+  useEffect(() => {
+    if (!isPhone) return;
+    return onPhonePanel(setPhonePanel);
   }, [isPhone]);
 
   // The stream's change-set card opens one turn in the Changes tab.
