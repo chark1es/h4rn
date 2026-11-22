@@ -1808,10 +1808,10 @@ mod tests {
         let _ = release_tx.send(());
         holder.join().expect("the lock holder joins");
 
-        // ConPTY keeps the console's output pipe open until the pseudoconsole
-        // is closed, so the reader never reaches EOF here and no exit notice is
-        // written. The child handle is what proves the cloned killer ended the
-        // console process, which is the close contract on Windows.
+        // The child handle directly proves the cloned killer ended the console
+        // process, which is the close contract on Windows; the exit notice
+        // also depends on the reader reaching EOF, which the close path
+        // arranges by dropping the master.
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let exited = {
