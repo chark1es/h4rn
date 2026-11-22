@@ -531,6 +531,15 @@ enum RecoveryOutcome {
     Settled,
 }
 
+/// Which branch of the idle fallback's one poll was ready.
+#[derive(Clone, Debug)]
+enum IdleWait {
+    /// The session's stream produced its next value, or ended.
+    Event(Option<HarnessEvent>),
+    /// The report window expired with nothing on the stream.
+    Deadline,
+}
+
 /// The facts a turn-end path hands to [`Inner::settle_turn`].
 ///
 /// The settler owns everything a turn end publishes, so every path reaches
@@ -749,10 +758,6 @@ impl TurnDispatch {
     /// Split into a check and a later mutation, a Stop landing between them
     /// would leave the turn active with nobody delivering it.
     async fn recover_lost_session(&self) -> RecoveryOutcome {
-        // Test-only interleaving point: in the two-step version this is exactly
-        // the window between its Stop check and its requeue.
-        #[cfg(test)]
-        self.pause_recovery().await;
         let mut state = self
             .state
             .lock()
@@ -3177,6 +3182,12 @@ impl Inner {
             if record.session.is_live(session) {
                 None
             } else {
+                // Test-only interleaving point: the old scope read the record
+                // and then released the dispatch in a second step, so a Stop
+                // landing in this window made the requeue fail and left the
+                // turn Working. The one decision below must handle it.
+                #[cfg(test)]
+                dispatch.pause_recovery().await;
                 // Whether the prompt returns to the queue or the stopped turn
                 // ends is one dispatch-lock decision: a Stop that lands while
                 // this write waits cannot be observed by a check and then
@@ -3426,29 +3437,24 @@ impl Inner {
                 Some(event)
             } else {
                 match idle_deadline {
-                    Some(deadline) => tokio::select! {
-                        // A report that is already queued always beats the
-                        // fallback: the deadline only exists to publish when
-                        // no such report comes.
-                        biased;
-                        event = stream.next() => event,
-                        _ = tokio::time::sleep_until(deadline) => {
-                            // No exit report came in the window: publish what
-                            // the generic close left and end this pump instead
-                            // of waiting for the stream end the session it
-                            // holds keeps from happening.
-                            if self
-                                .publish_idle_death(&handle, generation, &session)
-                                .await
-                            {
-                                return;
+                    Some(deadline) => {
+                        match Self::wait_for_idle_report(&mut stream, deadline).await {
+                            IdleWait::Event(event) => event,
+                            IdleWait::Deadline => {
+                                // No exit report came in the window: publish what
+                                // the generic close left and end this pump instead
+                                // of waiting for the stream end the session it
+                                // holds keeps from happening.
+                                if self.publish_idle_death(&handle, generation, &session).await {
+                                    return;
+                                }
+                                // The report no longer describes this thread's idle
+                                // death (a turn started since); that turn owns it.
+                                idle_deadline = None;
+                                continue;
                             }
-                            // The report no longer describes this thread's idle
-                            // death (a turn started since); that turn owns it.
-                            idle_deadline = None;
-                            continue;
                         }
-                    },
+                    }
                     None => stream.next().await,
                 }
             };
@@ -4155,6 +4161,23 @@ impl Inner {
         });
     }
 
+    /// The idle fallback's one poll: the session's stream, or its deadline.
+    ///
+    /// A report that is already queued always beats the fallback, so a death
+    /// whose exit report and deadline are ready at the same poll publishes the
+    /// report instead of the generic close notice. Kept as its own function so
+    /// a test can repeat that ready-together poll without a whole pump.
+    async fn wait_for_idle_report(
+        stream: &mut futures::stream::BoxStream<'static, HarnessEvent>,
+        deadline: tokio::time::Instant,
+    ) -> IdleWait {
+        tokio::select! {
+            biased;
+            event = stream.next() => IdleWait::Event(event),
+            _ = tokio::time::sleep_until(deadline) => IdleWait::Deadline,
+        }
+    }
+
     /// Waits, bounded, for a closed transport's exit report after a completed
     /// turn, applying the rate limit it may carry.
     ///
@@ -4163,10 +4186,11 @@ impl Inner {
     /// window the pump would detach the session and promote the queued work
     /// before that report arrives: auto-resume would never be armed and the
     /// queued message would start at once on a fresh agent. A `LimitHit` (the
-    /// report's typed signal) is applied while the turn still owns the record,
-    /// but only the exit report ends the wait: an ordinary limit without a
-    /// reset can arrive first, and the reset that pause belongs to travels on
-    /// the exit report that follows it.
+    /// report's typed signal) is collected while the turn still owns the record
+    /// and applied once after the wait, so one provider pause arms one
+    /// schedule, but only the exit report ends the wait: an ordinary limit
+    /// without a reset can arrive first, and the reset that pause belongs to
+    /// travels on the exit report that follows it.
     /// The exit/status report goes to `reports` because the turn's settlement
     /// must merge it into its one row; every other event goes to `later` and is
     /// applied after the completion, in the order it arrived.
@@ -4180,10 +4204,17 @@ impl Inner {
         later: &mut Vec<HarnessEvent>,
     ) {
         let deadline = tokio::time::Instant::now() + IDLE_DEATH_DETAIL_WAIT;
-        // Whether a reset was already applied in this window. The bridge reports
-        // an exit's reset both as a typed limit and on the exit report, and two
-        // applications would arm two schedules for one death.
-        let mut reset_applied = false;
+        // The limits observed while waiting, in the order they arrived. They are
+        // applied once after the wait instead of where they land: the bridge
+        // reports an exit's reset both as a typed limit and on the exit report,
+        // and a notification that arrived before the completion may already
+        // have armed the same reset. Applying each event would replace the
+        // schedule and bump its attempt counter, changing the jitter of one
+        // provider pause.
+        let mut limits: Vec<(Option<DateTime<Utc>>, bool)> = Vec::new();
+        // The exit report's own reset, when it carried one. It is the most
+        // specific account of the pause and wins over a notification.
+        let mut exit_reset: Option<Option<DateTime<Utc>>> = None;
         loop {
             tokio::select! {
                 // A report that is already queued always beats the deadline,
@@ -4192,25 +4223,15 @@ impl Inner {
                 // of the window expiring first.
                 biased;
                 event = stream.next() => match event {
-                    None => return,
+                    None => break,
                     Some(HarnessEvent::LimitHit {
                         reset_at,
                         auto_resume,
                     }) => {
-                        // Applied where it lands, exactly as the pump would
-                        // apply it, but it does not end the wait: a reset-less
-                        // limit that is not the exit report's own must not
-                        // detach the session and promote the queue before the
-                        // reset that follows it is armed.
-                        reset_applied |= reset_at.is_some();
-                        self.apply_completion_limit(
-                            handle,
-                            generation,
-                            session,
-                            reset_at,
-                            auto_resume,
-                        )
-                        .await;
+                        // Collected, never applied here: the wait only ends on
+                        // the exit report (or its deadline), and one schedule is
+                        // armed for the whole window.
+                        limits.push((reset_at, auto_resume));
                     }
                     Some(event) => {
                         // The process-exit report is the last report of the
@@ -4218,7 +4239,7 @@ impl Inner {
                         // waiting once it arrives. A read error is also
                         // non-retryable, but the exit report that may carry the
                         // provider's reset can still follow it.
-                        let exit_reset = match &event {
+                        let report_reset = match &event {
                             HarnessEvent::TransportClosed {
                                 kind: TransportCloseKind::Exit,
                                 reset_at,
@@ -4226,19 +4247,10 @@ impl Inner {
                             } => Some(*reset_at),
                             _ => None,
                         };
-                        if let Some(reset_at) = exit_reset {
-                            if !reset_applied && let Some(reset_at) = reset_at {
-                                self.apply_completion_limit(
-                                    handle,
-                                    generation,
-                                    session,
-                                    Some(reset_at),
-                                    true,
-                                )
-                                .await;
-                            }
+                        if let Some(reset_at) = report_reset {
+                            exit_reset = Some(reset_at);
                             reports.push(event);
-                            return;
+                            break;
                         }
                         if matches!(&event, HarnessEvent::ApprovalRequested { .. }) {
                             // An approval buffered behind a completion cannot be
@@ -4256,8 +4268,26 @@ impl Inner {
                         later.push(event);
                     }
                 },
-                _ = tokio::time::sleep_until(deadline) => return,
+                _ = tokio::time::sleep_until(deadline) => break,
             }
+        }
+        // Arm once, before the completion settles the turn: the exit report's
+        // reset when it carried one, otherwise the last notification that
+        // named a reset, otherwise the last one (which may be a reset-less
+        // limit that only needs its row).
+        let signal = exit_reset
+            .and_then(|reset| reset.map(|reset| (Some(reset), true)))
+            .or_else(|| {
+                limits
+                    .iter()
+                    .rev()
+                    .find(|(reset, _)| reset.is_some())
+                    .copied()
+            })
+            .or_else(|| limits.last().copied());
+        if let Some((reset_at, auto_resume)) = signal {
+            self.apply_completion_limit(handle, generation, session, reset_at, auto_resume)
+                .await;
         }
     }
 
@@ -4265,7 +4295,10 @@ impl Inner {
     ///
     /// The turn is still active here, so this is the pump's ordinary limit
     /// handling. A session that was detached while this waited no longer owns
-    /// the limit, exactly as for any other event from it.
+    /// the limit, exactly as for any other event from it. A limit this turn
+    /// already armed for the same reset is not replaced: the notification may
+    /// have arrived before the completion, and re-arming would bump the
+    /// schedule's attempt and change the jitter of one provider pause.
     async fn apply_completion_limit(
         self: &Arc<Self>,
         handle: &ThreadHandle,
@@ -4277,6 +4310,12 @@ impl Inner {
         let now = self.now();
         let mut record = handle.lock().await;
         if !record.session.is_live(session) || record.session.generation() != Some(generation) {
+            return;
+        }
+        if let Some(scheduled) = &record.scheduled_limit
+            && scheduled.auto_resume
+            && scheduled.reset_at == reset_at
+        {
             return;
         }
         let mut domain = Vec::new();
@@ -6964,7 +7003,7 @@ mod tests {
     /// must keep waiting for the exit kind, so a reset that only that report
     /// carries still arms the schedule before the queue is promoted.
     #[tokio::test]
-    async fn a_read_error_waits_for_the_exit_reports_limit() {
+    async fn a_read_error_waits_for_the_exit_reports_reset() {
         let workspace = tempfile::tempdir().expect("tempdir");
         let reset_at = chrono::Utc::now() + chrono::Duration::minutes(5);
         let (harness, harness_events) = FakeHarness::new().with_event_injector();
@@ -7012,7 +7051,8 @@ mod tests {
         drop(session);
 
         // `end_turn` arrives on a dead transport, then a stdout read error
-        // (also non-retryable), and only then the exit report's reset.
+        // (also non-retryable), and only then the exit report carrying the
+        // only reset.
         harness_events.emit(HarnessEvent::TurnCompleted {
             status: TurnStatus::Completed,
             usage: Usage::default(),
@@ -7023,9 +7063,11 @@ mod tests {
             kind: TransportCloseKind::Read,
             reset_at: None,
         });
-        harness_events.emit(HarnessEvent::LimitHit {
+        harness_events.emit(HarnessEvent::TransportClosed {
+            message: "agy exited (exit status: 7): agy: the session ended".into(),
+            retryable: false,
+            kind: TransportCloseKind::Exit,
             reset_at: Some(reset_at),
-            auto_resume: true,
         });
 
         tokio::time::timeout(Duration::from_secs(5), pump)
@@ -7040,7 +7082,17 @@ mod tests {
         assert_eq!(
             schedules.len(),
             1,
-            "the read error did not end the wait before the exit report's limit"
+            "the read error did not end the wait before the exit report's reset"
+        );
+        assert!(
+            schedules[0].reason.contains("provider reset at"),
+            "the schedule is armed from the exit report's reset, not a backoff: {:?}",
+            schedules[0].reason
+        );
+        assert!(
+            schedules[0].resume_at >= reset_at,
+            "the schedule waits for the reset the exit report carried: {:?}",
+            schedules[0].resume_at
         );
         let summary = manager
             .thread_summary(&created.thread_id)
@@ -7051,6 +7103,9 @@ mod tests {
             AgentState::Scheduled,
             "the armed resume keeps the thread scheduled"
         );
+        // The reset is minutes away; a paused clock makes the "no queued work
+        // started yet" window pass at once instead of waiting it in real time.
+        tokio::time::pause();
         let started = tokio::time::timeout(Duration::from_millis(250), async {
             loop {
                 let wire = next_event(&mut events).await;
@@ -7060,9 +7115,10 @@ mod tests {
             }
         })
         .await;
+        tokio::time::resume();
         assert!(
             started.is_err(),
-            "queued work did not start past the exit report's limit: {started:?}"
+            "queued work did not start past the exit report's reset: {started:?}"
         );
         completion.release();
     }
@@ -7171,6 +7227,9 @@ mod tests {
             AgentState::Scheduled,
             "the armed resume keeps the thread scheduled"
         );
+        // The reset is minutes away; a paused clock makes the "no queued work
+        // started yet" window pass at once instead of waiting it in real time.
+        tokio::time::pause();
         let started = tokio::time::timeout(Duration::from_millis(250), async {
             loop {
                 let wire = next_event(&mut events).await;
@@ -7180,9 +7239,135 @@ mod tests {
             }
         })
         .await;
+        tokio::time::resume();
         assert!(
             started.is_err(),
             "queued work did not start past the exit report's reset: {started:?}"
+        );
+        completion.release();
+    }
+
+    /// One provider limit arms one schedule.
+    ///
+    /// The bridge reports one pause twice: the prompt path's typed limit arrives
+    /// before the completion, and the exit report after it carries the same
+    /// reset. Arming each event replaced the schedule and bumped its attempt
+    /// counter, changing the jitter of the one pause they describe.
+    #[tokio::test]
+    async fn one_provider_limit_arms_one_schedule() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(12);
+        let (harness, harness_events) = FakeHarness::new().with_event_injector();
+        let (harness, completion) = harness.with_later_completion_gate();
+        let (harness, sends) = harness.with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        manager
+            .send_message(&created.thread_id, "third".into(), Vec::new())
+            .await
+            .expect("queue third");
+        sends.wait_for(2).await;
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        let (session, pump) = {
+            let mut record = handle.lock().await;
+            (
+                record.live_session().cloned().expect("a live session"),
+                record.pump.take().expect("this session's pump"),
+            )
+        };
+        session
+            .lock()
+            .await
+            .shutdown()
+            .await
+            .expect("close the fake session");
+        drop(session);
+
+        // The typed limit lands first, while the turn is still active; the
+        // completion then waits for the exit report, which carries the reset
+        // again.
+        harness_events.emit(HarnessEvent::LimitHit {
+            reset_at: Some(reset_at),
+            auto_resume: true,
+        });
+        harness_events.emit(HarnessEvent::TurnCompleted {
+            status: TurnStatus::Completed,
+            usage: Usage::default(),
+        });
+        harness_events.emit(HarnessEvent::TransportClosed {
+            message: "agy exited (exit status: 7): agy: the session ended".into(),
+            retryable: false,
+            kind: TransportCloseKind::Exit,
+            reset_at: Some(reset_at),
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), pump)
+            .await
+            .expect("the pump ends with the completion")
+            .expect("the pump task did not panic");
+        let (turn, status) = next_turn_completion(&mut events).await;
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+
+        let schedules = meter.schedules().await.expect("read schedules");
+        assert_eq!(schedules.len(), 1, "one provider limit is one schedule");
+        assert_eq!(
+            schedules[0].attempt, 0,
+            "the exit report did not replace the schedule the notification armed"
+        );
+        assert!(
+            schedules[0].reason.contains("provider reset at"),
+            "the schedule keeps the provider's reset: {:?}",
+            schedules[0].reason
+        );
+        assert!(
+            schedules[0].resume_at >= reset_at,
+            "the schedule waits for the provider's reset: {:?}",
+            schedules[0].resume_at
+        );
+        let summary = manager
+            .thread_summary(&created.thread_id)
+            .await
+            .expect("summary");
+        assert_eq!(
+            summary.agent_state,
+            AgentState::Scheduled,
+            "the armed resume keeps the thread scheduled"
+        );
+        // The reset is minutes away; a paused clock makes the "no queued work
+        // started yet" window pass at once instead of waiting it in real time.
+        tokio::time::pause();
+        let started = tokio::time::timeout(Duration::from_millis(250), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                if let Event::TurnStarted { turn_id, .. } = wire.event {
+                    return turn_id;
+                }
+            }
+        })
+        .await;
+        tokio::time::resume();
+        assert!(
+            started.is_err(),
+            "queued work did not start past the provider's reset: {started:?}"
         );
         completion.release();
     }
@@ -7387,128 +7572,60 @@ mod tests {
     /// generic close notice.
     ///
     /// The stream is a channel and reports when it is parked, so the test can
-    /// queue the exit report and expire the deadline before the pump polls its
-    /// select again. Both branches are ready at that one poll, which is what
-    /// makes the test depend on the `biased;` order: without it the select
-    /// would pick the expired deadline half the time.
+    /// queue the exit report and expire the deadline before the wait polls
+    /// again. Both branches are ready at that one poll, which is what makes the
+    /// test depend on the `biased;` order: without it the select would pick the
+    /// expired deadline half the time. The rounds repeat the same
+    /// ready-together poll, so a select without `biased;` loses reliably
+    /// instead of one time in two.
     #[tokio::test]
     async fn an_idle_report_wins_over_an_expired_fallback_deadline() {
-        struct GatedStream {
-            events: tokio::sync::mpsc::UnboundedReceiver<HarnessEvent>,
-            parked: Arc<tokio::sync::Notify>,
+        for round in 0..64 {
+            let (reports, queued) = tokio::sync::mpsc::unbounded_channel();
+            let parked = Arc::new(tokio::sync::Notify::new());
+            let mut stream: futures::stream::BoxStream<'static, HarnessEvent> =
+                Box::pin(ParkedStream {
+                    events: queued,
+                    parked: Arc::clone(&parked),
+                });
+            let waiting = tokio::spawn(async move {
+                let deadline = tokio::time::Instant::now() + IDLE_DEATH_DETAIL_WAIT;
+                Inner::wait_for_idle_report(&mut stream, deadline).await
+            });
+            // The wait is parked with the deadline not yet expired.
+            parked.notified().await;
+            tokio::time::pause();
+
+            // Queue the exit report and expire the deadline before the wait
+            // polls again. The clock's advance alone does not wake it, so
+            // nothing is decided yet; queuing the report wakes the parked
+            // select with both branches ready at one poll.
+            tokio::time::advance(IDLE_DEATH_DETAIL_WAIT + Duration::from_millis(100)).await;
+            reports
+                .send(HarnessEvent::TransportClosed {
+                    message: "agy exited (exit status: 7): agy: the session ended".into(),
+                    retryable: false,
+                    kind: TransportCloseKind::Exit,
+                    reset_at: None,
+                })
+                .expect("queue the exit report");
+            tokio::time::resume();
+
+            let outcome = tokio::time::timeout(Duration::from_secs(3), waiting)
+                .await
+                .expect("the wait ends")
+                .expect("the wait task did not panic");
+            assert!(
+                matches!(
+                    outcome,
+                    IdleWait::Event(Some(HarnessEvent::TransportClosed {
+                        kind: TransportCloseKind::Exit,
+                        ..
+                    }))
+                ),
+                "round {round}: the ready exit report beats the expired deadline: {outcome:?}"
+            );
         }
-
-        impl futures::Stream for GatedStream {
-            type Item = HarnessEvent;
-
-            fn poll_next(
-                self: std::pin::Pin<&mut Self>,
-                cx: &mut std::task::Context<'_>,
-            ) -> std::task::Poll<Option<HarnessEvent>> {
-                let this = self.get_mut();
-                match this.events.poll_recv(cx) {
-                    std::task::Poll::Pending => {
-                        // The pump has read everything queued and is now in its
-                        // idle wait: nothing else can run before the test
-                        // chooses to queue the next report.
-                        this.parked.notify_one();
-                        std::task::Poll::Pending
-                    }
-                    ready => ready,
-                }
-            }
-        }
-
-        let workspace = tempfile::tempdir().expect("tempdir");
-        let (harness, _harness_events) = FakeHarness::new().with_event_injector();
-        let host = HostId::new("host_test");
-        let manager = open_test_manager(harness, host.clone()).await;
-        let mut events = manager.subscribe();
-        let created = manager
-            .create_thread(new_thread(host, workspace.path(), "first"))
-            .await
-            .expect("create");
-        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
-
-        let handle = manager
-            .inner
-            .handle(&created.thread_id)
-            .await
-            .expect("thread handle");
-        let (session, generation, old_pump) = {
-            let mut record = handle.lock().await;
-            (
-                record.live_session().cloned().expect("a live session"),
-                record.session.generation().expect("a generation"),
-                record.pump.take().expect("this session's pump"),
-            )
-        };
-        // End the session's own pump before the synthetic one takes over, so
-        // the two can never interleave on this session's stream.
-        old_pump.abort();
-        let _ = old_pump.await;
-
-        let (reports, queued) = tokio::sync::mpsc::unbounded_channel();
-        reports
-            .send(HarnessEvent::TransportClosed {
-                message: "the harness transport closed".into(),
-                retryable: true,
-                kind: TransportCloseKind::Eof,
-                reset_at: None,
-            })
-            .expect("queue the generic close");
-        let parked = Arc::new(tokio::sync::Notify::new());
-        let stream: futures::stream::BoxStream<'static, HarnessEvent> = Box::pin(GatedStream {
-            events: queued,
-            parked: Arc::clone(&parked),
-        });
-
-        let pumping = tokio::spawn(Arc::clone(&manager.inner).run_pump(
-            handle.clone(),
-            generation,
-            session,
-            None,
-            stream,
-        ));
-        // The generic close is queued and the pump is parked in its idle wait:
-        // the exit report does not exist yet and the deadline is not expired.
-        // The clock is frozen only after that, so the pump's own journal work
-        // never runs against a paused clock (whose idle auto-advance would reap
-        // the test journal's in-memory connection).
-        parked.notified().await;
-        tokio::time::pause();
-
-        // Queue the report and expire the deadline before the pump polls again.
-        // The clock's advance alone does not wake the pump, so nothing is
-        // published yet. Queuing the exit report (and one harmless event, so
-        // the pump re-enters its select and re-arms the already-expired
-        // deadline, which fires as it is registered) leaves both branches ready
-        // at the pump's next poll.
-        tokio::time::advance(IDLE_DEATH_DETAIL_WAIT + Duration::from_millis(100)).await;
-        reports
-            .send(HarnessEvent::Usage {
-                usage: Usage::default(),
-            })
-            .expect("queue an event that makes the pump poll again");
-        reports
-            .send(HarnessEvent::TransportClosed {
-                message: "agy exited (exit status: 7): agy: the session ended".into(),
-                retryable: false,
-                kind: TransportCloseKind::Exit,
-                reset_at: None,
-            })
-            .expect("queue the exit report");
-        tokio::time::resume();
-        tokio::time::timeout(Duration::from_secs(3), pumping)
-            .await
-            .expect("the pump ends after publishing the idle death")
-            .expect("the pump task did not panic");
-
-        let row = next_error(&mut events).await;
-        assert!(
-            row.starts_with("agy exited (exit status: 7)"),
-            "the ready exit report beat the expired deadline: {row:?}"
-        );
     }
 
     /// A harness stream that reports when its reader has parked.

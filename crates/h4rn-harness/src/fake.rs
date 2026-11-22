@@ -189,7 +189,12 @@ impl SendCount {
             if self.get() >= count {
                 return;
             }
+            // Register before re-checking: `note` wakes only waiters that are
+            // already registered, so a prompt counted between the load above
+            // and this await would otherwise be lost.
             let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if self.get() >= count {
                 return;
             }
@@ -227,7 +232,12 @@ impl SessionCount {
             if self.get() >= count {
                 return;
             }
+            // Register before re-checking: `note` wakes only waiters that are
+            // already registered, so a session counted between the load above
+            // and this await would otherwise be lost.
             let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if self.get() >= count {
                 return;
             }
@@ -321,7 +331,12 @@ impl Gate {
             if self.is_released() {
                 return;
             }
+            // Register before re-checking: `release` wakes only waiters that
+            // are already registered, so a release between the load above and
+            // this await would otherwise be lost.
             let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if self.is_released() {
                 return;
             }

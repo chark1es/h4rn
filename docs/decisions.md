@@ -611,7 +611,9 @@ transport death now says which part of the transport reported it (stdout EOF, a 
 writer failure, or the process exit). Only the exit kind is the process's final account, so a read
 error that is also non-retryable no longer ends the wait for the exit report's status, stderr and
 rate-limit reset; both a completion on a closed transport and a death between turns keep waiting for
-that kind. Every non-deliberate exit publishes its exit report even when its stderr carries a typed
+that kind. A `Write` report between turns is terminal instead: the writer's teardown kills the
+process on purpose, so the adapter suppresses the exit report and no later event can sharpen or
+contradict that row. Every non-deliberate exit publishes its exit report even when its stderr carries a typed
 limit, so the limit arms auto-resume and the pump still learns that the session is dead and detaches
 it; an idle death therefore reaches the next Send as a fresh session rather than as a failed write on
 a dead one. Events buffered inside the exit-report window are applied to the completing turn before
@@ -649,6 +651,16 @@ delivery; now the same interleaving either requeues or settles, never neither. F
 a closed transport's exit report prefers a ready report over its deadline, as the idle fallback does,
 so a completion whose report and deadline are ready at the same poll keeps the exit's status, stderr
 and rate-limit reset.
+
+**Addendum: one provider limit arms one schedule, and a closed transport keeps the reason it died.**
+Inside the closed-completion window the adapter can report one pause twice: the prompt path's typed
+limit lands before the completion and the exit report carries the same reset after it. The window now
+collects its limits and applies one after the wait, preferring the exit report's reset, and a limit
+the turn already armed for that reset is never replaced: the schedule keeps its first attempt and
+therefore its jitter instead of being silently bumped. A request rejected because the transport is
+already closed now names the close the client observed (stdout EOF, a failed read, a writer failure
+or the process exit) rather than always blaming a write, so the daemon's one failure row says what
+actually ended the agent.
 
 ## ADR-027: Push notifications are metadata-only wake signals
 

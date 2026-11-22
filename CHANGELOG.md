@@ -7,6 +7,14 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **One provider limit arms one schedule.** The bridge can report one pause twice: the prompt's
+  typed limit before the completion and the same reset on the exit report after it. The
+  closed-completion wait now collects those limits and applies one after the wait, preferring the
+  exit report's reset, and does not replace a schedule the turn already armed for that reset. The
+  attempt counter keeps its first value and the jitter is no longer silently changed.
+- **A request refused after an agent death names what actually closed.** The client keeps the close
+  it observed (stdout EOF, a failed read, a writer failure or the process exit) and uses it when a
+  later request is rejected, so a stdout death no longer looks like a dead writer in the failure row.
 - **A second Stop retries a cancel the harness did not take.** Stop used to record the intent
   before sending the cancel and then treat every later Stop on that turn as already stopped. If the
   first cancel failed while the session stayed open (a transient interrupt error), the turn kept

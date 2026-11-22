@@ -374,8 +374,38 @@ impl HarnessError {
 /// for. A session that can lose its transport mid-turn publishes that fact here
 /// when it happens, so the pump (and the daemon's other non-blocking readers)
 /// can see it without locking.
+///
+/// The first close wins and keeps the reason it was closed for, so a request
+/// rejected afterwards names what actually happened (a stdout EOF is not a
+/// write failure).
 #[derive(Clone, Debug, Default)]
-pub struct TransportHealth(std::sync::Arc<std::sync::atomic::AtomicBool>);
+pub struct TransportHealth(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+/// [`TransportHealth`]'s sentinel for a transport that is still open.
+const TRANSPORT_OPEN: u8 = 0;
+
+impl TransportCloseKind {
+    /// The byte [`TransportHealth`] stores for this kind.
+    const fn code(self) -> u8 {
+        match self {
+            Self::Eof => 1,
+            Self::Read => 2,
+            Self::Write => 3,
+            Self::Exit => 4,
+        }
+    }
+
+    /// The kind a stored byte names, if the transport has closed.
+    const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Eof),
+            2 => Some(Self::Read),
+            3 => Some(Self::Write),
+            4 => Some(Self::Exit),
+            _ => None,
+        }
+    }
+}
 
 impl TransportHealth {
     /// A transport that is still healthy.
@@ -384,13 +414,34 @@ impl TransportHealth {
     }
 
     /// Marks the transport closed. Every later read sees it.
+    ///
+    /// The reason is the general writer failure; a path that observed a
+    /// specific close uses [`Self::close_with`] instead.
     pub fn close(&self) {
-        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.close_with(TransportCloseKind::Write);
+    }
+
+    /// Marks the transport closed for the reason `kind` observed.
+    ///
+    /// The first close wins: a later teardown (a shutdown after the reader saw
+    /// EOF) must not rewrite the cause that actually ended the transport.
+    pub fn close_with(&self, kind: TransportCloseKind) {
+        let _ = self.0.compare_exchange(
+            TRANSPORT_OPEN,
+            kind.code(),
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        );
     }
 
     /// Whether the transport has closed.
     pub fn is_closed(&self) -> bool {
-        self.0.load(std::sync::atomic::Ordering::SeqCst)
+        self.0.load(std::sync::atomic::Ordering::SeqCst) != TRANSPORT_OPEN
+    }
+
+    /// The close the transport observed, when one was recorded.
+    pub fn close_kind(&self) -> Option<TransportCloseKind> {
+        TransportCloseKind::from_code(self.0.load(std::sync::atomic::Ordering::SeqCst))
     }
 }
 
