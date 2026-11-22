@@ -14,9 +14,10 @@ export type ComposerTrigger =
 const WHITESPACE = /\s/;
 /**
  * Characters that keep a mention inside a word (`me@example.com`, `foo@bar`).
- * Unicode letters and numbers count, so `café@src` is a word too.
+ * Unicode letters, numbers and combining marks count, so `café@src` is a word
+ * too, as is a decomposed `e` + U+0301.
  */
-const IDENTIFIER = /[\p{L}\p{N}_]/u;
+const IDENTIFIER = /[\p{L}\p{N}\p{M}_]/u;
 
 function isWhitespace(char: string | undefined): boolean {
   return char !== undefined && WHITESPACE.test(char);

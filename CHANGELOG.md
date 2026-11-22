@@ -86,11 +86,15 @@ All notable changes to h4rn are recorded here. The format follows
   h4rn and h4rn defines no skill invocation of its own.
 - **Unsent composer text survives a reload, an app restart or Android killing the webview.** Every
   draft is stored under its own key for a host and thread, so one tab never erases another
-  thread's draft; for the same thread the most recent edit wins. Writes happen after a short
-  debounce and are flushed when the page hides. Drafts
-  from the previous single-blob store are migrated on first launch. A sent message clears only the
+  thread's draft; for the same thread the most recent edit wins, including when both tabs type
+  inside one debounce window — the later edit is saved and the tab whose queued edit lost updates
+  to the text that won. Writes happen after a short debounce and are flushed when the page hides.
+  A sent message clears only the
   text that was sent: a newer draft written in another tab while the message was in flight stays,
-  and a failed send keeps the text so it can be retried. Every write carries its own revision (a
+  and a failed send keeps the text so it can be retried. Sending a prompt recalled with `↑` does
+  not clear the unsent draft recall preserved; it comes back when the send finishes. A draft for a
+  thread the daemon is still starting stays in memory under its temporary id and moves to the real
+  thread id once it exists, and is never written under the temporary id. Every write carries its own revision (a
   timestamp plus a per-tab id), so two tabs writing in the same moment cannot be confused, and a
   send clears only the revision the composer was showing rather than whatever storage holds when
   the reply finishes; a removal that failed is retried only while storage still holds that
@@ -118,6 +122,19 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Composer drafts survive recall, two tabs and a full quota.** Sending a recalled prompt puts the
+  draft that recall preserved back in the box instead of clearing it. Two tabs editing the same
+  thread inside one 300 ms window no longer lose the later edit, and a tab whose queued write was
+  superseded shows the text that actually won. A storage event carrying a corrupt value re-reads
+  the key first, so a value repaired in the meantime is kept, and a write that failed on a full
+  quota no longer counts against the 200-draft cap and evicts stored drafts. Drafts for a
+  `local-thread-*` id stay in memory and move to the real thread id once the daemon returns it;
+  temporary ids are never persisted. The empty-inbox Start a thread box now keeps its draft per
+  host and folder like the New thread dialog. The file walk checks its ignore list before the
+  depth cap, so a deep `node_modules` no longer marks the index truncated; `@` stays closed after
+  a decomposed accent (`e` + U+0301); switching workspaces clears the picker instead of flashing
+  the previous workspace's files; and the flip-below fallback uses the caret line's measured
+  height. The dead single-blob draft migration was removed: no released build wrote that format.
 - **The composer's phone sheet stays inside the keyboard, and the panel sheet takes focus.** The
   `@` sheet now ends at whichever comes first, the composer or the visible viewport's bottom, so no
   row hides under an open keyboard when the composer itself sits below it. When less than the header

@@ -6,7 +6,7 @@ import {
   FolderPlusIcon,
   PaperclipIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
 import { CommandPalette } from "@/components/dialogs/CommandPalette";
@@ -50,9 +50,11 @@ import { UsagePage } from "@/features/usage/UsagePage";
 import type { HarnessKind } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { useViewportWidth } from "@/hooks/use-viewport-width";
+import { DEFAULT_NEW_THREAD_WORKSPACE, drafts } from "@/lib/drafts";
 import { HARNESS_LABELS, harnessLabel, harnessSeed, machineSeed } from "@/lib/entities";
 import { projectName } from "@/lib/grouping";
 import { titleWithShortcut } from "@/lib/keybindings";
+import { NewThreadDraftSession } from "@/lib/newThreadDraft";
 import { createThread, navigate, openAddProject, panelFits, useApp } from "@/lib/store/appStore";
 import { defaultThreadHostId, localOnlyHostOptions } from "@/lib/thread-hosts";
 import { activeThread } from "@/lib/thread-selection";
@@ -66,7 +68,7 @@ const START_MODELS: Record<HarnessKind, string> = {
 
 const HARNESSES: HarnessKind[] = ["claude_code", "codex", "opencode", "antigravity"];
 
-function InboxDetailEmpty() {
+export function InboxDetailEmpty() {
   const hosts = useApp((state) => state.hosts);
   const localHostId = useApp((state) => state.localHostId);
   const connection = useApp((state) => state.connection.status);
@@ -91,13 +93,39 @@ function InboxDetailEmpty() {
   const [prompt, setPrompt] = useState("");
   const [starting, setStarting] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  /**
+   * The inbox box remembers text per host and folder, exactly like the New
+   * thread dialog: it is the same start-a-thread slot, just always on screen.
+   */
+  const sessionRef = useRef<NewThreadDraftSession | null>(null);
+  const draftSession = useCallback(
+    () =>
+      (sessionRef.current ??= new NewThreadDraftSession(drafts, {
+        workspace: workspace || DEFAULT_NEW_THREAD_WORKSPACE,
+      })),
+    [workspace],
+  );
   useProxyCatalog();
   useProxy((state) => state.profiles);
 
   useEffect(() => {
     if (host || onlineHosts.length === 0) return;
-    setHost(defaultThreadHostId(onlineHosts, localHostId) ?? "");
-  }, [host, onlineHosts, localHostId]);
+    const first = defaultThreadHostId(onlineHosts, localHostId) ?? "";
+    if (!first) return;
+    const draft = draftSession().adoptHost(first);
+    setHost(first);
+    setWorkspace(draft.workspace);
+    setPrompt(draft.text);
+  }, [host, onlineHosts, localHostId, draftSession]);
+
+  const commitWorkspace = useCallback(
+    (path: string) => {
+      const draft = draftSession().commitWorkspace(path);
+      setWorkspace(draft.workspace);
+      setPrompt(draft.text);
+    },
+    [draftSession],
+  );
 
   const selectedHost = hosts[host];
   // Registered projects first, then folders that only have threads so far.
@@ -121,8 +149,10 @@ function InboxDetailEmpty() {
   useEffect(() => {
     if (customFolder || selectedFolder) return;
     const first = folderChoices[0];
-    if (first && workspace === "~/code") setWorkspace(first.path);
-  }, [customFolder, selectedFolder, folderChoices, workspace]);
+    if (!first || workspace !== DEFAULT_NEW_THREAD_WORKSPACE) return;
+    if (host) commitWorkspace(first.path);
+    else setWorkspace(first.path);
+  }, [customFolder, selectedFolder, folderChoices, workspace, host, commitWorkspace]);
   const harnessChoices = selectedHost?.harnesses.length ? selectedHost.harnesses : HARNESSES;
   const hostName = selectedHost?.name ?? "a host";
   const offline = connection !== "online";
@@ -135,21 +165,32 @@ function InboxDetailEmpty() {
   const newThreadOpen = useApp((state) => state.ui.newThreadOpen);
   useAttachShortcut(attachments.openPicker, writable && !newThreadOpen);
 
+  const updatePrompt = (value: string) => {
+    setPrompt(value);
+    draftSession().setText(value);
+  };
+
   const submit = async () => {
     if (!writable || starting || attachments.blockedReason) return;
     if (!prompt.trim() && attachments.attachments.length === 0) return;
+    const draft = draftSession().submission(workspace);
+    if (!draft) return;
     setStarting(true);
     const ok = await createThread({
-      host,
+      host: draft.host,
       harness,
-      workspacePath: workspace.trim() || "~/code",
+      workspacePath: draft.workspace,
       model,
-      prompt: prompt.trim(),
+      prompt: draft.text.trim(),
       attachments: attachments.attachments,
       runtimeMode: "approval_required",
     });
     setStarting(false);
     if (ok) {
+      // Clear only the slot whose revision was sent; newer text from another
+      // tab survives, like a thread composer's draft.
+      draftSession().clearSubmitted(draft);
+      drafts.writeLastWorkspace(draft.host, draft.workspace);
       setPrompt("");
       attachments.clear();
     }
@@ -159,7 +200,7 @@ function InboxDetailEmpty() {
     const element = textareaRef.current;
     if (!element || !writable) return;
     const start = element.selectionStart ?? prompt.length;
-    setPrompt(`${prompt.slice(0, start)}@${prompt.slice(start)}`);
+    updatePrompt(`${prompt.slice(0, start)}@${prompt.slice(start)}`);
     requestAnimationFrame(() => {
       element.focus();
       element.setSelectionRange(start + 1, start + 1);
@@ -167,7 +208,10 @@ function InboxDetailEmpty() {
   };
 
   const pickHost = (nextHostId: string) => {
+    const draft = draftSession().selectHost(nextHostId);
     setHost(nextHostId);
+    setWorkspace(draft.workspace);
+    setPrompt(draft.text);
     const nextHarness = hosts[nextHostId]?.harnesses[0];
     if (nextHarness) {
       setHarness(nextHarness);
@@ -297,6 +341,13 @@ function InboxDetailEmpty() {
                 <input
                   value={workspace}
                   onChange={(event) => setWorkspace(event.target.value)}
+                  onBlur={() => commitWorkspace(workspace)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      commitWorkspace(workspace);
+                    }
+                  }}
                   placeholder="~/code/api"
                   spellCheck={false}
                 />
@@ -329,7 +380,7 @@ function InboxDetailEmpty() {
                       key={choice.path}
                       onSelect={() => {
                         setCustomFolder(false);
-                        setWorkspace(choice.path);
+                        commitWorkspace(choice.path);
                       }}
                     >
                       <span className="min-w-0 flex-1 truncate">{choice.name}</span>
@@ -376,7 +427,7 @@ function InboxDetailEmpty() {
               placeholder={`Describe the task for ${harnessLabel(harness)} on ${hostName}`}
               value={prompt}
               disabled={!writable}
-              onChange={(event) => setPrompt(event.target.value)}
+              onChange={(event) => updatePrompt(event.target.value)}
               onPaste={(event) => {
                 if (!writable) return;
                 const files = Array.from(event.clipboardData.files);

@@ -1,3 +1,7 @@
+// @vitest-environment jsdom
+
+import { renderHook, waitFor } from "@testing-library/react";
+import { createElement, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { FileEntry, FsListing } from "@/gen";
 
@@ -6,6 +10,8 @@ import {
   loadWorkspaceFiles,
   MAX_INDEXED_FILES,
   readWorkspaceFilesCache,
+  useWorkspaceFiles,
+  WorkspaceFilesContext,
   walkWorkspace,
 } from "./workspaceFiles";
 
@@ -136,6 +142,23 @@ describe("workspace file walk", () => {
     expect(index.truncated).toBe(true);
   });
 
+  it("never descends into an ignored folder at the depth cap", async () => {
+    const lister = async ({ path }: { path: string }) => {
+      const depth = path.split("/").filter(Boolean).length;
+      if (depth < 8) {
+        return listing(path, [directory(path ? `${path}/next` : "next")]);
+      }
+      // At the deepest level the only entry is one the walk ignores anyway.
+      return listing(path, [directory(`${path}/node_modules`)]);
+    };
+
+    const index = await walkWorkspace(target, lister);
+
+    // The ignored folder was not omitted from the index, because it was never
+    // going to be in it; the walk is complete rather than truncated.
+    expect(index).toEqual({ files: [], truncated: false });
+  });
+
   it("reports a listing the daemon itself truncated", async () => {
     const lister = async ({ path }: { path: string }) => ({
       ...listing(path, path === "" ? [file("a.ts")] : []),
@@ -213,5 +236,40 @@ describe("workspace file cache", () => {
       files: ["a.ts"],
       truncated: false,
     });
+  });
+});
+
+describe("workspace file hook", () => {
+  it("does not show the previous workspace's files after the target changes", async () => {
+    const lister = async ({ workspace, path }: { workspace: string; path: string }) =>
+      path === ""
+        ? listing(
+            path,
+            workspace.endsWith("/one") ? [file("only-in-one.ts")] : [file("only-in-two.ts")],
+          )
+        : listing(path, []);
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(WorkspaceFilesContext.Provider, { value: lister }, children);
+    // Record every render's value: the bug is the render before the effect,
+    // which `result.current` alone would no longer show.
+    const renders: string[][] = [];
+    const { result, rerender } = renderHook(
+      ({ workspace }: { workspace: string }) => {
+        const state = useWorkspaceFiles({ host: "host_1", workspace }, true);
+        renders.push(state.files);
+        return state;
+      },
+      { initialProps: { workspace: "/work/one" }, wrapper },
+    );
+    await waitFor(() => expect(result.current.files).toEqual(["only-in-one.ts"]));
+
+    const firstNewRender = renders.length;
+    rerender({ workspace: "/work/two" });
+
+    // Before the new walk answers, the picker must not render the old
+    // workspace's index as if it belonged to this one.
+    expect(renders[firstNewRender]).toEqual([]);
+    expect(result.current.files).toEqual([]);
+    await waitFor(() => expect(result.current.files).toEqual(["only-in-two.ts"]));
   });
 });

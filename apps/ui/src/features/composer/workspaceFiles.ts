@@ -111,11 +111,14 @@ export async function walkWorkspace(
       if (result.value.truncated) truncated = true;
       for (const entry of result.value.entries) {
         if (entry.kind === "directory") {
+          // Check the ignore list first: a `node_modules` that happens to sit
+          // at the depth cap was never going to be read, so it is not an
+          // omitted part of the index and must not mark the walk truncated.
+          if (IGNORED_DIRECTORIES.has(entry.name)) continue;
           if (depth + 1 > MAX_DEPTH) {
             truncated = true;
             continue;
           }
-          if (IGNORED_DIRECTORIES.has(entry.name)) continue;
           queue.push({ path: entry.path, depth: depth + 1 });
           continue;
         }
@@ -208,41 +211,59 @@ const EMPTY: WorkspaceFilesState = { files: [], truncated: false, loading: false
  */
 export function useWorkspaceFiles(target: WorkspaceTarget, enabled: boolean): WorkspaceFilesState {
   const injected = useContext(WorkspaceFilesContext);
-  const [state, setState] = useState<WorkspaceFilesState>(EMPTY);
+  const { host, workspace } = target;
+  const targetKey = `${host}\u0000${workspace}`;
+  // The state remembers which workspace produced it. A render for a different
+  // target shows an empty list before the effect can run, instead of one frame
+  // of another workspace's files.
+  const [state, setState] = useState<{ key: string; value: WorkspaceFilesState }>({
+    key: targetKey,
+    value: EMPTY,
+  });
 
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;
-    const cached = readWorkspaceFilesCache(target);
+    const active = { host, workspace };
+    const cached = readWorkspaceFilesCache(active);
     setState({
-      files: cached?.files ?? [],
-      truncated: cached?.truncated ?? false,
-      loading: true,
-      error: null,
+      key: targetKey,
+      value: {
+        files: cached?.files ?? [],
+        truncated: cached?.truncated ?? false,
+        loading: true,
+        error: null,
+      },
     });
-    loadWorkspaceFiles(target, injected ?? listFromDaemon)
+    loadWorkspaceFiles(active, injected ?? listFromDaemon)
       .then((index) => {
         if (cancelled) return;
         setState({
-          files: index.files,
-          truncated: index.truncated,
-          loading: false,
-          error: null,
+          key: targetKey,
+          value: {
+            files: index.files,
+            truncated: index.truncated,
+            loading: false,
+            error: null,
+          },
         });
       })
       .catch((error: unknown) => {
         if (cancelled) return;
         setState({
-          files: [],
-          truncated: false,
-          loading: false,
-          error: error instanceof Error ? error.message : "The workspace could not be read.",
+          key: targetKey,
+          value: {
+            files: [],
+            truncated: false,
+            loading: false,
+            error: error instanceof Error ? error.message : "The workspace could not be read.",
+          },
         });
       });
     return () => {
       cancelled = true;
     };
-  }, [target, enabled, injected]);
+  }, [host, workspace, targetKey, enabled, injected]);
 
-  return state;
+  return state.key === targetKey ? state.value : EMPTY;
 }

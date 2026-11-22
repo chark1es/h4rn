@@ -3,10 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createDraftStore,
   DRAFT_KEY_PREFIX,
+  type DraftChange,
   type DraftStorage,
   draftStorageKey,
   installDraftFlushHandlers,
-  LEGACY_DRAFTS_STORAGE_KEY,
   MAX_STORED_DRAFTS,
 } from "./drafts";
 
@@ -65,7 +65,6 @@ describe("draft store", () => {
     vi.advanceTimersByTime(1);
 
     expect(storedText(storage, threadKey("host_a", "thread_1"))).toBe("hello");
-    expect(storage.getItem(LEGACY_DRAFTS_STORAGE_KEY)).toBeNull();
   });
 
   it("debounces a burst of edits into one write", () => {
@@ -204,8 +203,10 @@ describe("draft store", () => {
 
   it("does not let a debounced write replace a revision it never saw", () => {
     const storage = memoryStorage();
+    // B's edit happened a millisecond later, so A's queued write is stale
+    // even though A only gets around to flushing it afterwards.
     const tabA = createDraftStore(storage, { now: () => 5, nonce: "tab-a" });
-    const tabB = createDraftStore(storage, { now: () => 5, nonce: "tab-b" });
+    const tabB = createDraftStore(storage, { now: () => 6, nonce: "tab-b" });
 
     tabA.writeThreadDraft("host_a", "thread_1", "older from A");
     tabB.writeThreadDraft("host_a", "thread_1", "newer from B");
@@ -215,6 +216,46 @@ describe("draft store", () => {
 
     expect(storedText(storage, threadKey("host_a", "thread_1"))).toBe("newer from B");
     expect(tabA.readThreadDraft("host_a", "thread_1")).toBe("newer from B");
+  });
+
+  it("keeps the edit a second tab flushes inside the debounce window", () => {
+    const storage = memoryStorage();
+    const tabA = createDraftStore(storage, { now: () => 5, nonce: "tab-a" });
+    const tabB = createDraftStore(storage, { now: () => 6, nonce: "tab-b" });
+
+    // Both tabs type before either debounce fires. The later flush must land
+    // instead of being discarded because storage moved since it was queued.
+    tabA.writeThreadDraft("host_a", "thread_1", "from A");
+    tabB.writeThreadDraft("host_a", "thread_1", "from B");
+    tabA.flush();
+    tabB.flush();
+
+    expect(storedText(storage, threadKey("host_a", "thread_1"))).toBe("from B");
+    expect(tabA.readThreadDraft("host_a", "thread_1")).toBe("from B");
+  });
+
+  it("reports the winning text when a queued edit was older", () => {
+    const storage = memoryStorage();
+    const changes: DraftChange[] = [];
+    const tabA = createDraftStore(storage, {
+      now: () => 5,
+      nonce: "tab-a",
+      onAdopt: (change) => changes.push(change),
+    });
+    const tabB = createDraftStore(storage, { now: () => 9, nonce: "tab-b" });
+
+    tabA.writeThreadDraft("host_a", "thread_1", "older");
+    tabB.writeThreadDraft("host_a", "thread_1", "newer");
+    tabB.flush();
+    tabA.flush();
+
+    expect(storedText(storage, threadKey("host_a", "thread_1"))).toBe("newer");
+    expect(tabA.readThreadDraft("host_a", "thread_1")).toBe("newer");
+    // The tab whose edit lost has to re-render, or its box keeps showing text
+    // the store no longer has.
+    expect(changes).toHaveLength(1);
+    expect(changes[0]?.text).toBe("newer");
+    expect(changes[0]?.revision).toEqual({ updatedAt: 9, nonce: "tab-b" });
   });
 
   it("reads the text and its revision together", () => {
@@ -339,6 +380,38 @@ describe("draft store", () => {
     expect(store.readThreadDraft("host_a", "t4")).toBe("four");
   });
 
+  it("does not count a quota-failed write against the cap", () => {
+    const stored = new Map<string, string>();
+    const quotaKey = threadKey("host_a", "t3");
+    const base = 1_000;
+    stored.set(threadKey("host_a", "t1"), JSON.stringify({ text: "one", updatedAt: base + 1 }));
+    stored.set(threadKey("host_a", "t2"), JSON.stringify({ text: "two", updatedAt: base + 2 }));
+    const storage: DraftStorage = {
+      getItem: (key) => stored.get(key) ?? null,
+      setItem: (key, value) => {
+        if (key === quotaKey) throw new Error("quota exceeded");
+        stored.set(key, value);
+      },
+      removeItem: (key) => {
+        stored.delete(key);
+      },
+      key: (index) => [...stored.keys()][index] ?? null,
+      get length() {
+        return stored.size;
+      },
+    };
+    const store = createDraftStore(storage, { maxDrafts: 2, now: () => base + 100 });
+
+    store.writeThreadDraft("host_a", "t3", "could not save");
+    store.flush();
+
+    // The failed write is still readable from memory, but it never occupied a
+    // slot, so neither stored draft was evicted to make room for it.
+    expect(store.readThreadDraft("host_a", "t3")).toBe("could not save");
+    expect(stored.has(threadKey("host_a", "t1"))).toBe(true);
+    expect(stored.has(threadKey("host_a", "t2"))).toBe(true);
+  });
+
   it("trims an over-cap store when it loads", () => {
     const base = 1_700_000_000_000;
     const initial: Record<string, string> = {};
@@ -393,6 +466,36 @@ describe("draft store", () => {
     store.writeThreadDraft("host_a", "thread_1", "fresh");
     store.flush();
     expect(store.readThreadDraft("host_a", "thread_1")).toBe("fresh");
+  });
+
+  it("keeps a temporary thread's draft in memory until the real id exists", () => {
+    const storage = memoryStorage();
+    const store = createDraftStore(storage, { now: () => 1 });
+
+    store.writeThreadDraft("host_a", "local-thread-1", "typed before it existed");
+    store.flush();
+
+    // A temporary id must never reach storage: another session could reuse it.
+    expect(storage.data.size).toBe(0);
+    expect(store.readThreadDraft("host_a", "local-thread-1")).toBe("typed before it existed");
+
+    store.moveThreadDraft("host_a", "local-thread-1", "thread_1");
+
+    expect(store.readThreadDraft("host_a", "local-thread-1")).toBe("");
+    expect(store.readThreadDraft("host_a", "thread_1")).toBe("typed before it existed");
+    expect(storedText(storage, threadKey("host_a", "thread_1"))).toBe("typed before it existed");
+    expect(storage.data.has(threadKey("host_a", "local-thread-1"))).toBe(false);
+  });
+
+  it("drops a temporary thread key a development build left in storage", () => {
+    const tempKey = threadKey("host_a", "local-thread-9");
+    const storage = memoryStorage({
+      [tempKey]: JSON.stringify({ text: "stale", updatedAt: 1 }),
+    });
+    const store = createDraftStore(storage, { now: () => 1 });
+
+    expect(store.readThreadDraft("host_a", "local-thread-9")).toBe("");
+    expect(storage.data.has(tempKey)).toBe(false);
   });
 
   it("does not evict a draft whose age it could not read", () => {
@@ -451,59 +554,6 @@ describe("draft store", () => {
 
     expect(store.readThreadDraft("host_a", "thread_1")).toBe("");
     expect(storage.data.size).toBe(0);
-  });
-
-  it("migrates the old single-blob key, then deletes it", () => {
-    const now = Date.now();
-    const legacy = JSON.stringify({
-      version: 1,
-      drafts: [
-        {
-          scope: "thread",
-          host: "host_a",
-          target: "thread_1",
-          text: "old draft",
-          updatedAt: now - 1000,
-        },
-        {
-          scope: "new-thread",
-          host: "host_a",
-          target: "~/code",
-          text: "old prompt",
-          updatedAt: now - 500,
-        },
-      ],
-    });
-    const storage = memoryStorage({ [LEGACY_DRAFTS_STORAGE_KEY]: legacy });
-    const store = createDraftStore(storage);
-
-    expect(store.readThreadDraft("host_a", "thread_1")).toBe("old draft");
-    expect(store.readNewThreadDraft("host_a", "~/code")).toBe("old prompt");
-    expect(storage.getItem(LEGACY_DRAFTS_STORAGE_KEY)).toBeNull();
-    expect(storedText(storage, threadKey("host_a", "thread_1"))).toBe("old draft");
-  });
-
-  it("does not overwrite a newer per-key draft during migration", () => {
-    const key = threadKey("host_a", "thread_1");
-    const now = Date.now();
-    const storage = memoryStorage({
-      [LEGACY_DRAFTS_STORAGE_KEY]: JSON.stringify({
-        version: 1,
-        drafts: [
-          {
-            scope: "thread",
-            host: "host_a",
-            target: "thread_1",
-            text: "older",
-            updatedAt: now - 2000,
-          },
-        ],
-      }),
-      [key]: JSON.stringify({ text: "newer", updatedAt: now - 1000 }),
-    });
-    const store = createDraftStore(storage);
-
-    expect(store.readThreadDraft("host_a", "thread_1")).toBe("newer");
   });
 
   it("lets two tabs write their own drafts without erasing each other", () => {
@@ -579,6 +629,26 @@ describe("draft store", () => {
     });
     expect(storage.data.has(key)).toBe(false);
     expect(store.readThreadDraft("host_a", "thread_1")).toBe("");
+  });
+
+  it("does not delete a value repaired after a stale corrupt event", () => {
+    const storage = memoryStorage();
+    const store = createDraftStore(storage);
+    const key = threadKey("host_a", "thread_1");
+    // The event carries the old garbage, but storage now holds good text
+    // written after it (for example by a retry in another tab).
+    const repaired = JSON.stringify({
+      text: "repaired",
+      updatedAt: Date.now(),
+      nonce: "tab-b",
+    });
+    storage.data.set(key, repaired);
+
+    const change = store.applyStorageEvent(key, "not json");
+
+    expect(change?.text).toBe("repaired");
+    expect(storage.data.get(key)).toBe(repaired);
+    expect(store.readThreadDraft("host_a", "thread_1")).toBe("repaired");
   });
 
   it("clears the open composer when another tab removes the draft", () => {

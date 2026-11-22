@@ -440,6 +440,60 @@ describe("Composer drafts and history", () => {
     expect(readThreadDraft(HOST, THREAD)).toBe("earlier prompt edited");
   });
 
+  it("restores the preserved draft after sending a recalled prompt", async () => {
+    mock.state.logs[THREAD] = log(["earlier prompt"]);
+    mock.sendMessage.mockResolvedValue(true);
+    renderComposer();
+    const input = textarea();
+
+    fireEvent.change(input, { target: { value: "half typed" } });
+    input.setSelectionRange(0, 0);
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    runAnimationFrames();
+    expect(input.value).toBe("earlier prompt");
+
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+
+    await waitFor(() =>
+      expect(mock.sendMessage).toHaveBeenCalledWith(THREAD, "earlier prompt", []),
+    );
+    await waitFor(() => expect(input.value).toBe("half typed"));
+    // The recalled prompt was sent; the unsent draft it replaced was not.
+    expect(readThreadDraft(HOST, THREAD)).toBe("half typed");
+  });
+
+  it("does not recall history during IME composition", () => {
+    mock.state.logs[THREAD] = log(["earlier prompt"]);
+    renderComposer();
+    const input = textarea();
+
+    fireEvent.change(input, { target: { value: "composition text" } });
+    input.setSelectionRange(0, 0);
+    fireEvent.compositionStart(input);
+    fireEvent.keyDown(input, { key: "ArrowUp", isComposing: true });
+    runAnimationFrames();
+
+    expect(input.value).toBe("composition text");
+    expect(readThreadDraft(HOST, THREAD)).toBe("composition text");
+    fireEvent.compositionEnd(input);
+  });
+
+  it("does not recall history while the file menu is open", async () => {
+    mock.state.logs[THREAD] = log(["earlier prompt"]);
+    renderComposer();
+    const input = textarea();
+
+    typeInto(input, "@");
+    await waitFor(() => expect(option(/README\.md/)).not.toBeNull());
+    input.setSelectionRange(1, 1);
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    runAnimationFrames();
+
+    // The arrow moved the menu highlight; history stayed put.
+    expect(input.value).toBe("@");
+    expect(readThreadDraft(HOST, THREAD)).toBe("@");
+  });
+
   it("keeps a newer draft from another tab when the send finishes", async () => {
     let finish: (ok: boolean) => void = () => undefined;
     mock.sendMessage.mockReturnValue(
@@ -500,6 +554,31 @@ describe("Composer drafts and history", () => {
     expect(textarea().value).toBe("second thread draft");
     expect(readThreadDraft(HOST, secondThread)).toBe("second thread draft");
     expect(readThreadDraft(HOST, THREAD)).toBe("");
+  });
+
+  it("re-renders when a flush gives up its queued edit to newer text", () => {
+    renderComposer();
+    const input = textarea();
+
+    fireEvent.change(input, { target: { value: "my queued edit" } });
+    // The other tab's newer text is already in storage, but this tab has not
+    // heard the storage event yet (it ignored one while its write was queued).
+    const key = draftStorageKey("thread", HOST, THREAD);
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({
+        text: "newer from elsewhere",
+        updatedAt: Date.now() + 1000,
+        nonce: "other",
+      }),
+    );
+
+    act(() => {
+      flushDrafts();
+    });
+
+    expect(input.value).toBe("newer from elsewhere");
+    expect(readThreadDraft(HOST, THREAD)).toBe("newer from elsewhere");
   });
 
   it("adopts another tab's draft only when it has no unsaved edit", async () => {
@@ -698,16 +777,23 @@ describe("Composer @ file picker", () => {
     renderComposer();
     const input = textarea();
     typeInto(input, "@");
+    // Under an empty query README.md is the highlighted row.
     await waitFor(() => expect(option(/README\.md/)).not.toBeNull());
+    expect(within(screen.getByRole("listbox")).getAllByRole("option")[0]?.textContent).toContain(
+      "README.md",
+    );
 
-    // Change the query and press Enter in the same turn, before the index
-    // refresh could catch up. The highlighted row must be README's
-    // replacement, not the row that was highlighted for the old query.
-    typeInto(input, "@doc");
-    fireEvent.keyDown(input, { key: "Enter" });
+    // Change the query and press Enter in one batch, so the component has not
+    // re-rendered between the two events. The rank for the new query must be
+    // used - a different file from the one highlighted under the old query.
+    act(() => {
+      typeInto(input, "@doc");
+      fireEvent.keyDown(input, { key: "Enter" });
+    });
     runAnimationFrames();
 
     expect(input.value).toBe("@docs/ux.md ");
+    expect(option(/README\.md/)).toBeNull();
   });
 
   it("offers a quiet footer when the index hit a cap", async () => {
@@ -1052,8 +1138,15 @@ describe("Composer / command menu", () => {
     expect(sheet.style.maxHeight).toBe("584px");
     expect(sheet.className).toContain("q-ph-sheet");
     expect(sheet.className).toContain("q-comp-sheet");
-    expect(sheet.getAttribute("data-placement")).toBe("above");
-    expect(sheet.getAttribute("data-covers")).toBeNull();
+    // Geometry: the container's bottom is 796, so the sheet's top edge in
+    // viewport coordinates is 796 - 204 - 584 = 8 and its bottom edge is 592,
+    // which is above the composer (700) and inside the visible viewport (600).
+    const containerBottom = 796;
+    const sheetTop = containerBottom - Number.parseFloat(sheet.style.bottom) - 584;
+    const sheetBottom = containerBottom - Number.parseFloat(sheet.style.bottom);
+    expect(sheetTop).toBeGreaterThanOrEqual(0);
+    expect(sheetBottom).toBeLessThanOrEqual(600);
+    expect(sheetBottom).toBeLessThan(700);
     expect(within(sheet).getByText("Files in code")).toBeTruthy();
 
     fireEvent.click(await within(sheet).findByRole("option", { name: /README\.md/ }));
