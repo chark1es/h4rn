@@ -1757,6 +1757,14 @@ where
     }
 }
 
+/// Whether a task's action launches the installation being replaced.
+///
+/// A task that runs another installation keeps its action: it is the only
+/// recovery path for that binary and must not be repointed by this update.
+fn task_runs_installation(installed: &InstalledService, current: &Path) -> bool {
+    matches!(installed, InstalledService::Runs(binary) if same_binary(binary, current))
+}
+
 /// Prepares an installation for a Windows replace or rollback.
 ///
 /// Both move the running `h4rnd.exe` aside, so the registered task must already
@@ -1769,7 +1777,19 @@ pub fn prepare_replace(current: &Path, data_dir: &Path) -> Result<()> {
     if ServicePlatform::current() != ServicePlatform::Windows {
         return Ok(());
     }
-    if windows_installed_task().is_none() {
+    let Some(installed) = windows_installed_task() else {
+        return Ok(());
+    };
+    // Never repoint a task that belongs to another installation: its existing
+    // action is the only recovery path that machine has.
+    let Ok(output) = run_capture_allow_failure(&windows_task_executable_command(&installed)) else {
+        return Ok(());
+    };
+    if !output.status.success() {
+        return Ok(());
+    }
+    let installed = windows_installed_binary(&String::from_utf8_lossy(&output.stdout));
+    if !task_runs_installation(&installed, current) {
         return Ok(());
     }
     ensure_available("powershell")?;
@@ -3309,6 +3329,31 @@ mod tests {
             }
             other => panic!("an unreadable source must fail closed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn only_the_replaced_installations_task_is_prepared() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir.path().join("h4rnd.exe");
+        let other = dir.path().join("other-h4rnd.exe");
+        std::fs::write(&current, b"bin").unwrap();
+        std::fs::write(&other, b"bin").unwrap();
+        assert!(task_runs_installation(
+            &InstalledService::Runs(current.clone()),
+            &current
+        ));
+        assert!(!task_runs_installation(
+            &InstalledService::Runs(other),
+            &current
+        ));
+        assert!(!task_runs_installation(
+            &InstalledService::NotInstalled,
+            &current
+        ));
+        assert!(!task_runs_installation(
+            &InstalledService::Unknown,
+            &current
+        ));
     }
 
     #[test]

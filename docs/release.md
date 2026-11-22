@@ -193,7 +193,8 @@ starting the daemon. Because the launcher does that work rather than calling
 an older image that predates that flag. Before a Windows update or rollback
 renames anything, `h4rnd` rewrites the registered task's launcher with this
 version (the install script's `-NoStart` mode), so a legacy task that launched
-`h4rnd.exe` directly becomes recoverable too. The update releases the installation lock
+`h4rnd.exe` directly becomes recoverable too; a task that runs a different
+installation is left alone. The update releases the installation lock
 before it triggers the restart, so the launcher never has to wait for the process
 that started it. Tasks registered by older releases under the machine-wide
 `h4rn` name are removed by the next install or uninstall. Without a service, run
