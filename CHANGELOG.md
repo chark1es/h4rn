@@ -112,6 +112,16 @@ All notable changes to h4rn are recorded here. The format follows
   8 levels — and the menu says “Showing the first 3,000 files.” instead of a bare “No files match”.
   Every option has an id, `↑`/`↓` scroll the highlighted row into view and the textarea names it
   with `aria-activedescendant`.
+- **The composer's file list tells the truth when the workspace cannot be fully read.** A folder
+  that fails to list makes the index partial, so the quiet “Showing the first … files.” footer
+  appears instead of claiming no other file exists; if the workspace root itself fails, the picker
+  shows that error rather than “No files in …”. The phone `/` menu no longer offers “Open the IDE”
+  (the phone shell has no IDE view to open), the phone sheet's Done button dismisses it exactly
+  like `Esc`, and `⇧↵` inserts a newline even while the `@` list is open. A quoted mention
+  (`@"path with space"`) is scanned as one token: the picker keeps filtering while its closing
+  quote is missing, does nothing inside a finished mention, and completes it without doubling or
+  dropping the quotes. The caret popover also follows the caret line when the textarea has
+  scrolled.
 - **A second launch hands its deep link to the running app.** Launching h4rn while it is already
   running (including from a hidden tray) used to focus the window and drop the `h4rn://` link that
   started the second process. The single-instance plugin now has its `deep-link` feature, so it

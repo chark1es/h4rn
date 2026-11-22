@@ -34,6 +34,58 @@ function tokenEnd(value: string, caret: number): number {
   return index;
 }
 
+/** True when the quote at `index` is escaped (`\"`), as `fileReference` writes it. */
+function isEscaped(value: string, index: number): boolean {
+  let backslashes = 0;
+  for (let cursor = index - 1; cursor >= 0 && value[cursor] === "\\"; cursor -= 1) {
+    backslashes += 1;
+  }
+  return backslashes % 2 === 1;
+}
+
+/** End of the line that holds `index`; a quoted mention never spans lines. */
+function lineEnd(value: string, index: number): number {
+  const newline = value.indexOf("\n", index);
+  return newline < 0 ? value.length : newline;
+}
+
+/**
+ * The quoted mention (`@"…"`) around the caret, or `null`.
+ *
+ * A quoted mention is one token even though it contains spaces. While its
+ * closing quote has not been typed the picker filters on the text inside the
+ * quotes; once the quote is closed the text is a finished mention, so no
+ * trigger fires anywhere inside it.
+ */
+function quotedTrigger(value: string, caret: number): ComposerTrigger | null | "complete" {
+  let index = 0;
+  while (index < value.length - 1) {
+    if (value[index] !== "@" || value[index + 1] !== '"' || !isWordBoundary(value, index)) {
+      index += 1;
+      continue;
+    }
+    let close = -1;
+    for (let cursor = index + 2; cursor < value.length; cursor += 1) {
+      if (value[cursor] === '"' && !isEscaped(value, cursor)) {
+        close = cursor;
+        break;
+      }
+    }
+    if (close >= 0) {
+      // A closed mention is inert, even when the caret sits inside it.
+      if (caret > index && caret <= close) return "complete";
+      index = close + 1;
+      continue;
+    }
+    const end = lineEnd(value, index + 2);
+    if (caret > index + 1 && caret <= end) {
+      return { kind: "file", query: value.slice(index + 2, caret), start: index, end };
+    }
+    return null;
+  }
+  return null;
+}
+
 /**
  * The trigger the caret is inside, or `null`.
  *
@@ -45,6 +97,13 @@ function tokenEnd(value: string, caret: number): number {
  */
 export function detectComposerTrigger(value: string, caretInput: number): ComposerTrigger | null {
   const caret = Math.max(0, Math.min(caretInput, value.length));
+
+  // A quoted mention is one token: `@"src/with space.ts"` keeps the filter
+  // reading the text inside the quotes, and a finished mention fires nothing.
+  const quoted = quotedTrigger(value, caret);
+  if (quoted === "complete") return null;
+  if (quoted) return quoted;
+
   const end = tokenEnd(value, caret);
 
   // The nearest `@` in the current token, provided nothing but the token

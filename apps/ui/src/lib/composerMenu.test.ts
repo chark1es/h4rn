@@ -74,6 +74,47 @@ describe("@ file trigger", () => {
   it("tracks the query only up to the caret", () => {
     expect(detectComposerTrigger("ask @src/co now", 11)?.query).toBe("src/co");
   });
+
+  it("treats a quoted mention as one token, spaces included", () => {
+    const value = 'open @"src/with space';
+    expect(detectComposerTrigger(value, value.length)).toEqual({
+      kind: "file",
+      query: "src/with space",
+      start: 5,
+      end: value.length,
+    });
+  });
+
+  it("does not fire inside a completed quoted mention", () => {
+    const value = 'see @"src/with space.ts" now';
+    // The caret in the middle of the quoted path and after the closing quote.
+    expect(detectComposerTrigger(value, 16)).toBeNull();
+    expect(detectComposerTrigger(value, value.length)).toBeNull();
+    expect(detectComposerTrigger('@"src/with space.ts"', 12)).toBeNull();
+  });
+
+  it("finds the mention being typed after a completed one", () => {
+    const value = '@"a b" @"src/wi';
+    expect(detectComposerTrigger(value, value.length)).toEqual({
+      kind: "file",
+      query: "src/wi",
+      start: 7,
+      end: value.length,
+    });
+  });
+
+  it("completes a quoted mention without mangling it", () => {
+    const value = 'open @"src/with space';
+    const trigger = detectComposerTrigger(value, value.length);
+    expect(trigger).not.toBeNull();
+    const applied = applyCompletion(
+      value,
+      trigger ?? { start: 0, end: 0 },
+      fileReference("src/with space.ts"),
+    );
+    expect(applied.value).toBe('open @"src/with space.ts" ');
+    expect(applied.caret).toBe(applied.value.length);
+  });
 });
 
 describe("/ command trigger", () => {

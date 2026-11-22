@@ -238,6 +238,7 @@ afterEach(() => {
   setWorkspaceFileListerForTests(null);
   clearWorkspaceFilesCache();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
   delete (Element.prototype as unknown as Record<string, unknown>).scrollIntoView;
 });
 
@@ -677,6 +678,57 @@ describe("Composer @ file picker", () => {
     fireEvent.compositionEnd(input);
   });
 
+  it("keeps Shift+Enter as a newline while the picker is open", async () => {
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "@read");
+    await waitFor(() => expect(option(/README\.md/)).not.toBeNull(), { timeout: 1_000 });
+
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    runAnimationFrames();
+    // The default newline is the textarea's; no row was accepted.
+    expect(input.value).toBe("@read");
+    expect(screen.queryByRole("listbox", { name: "Files" })).not.toBeNull();
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    runAnimationFrames();
+    expect(input.value).toBe("@README.md ");
+  });
+
+  it("points the popover at the caret's visible line when the textarea is scrolled", async () => {
+    // jsdom has no layout: the mirror's caret sits 120 px down the content and
+    // the wrapper is 200 px tall. With 40 px scrolled away the caret line is
+    // 80 px down, so the popover sits 126 px above the wrapper's bottom.
+    vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      return this.tagName === "SPAN" ? 120 : 0;
+    });
+    vi.spyOn(Element.prototype, "clientHeight", "get").mockImplementation(function (this: Element) {
+      return this.classList.contains("q-comp-in") ? 200 : 0;
+    });
+
+    renderComposer();
+    const input = textarea();
+    input.scrollTop = 40;
+    typeInto(input, "@");
+
+    const menu = (await screen.findByRole("listbox", { name: "Files" })).parentElement;
+    expect(menu?.className).toContain("q-comp-menu");
+    await waitFor(() => expect((menu as HTMLElement).style.bottom).toBe("126px"));
+  });
+
+  it("shows the read error instead of claiming an empty workspace", async () => {
+    setWorkspaceFileListerForTests(async () => {
+      throw new Error("The workspace could not be read.");
+    });
+    renderComposer();
+    typeInto(textarea(), "@");
+
+    expect(await screen.findByText("The workspace could not be read.")).toBeTruthy();
+    expect(screen.queryByText("No files in code.")).toBeNull();
+  });
+
   it("shows an empty workspace and an empty filter state", async () => {
     stubWorkspaceFiles([]);
     renderComposer();
@@ -791,6 +843,20 @@ describe("Composer / command menu", () => {
     expect(mock.setPanelTab).toHaveBeenCalledWith("changes");
   });
 
+  it("does not offer the IDE from the phone / menu", async () => {
+    mock.state.ui.phone = true;
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "/");
+
+    await waitFor(() => expect(option(/Open changes/)).not.toBeNull());
+    // The phone shell never renders the IDE view, so offering it would only
+    // persist a layout the phone cannot show.
+    expect(option(/Open the IDE/)).toBeNull();
+    expect(option(/Back to the thread/)).toBeNull();
+    expect(mock.toggleView).not.toHaveBeenCalled();
+  });
+
   it("renders the same list as a bottom sheet on a phone", async () => {
     mock.state.ui.phone = true;
     renderComposer();
@@ -807,6 +873,24 @@ describe("Composer / command menu", () => {
     fireEvent.click(await within(sheet).findByRole("option", { name: /README\.md/ }));
     runAnimationFrames();
     expect(input.value).toBe("@README.md ");
+    expect(screen.queryByRole("dialog", { name: "Files" })).toBeNull();
+  });
+
+  it("keeps the phone sheet closed after Done, like Escape", async () => {
+    mock.state.ui.phone = true;
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "@read");
+
+    const sheet = await screen.findByRole("dialog", { name: "Files" });
+    fireEvent.click(within(sheet).getByRole("button", { name: "Done" }));
+    expect(screen.queryByRole("dialog", { name: "Files" })).toBeNull();
+
+    // The same @token stays dismissed on the next keystroke, as with Esc.
+    typeInto(input, "@rea");
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(screen.queryByRole("dialog", { name: "Files" })).toBeNull();
   });
 });

@@ -71,7 +71,7 @@ describe("workspace file walk", () => {
     expect(lister).not.toHaveBeenCalledWith(expect.objectContaining({ path: "node_modules" }));
   });
 
-  it("keeps the files from directories that answered when one listing fails", async () => {
+  it("keeps the files from directories that answered but marks the index incomplete", async () => {
     const lister = async ({ path }: { path: string }) => {
       if (path === "broken") throw new Error("permission denied");
       if (path === "") return listing("", [directory("broken"), directory("src")]);
@@ -80,8 +80,19 @@ describe("workspace file walk", () => {
 
     await expect(walkWorkspace(target, lister)).resolves.toEqual({
       files: ["src/file.ts"],
-      truncated: false,
+      // A listing that failed is not an empty directory: the picker says the
+      // index is a prefix instead of claiming nothing else exists.
+      truncated: true,
     });
+  });
+
+  it("rejects when the root listing fails so the picker can show its error", async () => {
+    const lister = async ({ path }: { path: string }) => {
+      if (path === "") throw new Error("The workspace could not be read.");
+      return listing(path, []);
+    };
+
+    await expect(walkWorkspace(target, lister)).rejects.toThrow("The workspace could not be read.");
   });
 
   it("stops at the file cap", async () => {

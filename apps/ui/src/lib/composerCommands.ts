@@ -3,9 +3,10 @@
  *
  * These are the same store actions the command palette and the thread header
  * call; the menu never invents a command. On a phone the panel actions open
- * the phone panel sheet instead of a desktop tab. Harness slash commands and
- * skills are absent on purpose: h4rn does not expose a harness command surface
- * to the UI, and it defines no invocation syntax of its own for skills.
+ * the phone panel sheet instead of a desktop tab, and the IDE action is left
+ * out because the phone shell never renders that view. Harness slash commands
+ * and skills are absent on purpose: h4rn does not expose a harness command
+ * surface to the UI, and it defines no invocation syntax of its own for skills.
  */
 import type { ThreadSummary } from "@/gen";
 import type { CommandSearchItem } from "@/lib/composerMenu";
@@ -89,14 +90,6 @@ export function composerCommands(
       run: toggleTerminal,
     },
     {
-      id: "view.toggle",
-      label: options.view === "ide" ? "Back to the thread" : "Open the IDE",
-      hint: `Edit ${projectName(summary.workspace_path)}`,
-      keywords: "editor code files project",
-      icon: "ide",
-      run: toggleView,
-    },
-    {
       id: "thread.new",
       label: "New thread",
       hint: `Start one in ${projectName(summary.workspace_path)}`,
@@ -105,6 +98,19 @@ export function composerCommands(
       run: () => openNewThread({ host: summary.host, workspace: summary.workspace_path }),
     },
   );
+
+  // The phone shell never renders the IDE view, so the phone menu does not
+  // offer it; choosing it there would only persist a layout it cannot show.
+  if (!options.phone) {
+    commands.splice(commands.length - 1, 0, {
+      id: "view.toggle",
+      label: options.view === "ide" ? "Back to the thread" : "Open the IDE",
+      hint: `Edit ${projectName(summary.workspace_path)}`,
+      keywords: "editor code files project",
+      icon: "ide",
+      run: toggleView,
+    });
+  }
 
   return commands;
 }

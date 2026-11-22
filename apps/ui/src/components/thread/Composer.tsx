@@ -101,7 +101,11 @@ function caretAnchor(
   mirror.remove();
 
   const lineHeight = Number.parseFloat(computed.lineHeight) || 21;
-  const above = wrapper.clientHeight - (element.offsetTop + markerTop);
+  // The textarea scrolls internally once it reaches its max height. The
+  // mirror measures the caret in the full text, so subtract the scroll to
+  // point at the line the caret is actually on.
+  const caretTop = markerTop - element.scrollTop;
+  const above = wrapper.clientHeight - (element.offsetTop + caretTop);
   return {
     left: Math.max(0, markerLeft + element.offsetLeft),
     bottom: Math.max(lineHeight, above + 6),
@@ -478,11 +482,13 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
             );
             return;
           }
-          if (event.key === "Enter" || event.key === "Tab") {
+          if (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey)) {
             event.preventDefault();
             if (rows.length > 0) choose(activeIndex);
             return;
           }
+          // Shift+↵ is a newline even with the menu open; it falls through to
+          // the textarea's own default because the send key needs no shift.
           if (event.key === "Escape") {
             event.preventDefault();
             closeMenu(true);
@@ -636,7 +642,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
             onHighlight={(index) =>
               setMenu((current) => (current ? { ...current, activeIndex: index } : current))
             }
-            onClose={() => closeMenu(false)}
+            onClose={() => closeMenu(true)}
           />
         ) : null}
         {hiddenInput}

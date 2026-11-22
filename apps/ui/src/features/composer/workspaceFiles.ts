@@ -66,10 +66,10 @@ async function list(input: WorkspaceTarget & { path: string }): Promise<FsListin
   return response.listing;
 }
 
-/** Walk one workspace, pruned and capped. A failed directory is skipped. */
+/** Walk one workspace, pruned and capped. A failed subdirectory leaves the index incomplete. */
 export type WorkspaceIndex = {
   files: string[];
-  /** True when a listing, the depth cap, the directory cap or the file cap cut the walk short. */
+  /** True when a listing failed or a cap cut the walk short: the list is a prefix. */
   truncated: boolean;
 };
 
@@ -90,9 +90,22 @@ export async function walkWorkspace(
 
     for (let index = 0; index < listings.length; index += 1) {
       const result = listings[index];
-      if (result?.status !== "fulfilled") continue;
+      const directory = batch[index];
+      if (result?.status !== "fulfilled") {
+        // A directory that could not be read is not an empty directory: the
+        // index is incomplete, and with no root there is no index at all, so
+        // the picker can show its error instead of claiming the workspace is
+        // empty.
+        if (directory?.path === "") {
+          throw result?.reason instanceof Error
+            ? result.reason
+            : new Error("The workspace could not be read.");
+        }
+        truncated = true;
+        continue;
+      }
       directories += 1;
-      const depth = batch[index]?.depth ?? 0;
+      const depth = directory?.depth ?? 0;
       if (result.value.truncated) truncated = true;
       for (const entry of result.value.entries) {
         if (entry.kind === "directory") {
