@@ -20,7 +20,8 @@ use std::time::Duration;
 use chrono::Utc;
 use h4rn_forge::{
     Forge, ForgeError, ForgeHosts, ForgeViewer, PrPage, auth, client_for_with_budget, detect_repos,
-    pr_context_for_agent, remote::validate_base_url,
+    pr_context_for_agent, remote::validate_base_url, remote::validate_base_url_for,
+    remote::validate_cloud_base_url,
 };
 use h4rn_protocol::{
     ForgeAccount, ForgeAgentTarget, ForgeCapabilityEntry, ForgeChecks, ForgeComment,
@@ -345,18 +346,26 @@ impl ForgeService {
         token: &str,
         username: Option<String>,
         source: ForgeCredentialSource,
+        repository: Option<ForgeRepoRef>,
     ) -> Result<ForgeAccount, ForgeServiceError> {
         let token = token.trim();
         if token.is_empty() {
             return Err(ForgeError::InvalidRequest("the token is empty".into()).into());
         }
-        let base_url = validate_base_url(base_url)?;
+        let base_url = validate_cloud_base_url(forge, base_url)
+            .and_then(|()| validate_base_url_for(forge, base_url))?;
         let account_id = format!("acct_{}", uuid::Uuid::now_v7().simple());
-        let mut account = ForgeAccount {
+        let username = username
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        // Bitbucket's auth scheme is decided once, here, and recorded so a
+        // restart does not turn a Bearer token into a Basic credential.
+        let (source, username) = bitbucket_auth_source(forge, source, username);
+        let account = ForgeAccount {
             account_id: account_id.clone(),
             forge,
             base_url,
-            username: username.map(|value| value.trim().to_owned()),
+            username,
             display_name: None,
             scopes: Vec::new(),
             source,
@@ -366,31 +375,61 @@ impl ForgeService {
         // Validate before storing anything so a typo never leaves a dead
         // credential behind.
         let client = client_for_with_budget(&account, token, self.requests_per_minute)?;
-        let viewer: ForgeViewer = client.viewer().await?;
-        account.username = Some(viewer.login.clone());
+        self.finish_add_account(account, token, client, repository.as_ref())
+            .await
+    }
+
+    /// Validates and stores an account whose client is already built.
+    ///
+    /// Split from [`Self::add_account`] so a test can point a real client at a
+    /// local server and exercise the repository hint without a cloud URL.
+    async fn finish_add_account(
+        &self,
+        mut account: ForgeAccount,
+        token: &str,
+        client: Arc<dyn Forge>,
+        repository: Option<&ForgeRepoRef>,
+    ) -> Result<ForgeAccount, ForgeServiceError> {
+        // A repository, project or workspace access token for Bitbucket Cloud
+        // cannot read `/user` or `/user/workspaces`, so the daemon proves it
+        // against the repository the form detected instead.
+        let viewer: ForgeViewer = client.viewer_for(repository).await?;
+        // Bitbucket keeps the username the user supplied for an API token
+        // (Basic needs the Atlassian account email). An access token must not
+        // carry one: a username would make the client send Basic instead of
+        // Bearer.
+        let keep_bitbucket_username = account.forge == ForgeKind::Bitbucket
+            && matches!(
+                account.source,
+                ForgeCredentialSource::BitbucketApiToken
+                    | ForgeCredentialSource::BitbucketAccessToken
+            );
+        if !keep_bitbucket_username {
+            account.username = Some(viewer.login.clone());
+        }
         account.display_name = viewer.display_name;
         account.scopes = viewer.scopes;
 
-        self.tokens.save(&account_id, token)?;
+        self.tokens.save(&account.account_id, token)?;
         if let Err(error) = self.insert_account(account.clone()) {
-            self.tokens.remove(&account_id);
+            self.tokens.remove(&account.account_id);
             return Err(error);
         }
         self.clients
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(account_id.clone(), client);
+            .insert(account.account_id.clone(), client);
         self.audit.record(
             "account.added",
-            &account_id,
+            &account.account_id,
             &ForgeRepoRef {
-                forge,
+                forge: account.forge,
                 base_url: account.base_url.clone(),
                 owner: String::new(),
                 repo: String::new(),
             },
             0,
-            json!({"source": source.label(), "username": account.username}),
+            json!({"source": account.source.label(), "username": account.username}),
         );
         Ok(account)
     }
@@ -492,6 +531,7 @@ impl ForgeService {
                         &token.access_token,
                         None,
                         ForgeCredentialSource::OAuthDevice,
+                        None,
                     )
                     .await?;
                 self.forget_flow(flow_id);
@@ -543,7 +583,7 @@ impl ForgeService {
                 .into());
             }
         };
-        self.add_account(forge, &base_url, &token, None, source)
+        self.add_account(forge, &base_url, &token, None, source, None)
             .await
     }
 
@@ -902,11 +942,9 @@ impl ForgeService {
                     .accounts
                     .read()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let mut matches = accounts.iter().filter(|account| {
-                    account.forge == repo.forge
-                        && account.base_url.trim_end_matches('/')
-                            == repo.base_url.trim_end_matches('/')
-                });
+                let mut matches = accounts
+                    .iter()
+                    .filter(|account| account_matches_repo(account, repo));
                 let first = matches.next().cloned().ok_or_else(|| {
                     ForgeError::NotConfigured(format!(
                         "no {} account for {}",
@@ -925,9 +963,7 @@ impl ForgeService {
                 first
             }
         };
-        if account.forge != repo.forge
-            || account.base_url.trim_end_matches('/') != repo.base_url.trim_end_matches('/')
-        {
+        if !account_matches_repo(&account, repo) {
             return Err(ForgeError::InvalidRequest(format!(
                 "account {} is for {} at {}, not {} at {}",
                 account.account_id,
@@ -1141,6 +1177,39 @@ async fn push_branch(
     Ok(())
 }
 
+/// Chooses the Bitbucket credential scheme from what the user supplied.
+///
+/// A username (the Atlassian account email) means an API token (HTTP Basic).
+/// Without one the token is a workspace, project or repository access token
+/// (Bearer). The chosen source is stored so later client construction makes
+/// the same decision.
+fn bitbucket_auth_source(
+    forge: ForgeKind,
+    source: ForgeCredentialSource,
+    username: Option<String>,
+) -> (ForgeCredentialSource, Option<String>) {
+    match (forge, source, username) {
+        (ForgeKind::Bitbucket, ForgeCredentialSource::Pat, Some(username)) => {
+            (ForgeCredentialSource::BitbucketApiToken, Some(username))
+        }
+        (ForgeKind::Bitbucket, ForgeCredentialSource::Pat, None) => {
+            (ForgeCredentialSource::BitbucketAccessToken, None)
+        }
+        (_, source, username) => (source, username),
+    }
+}
+
+/// Whether a stored account serves a repository.
+///
+/// Azure DevOps also matches the legacy `DefaultCollection` form, so a remote
+/// that spells `https://<org>.visualstudio.com/DefaultCollection` resolves the
+/// account added as `https://<org>.visualstudio.com` (and the other way
+/// round).
+fn account_matches_repo(account: &ForgeAccount, repo: &ForgeRepoRef) -> bool {
+    account.forge == repo.forge
+        && h4rn_forge::base_urls_match(account.forge, &account.base_url, &repo.base_url)
+}
+
 fn checks_signature(checks: &ForgeChecks) -> String {
     let mut signature = format!(
         "{:?}:{}:{}:{}:{}",
@@ -1210,6 +1279,141 @@ mod tests {
         });
         let second = checks_signature(&changed);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn bitbucket_auth_scheme_is_chosen_from_the_username() {
+        use h4rn_protocol::ForgeCredentialSource as Source;
+        assert_eq!(
+            bitbucket_auth_source(ForgeKind::Bitbucket, Source::Pat, Some("alice".into())),
+            (Source::BitbucketApiToken, Some("alice".into()))
+        );
+        assert_eq!(
+            bitbucket_auth_source(ForgeKind::Bitbucket, Source::Pat, None),
+            (Source::BitbucketAccessToken, None)
+        );
+        // Other forges keep the source the client sent.
+        assert_eq!(
+            bitbucket_auth_source(ForgeKind::GitHub, Source::Pat, Some("alice".into())),
+            (Source::Pat, Some("alice".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repository_token_is_validated_against_the_repository_hint() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Both account endpoints reject a repository access token; only the
+        // repository it was granted for can prove it.
+        let server = MockServer::start().await;
+        for endpoint in ["/2.0/user", "/2.0/user/workspaces"] {
+            Mock::given(method("GET"))
+                .and(path(endpoint))
+                .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+                    "type": "error",
+                    "error": {"message": "Unauthorized"}
+                })))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("GET"))
+            .and(path("/2.0/repositories/acme/widget"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "type": "repository",
+                "name": "widget",
+                "full_name": "acme/widget"
+            })))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let service = ForgeService::open(dir.path()).unwrap();
+        service.shutdown();
+        let repo = ForgeRepoRef {
+            forge: ForgeKind::Bitbucket,
+            base_url: server.uri(),
+            owner: "acme".into(),
+            repo: "widget".into(),
+        };
+        let account = ForgeAccount {
+            account_id: "acct_repo_token".into(),
+            forge: ForgeKind::Bitbucket,
+            base_url: server.uri(),
+            username: None,
+            display_name: None,
+            scopes: Vec::new(),
+            source: ForgeCredentialSource::BitbucketAccessToken,
+            created_at: Utc::now(),
+        };
+        let client: Arc<dyn Forge> = Arc::new(
+            h4rn_forge::BitbucketClient::new(&server.uri(), "ATBB-repo", None, 120).unwrap(),
+        );
+        let saved = service
+            .finish_add_account(account, "ATBB-repo", client, Some(&repo))
+            .await
+            .unwrap();
+        assert_eq!(saved.username, None, "a username would select Basic auth");
+        assert!(
+            service
+                .list_accounts()
+                .0
+                .iter()
+                .any(|account| account.account_id == "acct_repo_token")
+        );
+        let paths: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|request| request.url.path().to_owned())
+            .collect();
+        assert!(paths.iter().any(|path| path == "/2.0/user"), "{paths:?}");
+        assert!(
+            paths
+                .iter()
+                .any(|path| path == "/2.0/repositories/acme/widget"),
+            "{paths:?}"
+        );
+        // Leave no stored credential behind in the developer's keychain.
+        service.remove_account("acct_repo_token").unwrap();
+    }
+
+    #[test]
+    fn default_collection_remote_finds_the_plain_account() {
+        let account = ForgeAccount {
+            account_id: "acct_azure".into(),
+            forge: ForgeKind::AzureDevOps,
+            base_url: "https://acme.visualstudio.com".into(),
+            username: None,
+            display_name: None,
+            scopes: Vec::new(),
+            source: ForgeCredentialSource::Pat,
+            created_at: Utc::now(),
+        };
+        let repo = ForgeRepoRef {
+            forge: ForgeKind::AzureDevOps,
+            base_url: "https://acme.visualstudio.com/DefaultCollection".into(),
+            owner: "platform".into(),
+            repo: "widget".into(),
+        };
+        assert!(account_matches_repo(&account, &repo));
+        let reversed = ForgeAccount {
+            base_url: repo.base_url.clone(),
+            ..account.clone()
+        };
+        let plain = ForgeRepoRef {
+            base_url: account.base_url.clone(),
+            ..repo.clone()
+        };
+        assert!(account_matches_repo(&reversed, &plain));
+
+        // Another organization is still a different account.
+        let other = ForgeRepoRef {
+            base_url: "https://other.visualstudio.com".into(),
+            ..repo
+        };
+        assert!(!account_matches_repo(&account, &other));
     }
 
     #[test]

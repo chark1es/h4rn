@@ -4,9 +4,11 @@ import type { ForgeKind } from "./ForgeKind";
 /**
  * A repository address independent of any one remote.
  *
- * `owner` may contain `/` on GitLab (nested groups); on GitHub, Gitea and
- * Forgejo it is a single path segment. `base_url` is the public web URL; the
- * client derives the API URL from the forge kind.
+ * `owner` may contain `/` on GitLab (nested groups); on every other forge it
+ * is a single path segment. `base_url` is the public web URL; the client
+ * derives the API URL from the forge kind. Azure DevOps keeps the
+ * organization in `base_url` (`https://dev.azure.com/acme`) and uses `owner`
+ * for the project, so [`ForgeRepoRef::web_url`] inserts the `/_git/` segment.
  */
 export type ForgeRepoRef = { 
 /**
@@ -18,7 +20,7 @@ forge: ForgeKind,
  */
 base_url: string, 
 /**
- * Owner or GitLab namespace.
+ * Owner, GitLab namespace, or Azure DevOps project.
  */
 owner: string, 
 /**

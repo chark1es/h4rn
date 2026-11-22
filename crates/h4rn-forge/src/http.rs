@@ -359,12 +359,48 @@ pub fn next_link(headers: &HeaderMap) -> Option<String> {
     None
 }
 
+/// Percent-encodes one URL path segment.
+///
+/// `form_urlencoded` encodes a space as `+`, which is a literal plus in a
+/// path; this keeps the RFC 3986 unreserved characters and percent-encodes
+/// everything else, including `/`.
+pub fn encode_path_segment(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 /// Extracts a `page` query parameter from a URL.
 pub fn page_of(url: &str) -> Option<u32> {
     let url = url::Url::parse(url).ok()?;
     url.query_pairs()
         .find(|(key, _)| key == "page")
         .and_then(|(_, value)| value.parse().ok())
+}
+
+/// Whether `candidate` is on the same origin (scheme, host and port) as
+/// `base`, and carries no credentials of its own.
+///
+/// Pagination links are followed only when this is true, so a forge (or a
+/// compromised proxy) cannot point the next request at another host and
+/// receive the account's Authorization header.
+pub fn same_origin(candidate: &str, base: &str) -> bool {
+    let (Ok(candidate), Ok(base)) = (url::Url::parse(candidate), url::Url::parse(base)) else {
+        return false;
+    };
+    if !candidate.username().is_empty() || candidate.password().is_some() {
+        return false;
+    }
+    candidate.scheme() == base.scheme()
+        && candidate.host_str() == base.host_str()
+        && candidate.port_or_known_default() == base.port_or_known_default()
 }
 
 fn retry_after(headers: &HeaderMap) -> Option<u64> {
@@ -407,22 +443,51 @@ fn response_message(body: &str) -> String {
     redact(trimmed)
 }
 
+/// Token prefixes that identify a forge credential. Azure DevOps personal
+/// access tokens have no prefix of their own, so they cannot be recognised by
+/// shape; the Atlassian and GitHub/GitLab forms can.
+const TOKEN_PREFIXES: [&str; 6] = ["ghp_", "gho_", "glpat-", "github_pat_", "ATBB", "ATATT"];
+
 /// Removes anything that looks like a token from a forge message.
+///
+/// The prefix is found anywhere in the text, not just at the start of a
+/// whitespace-delimited word: an error body often quotes it
+/// (`{"message":"bad token ghp_..."}`, `token=glpat-...`). The run of token
+/// characters after the prefix is replaced too, and the rest of the text
+/// (spacing included) is left exactly as it was.
 pub fn redact(value: &str) -> String {
     let mut output = String::with_capacity(value.len());
-    for word in value.split_whitespace() {
-        if word.starts_with("ghp_")
-            || word.starts_with("gho_")
-            || word.starts_with("glpat-")
-            || word.starts_with("github_pat_")
-        {
-            output.push_str("[redacted]");
-        } else {
-            output.push_str(word);
-        }
-        output.push(' ');
+    let mut rest = value;
+    while let Some((index, prefix)) = find_token_prefix(rest) {
+        output.push_str(&rest[..index]);
+        output.push_str("[redacted]");
+        let after_prefix = &rest[index + prefix.len()..];
+        rest = &after_prefix[token_run_len(after_prefix)..];
     }
-    output.trim_end().to_owned()
+    output.push_str(rest);
+    output
+}
+
+/// The earliest known token prefix and its position.
+fn find_token_prefix(value: &str) -> Option<(usize, &'static str)> {
+    TOKEN_PREFIXES
+        .iter()
+        .filter_map(|prefix| value.find(prefix).map(|index| (index, *prefix)))
+        .min_by_key(|(index, _)| *index)
+}
+
+/// Length of the token characters at the start of `value`.
+///
+/// Quotes, colons, commas, brackets, braces and whitespace all end a token,
+/// which is what makes a JSON body redactable.
+fn token_run_len(value: &str) -> usize {
+    value
+        .char_indices()
+        .find(|(_, ch)| {
+            !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '~' | '+' | '/' | '='))
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(value.len())
 }
 
 fn redact_network_error(error: &reqwest::Error) -> String {
@@ -545,6 +610,17 @@ pub fn auth_header(name: &'static str, value: &str) -> Option<(HeaderName, Strin
     Some((name, value.to_owned()))
 }
 
+/// An HTTP Basic credential header, base64-encoded as the RFC requires.
+///
+/// Bitbucket Cloud API tokens use `email:api-token`; Azure DevOps personal
+/// access tokens use an empty username (`:pat`).
+pub fn basic_auth_header(username: &str, secret: &str) -> Option<(HeaderName, String)> {
+    use base64::Engine as _;
+    let credentials = format!("{username}:{secret}");
+    let encoded = base64::engine::general_purpose::STANDARD.encode(credentials.as_bytes());
+    auth_header("authorization", &format!("Basic {encoded}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -574,11 +650,88 @@ mod tests {
     }
 
     #[test]
+    fn path_segments_encode_spaces_and_separators() {
+        assert_eq!(encode_path_segment("My Project"), "My%20Project");
+        assert_eq!(encode_path_segment("a/b"), "a%2Fb");
+        assert_eq!(encode_path_segment("widget-1.2_~"), "widget-1.2_~");
+    }
+
+    #[test]
+    fn same_origin_ignores_the_path_but_not_the_host() {
+        assert!(same_origin(
+            "https://api.bitbucket.org/2.0/repositories/a/b/pullrequests?page=2",
+            "https://api.bitbucket.org/2.0"
+        ));
+        assert!(!same_origin(
+            "https://evil.example/2.0/repositories?page=2",
+            "https://api.bitbucket.org/2.0"
+        ));
+        assert!(!same_origin(
+            "http://api.bitbucket.org/2.0/repositories?page=2",
+            "https://api.bitbucket.org/2.0"
+        ));
+        assert!(!same_origin(
+            "https://api.bitbucket.org:8443/2.0/repositories?page=2",
+            "https://api.bitbucket.org/2.0"
+        ));
+        assert!(!same_origin(
+            "https://token@api.bitbucket.org/2.0/repositories?page=2",
+            "https://api.bitbucket.org/2.0"
+        ));
+    }
+
+    #[test]
     fn messages_redact_tokens() {
         assert_eq!(
             redact("bad token ghp_abc123 here"),
             "bad token [redacted] here"
         );
         assert_eq!(redact("glpat-xyz"), "[redacted]");
+        assert_eq!(redact("ATBBtoken"), "[redacted]");
+        assert_eq!(redact("ATATT3xFfGF0abc"), "[redacted]");
+    }
+
+    #[test]
+    fn redaction_finds_tokens_next_to_punctuation() {
+        // A quoted token inside a JSON error body, with the surrounding text
+        // and spacing left intact.
+        let body = r#"{"error":"bad token","detail":"ATATT3xFfGF0abc","retry":false}"#;
+        assert_eq!(
+            redact(body),
+            r#"{"error":"bad token","detail":"[redacted]","retry":false}"#
+        );
+        assert_eq!(
+            redact("token=glpat-abc123, host:bitbucket.org"),
+            "token=[redacted], host:bitbucket.org"
+        );
+        assert_eq!(
+            redact("Authorization: Bearer ATBBxyz\nnext line"),
+            "Authorization: Bearer [redacted]\nnext line",
+            "a newline stays a newline"
+        );
+        assert_eq!(
+            redact(r#"["ghp_quoted", "plain"]"#),
+            r#"["[redacted]", "plain"]"#
+        );
+    }
+
+    #[test]
+    fn basic_auth_encodes_both_parts() {
+        use base64::Engine as _;
+        let (_, value) = basic_auth_header("alice", "s3cret").unwrap();
+        let encoded = value.trim_start_matches("Basic ");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap(),
+            b"alice:s3cret"
+        );
+        let (_, azure) = basic_auth_header("", "pat").unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(azure.trim_start_matches("Basic "))
+                .unwrap(),
+            b":pat"
+        );
     }
 }

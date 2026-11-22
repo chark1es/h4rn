@@ -99,8 +99,21 @@ briefly for that report, and applies its limit before the turn settles, so the
 schedule is armed and the message queued behind the turn stays paused. The
 reset a turn already applied is kept on the turn, not only on the live
 schedule, so an exit report that repeats it cannot arm a new schedule after the
-person cancelled the resume during the wait; a newer reset still arms one. A
-death between turns publishes one diagnostic row; it does not raise a failure,
+person cancelled the resume during the wait; a newer reset still arms one. The
+same applies when the death is reported only by the exit, with no EOF first: the
+live session carries the reset it applied into the dying entry. When several
+deaths are waiting for their exit reports, each schedule remembers the
+generation that armed it, and an older generation's later, earlier reset keeps
+its own row but cannot replace the newer generation's pause. A reset applied by
+one generation is never recorded on another, and a requeued write's pause names
+the generation that claimed the write. That per-generation rule also covers the
+turn's own marker: only the generation that owns the active turn records a reset
+on it, so an older generation's delayed exit report cannot make a newer turn's
+own completion arm the pause the person already cancelled. When a newer
+generation confirms the same reset, the pause keeps its attempt and jitter and
+transfers to that generation, so an older generation's delayed report cannot
+replace it later.
+A death between turns publishes one diagnostic row; it does not raise a failure,
 so a thread whose auto-resume just armed stays Scheduled (and a thread with no
 limit is not turned into an Error asking for attention by the agent's exit
 alone). Each death between turns is tracked by its session generation, so a
@@ -123,10 +136,52 @@ reports of the same kind are compared by detail.
 Schedules are persisted in SQLite and replayed after a daemon restart. While a
 schedule is armed the thread stays in Working, queued input is held, and the
 schedule can be cancelled (`CancelResume`) or fired immediately (`ResumeNow`).
+Cancelling the pause, or sending a message while a requeued turn is parked
+behind it, releases that turn instead of leaving it pending with nothing to
+deliver it; a Send's own message queues behind the parked turn. A release never
+waits on a storage write: if the ledger or the journal cannot record it, the
+error is logged and the prompt is still delivered, because the schedule it was
+waiting for is already gone. A released thread is projected as running, not as
+rate limited: it leaves the paused phase, drops the limit that explained it and
+shows no resume time, without counting a second turn. A pause records the one
+dispatch it parks, so a pause armed by an old agent's exit report does not hold a
+replacement prompt that a Send has just started. The parked prompt is stored on
+the thread row, so a restart restores it and the schedule delivers the person's
+message rather than the policy's prompt; a graceful shutdown leaves that parked
+turn and its saved prompt untouched for the same reason. A schedule that did not
+survive the restart releases the prompt instead, recording the release and
+dropping the limit exactly as a cancellation does. The restart restores the
+schedule ids from the ledger independently of the limit history: a failed limit
+read only leaves the reset time unknown for now, and the ticker retries the
+resync until both reads succeed, so a restored pause never stays unnamed.
 
 When a schedule fires, the daemon starts a new turn with the policy prompt and
-marks the schedule `Fired`. With `failover = true` and an active proxy profile,
-it asks the proxy for another model/account that is not cooling down, records
+marks the schedule `Fired`. The fire first checks that the thread's record names
+the schedule it is about to claim, by its ledger id, so a restarted daemon that
+has not yet read the ledger cannot consume a due attempt it does not know
+about; the daemon attaches metering and resyncs the record before the ticker
+starts for the same reason. If a failed write had put its prompt back for a
+retry when the limit armed, that requeued turn is what the schedule delivers,
+instead of the policy prompt, so the person's message is not replaced. A newer
+limit that replaces the parked pause keeps that prompt named, so a pump-end
+advance cannot deliver it into the paused provider. The fire re-checks under
+the record lock that the pause on the thread is the schedule it claimed, by its
+ledger id: a missing pause, a different pause, or a newer limit that replaced it
+while the attempt was being claimed leaves the newer pause alone and starts
+nothing (and does not change the model for a failover). A fire only releases the
+pending prompt its own pause parks: a turn a Send started is left alone and no
+attempt is spent on it. When a claimed fire then finds the record no longer
+names its schedule, it records the attempt as `Cancelled` with
+`superseded before delivery` instead of leaving the row looking `Fired`; a
+newer row that replaced the attempt is never touched. A retried write only
+waits for a pause that names its own dispatch, the same predicate the queue
+advance uses, so a pause armed by another session generation does not hold a
+prompt it does not own. An unknown reset on that requeued-write path waits the
+backoff above rather than retrying immediately. A release whose journal append
+fails is still projected on the next tick instead of being hidden by a cached
+summary. With
+`failover = true` and an active proxy profile, it asks the proxy for another
+model/account that is not cooling down, records
 that choice on the schedule (and emits it in `ScheduleChanged`), and uses the
 model for the resumed session. A failed resume moves to `Waiting` with
 `last_error` instead of silently losing the thread.

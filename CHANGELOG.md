@@ -28,6 +28,24 @@ All notable changes to h4rn are recorded here. The format follows
   size limit, or not UTF-8 show a plain message instead, and the selected file is still watched so
   recreating it reloads the preview. MCP Apps, a headless browser and dev-server proxying are not
   part of this change.
+- **Bitbucket Cloud and Azure DevOps pull requests.** The forge layer now understands two more
+  providers. Bitbucket Cloud takes an Atlassian API token (account email plus token, HTTP Basic) or
+  a workspace, project or repository access token (Bearer); app passwords were retired in July 2026
+  and are no longer offered. Access tokens cannot read `/user` or `/user/workspaces`, so the add
+  form sends the workspace's detected Bitbucket repository and the daemon validates the token
+  against it. The client lists open pull requests, applies the documented `q=` author, reviewer and
+  source-branch filters so pagination stays server-side and pages never repeat, reads the raw PR
+  diff from `/pullrequests/{id}/diff`, rebuilds comment threads from `parent` chains, and maps build
+  statuses onto checks. Azure DevOps Services takes a personal access token (Basic with an empty
+  username), lists active pull requests, reads commits and iteration changes, builds a unified diff
+  page by page from the iteration's `commonRefCommit` and `sourceRefCommit`, maps thread statuses
+  (`fixed`, `closed`, `wontFix`, `byDesign`) to resolved, and combines PR statuses with blocking
+  policy evaluations as checks. Remote detection understands `bitbucket.org`, `ssh.bitbucket.org`,
+  `dev.azure.com`, `ssh.dev.azure.com`, the legacy `vs-ssh.visualstudio.com` SSH host and legacy
+  `*.visualstudio.com` URLs. Bitbucket Server/Data Center and Azure DevOps Server are explicitly
+  unsupported. Neither provider can re-run checks from this surface, and the UI shows that reason
+  the same way it does for Gitea.
+
 - **Notifications, Open at login and the tray are real settings.** Settings → Notifications now
   controls OS notifications on the desktop app (the Tauri notification plugin) and in the browser
   (the Web Notification API, asked for only when a switch is turned on; there is no separate
@@ -126,6 +144,79 @@ All notable changes to h4rn are recorded here. The format follows
   for their own targets, so the mobile crate's unit tests (the preview store and its origin) were
   never compiled. The Linux job that already installs Tauri's WebKitGTK packages now runs
   `cargo check --tests` for `apps/mobile/src-tauri`.
+- **Large Azure DevOps pull requests load within the page deadline.** Azure needs file contents to
+  build a diff, so a 30-file page could not finish inside the UI's ten-second budget once the
+  account's local request allowance ran out. A diff page now holds at most eight files (eighteen
+  requests in the worst case), a file whose change keeps its bytes (a pure rename, branch or merge)
+  downloads nothing, and the existing per-request cache still avoids a duplicate blob.
+- **Azure DevOps checks no longer flip to passing.** Statuses are filtered to PR-level rows and the
+  current iteration only, so a failure from an earlier push cannot outlive the code it tested.
+  Policy evaluations stay distinct by evaluation and configuration id: an approved optional policy
+  and a rejected blocking policy that share a display name are two rows, and the rejection keeps the
+  PR failing. A policy outcome still wins over a status of the same name.
+- **Azure DevOps no longer reads `undelete` as a deletion.** Change types are matched as exact
+  comma-separated tokens (`rename, edit`, `undelete`, `sourceRename`) instead of by substring.
+- **Azure DevOps diffs keep line endings and empty files.** The local patch builder keeps `\r\n`
+  terminators, emits `\ No newline at end of file` where one side lacks a final newline, and uses
+  `/dev/null` only when the path is absent on that side, so an existing empty file is not shown as
+  new or deleted.
+- **Bitbucket Cloud lists no longer repeat rows.** Author, reviewer and source-branch filters use
+  the documented server-side `q=` language (reviewer rows also request `fields=+values.reviewers`),
+  so page two resumes where page one ended. The GitHub-style `x-oauth-scopes` header is no
+  longer read as a Bitbucket scope list, and a diffstat whose five-page cap is reached reports the size as
+  unknown instead of as a partial total.
+- **Remote detection keeps other forges' URL handling.** Azure DevOps keeps the strict
+  percent-decoded path rules; every other forge still resolves a path with an empty segment the way
+  it always has (`https://gitlab.com/team//repo.git`). Azure base-URL errors never echo the input,
+  which can carry a secret in its path.
+- **Bitbucket Cloud recognises its SSH host.** `git@ssh.bitbucket.org:workspace/repo.git` and
+  `ssh://git@ssh.bitbucket.org/workspace/repo.git` resolve to the `https://bitbucket.org` account,
+  like the web and `bitbucket.org` SSH forms.
+- **Azure DevOps checks fail closed.** If the iteration, status or policy-evaluation request fails,
+  the checks request now fails instead of reporting the green rows as passing; a branch gate that
+  could not be read is never a pass.
+- **Azure DevOps fork pull requests read the source side from the fork.** When a PR names a
+  `forkSource.repository`, the old side comes from the target repository and the new side from the
+  fork, where the source commit lives. A 404 for a side the change says exists is an error rather
+  than a silently invented addition or deletion.
+- **Azure DevOps checks need both collections.** A 200 whose status or policy body lacks its `value`
+  collection is now an error instead of zero rows; a valid `value: []` stays empty. Half an answer
+  can no longer read as a pass.
+- **Bitbucket Cloud follows the cursor it is given.** The PR list carries the same-origin `next` URL
+  forward as the next page instead of rebuilding `page=N`, so an opaque cursor keeps its filters and
+  pages do not repeat. Learned cursors are sparse and bounded (the 64 most recent), and a page with
+  no learned cursor falls back to the documented `page` parameter, so a distant page never
+  allocates memory in proportion to its number.
+- **Bitbucket Cloud Mine and Review requested match the account uuid.** The filters use
+  `author.uuid` and `reviewers.uuid` from `/user`, as Bitbucket documents, instead of a nickname or
+  display name that two people can share (or that a token may not report). Workspace, project and
+  repository access tokens have no user identity, so those two filters say “unsupported” with that
+  reason instead of showing an empty list.
+- **Bitbucket Cloud reads `inline.outdated`.** A line-anchored thread is outdated when its root
+  comment says so; a file-level comment stays not outdated.
+- **Redaction finds tokens wherever they appear.** Atlassian and GitHub/GitLab token values are
+  removed next to quotes, colons, commas and brackets, including inside a quoted JSON error body,
+  instead of only at the start of a whitespace-delimited word.
+- **Azure DevOps pull requests keep a browser URL.** A response without `_links.web` falls back to
+  `<repository.webUrl>/pullrequest/<id>`, or to the base URL, project and repository, instead of an
+  empty link.
+- **Line counts are only shown when the forge reports them.** Azure DevOps (and GitLab) report no
+  PR-wide totals, so `line_counts_known` is `false` and the agent handoff says the counts are
+  unknown instead of “+0 −0”. Bitbucket sets it once the diffstat was read in full.
+- **A legacy `DefaultCollection` remote finds its Azure DevOps account.** An account added as
+  `https://<org>.visualstudio.com` matches a remote that spells
+  `https://<org>.visualstudio.com/DefaultCollection`, and the other way round.
+- **Bitbucket Cloud base-URL errors never repeat the input.** A non-root path is rejected with the
+  same fixed wording Azure DevOps uses, and `ATATT…` Atlassian API tokens are redacted from error
+  messages like `ATBB…` already was.
+- **Honest Bitbucket Cloud counts and anchors.** A failed or capped diffstat leaves the changed-file
+  count and line counts unknown (`changed_files_known` and `line_counts_known` false) so the PR
+  header shows “—” instead of “0”; the comments page reports `has_more` only when the last page it
+  read linked a `next` page.
+- **The Bitbucket token form says Pull requests: read and write**, matching the documented scopes,
+  and with several detected Bitbucket checkouts it lets the person choose which repository proves
+  an access token (the first is used by default).
+
 - **A second launch hands its deep link to the running app.** Launching h4rn while it is already
   running (including from a hidden tray) used to focus the window and drop the `h4rn://` link that
   started the second process. The single-instance plugin now has its `deep-link` feature, so it
@@ -199,11 +290,67 @@ All notable changes to h4rn are recorded here. The format follows
   overwrote the first and the first death's row and reset were lost. They are kept per session now,
   and each pump finalizes only its own. A reset a death already applied is also kept with it, so an
   exit report that repeats a reset after the person cancelled the resume no longer arms it again.
+- **Auto-resume stays cancelled, waits for the newest reset, and covers retried writes.** A
+  `LimitHit` followed by an `Exit` with the same reset, with no EOF in between, used to re-arm the
+  pause after the person cancelled it; the live session now remembers the reset it applied and hands
+  it to the death. When two dead sessions are waiting for their exit reports, an older one's later,
+  earlier reset no longer replaces the newer one's schedule: both deaths keep their row, but the
+  thread waits for the newest reset. Finally, a failed write whose session was lost still honors the
+  adapter's typed limit: the retry is held behind the schedule and delivered when it fires, instead
+  of running straight into the paused provider.
+- **A paused requeued prompt is never stranded, and the pause belongs to the session that reported
+  it.** A failed write that put its prompt back behind a typed limit left the turn Pending when the
+  person then cancelled the resume or sent a message: clearing the schedule removed the only thing
+  that would deliver it. Both actions now release that turn. A Send queues its message behind it,
+  so the parked prompt runs first. An older session generation's delayed exit report no longer
+  marks the live replacement's reset as applied, and a requeued write's pause names the generation
+  that claimed the write instead of `None`. A newer generation that confirms the same reset takes
+  ownership of the pause without re-arming it, so an older generation's later, earlier reset can no
+  longer replace it. A firing schedule re-checks under the record lock that the pause is still its
+  own before it clears anything or hands off delivery. Finally, a typed limit without a reset time
+  on a requeued write waits the meter's unknown-reset backoff instead of retrying immediately.
+- **A parked resume survives storage errors, restarts and unrelated pauses.** Releasing a parked
+  prompt never waits on a storage write now: the fire's ledger outcome and the Send/cancel state
+  write are logged if they fail, and the prompt is delivered either way, so a failed write can no
+  longer leave a Pending turn with no delivery owner. A released turn is projected as running
+  rather than left Rate limited: the thread leaves the paused phase and drops its limit without
+  counting a second turn, so a cancelled or superseded pause shows Working and no resume time. A
+  fire only acts when the record still names the schedule it claimed; a missing or different
+  identity is not a match, and the failover model change now happens after that check. A pause parks
+  only the prompt it was armed for, so an old agent's exit report no longer holds a replacement turn
+  a Send started. Applied resets are recorded per session generation, including when a live session
+  adopts an equal reset, so a cancelled resume stays cancelled through that generation's exit-only
+  repeat. Finally, the parked prompt is stored with the thread row: a daemon restart restores the
+  dispatch and its schedule delivers the person's message instead of the policy's "continue".
 - **One provider limit arms one schedule.** The bridge can report one pause twice: the prompt's
   typed limit before the completion and the same reset on the exit report after it. The
   closed-completion wait now collects those limits and applies one after the wait, preferring the
   exit report's reset, and does not replace a schedule the turn already armed for that reset. The
   attempt counter keeps its first value and the jitter is no longer silently changed.
+- **Auto-resume round 3: a schedule is only fired, held and released by the record that owns it.**
+  A fire now checks that the thread's record names the schedule before it claims the attempt in the
+  ledger, and the daemon resyncs that record before it starts the ticker, so a restarted daemon
+  cannot consume a due attempt it never knew about. A delayed report from an older session
+  generation no longer overwrites a newer turn's applied-reset marker (the marker is only written by
+  the generation that owns the turn), so that turn's own completion cannot re-arm a pause the person
+  cancelled. The failed-write retry decides whether a pause holds it with the same
+  `pause_parks_turn` predicate `advance_queue` uses: a pause armed by another generation does not
+  hold a dispatch it does not name. A newer limit that replaces a parked pause keeps carrying the
+  prompt the pause was holding, so a pump-end advance cannot deliver it into the paused provider.
+  Finally, a parked prompt whose ledger schedule did not survive a restart is released exactly as a
+  cancel releases it — recorded as `LimitResumeReleased` with the limit cleared — instead of running
+  while the thread still claims to be rate limited.
+- **Auto-resume round 4: shutdown, restart and firing keep the parked prompt and its own turn.** A
+  graceful daemon shutdown now leaves a prompt parked behind an armed schedule exactly as it is, so
+  reopening restores the dispatch and the schedule delivers the person's message instead of the
+  policy's "continue". The restart resync restores schedule ids from the ledger even when the limit
+  history cannot be read, and the ticker retries a failed ledger read until it succeeds, so a
+  restored pause never stays unnamed. A fire only releases the pending turn its own pause parks: a
+  Send's startup that merely happens to be pending is left alone and spends no attempt. If a claimed
+  fire then finds the record no longer names its schedule, it marks the attempt `Cancelled` with
+  "superseded before delivery" instead of leaving it looking `Fired`, and a newer row that replaced
+  the attempt is untouched. A release whose journal append fails is no longer hidden by a cached
+  summary: the next tick publishes the running state.
 - **A request refused after an agent death names what actually closed.** The client keeps the close
   it observed (stdout EOF, a failed read, a writer failure or the process exit) and uses it when a
   later request is rejected, so a stdout death no longer looks like a dead writer in the failure row.

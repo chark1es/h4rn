@@ -751,7 +751,17 @@ username: string | null,
 /**
  * Where the token came from.
  */
-source: ForgeCredentialSource, } | { "type": "forge_remove_account", 
+source: ForgeCredentialSource, 
+/**
+ * Repository the token was granted for, when the client already knows
+ * one (a detected workspace remote).
+ *
+ * Repository, project and workspace access tokens for Bitbucket Cloud
+ * cannot call `/user` or `/user/workspaces`, so the daemon validates
+ * them against this repository instead. `None` means no repository is
+ * known; such tokens then need a detected repository to be added.
+ */
+repository: ForgeRepoRef | null, } | { "type": "forge_remove_account", 
 /**
  * Account to remove.
  */

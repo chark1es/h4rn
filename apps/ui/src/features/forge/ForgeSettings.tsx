@@ -1,22 +1,31 @@
 import { KeyRoundIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { type ForgeAccounts, ForgeApi, forgeLabel } from "@/features/forge/store";
-import type { ForgeAccount, ForgeCredentialSource, ForgeDeviceFlow, ForgeKind } from "@/gen";
+import type {
+  ForgeAccount,
+  ForgeCredentialSource,
+  ForgeDeviceFlow,
+  ForgeKind,
+  ForgeRemote,
+  ForgeRepoRef,
+} from "@/gen";
 import { relativeAge } from "@/lib/format";
-import { getClient, pushToast } from "@/lib/store/appStore";
+import { getClient, pushToast, useApp } from "@/lib/store/appStore";
 
 const api = () => new ForgeApi((request) => getClient().request(request));
 
-const FORGES: ForgeKind[] = ["github", "gitlab", "gitea", "forgejo"];
+const FORGES: ForgeKind[] = ["github", "gitlab", "gitea", "forgejo", "bitbucket", "azure_devops"];
 
 const DEFAULT_BASE: Record<ForgeKind, string> = {
   github: "https://github.com",
   gitlab: "https://gitlab.com",
   gitea: "https://gitea.example.com",
   forgejo: "https://forgejo.example.com",
+  bitbucket: "https://bitbucket.org",
+  azure_devops: "https://dev.azure.com",
 };
 
 /** The forge's smallest useful token, in the words of its own settings page. */
@@ -25,6 +34,9 @@ const SCOPES: Record<ForgeKind, string> = {
   gitlab: "a project access token with read_api and write to merge requests",
   gitea: "a token with repo scope on the repositories you want to see",
   forgejo: "a token with repo scope on the repositories you want to see",
+  bitbucket:
+    "an Atlassian API token (Account: read, Repositories: read, Pull requests: read and write) with your Atlassian account email, or a workspace, project or repository access token (app passwords were retired in July 2026)",
+  azure_devops: "a personal access token with Code: read & write",
 };
 
 /** OAuth device flow is a GitHub dotcom feature in this build. */
@@ -45,6 +57,10 @@ function sourceLabel(source: ForgeCredentialSource): string {
       return "Imported from gh";
     case "glab_cli":
       return "Imported from glab";
+    case "bitbucket_api_token":
+      return "API token (email + token)";
+    case "bitbucket_access_token":
+      return "Workspace, project or repository access token";
   }
 }
 
@@ -136,10 +152,18 @@ function AccountsTable({
   );
 }
 
-function AddAccountForm({ onAdded }: { onAdded: () => void }) {
+function AddAccountForm({
+  onAdded,
+  repositories,
+}: {
+  onAdded: () => void;
+  repositories: ForgeRemote[];
+}) {
   const [forge, setForge] = useState<ForgeKind>("github");
   const [baseUrl, setBaseUrl] = useState(DEFAULT_BASE.github);
+  const [username, setUsername] = useState("");
   const [token, setToken] = useState("");
+  const [repositoryKey, setRepositoryKey] = useState("");
   const [busy, setBusy] = useState(false);
 
   const changeForge = (next: ForgeKind) => {
@@ -150,17 +174,54 @@ function AddAccountForm({ onAdded }: { onAdded: () => void }) {
     setForge(next);
   };
 
+  const missingOrganization =
+    forge === "azure_devops" && baseUrl.trim().replace(/\/$/, "") === "https://dev.azure.com";
+
+  // The detected workspace remotes for this host. Bitbucket access tokens need
+  // one because they cannot read `/user` or `/user/workspaces`; with several
+  // checkouts the person picks which repository proves the token.
+  const normalizedBase = baseUrl.trim().replace(/\/$/, "");
+  const candidateRepos: ForgeRepoRef[] =
+    forge === "bitbucket"
+      ? repositories
+          .filter(
+            (remote) =>
+              remote.repo.forge === "bitbucket" &&
+              remote.repo.base_url.replace(/\/$/, "") === normalizedBase,
+          )
+          .map((remote) => remote.repo)
+      : [];
+  const repositoryName = (repo: ForgeRepoRef) => `${repo.owner}/${repo.repo}`;
+  const detectedRepo: ForgeRepoRef | null =
+    candidateRepos.find((repo) => repositoryName(repo) === repositoryKey) ??
+    candidateRepos[0] ??
+    null;
+  const accessTokenWithoutRepository =
+    forge === "bitbucket" && username.trim() === "" && detectedRepo === null;
+
   const submit = async () => {
-    if (token.trim() === "" || baseUrl.trim() === "" || busy) return;
+    if (
+      token.trim() === "" ||
+      baseUrl.trim() === "" ||
+      busy ||
+      missingOrganization ||
+      accessTokenWithoutRepository
+    ) {
+      return;
+    }
     setBusy(true);
     try {
       const account = await api().addAccount(
         forge,
-        baseUrl.trim().replace(/\/$/, ""),
+        normalizedBase,
         token.trim(),
+        forge === "bitbucket" ? username.trim() || null : null,
+        detectedRepo,
       );
-      // The token is written once and never read back.
+      // The token is written once and never read back, and the email is
+      // cleared so the next account starts from an empty form.
       setToken("");
+      setUsername("");
       pushToast({
         title: `Added ${forgeLabel(forge)}${account.username ? ` as @${account.username}` : ""}.`,
         variant: "success",
@@ -188,19 +249,31 @@ function AddAccountForm({ onAdded }: { onAdded: () => void }) {
           <ChipSelect
             label="Forge"
             value={forge}
-            width={160}
+            width={190}
             options={FORGES.map((kind) => ({ value: kind, label: forgeLabel(kind) }))}
             onChange={changeForge}
           />
           <span className="q-faint" style={{ fontSize: 12 }}>
             Use {SCOPES[forge]}.
           </span>
+          {forge === "bitbucket" ? (
+            <span className="q-faint" style={{ fontSize: 12, display: "block" }}>
+              App passwords no longer work. Paste an API token with your Atlassian account email, or
+              a workspace, project or repository access token with the email left empty.
+            </span>
+          ) : null}
         </div>
       </div>
       <div className="q-field">
         <div className="lab">
           <div className="t">Base URL</div>
-          <div className="s">Point a self-hosted forge at its own host</div>
+          <div className="s">
+            {forge === "azure_devops"
+              ? "Include the organization, e.g. https://dev.azure.com/acme"
+              : forge === "bitbucket"
+                ? "Bitbucket Cloud only, at bitbucket.org"
+                : "Point a self-hosted forge at its own host"}
+          </div>
         </div>
         <div className="ctl">
           <input
@@ -213,6 +286,57 @@ function AddAccountForm({ onAdded }: { onAdded: () => void }) {
           />
         </div>
       </div>
+      {forge === "bitbucket" ? (
+        <div className="q-field">
+          <div className="lab">
+            <div className="t">Atlassian account email</div>
+            <div className="s">
+              Needed for an API token (email + token). Leave empty for a workspace, project or
+              repository access token.
+            </div>
+          </div>
+          <div className="ctl">
+            <input
+              className="q-input q-mono"
+              style={{ maxWidth: 300, fontSize: 12 }}
+              autoComplete="username"
+              aria-label="Atlassian account email"
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              placeholder="you@example.com"
+            />
+            {accessTokenWithoutRepository ? (
+              <span className="q-warn" style={{ fontSize: 12, display: "block" }}>
+                An access token cannot read your account, so it is validated against a repository.
+                Open the Pull requests page from a checkout of a Bitbucket repository first, then
+                this form can detect it.
+              </span>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+      {forge === "bitbucket" && candidateRepos.length > 1 ? (
+        <div className="q-field">
+          <div className="lab">
+            <div className="t">Validate against</div>
+            <div className="s">
+              Which detected Bitbucket repository proves this account. The first is used by default.
+            </div>
+          </div>
+          <div className="ctl">
+            <ChipSelect
+              label="Bitbucket repository to validate against"
+              value={detectedRepo ? repositoryName(detectedRepo) : ""}
+              width={300}
+              options={candidateRepos.map((repo) => ({
+                value: repositoryName(repo),
+                label: repositoryName(repo),
+              }))}
+              onChange={setRepositoryKey}
+            />
+          </div>
+        </div>
+      ) : null}
       <div className="q-field">
         <div className="lab">
           <div className="t">Token</div>
@@ -232,12 +356,23 @@ function AddAccountForm({ onAdded }: { onAdded: () => void }) {
           <button
             type="button"
             className="q-btn primary"
-            disabled={busy || token.trim() === "" || baseUrl.trim() === ""}
+            disabled={
+              busy ||
+              token.trim() === "" ||
+              baseUrl.trim() === "" ||
+              missingOrganization ||
+              accessTokenWithoutRepository
+            }
             onClick={() => void submit()}
           >
             <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             {busy ? "Checking…" : "Add account"}
           </button>
+          {missingOrganization ? (
+            <span className="q-warn" style={{ fontSize: 12 }}>
+              Add the organization to the base URL.
+            </span>
+          ) : null}
         </div>
       </div>
     </div>
@@ -387,6 +522,8 @@ function DeviceFlow({ baseUrl, onComplete }: { baseUrl: string; onComplete: () =
 }
 
 export function ForgeSettings() {
+  const threads = useApp((state) => state.threads);
+  const [repositories, setRepositories] = useState<ForgeRemote[]>([]);
   const [data, setData] = useState<ForgeAccounts>({ accounts: [], capabilities: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -396,6 +533,52 @@ export function ForgeSettings() {
   const [importing, setImporting] = useState(false);
 
   const load = useCallback(() => setReload((value) => value + 1), []);
+
+  const workspaceKey = useMemo(
+    () =>
+      [
+        ...new Set(
+          Object.values(threads)
+            .map((thread) => thread.workspace_path)
+            .filter(Boolean),
+        ),
+      ]
+        .sort()
+        .join("\n"),
+    [threads],
+  );
+
+  // The detected workspace remotes let a Bitbucket access token be validated
+  // against its repository even though it cannot read the account.
+  useEffect(() => {
+    if (!workspaceKey) {
+      setRepositories([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const found: ForgeRemote[] = [];
+      for (const workspace of workspaceKey.split("\n")) {
+        try {
+          found.push(...(await api().detectRepo(workspace)));
+        } catch {
+          // A workspace without a forge remote is not an error.
+        }
+      }
+      if (cancelled) return;
+      setRepositories([
+        ...new Map(
+          found.map((remote) => [
+            `${remote.repo.forge}:${remote.repo.base_url}:${remote.repo.owner}/${remote.repo.repo}`,
+            remote,
+          ]),
+        ).values(),
+      ]);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceKey]);
 
   useEffect(() => {
     void reload;
@@ -466,8 +649,9 @@ export function ForgeSettings() {
         <div style={{ flex: 1 }}>
           <h1>Forges</h1>
           <p className="lead">
-            GitHub, GitLab, Gitea and Forgejo accounts used for pull requests, checks and reviews.
-            Tokens stay on this host and every call goes through the daemon.
+            GitHub, GitLab, Gitea, Forgejo, Bitbucket Cloud and Azure DevOps accounts used for pull
+            requests, checks and reviews. Tokens stay on this host and every call goes through the
+            daemon.
           </p>
         </div>
         <button type="button" className="q-btn secondary" onClick={load} disabled={loading}>
@@ -495,7 +679,7 @@ export function ForgeSettings() {
         )}
       </div>
 
-      <AddAccountForm onAdded={load} />
+      <AddAccountForm onAdded={load} repositories={repositories} />
 
       <div className="q-group">
         <h2>Import from a CLI</h2>
