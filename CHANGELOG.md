@@ -8,8 +8,9 @@ All notable changes to h4rn are recorded here. The format follows
 ### Added
 
 - **Unsent composer text survives a reload, an app restart or Android killing the webview.** Every
-  draft is stored under its own key for a host and thread, written after a short debounce and
-  flushed when the page hides, so two open tabs or windows never erase each other's work. Drafts
+  draft is stored under its own key for a host and thread, so one tab never erases another
+  thread's draft; for the same thread the most recent edit wins. Writes happen after a short
+  debounce and are flushed when the page hides. Drafts
   from the previous single-blob store are migrated on first launch. A sent message clears only the
   text that was sent: a newer draft written in another tab while the message was in flight stays,
   and a failed send keeps the text so it can be retried. Every write carries its own revision (a

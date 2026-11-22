@@ -49,6 +49,8 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
    * loaded, when it is written, and when another tab's change is adopted.
    */
   const revision = useRef<DraftRevision | null>(null);
+  /** The thread this component is showing now; a send started on another must not touch it. */
+  const shownThread = useRef({ host: summary.host, threadId: summary.thread_id });
   /** -1 while the in-progress text is showing; otherwise an index into sent prompts. */
   const historyIndex = useRef(-1);
   /** The in-progress text captured before the first ArrowUp. */
@@ -72,6 +74,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   });
 
   useEffect(() => {
+    shownThread.current = { host: summary.host, threadId: summary.thread_id };
     const entry = readThreadDraftEntry(summary.host, summary.thread_id);
     setText(entry.text);
     revision.current = entry.revision;
@@ -165,25 +168,32 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     // must not be cleared.
     const value = text;
     const submitted = revision.current;
+    const submittedHost = summary.host;
+    const submittedThread = summary.thread_id;
     // Store the draft before the send waits so a second tab's edit during the
     // request is not hidden behind this tab's pending write.
     flushDrafts();
     setSending(true);
-    const ok = await sendMessage(summary.thread_id, value, attachments.attachments);
+    const ok = await sendMessage(submittedThread, value, attachments.attachments);
     setSending(false);
-    if (ok) {
-      // Clear only the draft that was sent. If this tab typed again, or another
-      // tab saved newer text, that text stays in the box and in storage.
-      const cleared = clearThreadDraftIfRevision(summary.host, summary.thread_id, submitted);
-      historyIndex.current = -1;
-      historyDraft.current = "";
-      if (cleared) {
-        revision.current = null;
-        setText("");
-      }
-      attachments.clear();
-      requestAnimationFrame(autosize);
+    if (!ok) return;
+    // Clear only the draft that was sent. If this tab typed again, or another
+    // tab saved newer text, that text stays in the box and in storage.
+    const cleared = clearThreadDraftIfRevision(submittedHost, submittedThread, submitted);
+    // The pane may have switched threads while the send waited. The new
+    // thread's box belongs to that thread, so leave its text and files alone.
+    const stillShowing =
+      shownThread.current.host === submittedHost &&
+      shownThread.current.threadId === submittedThread;
+    if (!stillShowing) return;
+    historyIndex.current = -1;
+    historyDraft.current = "";
+    if (cleared) {
+      revision.current = null;
+      setText("");
     }
+    attachments.clear();
+    requestAnimationFrame(autosize);
   };
 
   const canSend =

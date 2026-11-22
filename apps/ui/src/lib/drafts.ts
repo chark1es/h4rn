@@ -155,6 +155,16 @@ export function sameRevision(a: DraftRevision | null, b: DraftRevision | null): 
   return a.updatedAt === b.updatedAt && a.nonce === b.nonce;
 }
 
+/**
+ * Whether `a` was written after `b`. Timestamps are monotonic per key, so a
+ * larger one is newer; at the same millisecond a different tab wrote it.
+ */
+function isNewerRevision(a: DraftRevision, b: DraftRevision | null): boolean {
+  if (b === null) return true;
+  if (a.updatedAt !== b.updatedAt) return a.updatedAt > b.updatedAt;
+  return a.nonce !== b.nonce;
+}
+
 function randomNonce(): string {
   try {
     if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -246,6 +256,12 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
   const memory = new Map<string, StoredDraft>();
   /** Keys changed by this tab and not yet written to storage. */
   const pendingWrites = new Map<string, StoredDraft>();
+  /**
+   * The stored revision each pending write was based on (null: nothing was
+   * stored yet). If storage moves past it before the debounce fires, another
+   * tab saved newer text and this tab's write must not replace it.
+   */
+  const pendingBases = new Map<string, DraftRevision | null>();
   /** Keys this tab removed, with the revision it meant to remove. */
   const pendingRemoves = new Map<string, DraftRevision>();
   let loaded = false;
@@ -255,6 +271,7 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
   function forgetCorrupt(key: string): void {
     memory.delete(key);
     pendingWrites.delete(key);
+    pendingBases.delete(key);
     try {
       storage?.removeItem(key);
     } catch {
@@ -299,6 +316,7 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
         // Leave it; the next flush tries again.
       }
       memory.delete(entry.key);
+      pendingBases.delete(entry.key);
       pendingRemoves.delete(entry.key);
     }
   }
@@ -342,6 +360,7 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
       }
       memory.delete(key);
       pendingWrites.delete(key);
+      pendingBases.delete(key);
     }
   }
 
@@ -392,10 +411,23 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
       return;
     }
     for (const [key, value] of [...pendingWrites]) {
+      const read = readStored(storage, key);
+      if (read.state === "ok" && pendingBases.has(key)) {
+        const base = pendingBases.get(key) ?? null;
+        // Another tab saved after this write was queued. Its revision is
+        // newer than the one this tab saw, so the remote text wins.
+        if (isNewerRevision(revisionOf(read.value), base)) {
+          memory.set(key, read.value);
+          pendingWrites.delete(key);
+          pendingBases.delete(key);
+          continue;
+        }
+      }
       try {
         storage.setItem(key, JSON.stringify(value));
         memory.set(key, value);
         pendingWrites.delete(key);
+        pendingBases.delete(key);
       } catch {
         // Keep the draft pending and retry on the next write or flush.
       }
@@ -470,13 +502,13 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
     return { text: read.value.text, revision: revisionOf(read.value) };
   }
 
-  /** The newest revision seen so far for a key, from this tab or storage. */
-  function storedUpdatedAt(key: string): number {
-    if (!storage) return 0;
+  /** The revision storage holds now, or null when it holds nothing usable. */
+  function storedRevision(key: string): DraftRevision | null {
+    if (!storage) return null;
     const read = readStored(storage, key);
-    if (read.state === "ok") return read.value.updatedAt;
+    if (read.state === "ok") return revisionOf(read.value);
     if (read.state === "corrupt") forgetCorrupt(key);
-    return 0;
+    return null;
   }
 
   function write(
@@ -500,13 +532,15 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
       memory.get(key)?.updatedAt ?? 0,
       pendingWrites.get(key)?.updatedAt ?? 0,
     );
+    const base = storedRevision(key);
     const value: StoredDraft = {
       text,
-      updatedAt: Math.max(now(), storedUpdatedAt(key) + 1, previous + 1),
+      updatedAt: Math.max(now(), (base?.updatedAt ?? 0) + 1, previous + 1),
       nonce,
     };
     memory.set(key, value);
     pendingWrites.set(key, value);
+    pendingBases.set(key, base);
     pendingRemoves.delete(key);
     schedule();
     return revisionOf(value);
@@ -524,6 +558,21 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
     expected: DraftRevision | null,
   ): boolean {
     const key = draftStorageKey(scope, host, target);
+    if (storage) {
+      const read = readStored(storage, key);
+      // Storage may already hold another tab's newer text. Flushing this
+      // tab's queued write first would replace it, so drop that write
+      // instead and clear nothing.
+      if (read.state === "ok" && isNewerRevision(revisionOf(read.value), expected)) {
+        const pending = pendingWrites.get(key);
+        if (pending !== undefined && sameRevision(revisionOf(pending), expected)) {
+          pendingWrites.delete(key);
+          pendingBases.delete(key);
+          memory.set(key, read.value);
+        }
+        return false;
+      }
+    }
     // Write any pending text first: it is the revision this clear is about,
     // and the guard compares what storage holds. A pending write would leave
     // the older stored revision in place and make the guard fail.
@@ -628,10 +677,19 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
     const target = parseDraftStorageKey(key);
     if (!target) return null;
     if (pendingWrites.has(key) || pendingRemoves.has(key)) return null;
+    if (newValue === null) {
+      memory.delete(key);
+      return { ...target, text: "", revision: null };
+    }
     const value = parseDraftValue(newValue);
-    if (value) memory.set(key, value);
-    else memory.delete(key);
-    return { ...target, text: value?.text ?? "", revision: value ? revisionOf(value) : null };
+    if (!value) {
+      // Another tab wrote something that does not parse: drop it rather than
+      // leave a value no reader can use in storage.
+      forgetCorrupt(key);
+      return { ...target, text: "", revision: null };
+    }
+    memory.set(key, value);
+    return { ...target, text: value.text, revision: revisionOf(value) };
   }
 
   return {
@@ -659,7 +717,6 @@ export const drafts = createDraftStore(readBrowserStorage());
 export const readThreadDraft = drafts.readThreadDraft;
 export const readThreadDraftEntry = drafts.readThreadDraftEntry;
 export const writeThreadDraft = drafts.writeThreadDraft;
-export const readThreadDraftRevision = drafts.readThreadDraftRevision;
 export const clearThreadDraftIfRevision = drafts.clearThreadDraftIfRevision;
 export const readNewThreadDraft = drafts.readNewThreadDraft;
 export const readNewThreadDraftEntry = drafts.readNewThreadDraftEntry;

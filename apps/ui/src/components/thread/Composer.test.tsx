@@ -351,6 +351,35 @@ describe("Composer drafts and history", () => {
     expect(input.value).toBe("written elsewhere");
   });
 
+  it("does not clear the next thread's box when a late send finishes", async () => {
+    let finish: (ok: boolean) => void = () => undefined;
+    mock.sendMessage.mockReturnValue(
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const secondThread = "thread_ui_two";
+    writeThreadDraft(HOST, secondThread, "second thread draft");
+    flushDrafts();
+
+    const view = renderComposer();
+    fireEvent.change(textarea(), { target: { value: "sent from the first thread" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await waitFor(() => expect(mock.sendMessage).toHaveBeenCalled());
+
+    // The pane switches threads while the send is still in flight.
+    view.rerender(<Composer summary={{ ...summary, thread_id: secondThread }} />);
+    await waitFor(() => expect(textarea().value).toBe("second thread draft"));
+
+    await act(async () => {
+      finish(true);
+    });
+
+    expect(textarea().value).toBe("second thread draft");
+    expect(readThreadDraft(HOST, secondThread)).toBe("second thread draft");
+    expect(readThreadDraft(HOST, THREAD)).toBe("");
+  });
+
   it("adopts another tab's draft only when it has no unsaved edit", async () => {
     writeThreadDraft(HOST, THREAD, "saved elsewhere");
     flushDrafts();

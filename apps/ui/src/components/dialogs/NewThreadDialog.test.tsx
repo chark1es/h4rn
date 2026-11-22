@@ -143,6 +143,29 @@ describe("NewThreadDialog drafts", () => {
     expect(textarea().placeholder).not.toBe("Connecting…");
   });
 
+  it("disables the task box again after closing and reopening before a host resolves", async () => {
+    mock.state.hosts = { host_a: host("host_a", "atlas") };
+    mock.state.localHostId = "host_a";
+
+    const view = render(<NewThreadDialog />);
+    await waitFor(() => expect(textarea().disabled).toBe(false));
+
+    mock.state.ui.newThreadOpen = false;
+    view.rerender(<NewThreadDialog />);
+
+    // Reopen while no host is known yet: the old binding must not survive.
+    mock.state.hosts = {};
+    mock.state.localHostId = null;
+    mock.state.ui.newThreadOpen = true;
+    view.rerender(<NewThreadDialog />);
+
+    await waitFor(() => expect(textarea().disabled).toBe(true));
+    expect(textarea().placeholder).toBe("Connecting…");
+    expect((screen.getByRole("button", { name: "Start" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+  });
+
   it("adopts the default host and its saved draft when the host resolves", async () => {
     writeNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE, "saved prompt");
     flushDrafts();
@@ -212,6 +235,32 @@ describe("NewThreadDialog drafts", () => {
     expect(screen.getByRole("button", { name: "Host: beta" })).toBeTruthy();
   });
 
+  it("rebinds a chosen host that stops being eligible", async () => {
+    writeNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE, "for alpha");
+    writeNewThreadDraft("host_b", DEFAULT_NEW_THREAD_WORKSPACE, "for beta");
+    flushDrafts();
+    mock.state.hosts = { host_a: host("host_a", "alpha"), host_b: host("host_b", "beta") };
+    mock.state.localHostId = null;
+
+    const view = render(<NewThreadDialog />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Host: alpha" })).toBeTruthy());
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Host: alpha" }), {
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    fireEvent.click(await screen.findByRole("menuitem", { name: /beta/ }));
+    await waitFor(() => expect(textarea().value).toBe("for beta"));
+
+    // The user's chosen host is gone; the dialog falls back to the default.
+    mock.state.hosts = { host_a: host("host_a", "alpha") };
+    view.rerender(<NewThreadDialog />);
+
+    await waitFor(() => expect(textarea().value).toBe("for alpha"));
+    expect(screen.getByRole("button", { name: "Host: alpha" })).toBeTruthy();
+  });
+
   it("rebinds to the daemon's own host when it arrives before the user picks one", async () => {
     writeNewThreadDraft("host_local", DEFAULT_NEW_THREAD_WORKSPACE, "local draft");
     flushDrafts();
@@ -231,6 +280,61 @@ describe("NewThreadDialog drafts", () => {
 
     await waitFor(() => expect(textarea().value).toBe("local draft"));
     expect(screen.getByRole("button", { name: "Host: zulu" })).toBeTruthy();
+  });
+
+  it("does nothing on Cmd+Enter before a host resolves", () => {
+    mock.state.hosts = {};
+    mock.state.localHostId = null;
+
+    render(<NewThreadDialog />);
+    fireEvent.change(textarea(), { target: { value: "typed before a host" } });
+    fireEvent.keyDown(textarea(), { key: "Enter", metaKey: true });
+
+    expect(mock.createThread).not.toHaveBeenCalled();
+    expect(
+      Object.keys(window.localStorage).filter((key) => key.startsWith("h4rn.newThread.workspace.")),
+    ).toEqual([]);
+  });
+
+  it("does not keep the Start-press flag after the pointer is cancelled", async () => {
+    writeNewThreadDraft("host_a", "~/code/web", "web work");
+    flushDrafts();
+    mock.state.hosts = { host_a: host("host_a", "atlas") };
+    mock.state.localHostId = "host_a";
+
+    render(<NewThreadDialog />);
+    await waitFor(() => expect(folderField().value).toBe(DEFAULT_NEW_THREAD_WORKSPACE));
+
+    const start = screen.getByRole("button", { name: "Start" });
+    fireEvent.pointerDown(start, { button: 0, pointerType: "mouse" });
+    fireEvent.pointerCancel(start, { button: 0, pointerType: "mouse" });
+
+    // The flag is gone, so leaving the folder field commits it and shows its draft.
+    commitFolder("~/code/web");
+    await waitFor(() => expect(textarea().value).toBe("web work"));
+  });
+
+  it("does not keep the Start-press flag after the dialog closes", async () => {
+    writeNewThreadDraft("host_a", "~/code/web", "web work");
+    flushDrafts();
+    mock.state.hosts = { host_a: host("host_a", "atlas") };
+    mock.state.localHostId = "host_a";
+
+    const view = render(<NewThreadDialog />);
+    await waitFor(() => expect(folderField().value).toBe(DEFAULT_NEW_THREAD_WORKSPACE));
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Start" }), {
+      button: 0,
+      pointerType: "mouse",
+    });
+    mock.state.ui.newThreadOpen = false;
+    view.rerender(<NewThreadDialog />);
+    mock.state.ui.newThreadOpen = true;
+    view.rerender(<NewThreadDialog />);
+    await waitFor(() => expect(textarea().disabled).toBe(false));
+
+    commitFolder("~/code/web");
+    await waitFor(() => expect(textarea().value).toBe("web work"));
   });
 
   it("starts on the visible host and folder and clears the submitted draft", async () => {

@@ -182,6 +182,41 @@ describe("draft store", () => {
     expect(store.readThreadDraft("host_a", "thread_1")).toBe("");
   });
 
+  it("keeps another tab's newer draft when a clear would flush an older write", () => {
+    const storage = memoryStorage();
+    const tabA = createDraftStore(storage, { now: () => 5, nonce: "tab-a" });
+    const tabB = createDraftStore(storage, { now: () => 5, nonce: "tab-b" });
+
+    // A's message starts before its debounce fires.
+    const submitted = tabA.writeThreadDraft("host_a", "thread_1", "sent from A");
+    // B saves newer text for the same slot while the send waits.
+    tabB.writeThreadDraft("host_a", "thread_1", "newer from B");
+    tabB.flush();
+
+    expect(tabA.clearThreadDraftIfRevision("host_a", "thread_1", submitted)).toBe(false);
+    expect(storedText(storage, threadKey("host_a", "thread_1"))).toBe("newer from B");
+
+    // The queued write is dropped, not flushed over the newer text later.
+    tabA.flush();
+    expect(storedText(storage, threadKey("host_a", "thread_1"))).toBe("newer from B");
+    expect(tabB.readThreadDraft("host_a", "thread_1")).toBe("newer from B");
+  });
+
+  it("does not let a debounced write replace a revision it never saw", () => {
+    const storage = memoryStorage();
+    const tabA = createDraftStore(storage, { now: () => 5, nonce: "tab-a" });
+    const tabB = createDraftStore(storage, { now: () => 5, nonce: "tab-b" });
+
+    tabA.writeThreadDraft("host_a", "thread_1", "older from A");
+    tabB.writeThreadDraft("host_a", "thread_1", "newer from B");
+    tabB.flush();
+
+    tabA.flush();
+
+    expect(storedText(storage, threadKey("host_a", "thread_1"))).toBe("newer from B");
+    expect(tabA.readThreadDraft("host_a", "thread_1")).toBe("newer from B");
+  });
+
   it("reads the text and its revision together", () => {
     const storage = memoryStorage();
     const store = createDraftStore(storage, { now: () => 42, nonce: "tab-a" });
@@ -525,6 +560,25 @@ describe("draft store", () => {
       null,
     );
     expect(store.readThreadDraft("host_a", "thread_1")).toBe("local, being typed");
+  });
+
+  it("removes a corrupt value reported by another tab", () => {
+    const storage = memoryStorage();
+    const store = createDraftStore(storage);
+    const key = threadKey("host_a", "thread_1");
+    storage.data.set(key, "not json");
+
+    const change = store.applyStorageEvent(key, "not json");
+
+    expect(change).toEqual({
+      scope: "thread",
+      host: "host_a",
+      target: "thread_1",
+      text: "",
+      revision: null,
+    });
+    expect(storage.data.has(key)).toBe(false);
+    expect(store.readThreadDraft("host_a", "thread_1")).toBe("");
   });
 
   it("clears the open composer when another tab removes the draft", () => {
