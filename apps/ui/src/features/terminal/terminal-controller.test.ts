@@ -55,19 +55,20 @@ const fakes = vi.hoisted(() => {
       return { dispose: () => undefined };
     }
     attachCustomKeyEventHandler(): void {}
-    private writeCallback: (() => void) | null = null;
+    private writeCallbacks: Array<(() => void) | undefined> = [];
     write(_data: string | Uint8Array, callback?: () => void): void {
-      this.writeCallback = callback ?? null;
+      // xterm's WriteBuffer keeps writes queued and parses them later, in the
+      // order they were handed in. A write without a callback gives the test
+      // nothing to observe, so only the callbacks are queued.
+      if (callback) this.writeCallbacks.push(callback);
     }
     focus(): void {}
     reset(): void {}
     dispose(): void {}
 
-    /** Acts like xterm finishing the last chunk it was given. */
+    /** Acts like xterm finishing the oldest chunk it was given. */
     finishWrite() {
-      const callback = this.writeCallback;
-      this.writeCallback = null;
-      callback?.();
+      this.writeCallbacks.shift()?.();
     }
 
     /** Acts like the program sending a query. */
@@ -378,6 +379,29 @@ describe("terminal controller query replies", () => {
     term.input("\x1b[?12;2$y");
 
     expect(sent.map((frame) => frame.seq)).toEqual([ptyInputReplySeq(6)]);
+    controller.dispose();
+  });
+
+  it("names a query parsed before a queued snapshot by its own chunk", async () => {
+    const sent: BinaryFrame[] = [];
+    const { controller, term, binary } = await startController(sent, 0);
+
+    // Chunk 5's write is queued; the snapshot at 6 is applied before xterm
+    // has parsed chunk 5, exactly as its WriteBuffer schedules writes. The
+    // snapshot's reset must wait: chunk 5 is parsed first and its answer keeps
+    // chunk 5's name, not the snapshot's.
+    pushOutput(binary, 5, "\x1b[?25$p");
+    pushSnapshot(binary, 6);
+    expect(term.query({ prefix: "?", intermediates: "$", final: "p" }, [25])).toBe(false);
+    term.input("\x1b[?25;2$y");
+    expect(sent.map((frame) => frame.seq)).toEqual([ptyInputReplySeq(5, 0)]);
+
+    // Once chunk 5 finishes, the snapshot chunk starts parsing and the old
+    // query state is gone: the same report is now typed input.
+    term.finishWrite();
+    term.finishWrite();
+    term.input("\x1b[?25;2$y");
+    expect(sent.map((frame) => frame.seq)).toEqual([ptyInputReplySeq(5, 0), 0]);
     controller.dispose();
   });
 

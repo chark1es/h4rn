@@ -1018,6 +1018,8 @@ fn replace_binary_with<P: ChecksumPublisher>(
         .parent()
         .context("the current executable has no parent directory")?;
     let staged = stage_binary(current, bytes)?;
+    // cfg! would compile both calls, and each replace function only exists on
+    // its own platform.
     #[cfg(windows)]
     let result = replace_binary_windows(current, &staged, publisher);
     #[cfg(not(windows))]
@@ -1242,7 +1244,8 @@ fn copy_file_atomic(from: &Path, to: &Path) -> Result<()> {
     let parent = to
         .parent()
         .context("the install path has no parent directory")?;
-    // Only the Unix copy needs the source mode; Windows has no executable bit.
+    // Only the Unix publication copies the source's executable bits. `open`
+    // below still reports a missing source on every platform.
     #[cfg(unix)]
     let metadata = std::fs::metadata(from).with_context(|| format!("read {}", from.display()))?;
     let mut source =
@@ -1367,16 +1370,15 @@ fn remove_staging_files(current: &Path) -> usize {
     removed
 }
 
-fn fsync_dir(path: &Path) {
+fn fsync_dir(_path: &Path) {
+    // Windows has no directory handle to fsync; the file itself is synced
+    // before it is renamed into place.
     #[cfg(unix)]
     {
-        if let Ok(directory) = std::fs::File::open(path) {
+        if let Ok(directory) = std::fs::File::open(_path) {
             let _ = directory.sync_all();
         }
     }
-    // Windows has no directory fsync; the rename is what publishes the file.
-    #[cfg(not(unix))]
-    let _ = path;
 }
 
 /// The loopback health address for a bind address shown in `/healthz`.

@@ -406,41 +406,220 @@ describe("terminal query replies", () => {
     }
   });
 
+  it("keeps C0 controls and DEL inside a sequence out of its parameters", async () => {
+    // Each chunk 5 opens a query and hides a control in it; chunk 6 completes
+    // that query and then asks a second one. A scanner that appends the
+    // control corrupts the parameters, so the split query is named by chunk 6
+    // instead of chunk 5. The late viewer never saw chunk 5 and must name only
+    // the query that starts in chunk 6.
+    const cases: Array<{
+      name: string;
+      chunk5: string;
+      chunk6: string;
+      expected: Array<{ position: number; ordinal: number }>;
+    }> = [
+      {
+        name: "CR inside CSI parameters",
+        chunk5: "\x1b[?25",
+        chunk6: "\r$p\x1b[c",
+        expected: [
+          { position: 5, ordinal: 0 },
+          { position: 6, ordinal: 0 },
+        ],
+      },
+      {
+        name: "LF after ESC",
+        chunk5: "\x1b",
+        chunk6: "\n[6n\x1b[c",
+        expected: [
+          { position: 5, ordinal: 0 },
+          { position: 6, ordinal: 0 },
+        ],
+      },
+      {
+        name: "DEL inside CSI parameters",
+        chunk5: "\x1b[?2\x7f",
+        chunk6: "5$p\x1b[c",
+        expected: [
+          { position: 5, ordinal: 0 },
+          { position: 6, ordinal: 0 },
+        ],
+      },
+      {
+        name: "BEL inside CSI parameters",
+        chunk5: "\x1b[?25",
+        chunk6: "\x07$p\x1b[c",
+        expected: [
+          { position: 5, ordinal: 0 },
+          { position: 6, ordinal: 0 },
+        ],
+      },
+    ];
+
+    for (const { name, chunk5, chunk6, expected } of cases) {
+      const early = await repliesFor([
+        [5, chunk5],
+        [6, chunk6],
+      ]);
+      // The viewer whose snapshot already held chunk 5 parses only chunk 6;
+      // the tail of the split query is text to it.
+      const late = await repliesFor([[6, chunk6]]);
+      expect(early, name).toEqual(expected);
+      expect(late, name).toEqual([{ position: 6, ordinal: 0 }]);
+      expect(late[0], name).toEqual(early[1]);
+    }
+  });
+
+  it("starts and ends sequences on C1 controls the way xterm does", async () => {
+    // U+009B is CSI. The query starts in chunk 5; chunk 6 finishes it and asks
+    // a DA1 query. A byte scanner that does not know C1 sees only the DA1.
+    expect(
+      await repliesFor([
+        [5, "\u009b"],
+        [6, "6n\x1b[c"],
+      ]),
+    ).toEqual([
+      { position: 5, ordinal: 0 },
+      { position: 6, ordinal: 0 },
+    ]);
+    expect(await repliesFor([[6, "6n\x1b[c"]])).toEqual([{ position: 6, ordinal: 0 }]);
+
+    // U+0090 starts a DCS, and U+009C ends it. The DECRQSS query starts in
+    // chunk 5; the late viewer sees only text and the DA1 query.
+    const dcs = await repliesFor([
+      [5, "\u0090$"],
+      [6, "qm\u009c\x1b[c"],
+    ]);
+    expect(dcs).toEqual([
+      { position: 5, ordinal: 0 },
+      { position: 6, ordinal: 0 },
+    ]);
+    expect(await repliesFor([[6, "qm\u009c\x1b[c"]])).toEqual([{ position: 6, ordinal: 0 }]);
+
+    // U+009D starts an OSC and U+009C ends it. xterm reports colour queries
+    // through its renderer, so the report shape is supplied here; it keeps
+    // the chunk its C1 introducer came in.
+    const osc = new Terminal({ cols: 80, rows: 24 });
+    const oscTracker = new TerminalQueryTracker();
+    const oscHooks = registerTerminalQueryHooks(osc.parser, oscTracker);
+    try {
+      const start = bytes("\u009d10;?");
+      oscTracker.beginChunk(5, start);
+      await parse(osc, start);
+      oscTracker.endChunk();
+      const end = bytes("\u009c");
+      oscTracker.beginChunk(6, end);
+      await parse(osc, end);
+      oscTracker.endChunk();
+      expect(oscTracker.takeReply("\x1b]10;rgb:cccc/cccc/cccc\x1b\\")).toEqual({
+        position: 5,
+        ordinal: 0,
+      });
+    } finally {
+      for (const hook of oscHooks) hook.dispose();
+      osc.dispose();
+    }
+
+    // U+0098 opens a string that U+009C ends; a query after it starts in the
+    // chunk where its own ESC arrived.
+    expect(
+      await repliesFor([
+        [5, "\u0098"],
+        [6, "ignored\u009c\x1b[6n"],
+      ]),
+    ).toEqual([{ position: 6, ordinal: 0 }]);
+
+    // Other C1 controls return to ground. U+0085 aborts the CSI in chunk 5,
+    // so `$p` in chunk 6 is text and only the real query is answered. A
+    // scanner that ignored it in place would finish the abandoned query and
+    // name the answer by chunk 5.
+    const c1 = await repliesFor([
+      [5, "\x1b[?2\u0085"],
+      [6, "$p\x1b[?2$p"],
+    ]);
+    expect(c1).toEqual([{ position: 6, ordinal: 0 }]);
+    expect(await repliesFor([[6, "$p\x1b[?2$p"]])).toEqual(c1);
+  });
+
+  it("never treats the 0x9c byte inside a UTF-8 character as ST", async () => {
+    // `Ü` is C3 9C. Split between its two bytes, a raw-byte scanner ends the
+    // DCS at the 9C and names the DECRQSS by chunk 6; xterm decodes the
+    // character and reports the query when its real ESC \ arrives in chunk 7.
+    const early = await repliesFor([
+      [5, concat(bytes("\x1bP$qm"), Uint8Array.of(0xc3))],
+      [6, Uint8Array.of(0x9c)],
+      [7, bytes("\x1b\\")],
+    ]);
+    expect(early).toEqual([{ position: 5, ordinal: 0 }]);
+
+    // A viewer that attached with chunks 5 and 6 folded into its snapshot
+    // never saw the query.
+    expect(await repliesFor([[7, bytes("\x1b\\")]])).toEqual([]);
+  });
+
   it("cancels an open sequence on CAN and SUB", async () => {
-    // `ESC[?25` then CAN returns xterm's parser to ground, so the ESC in
-    // chunk 6 begins a fresh escape and the query that completes in chunk 7
-    // starts there. A scanner that kept the CAN as a parameter byte stays
-    // inside the old CSI and names the answer by chunk 7, where the final
-    // byte landed.
-    expect(
-      await repliesFor([
-        [5, "\x1b[?25\x18"],
-        [6, "\x1b"],
-        [7, "[?25$p"],
-      ]),
-    ).toEqual([{ position: 6, ordinal: 0 }]);
-    expect(
-      await repliesFor([
-        [5, "\x1b[?25\x1a"],
-        [6, "\x1b"],
-        [7, "[?25$p"],
-      ]),
-    ).toEqual([{ position: 6, ordinal: 0 }]);
+    // Only the cancel keeps the two viewers equal here: there is no later ESC
+    // to restart the escape. Chunk 6 completes the text `$p`, which would
+    // finish the abandoned CSI, and then asks the same query for real. A
+    // scanner that kept CAN or SUB in the open sequence matches the carried
+    // signature and names the answer by chunk 5; the late viewer names chunk 6.
+    for (const cancel of ["\x18", "\x1a"]) {
+      const chunks: Array<[number, string]> = [
+        [5, `\x1b[?2${cancel}`],
+        [6, "$p\x1b[?2$p"],
+      ];
+      const early = await repliesFor(chunks);
+      const late = await repliesFor([[6, "$p\x1b[?2$p"]]);
+      expect(early, `cancel ${cancel.charCodeAt(0)}`).toEqual([{ position: 6, ordinal: 0 }]);
+      expect(late, `cancel ${cancel.charCodeAt(0)}`).toEqual(early);
+    }
+
+    // The OSC case pins an appended CAN/SUB even though an appended control in
+    // a CSI would corrupt its parameters: `parseInt` stops at the control in
+    // an OSC ident, so `OSC 10<CAN>;?` still parses as `OSC 10;?`. Only the
+    // cancel keeps the abandoned OSC from being carried into chunk 6 and
+    // matching the real colour query that starts there.
+    for (const cancel of ["\x18", "\x1a"]) {
+      const early = await colourReplyFor([
+        [5, `\x1b]10${cancel};?`],
+        [6, "\x07\x1b]10;?\x07"],
+      ]);
+      const late = await colourReplyFor([[6, "\x07\x1b]10;?\x07"]]);
+      expect(early, `cancel ${cancel.charCodeAt(0)}`).toEqual({ position: 6, ordinal: 0 });
+      expect(late, `cancel ${cancel.charCodeAt(0)}`).toEqual(early);
+    }
   });
 
   it("names a query the same way at every two-chunk split", async () => {
     // The query follows a sequence that a split can cut anywhere. Whichever
-    // chunk carries the query's ESC names the answer, in every split.
-    const before = "\x1b[2J";
-    const stream = `${before}\x1b[?25$p`;
-    expect(await repliesFor([[5, stream]])).toEqual([{ position: 5, ordinal: 0 }]);
-    for (let split = 1; split < stream.length; split += 1) {
-      const answers = await repliesFor([
-        [5, stream.slice(0, split)],
-        [6, stream.slice(split)],
+    // chunk carries the query's ESC names the answer, in every split. The
+    // prefix carries a C0 control or DEL so an executable inside the chunk
+    // cannot shift the query's start either. A late viewer that parses only
+    // chunk 6 must agree whenever the query really starts there, and must see
+    // no query when chunk 5 carried its first byte.
+    for (const before of ["\x1b[2J\r", "\x1b[2J\x7f", "\x1b[2J\x00\x19", "\x1b[2J\x1c"]) {
+      const stream = `${before}\x1b[?25$p`;
+      expect(await repliesFor([[5, stream]]), JSON.stringify(before)).toEqual([
+        { position: 5, ordinal: 0 },
       ]);
-      const expected = split > before.length ? 5 : 6;
-      expect(answers, `split at ${split}`).toEqual([{ position: expected, ordinal: 0 }]);
+      for (let split = 1; split < stream.length; split += 1) {
+        const tail = stream.slice(split);
+        const answers = await repliesFor([
+          [5, stream.slice(0, split)],
+          [6, tail],
+        ]);
+        const expected = split > before.length ? 5 : 6;
+        expect(answers, `${JSON.stringify(before)} split at ${split}`).toEqual([
+          { position: expected, ordinal: 0 },
+        ]);
+
+        const late = await repliesFor([[6, tail]]);
+        if (expected === 5) {
+          expect(late, `${JSON.stringify(before)} late at ${split}`).toEqual([]);
+        } else {
+          expect(late, `${JSON.stringify(before)} late at ${split}`).toEqual(answers);
+        }
+      }
     }
   });
 
@@ -485,6 +664,36 @@ describe("terminal query replies", () => {
     ).toEqual([{ position: 6, ordinal: 0 }]);
   });
 
+  it("keeps a queued query's name when a snapshot is applied before its parse", async () => {
+    // xterm's WriteBuffer schedules `_innerWrite`, so the snapshot frame is
+    // applied while chunk 5's write is still queued. The reset must wait for
+    // the snapshot's own parse; clearing at apply time would delete chunk 5
+    // and report its answer as the snapshot's.
+    const term = new Terminal({ cols: 80, rows: 24 });
+    const tracker = new TerminalQueryTracker();
+    const hooks = registerTerminalQueryHooks(term.parser, tracker);
+    const replies: Array<{ position: number; ordinal: number } | null> = [];
+    const onData = term.onData((data) => replies.push(tracker.takeReply(data)));
+    try {
+      const output = bytes("\x1b[?25$p");
+      tracker.beginChunk(5, output);
+      const first = parse(term, output);
+
+      tracker.resetAt(6);
+      const snapshot = bytes("\x1b[2J\x1b[H");
+      tracker.beginChunk(6, snapshot);
+      const second = parse(term, snapshot);
+
+      await first;
+      await second;
+      expect(replies).toEqual([{ position: 5, ordinal: 0 }]);
+    } finally {
+      onData.dispose();
+      for (const hook of hooks) hook.dispose();
+      term.dispose();
+    }
+  });
+
   it("forgets a query xterm did not answer when its chunk is done", async () => {
     // Enable window reports so xterm's parser lets the window-size query
     // through to the hook.
@@ -512,18 +721,63 @@ describe("terminal query replies", () => {
 });
 
 /** Resolves once xterm has parsed `data`, as its write callback does. */
-function parse(term: Terminal, data: string): Promise<void> {
+function parse(term: Terminal, data: string | Uint8Array): Promise<void> {
   return new Promise((resolve) => term.write(data, resolve));
 }
 
 const bytes = (text: string) => new TextEncoder().encode(text);
 
+/** Joins byte chunks so a UTF-8 character can be cut between them. */
+function concat(...parts: Uint8Array[]): Uint8Array {
+  const joined = new Uint8Array(parts.reduce((total, part) => total + part.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    joined.set(part, offset);
+    offset += part.length;
+  }
+  return joined;
+}
+
+/** A chunk's raw bytes, whether the test names it as text or gives bytes. */
+const raw = (chunk: string | Uint8Array) => (typeof chunk === "string" ? bytes(chunk) : chunk);
+
+/**
+ * Feeds one viewer's chunks to a real xterm parser and returns the identity of
+ * the colour report it owes, or null when it saw no query.
+ *
+ * xterm answers OSC colour queries through its renderer rather than `onData`,
+ * so the report is supplied here, exactly as `onData` would carry it.
+ */
+async function colourReplyFor(
+  chunks: Array<[seq: number, text: string]>,
+): Promise<{ position: number; ordinal: number } | null> {
+  const term = new Terminal({ cols: 80, rows: 24 });
+  const tracker = new TerminalQueryTracker();
+  const hooks = registerTerminalQueryHooks(term.parser, tracker);
+  try {
+    for (const [seq, text] of chunks) {
+      const payload = bytes(text);
+      tracker.beginChunk(seq, payload);
+      await parse(term, payload);
+      tracker.endChunk();
+    }
+    return tracker.takeReply("\x1b]10;rgb:cccc/cccc/cccc\x1b\\");
+  } finally {
+    for (const hook of hooks) hook.dispose();
+    term.dispose();
+  }
+}
+
 /**
  * Feeds one viewer's chunks to a real xterm parser and returns the identities
  * of the answers it sent, in order.
+ *
+ * Chunks go in as UTF-8 bytes, the way the controller writes `frame.payload`,
+ * so a character split across two chunks is decoded by the parser the same way
+ * as in the browser.
  */
 async function repliesFor(
-  chunks: Array<[seq: number, text: string]>,
+  chunks: Array<[seq: number, text: string | Uint8Array]>,
 ): Promise<Array<{ position: number; ordinal: number }>> {
   const term = new Terminal({ cols: 80, rows: 24 });
   const tracker = new TerminalQueryTracker();
@@ -532,8 +786,9 @@ async function repliesFor(
   const onData = term.onData((data) => answers.push(data));
   try {
     for (const [seq, text] of chunks) {
-      tracker.beginChunk(seq, bytes(text));
-      await parse(term, text);
+      const payload = raw(text);
+      tracker.beginChunk(seq, payload);
+      await parse(term, payload);
       tracker.endChunk();
     }
     return answers
