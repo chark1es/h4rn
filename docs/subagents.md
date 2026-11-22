@@ -508,10 +508,18 @@ selection does no filesystem work at all.
   -c core.checkStat=default -c core.ignoreCase=false`. With
   `core.ignoreCase=true` on a case-sensitive filesystem an untracked `README`
   beside a tracked `readme` would be invisible; forcing case sensitivity can
-  only over-report on a case-insensitive one, which skips. A filesystem monitor hook that reports nothing
-  changed, a stale untracked cache, or reduced stat checks (a same-size edit
-  that kept its indexed mtime) would otherwise let git trust its index and miss
-  an edit or a new file.
+  only over-report on a case-insensitive one, which skips. A filesystem monitor
+  hook that reports nothing changed, a stale untracked cache, or reduced stat
+  checks (a same-size edit that kept its indexed mtime) would otherwise let git
+  trust its index and miss an edit or a new file.
+- The dirty check and git's removal backstop also force
+  `-c core.fileMode=true -c core.symlinks=true` when the checkout is on a
+  different filesystem from its admin dir (or that cannot be determined). Git
+  probes those two settings once, for the filesystem the repository was created
+  on, and every linked worktree shares them; a checkout elsewhere could then
+  hide a `chmod +x` or a symlink replaced by a plain file. On the repository's
+  own filesystem git's probe is kept: forcing it on a filesystem without
+  executable bits would mark every file changed and no clear could pass.
 - Every git call runs with `GIT_NO_REPLACE_OBJECTS=1` (and without
   `GIT_REPLACE_REF_BASE`) and with `GIT_GRAFT_FILE` pointed at an empty file: a
   replacement ref (`refs/replace/*`) or a graft (`<common>/info/grafts`, or an
@@ -522,8 +530,9 @@ selection does no filesystem work at all.
   dropped too, so git reads the user's normal configuration: a redirected global
   config could otherwise set keys that are not forced (`core.excludesFile`
   hiding every untracked file). The subagent result card's `git status` uses the
-  same overrides with `--untracked-files=normal --ignore-submodules=none`, off
-  the async runtime.
+  same overrides with `--untracked-files=normal --ignore-submodules=none` (an
+  untracked directory is one row, so a child's build output cannot flood the
+  card), bounded at 30 seconds and off the async runtime.
 - Without `force`, an existing checkout must still be on the branch the listing
   gave it. If the current branch differs, the entry is skipped as
   `checkout is no longer on <branch>`; force removes the replacement checkout

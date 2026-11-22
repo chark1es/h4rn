@@ -94,34 +94,30 @@ pub fn remove(repo: &Path, dest: &Path, branch: Option<&str>) {
 ///
 /// Call this **before** [`remove`]; it is what the parent's result card shows.
 pub fn changes(worktree: &Path) -> Vec<SubagentFileChange> {
+    use crate::worktrees::git;
     // The same overrides as the clearing checks, so the result card does not
     // under-report under `status.showUntrackedFiles=no` or a filesystem
-    // monitor.
-    let output = git_command()
-        .arg("-C")
-        .arg(worktree)
-        .args(crate::worktrees::git::SAFETY_CONFIG)
-        // `normal` collapses an untracked directory to one row, so a child's
-        // `dist/` cannot flood the result card, while still overriding a
-        // config that hides untracked files.
-        .args([
-            "status",
-            "--porcelain",
-            "--untracked-files=normal",
-            "--ignore-submodules=none",
-        ])
-        .output();
-    let Ok(output) = output else {
+    // monitor, and the same per-command deadline, so a wedged checkout cannot
+    // stall finalize. `normal` collapses an untracked directory to one row, so
+    // a child's `dist/` cannot flood the result card. Bytes are kept as git
+    // wrote them: a porcelain line starts with a meaningful space.
+    let args = git::SAFETY_CONFIG.into_iter().chain([
+        "status",
+        "--porcelain",
+        "--untracked-files=normal",
+        "--ignore-submodules=none",
+    ]);
+    let Ok(stdout) = git::run_bytes_with_timeout(worktree, args, CHANGES_TIMEOUT) else {
         return Vec::new();
     };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&output.stdout)
+    String::from_utf8_lossy(&stdout)
         .lines()
         .filter_map(parse_porcelain_line)
         .collect()
 }
+
+/// How long the result card's `git status` may take.
+const CHANGES_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 fn parse_porcelain_line(line: &str) -> Option<SubagentFileChange> {
     if line.len() < 4 {

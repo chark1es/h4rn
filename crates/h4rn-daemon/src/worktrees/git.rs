@@ -183,6 +183,10 @@ thread_local! {
     /// for a git that rejects `worktree list -z`.
     pub static FORCE_METADATA_FALLBACK: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    /// Test-only: treat every checkout as on a different filesystem from its
+    /// admin dir on this thread.
+    pub static FORCE_FOREIGN_FILESYSTEM: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -1622,13 +1626,63 @@ where
 /// user asked git to hide from `status` is still work that removing the
 /// checkout would lose. Runs with [`SAFETY_CONFIG`]; bounded by `limit`.
 pub fn status(worktree: &Path, limit: Duration) -> Result<String, String> {
-    let args = SAFETY_CONFIG.into_iter().chain([
-        "status",
-        "--porcelain",
-        "--untracked-files=all",
-        "--ignore-submodules=none",
-    ]);
+    let args = SAFETY_CONFIG
+        .into_iter()
+        .chain(mode_config(worktree).iter().copied())
+        .chain([
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ]);
     run_with_timeout(worktree, args, limit)
+}
+
+/// Forces git to compare executable bits and symlinks.
+const FULL_MODES: [&str; 4] = ["-c", "core.fileMode=true", "-c", "core.symlinks=true"];
+
+/// Extra config for the checks on `checkout` (the dirty check and git's
+/// removal backstop).
+///
+/// `core.fileMode` and `core.symlinks` are probed by git for the filesystem the
+/// repository was created on and shared by every linked worktree. A checkout
+/// on another filesystem that supports executable bits and symlinks would then
+/// hide a `chmod +x` or a symlink replaced by a plain file, so the full
+/// comparison is forced there — and whenever the filesystems cannot be told
+/// apart, since forcing can only over-report, which skips. On the repository's
+/// own filesystem git's probe is right and is kept: forcing it on a filesystem
+/// without executable bits would mark every file changed and no clear could
+/// ever pass.
+pub fn mode_config(checkout: &Path) -> &'static [&'static str] {
+    if foreign_filesystem(checkout) {
+        &FULL_MODES
+    } else {
+        &[]
+    }
+}
+
+#[cfg(unix)]
+fn foreign_filesystem(checkout: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    #[cfg(test)]
+    if FORCE_FOREIGN_FILESYSTEM.with(std::cell::Cell::get) {
+        return true;
+    }
+    let Some(admin) = gitfile_target(&checkout.join(".git")) else {
+        // The main worktree (a `.git` directory) shares the repository's
+        // filesystem; anything else unreadable is treated as foreign.
+        return !checkout.join(".git").is_dir();
+    };
+    match (checkout.metadata(), admin.metadata()) {
+        (Ok(checkout), Ok(admin)) => checkout.dev() != admin.dev(),
+        _ => true,
+    }
+}
+
+#[cfg(not(unix))]
+fn foreign_filesystem(_checkout: &Path) -> bool {
+    // No portable device id; git's own probe stands.
+    false
 }
 
 #[cfg(test)]

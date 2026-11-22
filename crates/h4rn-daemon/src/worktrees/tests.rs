@@ -5622,6 +5622,13 @@ fn grafts_do_not_make_a_detached_commit_look_reachable() {
 #[test]
 fn ignore_case_does_not_hide_an_untracked_case_variant() {
     let fixture = Fixture::new();
+    // The scenario needs a case-sensitive filesystem (Linux; not the default
+    // on macOS or Windows, where `NOTES` would be `notes`).
+    let probe = fixture.root.path().join("case-probe");
+    std::fs::write(&probe, "a").expect("probe");
+    if fixture.root.path().join("CASE-PROBE").exists() {
+        return;
+    }
     let linked = fixture.add_worktree("wt-ignore-case", "ignore-case-branch");
     std::fs::write(linked.join("notes"), "tracked\n").expect("notes");
     run(&linked, &["add", "notes"]);
@@ -5729,4 +5736,84 @@ fn the_result_card_lists_untracked_files_whatever_the_config() {
             .any(|change| change.path == "left-behind.txt" && change.status == "??"),
         "{changes:?}"
     );
+}
+
+#[cfg(unix)]
+fn chmod_x(file: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = std::fs::metadata(file).expect("metadata").permissions();
+    permissions.set_mode(permissions.mode() | 0o111);
+    std::fs::set_permissions(file, permissions).expect("chmod +x");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_executable_bit_change_on_a_foreign_filesystem_is_kept() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-file-mode", "file-mode-branch");
+    run(&linked, &["config", "core.fileMode", "false"]);
+    chmod_x(&linked.join("README.md"));
+    let plain = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&linked)
+        .output()
+        .expect("plain status");
+    assert!(
+        plain.stdout.is_empty(),
+        "with core.fileMode=false plain git misses the mode change"
+    );
+
+    let target = entry(&linked, &fixture.repo, Some("file-mode-branch"), false);
+    git::FORCE_FOREIGN_FILESYSTEM.with(|forced| forced.set(true));
+    let outcome = clear_one(&target, false, &fixture.data_dir());
+    git::FORCE_FOREIGN_FILESYSTEM.with(|forced| forced.set(false));
+    assert_eq!(outcome.err().as_deref(), Some("has uncommitted changes"));
+    assert!(linked.join("README.md").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_replaced_by_a_file_on_a_foreign_filesystem_is_kept() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-symlinks", "symlinks-branch");
+    std::os::unix::fs::symlink("README.md", linked.join("link")).expect("symlink");
+    run(&linked, &["add", "link"]);
+    run(&linked, &["commit", "-q", "-m", "a symlink"]);
+    run(&linked, &["config", "core.symlinks", "false"]);
+    // Replace the symlink with a plain file holding the same target text.
+    std::fs::remove_file(linked.join("link")).expect("remove symlink");
+    std::fs::write(linked.join("link"), "README.md").expect("plain file");
+    let plain = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&linked)
+        .output()
+        .expect("plain status");
+    assert!(
+        plain.stdout.is_empty(),
+        "with core.symlinks=false plain git misses the type change"
+    );
+
+    let target = entry(&linked, &fixture.repo, Some("symlinks-branch"), false);
+    git::FORCE_FOREIGN_FILESYSTEM.with(|forced| forced.set(true));
+    let outcome = clear_one(&target, false, &fixture.data_dir());
+    git::FORCE_FOREIGN_FILESYSTEM.with(|forced| forced.set(false));
+    assert_eq!(outcome.err().as_deref(), Some("has uncommitted changes"));
+    assert!(linked.join("link").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn on_the_repositorys_own_filesystem_gits_mode_probe_is_kept() {
+    // Same filesystem: `core.fileMode=false` stands (forcing it would mark
+    // every file changed on a filesystem without executable bits).
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-own-fs", "own-fs-branch");
+    assert!(git::mode_config(&linked).is_empty(), "same filesystem");
+    run(&linked, &["config", "core.fileMode", "false"]);
+    chmod_x(&linked.join("README.md"));
+    let target = entry(&linked, &fixture.repo, Some("own-fs-branch"), false);
+    assert!(matches!(
+        clear_one(&target, false, &fixture.data_dir()),
+        Ok(ClearOne::Removed)
+    ));
 }

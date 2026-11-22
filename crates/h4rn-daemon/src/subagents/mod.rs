@@ -775,9 +775,14 @@ impl Inner {
                 let record = self.records.lock().await.remove(subagent_id.as_str());
                 let _ = self.store.remove(subagent_id.as_str()).await;
                 if let Some(record) = record
-                    && let (Some(repo), Some(worktree)) = (&record.repo, &record.worktree)
+                    && let (Some(repo), Some(worktree)) = (record.repo, record.worktree)
                 {
-                    worktree::remove(repo, worktree, record.view.branch.as_deref());
+                    let branch = record.view.branch;
+                    // Shells out to git; keep it off the runtime.
+                    let _ = tokio::task::spawn_blocking(move || {
+                        worktree::remove(&repo, &worktree, branch.as_deref());
+                    })
+                    .await;
                 }
                 return Err(error.into());
             }
@@ -1230,7 +1235,10 @@ impl Inner {
                 changes
             })
             .await
-            .unwrap_or_default();
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "the subagent worktree cleanup task failed");
+                Vec::new()
+            });
         }
         if state == SubagentState::Failed || state == SubagentState::BudgetExceeded {
             let records = self.records.lock().await;

@@ -1996,6 +1996,7 @@ fn branch_delete_failure(branch: &str, why: &str) -> String {
 fn worktree_remove(repo: &Path, path: &Path, force: bool) -> Result<(), String> {
     let mut args: Vec<&OsStr> = git::SAFETY_CONFIG
         .into_iter()
+        .chain(git::mode_config(path).iter().copied())
         .chain([
             "-c",
             "status.showUntrackedFiles=all",
