@@ -3,4 +3,4 @@
 /**
  * A supported forge implementation.
  */
-export type ForgeKind = "github" | "gitlab" | "gitea" | "forgejo";
+export type ForgeKind = "github" | "gitlab" | "gitea" | "forgejo" | "bitbucket" | "azure_devops";

@@ -1,0 +1,63 @@
+{
+  "size": 2,
+  "page": 1,
+  "pagelen": 100,
+  "values": [
+    {
+      "type": "commit",
+      "hash": "aaaa1111bbbb2222cccc3333dddd4444eeee5555",
+      "message": "Fix the panic\n\nReproduces the panic on empty input.",
+      "summary": {
+        "type": "rendered",
+        "raw": "Fix the panic",
+        "markup": "markdown",
+        "html": "<p>Fix the panic</p>"
+      },
+      "author": {
+        "type": "author",
+        "raw": "Alice Example <alice@example.test>",
+        "user": {
+          "type": "user",
+          "display_name": "Alice Example",
+          "nickname": "alice",
+          "uuid": "{alice-uuid}",
+          "account_id": "557058:alice"
+        }
+      },
+      "date": "2024-05-01T11:00:00+00:00",
+      "links": {
+        "html": {
+          "href": "https://bitbucket.org/acme/widget/commits/aaaa1111bbbb2222cccc3333dddd4444eeee5555"
+        }
+      }
+    },
+    {
+      "type": "commit",
+      "hash": "cccc1111dddd2222eeee3333ffff4444aaaa5555",
+      "message": "Add a test",
+      "summary": {
+        "type": "rendered",
+        "raw": "Add a test",
+        "markup": "markdown",
+        "html": "<p>Add a test</p>"
+      },
+      "author": {
+        "type": "author",
+        "raw": "Alice Example <alice@example.test>",
+        "user": {
+          "type": "user",
+          "display_name": "Alice Example",
+          "nickname": "alice",
+          "uuid": "{alice-uuid}",
+          "account_id": "557058:alice"
+        }
+      },
+      "date": "2024-05-01T11:30:00+00:00",
+      "links": {
+        "html": {
+          "href": "https://bitbucket.org/acme/widget/commits/cccc1111dddd2222eeee3333ffff4444aaaa5555"
+        }
+      }
+    }
+  ]
+}
