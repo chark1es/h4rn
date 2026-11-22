@@ -51,6 +51,14 @@ model: string,
  */
 tab: ThreadTab, 
 /**
+ * Whether the current tab is where the person just placed the thread.
+ *
+ * A manual move is a placement, not a lifecycle transition: the client
+ * that moved it is not "finishing" a turn, and every other client sees
+ * the same summary. Notifiers stay quiet for a transition this names.
+ */
+placed_by_user: boolean, 
+/**
  * A hand-set Working pin (cleared when the next turn starts).
  */
 pinned: boolean, 

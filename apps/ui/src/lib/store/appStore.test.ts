@@ -38,6 +38,7 @@ function threadSummary(input: { threadId: string; host: string }): ThreadSummary
     workspace_path: "~/code",
     model: "claude-sonnet-4-5",
     tab: "working",
+    placed_by_user: false,
     pinned: false,
     snoozed_until: null,
     last_activity: "2026-01-01T00:00:00.000Z",

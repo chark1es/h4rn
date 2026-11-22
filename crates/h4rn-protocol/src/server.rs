@@ -545,6 +545,18 @@ pub enum ResponseBody {
         /// The listing.
         listing: crate::projects::DirectoryListing,
     },
+    /// A subscription was accepted and the replay it asked for is finished.
+    ///
+    /// Every journal event at or below `replay_through` was either sent as
+    /// replay or was already at or below the client's `since_seq`; anything
+    /// above it is live. A client uses this boundary instead of guessing from
+    /// arrival order, because events can arrive between `Hello` and this
+    /// answer while still being brand new.
+    Subscribed {
+        /// Journal head at the moment the subscription was served.
+        #[ts(type = "number")]
+        replay_through: u64,
+    },
     /// A request with no payload completed successfully.
     Ack,
 }
