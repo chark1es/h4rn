@@ -970,6 +970,14 @@ function PrDetail({
     });
   }, [repo, number]);
 
+  const retryPage = () => {
+    setDetailNonce((value) => value + 1);
+    setCommentsNonce((value) => value + 1);
+    setChecksNonce((value) => value + 1);
+    setCommitsNonce((value) => value + 1);
+    setDiffNonce((value) => value + 1);
+  };
+
   const rerunFailed = async () => {
     if (rerunBusy) return;
     setRerunBusy(true);
@@ -1202,11 +1210,7 @@ function PrDetail({
                 <button type="button" className="q-btn secondary" onClick={onBack}>
                   Back to list
                 </button>
-                <button
-                  type="button"
-                  className="q-btn secondary"
-                  onClick={() => setDetailNonce((value) => value + 1)}
-                >
+                <button type="button" className="q-btn secondary" onClick={retryPage}>
                   Retry
                 </button>
               </div>
