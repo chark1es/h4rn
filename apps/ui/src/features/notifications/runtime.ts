@@ -9,7 +9,7 @@
 
 import { getRemoteState, remoteStore } from "@/features/remote/remoteStore";
 import { currentConnectClient } from "@/features/remote/session";
-import type { Event, MachineSummary, ThreadId, ThreadSummary } from "@/gen";
+import type { MachineSummary, ThreadId, ThreadSummary } from "@/gen";
 import type { EventEnvelope } from "@/lib/client/types";
 import { getState, onAppEvent, openThread, store } from "@/lib/store/appStore";
 
@@ -29,20 +29,17 @@ import {
   finishedTransition,
   type HostState,
   hostPresence,
-  type LastTurn,
   type NotificationDraft,
   type NotificationKind,
   type NotificationQueue,
   nextDeadline,
   offlineTransitions,
 } from "./logic";
+import { NotificationMemory } from "./memory";
 import { getNotificationSettings, type NotificationSettings } from "./settings";
 
 /** How often connect's machine list is re-read for host presence. */
 const HOST_POLL_MS = 30_000;
-
-/** How long an error remains the explanation for a failed turn. */
-const ERROR_MEMORY_MS = 2 * 60_000;
 
 let started = false;
 let channel: NotificationChannel | null = null;
@@ -59,10 +56,7 @@ const summaries = new Map<
   Pick<ThreadSummary, "tab" | "needs_attention" | "agent_state">
 >();
 /** What each thread's most recent turn did, until the next turn starts. */
-const lastTurns = new Map<ThreadId, LastTurn>();
-/** Threads whose current turn's failure was already announced. */
-const announcedFailures = new Set<ThreadId>();
-const recentErrors = new Map<ThreadId, { message: string; at: number }>();
+const memory = new NotificationMemory();
 
 function focusSnapshot(): FocusSnapshot {
   const state = getState();
@@ -138,43 +132,18 @@ function queueDraft(draft: NotificationDraft | null): void {
   schedule();
 }
 
-function rememberError(event: Extract<Event, { type: "error" }>): void {
-  if (!event.thread_id) return;
-  recentErrors.set(event.thread_id, { message: event.message, at: Date.now() });
-}
-
-function lastErrorFor(threadId: ThreadId): string | null {
-  const remembered = recentErrors.get(threadId);
-  if (!remembered) return null;
-  if (Date.now() - remembered.at > ERROR_MEMORY_MS) {
-    recentErrors.delete(threadId);
-    return null;
-  }
-  return remembered.message;
-}
-
-function startTurn(threadId: ThreadId): void {
-  // A new attempt is not explained by the previous attempt's failure.
-  recentErrors.delete(threadId);
-  lastTurns.delete(threadId);
-  announcedFailures.delete(threadId);
-}
-
-function completeTurn(event: Extract<Event, { type: "turn_completed" }>): void {
-  lastTurns.set(event.thread_id, {
-    status: event.status,
-    error: lastErrorFor(event.thread_id),
-  });
-}
-
 function handleEnvelope(envelope: EventEnvelope): void {
   const { event } = envelope;
 
   // Memory is kept even for replayed history: the notifier still has to
   // explain a Done transition that only finished arriving after a reconnect.
-  if (event.type === "error") rememberError(event);
-  if (event.type === "turn_started") startTurn(event.thread_id);
-  if (event.type === "turn_completed") completeTurn(event);
+  if (event.type === "error") {
+    memory.rememberError(event.thread_id, event.message, Date.now());
+  }
+  if (event.type === "turn_started") memory.startTurn(event.thread_id);
+  if (event.type === "turn_completed") {
+    memory.completeTurn(event.thread_id, event.status, Date.now());
+  }
 
   if (event.type === "thread_upserted") {
     const previous = summaries.get(event.thread_id);
@@ -188,11 +157,11 @@ function handleEnvelope(envelope: EventEnvelope): void {
     const draft = finishedDraft(previous, event, {
       settings: getNotificationSettings(),
       focus: focusSnapshot(),
-      lastTurn: lastTurns.get(event.thread_id) ?? null,
-      announcedFailure: announcedFailures.has(event.thread_id),
+      lastTurn: memory.lastTurn(event.thread_id),
+      announcedFailure: memory.failureAnnounced(event.thread_id),
     });
     queueDraft(draft);
-    if (transition === "failure" && draft !== null) announcedFailures.add(event.thread_id);
+    if (transition === "failure" && draft !== null) memory.announceFailure(event.thread_id);
     return;
   }
 
