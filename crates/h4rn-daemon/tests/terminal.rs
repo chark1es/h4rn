@@ -16,7 +16,7 @@ use h4rn_daemon::server::Outbound;
 use h4rn_daemon::terminal::{OpenSpec, TerminalManager, TracingAudit, run_viewer};
 use h4rn_protocol::{
     BINARY_HEADER_LEN, BinaryFrame, BinaryKind, ClientFrame, ClientRequest, DeviceId, DeviceInfo,
-    HostId, ResponseBody, ServerFrame, TerminalId, TerminalInfo,
+    HostId, PTY_INPUT_REPLY, ResponseBody, ServerFrame, TerminalId, TerminalInfo,
 };
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
@@ -135,10 +135,14 @@ impl Client {
     }
 
     async fn send_input(&mut self, stream_id: u32, data: &[u8]) {
+        self.send_input_frame(stream_id, 0, data).await;
+    }
+
+    async fn send_input_frame(&mut self, stream_id: u32, seq: u64, data: &[u8]) {
         let frame = BinaryFrame {
             kind: BinaryKind::PtyInput,
             stream_id,
-            seq: 0,
+            seq,
             payload: data.to_vec(),
         };
         self.ws
@@ -593,6 +597,66 @@ async fn pty_input_needs_hello_and_an_attached_viewer() {
     daemon.stop().await;
 }
 
+/// Two viewers' marked replies carry `PTY_INPUT_REPLY` in the binary frame's
+/// flag word. Only the owner's answer is written to the PTY; typed input is
+/// always written.
+#[tokio::test]
+async fn only_one_marked_reply_reaches_the_pty() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let work = tempfile::tempdir().unwrap();
+    let cwd = work.path().to_string_lossy().to_string();
+
+    let mut first = Client::connect(&daemon).await;
+    first.hello().await;
+    let terminal = first
+        .open(
+            host,
+            &cwd,
+            Some("/bin/sh"),
+            vec!["-c".into(), "stty raw -echo; exec cat".into()],
+            80,
+            24,
+        )
+        .await;
+    first.attach(&terminal.terminal_id, 80, 24).await;
+
+    let mut second = Client::connect(&daemon).await;
+    second.hello().await;
+    second.attach(&terminal.terminal_id, 80, 24).await;
+
+    // Let the shell switch the PTY to raw, echo-free mode before writing.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // A mode report both viewers' xterm would answer identically.
+    let mode_reply: &[u8] = b"\x1b[?12;2$y";
+    let written = "\u{1b}[?12;2$y";
+    first
+        .send_input_frame(terminal.stream_id, PTY_INPUT_REPLY, mode_reply)
+        .await;
+    second
+        .send_input_frame(terminal.stream_id, PTY_INPUT_REPLY, mode_reply)
+        .await;
+    second
+        .send_input_frame(terminal.stream_id, 0, b"iHELLO")
+        .await;
+
+    let output = second.output_until("iHELLO").await;
+    assert_eq!(
+        output.matches(written).count(),
+        1,
+        "two viewers' replies must reach the shell once: {output:?}"
+    );
+
+    first
+        .request(ClientRequest::TerminalClose {
+            terminal_id: terminal.terminal_id,
+        })
+        .await
+        .expect("close terminal");
+    daemon.stop().await;
+}
+
 /// Reads one viewer's output until `done` accepts it, acknowledging chunks.
 async fn read_until(
     rx: &mut mpsc::Receiver<Outbound>,
@@ -771,14 +835,14 @@ async fn closing_a_terminal_ends_background_jobs() {
         }
     }
 
-    async fn wait_until_gone(pid: i32) {
+    async fn wait_until_gone(what: &str, pid: i32) {
         for _ in 0..250 {
             if !process_running(pid) {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        panic!("pid {pid} still runs after the terminal closed");
+        panic!("{what} (pid {pid}) still runs after the terminal closed");
     }
 
     let daemon = boot().await;
@@ -802,6 +866,13 @@ async fn closing_a_terminal_ends_background_jobs() {
     client.attach(&terminal.terminal_id, 80, 24).await;
     // Let the prompt settle before typing.
     tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Keep the shell alive through SIGTERM. Otherwise the TERM-first order
+    // would kill it before it could forward SIGHUP, and the fixtures below
+    // could not tell the two orders apart.
+    client
+        .send_input(terminal.stream_id, b"trap '' TERM\n")
+        .await;
 
     // `set -m` gives the job its own process group, the case a group-only
     // signal misses; the shell's SIGHUP forwarding reaches it anyway.
@@ -841,6 +912,27 @@ async fn closing_a_terminal_ends_background_jobs() {
         None
     };
 
+    // A job that only dies when the shell forwards SIGHUP before SIGTERM.
+    // `set +m` leaves it in the shell's process group, so the TERM-first order
+    // reaches it first; that trap then ignores HUP and moves the job into a new
+    // session, which the group-wide KILL also misses. With HUP first the job
+    // exits at once, before TERM can run the trap.
+    let hup_first = if has_setsid {
+        client.send_input(terminal.stream_id, b"set +m\n").await;
+        client
+            .send_input(
+                terminal.stream_id,
+                b"( trap 'trap \"\" HUP; exec setsid sleep 1000' TERM; trap 'exit 0' HUP; while :; do sleep 0.05; done ) & echo $! > hup-first.pid\n",
+            )
+            .await;
+        let pid = read_pid(&cwd_path.join("hup-first.pid")).await;
+        // Give the loop a moment to install its traps.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        Some(pid)
+    } else {
+        None
+    };
+
     client
         .request(ClientRequest::TerminalClose {
             terminal_id: terminal.terminal_id,
@@ -848,7 +940,10 @@ async fn closing_a_terminal_ends_background_jobs() {
         .await
         .expect("close terminal");
 
-    wait_until_gone(bg).await;
+    wait_until_gone("the background job", bg).await;
+    if let Some(pid) = hup_first {
+        wait_until_gone("the HUP-before-TERM job", pid).await;
+    }
     for survivor in [Some(nohup_job), detached].into_iter().flatten() {
         assert!(
             process_running(survivor),
@@ -857,7 +952,7 @@ async fn closing_a_terminal_ends_background_jobs() {
         let _ = std::process::Command::new("kill")
             .args(["-9", &survivor.to_string()])
             .status();
-        wait_until_gone(survivor).await;
+        wait_until_gone("a detached job", survivor).await;
     }
     daemon.stop().await;
 }

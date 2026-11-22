@@ -383,6 +383,9 @@ export class H4rnClient {
     this.clearReconnect();
     this.stopped = false;
     this.fatal = false;
+    // `stop()` removed the wake listeners; a manual Reconnect starts a live
+    // client again, so put them back (installing twice is a no-op).
+    this.installWakeListeners();
     this.attempt = 0;
     this.setSnapshot({ status: "connecting", attempt: 0, error: null });
     if (this.socketOpen) {

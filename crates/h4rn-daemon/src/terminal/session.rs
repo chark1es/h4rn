@@ -489,8 +489,10 @@ impl Session {
     /// input. Viewers share one PTY, so only the reply owner's answer is
     /// written; a marked reply from any other viewer is dropped. Ownership is
     /// claimed by the first marked reply and lasts until that viewer detaches.
-    /// Membership and ownership are decided under the same lock, so a viewer
-    /// that detaches cannot answer afterwards.
+    /// Membership and ownership are decided under one lock, but the lock is
+    /// released before the PTY write: a reply is accepted when the viewer is
+    /// the owner at that check, even if the viewer detaches while the write is
+    /// in flight.
     pub fn write_viewer_input(
         &self,
         viewer_id: ViewerId,
@@ -527,27 +529,6 @@ impl Session {
     /// Whether the child is still running.
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::SeqCst)
-    }
-
-    /// Hangs up the shell, then terminates its process group and the child.
-    ///
-    /// An interactive shell forwards SIGHUP to its jobs and skips `nohup`'d
-    /// and `disown`'d ones. Only the shell is signalled here: with job control
-    /// each background job has its own process group, and signalling them
-    /// directly would also reach jobs the user detached on purpose. Afterwards
-    /// TERM and KILL clean up the shell's group.
-    pub fn kill(&self) {
-        if let Some(pgid) = self.process_group {
-            signal_shell(pgid);
-            signal_group(pgid, Signal::Term);
-        }
-        {
-            let mut child = lock(&self.child);
-            let _ = child.kill();
-        }
-        if let Some(pgid) = self.process_group {
-            signal_group(pgid, Signal::Kill);
-        }
     }
 
     /// Hangs up, waits, then terminates with a short grace period so shells

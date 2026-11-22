@@ -396,7 +396,12 @@ export class TerminalController {
 
     if (frame.kind === BinaryKind.PtyOutput) {
       if (frame.seq <= this.tracker.position) return;
+      // Queries in this chunk are only answerable while it is being parsed:
+      // once xterm is done, anything it did not answer has missed its chance
+      // and a later answer-shaped paste must stay input.
+      const mark = this.queryTracker.mark();
       term.write(frame.payload, () => {
+        this.queryTracker.settle(mark);
         this.tracker?.applied(frame.seq);
         this.scheduleAck();
       });

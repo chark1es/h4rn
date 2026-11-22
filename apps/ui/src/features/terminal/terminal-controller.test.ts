@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type BinaryFrame, decodeBinaryFrame } from "@/lib/client/binary";
+import {
+  type BinaryFrame,
+  BinaryKind,
+  decodeBinaryFrame,
+  encodeBinaryFrame,
+} from "@/lib/client/binary";
 import type { H4rnClient } from "@/lib/client/client";
 
 /**
@@ -49,10 +54,20 @@ const fakes = vi.hoisted(() => {
       return { dispose: () => undefined };
     }
     attachCustomKeyEventHandler(): void {}
-    write(): void {}
+    private writeCallback: (() => void) | null = null;
+    write(_data: string | Uint8Array, callback?: () => void): void {
+      this.writeCallback = callback ?? null;
+    }
     focus(): void {}
     reset(): void {}
     dispose(): void {}
+
+    /** Acts like xterm finishing the last chunk it was given. */
+    finishWrite() {
+      const callback = this.writeCallback;
+      this.writeCallback = null;
+      callback?.();
+    }
 
     /** Acts like the program sending a query. */
     query(id: { final: string; prefix?: string; intermediates?: string }, params: unknown[] = []) {
@@ -90,7 +105,9 @@ const TERMINAL_INFO = {
   exit: null,
 };
 
-function fakeClient(sent: BinaryFrame[]) {
+type BinarySink = { handler: ((data: ArrayBuffer) => void) | null };
+
+function fakeClient(sent: BinaryFrame[], binary: BinarySink) {
   return {
     getSnapshot: () => ({ status: "online" }),
     request: async (body: { type: string }) => {
@@ -107,7 +124,10 @@ function fakeClient(sent: BinaryFrame[]) {
       }
       return { type: "ack" };
     },
-    onBinary: () => () => undefined,
+    onBinary: (handler: (data: ArrayBuffer) => void) => {
+      binary.handler = handler;
+      return () => undefined;
+    },
     onTerminalEvent: () => () => undefined,
     sendBinary: (bytes: Uint8Array) => {
       const frame = decodeBinaryFrame(bytes);
@@ -118,8 +138,9 @@ function fakeClient(sent: BinaryFrame[]) {
 
 async function startController(sent: BinaryFrame[]) {
   const controller = new TerminalController();
+  const binary: BinarySink = { handler: null };
   await controller.start({
-    client: fakeClient(sent),
+    client: fakeClient(sent, binary),
     threadId: null,
     host: "host_test",
     cwd: "/tmp",
@@ -127,10 +148,22 @@ async function startController(sent: BinaryFrame[]) {
   });
   const term = fakes.FakeTerminal.last;
   if (!term) throw new Error("xterm was not created");
-  return { controller, term };
+  return { controller, term, binary };
 }
 
 const payload = (frame: BinaryFrame) => new TextDecoder().decode(frame.payload);
+
+/** Delivers one PTY output chunk the way the client does. */
+function pushOutput(binary: BinarySink, seq: number, text: string): void {
+  const bytes = encodeBinaryFrame({
+    kind: BinaryKind.PtyOutput,
+    streamId: TERMINAL_INFO.stream_id,
+    seq,
+    payload: new TextEncoder().encode(text),
+  });
+  const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  binary.handler?.(buffer as ArrayBuffer);
+}
 
 describe("terminal controller query replies", () => {
   beforeEach(() => {
@@ -199,6 +232,31 @@ describe("terminal controller query replies", () => {
     term.input("\x1b[?12;2$y");
 
     expect(sent.map((frame) => frame.seq)).toEqual([1, 1]);
+    controller.dispose();
+  });
+
+  it("stops expecting a reply once the chunk that asked has been parsed", async () => {
+    const sent: BinaryFrame[] = [];
+    const { controller, term, binary } = await startController(sent);
+
+    // The program asks for the window size; this xterm leaves it unanswered.
+    pushOutput(binary, 1, "\x1b[18t");
+    // The hook ran while xterm parsed the chunk, then xterm finished it.
+    expect(term.query({ final: "t" }, [18])).toBe(false);
+    term.finishWrite();
+
+    // A pasted window report is now input, not an answer.
+    term.input("\x1b[8;24;80t");
+    expect(sent.map((frame) => [frame.seq, payload(frame)])).toEqual([[0, "\x1b[8;24;80t"]]);
+
+    // An answer that arrives while its own chunk is still being parsed is
+    // still marked, and the chunk's end does not double-count it.
+    pushOutput(binary, 2, "\x1b[18t");
+    expect(term.query({ final: "t" }, [18])).toBe(false);
+    term.input("\x1b[8;24;80t");
+    term.finishWrite();
+    expect(sent.map((frame) => frame.seq)).toEqual([0, 1]);
+
     controller.dispose();
   });
 });

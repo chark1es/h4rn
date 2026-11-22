@@ -60,20 +60,48 @@ export type TerminalQueryParser = {
 /** How many unanswered queries to remember before forgetting the oldest. */
 const MAX_PENDING = 32;
 
+type Expectation = {
+  /** Monotonic position, so a finished chunk can settle only its own queries. */
+  mark: number;
+  pattern: RegExp;
+};
+
 /**
  * Notes the answer shapes xterm owes the program since the last chunk.
  *
  * Matching is by shape rather than a bare count, because one query may go
  * unanswered (xterm only reports window size when the option is enabled) and
- * a stale counter must not swallow a later keystroke.
+ * a stale counter must not swallow a later keystroke. Expectations also
+ * expire with the output chunk that asked the question: a query xterm chose
+ * not to answer must not make a later paste look like a reply.
  */
 export class TerminalQueryTracker {
-  private readonly expected: RegExp[] = [];
+  private readonly expected: Expectation[] = [];
+  private nextMark = 0;
 
   /** Records that xterm is about to send one `pattern`-shaped answer. */
   expect(pattern: RegExp): void {
-    this.expected.push(pattern);
+    this.expected.push({ mark: ++this.nextMark, pattern });
     if (this.expected.length > MAX_PENDING) this.expected.shift();
+  }
+
+  /** The position to settle from once xterm finishes the chunk being written. */
+  mark(): number {
+    return this.nextMark;
+  }
+
+  /**
+   * Forgets unanswered queries recorded since `mark`.
+   *
+   * Called when xterm has finished parsing an output chunk: any query in it
+   * that xterm did not answer stays unanswered, so an answer-shaped string
+   * pasted later is input. Later chunks are not affected.
+   */
+  settle(mark: number): void {
+    for (let index = this.expected.length - 1; index >= 0; index -= 1) {
+      const entry = this.expected[index];
+      if (entry && entry.mark > mark) this.expected.splice(index, 1);
+    }
   }
 
   /**
@@ -84,7 +112,7 @@ export class TerminalQueryTracker {
    */
   take(data: string): boolean {
     if (this.expected.length === 0) return false;
-    const index = this.expected.findIndex((pattern) => pattern.test(data));
+    const index = this.expected.findIndex((entry) => entry.pattern.test(data));
     if (index === -1) return false;
     this.expected.splice(index, 1);
     return true;
@@ -149,7 +177,7 @@ export function registerTerminalQueryHooks(
   // OSC 4;index;? queries any number of palette entries.
   disposables.push(
     parser.registerOscHandler(4, (data) => {
-      // One report per queried index, all in one data event each.
+      // One report per queried index, each arriving as its own data event.
       for (const part of data.split(";")) {
         if (part === "?") tracker.expect(INDEXED_COLOR);
       }
@@ -157,10 +185,14 @@ export function registerTerminalQueryHooks(
     }),
   );
   // OSC 10/11/12;? asks for the default foreground, background or cursor.
+  // One command may carry a chain of slots (`10;?;?;?`), and xterm reports
+  // every slot, so count them all.
   for (const resource of [10, 11, 12]) {
     disposables.push(
       parser.registerOscHandler(resource, (data) => {
-        if (data === "?") tracker.expect(SPECIAL_COLOR);
+        for (const part of data.split(";")) {
+          if (part === "?") tracker.expect(SPECIAL_COLOR);
+        }
         return false;
       }),
     );

@@ -2,9 +2,53 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { kindForEndpoint, normalizeSecureUrl } from "./secure";
+import { createSecureTransportFactory, kindForEndpoint, normalizeSecureUrl } from "./secure";
+
+const secrets = vi.hoisted(() => {
+  const store = new Map<string, string>();
+  return {
+    store,
+    getSecret: async (key: string) => store.get(key) ?? null,
+    peekSecret: (key: string) => store.get(key) ?? null,
+    setSecret: async (key: string, value: string) => {
+      store.set(key, value);
+    },
+    forgetSecret: (key: string) => {
+      store.delete(key);
+    },
+  };
+});
+
+vi.mock("@/lib/platform/secrets", () => ({
+  getSecret: secrets.getSecret,
+  peekSecret: secrets.peekSecret,
+  setSecret: secrets.setSecret,
+  forgetSecret: secrets.forgetSecret,
+}));
+
+vi.mock("@/lib/client/wasm", () => ({ loadTransportWasm: async () => undefined }));
+
+vi.mock("@/gen/transport-wasm/h4rn_transport_wasm", () => ({
+  connect: () => ({
+    status_json: () => "{}",
+    send: () => undefined,
+    tick: () => undefined,
+    path_open: () => undefined,
+    path_closed: () => undefined,
+    receive: () => undefined,
+    on_packet: () => undefined,
+    on_frame: () => undefined,
+    on_status: () => undefined,
+    on_ticket: () => undefined,
+    on_closed: () => undefined,
+    close: () => undefined,
+    free: () => undefined,
+  }),
+  generate_identity: () => "identity",
+  parse_pairing: () => "{}",
+}));
 
 const here = dirname(fileURLToPath(import.meta.url));
 /** apps/ui/src/lib/client -> repository root. */
@@ -62,5 +106,100 @@ describe("mobile cleartext policy", () => {
       bundle: { iOS: { infoPlist?: string } };
     };
     expect(tauri.bundle.iOS.infoPlist).toBe("Info.plist");
+  });
+});
+
+/** A socket that records the endpoint without ever opening. */
+class FakeSocket {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
+  static readonly opened: string[] = [];
+
+  readyState = FakeSocket.CONNECTING;
+  binaryType = "blob";
+  onopen: (() => void) | null = null;
+  onmessage: ((message: { data: unknown }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  onclose: ((event: { reason: string }) => void) | null = null;
+
+  constructor(readonly url: string) {
+    FakeSocket.opened.push(url);
+  }
+
+  send(): void {}
+  close(): void {
+    this.readyState = FakeSocket.CLOSED;
+  }
+}
+
+async function flush(): Promise<void> {
+  for (let index = 0; index < 50; index += 1) await Promise.resolve();
+}
+
+async function waitFor(condition: () => boolean): Promise<void> {
+  for (let index = 0; index < 200; index += 1) {
+    if (condition()) return;
+    await flush();
+  }
+  throw new Error("condition was never met");
+}
+
+describe("secure transport cancellation", () => {
+  it("does not open a socket from a config attempt a wake abandoned", async () => {
+    FakeSocket.opened.length = 0;
+    const previous = globalThis.WebSocket;
+    Object.defineProperty(globalThis, "WebSocket", {
+      value: FakeSocket,
+      configurable: true,
+      writable: true,
+    });
+    try {
+      const mints: Array<(url: string | null) => void> = [];
+      const factory = createSecureTransportFactory({
+        remote: {
+          daemonPublic: "aa".repeat(32),
+          paths: [{ kind: "relay", endpoint: "wss://relay.invalid/relay" }],
+          machineId: "machine",
+          sessionKey: "test.session",
+        },
+        mintRelayUrl: () =>
+          new Promise<string | null>((resolve) => {
+            mints.push(resolve);
+          }),
+      });
+      const context = { url: "ws://daemon.test:47800/secure", token: null, attempt: 0 };
+      const handlers = {
+        onOpen: () => undefined,
+        onMessage: () => undefined,
+        onClose: () => undefined,
+        onError: () => undefined,
+      };
+
+      const abandoned = factory(context);
+      abandoned.connect(handlers);
+      await waitFor(() => mints.length === 1);
+
+      // A browser wake replaces the transport while its config is still
+      // being resolved.
+      abandoned.close();
+      const replacement = factory(context);
+      replacement.connect(handlers);
+      await waitFor(() => mints.length === 2);
+
+      mints[0]?.("wss://relay.invalid/first");
+      mints[1]?.("wss://relay.invalid/second");
+      await flush();
+
+      expect(FakeSocket.opened).toEqual(["wss://relay.invalid/second"]);
+      replacement.close();
+    } finally {
+      Object.defineProperty(globalThis, "WebSocket", {
+        value: previous,
+        configurable: true,
+        writable: true,
+      });
+    }
   });
 });

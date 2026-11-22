@@ -472,6 +472,39 @@ describe("H4rnClient", () => {
     }
   });
 
+  it("reinstalls wake listeners when the user presses Reconnect", async () => {
+    vi.useFakeTimers();
+    const windowStub = new EventTarget();
+    Object.defineProperty(globalThis, "window", { value: windowStub, configurable: true });
+    try {
+      const { client, transports } = harness(() => new FakeTransport(), {
+        reconnect: { baseMs: 60_000, maxMs: 60_000, jitter: 0, maxAttempts: 4 },
+      });
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(client.getSnapshot().status).toBe("online");
+
+      // Stopping removes the listeners; Reconnect must bring them back.
+      client.stop();
+      client.reconnectNow();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(client.getSnapshot().status).toBe("online");
+      expect(transports.length).toBe(2);
+
+      transports[1]?.drop();
+      expect(client.getSnapshot()).toMatchObject({ status: "degraded", attempt: 1 });
+      // The 60 s backoff must not hold this retry back.
+      windowStub.dispatchEvent(new Event("online"));
+      await settle();
+      expect(transports.length).toBe(3);
+      client.stop();
+    } finally {
+      Reflect.deleteProperty(globalThis, "window");
+      vi.useRealTimers();
+    }
+  });
+
   it("ignores wake signals after a fatal close", async () => {
     const windowStub = new EventTarget();
     Object.defineProperty(globalThis, "window", { value: windowStub, configurable: true });
