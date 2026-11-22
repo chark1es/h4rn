@@ -37,6 +37,7 @@ import { useAttachmentDrafts, useAttachShortcut } from "@/features/attachments/u
 import { IdePane } from "@/features/ide/IdePane";
 import { McpApprovalCard } from "@/features/mcp/McpApprovalCard";
 import { ensureMcpEvents } from "@/features/mcp/store";
+import { PreviewPanel } from "@/features/preview/PreviewPanel";
 import { AddProjectDialog } from "@/features/projects/AddProjectDialog";
 import { shortPath, useProjects } from "@/features/projects/store";
 import {
@@ -569,6 +570,8 @@ export function AppShell() {
     ) : null;
   const ide = layout.view === "ide" && !isPhone && (isThread || route.kind === "ide");
   const thread = activeThread(threads, selectedThreadId);
+  const preview = useApp((state) => state.ui.preview);
+  const previewExpanded = useApp((state) => state.ui.previewExpanded);
   const viewportWidth = useViewportWidth();
   const showPanel =
     !isPhone &&
@@ -606,7 +609,22 @@ export function AppShell() {
     );
   }
 
-  const main = ide ? (
+  const expandedPreview =
+    !isPhone &&
+    previewExpanded &&
+    preview !== null &&
+    thread !== null &&
+    preview.threadId === thread.thread_id &&
+    (isThread || ide);
+
+  const main = expandedPreview ? (
+    <PreviewPanel
+      key={`${thread.thread_id}:${preview.path}`}
+      thread={thread}
+      path={preview.path}
+      variant="full"
+    />
+  ) : ide ? (
     <IdePane />
   ) : isThread ? (
     <ThreadPane threadId={route.threadId} />

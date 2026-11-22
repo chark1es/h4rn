@@ -82,6 +82,7 @@ export type * from "./FsDeleteResult";
 export type * from "./FsDiff";
 export type * from "./FsFileContent";
 export type * from "./FsListing";
+export type * from "./FsOmitted";
 export type * from "./FsSearchMatch";
 export type * from "./FsTurnChanges";
 export type * from "./FsTurnFile";

@@ -7,6 +7,37 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Preview HTML files in the right panel.** A report, chart or mockup the agent wrote can be
+  opened from the Files tab's new action on `.html`/`.htm` rows, or from a relative HTML link in
+  an agent message. The Preview tab reads the file through the daemon, inlines its relative CSS,
+  JS, images and fonts from inside the workspace, and renders it in a `sandbox="allow-scripts"`
+  iframe with a `default-src 'none'` CSP, so page scripts run without gaining access to h4rn, its
+  cookies or its storage. The desktop and mobile shells serve the prepared page from their own
+  `h4rn-preview` origin (a `srcdoc` frame would inherit the window's `script-src 'self'`); the
+  browser build keeps `srcdoc`. The prepared document starts with a trusted doctype and the policy,
+  so no malformed comment in the workspace file can put its markup ahead of the CSP. Limits are a
+  400 KiB text read for the page and its stylesheets and scripts (one secure-transport frame,
+  escaping included, so a smaller file that needs more than the frame once serialized is refused
+  as too large instead of closing the session), 360 KiB per binary asset and 10 MB for all embedded
+  copies. That frame bound applies to the secure transport, which closes a session on an oversized
+  frame; the plain loopback connection has no frame bound, so large listings and the editor's 2 MiB
+  reads are delivered whole there. The budget is charged for each copy as it is inserted, including
+  a file reached again through an imported stylesheet, and an insertion that would not fit is left
+  out and reported, so the page is never built past the cap; fetching stops once the budget is
+  spent. References cover styles, scripts, images, every `srcset` candidate (workspace candidates
+  inlined or removed, `data:` and `https:` ones kept), `<video>/<audio>/<track>`, `<source>`,
+  `<iframe>`, `<object>`, `<embed>`, SVG `href`/`xlink:href` and CSS `@import` of a workspace
+  stylesheet, which is inlined as CSS text. Links in the page ask in an inline bar before opening
+  in the system browser, and that bar freezes its URL until the user answers. It reloads when the
+  file or an asset changes on disk (the workspace watch is shared with the IDE and re-sent after a
+  reconnect), expands to full
+  width in the main area, and opens in the phone panel sheet. Files outside the workspace, over a
+  size limit, or not UTF-8 show a plain message instead, and the selected file is still watched so
+  recreating it reloads the preview. On an Android WebView without document-start script support,
+  where Wry's fallback would add script hashes to the CSP and silently block every page script, the
+  preview turns itself off with a plain message asking for an updated System WebView instead of
+  showing a page without its scripts. MCP Apps, a headless browser and dev-server proxying are not
+  part of this change.
 - **Bitbucket Cloud and Azure DevOps pull requests.** The forge layer now understands two more
   providers. Bitbucket Cloud takes an Atlassian API token (account email plus token, HTTP Basic) or
   a workspace, project or repository access token (Bearer); app passwords were retired in July 2026
@@ -71,6 +102,19 @@ All notable changes to h4rn are recorded here. The format follows
   explanation. Both startup rows are hidden in the browser and on mobile.
 - The mobile build does not send notifications yet, and Settings says so instead of offering
   switches that do nothing.
+- **The composer picks files with `@` and runs commands with `/`.** Typing `@` at a word boundary,
+  or pressing the `@` button, opens a caret-anchored list of the thread's workspace files; typing
+  filters it with a path-aware fuzzy match (`src/comp` finds `apps/ui/src/components/…`). The index
+  walks the daemon's existing directory listings, skips dependency and build folders, and reuses
+  one cached walk per host and workspace. `↑`/`↓` move, `↵` or `Tab` inserts, `Esc` closes and
+  leaves the typed text, and a click inserts too. The `@query` token becomes the workspace-relative
+  path plus a space, quoted when the path contains spaces (`@"src/with space.ts"`). Typing `/` as
+  the first character opens the actions h4rn already has for the thread — stop the turn, changes,
+  subagents, the terminal, the IDE and a new thread — and choosing one runs it and clears the
+  slash text. While a menu is open its arrows and accept keys do not fire prompt history or send;
+  IME composition never opens or drives it. On a phone the same list is a sheet above the keyboard.
+  Harness-native slash commands and skills are not listed: no harness publishes commands through
+  h4rn and h4rn defines no skill invocation of its own.
 - **Unsent composer text survives a reload, an app restart or Android killing the webview.** Every
   draft is stored under its own key for a host and thread, so one tab never erases another
   thread's draft; for the same thread the most recent edit wins. Writes happen after a short
@@ -115,6 +159,153 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **An oversized filesystem response no longer closes the paired session.** JSON escaping of
+  quotes, backslashes, newlines and control characters can push a 400 KiB text read past the
+  secure transport's 512 KiB frame, and the transport answers an oversized frame with
+  `FrameTooLarge` by closing the session. The daemon now measures the serialized response with
+  headroom and answers a text or base64 read with a typed `content_omitted: too_large` /
+  `bytes_omitted: too_large` and an honest hint, and the response path keeps a last guard so no
+  filesystem response can exceed one frame. Copy and docs say 400 KiB is a read bound rather than
+  a promise that every file under it opens, and the too-large message uses one unit (KiB) for the
+  file size and the limit.
+- **Workspace watches survive a connection restart.** Signing in, pairing, switching machines or
+  recovering from offline replaces the transport client, and the file watcher's held watches were
+  tied to the old client instance, so live reload stopped until a view was remounted. The counts
+  and owners now live outside the client, and every held watch is re-sent on the connection that
+  replaces it, after a transport reconnect and on a new client's first ready notice.
+- **The mobile shell's Rust tests are compiled on the host.** The Android and iOS CI jobs build
+  for their own targets, so the mobile crate's unit tests (the preview store and its origin) were
+  never compiled. The Linux job that already installs Tauri's WebKitGTK packages now runs
+  `cargo check --tests` for `apps/mobile/src-tauri`.
+- **A parked prompt survives a shutdown while the ledger cannot be read.** If the startup ledger
+  read failed after a parked prompt was restored, a shutdown used to settle that turn and erase the
+  saved prompt while the resume schedule stayed armed; the next launch then ran the policy's
+  "continue" instead of the person's message. The parked turn is now left alone until the schedule
+  is resolved.
+- **A resume retry no longer undoes a newer schedule.** A retry that reads the ledger can race a
+  newer limit that arms another schedule, and it used to write the older reset and schedule id back
+  onto the thread. The retry now keeps the newer pause (and the prompt it holds) and only fills in
+  details for the schedule the thread already names.
+- **A ledger that stays unreadable no longer rewrites the inbox every tick.** Retries now wait from
+  one second up to a minute, and only threads whose restored state actually changed are
+  re-published, instead of clearing every thread's cached summary on every tick.
+- **A prompt is no longer left waiting behind a resume the person cancelled.** If the startup
+  ledger read failed and its retry had already read a resume schedule when the person cancelled it,
+  the retry used to attach that cancelled schedule to the restored prompt; nothing could ever fire
+  it. The retry now re-reads that one schedule before attaching it, and releases the prompt to run
+  instead when it is gone.
+- **A system clock change no longer delays a resume retry.** Retry waits are measured on a
+  monotonic clock, so moving the clock backwards cannot stretch the wait past its cap.
+- **A resume check that cannot re-read one schedule is retried.** The startup pass could read the
+  schedule list and the limit history, fail on the per-schedule re-check that confirms a restored
+  row, and then never retry: the thread's pause stayed unnamed and a restored prompt could wait
+  forever. Any partial failure now leaves the resync unresolved, so the ticker runs the pass again
+  and the due schedule fires.
+- **A cancelled pause no longer releases a prompt it never held.** Cancelling an idle thread's
+  schedule after a retry had snapshotted it — or sending while an older pause is armed that does not
+  hold the pending turn — used to record a release and flip the thread to Thinking even though
+  nothing was parked. Now only a prompt that is really parked (a pending turn whose prompt is saved
+  on the thread row) is released; a stale pause is dropped without a release or a phase change, and
+  a cancel that already released the prompt is not released twice.
+- **Forge errors never repeat the account's own credential.** Every client now
+  redacts the configured token verbatim before an error leaves it or reaches a
+  log, including a token quoted in a JSON error body, a percent-encoded copy
+  from a URL and the Base64 Basic credential Azure DevOps can echo back. Every
+  copy goes, whichever hex case and whichever spelling: the plain value plus an
+  uppercase-escaped and a lowercase-escaped copy in one body all disappear.
+  Nested JSON error details are redacted as decoded strings before they are
+  serialized into the message, so a credential containing a quote cannot
+  survive as a JSON-escaped value, and the escaped spelling is matched as a
+  second layer. Object keys are redacted as well as values (a credential used
+  as a key cannot slip through a serialized `error` object), and a JSON body
+  with no `message`, `error`, `detail` or `errors` key is serialized from the
+  redacted decoded value instead of echoing the raw body, so no `\/` or
+  `\u00xx` spelling survives. Matching normalizes the text once and reads every
+  match offset from that normalised copy, so a body that echoes a credential
+  thousands of times is redacted in one linear pass. The configured secret is
+  removed before the pattern-based token pass, which stays as a second layer.
+- **Azure DevOps reply ids are parsed before they are used.** A reply's thread
+  id goes into the request URL and its comment id into the JSON body; both must
+  be positive 32-bit integers, and an invalid one returns `InvalidRequest`
+  without sending a request.
+- **A `DefaultCollection` Azure DevOps checkout finds its account in the UI.**
+  Account matching applies the daemon's alias rule
+  (`https://acme.visualstudio.com` equals
+  `https://acme.visualstudio.com/DefaultCollection`, host case, the segment's
+  letter case and trailing slashes ignored), so Open PR works whichever
+  spelling the remote uses.
+- **GitLab merge requests report their real line totals.** `get_pr` already
+  summed the `/changes` diffs; it now counts added and removed lines by their
+  first character inside a hunk (content that itself begins `+++` or `---`
+  counts) and marks the totals known so the UI and the agent handoff show
+  them. A truncated answer (`overflow: true`, or a change marked `collapsed` or
+  `too_large`) leaves them unknown instead of reporting a partial sum.
+- **Every pull-request tab recovers on its own.** The detail, comments, checks,
+  diff and commits load independently, and each tab has its own loading state
+  and Retry: a quiet “Loading…” fills the tab while its request is in flight
+  instead of a “did not load” or empty state, Retry re-runs only that tab's
+  request while the PR header, checks and the rest of the detail stay on
+  screen, and a live checks update clears a failed Checks load. A live update
+  also wins over a checks request that was already in flight: its late answer,
+  success or failure, describes an older snapshot and no longer replaces what
+  the daemon pushed. An error still stays inside its own tab.
+- **Azure DevOps missing collections are errors, not empty answers.** A 200
+  without `threads` or `changeEntries` is a parse error, while an explicit
+  empty list stays empty; a missing `changeEntries` leaves
+  `changed_files_known` false rather than reporting zero files.
+- **Azure DevOps links and diff totals are correct for unusual names and
+  content.** The browser-URL fallback percent-encodes the project and
+  repository segments (a repository named `release%20notes` no longer links to
+  `release notes`), and a file's totals count added or removed lines whose
+  content starts `+++` or `---` instead of mistaking them for file headers.
+- **A literal `%` in an Azure DevOps project or repository name works.** Azure
+  returns decoded names, so `release%20notes` is a name, not an escaped space.
+  Shared validation accepts it and every segment is percent-encoded before it
+  enters a request or browser URL (`%` becomes `%25`), while the checks that
+  keep a segment a single safe path step still reject separators and `.`/`..`.
+- **The composer's phone sheet stays inside the keyboard, and the panel sheet takes focus.** The
+  `@` sheet now ends at whichever comes first, the composer or the visible viewport's bottom, so no
+  row hides under an open keyboard when the composer itself sits below it. When less than the header
+  plus one row fits above, it covers the composer inside the visible viewport instead of collapsing
+  to nothing. Opening Changes or Subagents with `/` moves focus into the panel sheet, so typing no
+  longer edits the draft behind it. `@` no longer opens after a Unicode letter (`café@src`), and a
+  workspace with exactly 3,000 files is a complete index, not a truncated one.
+- **The composer's menus trust the caret and the query in front of them.** `↵` and `Tab` accept
+  only rows ranked for the text on screen, so pressing Enter inside the old 120 ms debounce cannot
+  insert the row for the previous query. The `@` button separates a new mention from the words on
+  both sides of the caret (`Review this part` → `Review @README.md this part`) and completion never
+  glues a path to the following word. A quoted mention no longer pairs its opening quote with one
+  on another line, so a finished `@"…"` on the next line stays inert. The popover anchors to the
+  actual selection (not the end of the token) and copies the textarea's computed styles under CSS
+  property names, so its mirror measures the caret correctly in Chromium. The file walk spends its
+  250-listing budget on failed folders too, limits each batch to what remains, and stops adding
+  files the moment the 3,000 cap is hit; the partial-index note sits beside the footer instead of
+  scrolling away with the list. On a phone the sheet is sized to the visible space above the
+  composer (visual viewport and keyboard included), keeping its header and Done on screen with an
+  expanded composer, and a `/` command that opens a dialog or sheet keeps focus there instead of
+  pulling it back into the textarea.
+- **The composer's `@` picker and `/` menu hold up on a phone and at the edges.** The phone file
+  sheet no longer inherits the shared bottom-sheet placement and covers the composer: it sits above
+  the input it belongs to. On a phone, `/` → Changes and Subagents open the phone panel sheet on the
+  matching segment instead of calling the desktop panel action, like the header button does. `@`
+  now opens after any non-identifier character (`(`, `[`, `{`, a quote, a comma), not only after
+  whitespace, and the `@` button inserts a separating space on either side of the caret, so the
+  menu no longer dies on the next keystroke. The caret popover measures itself and
+  clamps to the viewport, moving left and opening below the caret when there is no room above.
+  The file index now reports the caps it hit — a truncated listing, 3,000 files, 250 folders or
+  8 levels — and the menu says “Showing the first 3,000 files.” instead of a bare “No files match”.
+  Every option has an id, `↑`/`↓` scroll the highlighted row into view and the textarea names it
+  with `aria-activedescendant`.
+- **The composer's file list tells the truth when the workspace cannot be fully read.** A folder
+  that fails to list makes the index partial, so the quiet “Showing the first … files.” note beside
+  the footer appears instead of claiming no other file exists; if the workspace root itself fails,
+  the picker shows that error rather than “No files in …”. The phone `/` menu no longer offers
+  “Open the IDE” (the phone shell has no IDE view to open), the phone sheet's Done button dismisses
+  it exactly like `Esc`, and `⇧↵` inserts a newline even while the `@` list is open. A quoted
+  mention (`@"path with space"`) is scanned as one token on one line: the picker keeps filtering
+  while its closing quote is missing, does nothing inside a finished mention, and completes it
+  without doubling or dropping the quotes. The caret popover also follows the caret line when the
+  textarea has scrolled.
 - **Large Azure DevOps pull requests load within the page deadline.** Azure needs file contents to
   build a diff, so a 30-file page could not finish inside the UI's ten-second budget once the
   account's local request allowance ran out. A diff page now holds at most eight files (eighteen
@@ -399,10 +590,10 @@ All notable changes to h4rn are recorded here. The format follows
   closed-completion wait now collects those limits and applies one after the wait, preferring the
   exit report's reset, and does not replace a schedule the turn already armed for that reset. The
   attempt counter keeps its first value and the jitter is no longer silently changed.
-- **Auto-resume round 3: a schedule is only fired, held and released by the record that owns it.**
-  A fire now checks that the thread's record names the schedule before it claims the attempt in the
-  ledger, and the daemon resyncs that record before it starts the ticker, so a restarted daemon
-  cannot consume a due attempt it never knew about. A delayed report from an older session
+- **A paused resume is only fired, held and released by the record that owns it.** A fire now checks
+  that the thread's record names the schedule before it claims the attempt in the ledger, and the
+  daemon resyncs that record before it starts the ticker, so a restarted daemon cannot consume a due
+  attempt it never knew about. A delayed report from an older session
   generation no longer overwrites a newer turn's applied-reset marker (the marker is only written by
   the generation that owns the turn), so that turn's own completion cannot re-arm a pause the person
   cancelled. The failed-write retry decides whether a pause holds it with the same
@@ -412,7 +603,7 @@ All notable changes to h4rn are recorded here. The format follows
   Finally, a parked prompt whose ledger schedule did not survive a restart is released exactly as a
   cancel releases it — recorded as `LimitResumeReleased` with the limit cleared — instead of running
   while the thread still claims to be rate limited.
-- **Auto-resume round 4: shutdown, restart and firing keep the parked prompt and its own turn.** A
+- **Shutdown, restart and firing keep the parked prompt and its own turn.** A
   graceful daemon shutdown now leaves a prompt parked behind an armed schedule exactly as it is, so
   reopening restores the dispatch and the schedule delivers the person's message instead of the
   policy's "continue". The restart resync restores schedule ids from the ledger even when the limit

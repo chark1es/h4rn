@@ -169,6 +169,12 @@ pub struct MeterStore {
     /// startup resync restores schedule ids without the limit history and
     /// retries the read on a later tick.
     fail_limit_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Test-only: makes the next N `schedules` reads fail, so a test can prove
+    /// a daemon that stops before the startup retry keeps the parked prompt.
+    fail_schedule_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Test-only: makes the next N `schedule` re-reads fail, so a test can
+    /// prove a retry that cannot confirm one restored row is retried again.
+    fail_schedule_queries: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     /// Test-only: how many `limits` reads were attempted, so a test can prove
     /// the retry actually ran.
     limit_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
@@ -207,6 +213,8 @@ impl MeterStore {
             pool,
             fail_schedule_finish: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             fail_limit_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            fail_schedule_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            fail_schedule_queries: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             limit_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         store.ensure_schema().await?;
@@ -242,6 +250,30 @@ impl MeterStore {
     #[doc(hidden)]
     pub fn limit_reads_for_tests(&self) -> usize {
         self.limit_reads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Makes the next `count` [`Self::schedules`] reads fail.
+    ///
+    /// Test hook: a startup resync that cannot read the ledger leaves the
+    /// restored pause unresolved, and a shutdown in that window must not
+    /// settle the prompt the ledger will still fire for. Nothing in production
+    /// calls this.
+    #[doc(hidden)]
+    pub fn fail_next_schedule_reads_for_tests(&self, count: usize) {
+        self.fail_schedule_reads
+            .store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Makes the next `count` [`Self::schedule`] re-reads fail.
+    ///
+    /// Test hook: a resync that read the schedule list and the limit history
+    /// but cannot confirm one restored row has not attached that row's pause,
+    /// so the ticker must retry the whole pass. Nothing in production calls
+    /// this.
+    #[doc(hidden)]
+    pub fn fail_next_schedule_queries_for_tests(&self, count: usize) {
+        self.fail_schedule_queries
+            .store(count, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Adds a column to an existing database created before it existed.
@@ -695,10 +727,46 @@ impl MeterStore {
 
     /// Every schedule, soonest first.
     pub async fn schedules(&self) -> Result<Vec<ResumeSchedule>, StoreError> {
+        if self
+            .fail_schedule_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+        {
+            self.fail_schedule_reads
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            return Err(StoreError::Data(
+                "injected schedule read failure".to_owned(),
+            ));
+        }
         let rows = sqlx::query("SELECT * FROM meter_schedules ORDER BY resume_at ASC")
             .fetch_all(&self.pool)
             .await?;
         rows.iter().map(schedule_from_sql).collect()
+    }
+
+    /// One schedule by its ledger id, if the row still exists.
+    ///
+    /// The startup resync re-checks a schedule it snapshotted before taking a
+    /// record lock: the person can cancel it in that window, and binding a
+    /// cancelled row to a restored prompt would leave the prompt waiting for a
+    /// fire that can never happen.
+    pub async fn schedule(&self, schedule_id: &str) -> Result<Option<ResumeSchedule>, StoreError> {
+        if self
+            .fail_schedule_queries
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+        {
+            self.fail_schedule_queries
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            return Err(StoreError::Data(
+                "injected schedule query failure".to_owned(),
+            ));
+        }
+        let row = sqlx::query("SELECT * FROM meter_schedules WHERE schedule_id = ?")
+            .bind(schedule_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref().map(schedule_from_sql).transpose()
     }
 
     /// Schedules due at `now`, soonest first.

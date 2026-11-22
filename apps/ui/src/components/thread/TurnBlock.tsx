@@ -32,7 +32,7 @@ import { ToolCard } from "./ToolCard";
 
 function AssistantMessage({ item, streaming }: { item: MessageItem; streaming: boolean }) {
   const text = useSmoothText(item.text, streaming);
-  return <Markdown text={text} />;
+  return <Markdown text={text} interceptHtmlLinks />;
 }
 
 function UserMessage({ item, at }: { item: MessageItem; at: string }) {

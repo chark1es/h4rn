@@ -105,13 +105,20 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: apps/desktop/src-tauri
+          workspaces: |
+            apps/desktop/src-tauri
+            apps/mobile/src-tauri
       - run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - run: cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml
       - run: cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml
+      # The mobile shell's Rust (preview store, secret commands) keeps its unit
+      # tests out of reach of the Android and iOS jobs, which build for their
+      # own targets. This host-target check compiles them, and this job already
+      # installs the WebKitGTK/GTK development packages Tauri needs.
+      - run: cargo check --tests --manifest-path apps/mobile/src-tauri/Cargo.toml
 
   mobile-android:
     name: Android APKs build
