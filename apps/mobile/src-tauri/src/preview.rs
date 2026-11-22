@@ -139,7 +139,11 @@ pub struct PreviewCapabilities {
     /// The shell platform: `android`, `ios` or `desktop` (a host test build).
     pub platform: &'static str,
     /// Whether the WebView runs the shell's scripts at document start.
-    pub document_start_scripts: bool,
+    ///
+    /// `None` (JSON `null`) is "unknown": the shell could not read the WebView
+    /// version. The panel treats that as unsupported rather than assuming the
+    /// page's scripts will run.
+    pub document_start_scripts: Option<bool>,
 }
 
 #[cfg(target_os = "android")]
@@ -150,7 +154,11 @@ const PLATFORM: &str = "ios";
 const PLATFORM: &str = "desktop";
 
 /// Reports the preview's WebView capabilities before a page is framed.
-#[tauri::command]
+///
+/// `async` keeps the command off the main thread: on Android it asks the
+/// platform for the WebView version, which must never block the event loop
+/// while the panel waits for an answer.
+#[tauri::command(async)]
 pub fn preview_capabilities() -> PreviewCapabilities {
     PreviewCapabilities {
         platform: PLATFORM,
@@ -158,30 +166,49 @@ pub fn preview_capabilities() -> PreviewCapabilities {
     }
 }
 
+/// The WebView major version that first ships `DOCUMENT_START_SCRIPT`.
+///
+/// Source: androidx.webkit maps `WebViewFeature.DOCUMENT_START_SCRIPT` to
+/// WebView APK version 84 in `WebViewFeatureInternal`'s feature table, and
+/// Wry 0.57 calls `WebViewFeature.isFeatureSupported(...)` for it in
+/// `src/android/kotlin/RustWebView.kt` before registering a document-start
+/// script. Comparing the reported version avoids a JNI round trip to the
+/// feature check itself.
+///
+/// Only Android reads a version; the host tests exercise the parser too.
+#[cfg(any(test, target_os = "android"))]
+const DOCUMENT_START_WEBVIEW_MAJOR: u32 = 84;
+
+/// Whether a WebView version string supports document-start scripts.
+///
+/// `None` is "unknown" — no version at all, or one that does not start with a
+/// number. It is deliberately not a default of supported: Wry's fallback would
+/// add CSP hashes, every page script would silently stop, and the panel would
+/// have shown a broken page instead of a notice.
+#[cfg(any(test, target_os = "android"))]
+fn document_start_scripts_for_version(version: Option<&str>) -> Option<bool> {
+    let major = version?.trim().split('.').next()?.parse::<u32>().ok()?;
+    Some(major >= DOCUMENT_START_WEBVIEW_MAJOR)
+}
+
 /// Whether this WebView supports document-start scripts.
 ///
 /// Wry checks `WebViewFeature.DOCUMENT_START_SCRIPT` on Android and, when it
 /// is missing, injects the shell's initialization scripts into the HTML and
 /// adds their hashes to `script-src`; a policy with hashes ignores
-/// `'unsafe-inline'`, so the page's own scripts never run. That WebView
-/// feature arrived in WebView 84, which is what the reported runtime version
-/// is compared against here. The shell can answer before a frame is created,
-/// so the panel never has to infer an Android limitation from a missing
-/// bridge message on every platform.
+/// `'unsafe-inline'`, so the page's own scripts never run. The shell can answer
+/// before a frame is created, so the panel never has to infer an Android
+/// limitation from a missing bridge message on every platform.
 #[cfg(target_os = "android")]
-fn document_start_scripts_supported() -> bool {
-    const DOCUMENT_START_WEBVIEW_MAJOR: u32 = 84;
-    tauri::webview_version()
-        .ok()
-        .and_then(|version| version.split('.').next()?.parse::<u32>().ok())
-        .is_none_or(|major| major >= DOCUMENT_START_WEBVIEW_MAJOR)
+fn document_start_scripts_supported() -> Option<bool> {
+    document_start_scripts_for_version(tauri::webview_version().ok().as_deref())
 }
 
 /// iOS WebViews (and a host test build of this crate) inject scripts at
 /// document start.
 #[cfg(not(target_os = "android"))]
-fn document_start_scripts_supported() -> bool {
-    true
+fn document_start_scripts_supported() -> Option<bool> {
+    Some(true)
 }
 
 /// Stores one prepared document; answers with the URL to frame it.
@@ -249,10 +276,41 @@ mod tests {
     fn a_host_build_reports_desktop_webview_capabilities() {
         let capabilities = preview_capabilities();
         assert_eq!(capabilities.platform, "desktop");
-        assert!(capabilities.document_start_scripts);
+        assert_eq!(capabilities.document_start_scripts, Some(true));
         // The UI reads camelCase; a snake_case field would silently default.
         let json = serde_json::to_value(capabilities).expect("capabilities json");
         assert_eq!(json["documentStartScripts"], true);
+    }
+
+    #[test]
+    fn a_webview_version_below_the_baseline_is_unsupported() {
+        assert_eq!(
+            document_start_scripts_for_version(Some("83.0.4103.106")),
+            Some(false)
+        );
+        assert_eq!(
+            document_start_scripts_for_version(Some("84.0.0.0")),
+            Some(true)
+        );
+        assert_eq!(
+            document_start_scripts_for_version(Some(" 141.0.7390.70 ")),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn an_unreadable_webview_version_is_unknown_not_supported() {
+        assert_eq!(document_start_scripts_for_version(None), None);
+        assert_eq!(document_start_scripts_for_version(Some("")), None);
+        assert_eq!(document_start_scripts_for_version(Some("unknown")), None);
+        assert_eq!(document_start_scripts_for_version(Some(".84")), None);
+        // The report is explicit: null, never a default of supported.
+        let json = serde_json::to_value(PreviewCapabilities {
+            platform: "android",
+            document_start_scripts: None,
+        })
+        .expect("capabilities json");
+        assert!(json["documentStartScripts"].is_null());
     }
 
     #[test]

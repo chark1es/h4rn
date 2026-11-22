@@ -35,6 +35,23 @@ export function previewReadyTimeoutMs(documentBytes: number): number {
 }
 
 /**
+ * A Reload button inside a notice.
+ *
+ * A notice can be about the WebView itself, so its Reload asks the shell for
+ * the capabilities again (the panel's reload nonce) as well as re-reading the
+ * file; a WebView that was updated out from under the app clears the notice.
+ */
+function NoticeReload({ onReload }: { onReload: (() => void) | undefined }) {
+  if (!onReload) return null;
+  return (
+    <button type="button" className="q-btn secondary" style={{ height: 26 }} onClick={onReload}>
+      <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+      Reload
+    </button>
+  );
+}
+
+/**
  * The sandboxed page and the app's half of the link bridge.
  *
  * The page can forge anything inside the frame, including its token, so a
@@ -67,8 +84,12 @@ export function PreviewFrame({
   // document start. Without that feature Wry injects them into the HTML with
   // CSP hashes, so the page's bridge can never run; that is a fact about the
   // device, not something to infer from a missing message on every platform.
+  // A shell that could not tell (an error, or an unparseable WebView version)
+  // reports unknown, which counts as unsupported here: the page is not framed
+  // until a Reload gets a real answer.
   const cannotRunScripts =
     capabilities?.platform === "android" && capabilities.documentStartScripts === false;
+  const capabilityUnknown = capabilities?.documentStartScripts === "unknown";
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: a new document must dismiss an old confirmation
   useEffect(() => {
@@ -154,25 +175,17 @@ export function PreviewFrame({
             Its WebView blocks a sandboxed page’s own scripts, so the preview was turned off instead
             of showing the page without them. Update Android System WebView, then reload.
           </p>
+          <NoticeReload onReload={onReload} />
         </div>
-      ) : scriptsBlocked ? (
+      ) : capabilityUnknown || scriptsBlocked ? (
         <div className="q-sub-empty q-pv-state" role="alert">
           <p className="q-pv-state-t">Preview scripts didn’t start.</p>
           <p>
-            The page loaded, but the script that keeps its links safe never ran. Reload the preview;
-            a comment that is never closed, or a policy that blocks scripts, can cause this.
+            {capabilityUnknown
+              ? "The app couldn’t read this WebView’s capability report, so it can’t confirm the page’s scripts will run. Reload to check again."
+              : "The page loaded, but the script that keeps its links safe never ran. Reload the preview; a comment that is never closed, or a policy that blocks scripts, can cause this."}
           </p>
-          {onReload ? (
-            <button
-              type="button"
-              className="q-btn secondary"
-              style={{ height: 26 }}
-              onClick={onReload}
-            >
-              <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-              Reload
-            </button>
-          ) : null}
+          <NoticeReload onReload={onReload} />
         </div>
       ) : (
         <iframe
@@ -234,13 +247,18 @@ function ReloadButton({
 }
 
 /**
- * Asks the shell once per open preview what its WebView can do.
+ * Asks the shell what its WebView can do.
  *
  * A shell answers before the document is framed; the browser build answers
- * `null`, which leaves the ready-message check as the only signal there.
+ * `null`, which leaves the ready-message check as the only signal there. The
+ * `revision` is the preview's reload nonce: asking again on Reload lets an
+ * updated WebView clear a stale notice instead of leaving it up until the tab
+ * is closed.
  */
-function usePreviewCapabilities(enabled: boolean): PreviewCapabilities | null {
+function usePreviewCapabilities(enabled: boolean, revision: number): PreviewCapabilities | null {
   const [capabilities, setCapabilities] = useState<PreviewCapabilities | null>(null);
+  // `revision` is the reload trigger; it is intentionally not read here.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: revision refetches the report
   useEffect(() => {
     if (!enabled) return;
     let alive = true;
@@ -250,7 +268,7 @@ function usePreviewCapabilities(enabled: boolean): PreviewCapabilities | null {
     return () => {
       alive = false;
     };
-  }, [enabled]);
+  }, [enabled, revision]);
   return capabilities;
 }
 
@@ -269,8 +287,9 @@ export function PreviewPanel({
 }) {
   const preview = useHtmlPreview(thread, path);
   // Ask while the file is being read, so an Android WebView without
-  // document-start scripts is known before the frame is created.
-  const capabilities = usePreviewCapabilities(path !== null);
+  // document-start scripts is known before the frame is created; a Reload
+  // asks again, and the nonce keeps the two in step.
+  const capabilities = usePreviewCapabilities(path !== null, preview.revision);
   const name = path ? fileName(path) : null;
   const missing = preview.document?.missing.length ?? 0;
 

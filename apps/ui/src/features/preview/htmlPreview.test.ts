@@ -532,6 +532,55 @@ describe("HTML preview document", () => {
     expect(built.missing).toEqual(["logo.png"]);
   });
 
+  it("charges the backslashes that escaping a script body adds", () => {
+    const bytes = (text: string) => new TextEncoder().encode(text).length;
+    const text = `const end = "${"x".repeat(1000)}</script>";`;
+    const html = `<script src="app.js"></script>`;
+    // Exactly the page, the script text and its `<script></script>` wrapper,
+    // with no room for the backslash the `</script` escape adds.
+    const maxBytes =
+      bytes(html) +
+      bytes(text) +
+      bytes(injectCsp("")) +
+      bytes(previewBridge("t1")) +
+      bytes("<script></script>");
+    const built = buildPreviewDocument({
+      html,
+      docPath: "page.html",
+      assets: { "app.js": { kind: "text" as const, text } },
+      token: "t1",
+      maxBytes,
+    });
+    expect(bytes(built.srcdoc)).toBeLessThanOrEqual(maxBytes);
+    expect(built.srcdoc).not.toContain("const end");
+    expect(built.missing).toEqual(["app.js"]);
+  });
+
+  it("charges the backslashes that escaping a style body adds", () => {
+    const bytes = (text: string) => new TextEncoder().encode(text).length;
+    const css = `.x { content: "${"y".repeat(1000)}</style>" }`;
+    const html = `<link rel="stylesheet" href="style.css">`;
+    // The stylesheet text and its `<style></style>` wrapper fill the budget
+    // exactly; escaping its `</style` would add a byte, so the body cannot be
+    // kept and the link becomes an empty style element.
+    const maxBytes =
+      bytes(html) +
+      bytes(css) +
+      bytes("<style></style>") +
+      bytes(injectCsp("")) +
+      bytes(previewBridge("t1"));
+    const built = buildPreviewDocument({
+      html,
+      docPath: "page.html",
+      assets: { "style.css": { kind: "text" as const, text: css } },
+      token: "t1",
+      maxBytes,
+    });
+    expect(bytes(built.srcdoc)).toBeLessThanOrEqual(maxBytes);
+    expect(built.srcdoc).toContain("<style></style>");
+    expect(built.srcdoc).not.toContain("yyyy");
+  });
+
   it("names images and fonts by type, with a safe fallback", () => {
     expect(previewMimeType("a/b.PNG")).toBe("image/png");
     expect(previewMimeType("a/b.woff2")).toBe("font/woff2");

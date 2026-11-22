@@ -194,6 +194,7 @@ describe("preview link bridge", () => {
   });
 
   it("shows the Android notice from the shell's capability report, without waiting", () => {
+    const reload = vi.fn();
     const { root, container } = render(
       <PreviewFrame
         srcdoc="<p>hi</p>"
@@ -201,11 +202,46 @@ describe("preview link bridge", () => {
         token="t1"
         title="Preview"
         capabilities={{ platform: "android", documentStartScripts: false }}
+        onReload={reload}
       />,
     );
     roots.push(root);
     expect(container.querySelector("iframe")).toBeNull();
     expect(container.textContent).toContain("Update Android System WebView");
+    // Updating the WebView happens outside the app; Reload asks the shell
+    // again and clears the notice when the capability changed.
+    const button = [...container.querySelectorAll("button")].find(
+      (entry) => entry.textContent === "Reload",
+    );
+    act(() => button?.click());
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the generic note with Reload when the capability is unknown", () => {
+    const reload = vi.fn();
+    const { root, container } = render(
+      <PreviewFrame
+        srcdoc="<p>hi</p>"
+        url={null}
+        token="t1"
+        title="Preview"
+        capabilities={{ platform: "unknown", documentStartScripts: "unknown" }}
+        onReload={reload}
+      />,
+    );
+    roots.push(root);
+    // A shell that could not read its WebView's version is not "supported":
+    // the page is not framed, and the note offers Reload instead of an Android
+    // upgrade.
+    expect(container.querySelector("iframe")).toBeNull();
+    expect(container.textContent).toContain("Preview scripts didn’t start");
+    expect(container.textContent).toContain("couldn’t read this WebView’s capability report");
+    expect(container.textContent).not.toContain("Android System WebView");
+    const button = [...container.querySelectorAll("button")].find(
+      (entry) => entry.textContent === "Reload",
+    );
+    act(() => button?.click());
+    expect(reload).toHaveBeenCalledTimes(1);
   });
 
   it("shows the generic note on an Android WebView that supports document-start scripts", () => {

@@ -58,6 +58,31 @@ describe("preview origin", () => {
     });
   });
 
+  it("reports a failed or unreadable capability answer as unknown", async () => {
+    // A null version is the shell's way of saying it could not tell; an
+    // unparseable platform or a missing field is no better. None of them may
+    // be read as "supported".
+    installShell(async () => ({ platform: "android", documentStartScripts: null }));
+    expect(await previewCapabilities()).toEqual({
+      platform: "android",
+      documentStartScripts: "unknown",
+    });
+
+    installShell(async () => ({ platform: "wherever" }));
+    expect(await previewCapabilities()).toEqual({
+      platform: "unknown",
+      documentStartScripts: "unknown",
+    });
+
+    installShell(async () => {
+      throw new Error("no such command");
+    });
+    expect(await previewCapabilities()).toEqual({
+      platform: "unknown",
+      documentStartScripts: "unknown",
+    });
+  });
+
   it("keeps srcdoc in the browser build", async () => {
     expect(hasPreviewOrigin()).toBe(false);
     expect(await preparePreviewFrame("<p>hi</p>")).toBeNull();

@@ -277,6 +277,39 @@ describe("loadPreview assets", () => {
     expect(new TextEncoder().encode(srcdoc).length).toBeLessThanOrEqual(cap);
   });
 
+  it("charges the attributes an anchor rewrite adds on a near-cap page", async () => {
+    const links = Array.from(
+      { length: 200 },
+      (_, index) => `<a href="https://example.com/${index}">link ${index}</a>`,
+    ).join("");
+    const copies = 4;
+    const base64 = "A".repeat(90_000);
+    const html = links + Array.from({ length: copies }, () => `<img src="pixel.png">`).join("");
+    const htmlBytes = new TextEncoder().encode(html).length;
+    // Room for the page, four image payloads and a little headroom. The
+    // anchors grow by their `target`/`rel` attributes — about 8 KiB for these
+    // 200 — far more than the headroom, so the fourth image cannot fit. A
+    // budget that only charges the payloads builds past the cap here.
+    const cap = htmlBytes + copies * (22 + base64.length) + 3_000;
+    const load = await loadPreview({
+      path: "page.html",
+      maxTotalBytes: cap,
+      read: reader({
+        "page.html": textFile("page.html", html),
+        "pixel.png": byteFile("pixel.png", base64, base64.length),
+      }),
+    });
+
+    expect(load.failure).toBeNull();
+    expect(load.document).not.toBeNull();
+    const srcdoc = load.document?.srcdoc ?? "";
+    expect(srcdoc.split("data:image/png;base64,").length - 1).toBe(copies - 1);
+    // The anchors keep opening through the bridge.
+    expect(srcdoc).toContain('target="_blank"');
+    expect(load.document?.missing).toEqual(["pixel.png"]);
+    expect(new TextEncoder().encode(srcdoc).length).toBeLessThanOrEqual(cap);
+  });
+
   it("stops fetching once the total budget is spent", async () => {
     const fetched: string[] = [];
     const names = Array.from({ length: 40 }, (_, index) => `asset-${index}.png`);
