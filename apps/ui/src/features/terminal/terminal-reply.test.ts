@@ -171,28 +171,68 @@ describe("terminal query replies", () => {
     }
   });
 
-  it("records the output chunk that carried each query", () => {
+  it("records the output chunk and ordinal that carried each query", () => {
     const tracker = new TerminalQueryTracker();
 
     tracker.beginChunk(5);
     tracker.expect(/pattern/);
-    expect(tracker.takeReply("pattern")).toBe(5);
+    expect(tracker.takeReply("pattern")).toEqual({ position: 5, ordinal: 0 });
     tracker.endChunk();
 
     // Two queued chunks: a query is attributed to the one being parsed.
     tracker.beginChunk(6);
     tracker.beginChunk(7);
     tracker.expect(/first/);
-    expect(tracker.takeReply("first")).toBe(6);
+    expect(tracker.takeReply("first")).toEqual({ position: 6, ordinal: 0 });
     tracker.endChunk();
     tracker.expect(/second/);
-    expect(tracker.takeReply("second")).toBe(7);
+    expect(tracker.takeReply("second")).toEqual({ position: 7, ordinal: 0 });
     tracker.endChunk();
 
     // A query seen before any output names no position (old-client shape).
     tracker.expect(/bare/);
-    expect(tracker.takeReply("bare")).toBe(0);
+    expect(tracker.takeReply("bare")).toEqual({ position: 0, ordinal: 0 });
     expect(tracker.takeReply("nothing")).toBeNull();
+  });
+
+  it("numbers every answer in one chunk, including after an earlier answer", () => {
+    const tracker = new TerminalQueryTracker();
+
+    tracker.beginChunk(9);
+    tracker.expect(/first/);
+    tracker.expect(/second/);
+    // The first answer arriving before the next query is recorded must not
+    // renumber the second: xterm parses and answers in one pass.
+    expect(tracker.takeReply("first")).toEqual({ position: 9, ordinal: 0 });
+    tracker.expect(/third/);
+    expect(tracker.takeReply("second")).toEqual({ position: 9, ordinal: 1 });
+    expect(tracker.takeReply("third")).toEqual({ position: 9, ordinal: 2 });
+  });
+
+  it("answers a mode query split across frames from the ending chunk", async () => {
+    const term = new Terminal({ cols: 80, rows: 24 });
+    const tracker = new TerminalQueryTracker();
+    const hooks = registerTerminalQueryHooks(term.parser, tracker);
+    const answers: string[] = [];
+    const onData = term.onData((data) => answers.push(data));
+    try {
+      // A real xterm parses DECRQM (`CSI ? Ps $ p`) and answers through
+      // onData. The query starts in chunk 7 and ends in chunk 8.
+      tracker.beginChunk(7);
+      await parse(term, "\x1b[?12");
+      tracker.endChunk();
+
+      tracker.beginChunk(8);
+      await parse(term, "$p");
+      tracker.endChunk();
+
+      expect(answers).toHaveLength(1);
+      expect(tracker.takeReply(answers[0] ?? "")).toEqual({ position: 8, ordinal: 0 });
+    } finally {
+      onData.dispose();
+      for (const hook of hooks) hook.dispose();
+      term.dispose();
+    }
   });
 
   it("forgets a query xterm did not answer when its chunk is done", async () => {

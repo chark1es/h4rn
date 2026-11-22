@@ -80,6 +80,8 @@ struct Client {
     next_id: u64,
     texts: VecDeque<ServerFrame>,
     binaries: VecDeque<BinaryFrame>,
+    /// Terminal this connection attached, so output can be acknowledged.
+    attached: Option<TerminalId>,
 }
 
 impl Client {
@@ -91,6 +93,7 @@ impl Client {
             next_id: 1,
             texts: VecDeque::new(),
             binaries: VecDeque::new(),
+            attached: None,
         }
     }
 
@@ -116,7 +119,21 @@ impl Client {
             }
             Message::Binary(bytes) => {
                 let frame = BinaryFrame::decode(&bytes).expect("decode binary frame");
+                let ack = match (&self.attached, frame.kind) {
+                    (Some(terminal_id), BinaryKind::PtyOutput | BinaryKind::PtySnapshot) => {
+                        Some((terminal_id.clone(), frame.seq))
+                    }
+                    _ => None,
+                };
                 self.binaries.push_back(frame);
+                if let Some((terminal_id, up_to_chunk)) = ack {
+                    // The ack's own response is drained by the next pump.
+                    self.send(ClientRequest::TerminalAck {
+                        terminal_id,
+                        up_to_chunk,
+                    })
+                    .await;
+                }
             }
             Message::Close(_) => panic!("server closed the connection unexpectedly"),
             Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {}
@@ -238,11 +255,14 @@ impl Client {
                 terminal,
                 snapshot,
                 start_seq,
-            } => AttachedView {
-                terminal,
-                snapshot,
-                start_seq,
-            },
+            } => {
+                self.attached = Some(terminal.terminal_id.clone());
+                AttachedView {
+                    terminal,
+                    snapshot,
+                    start_seq,
+                }
+            }
             other => panic!("unexpected attach response: {other:?}"),
         }
     }
@@ -559,6 +579,7 @@ async fn pty_input_needs_hello_and_an_attached_viewer() {
             next_id: 1,
             texts: VecDeque::new(),
             binaries: VecDeque::new(),
+            attached: None,
         }
     };
     stranger
@@ -627,10 +648,18 @@ async fn only_one_marked_reply_per_position_reaches_the_pty() {
     // Let the shell switch the PTY to raw, echo-free mode before writing.
     tokio::time::sleep(Duration::from_millis(300)).await;
 
+    // A reply may only name output the viewer was sent. Three round trips give
+    // both viewers chunks 1 through 3, so the mode reply can name position 3.
+    for _ in 0..3 {
+        first.send_input(terminal.stream_id, b"x").await;
+        first.output_until("x").await;
+        second.output_until("x").await;
+    }
+
     // A mode report both viewers' xterm would answer identically.
     let mode_reply: &[u8] = b"\x1b[?12;2$y";
     let written = "\u{1b}[?12;2$y";
-    let position = pty_input_reply_seq(3);
+    let position = pty_input_reply_seq(3, 0);
     first
         .send_input_frame(terminal.stream_id, position, mode_reply)
         .await;
@@ -746,19 +775,33 @@ fn attach_viewer(
 const MODE_REPLY: &[u8] = b"\x1b[?12;2$y";
 const WRITTEN_MODE_REPLY: &str = "\u{1b}[?12;2$y";
 
+fn at(position: u64, ordinal: u64) -> QueryReply {
+    QueryReply::At { position, ordinal }
+}
+
+/// Pretends the daemon has already sent output up to `seq` to this viewer.
+///
+/// A reply may only name output the viewer was sent; tests that do not read
+/// real output state that here.
+fn mark_sent(attached: &h4rn_daemon::terminal::Attached, seq: u64) {
+    attached.viewer.record_sent(seq, 1);
+}
+
 /// Two viewers answer the same query position: the first reply is written and
 /// the second is dropped, while typed input still goes through.
 #[tokio::test]
 async fn two_viewers_answering_the_same_position_write_once() {
     let (manager, terminal, cwd) = raw_cat_terminal().await;
     let (first_id, _first_rx, first) = attach_viewer(&manager, &terminal, false);
+    mark_sent(&first, 10);
     let (second_id, mut second_rx, second) = attach_viewer(&manager, &terminal, true);
+    mark_sent(&second, 10);
 
     manager
-        .input_by_stream(terminal.stream_id, first_id, MODE_REPLY, QueryReply::At(3))
+        .input_by_stream(terminal.stream_id, first_id, MODE_REPLY, at(3, 0))
         .expect("first reply");
     manager
-        .input_by_stream(terminal.stream_id, second_id, MODE_REPLY, QueryReply::At(3))
+        .input_by_stream(terminal.stream_id, second_id, MODE_REPLY, at(3, 0))
         .expect("duplicate reply is dropped");
     manager
         .input_by_stream(terminal.stream_id, second_id, b"iHELLO", QueryReply::No)
@@ -785,6 +828,94 @@ async fn two_viewers_answering_the_same_position_write_once() {
     drop(cwd);
 }
 
+/// One chunk can carry several queries (two mode reports, a batched palette
+/// query) and xterm answers each separately. Every distinct answer is written
+/// once; only exact duplicates are dropped.
+#[tokio::test]
+async fn every_answer_in_one_chunk_is_written_once() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (first_id, _first_rx, first) = attach_viewer(&manager, &terminal, false);
+    mark_sent(&first, 10);
+    let (second_id, mut second_rx, second) = attach_viewer(&manager, &terminal, true);
+    mark_sent(&second, 10);
+
+    // Two expected answers in chunk 3, each answered by both viewers.
+    for ordinal in 0..2 {
+        manager
+            .input_by_stream(terminal.stream_id, first_id, MODE_REPLY, at(3, ordinal))
+            .expect("first viewer answers");
+        manager
+            .input_by_stream(terminal.stream_id, second_id, MODE_REPLY, at(3, ordinal))
+            .expect("the other viewer's copy is dropped");
+    }
+    manager
+        .input_by_stream(terminal.stream_id, second_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut second_rx,
+        &manager,
+        &terminal.terminal_id,
+        second_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches(WRITTEN_MODE_REPLY).count(),
+        2,
+        "each answer in the chunk must reach the shell once: {output:?}"
+    );
+
+    drop(first);
+    drop(second);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
+}
+
+/// A 40-entry `OSC 4` batch in one chunk earns 40 answers; each must be
+/// written once, not just the first.
+#[tokio::test]
+async fn a_forty_slot_palette_batch_gets_one_answer_per_slot() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (first_id, _first_rx, first) = attach_viewer(&manager, &terminal, false);
+    mark_sent(&first, 10);
+    let (second_id, mut second_rx, second) = attach_viewer(&manager, &terminal, true);
+    mark_sent(&second, 10);
+
+    for ordinal in 0..40 {
+        manager
+            .input_by_stream(terminal.stream_id, first_id, MODE_REPLY, at(5, ordinal))
+            .expect("first viewer answers a slot");
+        manager
+            .input_by_stream(terminal.stream_id, second_id, MODE_REPLY, at(5, ordinal))
+            .expect("the other viewer's copy is dropped");
+    }
+    manager
+        .input_by_stream(terminal.stream_id, second_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut second_rx,
+        &manager,
+        &terminal.terminal_id,
+        second_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches(WRITTEN_MODE_REPLY).count(),
+        40,
+        "every slot in the batch must be answered once: {output:?}"
+    );
+
+    drop(first);
+    drop(second);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
+}
+
 /// A viewer that receives a query but never answers blocks nobody: another
 /// viewer's reply for that position is written.
 #[tokio::test]
@@ -792,10 +923,11 @@ async fn a_stalled_viewer_does_not_block_the_reply() {
     let (manager, terminal, cwd) = raw_cat_terminal().await;
     let (_first_id, _first_rx, first) = attach_viewer(&manager, &terminal, false);
     let (second_id, mut second_rx, second) = attach_viewer(&manager, &terminal, true);
+    mark_sent(&second, 10);
 
     // The first viewer stays silent, as a backgrounded tab would.
     manager
-        .input_by_stream(terminal.stream_id, second_id, MODE_REPLY, QueryReply::At(4))
+        .input_by_stream(terminal.stream_id, second_id, MODE_REPLY, at(4, 0))
         .expect("reply from the second viewer");
     manager
         .input_by_stream(terminal.stream_id, second_id, b"iHELLO", QueryReply::No)
@@ -822,23 +954,22 @@ async fn a_stalled_viewer_does_not_block_the_reply() {
     drop(cwd);
 }
 
-/// A reply for an already answered position, or for an older one, is dropped
-/// even when it comes from another viewer.
+/// The viewer that answered first does not own the terminal. It may stay
+/// attached and silent while another viewer answers a later query.
 #[tokio::test]
-async fn replies_for_answered_or_older_positions_are_dropped() {
+async fn an_early_answer_does_not_claim_later_queries() {
     let (manager, terminal, cwd) = raw_cat_terminal().await;
     let (first_id, _first_rx, first) = attach_viewer(&manager, &terminal, false);
+    mark_sent(&first, 10);
     let (second_id, mut second_rx, second) = attach_viewer(&manager, &terminal, true);
+    mark_sent(&second, 10);
 
     manager
-        .input_by_stream(terminal.stream_id, first_id, MODE_REPLY, QueryReply::At(6))
-        .expect("reply for the newest position");
+        .input_by_stream(terminal.stream_id, first_id, MODE_REPLY, at(3, 0))
+        .expect("first viewer answers position 3");
     manager
-        .input_by_stream(terminal.stream_id, second_id, MODE_REPLY, QueryReply::At(6))
-        .expect("duplicate position is dropped");
-    manager
-        .input_by_stream(terminal.stream_id, second_id, MODE_REPLY, QueryReply::At(5))
-        .expect("older position is dropped");
+        .input_by_stream(terminal.stream_id, second_id, MODE_REPLY, at(9, 0))
+        .expect("second viewer answers position 9");
     manager
         .input_by_stream(terminal.stream_id, second_id, b"iHELLO", QueryReply::No)
         .expect("typed input");
@@ -853,8 +984,73 @@ async fn replies_for_answered_or_older_positions_are_dropped() {
     .await;
     assert_eq!(
         output.matches(WRITTEN_MODE_REPLY).count(),
+        2,
+        "both answers must be written; the first answerer owns no later query: {output:?}"
+    );
+
+    drop(first);
+    drop(second);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
+}
+
+/// A reply naming output the viewer was never sent is ignored and leaves the
+/// answered record untouched, so it cannot suppress another viewer's valid
+/// reply, whether it comes before or after that viewer detaches.
+#[tokio::test]
+async fn a_reply_for_output_never_sent_is_ignored() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (first_id, _first_rx, first) = attach_viewer(&manager, &terminal, false);
+    mark_sent(&first, 10);
+    let (second_id, mut second_rx, second) = attach_viewer(&manager, &terminal, true);
+    mark_sent(&second, 10);
+
+    // The first viewer claims a position far beyond anything it was sent.
+    manager
+        .input_by_stream(terminal.stream_id, first_id, MODE_REPLY, at(99, 0))
+        .expect("a bogus position is ignored");
+
+    manager
+        .input_by_stream(terminal.stream_id, second_id, MODE_REPLY, at(3, 0))
+        .expect("the real answer is written");
+    manager
+        .input_by_stream(terminal.stream_id, second_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+    let output = read_until(
+        &mut second_rx,
+        &manager,
+        &terminal.terminal_id,
+        second_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches(WRITTEN_MODE_REPLY).count(),
         1,
-        "only the first reply for the newest position may be written: {output:?}"
+        "the bogus claim must not suppress the valid answer: {output:?}"
+    );
+
+    // After the bogus viewer detaches, the valid viewer still answers.
+    manager.detach_viewer(first_id);
+    manager
+        .input_by_stream(terminal.stream_id, second_id, MODE_REPLY, at(4, 0))
+        .expect("another real answer is written");
+    manager
+        .input_by_stream(terminal.stream_id, second_id, b"iEND", QueryReply::No)
+        .expect("typed input");
+    let output = read_until(
+        &mut second_rx,
+        &manager,
+        &terminal.terminal_id,
+        second_id,
+        |output| output.contains("iEND"),
+    )
+    .await;
+    assert_eq!(
+        output.matches(WRITTEN_MODE_REPLY).count(),
+        1,
+        "the valid viewer keeps answering after the bogus one detaches: {output:?}"
     );
 
     drop(first);
@@ -870,7 +1066,9 @@ async fn replies_for_answered_or_older_positions_are_dropped() {
 async fn an_unpositioned_reply_keeps_the_old_single_owner_rule() {
     let (manager, terminal, cwd) = raw_cat_terminal().await;
     let (first_id, _first_rx, first) = attach_viewer(&manager, &terminal, false);
+    mark_sent(&first, 10);
     let (second_id, mut second_rx, second) = attach_viewer(&manager, &terminal, true);
+    mark_sent(&second, 10);
 
     manager
         .input_by_stream(
@@ -888,6 +1086,11 @@ async fn an_unpositioned_reply_keeps_the_old_single_owner_rule() {
             QueryReply::Unpositioned,
         )
         .expect("second reply is dropped");
+    // A positioned reply from the newcomer is dropped too while the old
+    // client owns the terminal: one rule for both kinds of reply.
+    manager
+        .input_by_stream(terminal.stream_id, second_id, MODE_REPLY, at(3, 0))
+        .expect("positioned reply from a non-owner is dropped");
     manager
         .input_by_stream(terminal.stream_id, second_id, b"iHELLO", QueryReply::No)
         .expect("typed input");
@@ -937,6 +1140,147 @@ async fn an_unpositioned_reply_keeps_the_old_single_owner_rule() {
     drop(cwd);
 }
 
+/// When a positioned reply arrives before the old client has revealed itself,
+/// it is written under the per-answer rule; the old client's first reply then
+/// claims the legacy role and later positioned replies are dropped until it
+/// detaches. This is the unavoidable transition window of mixed versions.
+#[tokio::test]
+async fn mixed_versions_positioned_first_then_the_old_client_takes_over() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (first_id, _first_rx, first) = attach_viewer(&manager, &terminal, false);
+    mark_sent(&first, 10);
+    let (second_id, mut second_rx, second) = attach_viewer(&manager, &terminal, true);
+    mark_sent(&second, 10);
+
+    manager
+        .input_by_stream(terminal.stream_id, second_id, MODE_REPLY, at(3, 0))
+        .expect("positioned reply before the old client has answered");
+    manager
+        .input_by_stream(
+            terminal.stream_id,
+            first_id,
+            MODE_REPLY,
+            QueryReply::Unpositioned,
+        )
+        .expect("the old client claims the legacy role");
+    manager
+        .input_by_stream(terminal.stream_id, second_id, MODE_REPLY, at(4, 0))
+        .expect("positioned reply from a non-owner is dropped");
+    manager
+        .input_by_stream(terminal.stream_id, second_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut second_rx,
+        &manager,
+        &terminal.terminal_id,
+        second_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches(WRITTEN_MODE_REPLY).count(),
+        2,
+        "the first positioned reply and the old client's reply are written: {output:?}"
+    );
+
+    // Once the old client detaches, per-answer arbitration resumes.
+    manager.detach_viewer(first_id);
+    manager
+        .input_by_stream(terminal.stream_id, second_id, MODE_REPLY, at(4, 0))
+        .expect("positioned reply after the old client left");
+    manager
+        .input_by_stream(terminal.stream_id, second_id, b"iEND", QueryReply::No)
+        .expect("typed input");
+    let output = read_until(
+        &mut second_rx,
+        &manager,
+        &terminal.terminal_id,
+        second_id,
+        |output| output.contains("iEND"),
+    )
+    .await;
+    assert_eq!(
+        output.matches(WRITTEN_MODE_REPLY).count(),
+        1,
+        "per-answer arbitration resumes after the old client leaves: {output:?}"
+    );
+
+    drop(first);
+    drop(second);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
+}
+
+/// The old client answering first owns every reply until it detaches, even a
+/// positioned reply from a new client for a different query.
+#[tokio::test]
+async fn mixed_versions_old_client_first_owns_every_reply() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (first_id, _first_rx, first) = attach_viewer(&manager, &terminal, false);
+    mark_sent(&first, 10);
+    let (second_id, mut second_rx, second) = attach_viewer(&manager, &terminal, true);
+    mark_sent(&second, 10);
+
+    manager
+        .input_by_stream(
+            terminal.stream_id,
+            first_id,
+            MODE_REPLY,
+            QueryReply::Unpositioned,
+        )
+        .expect("old client answers first");
+    manager
+        .input_by_stream(terminal.stream_id, second_id, MODE_REPLY, at(3, 0))
+        .expect("new client's positioned reply is dropped");
+    manager
+        .input_by_stream(terminal.stream_id, second_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut second_rx,
+        &manager,
+        &terminal.terminal_id,
+        second_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches(WRITTEN_MODE_REPLY).count(),
+        1,
+        "only the old client's answer is written while it attends: {output:?}"
+    );
+
+    // After it detaches the new client's answer for that query is written.
+    manager.detach_viewer(first_id);
+    manager
+        .input_by_stream(terminal.stream_id, second_id, MODE_REPLY, at(3, 0))
+        .expect("the answer after hand-over");
+    manager
+        .input_by_stream(terminal.stream_id, second_id, b"iEND", QueryReply::No)
+        .expect("typed input");
+    let output = read_until(
+        &mut second_rx,
+        &manager,
+        &terminal.terminal_id,
+        second_id,
+        |output| output.contains("iEND"),
+    )
+    .await;
+    assert_eq!(
+        output.matches(WRITTEN_MODE_REPLY).count(),
+        1,
+        "the new client answers once the old one is gone: {output:?}"
+    );
+
+    drop(first);
+    drop(second);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
+}
+
 /// Closing a terminal hangs up the shell, which forwards SIGHUP to its jobs.
 /// A job that put itself in another session survives, and so does one whose
 /// `nohup` explicitly ignores the hangup.
@@ -946,7 +1290,7 @@ async fn closing_a_terminal_ends_background_jobs() {
     use std::path::Path;
 
     async fn read_pid(path: &Path) -> i32 {
-        for _ in 0..500 {
+        for _ in 0..1000 {
             if let Ok(text) = std::fs::read_to_string(path)
                 && let Ok(pid) = text.trim().parse::<i32>()
             {
@@ -971,7 +1315,7 @@ async fn closing_a_terminal_ends_background_jobs() {
     }
 
     async fn wait_until_gone(what: &str, pid: i32) {
-        for _ in 0..250 {
+        for _ in 0..1000 {
             if !process_running(pid) {
                 return;
             }
@@ -999,8 +1343,14 @@ async fn closing_a_terminal_ends_background_jobs() {
         )
         .await;
     client.attach(&terminal.terminal_id, 80, 24).await;
-    // Let the prompt settle before typing.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Wait for the shell itself rather than a fixed startup delay. The `''`
+    // keeps the echoed command line from containing the marker the command
+    // prints, so the wait cannot match its own echo.
+    client
+        .send_input(terminal.stream_id, b"echo h4rn''-ready\n")
+        .await;
+    client.output_until("h4rn-ready").await;
 
     // Keep the shell itself out of the SIGTERM path, so the fixtures below
     // exercise their own traps rather than the shell's exit.
@@ -1056,12 +1406,13 @@ async fn closing_a_terminal_ends_background_jobs() {
         client
             .send_input(
                 terminal.stream_id,
-                b"( trap 'trap \"\" HUP; exec setsid sleep 1000' TERM; trap 'exit 0' HUP; while :; do sleep 0.05; done ) & echo $! > hup-first.pid\n",
+                b"( trap 'trap \"\" HUP; exec setsid sleep 1000' TERM; trap 'exit 0' HUP; echo hup''-ready; while :; do sleep 0.05; done ) & echo $! > hup-first.pid\n",
             )
             .await;
         let pid = read_pid(&cwd_path.join("hup-first.pid")).await;
-        // Give the loop a moment to install its traps.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // The marker is printed after both traps are installed, so the job is
+        // ready to receive the hangup without a timing guess.
+        client.output_until("hup-ready").await;
         Some(pid)
     } else {
         None

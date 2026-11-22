@@ -13,14 +13,20 @@ All notable changes to h4rn are recorded here. The format follows
   the grace period after SIGTERM so cleanup handlers can run, and only then sends SIGKILL to the
   shell's process group after `child.kill()`. The hangup uses the spawned child's pid, not the
   foreground group cached from `tcgetpgrp`, which a job started during shell startup can own. A
-  `nohup` job and one that moved itself into another session with `setsid` are left alone.
+  `nohup` job and one that moved itself into another session with `setsid` are left alone. The wait
+  after the hangup ends as soon as the shell exits (bounded at two seconds), so a loaded machine no
+  longer needs a fixed pause long enough for the shell to forward it.
 - **Only one attached viewer answers terminal queries.** Two xterm instances each answered device,
   cursor and colour queries, so a shell with a desktop and a phone attached received duplicate
   replies. The UI now marks xterm's own answers to just-asked queries with the output position that
-  carried the query, and the daemon writes the first answer naming that position from any viewer;
-  later answers for the same or an older position are dropped, while keystrokes and paste go through
-  from every viewer. A stalled or backgrounded viewer no longer holds an owner role that blocks the
-  others, and an older client's answer without a position keeps the previous single-owner rule.
+  carried the query and the answer's ordinal within that chunk (one chunk can ask several questions
+  and xterm answers each separately), and the daemon writes each distinct answer once from any
+  viewer; exact duplicates are dropped. A reply naming output the daemon never sent to that viewer is
+  ignored, so a bogus position cannot suppress a real answer, and acceptance and the PTY write happen
+  under one lock so accepted replies cannot reach the shell out of order. A stalled or backgrounded
+  viewer no longer holds an owner role that blocks the others. An older client's answer without a
+  position keeps the previous single-owner rule while that viewer stays attached, and the per-answer
+  rule resumes when it detaches.
 - **A batched colour query marks every answer it earns.** The query tracker kept at most 32 pending
   answers, so an `OSC 4` palette query with more entries left its tail looking like typed input. It
   now tracks the whole batch.

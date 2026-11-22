@@ -18,10 +18,11 @@
 //! `seq` is the stream sequence, not the JSON event sequence. A PTY snapshot
 //! carries the sequence it replaces in `seq`, so a reconnecting client can
 //! discard replayed history and resume from the snapshot. A PTY input frame
-//! has no sequence and uses `seq` for flags instead (see [`PTY_INPUT_REPLY`]);
-//! bit 0 marks a query reply and the remaining bits name the output position
-//! that carried the query (see [`pty_input_reply_seq`]). Payload length is
-//! implied by the WebSocket message length; there is no separate length field.
+//! has no sequence and uses `seq` for flags instead (see [`PTY_INPUT_REPLY`]):
+//! bit 0 marks a query reply, bits 1-32 name the output position that carried
+//! the query and bits 33-52 name the answer's ordinal within that chunk (see
+//! [`pty_input_reply_seq`]). Payload length is implied by the WebSocket message
+//! length; there is no separate length field.
 
 use thiserror::Error;
 
@@ -45,19 +46,59 @@ pub const PTY_INPUT_REPLY: u64 = 1;
 
 /// Shift of the output position in a reply input frame's `seq` flag word.
 ///
-/// Bit 0 remains [`PTY_INPUT_REPLY`]; bits 1 and above carry the sequence of
-/// the output chunk that contained the query.
+/// Bit 0 remains [`PTY_INPUT_REPLY`]; bits 1-32 carry the sequence of the
+/// output chunk that contained the query.
 pub const PTY_INPUT_POSITION_SHIFT: u32 = 1;
 
-/// Packs a marked reply's output position into an input frame's `seq` field.
+/// Number of bits the output position occupies in a reply's flag word.
+pub const PTY_INPUT_POSITION_BITS: u32 = 32;
+
+/// Largest output position the flag word can carry.
+///
+/// One terminal would have to emit more than four billion chunks before it
+/// reached this bound; the client falls back to an unpositioned reply rather
+/// than wrapping.
+pub const PTY_INPUT_POSITION_MAX: u64 = u32::MAX as u64;
+
+/// Shift of the answer ordinal in a reply input frame's `seq` flag word.
+///
+/// One output chunk can carry several queries (two DSR/OSC queries, a batched
+/// `OSC 4` palette query) and xterm answers each separately. The ordinal is the
+/// answer's index among the answers the client expected for that chunk, so two
+/// answers naming the same position stay distinct.
+pub const PTY_INPUT_ORDINAL_SHIFT: u32 = PTY_INPUT_POSITION_SHIFT + PTY_INPUT_POSITION_BITS;
+
+/// Number of bits the answer ordinal occupies in a reply's flag word.
+pub const PTY_INPUT_ORDINAL_BITS: u32 = 20;
+
+/// Largest answer ordinal the flag word can carry.
+///
+/// The whole flag word then stays within JavaScript's safe integer range
+/// (`2^53 - 1`), so the UI encodes it without losing precision.
+pub const PTY_INPUT_ORDINAL_MAX: u64 = (1 << PTY_INPUT_ORDINAL_BITS) - 1;
+
+/// Packs a marked reply's output position and answer ordinal into an input
+/// frame's `seq` field.
 ///
 /// `position` is the sequence of the output chunk whose bytes xterm was
 /// parsing when it saw the query; a query split across chunks uses the chunk
-/// that contained its end. An old daemon still sees bit 0 and writes the frame
-/// as ordinary input; an old client sends a bare flag word and names no
-/// position.
-pub const fn pty_input_reply_seq(position: u64) -> u64 {
-    (position << PTY_INPUT_POSITION_SHIFT) | PTY_INPUT_REPLY
+/// that contained its end. `ordinal` is the answer's index among the answers
+/// expected for that chunk, starting at zero.
+///
+/// Both values must fit their fields; a const context fails to compile and a
+/// call with a larger value panics rather than silently wrapping into the
+/// other field. An old daemon still sees bit 0 and writes the frame as ordinary
+/// input; an old client sends a bare flag word and names no position.
+pub const fn pty_input_reply_seq(position: u64, ordinal: u64) -> u64 {
+    assert!(
+        position <= PTY_INPUT_POSITION_MAX,
+        "a terminal output position must fit in 32 bits"
+    );
+    assert!(
+        ordinal <= PTY_INPUT_ORDINAL_MAX,
+        "an answer ordinal must fit in 20 bits"
+    );
+    (ordinal << PTY_INPUT_ORDINAL_SHIFT) | (position << PTY_INPUT_POSITION_SHIFT) | PTY_INPUT_REPLY
 }
 
 /// The output position a marked reply names, or `None` when it names none.
@@ -68,8 +109,16 @@ pub const fn pty_input_reply_position(seq: u64) -> Option<u64> {
     if seq & PTY_INPUT_REPLY == 0 {
         return None;
     }
-    let position = seq >> PTY_INPUT_POSITION_SHIFT;
+    let position = (seq >> PTY_INPUT_POSITION_SHIFT) & PTY_INPUT_POSITION_MAX;
     if position == 0 { None } else { Some(position) }
+}
+
+/// The answer ordinal a marked reply names, or zero when it names none.
+///
+/// Only meaningful together with [`pty_input_reply_position`]: a reply that
+/// names no position is an older client's and has no ordinal.
+pub const fn pty_input_reply_ordinal(seq: u64) -> u64 {
+    (seq >> PTY_INPUT_ORDINAL_SHIFT) & PTY_INPUT_ORDINAL_MAX
 }
 
 /// What a binary frame carries.
@@ -237,12 +286,38 @@ mod tests {
     }
 
     #[test]
-    fn reply_positions_round_trip_in_the_flag_word() {
-        for position in [1_u64, 2, 42, 9_007_199_254_740_992] {
-            let seq = pty_input_reply_seq(position);
+    fn reply_positions_and_ordinals_round_trip_in_the_flag_word() {
+        for (position, ordinal) in [
+            (1_u64, 0_u64),
+            (2, 0),
+            (42, 1),
+            (123_456, 7),
+            (PTY_INPUT_POSITION_MAX, PTY_INPUT_ORDINAL_MAX),
+        ] {
+            let seq = pty_input_reply_seq(position, ordinal);
             assert_ne!(seq & PTY_INPUT_REPLY, 0);
             assert_eq!(pty_input_reply_position(seq), Some(position));
+            assert_eq!(pty_input_reply_ordinal(seq), ordinal);
         }
+    }
+
+    #[test]
+    fn a_reply_flag_word_stays_within_the_javascript_safe_integer() {
+        // The UI encodes the same layout with a plain number.
+        let seq = pty_input_reply_seq(PTY_INPUT_POSITION_MAX, PTY_INPUT_ORDINAL_MAX);
+        assert_eq!(seq, 9_007_199_254_740_991);
+        assert_eq!(seq, (1_u64 << 53) - 1);
+    }
+
+    #[test]
+    fn two_answers_in_one_chunk_are_distinct() {
+        let first = pty_input_reply_seq(7, 0);
+        let second = pty_input_reply_seq(7, 1);
+        assert_ne!(first, second);
+        assert_eq!(pty_input_reply_position(first), Some(7));
+        assert_eq!(pty_input_reply_position(second), Some(7));
+        assert_eq!(pty_input_reply_ordinal(first), 0);
+        assert_eq!(pty_input_reply_ordinal(second), 1);
     }
 
     #[test]
@@ -251,7 +326,10 @@ mod tests {
         assert_eq!(pty_input_reply_position(PTY_INPUT_REPLY), None);
         assert_eq!(pty_input_reply_position(0), None);
         // Higher bits without bit 0 are not a reply at all.
-        assert_eq!(pty_input_reply_position(pty_input_reply_seq(7) & !1), None);
+        assert_eq!(
+            pty_input_reply_position(pty_input_reply_seq(7, 0) & !1),
+            None
+        );
     }
 
     #[test]

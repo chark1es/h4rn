@@ -1465,15 +1465,19 @@ impl Connection {
                     return Some(Outbound::Text(binary_error_frame(seq, error)));
                 }
                 // `seq` is a flag word for input: bit 0 marks xterm's own
-                // answer to a terminal query and the higher bits name the
-                // output chunk that carried the query. An old client sends
-                // only bit 0; an old daemon ignored `seq` altogether and wrote
-                // the frame as ordinary input, which still works.
+                // answer to a terminal query, bits 1-32 name the output chunk
+                // that carried the query and bits 33-52 name the answer's
+                // ordinal within that chunk. An old client sends only bit 0;
+                // an old daemon ignored `seq` altogether and wrote the frame
+                // as ordinary input, which still works.
                 let reply = if frame.seq & h4rn_protocol::PTY_INPUT_REPLY == 0 {
                     QueryReply::No
                 } else {
                     match h4rn_protocol::pty_input_reply_position(frame.seq) {
-                        Some(position) => QueryReply::At(position),
+                        Some(position) => QueryReply::At {
+                            position,
+                            ordinal: h4rn_protocol::pty_input_reply_ordinal(frame.seq),
+                        },
                         None => QueryReply::Unpositioned,
                     }
                 };

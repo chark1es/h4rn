@@ -16,7 +16,7 @@ import {
 } from "@/lib/client/binary";
 import type { H4rnClient } from "@/lib/client/client";
 import { H4rnRequestError } from "@/lib/client/errors";
-
+import type { TerminalQueryReply } from "./terminal-reply";
 import { registerTerminalQueryHooks, TerminalQueryTracker } from "./terminal-reply";
 import { isDarkTheme, terminalTheme } from "./theme";
 
@@ -188,19 +188,20 @@ export class TerminalController {
   /**
    * Sends raw text as PTY input (used by the phone key row and tests).
    *
-   * `replyPosition` is the output sequence of the frame that carried the
-   * query xterm is answering, or null for typed input. The daemon writes one
-   * answer per position; a position of 0 falls back to the old unpositioned
-   * reply flag, which only happens before any output has arrived.
+   * `reply` names the output position that carried the query xterm is
+   * answering and the answer's ordinal within that chunk, or null for typed
+   * input. The daemon writes one answer per `(position, ordinal)`; a position
+   * of 0 falls back to the old unpositioned reply flag, which only happens
+   * before any output has arrived.
    */
-  send(data: string, replyPosition: number | null = null): void {
+  send(data: string, reply: TerminalQueryReply | null = null): void {
     if (!this.client || this.streamId === 0) return;
     const payload = new TextEncoder().encode(data);
     const seq =
-      replyPosition === null
+      reply === null
         ? 0
-        : replyPosition > 0
-          ? ptyInputReplySeq(replyPosition)
+        : reply.position > 0
+          ? ptyInputReplySeq(reply.position, reply.ordinal)
           : PTY_INPUT_REPLY;
     try {
       this.client.sendBinary(

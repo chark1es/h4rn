@@ -50,7 +50,9 @@ mod worktrees;
 
 pub use binary::{
     BINARY_HEADER_LEN, BINARY_MAGIC, BINARY_VERSION, BinaryFrame, BinaryFrameError, BinaryKind,
-    PTY_INPUT_POSITION_SHIFT, PTY_INPUT_REPLY, pty_input_reply_position, pty_input_reply_seq,
+    PTY_INPUT_ORDINAL_BITS, PTY_INPUT_ORDINAL_MAX, PTY_INPUT_ORDINAL_SHIFT,
+    PTY_INPUT_POSITION_BITS, PTY_INPUT_POSITION_MAX, PTY_INPUT_POSITION_SHIFT, PTY_INPUT_REPLY,
+    pty_input_reply_ordinal, pty_input_reply_position, pty_input_reply_seq,
 };
 pub use blob::{Attachment, BlobDownload, BlobInfo, BlobRange, UploadState, UploadTicket};
 pub use client::{ClientFrame, ClientRequest};

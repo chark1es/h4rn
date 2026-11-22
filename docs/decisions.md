@@ -136,9 +136,10 @@ bound, ack-based backpressure of 8 chunks / 64 KiB per stream, smallest-viewer-w
 client xterm), which can diverge; the snapshot-plus-sequence handshake, and raw replay as a cold
 fallback, keep divergence bounded to one reconnect.
 
-Closing a terminal sends SIGHUP to the shell's own process id, waits for the shell to forward the
-hangup, then does what it always did: SIGTERM to the shell's process group, a grace period for TERM
-handlers, then SIGKILL after `child.kill()`. The hangup uses the spawned child's pid rather than the
+Closing a terminal sends SIGHUP to the shell's own process id, waits for the shell to exit so it
+has forwarded the hangup to its jobs (bounded at two seconds for a shell that ignores it), then does
+what it always did: SIGTERM to the shell's process group, a grace period for TERM handlers, then
+SIGKILL after `child.kill()`. The hangup uses the spawned child's pid rather than the
 foreground process group from `tcgetpgrp`, because a shell that starts a job while it boots puts that
 job in the foreground and it would receive the hangup instead. An interactive shell forwards SIGHUP
 to its jobs and skips `nohup`'d and `disown`'d ones, so background jobs end without special-casing
@@ -146,14 +147,22 @@ to its jobs and skips `nohup`'d and `disown`'d ones, so background jobs end with
 members is deliberately not done: `sess` is not portable and signalling every member reaches jobs the
 user detached. Attached viewers share one PTY, so the UI marks xterm's answer to a query the program
 just asked (through parser hooks for DA, DSR, DECRQM, XTWINOPS and OSC colour queries) in the input
-frame's `seq` flag. Bit 0 marks a reply and the remaining bits carry the output chunk whose bytes
-xterm was parsing when it saw the query; a query split across chunks names the chunk that contained
-its end. The daemon writes the first reply naming that position, from any viewer, and drops later
-replies naming the same or an older position, while unmarked input is always written. A stalled or
-backgrounded viewer therefore never blocks another viewer's answer, and two active viewers never
-both answer. Answered positions collapse to a high-water mark, so the record stays constant-size.
-A reply that names no position comes from an older client and keeps the previous single-owner rule.
-The client never gives up reconnecting: after
+frame's `seq` flag. Bit 0 marks a reply, bits 1-32 carry the output chunk whose bytes xterm was
+parsing when it saw the query, and bits 33-52 carry the answer's ordinal among the answers expected
+for that chunk: one chunk can ask several questions (two DSR/OSC queries, a batched `OSC 4` palette
+query) and xterm answers each separately. A query split across chunks names the chunk that contained
+its end. The daemon writes the first reply naming a `(position, ordinal)` pair, from any viewer, and
+drops exact duplicates; an unanswered position is still answerable after a later position was
+answered. A reply naming a position the daemon never sent to that viewer is ignored and leaves the
+record untouched, so a bogus claim cannot suppress a real answer. Acceptance and the PTY write happen
+under the same writer lock, so two connections cannot be accepted in one order and write out of
+order. Recent chunks keep a bounded bitset of answered ordinals (64 chunks, 1024 answers each); older
+chunks collapse into a high-water mark, so memory stays constant. A reply that names no position
+comes from an older client. While such a viewer that has answered stays attached, the legacy
+single-owner rule governs every reply: its replies are written and the others are dropped. When it
+detaches, the per-answer rule resumes. A stalled or backgrounded viewer therefore never blocks
+another viewer's answer, and two active viewers never both answer. The client never gives up
+reconnecting: after
 the fast backoff it retries at the capped interval, and an online, focus or visibility event retries
 at once, except during the very first connect, which is not yet a retry, and while an attempt that
 started less than a second ago is still opening.

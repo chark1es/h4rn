@@ -241,7 +241,7 @@ impl TerminalManager {
         session.add_viewer(viewer_id, cols, rows, Arc::clone(&viewer));
         let snapshot = session.snapshot();
         // The snapshot replaces everything older, so the window starts empty.
-        viewer.reset_credit();
+        viewer.reset_credit(snapshot.seq);
 
         Ok(Attached {
             terminal: session.info(),
@@ -279,9 +279,10 @@ impl TerminalManager {
     /// the same error as an unknown stream.
     ///
     /// A marked reply is xterm's answer to a terminal query. When it names the
-    /// output position that carried the query, the first viewer to answer that
-    /// position is written and later answers are dropped. A reply from an
-    /// older client names no position and keeps the previous single-owner rule.
+    /// output position and the answer's ordinal within that chunk, the first
+    /// viewer to answer that pair is written and exact duplicates are dropped.
+    /// A position the viewer was never sent is ignored. A reply from an older
+    /// client names no position and keeps the previous single-owner rule.
     pub fn input_by_stream(
         &self,
         stream_id: u32,
