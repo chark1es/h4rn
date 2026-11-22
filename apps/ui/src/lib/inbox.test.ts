@@ -32,6 +32,7 @@ function thread(overrides: Partial<ThreadSummary> = {}): ThreadSummary {
     workspace_path: "/work/h4rn",
     model: "opus",
     tab: "working",
+    placed_by_user: false,
     pinned: false,
     snoozed_until: null,
     last_activity: "2026-01-01T10:00:00.000Z",

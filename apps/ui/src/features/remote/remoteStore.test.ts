@@ -22,6 +22,7 @@ import {
   getRemoteState,
   pairByCode,
   pairMachine,
+  refresh,
   remoteStore,
 } from "./remoteStore";
 import { setConnectClient } from "./session";
@@ -199,5 +200,33 @@ describe("typed-code pairing", () => {
     expect(await waitUntilOnline(confirmation)).toBe(true);
     expect(getRemoteState().sasConfirm).toBeNull();
     expect(getRemoteState().active?.machineId).toBe(MACHINE.id);
+  });
+});
+
+describe("account refresh", () => {
+  it("keeps the account when linked presence cannot be fetched", async () => {
+    const client = fakeClient();
+    client.machines = vi.fn(async (options?: { linked?: boolean }) => {
+      if (options?.linked) throw new Error("the relay rejected the proof");
+      return [MACHINE];
+    });
+    setConnectClient(client as never);
+
+    await refresh();
+
+    const state = getRemoteState();
+    expect(state.phase).toBe("signed_in");
+    expect(state.machines).toEqual([MACHINE]);
+    expect(state.linkedMachines).toEqual([]);
+    expect(state.error).toBeNull();
+  });
+
+  it("stores the linked machines the relay answered with", async () => {
+    const client = fakeClient();
+    setConnectClient(client as never);
+
+    await refresh();
+
+    expect(getRemoteState().linkedMachines).toEqual([MACHINE]);
   });
 });

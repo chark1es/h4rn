@@ -1,6 +1,6 @@
 import { ArrowRightIcon, GitBranchIcon, PaperclipIcon, PlusIcon } from "lucide-react";
 import type * as React from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChipSelect } from "@/components/common/ChipSelect";
 
 import { ENTER, Kbd, MOD } from "@/components/common/Kbd";
@@ -28,8 +28,10 @@ import {
 } from "@/features/proxy/proxyStore";
 import type { HarnessKind, HostId, RuntimeMode } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
+import { DEFAULT_NEW_THREAD_WORKSPACE, drafts } from "@/lib/drafts";
 import { HARNESS_LABELS, HARNESS_SLUGS } from "@/lib/entities";
 import { detectedHarnesses, HARNESS_MODELS } from "@/lib/models";
+import { NewThreadDraftSession, type NewThreadDraftSnapshot } from "@/lib/newThreadDraft";
 import { closeNewThread, createThread, useApp } from "@/lib/store/appStore";
 import { defaultThreadHostId, localOnlyHostOptions } from "@/lib/thread-hosts";
 import { cn } from "@/lib/utils";
@@ -82,38 +84,111 @@ export function NewThreadDialog() {
   );
 
   const [host, setHost] = useState<HostId | "">("");
+  /** The host the draft session is bound to; empty until one resolves. */
+  const [boundHost, setBoundHost] = useState<HostId | "">("");
   const [harness, setHarness] = useState<HarnessKind>("claude_code");
   const [model, setModel] = useState(DEFAULT_MODELS.claude_code);
-  const [workspace, setWorkspace] = useState("~/code");
+  const [workspace, setWorkspace] = useState(DEFAULT_NEW_THREAD_WORKSPACE);
   const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("approval_required");
   const [prompt, setPrompt] = useState("");
   const [starting, setStarting] = useState(false);
+  /** Host + folder slot the prompt box is showing; one per dialog open. */
+  const sessionRef = useRef<NewThreadDraftSession | null>(null);
+  /** The preset is applied once per open; later host-list refreshes must not reset the form. */
+  const appliedPreset = useRef(false);
+  /** The first host and its draft are adopted once per open. */
+  const hostResolved = useRef(false);
+  /** The user picked the host; the dialog must not rebind it underneath them. */
+  const hostChosen = useRef(false);
+  /** Start is being pressed: its blur must not swap the text before it submits. */
+  const startPressed = useRef(false);
+  const preset = useApp((state) => state.ui.newThreadPreset);
+
+  const draftSession = useCallback((): NewThreadDraftSession => {
+    sessionRef.current ??= new NewThreadDraftSession(drafts);
+    return sessionRef.current;
+  }, []);
+
+  const showDraft = useCallback((draft: NewThreadDraftSnapshot) => {
+    setHost(draft.host);
+    setBoundHost(draft.host);
+    setWorkspace(draft.workspace);
+    setPrompt(draft.text);
+  }, []);
+
+  /** A host is usable only while it is online and this daemon allows it. */
+  const hostEligible = useCallback(
+    (hostId: HostId | "") =>
+      hostId !== "" &&
+      onlineHosts.some((candidate) => candidate.host_id === hostId) &&
+      (localHostId === null || hostId === localHostId),
+    [onlineHosts, localHostId],
+  );
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      sessionRef.current = null;
+      appliedPreset.current = false;
+      hostResolved.current = false;
+      hostChosen.current = false;
+      startPressed.current = false;
+      // Nothing is bound until a host resolves again, so the box and Start
+      // must not stay enabled from the previous open.
+      setHost("");
+      setBoundHost("");
+      setWorkspace(DEFAULT_NEW_THREAD_WORKSPACE);
+      setPrompt("");
+      return;
+    }
+    if (sessionRef.current === null) {
+      sessionRef.current = new NewThreadDraftSession(drafts, { workspace: preset?.workspace });
+    }
     // A new thread can only run on this daemon's host for now; prefer it even
-    // when another online host sorts first.
-    const firstId = defaultThreadHostId(onlineHosts, localHostId);
-    const first = firstId
-      ? onlineHosts.find((candidate) => candidate.host_id === firstId)
+    // when another online host sorts first. Recompute it whenever the host
+    // list or the daemon's own host changes, so Start never points at a host
+    // this daemon would reject.
+    const defaultId = defaultThreadHostId(onlineHosts, localHostId);
+    const first = defaultId
+      ? onlineHosts.find((candidate) => candidate.host_id === defaultId)
       : undefined;
     if (first) {
-      setHost(first.host_id);
-      const nextHarness =
-        detectedHarnesses(HARNESSES, installed, first.harnesses)[0] ?? "claude_code";
-      setHarness(nextHarness);
-      setModel(proxyDefaultModel(nextHarness) ?? DEFAULT_MODELS[nextHarness]);
+      const session = draftSession();
+      if (!hostResolved.current) {
+        hostResolved.current = true;
+        showDraft(session.adoptHost(first.host_id));
+        const nextHarness =
+          detectedHarnesses(HARNESSES, installed, first.harnesses)[0] ?? "claude_code";
+        setHarness(nextHarness);
+        setModel(proxyDefaultModel(nextHarness) ?? DEFAULT_MODELS[nextHarness]);
+      } else if (
+        // A host the user picked stays only while it is still a valid choice;
+        // when it is gone (another daemon, or the host went offline) fall back
+        // to the default host and show that slot's draft.
+        !hostEligible(session.snapshot().host) ||
+        (!hostChosen.current && session.snapshot().host !== first.host_id)
+      ) {
+        hostChosen.current = false;
+        showDraft(session.rebindHost(first.host_id));
+      }
     }
     setStarting(false);
-  }, [open, onlineHosts, localHostId, installed]);
+  }, [open, onlineHosts, localHostId, installed, preset, draftSession, showDraft, hostEligible]);
 
   // "New thread in <project>" starts in that project's folder.
-  const preset = useApp((state) => state.ui.newThreadPreset);
   useEffect(() => {
-    if (!open || !preset) return;
-    if (hosts[preset.host]?.online) setHost(preset.host);
-    setWorkspace(preset.workspace);
-  }, [open, preset, hosts]);
+    if (!open) {
+      appliedPreset.current = false;
+      return;
+    }
+    if (!preset || appliedPreset.current) return;
+    appliedPreset.current = true;
+    const session = draftSession();
+    if (hosts[preset.host]?.online && preset.host !== session.snapshot().host) {
+      hostChosen.current = true;
+      showDraft(session.selectHost(preset.host));
+    }
+    showDraft(session.commitWorkspace(preset.workspace));
+  }, [open, preset, hosts, draftSession, showDraft]);
 
   // The catalogue can arrive after the dialog opens; adopt its default only
   // while the user has not chosen a model of their own.
@@ -129,7 +204,7 @@ export function NewThreadDialog() {
     );
   }, [open, harness, proxyDefault, proxyModelKey, proxyProfileId]);
 
-  const selectedHost = host ? hosts[host] : undefined;
+  const selectedHost = boundHost ? hosts[boundHost] : undefined;
   const harnessChoices = detectedHarnesses(HARNESSES, installed, selectedHost?.harnesses);
   const modelInfo = HARNESS_MODELS[harness];
 
@@ -147,32 +222,52 @@ export function NewThreadDialog() {
     ...new Set([...modelInfo.models, ...proxyModels.map((candidate) => candidate.id)]),
   ];
   const attachments = useAttachmentDrafts("new-thread", {
-    enabled: !offline && Boolean(host),
+    enabled: !offline && Boolean(boundHost),
     disabledReason: offline ? "Reconnect to attach files." : "Pick an online host first.",
   });
 
-  useAttachShortcut(attachments.openPicker, open && !offline && Boolean(host));
+  useAttachShortcut(attachments.openPicker, open && !offline && Boolean(boundHost));
 
   useEffect(() => {
     if (!open) attachments.clear();
     // Clearing on close drops stale drafts between dialog sessions.
   }, [open, attachments.clear]);
 
+  const commitWorkspace = useCallback(() => {
+    const draft = draftSession().commitWorkspace(workspace);
+    setWorkspace(draft.workspace);
+    setPrompt(draft.text);
+  }, [draftSession, workspace]);
+
   const submit = async () => {
-    if (!host || starting || attachments.blockedReason) return;
-    if (!prompt.trim() && attachments.attachments.length === 0) return;
+    // A press is over by the time Start runs; its flag must not outlive it.
+    startPressed.current = false;
+    if (starting || attachments.blockedReason) return;
+    // Cmd+Enter with no host yet: nothing has been committed or saved.
+    const session = draftSession();
+    const draft = session.submission(workspace);
+    if (!draft || !hostEligible(draft.host)) return;
+    if (!draft.text.trim() && attachments.attachments.length === 0) return;
+    // The folder on screen is the one the request runs in, but the visible
+    // text stays where it is: Start never swaps the box for another slot.
+    setWorkspace(draft.workspace);
     setStarting(true);
     const ok = await createThread({
-      host,
+      host: draft.host,
       harness,
-      workspacePath: workspace.trim() || "~/code",
+      workspacePath: draft.workspace,
       model,
-      prompt: prompt.trim(),
+      prompt: draft.text.trim(),
       attachments: attachments.attachments,
       runtimeMode,
     });
     setStarting(false);
     if (ok) {
+      // Only the text's own slot, and only while it still holds the revision
+      // that was sent: newer text from another tab survives.
+      session.clearSubmitted(draft);
+      // The folder on screen was used, even if the field was never committed.
+      drafts.writeLastWorkspace(draft.host, draft.workspace);
       closeNewThread();
       setPrompt("");
       attachments.clear();
@@ -212,8 +307,10 @@ export function NewThreadDialog() {
                 "Not yet: new threads run on this host",
               )}
               onChange={(value) => {
+                if (value === "") return;
                 const nextHost = hosts[value];
-                setHost(value);
+                hostChosen.current = true;
+                showDraft(draftSession().selectHost(value));
                 const nextHarness = detectedHarnesses(HARNESSES, installed, nextHost?.harnesses)[0];
                 if (nextHarness) {
                   setHarness(nextHarness);
@@ -298,6 +395,19 @@ export function NewThreadDialog() {
               id="new-thread-workspace"
               value={workspace}
               onChange={(event) => setWorkspace(event.target.value)}
+              onBlur={() => {
+                // Pressing Start blurs this field on the way to the button.
+                // Start sends what is on screen to the folder as typed; it
+                // must not swap the box to that folder's draft first.
+                if (startPressed.current) return;
+                commitWorkspace();
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  commitWorkspace();
+                }
+              }}
               className="font-mono"
               placeholder="~/code/api"
             />
@@ -319,7 +429,7 @@ export function NewThreadDialog() {
             </FieldLabel>
             <button
               type="button"
-              disabled={offline || !host}
+              disabled={offline || !boundHost}
               onClick={attachments.openPicker}
               aria-label="Attach files"
               title={offline ? "Reconnect to attach files." : "Attach files (Ctrl/Cmd U)"}
@@ -352,8 +462,13 @@ export function NewThreadDialog() {
           <Textarea
             id="new-thread-task"
             autoFocus
+            disabled={!boundHost}
             value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
+            onChange={(event) => {
+              const value = event.target.value;
+              setPrompt(value);
+              draftSession().setText(value);
+            }}
             onPaste={(event) => {
               const files = Array.from(event.clipboardData.files);
               if (files.length > 0) {
@@ -370,7 +485,11 @@ export function NewThreadDialog() {
                 void submit();
               }
             }}
-            placeholder="Describe the task. Use @ for files and hosts, / for commands. Paste or drop images too."
+            placeholder={
+              boundHost
+                ? "Describe the task. Use @ for files and hosts, / for commands. Paste or drop images too."
+                : "Connecting…"
+            }
             className="min-h-32"
           />
         </div>
@@ -380,7 +499,7 @@ export function NewThreadDialog() {
             <>
               Starts <span className="font-mono">{HARNESS_SLUGS[harness]}</span> on{" "}
               <span className="font-medium text-fg">{selectedHost.name}</span> in{" "}
-              <span className="font-mono">{workspace || "~/code"}</span>.
+              <span className="font-mono">{workspace || DEFAULT_NEW_THREAD_WORKSPACE}</span>.
             </>
           ) : (
             "Pair an online host before starting a thread."
@@ -401,17 +520,30 @@ export function NewThreadDialog() {
             <Button
               disabled={
                 offline ||
-                !host ||
+                !boundHost ||
+                !hostEligible(boundHost) ||
                 starting ||
                 Boolean(attachments.blockedReason) ||
                 (!prompt.trim() && attachments.attachments.length === 0)
               }
+              onPointerDown={() => {
+                startPressed.current = true;
+              }}
+              onPointerUp={() => {
+                startPressed.current = false;
+              }}
+              onPointerCancel={() => {
+                startPressed.current = false;
+              }}
+              onPointerLeave={() => {
+                startPressed.current = false;
+              }}
               onClick={() => void submit()}
               title={
                 attachments.blockedReason ??
                 (offline
                   ? "Reconnect to start a thread."
-                  : !host
+                  : !boundHost || !hostEligible(boundHost)
                     ? "No online host is available."
                     : !prompt.trim() && attachments.attachments.length === 0
                       ? "Describe the task first."

@@ -15,6 +15,11 @@ cannot do on its own:
 | Cleartext dev traffic | Noise end-to-end encryption with the daemon key pinned; the release network security config and iOS ATS allow ws:// to LAN, `.local`, MagicDNS and CGNAT/Tailscale candidates (see below) |
 | Pairing screen | `apps/ui/src/lib/platform/mobile.ts`, the only mobile branch in the shared UI |
 
+Notifications are not sent by the mobile build yet. Settings → Notifications says so instead of
+showing switches that would do nothing; the desktop app and the browser send them through the
+Tauri notification plugin and the Web Notification API. Wiring the same choices to Android and
+iOS needs the notification plugin and its platform permission flow, which is a later pass.
+
 The pairing screen is a small DOM overlay rather than a React route because the UI is a pure view
 over the daemon and its first screen assumes it already knows where the daemon is. The adapter
 runs before React and only activates inside a Tauri mobile WebView (`__TAURI_INTERNALS__` plus a
