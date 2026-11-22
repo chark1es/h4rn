@@ -117,6 +117,13 @@ All notable changes to h4rn are recorded here. The format follows
 - **A ledger that stays unreadable no longer rewrites the inbox every tick.** Retries now wait from
   one second up to a minute, and only threads whose restored state actually changed are
   re-published, instead of clearing every thread's cached summary on every tick.
+- **A prompt is no longer left waiting behind a resume the person cancelled.** If the startup
+  ledger read failed and its retry had already read a resume schedule when the person cancelled it,
+  the retry used to attach that cancelled schedule to the restored prompt; nothing could ever fire
+  it. The retry now re-reads that one schedule before attaching it, and releases the prompt to run
+  instead when it is gone.
+- **A system clock change no longer delays a resume retry.** Retry waits are measured on a
+  monotonic clock, so moving the clock backwards cannot stretch the wait past its cap.
 - **Large Azure DevOps pull requests load within the page deadline.** Azure needs file contents to
   build a diff, so a 30-file page could not finish inside the UI's ten-second budget once the
   account's local request allowance ran out. A diff page now holds at most eight files (eighteen

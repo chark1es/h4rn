@@ -728,6 +728,20 @@ impl MeterStore {
         rows.iter().map(schedule_from_sql).collect()
     }
 
+    /// One schedule by its ledger id, if the row still exists.
+    ///
+    /// The startup resync re-checks a schedule it snapshotted before taking a
+    /// record lock: the person can cancel it in that window, and binding a
+    /// cancelled row to a restored prompt would leave the prompt waiting for a
+    /// fire that can never happen.
+    pub async fn schedule(&self, schedule_id: &str) -> Result<Option<ResumeSchedule>, StoreError> {
+        let row = sqlx::query("SELECT * FROM meter_schedules WHERE schedule_id = ?")
+            .bind(schedule_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.as_ref().map(schedule_from_sql).transpose()
+    }
+
     /// Schedules due at `now`, soonest first.
     pub async fn due_schedules(
         &self,

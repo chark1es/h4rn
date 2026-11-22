@@ -159,10 +159,16 @@ schedule ids from the ledger independently of the limit history: a failed limit
 read only leaves the reset time unknown for now, and the ticker retries the
 resync until both reads succeed, so a restored pause never stays unnamed. The
 retry waits start at a second and double up to a minute, so a ledger that stays
-unreadable does not rewrite every thread's summary on every tick. A retry never
-overwrites what changed after it read the ledger: a newer limit that armed
-another schedule in that window keeps its own reset and parked prompt, and only
-a record whose pause is still unresolved takes the restored identity.
+unreadable does not rewrite every thread's summary on every tick; the wait is
+measured on a monotonic clock, so moving the system clock backwards cannot
+stretch it. A retry never overwrites what changed after it read the ledger: a
+newer limit that armed another schedule in that window keeps its own reset and
+parked prompt, and only a record whose pause is still unresolved takes the
+restored identity. Before a retry binds that identity it re-reads the one
+schedule row under the record lock: if the person cancelled it (or it already
+fired) after the ledger read, the retry does not bind it and releases the
+parked prompt exactly as a cancellation does, instead of leaving the prompt
+behind a row that can never fire.
 
 When a schedule fires, the daemon starts a new turn with the policy prompt and
 marks the schedule `Fired`. The fire first checks that the thread's record names
