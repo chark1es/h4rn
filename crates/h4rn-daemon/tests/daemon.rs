@@ -2815,8 +2815,19 @@ async fn a_message_appended_to_an_active_turn_replaces_the_stale_schedule() {
 #[tokio::test]
 async fn a_fixture_coding_agent_writes_the_generated_thread_title() {
     let support = tempfile::tempdir().expect("support dir");
-    let fixture =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-title-agent.sh");
+    // The fixture records its argv and stdin beside itself, so run a copy in
+    // the temp directory rather than the one in the repo.
+    let fixture = support.path().join("fake-title-agent.sh");
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-title-agent.sh"),
+        &fixture,
+    )
+    .expect("copy fixture");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
     let service = Arc::new(
         h4rn_daemon::text_generation::TextGenerationService::open(support.path())
             .expect("open text generation")
@@ -2833,6 +2844,7 @@ async fn a_fixture_coding_agent_writes_the_generated_thread_title() {
                 model: None,
             },
         })
+        .await
         .expect("select the coding agent");
     let daemon = boot_inner_with_text_generation(
         ThreadManagerOptions::default(),
@@ -2875,5 +2887,91 @@ async fn a_fixture_coding_agent_writes_the_generated_thread_title() {
     // Read the row back through the protocol as the authoritative check.
     let renamed = thread_summary(&mut client, &summary.thread_id).await;
     assert_eq!(renamed.title, "Fixture title");
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_provider_test_does_not_block_the_connection() {
+    use h4rn_protocol::{TextGeneratorDraft, TextGeneratorKind};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let server = wiremock::MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(1))
+                .set_body_json(serde_json::json!({
+                    "choices": [{ "message": { "content": "ok" } }]
+                })),
+        )
+        .mount(&server)
+        .await;
+
+    let support = tempfile::tempdir().expect("support dir");
+    let service = Arc::new(
+        h4rn_daemon::text_generation::TextGenerationService::open(support.path())
+            .expect("open text generation")
+            .with_file_keys()
+            .expect("file keys"),
+    );
+    let generator = service
+        .add_generator(TextGeneratorDraft {
+            name: "Slow local".into(),
+            kind: TextGeneratorKind::OpenAiCompatible,
+            base_url: format!("{}/v1", server.uri()),
+            model: "tiny-model".into(),
+            api_key: None,
+        })
+        .await
+        .expect("add generator");
+    let daemon = boot_inner_with_text_generation(
+        ThreadManagerOptions::default(),
+        FakeHarness::new(),
+        true,
+        Some(Arc::clone(&service)),
+    )
+    .await;
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    let test_id = client
+        .send(ClientRequest::TestTextGenerator {
+            generator_id: generator.id.clone(),
+            model: None,
+        })
+        .await;
+    let list_id = client.send(ClientRequest::ListHosts).await;
+
+    let mut order = Vec::new();
+    let mut report_ok = None;
+    while order.len() < 2 {
+        if let ServerFrame::Response { id, result } = client.read_frame().await {
+            match id {
+                id if id == test_id => {
+                    let body = result.expect("test result");
+                    match body {
+                        ResponseBody::TextGeneratorTested { report } => {
+                            report_ok = Some(report.ok);
+                        }
+                        other => panic!("unexpected test response: {other:?}"),
+                    }
+                    order.push("test");
+                }
+                id if id == list_id => {
+                    result.expect("hosts result");
+                    order.push("hosts");
+                }
+                other => panic!("unexpected response id {other}"),
+            }
+        }
+    }
+    assert_eq!(
+        order,
+        vec!["hosts", "test"],
+        "a pending Test must not hold the read loop"
+    );
+    assert_eq!(report_ok, Some(true));
     daemon.stop().await;
 }

@@ -18,7 +18,24 @@ All notable changes to h4rn are recorded here. The format follows
   Only the first prompt text and the workspace folder name are sent. A failed, timed-out or empty
   answer keeps the first-line title and logs once. Renaming a thread yourself saves the name in the
   thread menu, and no generated title ever replaces it. Subagent threads keep the title their task
-  gave them. See [docs/text-generation.md](docs/text-generation.md).
+  gave them. With no agent picked, the default mode uses the thread's own harness when it has a
+  one-shot mode and otherwise keeps the first line, so a prompt is never handed to another
+  provider unasked. See [docs/text-generation.md](docs/text-generation.md).
+- **Title generation keeps keys and prompts where they belong.** No redirect is followed, so a
+  `3xx` from a generator cannot forward the key or the prompt to another host. The coding-agent
+  CLIs run with no tools, no MCP configuration and no user settings, project settings, hooks or
+  plugins, in an empty folder under one 30-second deadline that also covers version discovery and
+  cleanup; Claude Code receives the title instruction as its system prompt and Codex once above a
+  single delimited block, so the untrusted prompt is never repeated or mistaken for instructions.
+  A stored key is scrubbed from provider text, Test results, logs and errors before truncation, and
+  a reply that echoes the key is discarded. A generator's endpoint, kind and key are read as one
+  snapshot so a title job can never pair an old key with a new URL, and a new configuration is
+  published only after it is on disk. Both files are written atomically under one lock, so
+  concurrent saves lose nothing. Removing the selected generator turns titles Off rather than
+  borrowing a coding agent, a generated title that beats the create reply is kept, the rename
+  dialog keeps your draft, a Test no longer blocks other requests on the same connection, and
+  OpenAI-compatible requests send no `max_tokens` (OpenAI's own API gets
+  `max_completion_tokens`).
 - **Bitbucket Cloud and Azure DevOps pull requests.** The forge layer now understands two more
   providers. Bitbucket Cloud takes an Atlassian API token (account email plus token, HTTP Basic) or
   a workspace, project or repository access token (Bearer); app passwords were retired in July 2026

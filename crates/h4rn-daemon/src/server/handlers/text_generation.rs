@@ -7,7 +7,7 @@
 use h4rn_protocol::{ClientRequest, ProtoError, ResponseBody};
 use tokio::task::JoinHandle;
 
-use crate::server::Connection;
+use crate::server::{AppState, Connection, SessionOrigin};
 
 /// Requests owned by this service.
 pub(super) fn matches(request: &ClientRequest) -> bool {
@@ -31,10 +31,10 @@ pub(super) async fn handle(
 ) -> Result<ResponseBody, ProtoError> {
     match request {
         ClientRequest::ListTextGenerators => Ok(ResponseBody::TextGenerators {
-            generators: conn.state.text_generation.generators(),
+            generators: conn.state.text_generation.generators().await,
         }),
         ClientRequest::AddTextGenerator { generator } => {
-            let generator = conn.state.text_generation.add_generator(generator)?;
+            let generator = conn.state.text_generation.add_generator(generator).await?;
             conn.audit(
                 "text_generator.added",
                 Some("text_generator"),
@@ -54,7 +54,8 @@ pub(super) async fn handle(
             let generator = conn
                 .state
                 .text_generation
-                .update_generator(&generator_id, patch)?;
+                .update_generator(&generator_id, patch)
+                .await?;
             conn.audit(
                 "text_generator.updated",
                 Some("text_generator"),
@@ -69,7 +70,10 @@ pub(super) async fn handle(
             Ok(ResponseBody::TextGenerator { generator })
         }
         ClientRequest::RemoveTextGenerator { generator_id } => {
-            conn.state.text_generation.remove_generator(&generator_id)?;
+            conn.state
+                .text_generation
+                .remove_generator(&generator_id)
+                .await?;
             conn.audit(
                 "text_generator.removed",
                 Some("text_generator"),
@@ -78,31 +82,17 @@ pub(super) async fn handle(
             );
             Ok(ResponseBody::Ack)
         }
+        // The read loop defers this request to [`test_off_loop`]; reaching it
+        // here means a caller asked for it directly, which is the same work.
         ClientRequest::TestTextGenerator {
             generator_id,
             model,
-        } => {
-            let report = conn
-                .state
-                .text_generation
-                .test_generator(&generator_id, model.as_deref())
-                .await?;
-            conn.audit(
-                "text_generator.tested",
-                Some("text_generator"),
-                Some(generator_id.as_str()),
-                serde_json::json!({
-                    "ok": report.ok,
-                    "latency_ms": report.latency_ms,
-                }),
-            );
-            Ok(ResponseBody::TextGeneratorTested { report })
-        }
+        } => test(conn, generator_id, model).await,
         ClientRequest::GetTextGenerationSettings => Ok(ResponseBody::TextGenerationSettings {
-            settings: conn.state.text_generation.settings(),
+            settings: conn.state.text_generation.settings().await,
         }),
         ClientRequest::SetTextGenerationSettings { settings } => {
-            let settings = conn.state.text_generation.set_settings(settings)?;
+            let settings = conn.state.text_generation.set_settings(settings).await?;
             conn.audit(
                 "text_generation.settings_changed",
                 Some("setting"),
@@ -128,6 +118,63 @@ pub(super) async fn handle(
         }
         other => Err(crate::server::not_implemented(&other)),
     }
+}
+
+/// Runs one provider Test for a live connection.
+async fn test(
+    conn: &Connection,
+    generator_id: h4rn_protocol::TextGeneratorId,
+    model: Option<String>,
+) -> Result<ResponseBody, ProtoError> {
+    let report = conn
+        .state
+        .text_generation
+        .test_generator(&generator_id, model.as_deref())
+        .await?;
+    conn.audit(
+        "text_generator.tested",
+        Some("text_generator"),
+        Some(generator_id.as_str()),
+        serde_json::json!({
+            "ok": report.ok,
+            "latency_ms": report.latency_ms,
+        }),
+    );
+    Ok(ResponseBody::TextGeneratorTested { report })
+}
+
+/// Runs a Test without holding the connection's request loop.
+///
+/// A provider can take the whole HTTP timeout to answer, and the person may be
+/// using the same connection for anything else meanwhile.
+pub(crate) async fn test_off_loop(
+    state: &AppState,
+    origin: &SessionOrigin,
+    request: ClientRequest,
+) -> Result<ResponseBody, ProtoError> {
+    let ClientRequest::TestTextGenerator {
+        generator_id,
+        model,
+    } = request
+    else {
+        return Err(crate::server::not_implemented(&request));
+    };
+    let report = state
+        .text_generation
+        .test_generator(&generator_id, model.as_deref())
+        .await?;
+    crate::server::record_audit(
+        state,
+        origin,
+        "text_generator.tested",
+        Some("text_generator"),
+        Some(generator_id.as_str()),
+        serde_json::json!({
+            "ok": report.ok,
+            "latency_ms": report.latency_ms,
+        }),
+    );
+    Ok(ResponseBody::TextGeneratorTested { report })
 }
 
 /// Settings live in files and renames arrive as normal thread upserts, so the

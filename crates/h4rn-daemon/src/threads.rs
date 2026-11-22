@@ -1834,6 +1834,9 @@ impl ThreadManager {
         let harness_attachments = harness_refs(&resolved_attachments);
         let title_eligible = request.parent_thread_id.is_none() && request.subagent_id.is_none();
         let title_prompt = request.prompt.clone();
+        // The default title mode uses this thread's own harness, so a prompt is
+        // never handed to a different provider unasked.
+        let title_harness = request.harness;
         let meta = ThreadMeta {
             thread_id: thread_id.clone(),
             parent_thread_id: request.parent_thread_id.clone(),
@@ -1925,8 +1928,12 @@ impl ThreadManager {
             .insert(thread_id.as_str().to_owned(), handle.clone());
 
         if title_eligible {
-            self.inner
-                .spawn_title_job(thread_id.clone(), title_prompt, title_workspace);
+            self.inner.spawn_title_job(
+                thread_id.clone(),
+                title_prompt,
+                title_workspace,
+                title_harness,
+            );
         }
 
         self.inner.spawn_session(handle);
@@ -2931,7 +2938,13 @@ impl Inner {
     /// it only while the row still says the title came from the prompt, so a
     /// rename that lands first wins and a rename that lands later overwrites
     /// the generated title.
-    fn spawn_title_job(self: &Arc<Self>, thread_id: ThreadId, prompt: String, workspace: String) {
+    fn spawn_title_job(
+        self: &Arc<Self>,
+        thread_id: ThreadId,
+        prompt: String,
+        workspace: String,
+        harness: HarnessKind,
+    ) {
         let Some(service) = self.text_generation.get().cloned() else {
             return;
         };
@@ -2945,7 +2958,7 @@ impl Inner {
         }
         let inner = Arc::clone(self);
         tokio::spawn(async move {
-            let result = service.thread_title(&prompt, &workspace).await;
+            let result = service.thread_title(&prompt, &workspace, harness).await;
             match result {
                 Ok(title) => inner.apply_generated_title(&thread_id, title).await,
                 Err(error) => {
@@ -9674,6 +9687,7 @@ mod tests {
             &self,
             _first_prompt: &str,
             _workspace: &str,
+            _harness: HarnessKind,
         ) -> Result<String, TextGenerationError> {
             if let Some(started) = &self.started {
                 started.notify_one();

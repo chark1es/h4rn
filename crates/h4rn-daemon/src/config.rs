@@ -157,11 +157,6 @@ impl Config {
         self.proxy_dir().join("secrets")
     }
 
-    /// Directory holding text generator settings and encrypted keys.
-    pub fn text_generation_dir(&self) -> PathBuf {
-        self.data_dir.join(crate::text_generation::DATA_DIR)
-    }
-
     /// Directory holding per-thread materialised attachment copies.
     pub fn attachments_dir(&self) -> PathBuf {
         self.data_dir.join("attachments")

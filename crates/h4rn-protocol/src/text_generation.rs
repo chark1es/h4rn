@@ -106,7 +106,7 @@ pub struct TextGeneratorDraft {
 }
 
 /// A field-wise generator update. `None` leaves a field unchanged.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct TextGeneratorPatch {
     /// New label.
     #[serde(default)]
@@ -168,6 +168,18 @@ pub struct TitleModelSetting {
     /// Model override for the generator; `None` uses its stored model.
     #[serde(default)]
     pub model: Option<String>,
+}
+
+impl TitleModelSetting {
+    /// Titles keep the first line of the first prompt.
+    pub fn off() -> Self {
+        Self {
+            mode: TitleModelMode::Off,
+            harness: None,
+            generator_id: None,
+            model: None,
+        }
+    }
 }
 
 impl Default for TitleModelSetting {
