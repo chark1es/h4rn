@@ -103,6 +103,14 @@ async fn manager_with_agents() -> Option<(ThreadManager, Arc<AcpAgentService>, t
 async fn manager_with_agent_env(
     env: std::collections::BTreeMap<String, String>,
 ) -> Option<(ThreadManager, Arc<AcpAgentService>, tempfile::TempDir)> {
+    manager_with_agent(env, AcpWorkingDir::ThreadWorkspace).await
+}
+
+/// A manager whose configured agent may run in a fixed directory.
+async fn manager_with_agent(
+    env: std::collections::BTreeMap<String, String>,
+    working_dir: AcpWorkingDir,
+) -> Option<(ThreadManager, Arc<AcpAgentService>, tempfile::TempDir)> {
     let binary = fixture_binary()?;
     let data = tempfile::tempdir().expect("data dir");
     let agents = Arc::new(AcpAgentService::open(data.path()).expect("agent service"));
@@ -113,7 +121,7 @@ async fn manager_with_agent_env(
             command: binary.display().to_string(),
             args: Vec::new(),
             env,
-            working_dir: AcpWorkingDir::ThreadWorkspace,
+            working_dir,
         })
         .expect("configure the fixture");
     let catalog = StaticHarnessCatalog::with(Arc::new(GenericAcpHarness::new(agents.clone())));
@@ -139,6 +147,14 @@ async fn manager() -> Option<ThreadManager> {
 }
 
 async fn create(manager: &ThreadManager, workspace: &std::path::Path) -> ThreadId {
+    create_with_model(manager, workspace, "default").await
+}
+
+async fn create_with_model(
+    manager: &ThreadManager,
+    workspace: &std::path::Path,
+    model: &str,
+) -> ThreadId {
     manager
         .create_thread(NewThread {
             thread_id: None,
@@ -148,7 +164,7 @@ async fn create(manager: &ThreadManager, workspace: &std::path::Path) -> ThreadI
             harness: HarnessKind::Acp,
             agent_id: Some("fixture".into()),
             workspace_path: workspace.display().to_string(),
-            model: "default".into(),
+            model: model.into(),
             prompt: "hello".into(),
             attachments: Vec::new(),
             runtime_mode: RuntimeMode::ApprovalRequired,
@@ -611,4 +627,237 @@ async fn a_generic_agents_turn_can_be_cancelled() {
     assert!(text.contains("echo: after cancel"), "got {text:?}");
 
     manager.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dual_catalogue_agent_probes_and_starts_with_its_v1_catalogue() {
+    let Some(binary) = fixture_binary() else {
+        return skip_without_fixture();
+    };
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("H4RN_FIXTURE_DUAL_CATALOGUE".into(), "1".into());
+
+    // A probe must offer the catalogue a start selects from. This fixture
+    // publishes the legacy objects and ACP v1 `configOptions` with different
+    // ids; the generic adapter uses the v1 pair.
+    let data = tempfile::tempdir().expect("data dir");
+    let agents = AcpAgentService::open(data.path()).expect("agent service");
+    agents
+        .add(AcpAgentSpec {
+            id: "fixture".into(),
+            name: "ACP fixture".into(),
+            command: binary.display().to_string(),
+            args: Vec::new(),
+            env: env.clone(),
+            working_dir: AcpWorkingDir::ThreadWorkspace,
+        })
+        .expect("configure");
+    let probe = agents.probe("fixture").await.expect("probe");
+    assert!(probe.error.is_none(), "probe failed: {probe:?}");
+    assert_eq!(
+        probe
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["v1-model"],
+        "the probe reports the catalogue the adapter selects from"
+    );
+    assert_eq!(
+        probe
+            .modes
+            .iter()
+            .map(|mode| mode.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["default"]
+    );
+
+    // The same catalogue starts a thread: the model the picker offers is one
+    // the startup path accepts.
+    let workspace = tempfile::tempdir().expect("workspace");
+    let Some((manager, _agents, _data)) = manager_with_agent_env(env).await else {
+        return skip_without_fixture();
+    };
+    let mut events = manager.subscribe();
+    let _thread = create_with_model(&manager, workspace.path(), "v1-model").await;
+    let (status, text, _) = next_turn(&mut events, |_| {}).await;
+    assert_eq!(status, TurnStatus::Completed);
+    assert!(text.contains("echo: hello"), "got {text:?}");
+
+    manager.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn an_empty_resume_reply_keeps_the_saved_model_and_mode() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let mut env = std::collections::BTreeMap::new();
+    // Resume-only, and the reply names the session without repeating a
+    // catalogue.
+    env.insert("H4RN_FIXTURE_RESUME_ONLY".into(), "1".into());
+    env.insert("H4RN_FIXTURE_EMPTY_RESUME".into(), "1".into());
+    let Some((manager, _agents, _data)) = manager_with_agent_env(env).await else {
+        return skip_without_fixture();
+    };
+    let mut events = manager.subscribe();
+    let thread = create_with_model(&manager, workspace.path(), "fixture-model").await;
+    let (status, text, _) = next_turn(&mut events, |_| {}).await;
+    assert_eq!(status, TurnStatus::Completed);
+    assert!(text.contains("echo: hello"), "got {text:?}");
+
+    // The agent knows the model and mode from the session it continues; an
+    // empty catalogue must not reject the saved selection.
+    manager.restart_sessions(&[HarnessKind::Acp]).await;
+    manager
+        .send_message(&thread, "after the empty resume".into(), Vec::new())
+        .await
+        .expect("send");
+    let (status, text, _) = next_turn(&mut events, |_| {}).await;
+    assert_eq!(status, TurnStatus::Completed);
+    assert!(
+        text.contains("echo: after the empty resume"),
+        "got {text:?}"
+    );
+
+    let starts = std::fs::read_to_string(workspace.path().join(".agy-fixture-sessions"))
+        .expect("the fixture recorded its sessions");
+    assert!(
+        starts.lines().any(|line| line.starts_with("resume")),
+        "the restart used session/resume: {starts:?}"
+    );
+
+    manager.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_load_replay_larger_than_the_event_queue_is_not_live_output() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let mut env = std::collections::BTreeMap::new();
+    // The client's event queue holds 1,024 frames. A replay past that used to
+    // block the reader before it could deliver the load reply.
+    env.insert("H4RN_FIXTURE_LOAD_REPLAY".into(), "1500".into());
+    let Some((manager, _agents, _data)) = manager_with_agent_env(env).await else {
+        return skip_without_fixture();
+    };
+    let mut events = manager.subscribe();
+    let thread = create(&manager, workspace.path()).await;
+    let (status, _, _) = next_turn(&mut events, |_| {}).await;
+    assert_eq!(status, TurnStatus::Completed);
+
+    manager.restart_sessions(&[HarnessKind::Acp]).await;
+    manager
+        .send_message(&thread, "after the long replay".into(), Vec::new())
+        .await
+        .expect("send");
+    let (status, text, _) = next_turn(&mut events, |_| {}).await;
+    assert_eq!(
+        status,
+        TurnStatus::Completed,
+        "a long replay must not deadlock the load"
+    );
+    assert!(text.contains("echo: after the long replay"), "got {text:?}");
+    assert!(
+        !text.contains("replayed history"),
+        "the agent's replay is history the thread already shows, not this turn's output: {text:?}"
+    );
+
+    manager.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_fixed_working_directory_is_the_threads_workspace() {
+    let fixed = tempfile::tempdir().expect("fixed directory");
+    let thread_workspace = tempfile::tempdir().expect("thread workspace");
+    let Some((manager, _agents, _data)) = manager_with_agent(
+        std::collections::BTreeMap::new(),
+        AcpWorkingDir::FixedPath {
+            path: fixed.path().display().to_string(),
+        },
+    )
+    .await
+    else {
+        return skip_without_fixture();
+    };
+
+    let created = manager
+        .create_thread(NewThread {
+            thread_id: None,
+            parent_thread_id: None,
+            subagent_id: None,
+            host: HostId::new("host_test"),
+            harness: HarnessKind::Acp,
+            agent_id: Some("fixture".into()),
+            workspace_path: thread_workspace.path().display().to_string(),
+            model: "default".into(),
+            prompt: "hello".into(),
+            attachments: Vec::new(),
+            runtime_mode: RuntimeMode::ApprovalRequired,
+            worktree: None,
+        })
+        .await
+        .expect("create");
+    assert_eq!(
+        created.summary.workspace_path,
+        fixed.path().display().to_string(),
+        "Files/Changes must name the directory the agent runs in, not the one the client sent"
+    );
+
+    manager.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failed_probe_for_a_configuration_that_changed_is_a_conflict() {
+    let data = tempfile::tempdir().expect("data dir");
+    let agents = Arc::new(AcpAgentService::open(data.path()).expect("agent service"));
+    let gate = data.path().join("probe-gate");
+    let marker = data.path().join("probe-started");
+    let mut env = std::collections::BTreeMap::new();
+    env.insert("H4RN_TEST_MARKER".into(), marker.display().to_string());
+    env.insert("H4RN_TEST_GATE".into(), gate.display().to_string());
+    agents
+        .add(AcpAgentSpec {
+            id: "fixture".into(),
+            name: "ACP fixture".into(),
+            command: "sh".into(),
+            // Park until the test edits the entry, then fail the handshake.
+            args: vec![
+                "-c".into(),
+                "touch \"$H4RN_TEST_MARKER\"; while [ ! -f \"$H4RN_TEST_GATE\" ]; do sleep 0.02; done; exit 3"
+                    .into(),
+            ],
+            env,
+            working_dir: AcpWorkingDir::ThreadWorkspace,
+        })
+        .expect("configure");
+
+    let probing = {
+        let agents = Arc::clone(&agents);
+        tokio::spawn(async move { agents.probe("fixture").await })
+    };
+    for _ in 0..200 {
+        if marker.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(marker.exists(), "the probe started its command");
+    let mut renamed = agents.spec("fixture").expect("spec");
+    renamed.name = "Renamed while probing".into();
+    agents.update("fixture", renamed).expect("update");
+    std::fs::write(&gate, b"").expect("release the command");
+
+    let probe = tokio::time::timeout(TURN_TIMEOUT, probing)
+        .await
+        .expect("the probe finished")
+        .expect("probe task");
+    let error = probe.expect_err("a failed result for the old configuration is a conflict");
+    assert_eq!(
+        error.code,
+        h4rn_protocol::ProtoErrorCode::Conflict,
+        "a superseded failure names the same conflict as a superseded success: {error:?}"
+    );
 }

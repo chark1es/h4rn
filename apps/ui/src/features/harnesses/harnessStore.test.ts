@@ -133,6 +133,41 @@ describe("harness versions store", () => {
     expect(getHarnessState().probeErrors.demo).toContain("admin");
   });
 
+  it("waits past the client's default timeout for a slow probe", async () => {
+    vi.useFakeTimers();
+    try {
+      let finish: (value: unknown) => void = () => undefined;
+      // Model the client's real deadline: the default is 10 s unless the
+      // request names its own, which a probe must do because the daemon bounds
+      // its handshake at 30 s.
+      request.mockImplementation(
+        (_body: unknown, options: { timeoutMs?: number } = {}) =>
+          new Promise((resolve, reject) => {
+            const limit = options.timeoutMs ?? 10_000;
+            setTimeout(() => reject(new Error(`timed out after ${limit} ms`)), limit);
+            finish = resolve;
+          }),
+      );
+      const pending = probeAcpAgent("demo");
+      await vi.advanceTimersByTimeAsync(12_000);
+      expect(
+        getHarnessState().probeErrors.demo,
+        "a probe that outlives 10 s is still running",
+      ).toBeUndefined();
+
+      finish({
+        type: "acp_agent_probe",
+        probe: { id: "demo", installed: true, models: [], modes: [] },
+      });
+      request.mockResolvedValueOnce({ type: "acp_agents", agents: [] });
+      await expect(pending).resolves.toBeNull();
+      expect(getHarnessState().probes.demo).toBeDefined();
+      expect(getHarnessState().probing.demo).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("starts no second probe while one is already running", async () => {
     let finish: (value: unknown) => void = () => undefined;
     request.mockReturnValueOnce(
@@ -175,6 +210,13 @@ describe("harness versions store", () => {
       working_dir: { kind: "thread_workspace" },
     });
 
+    // The edit does not free the in-flight slot: the original handshake is
+    // still running, so a second Check must not start another process.
+    const before = request.mock.calls.length;
+    await expect(probeAcpAgent("demo")).resolves.toBeNull();
+    expect(request.mock.calls.length).toBe(before);
+    expect(getHarnessState().probing.demo).toBe(true);
+
     // The old command's models arrive afterwards and must not reach the picker.
     finish({
       type: "acp_agent_probe",
@@ -189,6 +231,7 @@ describe("harness versions store", () => {
     await pending;
 
     expect(getHarnessState().probes.demo).toBeUndefined();
+    expect(getHarnessState().probing.demo).toBe(false);
   });
 
   it("drops a cached probe when the agent is edited", async () => {

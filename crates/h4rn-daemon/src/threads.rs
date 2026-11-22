@@ -1790,15 +1790,22 @@ impl ThreadManager {
                     "an ACP thread must name a configured agent".into(),
                 ));
             };
-            let known = self
-                .inner
-                .harnesses
-                .get(HarnessKind::Acp)
+            let harness = self.inner.harnesses.get(HarnessKind::Acp);
+            let known = harness
+                .as_ref()
                 .is_some_and(|harness| harness.has_instance(agent_id));
             if !known {
                 return Err(ManagerError::InvalidRequest(format!(
                     "no ACP agent `{agent_id}` is configured on this host"
                 )));
+            }
+            // An agent configured with a fixed directory runs there whichever
+            // workspace the client sent. The thread row (and Files/Changes)
+            // must name the directory the agent actually uses.
+            if let Some(effective) = harness.as_ref().and_then(|harness| {
+                harness.instance_workspace(agent_id, std::path::Path::new(&request.workspace_path))
+            }) {
+                request.workspace_path = effective.display().to_string();
             }
         } else {
             request.agent_id = None;
@@ -3411,7 +3418,7 @@ impl Inner {
         // an agent for nobody would leave a session no turn asked for, and a
         // failure would be blamed on whichever turn arrived next. The slot stays
         // `None`, so a Send that arrives now starts its own session.
-        let (harness, mut spec, generation, turn) = {
+        let (harness, snapshot, mut spec, generation, turn) = {
             let mut record = handle.lock().await;
             if record.closed || self.closed.load(Ordering::Relaxed) {
                 return;
@@ -3456,17 +3463,23 @@ impl Inner {
             // copy: a start that fails before SessionStarted must not leave the
             // stale id behind for the next attempt.
             let workspace = std::path::PathBuf::from(&record.meta.workspace_path);
-            if harness_kind == HarnessKind::Acp
-                && let Some(agent_id) = record.meta.agent_id.as_deref()
-            {
-                let fingerprint = harness.instance_fingerprint(agent_id, &workspace);
+            let snapshot = if harness_kind == HarnessKind::Acp {
+                record
+                    .meta
+                    .agent_id
+                    .as_deref()
+                    .and_then(|agent_id| harness.resolve_instance(agent_id, &workspace))
+            } else {
+                None
+            };
+            if harness_kind == HarnessKind::Acp {
+                // One resolution: this fingerprint and the process this
+                // startup launches come from the same snapshot, so an edit in
+                // between cannot pair an old session id with a new command.
+                let fingerprint = snapshot.as_ref().map(|snapshot| snapshot.fingerprint());
                 let mut stored = record.meta.agent_fingerprint.clone();
                 let mut resume_id = record.meta.resume_id.clone();
-                resume_after_fingerprint_change(
-                    &mut stored,
-                    fingerprint.as_deref(),
-                    &mut resume_id,
-                );
+                resume_after_fingerprint_change(&mut stored, fingerprint, &mut resume_id);
                 record.meta.agent_fingerprint = stored;
                 record.meta.resume_id = resume_id;
             }
@@ -3483,7 +3496,7 @@ impl Inner {
             };
             let generation = record.next_session_gen();
             record.session = SessionSlot::Starting(generation);
-            (harness, spec, generation, turn)
+            (harness, snapshot, spec, generation, turn)
         };
 
         // CLIProxyAPI routing is applied only when the harness's toggle is on.
@@ -3514,7 +3527,7 @@ impl Inner {
             spec.env_overrides = applied.env;
         }
 
-        let mut session = match harness.start_session(spec).await {
+        let mut session = match harness.start_session_with(spec, snapshot).await {
             Ok(session) => session,
             Err(error) => {
                 self.fail_session(handle, Some(generation), turn, error.to_string())

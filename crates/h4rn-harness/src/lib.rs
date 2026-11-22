@@ -15,6 +15,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -544,6 +545,47 @@ pub trait HarnessSession: Send {
     }
 }
 
+/// One configured adapter instance, resolved at a single instant.
+///
+/// A thread stores the fingerprint beside its resume id, and the same snapshot
+/// is what a start launches. Reading the configuration twice would let an edit
+/// between those two steps fingerprint one command line and run another, so the
+/// daemon resolves it once and carries this value.
+#[derive(Clone)]
+pub struct InstanceSnapshot {
+    fingerprint: String,
+    payload: Arc<dyn std::any::Any + Send + Sync>,
+}
+
+impl std::fmt::Debug for InstanceSnapshot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InstanceSnapshot")
+            .field("fingerprint", &self.fingerprint)
+            .finish_non_exhaustive()
+    }
+}
+
+impl InstanceSnapshot {
+    /// Wraps the adapter-owned configuration a snapshot was resolved from.
+    pub fn new<T: Send + Sync + 'static>(fingerprint: impl Into<String>, payload: T) -> Self {
+        Self {
+            fingerprint: fingerprint.into(),
+            payload: Arc::new(payload),
+        }
+    }
+
+    /// The stable fingerprint the daemon stores with the thread's resume id.
+    pub fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+
+    /// The adapter's own configuration, when this snapshot is its kind.
+    pub fn payload<T: 'static>(&self) -> Option<&T> {
+        self.payload.downcast_ref::<T>()
+    }
+}
+
 /// A harness adapter.
 #[async_trait]
 pub trait Harness: Send + Sync {
@@ -561,19 +603,39 @@ pub trait Harness: Send + Sync {
         false
     }
 
+    /// The directory one configured instance actually runs in.
+    ///
+    /// A thread workspace is the default; an adapter whose configuration fixes
+    /// the directory overrides it, so the thread row and Files/Changes name the
+    /// directory the agent really uses. Built-in adapters run in the thread
+    /// workspace and answer `None`.
+    fn instance_workspace(&self, _instance: &str, _workspace: &std::path::Path) -> Option<PathBuf> {
+        None
+    }
+
+    /// Resolves one configured instance, for a thread whose workspace is
+    /// `workspace`, into the fingerprint a thread stores beside its resume id
+    /// and the exact configuration a start must launch.
+    ///
+    /// Built-in adapters have one command per kind and answer `None`.
+    fn resolve_instance(
+        &self,
+        _instance: &str,
+        _workspace: &std::path::Path,
+    ) -> Option<InstanceSnapshot> {
+        None
+    }
+
     /// A stable fingerprint of the command line behind one configured
     /// instance, for a thread whose workspace is `workspace`.
     ///
     /// The daemon stores it beside a thread's resume id: when the command line
     /// or the effective working directory changes, the old session id names a
     /// conversation the new command never saw, so the next start opens a fresh
-    /// session. Built-in adapters have one command per kind and answer `None`.
-    fn instance_fingerprint(
-        &self,
-        _instance: &str,
-        _workspace: &std::path::Path,
-    ) -> Option<String> {
-        None
+    /// session.
+    fn instance_fingerprint(&self, instance: &str, workspace: &std::path::Path) -> Option<String> {
+        self.resolve_instance(instance, workspace)
+            .map(|snapshot| snapshot.fingerprint().to_owned())
     }
 
     /// Starts (or resumes) a session.
@@ -581,4 +643,18 @@ pub trait Harness: Send + Sync {
         &self,
         spec: SessionSpec,
     ) -> Result<Box<dyn HarnessSession>, HarnessError>;
+
+    /// Starts a session from configuration resolved earlier.
+    ///
+    /// The default ignores the snapshot: an adapter with nothing to snapshot
+    /// behaves exactly like [`Self::start_session`]. An adapter that offers
+    /// [`Self::resolve_instance`] launches the snapshot's configuration so the
+    /// fingerprint and the process can never disagree.
+    async fn start_session_with(
+        &self,
+        spec: SessionSpec,
+        _snapshot: Option<InstanceSnapshot>,
+    ) -> Result<Box<dyn HarnessSession>, HarnessError> {
+        self.start_session(spec).await
+    }
 }

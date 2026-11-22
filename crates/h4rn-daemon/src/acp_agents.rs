@@ -197,12 +197,6 @@ impl AcpAgentService {
         };
         let fingerprint = spec_fingerprint(&spec);
         let probe = probe_acp_agent(&spec).await;
-        // A failed probe keeps the last successful result: the picker can
-        // still offer the models the agent advertised before, and the failure
-        // itself is returned to the admin device that asked.
-        if probe.error.is_some() {
-            return Ok(probe);
-        }
         let mut agents = lock(&self.agents);
         let mut next = agents.clone();
         let Some(agent) = next.iter_mut().find(|agent| agent.spec.id == id) else {
@@ -212,12 +206,21 @@ impl AcpAgentService {
             );
             return Err(superseded(id));
         };
+        // A result for a configuration that no longer exists is superseded
+        // whether it succeeded or failed: the failure describes the old
+        // command line, not the saved one.
         if spec_fingerprint(&agent.spec) != fingerprint {
             tracing::debug!(
                 id,
                 "discarding an ACP probe whose configuration changed while it ran"
             );
             return Err(superseded(id));
+        }
+        // A failed probe keeps the last successful result: the picker can
+        // still offer the models the agent advertised before, and the failure
+        // itself is returned to the admin device that asked.
+        if probe.error.is_some() {
+            return Ok(probe);
         }
         agent.version = probe.version.clone();
         agent.models = probe.models.clone();
@@ -242,7 +245,7 @@ impl AcpAgentConfigSource for AcpAgentService {
 /// Used to tell whether a probe still describes the entry it was started for;
 /// the map order is stable and the shape is the same one that is persisted.
 fn spec_fingerprint(spec: &AcpAgentSpec) -> String {
-    serde_json::to_string(spec).unwrap_or_default()
+    serde_json::to_string(spec).expect("an ACP agent spec is always serializable")
 }
 
 fn view(agent: &StoredAgent) -> AcpAgent {

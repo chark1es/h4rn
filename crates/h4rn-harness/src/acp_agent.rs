@@ -29,7 +29,7 @@ use h4rn_protocol::{
 };
 
 use crate::acp::{AcpClient, AcpClientConfig, AcpSessionPolicy, default_mode, map_acp_error};
-use crate::{Harness, HarnessError, HarnessInstall, HarnessSession, SessionSpec};
+use crate::{Harness, HarnessError, HarnessInstall, HarnessSession, InstanceSnapshot, SessionSpec};
 
 /// Where the generic ACP adapter reads its configured instances.
 pub trait AcpAgentConfigSource: Send + Sync {
@@ -93,14 +93,30 @@ impl Harness for GenericAcpHarness {
         self.config(instance).is_some()
     }
 
-    fn instance_fingerprint(&self, instance: &str, workspace: &Path) -> Option<String> {
+    fn instance_workspace(&self, instance: &str, workspace: &Path) -> Option<PathBuf> {
+        let agent = self.config(instance)?;
+        Some(match &agent.working_dir {
+            AcpWorkingDir::ThreadWorkspace => workspace.to_path_buf(),
+            AcpWorkingDir::FixedPath { path } => PathBuf::from(path),
+        })
+    }
+
+    fn resolve_instance(&self, instance: &str, workspace: &Path) -> Option<InstanceSnapshot> {
         self.config(instance)
-            .map(|agent| command_fingerprint(&agent, workspace))
+            .map(|agent| InstanceSnapshot::new(command_fingerprint(&agent, workspace), agent))
     }
 
     async fn start_session(
         &self,
         spec: SessionSpec,
+    ) -> Result<Box<dyn HarnessSession>, HarnessError> {
+        self.start_session_with(spec, None).await
+    }
+
+    async fn start_session_with(
+        &self,
+        spec: SessionSpec,
+        snapshot: Option<InstanceSnapshot>,
     ) -> Result<Box<dyn HarnessSession>, HarnessError> {
         let Some(agent_id) = spec
             .agent_id
@@ -113,7 +129,15 @@ impl Harness for GenericAcpHarness {
                 message: "the thread does not name a configured ACP agent".into(),
             });
         };
-        let Some(agent) = self.config(agent_id) else {
+        // The snapshot is the configuration this startup fingerprinted. An edit
+        // made since then must not change the process: the stored resume id
+        // names the command that was fingerprinted, not the newer one.
+        let agent = snapshot
+            .as_ref()
+            .and_then(InstanceSnapshot::payload::<AcpAgentSpec>)
+            .cloned()
+            .or_else(|| self.config(agent_id));
+        let Some(agent) = agent else {
             return Err(HarnessError::Spawn {
                 harness: HarnessKind::Acp,
                 message: format!("no ACP agent `{agent_id}` is configured on this host"),
@@ -366,7 +390,14 @@ pub async fn probe_acp_agent(agent: &AcpAgentSpec) -> AcpAgentProbe {
     let exchange = async {
         let info = client.initialize().await?;
         probe.version = (!info.agent_version.trim().is_empty()).then(|| info.agent_version.clone());
-        let session = client.new_session(&workspace, &[]).await?;
+        // The picker must offer the catalogue a start will select from. A
+        // generic agent's v1 `configOptions` win over a legacy
+        // `models`/`modes` object it also publishes, exactly as at startup, so
+        // the probe reads the same catalogue the adapter uses.
+        let session = client
+            .new_session(&workspace, &[])
+            .await?
+            .prefer_config_options();
         probe.models = session
             .models
             .iter()
@@ -400,7 +431,28 @@ pub async fn probe_acp_agent(agent: &AcpAgentSpec) -> AcpAgentProbe {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
+
+    /// A source a test can edit while a resolved snapshot is still in use.
+    #[derive(Default)]
+    struct EditableAgents(Mutex<BTreeMap<String, AcpAgentSpec>>);
+
+    impl EditableAgents {
+        fn set(&self, agent: AcpAgentSpec) {
+            self.0
+                .lock()
+                .expect("agents")
+                .insert(agent.id.clone(), agent);
+        }
+    }
+
+    impl AcpAgentConfigSource for EditableAgents {
+        fn acp_agent(&self, id: &str) -> Option<AcpAgentSpec> {
+            self.0.lock().expect("agents").get(id).cloned()
+        }
+    }
 
     fn spec(id: &str, command: &str) -> AcpAgentSpec {
         AcpAgentSpec {
@@ -524,6 +576,94 @@ mod tests {
                 .expect("fingerprint"),
             "a fixed directory replaces the thread workspace"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_snapshot_wins_over_an_edit_made_before_the_start() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let old = tempfile::tempdir().expect("old command");
+        let new = tempfile::tempdir().expect("new command");
+        let old_marker = old.path().join("old-ran");
+        let new_marker = new.path().join("new-ran");
+        let old_script = old.path().join("agent");
+        let new_script = new.path().join("agent");
+        executable_file(&old_script);
+        std::fs::write(
+            &old_script,
+            format!("#!/bin/sh\n: > '{}'\nexit 1\n", old_marker.display()),
+        )
+        .expect("write old script");
+        executable_file(&new_script);
+        std::fs::write(
+            &new_script,
+            format!("#!/bin/sh\n: > '{}'\nexit 1\n", new_marker.display()),
+        )
+        .expect("write new script");
+
+        let source = Arc::new(EditableAgents::default());
+        source.set(spec("demo", &old_script.display().to_string()));
+        let harness = GenericAcpHarness::new(source.clone());
+        let snapshot = harness
+            .resolve_instance("demo", workspace.path())
+            .expect("resolved instance");
+        let fingerprint = snapshot.fingerprint().to_owned();
+        assert_eq!(
+            harness.instance_fingerprint("demo", workspace.path()),
+            Some(fingerprint.clone())
+        );
+
+        // The person edits the command after the daemon fingerprinted the old
+        // one. The start must still run the snapshot the fingerprint names, so
+        // the stored resume id can never reach the new command.
+        source.set(spec("demo", &new_script.display().to_string()));
+        let session = SessionSpec {
+            workspace: workspace.path().to_path_buf(),
+            model: "default".into(),
+            runtime_mode: h4rn_protocol::RuntimeMode::ApprovalRequired,
+            resume_id: Some("stored-session".into()),
+            mcp_endpoint: None,
+            env_overrides: BTreeMap::new(),
+            attachments: Vec::new(),
+            agent_id: Some("demo".into()),
+        };
+        assert!(
+            harness
+                .start_session_with(session, Some(snapshot))
+                .await
+                .is_err(),
+            "the test script is not an ACP agent"
+        );
+        assert!(
+            old_marker.exists(),
+            "the fingerprinted command line is the one that runs"
+        );
+        assert!(
+            !new_marker.exists(),
+            "the command saved after the fingerprint must not run with the old session id"
+        );
+    }
+
+    #[test]
+    fn a_fixed_working_directory_is_the_instances_effective_workspace() {
+        let thread = tempfile::tempdir().expect("thread");
+        let fixed = tempfile::tempdir().expect("fixed");
+        let mut agent = spec("demo", "agent");
+        agent.working_dir = AcpWorkingDir::FixedPath {
+            path: fixed.path().display().to_string(),
+        };
+        let harness = GenericAcpHarness::new(Arc::new(StaticAcpAgents::new().with(agent)));
+        assert_eq!(
+            harness.instance_workspace("demo", thread.path()),
+            Some(fixed.path().to_path_buf())
+        );
+        let harness =
+            GenericAcpHarness::new(Arc::new(StaticAcpAgents::new().with(spec("demo", "agent"))));
+        assert_eq!(
+            harness.instance_workspace("demo", thread.path()),
+            Some(thread.path().to_path_buf())
+        );
+        assert_eq!(harness.instance_workspace("missing", thread.path()), None);
     }
 
     #[test]

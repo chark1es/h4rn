@@ -238,13 +238,18 @@ function probeGeneration(id: string): number {
   return probeGenerations.get(id) ?? 0;
 }
 
-/** Drops what a probe learned about an agent whose configuration changed. */
+/**
+ * Drops what a probe learned about an agent whose configuration changed.
+ *
+ * The in-flight flag is not cleared here: the running probe keeps its slot
+ * until it settles, so Check cannot start a second handshake against the edited
+ * command while the first one is still running.
+ */
 function forgetProbe(id: string): void {
   probeGenerations.set(id, probeGeneration(id) + 1);
   const { [id]: _probe, ...probes } = state.probes;
   const { [id]: _error, ...probeErrors } = state.probeErrors;
-  const { [id]: _probing, ...probing } = state.probing;
-  patch({ probes, probeErrors, probing });
+  patch({ probes, probeErrors });
 }
 
 /** Starts one agent once and records what it advertises. */
@@ -255,10 +260,18 @@ export async function probeAcpAgent(id: string): Promise<string | null> {
   const generation = probeGeneration(id);
   patch({ probing: { ...state.probing, [id]: true } });
   try {
-    const response = await getClient().request({ type: "probe_acp_agent", id });
+    // The daemon bounds its own handshake at 30 s. The client's default
+    // timeout is 10 s, which would abandon a slow but healthy probe.
+    const response = await getClient().request(
+      { type: "probe_acp_agent", id },
+      { timeoutMs: 35_000 },
+    );
     // The agent was edited or removed while this handshake ran; its answer
     // belongs to no configuration that exists now.
-    if (probeGeneration(id) !== generation) return null;
+    if (probeGeneration(id) !== generation) {
+      patch({ probing: { ...state.probing, [id]: false } });
+      return null;
+    }
     if (response.type !== "acp_agent_probe") {
       patch({ probing: { ...state.probing, [id]: false } });
       return null;
@@ -274,7 +287,10 @@ export async function probeAcpAgent(id: string): Promise<string | null> {
     await loadAcpAgents();
     return response.probe.error ?? null;
   } catch (error) {
-    if (probeGeneration(id) !== generation) return null;
+    if (probeGeneration(id) !== generation) {
+      patch({ probing: { ...state.probing, [id]: false } });
+      return null;
+    }
     const message = protoMessage(error);
     patch({
       probing: { ...state.probing, [id]: false },

@@ -599,6 +599,12 @@ impl AcpClient {
     }
 
     /// Loads an existing session (`session/load`).
+    ///
+    /// The agent replays the conversation as `session/update` notifications
+    /// before it answers. That history belongs to turns the thread already
+    /// shows, so it is consumed here instead of queued for the new session:
+    /// the event channel is bounded, and a long conversation would fill it and
+    /// leave the reader unable to deliver the reply at all.
     pub async fn load_session(
         &self,
         session_id: &str,
@@ -610,10 +616,48 @@ impl AcpClient {
             "cwd": cwd.display().to_string(),
             "mcpServers": mcp_servers.iter().map(|server| server.to_json()).collect::<Vec<_>>(),
         });
-        let result = self
-            .call("session/load", params, Some(SESSION_TIMEOUT))
-            .await?;
+        let result = self.call_consuming_replay("session/load", params).await?;
         Ok(AcpSessionInfo::from_value(&result, session_id))
+    }
+
+    /// Runs one session call while discarding the history it replays.
+    ///
+    /// `session/load` streams the old conversation between the request and the
+    /// reply. Nothing consumes the event stream yet at startup, so this drains
+    /// it alongside the call. Only `session/update` frames are dropped: a death
+    /// report, a permission hand or an error that arrives meanwhile is handed
+    /// back to the stream once the call settles.
+    async fn call_consuming_replay(
+        &self,
+        method: &'static str,
+        params: Value,
+    ) -> Result<Value, AcpError> {
+        let mut receiver = lock(&self.shared.events_rx).take();
+        let mut kept = Vec::new();
+        let result = match receiver.as_mut() {
+            None => self.call(method, params, Some(SESSION_TIMEOUT)).await,
+            Some(receiver) => {
+                let mut call = std::pin::pin!(self.call(method, params, Some(SESSION_TIMEOUT)));
+                loop {
+                    tokio::select! {
+                        result = &mut call => break result,
+                        event = receiver.recv() => match event {
+                            Some(AcpEvent::SessionUpdate { .. }) => {}
+                            Some(event) => kept.push(event),
+                            // The transport is gone; the call reports that.
+                            None => break call.await,
+                        },
+                    }
+                }
+            }
+        };
+        if let Some(receiver) = receiver {
+            *lock(&self.shared.events_rx) = Some(receiver);
+        }
+        for event in kept {
+            let _ = self.shared.events_tx.send(event).await;
+        }
+        result
     }
 
     /// Continues a stored session without replaying it (`session/resume`).

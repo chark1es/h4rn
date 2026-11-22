@@ -17,7 +17,13 @@ import { Textarea } from "@/components/ui/textarea";
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts, useAttachShortcut } from "@/features/attachments/use-attachments";
-import { acpModelChoices, acpPickerOptions } from "@/features/harnesses/acpForm";
+import {
+  acpModeChoices,
+  acpModelChoices,
+  acpPickerOptions,
+  acpRuntimeModeChoices,
+  THREAD_RUNTIME_MODES,
+} from "@/features/harnesses/acpForm";
 import {
   probeAcpAgent,
   useAcpAgents,
@@ -257,16 +263,28 @@ export function NewThreadDialog() {
   // successful result the daemon stored in the list. A failed probe (a rejected
   // request, or an answer that carries an error) falls back to that stored
   // result instead of emptying the picker.
-  const agentModels = acpModelChoices(
-    probe,
-    Boolean(probeError) || Boolean(probe?.error),
-    selectedAgent?.models,
-  );
-  const firstAgentModel = agentModels[0];
+  const probeFailed = Boolean(probeError) || Boolean(probe?.error);
+  const agentModels = acpModelChoices(probe, probeFailed, selectedAgent?.models);
+  // Only a mode h4rn can actually select is offered. An agent that names its
+  // own modes is left alone: the dialog says so instead of promising an
+  // "Approval required" mode the agent never advertised.
+  const agentModes = acpModeChoices(probe, probeFailed, selectedAgent?.modes);
+  const runtimeModeChoices =
+    harness === "acp" ? acpRuntimeModeChoices(agentModes) : THREAD_RUNTIME_MODES;
+  const modeManagedByAgent = harness === "acp" && runtimeModeChoices.length === 0;
   useEffect(() => {
-    if (!open || harness !== "acp" || !firstAgentModel) return;
-    setModel((current) => (current === "default" || current === "" ? firstAgentModel : current));
-  }, [open, harness, firstAgentModel]);
+    if (!open || modeManagedByAgent || runtimeModeChoices.length === 0) return;
+    if (runtimeModeChoices.some((choice) => choice.value === runtimeMode)) return;
+    const first = runtimeModeChoices[0];
+    if (first) setRuntimeMode(first.value);
+  }, [open, modeManagedByAgent, runtimeMode, runtimeModeChoices]);
+  // A fixed working directory is where the agent runs, whatever path the
+  // thread workspace would otherwise be: show it before Start and use it.
+  const fixedWorkspace =
+    harness === "acp" && selectedAgent?.working_dir.kind === "fixed_path"
+      ? selectedAgent.working_dir.path
+      : null;
+  const effectiveWorkspace = fixedWorkspace ?? workspace;
   const offline = connection !== "online";
   const modelChoices = [
     ...new Set([
@@ -309,7 +327,9 @@ export function NewThreadDialog() {
       host: draft.host,
       harness,
       agentId: harness === "acp" ? agentId : null,
-      workspacePath: draft.workspace,
+      // A fixed directory replaces the thread workspace: the thread row and
+      // Files/Changes must name where the agent really runs.
+      workspacePath: fixedWorkspace ?? draft.workspace,
       model,
       prompt: draft.text.trim(),
       attachments: attachments.attachments,
@@ -455,28 +475,41 @@ export function NewThreadDialog() {
         <div className="grid gap-3 sm:grid-cols-[1fr_1.2fr]">
           <div className="flex flex-col gap-1">
             <FieldLabel htmlFor="new-thread-mode">Mode</FieldLabel>
-            <ChipSelect
-              id="new-thread-mode"
-              block
-              label="Mode"
-              value={runtimeMode}
-              options={[
-                { value: "approval_required", label: "Approval required" },
-                { value: "auto_accept_edits", label: "Auto-accept edits" },
-                { value: "full_access", label: "Full access" },
-              ]}
-              onChange={setRuntimeMode}
-            />
-            <span className="text-small text-fg-3">Fixed for the life of the thread.</span>
+            {modeManagedByAgent ? (
+              <>
+                <span id="new-thread-mode" className="py-1.5 text-small text-fg-2">
+                  Mode is managed by the agent.
+                </span>
+                <span className="text-small text-fg-3">
+                  {probing ? "Reading the agent's modes…" : "The agent decides its own approvals."}
+                </span>
+              </>
+            ) : (
+              <>
+                <ChipSelect
+                  id="new-thread-mode"
+                  block
+                  label="Mode"
+                  value={runtimeMode}
+                  options={runtimeModeChoices}
+                  onChange={setRuntimeMode}
+                />
+                <span className="text-small text-fg-3">Fixed for the life of the thread.</span>
+              </>
+            )}
           </div>
 
           <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="new-thread-workspace" hint="on the host">
+            <FieldLabel
+              htmlFor="new-thread-workspace"
+              hint={fixedWorkspace ? "fixed by the agent" : "on the host"}
+            >
               Where
             </FieldLabel>
             <Input
               id="new-thread-workspace"
-              value={workspace}
+              value={effectiveWorkspace}
+              disabled={fixedWorkspace !== null}
               onChange={(event) => setWorkspace(event.target.value)}
               onBlur={() => {
                 // Pressing Start blurs this field on the way to the button.
@@ -496,8 +529,9 @@ export function NewThreadDialog() {
             />
             <span className="flex items-center gap-1 text-small text-fg-3">
               <GitBranchIcon className="size-3" aria-hidden />
-              The agent works in this directory. h4rn does not create a worktree for new threads
-              yet.
+              {fixedWorkspace
+                ? "This agent always runs in its configured directory."
+                : "The agent works in this directory. h4rn does not create a worktree for new threads yet."}
             </span>
           </div>
         </div>
@@ -588,7 +622,10 @@ export function NewThreadDialog() {
               </span>{" "}
               {harness === "acp" ? `(${threadHarnessLabel(harness, agentId)})` : null} on{" "}
               <span className="font-medium text-fg">{selectedHost.name}</span> in{" "}
-              <span className="font-mono">{workspace || DEFAULT_NEW_THREAD_WORKSPACE}</span>.
+              <span className="font-mono">
+                {effectiveWorkspace || DEFAULT_NEW_THREAD_WORKSPACE}
+              </span>
+              .
             </>
           ) : (
             "Pair an online host before starting a thread."

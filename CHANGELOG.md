@@ -271,6 +271,20 @@ All notable changes to h4rn are recorded here. The format follows
   fingerprint is structured (JSON), so an edit from no arguments to one empty argument starts a new
   session instead of replaying the old id. Two entries with the same instance id in
   `acp-agents.json` keep the first and drop the second with a warning.
+- **Local ACP agents: one answer for the catalogue, the resume and the process.** `Check` now reads
+  the same v1 `configOptions` catalogue a thread start selects from, so the picker no longer offers
+  legacy ids the agent would reject, and the model stays `default` until you choose one. The client
+  waits 35 s for a probe, matching the daemon's 30 s bound instead of abandoning it at the default
+  10 s. A `session/resume` or `session/load` reply that names no catalogue keeps the thread's saved
+  model and mode and still sends the prompt. A load's replayed history is consumed before the new
+  turn, so a conversation longer than the event queue no longer stalls the load and the old messages
+  are not shown twice. A probe edited while it ran reports the same conflict whether it succeeded or
+  failed, and the Check control stays busy until the original probe settles, so an edit cannot start
+  a second one. The resume fingerprint and the launch now come from one resolved configuration, so
+  an edit in between cannot hand the new command the old session id. The new-thread mode picker
+  offers only modes h4rn can map onto the agent's advertised ids and otherwise says
+  **Mode is managed by the agent**; a fixed working directory is shown before Start and becomes the
+  thread's workspace for Files and Changes.
 - **Closing a terminal ends its background jobs.** With job control, `sleep 1000 &` runs in its own
   process group, so the old group-only signal left it running after the shell was gone. Closing a
   terminal now sends SIGHUP to the shell's own process id, waits for it to forward the hangup, keeps

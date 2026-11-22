@@ -149,7 +149,39 @@ fn main() {
                 if let Some(cwd) = params.get("cwd").and_then(Value::as_str) {
                     log_start(cwd, &format!("load {session_id}"));
                 }
-                reply(&mut stdout, id, session_reply(&session_id));
+                // ACP replays the old conversation as `session/update` frames
+                // before the load reply. `H4RN_FIXTURE_LOAD_REPLAY` makes the
+                // replay longer than the client's bounded event queue, so a
+                // reader that cannot drain it deadlocks before the reply.
+                if let Ok(count) = std::env::var("H4RN_FIXTURE_LOAD_REPLAY")
+                    && let Ok(count) = count.parse::<u64>()
+                {
+                    for index in 0..count {
+                        write_frame(
+                            &mut stdout,
+                            &json!({
+                                "jsonrpc": "2.0",
+                                "method": "session/update",
+                                "params": {
+                                    "sessionId": session_id,
+                                    "update": {
+                                        "sessionUpdate": "agent_message_chunk",
+                                        "content": {
+                                            "type": "text",
+                                            "text": format!("replayed history {index}")
+                                        }
+                                    }
+                                }
+                            }),
+                        );
+                    }
+                }
+                let result = if std::env::var_os("H4RN_FIXTURE_EMPTY_RESUME").is_some() {
+                    json!({ "sessionId": session_id })
+                } else {
+                    session_reply(&session_id)
+                };
+                reply(&mut stdout, id, result);
             }
             "session/resume" => {
                 let session_id = params
@@ -160,9 +192,19 @@ fn main() {
                 if let Some(cwd) = params.get("cwd").and_then(Value::as_str) {
                     log_start(cwd, &format!("resume {session_id}"));
                 }
-                reply(&mut stdout, id, session_reply(&session_id));
+                // Some agents answer a resume without repeating the catalogue:
+                // the thread's saved selection still applies.
+                let result = if std::env::var_os("H4RN_FIXTURE_EMPTY_RESUME").is_some() {
+                    json!({ "sessionId": session_id })
+                } else {
+                    session_reply(&session_id)
+                };
+                reply(&mut stdout, id, result);
             }
-            "session/set_model" | "session/set_mode" | "session/close" => {
+            "session/set_config_option"
+            | "session/set_model"
+            | "session/set_mode"
+            | "session/close" => {
                 reply(&mut stdout, id, Value::Null);
             }
             "session/prompt" => {
@@ -614,6 +656,42 @@ fn reply(stdout: &mut std::io::Stdout, id: Option<Value>, result: Value) {
 }
 
 fn session_reply(session_id: &str) -> Value {
+    // A dual-catalogue agent publishes both the legacy `models`/`modes`
+    // objects and ACP v1 `configOptions`, with different ids. The generic
+    // adapter must read and select the v1 catalogue.
+    if std::env::var_os("H4RN_FIXTURE_DUAL_CATALOGUE").is_some() {
+        return json!({
+            "sessionId": session_id,
+            "models": {
+                "availableModels": [{"modelId": "legacy-model", "name": "Legacy"}],
+                "currentModelId": "legacy-model"
+            },
+            "modes": {
+                "availableModes": [
+                    {"id": "legacy-mode", "name": "Legacy mode"}
+                ],
+                "currentModeId": "legacy-mode"
+            },
+            "configOptions": [
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "v1-model",
+                    "options": [{"value": "v1-model", "name": "V1 Model"}]
+                },
+                {
+                    "id": "mode",
+                    "name": "Mode",
+                    "category": "mode",
+                    "type": "select",
+                    "currentValue": "default",
+                    "options": [{"value": "default", "name": "Default"}]
+                }
+            ]
+        });
+    }
     json!({
         "sessionId": session_id,
         "models": {

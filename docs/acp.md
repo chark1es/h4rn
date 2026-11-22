@@ -71,7 +71,6 @@ protocol gets:
   `session/resume` when it advertises only `sessionCapabilities.resume` (resume reattaches without
   replaying history); when it advertises neither, a restart starts a fresh session and replaces the
   stored id rather than failing the thread;
-- plans, forwarded as plan events so the thread shows every step and its status;
 - the models and modes the agent advertises, whether in `session/new`'s legacy `models`/`modes`
   objects or in the ACP v1 `configOptions`. A generic agent that advertises both uses
   `configOptions` and selects with `session/set_config_option`; the legacy catalogue is used only
@@ -87,13 +86,32 @@ is cleared in the stored thread too, not just for the attempt: a start that fail
 opens a session cannot leave the old id behind to be replayed by the next try.
 
 Model choices are read from the last successful `Check` result, which is stored in the list, so a
-`view`-scoped device can offer them without starting a process. A probe is admin-only; when one is
-refused, the picker shows the error and lets you type a model id instead of retrying the probe. A
-failed `Check` (a refused request, or an answer that carries the agent's own error) falls back to the
-previous models; a probe whose configuration was edited while it ran stores nothing and reports a
-conflict, because its answer describes the command that no longer exists. One probe runs per agent at
-a time, and a probe never holds the connection: other requests on the same socket keep answering
-while an agent finishes its handshake.
+`view`-scoped device can offer them without starting a process. The probe reads the same catalogue a
+start selects from: when an agent publishes both the legacy `models`/`modes` objects and ACP v1
+`configOptions`, the picker offers the `configOptions` ids. It leaves the model as `default` until
+you choose one. A probe is admin-only; when one is refused, the picker shows the error and lets you
+type a model id instead of retrying the probe. A failed `Check` (a refused request, or an answer that
+carries the agent's own error) falls back to the previous models; a probe whose configuration was
+edited while it ran stores nothing and reports a conflict, because its answer describes the command
+that no longer exists. That conflict is the same whether the superseded probe succeeded or failed.
+One probe runs per agent at a time: the Check control stays busy until the original probe settles, so
+an edit cannot start a second handshake. A probe never holds the connection: other requests on the
+same socket keep answering while an agent finishes its handshake.
+
+A `session/resume` or `session/load` reply may name the session without repeating its catalogue. The
+agent already knows the thread's model and mode from the session it is continuing, so h4rn keeps the
+saved selection and sends the prompt rather than rejecting it against an empty list. A load also
+replays the old conversation as session updates; h4rn consumes that history before the new turn, so
+it is neither shown twice nor able to fill the event queue and stall a long conversation.
+
+The new-thread mode picker only offers a choice h4rn can map onto an advertised mode id (Approval
+required → `default`, Auto-accept edits → `accept-edits`, Full access → `auto`). An agent that names
+its own modes (for example `ask` and `code`) shows **Mode is managed by the agent** instead, and h4rn
+leaves the agent's current mode alone.
+
+When an agent has a fixed working directory, **New thread** shows that directory before Start and
+the thread's workspace (Files and Changes) is that directory, not the thread workspace a built-in
+harness would use.
 
 A plan an agent publishes is shown in the turn as a quiet checklist: each step with a mark for
 pending, in progress or done. The newest plan replaces the previous one for that turn.

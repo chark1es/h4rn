@@ -188,27 +188,40 @@ impl AcpSession {
         let capabilities = info.capabilities.clone();
         let servers = mcp_servers(spec, &capabilities);
 
+        // Whether the agent continued an existing conversation. A load/resume
+        // reply can leave out the catalogue, because the agent already knows
+        // the selection from the session it is continuing.
+        let resumed;
         let session: AcpSessionInfo =
             match spec.resume_id.as_deref().filter(|id| !id.trim().is_empty()) {
-                Some(session_id) if capabilities.supports_load() => client
-                    .load_session(session_id, workspace, &servers)
-                    .await
-                    .map_err(|error| map_acp_error(error, policy.harness))?,
+                Some(session_id) if capabilities.supports_load() => {
+                    resumed = true;
+                    client
+                        .load_session(session_id, workspace, &servers)
+                        .await
+                        .map_err(|error| map_acp_error(error, policy.harness))?
+                }
                 // `session/resume` is a different method, not a synonym for
                 // `session/load`: an agent that only advertises resume has no
                 // load, so replaying an old conversation through `load` would
                 // fail. The history is not replayed here; the agent keeps it.
-                Some(session_id) if capabilities.supports_resume() => client
-                    .resume_session(session_id, workspace, &servers)
-                    .await
-                    .map_err(|error| map_acp_error(error, policy.harness))?,
+                Some(session_id) if capabilities.supports_resume() => {
+                    resumed = true;
+                    client
+                        .resume_session(session_id, workspace, &servers)
+                        .await
+                        .map_err(|error| map_acp_error(error, policy.harness))?
+                }
                 // A stored id from an agent that can neither load nor resume
                 // means the agent changed (or never supported either). Starting
                 // over is the only honest option; the new id replaces the old.
-                Some(_) if policy.fresh_without_load => client
-                    .new_session(workspace, &servers)
-                    .await
-                    .map_err(|error| map_acp_error(error, policy.harness))?,
+                Some(_) if policy.fresh_without_load => {
+                    resumed = false;
+                    client
+                        .new_session(workspace, &servers)
+                        .await
+                        .map_err(|error| map_acp_error(error, policy.harness))?
+                }
                 Some(_) => {
                     return Err(HarnessError::Unsupported {
                         harness: policy.harness,
@@ -216,10 +229,13 @@ impl AcpSession {
                             .into(),
                     });
                 }
-                None => client
-                    .new_session(workspace, &servers)
-                    .await
-                    .map_err(|error| map_acp_error(error, policy.harness))?,
+                None => {
+                    resumed = false;
+                    client
+                        .new_session(workspace, &servers)
+                        .await
+                        .map_err(|error| map_acp_error(error, policy.harness))?
+                }
             };
         // Which catalogue a selection RPC understands is adapter policy:
         // Antigravity's legacy `models`/`modes` objects win, a generic agent's
@@ -230,8 +246,14 @@ impl AcpSession {
             session
         };
 
+        // A resumed session already has the thread's model and mode. When the
+        // reply names no catalogue there is nothing to validate them against,
+        // so the saved selection is kept and the prompt is sent; failing here
+        // would turn a silent resume into a dead thread.
+        let unknown_model_catalogue = resumed && session.models.is_empty();
         let requested = spec.model.trim();
-        if !requested.is_empty() && !policy.is_default_model(requested) {
+        if !requested.is_empty() && !policy.is_default_model(requested) && !unknown_model_catalogue
+        {
             match session.resolve_model(requested) {
                 Some(model_id) => {
                     if session.current_model_id.as_deref() != Some(model_id.as_str()) {
@@ -270,6 +292,14 @@ impl AcpSession {
                         .map_err(|error| map_acp_error(error, policy.harness))?,
                 }
             }
+        } else if resumed && session.modes.is_empty() {
+            // The reply carried no modes: the agent kept the mode the session
+            // was already in, which is the thread's saved selection.
+            tracing::debug!(
+                target: "h4rn_harness::acp",
+                harness = ?policy.harness,
+                "the resumed session advertised no modes; keeping its current mode"
+            );
         } else if (policy.missing_mode_is_error)(spec) {
             return Err(HarnessError::Unsupported {
                 harness: policy.harness,
