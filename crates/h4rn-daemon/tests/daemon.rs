@@ -410,6 +410,7 @@ async fn create_with_model(
         .request(ClientRequest::CreateThread {
             host,
             harness,
+            agent_id: None,
             workspace_path: "/tmp/h4rn-workspace".into(),
             model: model.into(),
             prompt: prompt.into(),
@@ -1168,6 +1169,7 @@ async fn create_and_send_report_durable_ids_and_worktrees_are_not_implemented() 
         .request(ClientRequest::CreateThread {
             host: host.clone(),
             harness: HarnessKind::ClaudeCode,
+            agent_id: None,
             workspace_path: "/tmp/h4rn-workspace".into(),
             model: "fake-model".into(),
             prompt: "needs a worktree".into(),
@@ -1184,6 +1186,7 @@ async fn create_and_send_report_durable_ids_and_worktrees_are_not_implemented() 
         .request(ClientRequest::CreateThread {
             host,
             harness: HarnessKind::ClaudeCode,
+            agent_id: None,
             workspace_path: "/tmp/h4rn-workspace".into(),
             model: "fake-model".into(),
             prompt: "report ids".into(),
@@ -2385,6 +2388,7 @@ async fn an_edit_tool_call_reaches_the_client_with_its_diffstat() {
         .request(ClientRequest::CreateThread {
             host,
             harness: HarnessKind::ClaudeCode,
+            agent_id: None,
             workspace_path: workspace.path().display().to_string(),
             model: "fake-model".into(),
             prompt: "edit it [[write:notes.txt]]keep\nnew\nmore".into(),
@@ -2446,6 +2450,7 @@ async fn turn_completed_carries_the_turns_change_set() {
         .request(ClientRequest::CreateThread {
             host,
             harness: HarnessKind::ClaudeCode,
+            agent_id: None,
             workspace_path: workspace.path().display().to_string(),
             model: "fake-model".into(),
             prompt: "make a note [[write:notes.txt]]hello from the fake harness".into(),
@@ -2504,6 +2509,7 @@ async fn thread_summary_names_the_workspace_branch() {
         .request(ClientRequest::CreateThread {
             host,
             harness: HarnessKind::ClaudeCode,
+            agent_id: None,
             workspace_path: workspace.path().display().to_string(),
             model: "fake-model".into(),
             prompt: "name the branch".into(),

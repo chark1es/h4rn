@@ -1369,6 +1369,7 @@ pub fn test_spec() -> SessionSpec {
         mcp_endpoint: Some("http://127.0.0.1:9100/mcp".into()),
         env_overrides: BTreeMap::new(),
         attachments: Vec::new(),
+        agent_id: None,
     }
 }
 

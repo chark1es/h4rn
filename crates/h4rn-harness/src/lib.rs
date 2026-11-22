@@ -26,6 +26,7 @@ use h4rn_protocol::{
 use serde::{Deserialize, Serialize};
 
 pub mod acp;
+mod acp_agent;
 mod antigravity;
 mod attachments;
 mod claude_code;
@@ -36,6 +37,9 @@ pub mod registry;
 pub mod stats;
 pub mod versions;
 
+pub use acp_agent::{
+    AcpAgentConfigSource, GenericAcpHarness, StaticAcpAgents, probe_acp_agent, resolve_acp_command,
+};
 pub use antigravity::{
     AgyStreamParser, AntigravityHarness, ENV_AGY_MODE, ENV_AGY_PATH, ENV_AGY_TRANSPORT,
     ENV_APP_DATA_DIR, ENV_CLOUD_CODE_ENDPOINT, ENV_GEMINI_API_KEY, ENV_GEMINI_DIR,
@@ -111,6 +115,8 @@ pub struct SessionSpec {
     pub env_overrides: BTreeMap<String, String>,
     /// Attachments that must be delivered with the first prompt.
     pub attachments: Vec<AttachmentRef>,
+    /// Configured ACP agent instance, for [`HarnessKind::Acp`].
+    pub agent_id: Option<String>,
 }
 
 /// One message from the user or daemon to the harness.
@@ -541,6 +547,14 @@ pub trait Harness: Send + Sync {
 
     /// Detects an installation on this host.
     fn detect(&self) -> Option<HarnessInstall>;
+
+    /// Whether this adapter can run the named configured instance.
+    ///
+    /// Only a multi-instance adapter (the generic ACP harness) has instances;
+    /// built-in adapters answer `false` and are selected by kind alone.
+    fn has_instance(&self, _instance: &str) -> bool {
+        false
+    }
 
     /// Starts (or resumes) a session.
     async fn start_session(

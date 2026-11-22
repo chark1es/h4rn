@@ -30,6 +30,9 @@ fn main() {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut sessions = 0u64;
+    // A turn the fixture is holding open for a permission answer or a cancel.
+    let mut pending_prompt: Option<Value> = None;
+    let mut pending_permission = false;
 
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
@@ -42,7 +45,36 @@ fn main() {
         };
         let id = frame.get("id").cloned();
         let Some(method) = frame.get("method").and_then(Value::as_str) else {
-            // A response to a request this fixture never sends; nothing to do.
+            // The answer to our own `session/request_permission` request.
+            if pending_permission {
+                pending_permission = false;
+                if let Some(prompt_id) = pending_prompt.take() {
+                    let session_id = frame
+                        .get("params")
+                        .and_then(|params| params.get("sessionId"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("fixture-session");
+                    write_frame(
+                        &mut stdout,
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": {
+                                "sessionId": session_id,
+                                "update": {
+                                    "sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text", "text": "permission answered"}
+                                }
+                            }
+                        }),
+                    );
+                    reply(
+                        &mut stdout,
+                        Some(prompt_id),
+                        json!({"stopReason": "end_turn"}),
+                    );
+                }
+            }
             continue;
         };
         let params = frame.get("params").cloned().unwrap_or(Value::Null);
@@ -99,6 +131,122 @@ fn main() {
                             .join("\n")
                     })
                     .unwrap_or_default();
+                if text.contains("H4RN_FIXTURE_PERMISSION") {
+                    let session_id = params
+                        .get("sessionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("fixture-session");
+                    write_frame(
+                        &mut stdout,
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": {
+                                "sessionId": session_id,
+                                "update": {
+                                    "sessionUpdate": "tool_call",
+                                    "toolCallId": "perm-call-1",
+                                    "title": "Run the fixture command",
+                                    "kind": "execute",
+                                    "status": "pending",
+                                    "rawInput": {"command": "printf fixture"}
+                                }
+                            }
+                        }),
+                    );
+                    write_frame(
+                        &mut stdout,
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "id": "perm-1",
+                            "method": "session/request_permission",
+                            "params": {
+                                "sessionId": session_id,
+                                "toolCall": {
+                                    "toolCallId": "perm-call-1",
+                                    "title": "Run the fixture command",
+                                    "kind": "execute",
+                                    "status": "pending",
+                                    "rawInput": {"command": "printf fixture"}
+                                },
+                                "options": [
+                                    {"optionId": "allow", "name": "Allow", "kind": "allow_once"},
+                                    {"optionId": "deny", "name": "Deny", "kind": "reject_once"}
+                                ]
+                            }
+                        }),
+                    );
+                    pending_prompt = id;
+                    pending_permission = true;
+                    continue;
+                }
+                if text.contains("H4RN_FIXTURE_TOOL") {
+                    let session_id = params
+                        .get("sessionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("fixture-session");
+                    for (status, title) in [
+                        ("in_progress", "Run the fixture command"),
+                        ("completed", "Run the fixture command"),
+                    ] {
+                        let update = if status == "in_progress" {
+                            json!({
+                                "sessionId": session_id,
+                                "update": {
+                                    "sessionUpdate": "tool_call",
+                                    "toolCallId": "tool-1",
+                                    "title": title,
+                                    "kind": "execute",
+                                    "status": status,
+                                    "rawInput": {"command": "printf fixture"}
+                                }
+                            })
+                        } else {
+                            json!({
+                                "sessionId": session_id,
+                                "update": {
+                                    "sessionUpdate": "tool_call_update",
+                                    "toolCallId": "tool-1",
+                                    "status": status,
+                                    "rawOutput": "fixture output"
+                                }
+                            })
+                        };
+                        write_frame(
+                            &mut stdout,
+                            &json!({
+                                "jsonrpc": "2.0",
+                                "method": "session/update",
+                                "params": update
+                            }),
+                        );
+                    }
+                    write_frame(
+                        &mut stdout,
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": {
+                                "sessionId": session_id,
+                                "update": {
+                                    "sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text", "text": format!("echo: {text}")}
+                                }
+                            }
+                        }),
+                    );
+                    reply(
+                        &mut stdout,
+                        id,
+                        json!({"stopReason": "end_turn", "usage": {"inputTokens": 3, "outputTokens": 2}}),
+                    );
+                    continue;
+                }
+                if text.contains("H4RN_FIXTURE_CANCEL") {
+                    // Hold the turn open until `session/cancel` arrives.
+                    pending_prompt = id;
+                    continue;
+                }
                 if text.contains("H4RN_FIXTURE_EXIT") {
                     // Vanish mid-turn: stdout closes, the daemon's client sees a
                     // dead transport and never gets a prompt result. The death
@@ -261,7 +409,15 @@ fn main() {
                     stall_forever();
                 }
             }
-            "session/cancel" => {}
+            "session/cancel" => {
+                if let Some(prompt_id) = pending_prompt.take() {
+                    reply(
+                        &mut stdout,
+                        Some(prompt_id),
+                        json!({"stopReason": "cancelled"}),
+                    );
+                }
+            }
             other => {
                 if let Some(id) = id {
                     write_frame(

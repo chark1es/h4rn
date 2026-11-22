@@ -516,6 +516,21 @@ pub enum ResponseBody {
         /// One row per harness, in stable order.
         harnesses: Vec<crate::HarnessVersionInfo>,
     },
+    /// Local ACP agents configured on this daemon.
+    AcpAgents {
+        /// Configured agents, in creation order.
+        agents: Vec<crate::AcpAgent>,
+    },
+    /// One configured ACP agent after an add or update.
+    AcpAgent {
+        /// The stored agent with its installation facts.
+        agent: crate::AcpAgent,
+    },
+    /// What one configured ACP agent advertises.
+    AcpAgentProbe {
+        /// The probe result.
+        probe: crate::AcpAgentProbe,
+    },
     /// Tracked git worktrees.
     Worktrees {
         /// Active first, then orphaned, then settled; newest first within each.

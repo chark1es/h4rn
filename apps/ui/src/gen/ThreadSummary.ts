@@ -31,6 +31,13 @@ host: HostId,
  */
 harness: HarnessKind, 
 /**
+ * Configured ACP agent instance, when `harness` is [`HarnessKind::Acp`].
+ *
+ * Older daemons did not have this field; threads written before it
+ * deserialize with `None` and keep running on their built-in harness.
+ */
+agent_id?: string, 
+/**
  * Human title.
  */
 title: string, 

@@ -20,6 +20,11 @@ pub enum HarnessKind {
     Opencode,
     /// Google Antigravity (`agy acp`, ACP-first).
     Antigravity,
+    /// A user-configured local ACP command.
+    ///
+    /// The executable, arguments and environment are stored by the daemon;
+    /// the thread names the configured instance in its `agent_id`.
+    Acp,
 }
 
 impl HarnessKind {
@@ -30,6 +35,7 @@ impl HarnessKind {
             Self::Codex => "codex",
             Self::Opencode => "opencode",
             Self::Antigravity => "antigravity",
+            Self::Acp => "acp",
         }
     }
 }
@@ -343,6 +349,13 @@ pub struct ThreadSummary {
     pub host: HostId,
     /// Harness driving the thread.
     pub harness: HarnessKind,
+    /// Configured ACP agent instance, when `harness` is [`HarnessKind::Acp`].
+    ///
+    /// Older daemons did not have this field; threads written before it
+    /// deserialize with `None` and keep running on their built-in harness.
+    #[serde(default)]
+    #[ts(optional)]
+    pub agent_id: Option<String>,
     /// Human title.
     pub title: String,
     /// Workspace path on the host.
@@ -546,6 +559,7 @@ mod tests {
     fn harness_slugs_match_the_seed_scheme() {
         assert_eq!(HarnessKind::ClaudeCode.slug(), "claude-code");
         assert_eq!(HarnessKind::Antigravity.slug(), "antigravity");
+        assert_eq!(HarnessKind::Acp.slug(), "acp");
     }
 
     #[test]
@@ -582,6 +596,29 @@ mod tests {
         assert_eq!(usage.total_tokens(), u64::MAX);
     }
 
+    #[test]
+    fn an_old_thread_summary_without_an_agent_id_still_deserializes() {
+        let json = serde_json::json!({
+            "thread_id": "th_old",
+            "host": "host_local",
+            "harness": "claude_code",
+            "title": "old thread",
+            "workspace_path": "/tmp/work",
+            "model": "claude-sonnet-5",
+            "tab": "settled",
+            "pinned": false,
+            "snoozed_until": null,
+            "last_activity": "2026-01-01T00:00:00Z",
+            "agent_state": "idle",
+            "usage": Usage::default(),
+            "needs_attention": false,
+            "unread": false
+        });
+        let summary: ThreadSummary = serde_json::from_value(json).expect("old JSON");
+        assert_eq!(summary.agent_id, None);
+        assert_eq!(summary.harness, HarnessKind::ClaudeCode);
+    }
+
     fn summary_with(
         resume_at: Option<DateTime<Utc>>,
         limit: Option<crate::usage::LimitBrief>,
@@ -591,6 +628,7 @@ mod tests {
             parent_thread_id: None,
             host: HostId::new("host_test"),
             harness: HarnessKind::ClaudeCode,
+            agent_id: None,
             title: "usage limit".into(),
             workspace_path: "/tmp/work".into(),
             branch: Some("h4rn/usage-limit".into()),

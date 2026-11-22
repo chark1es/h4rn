@@ -63,6 +63,10 @@ pub enum ClientRequest {
         host: HostId,
         /// Harness adapter to use.
         harness: HarnessKind,
+        /// Configured ACP agent instance when `harness` is
+        /// [`HarnessKind::Acp`]; ignored by built-in harnesses.
+        #[serde(default)]
+        agent_id: Option<String>,
         /// Absolute workspace path on the host.
         workspace_path: String,
         /// Model slug.
@@ -905,6 +909,39 @@ pub enum ClientRequest {
         harness: HarnessKind,
     },
     // ------------------------------------------------------------------
+    // User-configured ACP agents.
+    // ------------------------------------------------------------------
+    /// List the local ACP agents configured on this daemon.
+    ListAcpAgents,
+    /// Add a local ACP agent.
+    ///
+    /// The daemon validates the id, command, arguments and environment and
+    /// writes the list in its data directory. It does not run the command.
+    AddAcpAgent {
+        /// Configuration to persist.
+        agent: crate::acp_agent::AcpAgentSpec,
+    },
+    /// Replace one configured ACP agent.
+    UpdateAcpAgent {
+        /// Instance id being changed.
+        id: String,
+        /// New configuration. `agent.id` must match `id`.
+        agent: crate::acp_agent::AcpAgentSpec,
+    },
+    /// Remove one configured ACP agent. Threads keep their history.
+    RemoveAcpAgent {
+        /// Instance id to remove.
+        id: String,
+    },
+    /// Start one configured agent and report what it advertises.
+    ///
+    /// This runs third-party code once (the ACP handshake and one
+    /// `session/new`) and then stops it. Nothing about the process is kept.
+    ProbeAcpAgent {
+        /// Instance id to probe.
+        id: String,
+    },
+    // ------------------------------------------------------------------
     // Worktrees.
     // ------------------------------------------------------------------
     /// List the git worktrees h4rn tracks: ones it made for subagents and ones
@@ -1003,6 +1040,7 @@ impl ClientRequest {
             | Self::ListResets
             | Self::ListFailoverOptions { .. }
             | Self::ListHarnessVersions
+            | Self::ListAcpAgents
             | Self::ListWorktrees
             | Self::ForgeListAccounts
             | Self::ForgeDetectRepo { .. }
@@ -1073,6 +1111,10 @@ impl ClientRequest {
             | Self::ApplyProxyOverrides { .. }
             | Self::PickProxyFailover { .. }
             | Self::SetAutoResumePolicy { .. }
+            | Self::AddAcpAgent { .. }
+            | Self::UpdateAcpAgent { .. }
+            | Self::RemoveAcpAgent { .. }
+            | Self::ProbeAcpAgent { .. }
             | Self::ForgeAddAccount { .. }
             | Self::ForgeRemoveAccount { .. }
             | Self::ForgeDeviceFlowStart { .. }
@@ -1246,6 +1288,36 @@ mod tests {
             (ClientRequest::McpRemove { name: "x".into() }, Admin),
             // Version reads are harmless; running a package manager is not.
             (ClientRequest::ListHarnessVersions, View),
+            (ClientRequest::ListAcpAgents, View),
+            (
+                ClientRequest::AddAcpAgent {
+                    agent: crate::acp_agent::AcpAgentSpec {
+                        id: "demo".into(),
+                        name: "Demo".into(),
+                        command: "demo".into(),
+                        args: Vec::new(),
+                        env: std::collections::BTreeMap::new(),
+                        working_dir: crate::acp_agent::AcpWorkingDir::ThreadWorkspace,
+                    },
+                },
+                Admin,
+            ),
+            (
+                ClientRequest::UpdateAcpAgent {
+                    id: "demo".into(),
+                    agent: crate::acp_agent::AcpAgentSpec {
+                        id: "demo".into(),
+                        name: "Demo".into(),
+                        command: "demo".into(),
+                        args: Vec::new(),
+                        env: std::collections::BTreeMap::new(),
+                        working_dir: crate::acp_agent::AcpWorkingDir::ThreadWorkspace,
+                    },
+                },
+                Admin,
+            ),
+            (ClientRequest::RemoveAcpAgent { id: "demo".into() }, Admin),
+            (ClientRequest::ProbeAcpAgent { id: "demo".into() }, Admin),
             (
                 ClientRequest::UpdateHarness {
                     harness: crate::common::HarnessKind::ClaudeCode,

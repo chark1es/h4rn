@@ -21,6 +21,7 @@
 mod client;
 mod process;
 mod protocol;
+mod session;
 
 pub use client::{AcpClient, AcpClientConfig, AcpError, AcpEvent, PendingPrompt};
 pub use protocol::{
@@ -30,5 +31,16 @@ pub use protocol::{
     AgentCapabilities, ENV_MCP_STDIO_BRIDGE, JSONRPC_VERSION, PlanEntry, PromptContent,
     ToolCallContent, parse_session_update,
 };
+pub(crate) use session::{AcpSessionPolicy, StartedAcpSession, default_mode, map_acp_error};
+
+/// Opens the shared ACP session runtime over a spawned client.
+pub(crate) async fn session_start(
+    client: &AcpClient,
+    spec: &crate::SessionSpec,
+    policy: AcpSessionPolicy,
+    workspace: &std::path::Path,
+) -> Result<StartedAcpSession, crate::HarnessError> {
+    session::AcpSession::start(client, spec, policy, workspace).await
+}
 
 pub(crate) use process::{GroupSignal, StderrRing, signal_group, spawn_agent, spawn_stderr_reader};

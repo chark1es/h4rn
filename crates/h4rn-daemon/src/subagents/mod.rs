@@ -760,6 +760,7 @@ impl Inner {
                 subagent_id: Some(subagent_id.clone()),
                 host,
                 harness,
+                agent_id: None,
                 workspace_path,
                 model,
                 prompt,

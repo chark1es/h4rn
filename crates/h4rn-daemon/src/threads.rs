@@ -133,6 +133,8 @@ pub struct NewThread {
     pub host: HostId,
     /// Harness adapter.
     pub harness: HarnessKind,
+    /// Configured ACP agent instance when `harness` is [`HarnessKind::Acp`].
+    pub agent_id: Option<String>,
     /// Absolute workspace path.
     pub workspace_path: String,
     /// Model slug.
@@ -930,6 +932,7 @@ impl ThreadRecord {
             parent_thread_id: self.meta.parent_thread_id.clone(),
             host: self.meta.host.clone(),
             harness: self.meta.harness,
+            agent_id: self.meta.agent_id.clone(),
             title: self.meta.title.clone(),
             workspace_path: self.meta.workspace_path.clone(),
             branch: self.branch.clone(),
@@ -1580,6 +1583,32 @@ impl ThreadManager {
                 request.harness
             )));
         }
+        // A generic ACP thread names the configured command it runs; a
+        // built-in harness ignores any instance id.
+        if request.harness == HarnessKind::Acp {
+            let Some(agent_id) = request
+                .agent_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+            else {
+                return Err(ManagerError::InvalidRequest(
+                    "an ACP thread must name a configured agent".into(),
+                ));
+            };
+            let known = self
+                .inner
+                .harnesses
+                .get(HarnessKind::Acp)
+                .is_some_and(|harness| harness.has_instance(agent_id));
+            if !known {
+                return Err(ManagerError::InvalidRequest(format!(
+                    "no ACP agent `{agent_id}` is configured on this host"
+                )));
+            }
+        } else {
+            request.agent_id = None;
+        }
         if !self.inner.local_host_is(&request.host) {
             return Err(ManagerError::Unsupported(format!(
                 "threads can only run on this daemon's host ({}) in phase 1b",
@@ -1621,6 +1650,7 @@ impl ThreadManager {
             subagent_id: request.subagent_id.clone(),
             host: request.host,
             harness: request.harness,
+            agent_id: request.agent_id,
             title: title_from_prompt(&request.prompt, &request.workspace_path),
             workspace_path: request.workspace_path,
             model: request.model,
@@ -3015,6 +3045,7 @@ impl Inner {
                 mcp_endpoint,
                 env_overrides,
                 attachments: Vec::new(),
+                agent_id: record.meta.agent_id.clone(),
             };
             let generation = record.next_session_gen();
             record.session = SessionSlot::Starting(generation);
@@ -5413,6 +5444,7 @@ mod tests {
             subagent_id: None,
             host,
             harness: HarnessKind::ClaudeCode,
+            agent_id: None,
             workspace_path: workspace.display().to_string(),
             model: "fake-model".into(),
             prompt: prompt.into(),
@@ -5858,6 +5890,7 @@ mod tests {
                 subagent_id: None,
                 host,
                 harness: HarnessKind::ClaudeCode,
+                agent_id: None,
                 workspace_path: workspace.path().display().to_string(),
                 model: "fake-model".into(),
                 prompt: "first".into(),

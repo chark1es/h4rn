@@ -98,6 +98,8 @@ pub struct AppState {
     pub meter: Arc<h4rn_meter::MeterHub>,
     /// Harness CLI versions and updates (ADR-043).
     pub harness_versions: Arc<crate::harness_versions::HarnessVersionService>,
+    /// User-configured local ACP agents.
+    pub acp_agents: Arc<crate::acp_agents::AcpAgentService>,
     /// Registered sidebar projects.
     pub projects: Arc<crate::projects::ProjectService>,
     /// Server boot time, for `/healthz`.
@@ -766,6 +768,7 @@ impl Connection {
                 ClientRequest::CreateThread {
                     host,
                     harness,
+                    agent_id,
                     workspace_path,
                     model,
                     prompt,
@@ -779,6 +782,7 @@ impl Connection {
                         subagent_id: None,
                         host,
                         harness,
+                        agent_id,
                         workspace_path: workspace_path.clone(),
                         model,
                         prompt,
