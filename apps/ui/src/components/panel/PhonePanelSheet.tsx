@@ -1,5 +1,5 @@
 import { CheckIcon, ChevronDownIcon, CircleXIcon, FileIcon, PlusIcon } from "lucide-react";
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
@@ -159,6 +159,7 @@ export function PhonePanelSheet({
   onReview?: () => void;
 }) {
   const [tab, setTab] = useState(initialTab);
+  const sheetRef = useRef<HTMLDivElement | null>(null);
   const changes = usePanelChanges(thread);
   const files = changes.changes?.files ?? [];
   const subagents = useSubagentCount(thread.thread_id);
@@ -168,6 +169,12 @@ export function PhonePanelSheet({
   const tabState = tab === "preview" && !previewPath ? "changes" : tab;
 
   useEffect(() => setTab(initialTab), [initialTab]);
+  // The sheet is modal: take focus on open so a `/` command that opens it
+  // leaves the composer, and typing no longer edits the draft behind it.
+  // Focus the container rather than Done, so no action looks pre-chosen.
+  useEffect(() => {
+    sheetRef.current?.focus({ preventScroll: true });
+  }, []);
   useEffect(() => {
     if (!previewPath && tab === "preview") setTab("changes");
   }, [previewPath, tab]);
@@ -190,7 +197,14 @@ export function PhonePanelSheet({
         aria-label="Close changes and subagents"
         onClick={onClose}
       />
-      <div className="q-ph-sheet large" role="dialog" aria-modal="true" aria-label="Thread panel">
+      <div
+        ref={sheetRef}
+        className="q-ph-sheet large"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Thread panel"
+        tabIndex={-1}
+      >
         <div className="q-grab" />
         <div className="q-ph-sh-nav">
           <span style={{ width: 64 }} />

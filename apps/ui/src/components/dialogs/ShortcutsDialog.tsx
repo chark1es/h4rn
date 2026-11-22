@@ -15,7 +15,11 @@ const TYPING: Array<[string, string[]]> = [
   ["New line", [SHIFT, ENTER]],
   ["Recall an earlier prompt", ["↑"]],
   ["Walk prompts forward", ["↓"]],
-  ["Mention a file or host", ["@"]],
+  ["Mention a file", ["@"]],
+  ["Run a command", ["/"]],
+  ["Move in the @ or / menu", ["↑", "↓"]],
+  ["Insert the highlighted item", [ENTER, "Tab"]],
+  ["Close the @ or / menu", [ESC]],
   ["Close a dialog or go back", [ESC]],
 ];
 
