@@ -674,9 +674,10 @@ impl Connection {
             Some(_) if handlers::acp_agents::defers_reply(&body) => {
                 let state = self.state.clone();
                 let tx = self.tx.clone();
+                let frame_limit = self.frame_limit();
                 tokio::spawn(async move {
                     let frame = match handlers::acp_agents::handle_deferred(&state, body).await {
-                        Ok(body) => response_frame(id, body),
+                        Ok(body) => response_frame(id, body, frame_limit),
                         Err(error) => error_frame(id, error),
                     };
                     let _ = tx.send(Outbound::Text(frame)).await;
@@ -1852,6 +1853,7 @@ mod tests {
             parent_thread_id: None,
             host: HostId::new("host_test"),
             harness: HarnessKind::ClaudeCode,
+            agent_id: None,
             title,
             workspace_path: "/tmp/work".into(),
             branch: None,
