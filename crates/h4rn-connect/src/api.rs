@@ -1174,12 +1174,32 @@ async fn revoke_device(
 // Machines
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Default, serde::Deserialize)]
+struct MachineListQuery {
+    /// Only machines this device is linked to, or runs.
+    #[serde(default)]
+    linked: bool,
+}
+
 async fn list_machines(
     State(state): State<AppState>,
     authed: Authed,
+    Query(query): Query<MachineListQuery>,
 ) -> Result<Json<Vec<MachineSummary>>> {
     let online: HashSet<Uuid> = state.relay.online_machines(authed.user.id).await;
-    let machines = state.store.machines(authed.user.id, &online).await?;
+    let mut machines = state.store.machines(authed.user.id, &online).await?;
+    if query.linked {
+        // A device may see every machine on the account, but only the ones it
+        // is linked to (or runs) are addressable for presence and switching.
+        let linked: HashSet<Uuid> = state
+            .store
+            .device_machines(authed.device.id)
+            .await?
+            .into_iter()
+            .collect();
+        machines
+            .retain(|machine| Uuid::parse_str(&machine.id).is_ok_and(|id| linked.contains(&id)));
+    }
     Ok(Json(machines))
 }
 
