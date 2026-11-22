@@ -124,7 +124,13 @@ function InboxDetailEmpty() {
     const first = folderChoices[0];
     if (first && workspace === "~/code") setWorkspace(first.path);
   }, [customFolder, selectedFolder, folderChoices, workspace]);
-  const harnessChoices = selectedHost?.harnesses.length ? selectedHost.harnesses : HARNESSES;
+  const harnessChoices = (
+    selectedHost?.harnesses.length ? selectedHost.harnesses : HARNESSES
+  ).filter(
+    // A local ACP command needs its instance id; the quick start has no such
+    // picker, so it never offers the bare kind.
+    (kind) => kind !== "acp",
+  );
   const hostName = selectedHost?.name ?? "a host";
   const offline = connection !== "online";
   const writable = !offline && Boolean(host);
@@ -169,7 +175,9 @@ function InboxDetailEmpty() {
 
   const pickHost = (nextHostId: string) => {
     setHost(nextHostId);
-    const nextHarness = hosts[nextHostId]?.harnesses[0];
+    // Never default to the bare ACP kind: it is not startable without an
+    // instance id, which this quick start does not choose.
+    const nextHarness = hosts[nextHostId]?.harnesses.find((kind) => kind !== "acp");
     if (nextHarness) {
       setHarness(nextHarness);
       setModel(START_MODELS[nextHarness]);

@@ -223,35 +223,42 @@ type ResponseOfRest<T extends ClientRequest["type"]> = T extends "hello"
                                                                                                       type: "direct_pairing_offer";
                                                                                                     }
                                                                                                   >
-                                                                                                : T extends "list_acp_agents"
+                                                                                                : T extends "get_acp_agent"
                                                                                                   ? Extract<
                                                                                                       ResponseBody,
                                                                                                       {
-                                                                                                        type: "acp_agents";
+                                                                                                        type: "acp_agent_spec";
                                                                                                       }
                                                                                                     >
-                                                                                                  : T extends
-                                                                                                        | "add_acp_agent"
-                                                                                                        | "update_acp_agent"
+                                                                                                  : T extends "list_acp_agents"
                                                                                                     ? Extract<
                                                                                                         ResponseBody,
                                                                                                         {
-                                                                                                          type: "acp_agent";
+                                                                                                          type: "acp_agents";
                                                                                                         }
                                                                                                       >
-                                                                                                    : T extends "probe_acp_agent"
+                                                                                                    : T extends
+                                                                                                          | "add_acp_agent"
+                                                                                                          | "update_acp_agent"
                                                                                                       ? Extract<
                                                                                                           ResponseBody,
                                                                                                           {
-                                                                                                            type: "acp_agent_probe";
+                                                                                                            type: "acp_agent";
                                                                                                           }
                                                                                                         >
-                                                                                                      : Extract<
-                                                                                                          ResponseBody,
-                                                                                                          {
-                                                                                                            type: "ack";
-                                                                                                          }
-                                                                                                        >;
+                                                                                                      : T extends "probe_acp_agent"
+                                                                                                        ? Extract<
+                                                                                                            ResponseBody,
+                                                                                                            {
+                                                                                                              type: "acp_agent_probe";
+                                                                                                            }
+                                                                                                          >
+                                                                                                        : Extract<
+                                                                                                            ResponseBody,
+                                                                                                            {
+                                                                                                              type: "ack";
+                                                                                                            }
+                                                                                                          >;
 
 export type ResponseOf<T extends ClientRequest["type"]> = T extends "list_worktrees"
   ? Extract<ResponseBody, { type: "worktrees" }>

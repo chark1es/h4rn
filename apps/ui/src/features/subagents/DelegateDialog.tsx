@@ -91,7 +91,11 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
     if (ok) closeDelegate();
   };
 
-  const harnessChoices = hosts[host]?.harnesses.length ? hosts[host].harnesses : HARNESSES;
+  const harnessChoices = (hosts[host]?.harnesses.length ? hosts[host].harnesses : HARNESSES).filter(
+    // A child has no configured agent instance, so the bare ACP kind is not
+    // startable here.
+    (kind) => kind !== "acp",
+  );
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : closeDelegate())}>
@@ -136,9 +140,13 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
               )}
               onChange={(next) => {
                 setHost(next);
-                const options = hosts[next]?.harnesses;
-                if (options?.length && !options.includes(harness))
-                  setHarness(options[0] ?? harness);
+                const options = hosts[next]?.harnesses.filter(
+                  (kind): kind is Exclude<HarnessKind, "acp"> => kind !== "acp",
+                );
+                const fallback = options?.[0];
+                if (fallback && !options?.includes(harness as Exclude<HarnessKind, "acp">)) {
+                  setHarness(fallback);
+                }
               }}
             />
           </div>

@@ -1935,6 +1935,8 @@ class MockDaemon {
   private proxyProfiles: ProxyProfile[] = [];
   private harnessVersions: HarnessVersionInfo[] = mockHarnessVersions();
   private acpAgents: AcpAgent[] = [];
+  /** Full configurations; only the admin get request returns these. */
+  private acpSpecs = new Map<string, AcpAgentSpec>();
   private harnessUpdating = new Set<HarnessKind>();
   private worktrees: TrackedWorktree[] = mockWorktrees();
   private proxyCatalogs = new Map<string, ProxyModelCatalog>();
@@ -2916,6 +2918,15 @@ class MockDaemon {
       case "list_acp_agents":
         this.ok(frame.id, { type: "acp_agents", agents: this.acpAgents });
         return;
+      case "get_acp_agent": {
+        const agent = this.acpSpecs.get(body.id);
+        if (!agent) {
+          this.err(frame.id, "not_found", `no ACP agent \`${body.id}\``, "Reload the list.");
+          return;
+        }
+        this.ok(frame.id, { type: "acp_agent_spec", agent });
+        return;
+      }
       case "add_acp_agent": {
         if (this.acpAgents.some((agent) => agent.id === body.agent.id)) {
           this.err(
@@ -2928,6 +2939,7 @@ class MockDaemon {
         }
         const agent = mockAcpAgent(body.agent);
         this.acpAgents = [...this.acpAgents, agent];
+        this.acpSpecs.set(agent.id, body.agent);
         this.ok(frame.id, { type: "acp_agent", agent });
         return;
       }
@@ -2939,11 +2951,13 @@ class MockDaemon {
         }
         const agent = mockAcpAgent(body.agent);
         this.acpAgents = this.acpAgents.map((entry, at) => (at === index ? agent : entry));
+        this.acpSpecs.set(agent.id, body.agent);
         this.ok(frame.id, { type: "acp_agent", agent });
         return;
       }
       case "remove_acp_agent":
         this.acpAgents = this.acpAgents.filter((agent) => agent.id !== body.id);
+        this.acpSpecs.delete(body.id);
         this.ok(frame.id, { type: "ack" });
         return;
       case "probe_acp_agent": {
@@ -4752,7 +4766,12 @@ function mockWorktrees(): TrackedWorktree[] {
 function mockAcpAgent(spec: AcpAgentSpec): AcpAgent {
   return {
     ...spec,
+    // The daemon masks values in the list; the edit form asks for the
+    // admin-scoped configuration.
+    env: Object.fromEntries(Object.keys(spec.env).map((key) => [key, "•••"])),
     installed: false,
+    models: [],
+    modes: [],
   };
 }
 

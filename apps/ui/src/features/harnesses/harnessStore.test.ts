@@ -15,7 +15,9 @@ import {
   getHarnessState,
   harnessUpdateCount,
   loadHarnessVersions,
+  probeAcpAgent,
   resetHarnessStoreForTests,
+  updateAcpAgent,
   updateHarness,
 } from "./harnessStore";
 
@@ -115,5 +117,41 @@ describe("harness versions store", () => {
     const lines = getHarnessState().output.codex ?? [];
     expect(lines).toHaveLength(200);
     expect(lines.at(-1)).toBe("line 249");
+  });
+
+  it("remembers a refused probe instead of retrying it", async () => {
+    request.mockRejectedValueOnce(
+      new H4rnRequestError({
+        code: "forbidden",
+        message: "This device cannot start the agent.",
+        hint: "Pair an admin device to check it.",
+      }),
+    );
+    const message = await probeAcpAgent("demo");
+    expect(message).toContain("start the agent");
+    expect(getHarnessState().probing.demo).toBe(false);
+    expect(getHarnessState().probeErrors.demo).toContain("admin");
+  });
+
+  it("drops a cached probe when the agent is edited", async () => {
+    request.mockResolvedValueOnce({
+      type: "acp_agent_probe",
+      probe: { id: "demo", installed: true, models: [], modes: [] },
+    });
+    request.mockResolvedValueOnce({ type: "acp_agents", agents: [] });
+    await probeAcpAgent("demo");
+    expect(getHarnessState().probes.demo).toBeDefined();
+
+    request.mockResolvedValueOnce({ type: "acp_agent", agent: { id: "demo" } });
+    request.mockResolvedValueOnce({ type: "acp_agents", agents: [] });
+    await updateAcpAgent("demo", {
+      id: "demo",
+      name: "Demo",
+      command: "demo-agent",
+      args: [],
+      env: {},
+      working_dir: { kind: "thread_workspace" },
+    });
+    expect(getHarnessState().probes.demo).toBeUndefined();
   });
 });

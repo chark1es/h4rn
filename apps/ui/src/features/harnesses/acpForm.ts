@@ -15,7 +15,9 @@ export const EMPTY_ACP_FORM: AcpAgentForm = {
   id: "",
   name: "",
   command: "",
-  args: [""],
+  // No placeholder row: every row the user adds is a literal argv entry, and
+  // an empty one is kept.
+  args: [],
   env: [{ key: "", value: "" }],
   workingDir: "thread_workspace",
   path: "",
@@ -42,6 +44,7 @@ export function validateAcpAgentForm(
   if (!ACP_ID_PATTERN.test(id) || id.includes("--")) {
     return "Use lowercase letters, digits and single dashes; start and end with a letter or digit.";
   }
+  if (id.length > 64) return "Keep the instance id to 64 characters or fewer.";
   if (options.editingId !== undefined && id !== options.editingId) {
     return "The instance id cannot be changed while editing.";
   }
@@ -80,8 +83,23 @@ export function validateAcpAgentForm(
   return null;
 }
 
-function isAbsolutePath(path: string): boolean {
-  return path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path);
+function isAbsolutePath(path: string, windows = uiRunsOnWindows()): boolean {
+  if (windows) {
+    // `C:\dir`, `C:/dir`, or a UNC share `\\server\share`.
+    return /^[A-Za-z]:[\\/]/.test(path) || /^\\\\[^\\]/.test(path);
+  }
+  return path.startsWith("/");
+}
+
+/** Whether this UI is running on Windows, where a drive path is absolute. */
+function uiRunsOnWindows(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return /Win/i.test(navigator.platform) || /Windows/i.test(navigator.userAgent);
+}
+
+/** Exported for tests; the form uses the UI's own platform. */
+export function isPlatformAbsolutePath(path: string, windows: boolean): boolean {
+  return isAbsolutePath(path, windows);
 }
 
 /** Converts the form to the daemon's configuration shape. */
@@ -94,7 +112,8 @@ export function acpAgentSpecFromForm(form: AcpAgentForm): AcpAgentSpec {
     id: form.id.trim(),
     name: form.name.trim(),
     command: form.command.trim(),
-    args: form.args.filter((argument) => argument.length > 0),
+    // Every row is literal argv, including one the user left empty on purpose.
+    args: [...form.args],
     env: Object.fromEntries(
       form.env.filter((row) => row.key.trim().length > 0).map((row) => [row.key.trim(), row.value]),
     ),
@@ -115,7 +134,7 @@ export function formFromAcpAgent(agent: {
     id: agent.id,
     name: agent.name,
     command: agent.command,
-    args: agent.args.length > 0 ? [...agent.args] : [""],
+    args: [...agent.args],
     env:
       Object.keys(agent.env).length > 0
         ? Object.entries(agent.env).map(([key, value]) => ({ key, value: value ?? "" }))

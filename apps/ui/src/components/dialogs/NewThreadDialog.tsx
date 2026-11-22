@@ -73,6 +73,8 @@ export function NewThreadDialog() {
   useAcpAgents();
   const agents = useHarnesses((value) => value.agents);
   const probes = useHarnesses((value) => value.probes);
+  const probeErrors = useHarnesses((value) => value.probeErrors);
+  const probingAgents = useHarnesses((value) => value.probing);
   const harnessRows = useHarnesses((value) => (value.loaded ? value.rows : null));
   const installed = useMemo(
     () => harnessRows?.filter((row) => row.installed !== null).map((row) => row.harness) ?? null,
@@ -143,6 +145,8 @@ export function NewThreadDialog() {
   const harnessChoices = detectedHarnesses(HARNESSES, installed, selectedHost?.harnesses);
   const selectedAgent = agentId ? agents.find((agent) => agent.id === agentId) : undefined;
   const probe = agentId ? probes[agentId] : undefined;
+  const probeError = agentId ? probeErrors[agentId] : undefined;
+  const probing = agentId ? probingAgents[agentId] === true : false;
   const modelInfo = HARNESS_MODELS[harness];
   // Built-in harnesses and configured agents share one picker. A value is a
   // harness kind, or `acp:<instance>` for a local command.
@@ -164,14 +168,17 @@ export function NewThreadDialog() {
   }, [open, harnessMissing, agentGone, firstChoice]);
 
   // The model list comes from the agent's own handshake. Probe once when the
-  // picker selects it; the daemon starts the command once and stops it.
+  // picker selects it; the daemon starts the command once and stops it. A
+  // device without admin cannot probe, and the failure is remembered so the
+  // picker does not retry on every render or selection.
   useEffect(() => {
-    if (!open || !agentId || probes[agentId]) return;
+    if (!open || !agentId || probes[agentId] || probeErrors[agentId]) return;
     void probeAcpAgent(agentId);
-  }, [open, agentId, probes]);
+  }, [open, agentId, probes, probeErrors]);
 
-  // Adopt the agent's first advertised model while the user has not chosen.
-  const agentModels = probe?.models.map((entry) => entry.id) ?? [];
+  // The probe fills from an admin device; every device still sees the last
+  // successful result the daemon stored in the list.
+  const agentModels = (probe?.models ?? selectedAgent?.models ?? []).map((entry) => entry.id);
   const firstAgentModel = agentModels[0];
   useEffect(() => {
     if (!open || harness !== "acp" || !firstAgentModel) return;
@@ -312,13 +319,17 @@ export function NewThreadDialog() {
             </datalist>
             {harness === "acp" ? (
               <span className="text-small text-fg-3">
-                {probe?.error
-                  ? probe.error
-                  : probe
-                    ? probe.models.length > 0
-                      ? `${probe.models.length} models from ${selectedAgent?.name ?? "the agent"}.`
-                      : "The agent advertises no models; type one or leave `default`."
-                    : "Reading the agent's models…"}
+                {probing
+                  ? "Reading the agent's models…"
+                  : probe?.error
+                    ? probe.error
+                    : probeError
+                      ? `${probeError} Type a model or leave \`default\`.`
+                      : agentModels.length > 0
+                        ? `${agentModels.length} models from ${selectedAgent?.name ?? "the agent"}.`
+                        : selectedAgent && !selectedAgent.installed
+                          ? "This command is not installed on the host yet. Type a model or leave `default`."
+                          : "No models read yet. Type one or leave `default`."}
               </span>
             ) : modelInfo.thinking ? (
               <span className="text-small text-fg-3">

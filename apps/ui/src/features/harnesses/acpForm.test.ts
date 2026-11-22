@@ -6,6 +6,7 @@ import {
   acpPickerOptions,
   EMPTY_ACP_FORM,
   formFromAcpAgent,
+  isPlatformAbsolutePath,
   validateAcpAgentForm,
 } from "./acpForm";
 
@@ -30,8 +31,8 @@ describe("ACP agent form", () => {
     });
   });
 
-  it("rejects ids that are not a lowercase slug", () => {
-    for (const id of ["Demo", "-demo", "demo-", "demo--agent", "demo agent", ""]) {
+  it("rejects ids that are not a lowercase slug or are too long", () => {
+    for (const id of ["Demo", "-demo", "demo-", "demo--agent", "demo agent", "", "a".repeat(65)]) {
       const form = { ...EMPTY_ACP_FORM, id, name: "Demo", command: "demo" };
       expect(validateAcpAgentForm(form), id).not.toBeNull();
     }
@@ -73,7 +74,7 @@ describe("ACP agent form", () => {
     ).toBeNull();
   });
 
-  it("drops empty argument and environment rows when saving", () => {
+  it("keeps explicitly added empty arguments", () => {
     const form = {
       ...EMPTY_ACP_FORM,
       id: "demo",
@@ -88,10 +89,23 @@ describe("ACP agent form", () => {
       path: "/tmp/work",
     };
     expect(acpAgentSpecFromForm(form)).toMatchObject({
-      args: ["acp"],
+      args: ["", "acp", ""],
       env: { TOKEN: "secret" },
       working_dir: { kind: "fixed_path", path: "/tmp/work" },
     });
+    // A brand-new form has no arguments at all, not one empty placeholder.
+    expect(
+      acpAgentSpecFromForm({ ...EMPTY_ACP_FORM, id: "x", name: "X", command: "x" }).args,
+    ).toEqual([]);
+  });
+
+  it("matches the daemon's platform-specific absolute path rules", () => {
+    expect(isPlatformAbsolutePath("/home/me/agent", false)).toBe(true);
+    expect(isPlatformAbsolutePath("C:\\agent.exe", false)).toBe(false);
+    expect(isPlatformAbsolutePath("C:\\agent.exe", true)).toBe(true);
+    expect(isPlatformAbsolutePath("\\\\server\\share\\agent.exe", true)).toBe(true);
+    expect(isPlatformAbsolutePath("\\\\server\\share\\agent.exe", false)).toBe(false);
+    expect(isPlatformAbsolutePath("relative/agent", true)).toBe(false);
   });
 
   it("round-trips a configured agent into the edit form", () => {

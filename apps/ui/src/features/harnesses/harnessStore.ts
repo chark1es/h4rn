@@ -34,6 +34,8 @@ export type HarnessState = {
   /** The last probe of each agent, by instance id. */
   probes: Record<string, AcpAgentProbe>;
   probing: Record<string, boolean>;
+  /** Why an automatic probe failed, so the picker stops retrying it. */
+  probeErrors: Record<string, string>;
 };
 
 const initialState: HarnessState = {
@@ -50,6 +52,7 @@ const initialState: HarnessState = {
   agentsError: null,
   probes: {},
   probing: {},
+  probeErrors: {},
 };
 
 type Listener = () => void;
@@ -191,6 +194,7 @@ export async function updateAcpAgent(id: string, agent: AcpAgentSpec): Promise<s
   try {
     const response = await getClient().request({ type: "update_acp_agent", id, agent });
     if (response.type !== "acp_agent") return null;
+    forgetProbe(id);
     await loadAcpAgents();
     return null;
   } catch (error) {
@@ -201,11 +205,32 @@ export async function updateAcpAgent(id: string, agent: AcpAgentSpec): Promise<s
 export async function removeAcpAgent(id: string): Promise<string | null> {
   try {
     await getClient().request({ type: "remove_acp_agent", id });
+    forgetProbe(id);
     await loadAcpAgents();
     return null;
   } catch (error) {
     return protoMessage(error);
   }
+}
+
+/**
+ * Reads one configuration with its real environment values.
+ *
+ * Admin-only: the list masks values because a value can be a credential, so
+ * only the edit form asks for this.
+ */
+export async function loadAcpAgentSpec(id: string): Promise<AcpAgentSpec> {
+  const response = await getClient().request({ type: "get_acp_agent", id });
+  if (response.type !== "acp_agent_spec") throw new Error("the daemon returned no configuration");
+  return response.agent;
+}
+
+/** Drops what a probe learned about an agent whose configuration changed. */
+function forgetProbe(id: string): void {
+  const { [id]: _probe, ...probes } = state.probes;
+  const { [id]: _error, ...probeErrors } = state.probeErrors;
+  const { [id]: _probing, ...probing } = state.probing;
+  patch({ probes, probeErrors, probing });
 }
 
 /** Starts one agent once and records what it advertises. */
@@ -214,15 +239,25 @@ export async function probeAcpAgent(id: string): Promise<string | null> {
   try {
     const response = await getClient().request({ type: "probe_acp_agent", id });
     if (response.type !== "acp_agent_probe") return null;
+    const { [id]: _error, ...probeErrors } = state.probeErrors;
     patch({
       probes: { ...state.probes, [id]: response.probe },
       probing: { ...state.probing, [id]: false },
+      probeErrors,
     });
-    if (response.probe.version) await loadAcpAgents();
+    // The list carries the probe result for view-scoped devices and the
+    // installed/version row, so refresh it either way.
+    await loadAcpAgents();
     return response.probe.error ?? null;
   } catch (error) {
-    patch({ probing: { ...state.probing, [id]: false } });
-    return protoMessage(error);
+    const message = protoMessage(error);
+    patch({
+      probing: { ...state.probing, [id]: false },
+      // Remember the failure: a device without admin cannot probe, and
+      // retrying on every picker selection would just fail again.
+      probeErrors: { ...state.probeErrors, [id]: message },
+    });
+    return message;
   }
 }
 

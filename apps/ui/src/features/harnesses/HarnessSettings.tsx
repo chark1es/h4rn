@@ -1,5 +1,5 @@
 import { PencilIcon, PlusIcon, RefreshCwIcon, Trash2Icon, UnplugIcon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { ChipSelect } from "@/components/common/ChipSelect";
 import type { AcpAgent, HarnessKind, HarnessVersionInfo } from "@/gen";
@@ -15,6 +15,7 @@ import {
 } from "./acpForm";
 import {
   addAcpAgent,
+  loadAcpAgentSpec,
   loadHarnessVersions,
   probeAcpAgent,
   removeAcpAgent,
@@ -137,11 +138,11 @@ function AgentRow({ agent, onEdit }: { agent: AcpAgent; onEdit: () => void }) {
           <button
             type="button"
             className="q-btn ghost"
-            disabled={probing || !agent.installed}
+            disabled={probing}
             onClick={() => void probeAcpAgent(agent.id).then(setError)}
           >
             <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-            {probing ? "Checking…" : "Check"}
+            {probing ? "Checking…" : agent.installed ? "Check" : "Check again"}
           </button>
           <button
             type="button"
@@ -189,15 +190,34 @@ function AgentForm({
   existingIds: string[];
   onDone: () => void;
 }) {
-  const [form, setForm] = useState<AcpAgentForm>(
-    agent === "new" ? EMPTY_ACP_FORM : formFromAcpAgent(agent),
-  );
+  const [form, setForm] = useState<AcpAgentForm | null>(agent === "new" ? EMPTY_ACP_FORM : null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  const patch = (next: Partial<AcpAgentForm>) => setForm((current) => ({ ...current, ...next }));
+  // The list masks environment values. The edit form asks the admin-scoped
+  // request for the real configuration once it opens.
+  useEffect(() => {
+    if (agent === "new") return;
+    let cancelled = false;
+    loadAcpAgentSpec(agent.id)
+      .then((spec) => {
+        if (!cancelled) setForm(formFromAcpAgent(spec));
+      })
+      .catch((reason: unknown) => {
+        if (!cancelled) {
+          setError(reason instanceof Error ? reason.message : "Could not read this agent.");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [agent]);
+
+  const patch = (next: Partial<AcpAgentForm>) =>
+    setForm((current) => (current ? { ...current, ...next } : current));
 
   const save = async () => {
+    if (!form) return;
     const message = validateAcpAgentForm(form, {
       existingIds,
       ...(agent === "new" ? {} : { editingId: agent.id }),
@@ -216,6 +236,26 @@ function AgentForm({
     }
     onDone();
   };
+
+  if (!form) {
+    return (
+      <div className="q-group">
+        <h2>Edit {agent === "new" ? "agent" : agent.name}</h2>
+        {error ? (
+          <p className="q-harness-manual" style={{ color: "var(--danger)" }} role="alert">
+            {error}
+          </p>
+        ) : (
+          <p className="q-muted">Reading the agent's configuration…</p>
+        )}
+        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 12 }}>
+          <button type="button" className="q-btn ghost" onClick={onDone}>
+            Close
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="q-group">
@@ -299,7 +339,6 @@ function AgentForm({
                 type="button"
                 className="q-btn ghost"
                 aria-label={`Remove argument ${index + 1}`}
-                disabled={form.args.length === 1 && argument === ""}
                 onClick={() => patch({ args: form.args.filter((_, at) => at !== index) })}
               >
                 Remove
