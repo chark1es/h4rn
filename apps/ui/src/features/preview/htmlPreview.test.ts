@@ -9,6 +9,7 @@ import {
   PREVIEW_MAX_TOTAL_BYTES,
   PREVIEW_SANDBOX,
   previewAssetFits,
+  previewBridge,
   previewEmbeddedBytes,
   previewLinkOpens,
   previewMimeType,
@@ -376,6 +377,35 @@ describe("HTML preview document", () => {
     expect(built.missing).toEqual([]);
   });
 
+  it("treats a trailing comma as the boundary after a descriptorless candidate", () => {
+    const built = buildPreviewDocument({
+      html: `<img srcset="data:image/png;base64,AAAA, small.png 2x">`,
+      docPath: "index.html",
+      assets: {
+        "small.png": { kind: "bytes" as const, base64: "BBBB", mime: "image/png" },
+      },
+      token: "t1",
+    });
+    // The data URL has no descriptor, so its trailing comma ends it. The
+    // workspace candidate after the comma is still rewritten and inlined.
+    expect(built.srcdoc).toContain(
+      'srcset="data:image/png;base64,AAAA, data:image/png;base64,BBBB 2x"',
+    );
+    expect(built.missing).toEqual([]);
+  });
+
+  it("removes the workspace candidate that follows a descriptorless one when it is missing", () => {
+    const built = buildPreviewDocument({
+      html: `<img srcset="data:image/png;base64,AAAA, gone.png 2x">`,
+      docPath: "index.html",
+      assets: {},
+      token: "t1",
+    });
+    expect(built.srcdoc).toContain('srcset="data:image/png;base64,AAAA"');
+    expect(built.srcdoc).not.toContain("gone.png");
+    expect(built.missing).toEqual(["gone.png"]);
+  });
+
   it("removes a missing workspace srcset candidate and keeps the data: one", () => {
     const built = buildPreviewDocument({
       html: `<img srcset="data:image/png;base64,AAAA 1x, gone.png 2x, https://cdn.example.com/c.png 3x">`,
@@ -478,12 +508,15 @@ describe("HTML preview document", () => {
     };
     const bytes = (text: string) => new TextEncoder().encode(text).length;
     const dataUrl = `data:image/png;base64,${pixel}`;
-    // Room for the page, both stylesheets and exactly one copy of the image.
+    // Room for the page, both stylesheets, exactly one copy of the image, and
+    // the fixed prefix and bridge every document carries.
     const maxBytes =
       bytes(html) +
       bytes(assets["theme.css"].text) +
       bytes(assets["colors.css"].text) +
       bytes(dataUrl) +
+      bytes(injectCsp("")) +
+      bytes(previewBridge("t1")) +
       512;
     const built = buildPreviewDocument({
       html,
@@ -497,6 +530,55 @@ describe("HTML preview document", () => {
     // as missing silently: it is reported as skipped.
     expect(built.srcdoc.split("data:image/png;base64,").length - 1).toBe(1);
     expect(built.missing).toEqual(["logo.png"]);
+  });
+
+  it("charges the backslashes that escaping a script body adds", () => {
+    const bytes = (text: string) => new TextEncoder().encode(text).length;
+    const text = `const end = "${"x".repeat(1000)}</script>";`;
+    const html = `<script src="app.js"></script>`;
+    // Exactly the page, the script text and its `<script></script>` wrapper,
+    // with no room for the backslash the `</script` escape adds.
+    const maxBytes =
+      bytes(html) +
+      bytes(text) +
+      bytes(injectCsp("")) +
+      bytes(previewBridge("t1")) +
+      bytes("<script></script>");
+    const built = buildPreviewDocument({
+      html,
+      docPath: "page.html",
+      assets: { "app.js": { kind: "text" as const, text } },
+      token: "t1",
+      maxBytes,
+    });
+    expect(bytes(built.srcdoc)).toBeLessThanOrEqual(maxBytes);
+    expect(built.srcdoc).not.toContain("const end");
+    expect(built.missing).toEqual(["app.js"]);
+  });
+
+  it("charges the backslashes that escaping a style body adds", () => {
+    const bytes = (text: string) => new TextEncoder().encode(text).length;
+    const css = `.x { content: "${"y".repeat(1000)}</style>" }`;
+    const html = `<link rel="stylesheet" href="style.css">`;
+    // The stylesheet text and its `<style></style>` wrapper fill the budget
+    // exactly; escaping its `</style` would add a byte, so the body cannot be
+    // kept and the link becomes an empty style element.
+    const maxBytes =
+      bytes(html) +
+      bytes(css) +
+      bytes("<style></style>") +
+      bytes(injectCsp("")) +
+      bytes(previewBridge("t1"));
+    const built = buildPreviewDocument({
+      html,
+      docPath: "page.html",
+      assets: { "style.css": { kind: "text" as const, text: css } },
+      token: "t1",
+      maxBytes,
+    });
+    expect(bytes(built.srcdoc)).toBeLessThanOrEqual(maxBytes);
+    expect(built.srcdoc).toContain("<style></style>");
+    expect(built.srcdoc).not.toContain("yyyy");
   });
 
   it("names images and fonts by type, with a safe fallback", () => {

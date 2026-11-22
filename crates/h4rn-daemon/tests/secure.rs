@@ -17,9 +17,9 @@ use h4rn_daemon::remote::DeviceRegistry;
 use h4rn_daemon::threads::ThreadManagerOptions;
 use h4rn_harness::FakeHarness;
 use h4rn_protocol::{
-    BinaryFrame, BinaryKind, ClientFrame, ClientRequest, DeviceId, DeviceInfo, Event, HarnessKind,
-    PairScope, ProtoError, ProtoErrorCode, ResponseBody, RuntimeMode, ServerFrame, ThreadSummary,
-    TransportPathKind,
+    BinaryFrame, BinaryKind, ClientFrame, ClientRequest, DeviceId, DeviceInfo, Event, FsOmitted,
+    HarnessKind, PairScope, ProjectSource, ProtoError, ProtoErrorCode, ResponseBody, RuntimeMode,
+    ServerFrame, ThreadSummary, TransportPathKind,
 };
 use h4rn_transport::client::{Client, ClientConfig, ClientEvent, ClientPath};
 use h4rn_transport::engine::EngineConfig;
@@ -2004,6 +2004,71 @@ async fn a_newer_direct_pairing_file_replaces_the_previous_offer() {
         "the second offer's scopes must be the ones armed"
     );
     assert_eq!(service.psk(), None);
+    client.close().await;
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_large_editor_read_is_omitted_on_a_secure_session() {
+    // The secure transport closes a session whose frame is over its bound, so
+    // the request handler must choose the secure frame limit from the
+    // connection's origin. The read is under the editor's 2 MiB limit, but its
+    // escaped JSON is over one frame; it must come back typed instead.
+    let client_identity = device_identity();
+    let allowed = PairingPolicy::new([client_identity.public().noise_public]);
+    let service = Arc::new(SecureService::new(
+        SecureOptions::new(device_identity()).with_policy(allowed),
+    ));
+    let daemon = boot(Arc::clone(&service)).await;
+    let mut client = SecureClient::connect(&daemon, client_identity, None).await;
+    client.hello().await;
+    let host = match client
+        .request(ClientRequest::ListHosts)
+        .await
+        .expect("hosts")
+    {
+        ResponseBody::Hosts { hosts } => hosts[0].host_id.clone(),
+        other => panic!("unexpected host response: {other:?}"),
+    };
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    let content = "\"".repeat(400 * 1024);
+    std::fs::write(workspace.path().join("big.txt"), &content).expect("write");
+    let workspace_path = workspace
+        .path()
+        .to_str()
+        .expect("utf-8 workspace")
+        .to_owned();
+    client
+        .request(ClientRequest::AddProject {
+            host: host.clone(),
+            source: ProjectSource::Existing {
+                path: workspace_path.clone(),
+            },
+            name: None,
+        })
+        .await
+        .expect("authorise the workspace");
+
+    let response = client
+        .request(ClientRequest::FsRead {
+            host,
+            workspace: workspace_path,
+            path: "big.txt".into(),
+            bytes_base64: false,
+            max_bytes: None,
+        })
+        .await
+        .expect("read");
+    match response {
+        ResponseBody::FsFile { file } => {
+            assert_eq!(file.content_omitted, Some(FsOmitted::TooLarge));
+            assert!(file.content.is_none());
+            assert!(file.truncated);
+        }
+        other => panic!("unexpected read response: {other:?}"),
+    }
+
     client.close().await;
     daemon.stop().await;
 }

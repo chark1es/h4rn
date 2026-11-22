@@ -26,8 +26,15 @@ const owners = new Map<string, Watch>();
 /** The client that currently carries the watches. */
 let bound: WatchClient | null = null;
 let unbind: (() => void) | null = null;
-/** Whether this client has been sent the held watches since it was bound. */
-let sentOnThisClient = false;
+/**
+ * Workspaces already sent to the bound client.
+ *
+ * A boolean is not enough: retaining a second workspace before a replacement
+ * client's first ready notice would mark that client as "sent" and leave the
+ * watch retained earlier unsent forever. Each workspace is tracked on its
+ * own, so the ready notice sends exactly the ones still outstanding.
+ */
+let sentOnThisClient = new Set<string>();
 let listeningForReplacements = false;
 
 function keyOf(host: string, workspace: string): string {
@@ -35,31 +42,35 @@ function keyOf(host: string, workspace: string): string {
 }
 
 function sendWatch(client: WatchClient, watch: Watch): void {
+  sentOnThisClient.add(keyOf(watch.host, watch.workspace));
   void client
     .request({ type: "fs_watch", host: watch.host, workspace: watch.workspace, paths: [] })
     .catch(() => undefined);
 }
 
 function resendHeldWatches(client: WatchClient): void {
-  for (const watch of owners.values()) sendWatch(client, watch);
-  sentOnThisClient = true;
+  for (const [key, watch] of owners) {
+    if (sentOnThisClient.has(key)) continue;
+    sendWatch(client, watch);
+  }
 }
 
 /**
  * Points the module at the client that must carry the watches now.
  *
  * A replacement client has never seen the held watches, so its first ready
- * notice re-sends them even though the transport did not report a reconnect.
- * On the same client only a reconnect drops the daemon-side watch.
+ * notice re-sends every one of them even though the transport did not report
+ * a reconnect. On the same client only a reconnect drops the daemon-side
+ * watch, which clears what that client has been sent.
  */
 function bindClient(client: WatchClient): void {
   if (bound === client) return;
   unbind?.();
   bound = client;
-  sentOnThisClient = false;
+  sentOnThisClient = new Set();
   unbind = client.onReady((info) => {
     if (client !== bound) return;
-    if (!info.reconnected && sentOnThisClient) return;
+    if (info.reconnected) sentOnThisClient.clear();
     resendHeldWatches(client);
   });
 }
@@ -88,7 +99,6 @@ export function retainWorkspaceWatch(host: string, workspace: string): () => voi
   owners.set(key, { host, workspace });
   if (count === 0) {
     sendWatch(client, { host, workspace });
-    sentOnThisClient = true;
   }
 
   let released = false;
@@ -102,6 +112,7 @@ export function retainWorkspaceWatch(host: string, workspace: string): () => voi
     }
     counts.delete(key);
     owners.delete(key);
+    sentOnThisClient.delete(key);
     const carrier = bound ?? client;
     void carrier.request({ type: "fs_unwatch", workspace }).catch(() => undefined);
   };
