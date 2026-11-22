@@ -235,14 +235,21 @@ stateDiagram-v2
 
 | Event | Desktop | Phone push | In-app |
 |---|---|---|---|
-| Approval / question | System notification (optional) | Yes, default on | Cue badge + standby bar |
-| Turn failed | Optional | Yes, default on | Strike badge + standby bar |
-| Usage limit, auto-resume armed | No | Yes, default on | Countdown card |
-| Turn finished (Done) | No | Digest only (default off) | Done count |
-| Host offline | Status bar only | No | Offline banner on affected threads |
+| Approval / question | Yes, optional (default on) | Not yet | Cue badge + standby bar |
+| Turn failed | Yes, optional (default on) | Not yet | Strike badge + standby bar |
+| Usage limit, auto-resume armed | No | No | Countdown card |
+| Turn finished (Done) | Yes, optional (default on) | Not yet | Done count |
+| Host offline | Yes, optional (default off) | No | Offline banner on affected threads |
 | MCP target unhealthy | No | No | Library badge |
 
 Quiet hours collapse pushes into one digest. Every push deep-links to the thread and opens the standby action, not just the transcript.
+
+On the desktop app and in the browser, a notification stays quiet while the person is already
+looking at the thing it names: the window is focused and that thread is open, or the app is focused
+for a host going offline. A burst of approvals in one thread becomes one notification with the
+latest message. Choices are stored per device, and a denied OS permission is shown as “Blocked in
+system settings” rather than a switch that looks on. The mobile build does not send notifications
+yet and says so.
 
 ---
 
@@ -1315,6 +1322,8 @@ Covered structurally in flow (d). Additional rules:
 - **Devices** table: device name + platform icon, scopes (View, Approve, Terminal, Files, Admin), last seen, presence, `Revoke`. Revoke is a confirm that names the device and says what stops immediately.
 - **Account & relay:** OrbitID issuer, signed-in identity, relay status, sign out (hosts stay paired), connection diagnostics. The issuer is configuration, never hardcoded; show it verbatim so self-hosters can verify.
 - **Appearance:** theme (System / Light / Dark), density (Comfortable / Compact desktop only), reduced motion (follow OS / force on), terminal theme (dark / light).
+- **Notifications:** approvals and questions, finished and failed turns, and host offline, each with a per-device switch (approvals and finished turns on, host offline off). Notifications stay quiet for the thread that is open in a focused window, coalesce per thread, and open the thread when clicked. A denied OS permission is shown as “Blocked in system settings”. The mobile build does not send notifications yet and says so.
+- **General:** Open at login registers the desktop app as a login item, and Keep running in tray adds an Open h4rn / Quit tray icon and makes the close button hide the window. Both rows are desktop-only; the browser and phone hide them.
 - **Shortcuts:** the full map, searchable, with reset-to-default and conflict warnings on rebind.
 - **Phone:** Hosts is a bottom-nav destination with a list; host detail is a pushed screen with collapsible sections. Devices live under More → Settings → Devices. Pairing is a prominent row at the top of Hosts.
 

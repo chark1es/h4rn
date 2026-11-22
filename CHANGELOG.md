@@ -5,6 +5,25 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **Notifications, Open at login and the tray are real settings.** Settings → Notifications now
+  controls OS notifications on the desktop app (the Tauri notification plugin) and in the browser
+  (the Web Notification API, asked for only when a switch is turned on). Approvals and waiting
+  questions, finished and failed turns, and a paired machine going offline notify only when the
+  window is not focused or a different thread is open; a burst in one thread becomes one
+  notification with the latest message, and clicking it focuses h4rn and opens the thread. The
+  choices persist per device (`h4rn.notifications`): approvals and finished turns on, host
+  offline off. A denied OS permission is shown as “Blocked in system settings” instead of a
+  switch that looks on.
+- **Open at login** registers the desktop app as a login item through the autostart plugin.
+- **Keep running in tray** adds an Open h4rn / Quit tray icon and makes the window's close button
+  hide h4rn instead of quitting while agents keep working; the shell stores the choice so the
+  close handler knows it before the UI loads. With it off, closing the window quits as before.
+  Both startup rows are hidden in the browser and on mobile.
+- The mobile build does not send notifications yet, and Settings says so instead of offering
+  switches that do nothing.
+
 ### Fixed
 
 - **A Send during an idle agent's death starts a fresh agent.** When a stdout read failed or EOF

@@ -1,9 +1,18 @@
 import type * as React from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { ShortcutCaps } from "@/components/common/Kbd";
 import { ForgeSettings } from "@/features/forge/ForgeSettings";
 import { HarnessSettings } from "@/features/harnesses/HarnessSettings";
+import {
+  type NotificationPermissionState,
+  notificationChannel,
+} from "@/features/notifications/channel";
+import {
+  type NotificationSettingKey,
+  setNotificationSetting,
+  useNotificationSettings,
+} from "@/features/notifications/settings";
 import { ProxySettings } from "@/features/proxy/ProxySettings";
 import { LiveAccountForm, LiveHostsForm } from "@/features/remote/SettingsRemote";
 import { AboutSettings } from "@/features/updates/AboutSettings";
@@ -25,6 +34,8 @@ import {
   shortcutText,
   useKeybindingsVersion,
 } from "@/lib/keybindings";
+import { desktopShellBridge } from "@/lib/platform/desktopShell";
+import { secretShell } from "@/lib/platform/secrets";
 import { setTheme, setUi, type Theme, useApp } from "@/lib/store/appStore";
 import { setTerminalMatchesApp, useTerminalMatchesApp } from "@/lib/terminalTheme";
 
@@ -32,10 +43,12 @@ function Toggle({
   checked,
   label,
   onChange,
+  disabled = false,
 }: {
   checked: boolean;
   label: string;
   onChange?: (next: boolean) => void;
+  disabled?: boolean;
 }) {
   return (
     <button
@@ -44,6 +57,8 @@ function Toggle({
       role="switch"
       aria-checked={checked}
       aria-label={label}
+      aria-disabled={disabled || undefined}
+      disabled={disabled}
       onClick={() => onChange?.(!checked)}
     />
   );
@@ -55,32 +70,113 @@ const SCHEMES: Array<{ value: Theme; label: string }> = [
   { value: "dark", label: "Dark" },
 ];
 
+function describeError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (typeof error === "object" && error !== null && "message" in error) {
+    return String((error as { message: unknown }).message);
+  }
+  return "The change did not stick.";
+}
+
 function GeneralForm() {
+  const shell = useMemo(desktopShellBridge, []);
+  const [autostart, setAutostart] = useState<boolean | null>(null);
+  const [keepInTray, setKeepInTray] = useState<boolean | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!shell) return;
+    let cancelled = false;
+    void shell
+      .autostartEnabled()
+      .then((enabled) => {
+        if (!cancelled) setAutostart(enabled);
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) setError(describeError(cause));
+      });
+    void shell
+      .shellSettings()
+      .then((settings) => {
+        if (!cancelled) setKeepInTray(settings.keep_in_tray);
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) setError(describeError(cause));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [shell]);
+
+  const changeAutostart = async (next: boolean) => {
+    if (!shell) return;
+    setError(null);
+    try {
+      await shell.setAutostart(next);
+      setAutostart(await shell.autostartEnabled());
+    } catch (cause) {
+      setError(describeError(cause));
+    }
+  };
+
+  const changeTray = async (next: boolean) => {
+    if (!shell) return;
+    setError(null);
+    try {
+      const settings = await shell.setKeepInTray(next);
+      setKeepInTray(settings.keep_in_tray);
+    } catch (cause) {
+      setError(describeError(cause));
+    }
+  };
+
   return (
     <div className="q-form">
       <h1>General</h1>
       <p className="lead">How h4rn starts and where it keeps its local state.</p>
-      <div className="q-group">
-        <h2>Startup</h2>
-        <div className="q-field">
-          <div className="lab">
-            <div className="t">Open at login</div>
-            <div className="s">Start the tray helper with your session</div>
+      {shell ? (
+        <div className="q-group">
+          <h2>Startup</h2>
+          <div className="q-field">
+            <div className="lab">
+              <div className="t">Open at login</div>
+              <div className="s">Start h4rn when you sign in to this computer</div>
+            </div>
+            <div className="ctl">
+              <Toggle
+                checked={autostart ?? false}
+                disabled={autostart === null}
+                label="Open at login"
+                onChange={(next) => void changeAutostart(next)}
+              />
+            </div>
           </div>
-          <div className="ctl">
-            <Toggle checked label="Open at login" />
+          <div className="q-field">
+            <div className="lab">
+              <div className="t">Keep running in tray</div>
+              <div className="s">
+                {keepInTray
+                  ? "Closing the window keeps h4rn in the tray"
+                  : "Closing the window quits h4rn"}
+              </div>
+            </div>
+            <div className="ctl">
+              <Toggle
+                checked={keepInTray ?? false}
+                disabled={keepInTray === null}
+                label="Keep running in tray"
+                onChange={(next) => void changeTray(next)}
+              />
+            </div>
           </div>
+          {error ? (
+            <p className="s" role="alert" style={{ color: "var(--danger)" }}>
+              {error}
+            </p>
+          ) : null}
         </div>
-        <div className="q-field">
-          <div className="lab">
-            <div className="t">Keep running in tray</div>
-            <div className="s">Closing the window leaves agents running</div>
-          </div>
-          <div className="ctl">
-            <Toggle checked label="Keep running in tray" />
-          </div>
-        </div>
-      </div>
+      ) : null}
       <AboutSettings />
       <div className="q-group">
         <h2>Daemon</h2>
@@ -148,41 +244,139 @@ function AppearanceForm() {
   );
 }
 
+const NOTIFICATION_ROWS: Array<{
+  key: NotificationSettingKey;
+  title: string;
+  subtitle: string;
+  label: string;
+}> = [
+  {
+    key: "approvals",
+    title: "Approvals",
+    subtitle: "A command or question is waiting to run",
+    label: "Approval notifications",
+  },
+  {
+    key: "finishedTurns",
+    title: "Finished turns",
+    subtitle: "A thread lands in Done",
+    label: "Finished turn notifications",
+  },
+  {
+    key: "hostOffline",
+    title: "Host offline",
+    subtitle: "A host becomes unreachable",
+    label: "Host offline notifications",
+  },
+];
+
 function NotificationsForm() {
+  const channel = useMemo(notificationChannel, []);
+  const settings = useNotificationSettings();
+  const shell = secretShell();
+  const [permission, setPermission] = useState<NotificationPermissionState | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!channel) return;
+    let cancelled = false;
+    void channel
+      .permission()
+      .then((state) => {
+        if (!cancelled) setPermission(state);
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) setError(describeError(cause));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [channel]);
+
+  const change = async (key: NotificationSettingKey, next: boolean) => {
+    if (!channel) return;
+    setError(null);
+    if (next) {
+      try {
+        const state = await channel.requestPermission();
+        setPermission(state);
+        if (state !== "granted") {
+          setNotificationSetting(key, false);
+          return;
+        }
+      } catch (cause) {
+        setError(describeError(cause));
+        return;
+      }
+    }
+    setNotificationSetting(key, next);
+  };
+
+  const allow = async () => {
+    if (!channel) return;
+    setError(null);
+    try {
+      setPermission(await channel.requestPermission());
+    } catch (cause) {
+      setError(describeError(cause));
+    }
+  };
+
   return (
     <div className="q-form">
       <h1>Notifications</h1>
       <p className="lead">Only things that need you interrupt you.</p>
-      <div className="q-group">
-        <h2>Desktop</h2>
-        <div className="q-field">
-          <div className="lab">
-            <div className="t">Approvals</div>
-            <div className="s">A command is waiting to run</div>
-          </div>
-          <div className="ctl">
-            <Toggle checked label="Approval notifications" />
-          </div>
+      {channel ? (
+        <div className="q-group">
+          <h2>On this device</h2>
+          {NOTIFICATION_ROWS.map((row) => (
+            <div className="q-field" key={row.key}>
+              <div className="lab">
+                <div className="t">{row.title}</div>
+                <div className="s">{row.subtitle}</div>
+              </div>
+              <div className="ctl">
+                {permission === "denied" ? (
+                  <span className="q-muted">Blocked in system settings</span>
+                ) : (
+                  <Toggle
+                    checked={settings[row.key]}
+                    label={row.label}
+                    onChange={(next) => void change(row.key, next)}
+                  />
+                )}
+              </div>
+            </div>
+          ))}
+          {permission === "default" ? (
+            <div className="q-field">
+              <div className="lab">
+                <div className="t">System permission</div>
+                <div className="s">h4rn needs your permission before it can notify you</div>
+              </div>
+              <div className="ctl">
+                <button type="button" className="q-btn secondary" onClick={() => void allow()}>
+                  Allow
+                </button>
+              </div>
+            </div>
+          ) : null}
+          {error ? (
+            <p className="s" role="alert" style={{ color: "var(--danger)" }}>
+              {error}
+            </p>
+          ) : null}
         </div>
-        <div className="q-field">
-          <div className="lab">
-            <div className="t">Finished turns</div>
-            <div className="s">A thread lands in Done</div>
-          </div>
-          <div className="ctl">
-            <Toggle checked label="Finished turn notifications" />
-          </div>
+      ) : (
+        <div className="q-group">
+          <h2>On this device</h2>
+          <p className="lead">
+            {shell === "mobile"
+              ? "This build does not send notifications yet. Use the desktop app or a browser."
+              : "This browser does not support notifications."}
+          </p>
         </div>
-        <div className="q-field">
-          <div className="lab">
-            <div className="t">Host offline</div>
-            <div className="s">A host becomes unreachable</div>
-          </div>
-          <div className="ctl">
-            <Toggle checked label="Host offline notifications" />
-          </div>
-        </div>
-      </div>
+      )}
     </div>
   );
 }
