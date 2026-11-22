@@ -484,4 +484,8 @@ project: Project, } | { "type": "directories",
 /**
  * The listing.
  */
-listing: DirectoryListing, } | { "type": "ack" };
+listing: DirectoryListing, } | { "type": "subscribed", 
+/**
+ * Journal head at the moment the subscription was served.
+ */
+replay_through: number, } | { "type": "ack" };

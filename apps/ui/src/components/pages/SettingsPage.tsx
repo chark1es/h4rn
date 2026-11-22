@@ -1,10 +1,21 @@
 import type * as React from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { ShortcutCaps } from "@/components/common/Kbd";
 import { ForgeSettings } from "@/features/forge/ForgeSettings";
 import { HarnessSettings } from "@/features/harnesses/HarnessSettings";
+import {
+  type NotificationPermissionState,
+  notificationChannel,
+} from "@/features/notifications/channel";
+import {
+  displayedNotificationSetting,
+  type NotificationSettingKey,
+  setNotificationSetting,
+  useNotificationSettings,
+} from "@/features/notifications/settings";
 import { ProxySettings } from "@/features/proxy/ProxySettings";
+import { useRemote } from "@/features/remote/remoteStore";
 import { LiveAccountForm, LiveHostsForm } from "@/features/remote/SettingsRemote";
 import { AboutSettings } from "@/features/updates/AboutSettings";
 import { AutoResumeSettings } from "@/features/usage/AutoResumeSettings";
@@ -25,6 +36,8 @@ import {
   shortcutText,
   useKeybindingsVersion,
 } from "@/lib/keybindings";
+import { desktopShellBridge, type ShellSettings } from "@/lib/platform/desktopShell";
+import { secretShell } from "@/lib/platform/secrets";
 import { setTheme, setUi, type Theme, useApp } from "@/lib/store/appStore";
 import { setTerminalMatchesApp, useTerminalMatchesApp } from "@/lib/terminalTheme";
 
@@ -32,10 +45,12 @@ function Toggle({
   checked,
   label,
   onChange,
+  disabled = false,
 }: {
   checked: boolean;
   label: string;
   onChange?: (next: boolean) => void;
+  disabled?: boolean;
 }) {
   return (
     <button
@@ -44,6 +59,8 @@ function Toggle({
       role="switch"
       aria-checked={checked}
       aria-label={label}
+      aria-disabled={disabled || undefined}
+      disabled={disabled}
       onClick={() => onChange?.(!checked)}
     />
   );
@@ -55,32 +72,117 @@ const SCHEMES: Array<{ value: Theme; label: string }> = [
   { value: "dark", label: "Dark" },
 ];
 
+function describeError(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (typeof error === "object" && error !== null && "message" in error) {
+    return String((error as { message: unknown }).message);
+  }
+  return "The change did not stick.";
+}
+
 function GeneralForm() {
+  const shell = useMemo(desktopShellBridge, []);
+  const [autostart, setAutostart] = useState<boolean | null>(null);
+  const [shellSettings, setShellSettings] = useState<ShellSettings | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!shell) return;
+    let cancelled = false;
+    void shell
+      .autostartEnabled()
+      .then((enabled) => {
+        if (!cancelled) setAutostart(enabled);
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) setError(describeError(cause));
+      });
+    void shell
+      .shellSettings()
+      .then((settings) => {
+        if (!cancelled) setShellSettings(settings);
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) setError(describeError(cause));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [shell]);
+
+  const changeAutostart = async (next: boolean) => {
+    if (!shell) return;
+    setError(null);
+    try {
+      await shell.setAutostart(next);
+      setAutostart(await shell.autostartEnabled());
+    } catch (cause) {
+      setError(describeError(cause));
+    }
+  };
+
+  const changeTray = async (next: boolean) => {
+    if (!shell) return;
+    setError(null);
+    try {
+      setShellSettings(await shell.setKeepInTray(next));
+    } catch (cause) {
+      setError(describeError(cause));
+    }
+  };
+
+  const trayAvailable = shellSettings?.tray_available === true;
+  const keepInTray = trayAvailable && shellSettings?.keep_in_tray === true;
+
   return (
     <div className="q-form">
       <h1>General</h1>
       <p className="lead">How h4rn starts and where it keeps its local state.</p>
-      <div className="q-group">
-        <h2>Startup</h2>
-        <div className="q-field">
-          <div className="lab">
-            <div className="t">Open at login</div>
-            <div className="s">Start the tray helper with your session</div>
+      {shell ? (
+        <div className="q-group">
+          <h2>Startup</h2>
+          <div className="q-field">
+            <div className="lab">
+              <div className="t">Open at login</div>
+              <div className="s">Start h4rn when you sign in to this computer</div>
+            </div>
+            <div className="ctl">
+              <Toggle
+                checked={autostart ?? false}
+                disabled={autostart === null}
+                label="Open at login"
+                onChange={(next) => void changeAutostart(next)}
+              />
+            </div>
           </div>
-          <div className="ctl">
-            <Toggle checked label="Open at login" />
+          <div className="q-field">
+            <div className="lab">
+              <div className="t">Keep running in tray</div>
+              <div className="s">
+                {shellSettings !== null && !trayAvailable
+                  ? "No tray icon was created, so closing the window quits h4rn"
+                  : keepInTray
+                    ? "Closing the window keeps h4rn in the tray — open h4rn again to show it"
+                    : "Closing the window quits h4rn"}
+              </div>
+            </div>
+            <div className="ctl">
+              <Toggle
+                checked={keepInTray}
+                disabled={shellSettings === null || !trayAvailable}
+                label="Keep running in tray"
+                onChange={(next) => void changeTray(next)}
+              />
+            </div>
           </div>
+          {error ? (
+            <p className="s" role="alert" style={{ color: "var(--danger)" }}>
+              {error}
+            </p>
+          ) : null}
         </div>
-        <div className="q-field">
-          <div className="lab">
-            <div className="t">Keep running in tray</div>
-            <div className="s">Closing the window leaves agents running</div>
-          </div>
-          <div className="ctl">
-            <Toggle checked label="Keep running in tray" />
-          </div>
-        </div>
-      </div>
+      ) : null}
       <AboutSettings />
       <div className="q-group">
         <h2>Daemon</h2>
@@ -148,41 +250,141 @@ function AppearanceForm() {
   );
 }
 
+const NOTIFICATION_ROWS: Array<{
+  key: NotificationSettingKey;
+  title: string;
+  subtitle: string;
+  label: string;
+}> = [
+  {
+    key: "approvals",
+    title: "Approvals",
+    subtitle: "A command or question is waiting to run",
+    label: "Approval notifications",
+  },
+  {
+    key: "finishedTurns",
+    title: "Finished turns",
+    subtitle: "A thread lands in Done",
+    label: "Finished turn notifications",
+  },
+  {
+    key: "hostOffline",
+    title: "Host offline",
+    subtitle: "A host becomes unreachable",
+    label: "Host offline notifications",
+  },
+];
+
 function NotificationsForm() {
+  const channel = useMemo(notificationChannel, []);
+  const settings = useNotificationSettings();
+  const shell = secretShell();
+  const signedIn = useRemote((state) => state.user !== null);
+  const linkedMachineCount = useRemote((state) => state.linkedMachines.length);
+  // Host presence comes from the relay for the machines this device is linked
+  // to. A direct-only session has no signal for other hosts, so the row is
+  // hidden rather than shown as a dead switch.
+  const relayPresence = signedIn && linkedMachineCount > 0;
+  const [permission, setPermission] = useState<NotificationPermissionState | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!channel) return;
+    let cancelled = false;
+    void channel
+      .permission()
+      .then((state) => {
+        if (!cancelled) setPermission(state);
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) {
+          setPermission("unknown");
+          setError(describeError(cause));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [channel]);
+
+  const change = async (key: NotificationSettingKey, next: boolean) => {
+    if (!channel) return;
+    setError(null);
+    if (next) {
+      try {
+        const state = await channel.requestPermission();
+        setPermission(state);
+        // The desktop shell cannot report a permission; the OS still decides
+        // whether a notification appears, so the switch is allowed to mean
+        // "ask for this" there. A browser that refused keeps the stored
+        // preference but shows no switch at all.
+        if (state === "granted" || state === "unknown") {
+          setNotificationSetting(key, true);
+        }
+        return;
+      } catch (cause) {
+        setError(describeError(cause));
+        return;
+      }
+    }
+    setNotificationSetting(key, next);
+  };
+
+  const rows = relayPresence
+    ? NOTIFICATION_ROWS
+    : NOTIFICATION_ROWS.filter((row) => row.key !== "hostOffline");
+
   return (
     <div className="q-form">
       <h1>Notifications</h1>
       <p className="lead">Only things that need you interrupt you.</p>
-      <div className="q-group">
-        <h2>Desktop</h2>
-        <div className="q-field">
-          <div className="lab">
-            <div className="t">Approvals</div>
-            <div className="s">A command is waiting to run</div>
-          </div>
-          <div className="ctl">
-            <Toggle checked label="Approval notifications" />
-          </div>
+      {channel ? (
+        <div className="q-group">
+          <h2>On this device</h2>
+          {rows.map((row) => (
+            <div className="q-field" key={row.key}>
+              <div className="lab">
+                <div className="t">{row.title}</div>
+                <div className="s">{row.subtitle}</div>
+              </div>
+              <div className="ctl">
+                {permission === null ? (
+                  <span className="q-faint">Checking…</span>
+                ) : permission === "denied" ? (
+                  <span className="q-muted">Blocked in system settings</span>
+                ) : (
+                  <Toggle
+                    checked={displayedNotificationSetting(permission, settings[row.key])}
+                    label={row.label}
+                    onChange={(next) => void change(row.key, next)}
+                  />
+                )}
+              </div>
+            </div>
+          ))}
+          {!relayPresence ? (
+            <p className="s q-muted">
+              Host offline alerts need a host linked through the relay. This device has none, so
+              there is no other host to watch.
+            </p>
+          ) : null}
+          {error ? (
+            <p className="s" role="alert" style={{ color: "var(--danger)" }}>
+              {error}
+            </p>
+          ) : null}
         </div>
-        <div className="q-field">
-          <div className="lab">
-            <div className="t">Finished turns</div>
-            <div className="s">A thread lands in Done</div>
-          </div>
-          <div className="ctl">
-            <Toggle checked label="Finished turn notifications" />
-          </div>
+      ) : (
+        <div className="q-group">
+          <h2>On this device</h2>
+          <p className="lead">
+            {shell === "mobile"
+              ? "This build does not send notifications yet. Use the desktop app or a browser."
+              : "This browser does not support notifications."}
+          </p>
         </div>
-        <div className="q-field">
-          <div className="lab">
-            <div className="t">Host offline</div>
-            <div className="s">A host becomes unreachable</div>
-          </div>
-          <div className="ctl">
-            <Toggle checked label="Host offline notifications" />
-          </div>
-        </div>
-      </div>
+      )}
     </div>
   );
 }

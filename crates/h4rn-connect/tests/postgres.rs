@@ -1010,3 +1010,48 @@ async fn admin_on_one_machine_does_not_mint_pairings_for_another() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
 }
+
+#[tokio::test]
+#[ignore = "requires H4RN_TEST_DATABASE_URL (use ./scripts/test-connect.sh)"]
+async fn machine_list_can_be_limited_to_this_devices_links() {
+    let state = test_state().await;
+    let subject = Uuid::now_v7().to_string();
+    let one = actor_with_subject(&state, ConnectDeviceKind::Daemon, Some("one"), &subject).await;
+    let two = actor_with_subject(&state, ConnectDeviceKind::Daemon, Some("two"), &subject).await;
+    let desktop = actor_with_subject(&state, ConnectDeviceKind::Desktop, None, &subject).await;
+
+    let (status, all) = send(
+        &state,
+        request(Method::GET, "/v1/machines", Some(&one), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{all}");
+    assert_eq!(all.as_array().unwrap().len(), 2);
+
+    // Each daemon runs exactly one of the user's machines.
+    let (status, linked) = send(
+        &state,
+        request(Method::GET, "/v1/machines?linked=true", Some(&one), None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{linked}");
+    let linked = linked.as_array().unwrap();
+    assert_eq!(linked.len(), 1);
+    assert_eq!(linked[0]["id"], one.device.machine_id.unwrap().to_string());
+    assert_ne!(linked[0]["id"], two.device.machine_id.unwrap().to_string());
+
+    // A desktop device linked to no machine has no addressable machines; the
+    // unflagged list still shows the account's machines for the picker.
+    let (status, linked) = send(
+        &state,
+        request(
+            Method::GET,
+            "/v1/machines?linked=true",
+            Some(&desktop),
+            None,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{linked}");
+    assert!(linked.as_array().unwrap().is_empty());
+}

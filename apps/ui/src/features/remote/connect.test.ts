@@ -1,9 +1,41 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { base64UrlToHex, listProviders, normalizeTokens, requestTimeoutSignal } from "./connect";
+const signed = vi.hoisted(() => [] as { method: string; path: string }[]);
+
+vi.mock("@/gen/transport-wasm/h4rn_transport_wasm", () => ({
+  connect_proof: (
+    _identity: string,
+    method: string,
+    path: string,
+    timestamp: bigint,
+    nonce: string,
+  ) => {
+    signed.push({ method, path });
+    return JSON.stringify({ proof: "proof", timestamp: Number(timestamp), nonce });
+  },
+  identity_public: () => JSON.stringify({ proofPublicKey: "proof-key", noisePublic: "noise-key" }),
+  pairing_sas: () => "0000 0000 0000",
+}));
+
+vi.mock("@/lib/client/secure", () => ({
+  ensureDeviceIdentity: async () => "device-identity",
+}));
+
+vi.mock("@/lib/client/wasm", () => ({
+  loadTransportWasm: async () => undefined,
+}));
+
+import {
+  base64UrlToHex,
+  ConnectClient,
+  listProviders,
+  normalizeTokens,
+  requestTimeoutSignal,
+} from "./connect";
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  signed.length = 0;
 });
 
 describe("normalizeTokens", () => {
@@ -61,5 +93,64 @@ describe("connect request deadlines", () => {
 
     await expect(listProviders("http://relay.test")).resolves.toEqual([]);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("signed request path", () => {
+  function credentials() {
+    return {
+      connectUrl: "https://relay.test",
+      user: { id: "user-1", email: null, display_name: "Dev", avatar_url: null },
+      device: {
+        id: "device-1",
+        kind: "desktop" as const,
+        name: "laptop",
+        machine_id: null,
+        proof_public_key: "proof-key",
+        noise_static_public_key: null,
+        platform: "linux",
+        created_at: new Date(0).toISOString(),
+        last_seen: null,
+        revoked_at: null,
+        scopes: [],
+      },
+      tokens: {
+        access_token: "access",
+        refresh_token: "refresh",
+        expires_in: 3_600,
+        token_type: "Bearer",
+      },
+      expires_at: Date.now() + 3_600_000,
+    };
+  }
+
+  it("signs the pathname while the fetch keeps the query string", async () => {
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL): Promise<Response> =>
+        new Response("[]", { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    // The real client path is what the relay will verify: a proof over
+    // `/v1/machines?linked=true` is rejected because the server only sees
+    // `parts.uri.path()`.
+    const client = new ConnectClient(credentials());
+    await client.machines({ linked: true });
+
+    expect(signed).toEqual([{ method: "GET", path: "/v1/machines" }]);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe("https://relay.test/v1/machines?linked=true");
+  });
+
+  it("still signs query-free endpoints unchanged", async () => {
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL): Promise<Response> =>
+        new Response("[]", { status: 200, headers: { "content-type": "application/json" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ConnectClient(credentials());
+    await client.machines();
+
+    expect(signed).toEqual([{ method: "GET", path: "/v1/machines" }]);
   });
 });

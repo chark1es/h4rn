@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 
 import { AppShell } from "@/components/shell/AppShell";
+import { startNotifications } from "@/features/notifications/runtime";
 import { initializeRemote } from "@/features/remote/remoteStore";
 import { initializeSubagents } from "@/features/subagents/subagentStore";
 import { startUsageWatch } from "@/features/usage/usageStore";
@@ -12,6 +13,7 @@ export function App() {
 
   useEffect(() => {
     startConnection();
+    startNotifications();
     startUsageWatch();
     initializeRemote();
     initializeSubagents();
