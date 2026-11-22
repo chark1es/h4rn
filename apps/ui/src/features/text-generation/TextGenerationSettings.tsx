@@ -527,6 +527,11 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
               Each thread's own agent runs once in an empty folder with no tools, then exits. Pick
               one agent only to hand every thread's title to it.
             </div>
+            {agents.length === 0 ? (
+              <div className="s q-faint">
+                No Claude Code or Codex is installed on this host yet.
+              </div>
+            ) : null}
           </div>
           <div className="ctl">
             <ChipSelect<AgentChoice>
@@ -550,9 +555,6 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
               }
             />
           </div>
-          {agents.length === 0 ? (
-            <div className="s q-faint">No Claude Code or Codex is installed on this host yet.</div>
-          ) : null}
         </div>
       ) : null}
 
