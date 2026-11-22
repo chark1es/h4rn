@@ -19,7 +19,11 @@ import {
 import { ProxySettings } from "@/features/proxy/ProxySettings";
 import { useRemote } from "@/features/remote/remoteStore";
 import { LiveAccountForm, LiveHostsForm } from "@/features/remote/SettingsRemote";
-import { ThreadSettingsForm } from "@/features/threads/ThreadSettings";
+import {
+  TextGeneratorsSettings,
+  ThreadSettings,
+} from "@/features/text-generation/TextGenerationSettings";
+import { NewThreadDefaults } from "@/features/threads/ThreadSettings";
 import { AboutSettings } from "@/features/updates/AboutSettings";
 import { AutoResumeSettings } from "@/features/usage/AutoResumeSettings";
 import { WorktreeSettings } from "@/features/worktrees/WorktreeSettings";
@@ -613,7 +617,21 @@ function ShortcutsForm() {
 const FORMS: Record<string, () => React.ReactNode> = {
   hosts: () => <LiveHostsForm />,
   devices: () => <LiveHostsForm pairing />,
-  providers: ProxySettings,
+  threads: () => (
+    <ThreadSettings>
+      <NewThreadDefaults />
+    </ThreadSettings>
+  ),
+  // One page title (the proxy form owns it) and one column: text generators
+  // render as a group under the same page padding.
+  providers: () => (
+    <>
+      <ProxySettings />
+      <div className="q-form" style={{ paddingTop: 0 }}>
+        <TextGeneratorsSettings />
+      </div>
+    </>
+  ),
   harnesses: HarnessSettings,
   worktrees: WorktreeSettings,
   resume: AutoResumeSettings,
@@ -622,7 +640,6 @@ const FORMS: Record<string, () => React.ReactNode> = {
   appearance: AppearanceForm,
   notifications: NotificationsForm,
   shortcuts: ShortcutsForm,
-  threads: ThreadSettingsForm,
   account: LiveAccountForm,
 };
 

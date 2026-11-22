@@ -102,6 +102,8 @@ pub struct AppState {
     pub acp_agents: Arc<crate::acp_agents::AcpAgentService>,
     /// Registered sidebar projects.
     pub projects: Arc<crate::projects::ProjectService>,
+    /// Title generation: coding-agent CLI or a configured text generator.
+    pub text_generation: Arc<crate::text_generation::TextGenerationService>,
     /// Server boot time, for `/healthz`.
     pub started: Instant,
 }
@@ -502,9 +504,48 @@ impl Connection {
         target_id: Option<&str>,
         metadata: serde_json::Value,
     ) {
-        if let Some(audit) = &self.state.remote {
-            audit.record(&self.origin, action, target_type, target_id, metadata);
-        }
+        record_audit(
+            &self.state,
+            &self.origin,
+            action,
+            target_type,
+            target_id,
+            metadata,
+        );
+    }
+
+    /// Runs one provider Test off the read loop.
+    ///
+    /// The provider may take its whole timeout to answer, and the connection
+    /// must keep answering other requests meanwhile. The reply is framed here
+    /// and sent when the work finishes; nothing about it depends on the loop.
+    fn spawn_text_generator_test(&self, id: u64, request: ClientRequest) {
+        let state = self.state.clone();
+        let origin = self.origin.clone();
+        let tx = self.tx.clone();
+        let frame_limit = self.frame_limit();
+        tokio::spawn(async move {
+            let result = handlers::text_generation::test_off_loop(&state, &origin, request).await;
+            let frame = match result {
+                Ok(body) => response_frame(id, body, frame_limit),
+                Err(error) => error_frame(id, error),
+            };
+            let _ = tx.send(Outbound::Text(frame)).await;
+        });
+    }
+}
+
+/// Records one remote action, when this daemon keeps an audit trail.
+pub(crate) fn record_audit(
+    state: &AppState,
+    origin: &SessionOrigin,
+    action: &str,
+    target_type: Option<&str>,
+    target_id: Option<&str>,
+    metadata: serde_json::Value,
+) {
+    if let Some(audit) = &state.remote {
+        audit.record(origin, action, target_type, target_id, metadata);
     }
 }
 
@@ -668,6 +709,14 @@ impl Connection {
                 serde_json::json!({"needs": body.required_scope().as_str()}),
             );
             return Some(error_frame(id, error));
+        }
+
+        // A provider Test can take tens of seconds. Run it in its own task so
+        // this connection keeps answering everything else, and send the framed
+        // reply when it finishes.
+        if matches!(&body, ClientRequest::TestTextGenerator { .. }) {
+            self.spawn_text_generator_test(id, body);
+            return None;
         }
 
         let result: Result<ResponseBody, ProtoError> = match handlers::Service::of(&body) {

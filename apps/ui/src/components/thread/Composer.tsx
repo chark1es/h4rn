@@ -42,12 +42,12 @@ type OpenMenu = { trigger: ComposerTrigger; activeIndex: number };
 function caretAnchor(
   element: HTMLTextAreaElement,
   position: number,
-): { left: number; bottom: number } {
+): { left: number; bottom: number; lineHeight: number } {
   const wrapper = element.parentElement;
-  if (!wrapper) return { left: 0, bottom: 0 };
+  if (!wrapper) return { left: 0, bottom: 0, lineHeight: 21 };
   const width = wrapper.clientWidth || element.clientWidth;
   if (typeof window === "undefined" || !window.getComputedStyle) {
-    return { left: 0, bottom: 0 };
+    return { left: 0, bottom: 0, lineHeight: 21 };
   }
   const computed = window.getComputedStyle(element);
   const mirror = document.createElement("div");
@@ -101,6 +101,9 @@ function caretAnchor(
   return {
     left: Math.max(0, markerLeft + element.offsetLeft),
     bottom: Math.max(lineHeight, above + 6),
+    // The flip-below fallback needs this line's height; a fixed default puts
+    // the menu inside the caret line when the CSS line height differs.
+    lineHeight,
   };
 }
 
@@ -113,7 +116,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   const [sending, setSending] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [menu, setMenu] = useState<OpenMenu | null>(null);
-  const [anchor, setAnchor] = useState({ left: 0, bottom: 0 });
+  const [anchor, setAnchor] = useState({ left: 0, bottom: 0, lineHeight: 21 });
   const ref = useRef<HTMLTextAreaElement | null>(null);
   /** True from compositionstart to compositionend; IME never drives the menu. */
   const composing = useRef(false);
@@ -288,6 +291,14 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     const submitted = revision.current;
     const submittedHost = summary.host;
     const submittedThread = summary.thread_id;
+    // A recalled prompt is not the stored draft: recall left the user's
+    // in-progress text in storage on purpose, so a successful send of the
+    // recalled text must not clear it. Remember whether this send came from
+    // history and what the box held before recall started.
+    const recalled = historyIndex.current >= 0;
+    const preservedDraft = historyDraft.current;
+    /** Where in history this send started; a newer recall replaces the restore. */
+    const submittedHistoryIndex = historyIndex.current;
     // Store the draft before the send waits so a second tab's edit during the
     // request is not hidden behind this tab's pending write.
     flushDrafts();
@@ -297,16 +308,26 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     if (!ok) return;
     // Clear only the draft that was sent. If this tab typed again, or another
     // tab saved newer text, that text stays in the box and in storage.
-    const cleared = clearThreadDraftIfRevision(submittedHost, submittedThread, submitted);
+    const cleared = recalled
+      ? false
+      : clearThreadDraftIfRevision(submittedHost, submittedThread, submitted);
     // The pane may have switched threads while the send waited. The new
     // thread's box belongs to that thread, so leave its text and files alone.
     const stillShowing =
       shownThread.current.host === submittedHost &&
       shownThread.current.threadId === submittedThread;
     if (!stillShowing) return;
+    // A recall the person made while the send waited is their newer intent:
+    // its text stays on screen instead of the draft recall had preserved.
+    const stillRecalled =
+      recalled && historyIndex.current >= 0 && historyIndex.current === submittedHistoryIndex;
     historyIndex.current = -1;
     historyDraft.current = "";
-    if (cleared) {
+    if (stillRecalled) {
+      // Put the preserved draft back: the recalled prompt was sent, but the
+      // unsent text from before recall is still unsent.
+      setText(preservedDraft);
+    } else if (cleared) {
       revision.current = null;
       setText("");
     }
@@ -374,21 +395,36 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   const choose = (index: number) => {
     const row = rows[index];
     if (!menu || !row) return;
+    // Read the textarea instead of render state: an accept key can arrive in
+    // the same batch as the change that typed the query, before React has
+    // re-rendered the rows. Ranking the old query then inserts the wrong row.
+    const element = ref.current;
+    const visibleText = element?.value ?? text;
+    // The live trigger is the only one an accept may use. A key can land in the
+    // same batch as text that replaced the trigger (`/` → `@`), before the rows
+    // follow; accepting a row from the old menu then runs the wrong thing.
+    const trigger = element
+      ? detectComposerTrigger(element.value, element.selectionStart ?? element.value.length)
+      : menu.trigger;
+    if (!trigger || trigger.kind !== row.kind) return;
     if (row.kind === "file") {
       // Rank again for the query on screen right now. A key that lands before
       // the render that would have refreshed `rows` must never accept a row
       // from the previous query.
-      const path = rankFilePaths(fileIndex.files, menu.trigger.query, 50)[index];
+      const path = rankFilePaths(fileIndex.files, trigger.query, 50)[index];
       if (!path) return;
-      const applied = applyCompletion(text, menu.trigger, fileReference(path));
+      const applied = applyCompletion(visibleText, trigger, fileReference(path));
       update(applied.value);
       dismissed.current = null;
       setMenu(null);
       focusCaret(applied.caret);
       return;
     }
-    const command = commandResults.find((entry) => entry.id === row.id);
-    const applied = applyCompletion(text, menu.trigger, "");
+    const command = rankCommands(commands, trigger.query)[index];
+    // Nothing is ranked for this query: keep the typed text rather than run a
+    // row the previous query left behind.
+    if (!command) return;
+    const applied = applyCompletion(visibleText, trigger, "");
     update(applied.value);
     dismissed.current = null;
     setMenu(null);
@@ -530,6 +566,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
           rows={rows}
           activeIndex={activeIndex}
           anchor={anchor}
+          lineHeight={anchor.lineHeight}
           loading={fileIndex.loading}
           error={fileIndex.error}
           workspaceName={workspaceName}
@@ -621,6 +658,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
             rows={rows}
             activeIndex={activeIndex}
             anchor={anchor}
+            lineHeight={anchor.lineHeight}
             loading={fileIndex.loading}
             error={fileIndex.error}
             workspaceName={workspaceName}

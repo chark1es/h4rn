@@ -5413,6 +5413,11 @@ fieldset.q-seg-fs {
     display: flex;
     width: 100%;
   }
+  /* A single-choice picker gets a thumb-sized target on a phone. */
+  .q-seg.q-seg-choice > button {
+    min-height: 44px;
+    padding: 0 12px;
+  }
   .q-form .q-seg.inline > button {
     flex: 1 1 0;
     min-width: 0;

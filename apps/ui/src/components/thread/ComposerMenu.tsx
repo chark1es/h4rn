@@ -126,6 +126,7 @@ export function ComposerMenu({
   rows,
   activeIndex,
   anchor,
+  lineHeight,
   loading,
   error,
   workspaceName,
@@ -142,6 +143,8 @@ export function ComposerMenu({
   rows: ComposerMenuRow[];
   activeIndex: number;
   anchor: { left: number; bottom: number };
+  /** The caret line's measured height, for the flip-below fallback. */
+  lineHeight?: number;
   loading: boolean;
   error: string | null;
   workspaceName: string;
@@ -206,6 +209,7 @@ export function ComposerMenu({
         height: parentRect.height,
       },
       viewport: { width: window.innerWidth, height: window.innerHeight },
+      ...(lineHeight === undefined ? {} : { lineHeight }),
     });
     const previous = measured.current;
     if (
@@ -269,8 +273,6 @@ export function ComposerMenu({
         className="q-ph-sheet q-comp-sheet"
         role="dialog"
         aria-label={label}
-        data-placement="above"
-        data-covers={sheet?.coversComposer ? "composer" : undefined}
         style={sheet ? { bottom: sheet.bottom, maxHeight: sheet.maxHeight } : undefined}
       >
         <div className="q-grab" />
@@ -304,13 +306,7 @@ export function ComposerMenu({
     : { left: anchor.left, bottom: anchor.bottom };
 
   return (
-    <div
-      ref={menuRef}
-      className="q-comp-menu"
-      style={style}
-      data-kind={kind}
-      {...(placement?.top != null ? { "data-flipped": "below" } : {})}
-    >
+    <div ref={menuRef} className="q-comp-menu" style={style}>
       <div className="q-comp-menu-list" role="listbox" aria-label={label} id={listId} ref={listRef}>
         {rows.length > 0 ? rowsView : <p className="q-comp-menu-empty">{empty}</p>}
       </div>

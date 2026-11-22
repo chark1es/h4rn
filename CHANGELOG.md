@@ -25,7 +25,46 @@ All notable changes to h4rn are recorded here. The format follows
   still deserialize. `⌘⇧A`/`Ctrl+Shift+A` opens the permission picker
   (Acknowledge moves to `⌘⌥A`/`Ctrl+Alt+A`), and Settings → Threads → New
   threads sets the default permission mode on this device.
-
+- **Thread titles are written by a model.** A new thread still appears immediately with the first
+  line of your first prompt, then a title of at most 60 characters replaces it through the normal
+  thread update. Settings → Threads → Title model picks Off, Claude Code (run once in an empty
+  folder with no tools) or a text generator you configure under Settings → Providers → Text
+  generators: an OpenAI-compatible chat API (OpenAI, OpenRouter, Ollama, LM Studio) or Anthropic.
+  Codex is not offered as a title agent: its flags remove nothing model-visible, so a Codex thread
+  keeps its first-line title, or uses a text generator. Generators have a Test button that sends a
+  tiny prompt and shows the provider's own error; keys are stored on the host like forge tokens and
+  are never returned to a client. Plain `http` base URLs are accepted only on loopback; everything
+  else must be `https`. Only the first prompt text and the workspace folder name are sent. A
+  failed, timed-out or empty answer keeps the first-line title and logs once. Renaming a thread
+  yourself saves the name in the thread menu, and no generated title ever replaces it. Subagent
+  threads keep the title their task gave them. With no agent picked, the default mode uses Claude
+  Code for a Claude Code thread and keeps the first line for every other harness, so a prompt is
+  never handed to another provider unasked. See [docs/text-generation.md](docs/text-generation.md).
+- **Title generation keeps keys and prompts where they belong.** No redirect is followed, so a
+  `3xx` from a generator cannot forward the key or the prompt to another host. Claude Code runs
+  with no tools, no MCP servers and no user configuration in an empty folder under the system temp
+  directory — never in the data directory beside `keys/` — and one 30-second deadline covers
+  version discovery, the run and cleanup. It gets exactly `--tools ""`, `--strict-mcp-config`,
+  `--setting-sources ""`, `--disable-slash-commands`, `--permission-mode dontAsk` and the title
+  instruction as its system prompt, so it has no shell, no MCP servers, no hooks and no plugins.
+  When it fails, the daemon quotes the last line of stderr (the error) instead of the banner before
+  it. Any spelling of `</untrusted_request` in the prompt or folder name is escaped, so untrusted
+  text cannot close the delimited block early, and the untrusted prompt is never repeated or
+  mistaken for instructions.
+  A stored key is scrubbed from provider text, Test results, logs and errors before truncation, and
+  a reply that echoes the key is discarded. A generator's endpoint, kind and key are read as one
+  snapshot so a title job can never pair an old key with a new URL, and a new configuration is
+  published only after it is on disk. Key presence is cached, so listing generators never calls the
+  keychain, and keychain reads and writes needed by a save or a job run off the async worker. Both
+  files are written atomically under one lock, so concurrent saves lose nothing. The Coding-agent
+  picker defaults to **Follow the thread's agent** (no agent picked); choosing Claude Code hands
+  every thread's title to it. Turning titles Off starts no job and logs nothing per thread. Removing
+  the selected generator turns titles Off rather than borrowing a coding agent, a generated title
+  that beats the create reply is kept, the rename dialog keeps your draft, the add-generator form
+  forgets the key and its fields on Cancel and after saving, a Test spinner always clears (including
+  on an unexpected response) and a Test no longer blocks other requests on the same connection, and
+  OpenAI-compatible requests send no `max_tokens` (OpenAI's own API gets
+  `max_completion_tokens`).
 - **The daemon can run as a per-user service.** `h4rnd service install` writes the
   shipped systemd user unit (or launch agent, or Windows scheduled task) with the
   running binary's absolute path and current data directory, then enables and
@@ -256,11 +295,15 @@ All notable changes to h4rn are recorded here. The format follows
   h4rn and h4rn defines no skill invocation of its own.
 - **Unsent composer text survives a reload, an app restart or Android killing the webview.** Every
   draft is stored under its own key for a host and thread, so one tab never erases another
-  thread's draft; for the same thread the most recent edit wins. Writes happen after a short
-  debounce and are flushed when the page hides. Drafts
-  from the previous single-blob store are migrated on first launch. A sent message clears only the
+  thread's draft; for the same thread the most recent edit wins, including when both tabs type
+  inside one debounce window — the later edit is saved and the tab whose queued edit lost updates
+  to the text that won. Writes happen after a short debounce and are flushed when the page hides.
+  A sent message clears only the
   text that was sent: a newer draft written in another tab while the message was in flight stays,
-  and a failed send keeps the text so it can be retried. Every write carries its own revision (a
+  and a failed send keeps the text so it can be retried. Sending a prompt recalled with `↑` does
+  not clear the unsent draft recall preserved; it comes back when the send finishes. A draft for a
+  thread the daemon is still starting stays in memory under its temporary id and moves to the real
+  thread id once it exists, and is never written under the temporary id. Every write carries its own revision (a
   timestamp plus a per-tab id), so two tabs writing in the same moment cannot be confused, and a
   send clears only the revision the composer was showing rather than whatever storage holds when
   the reply finishes; a removal that failed is retried only while storage still holds that
@@ -304,6 +347,40 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Composer drafts survive recall, two tabs and a full quota.** Sending a recalled prompt puts the
+  draft that recall preserved back in the box instead of clearing it. Two tabs editing the same
+  thread inside one 300 ms window no longer lose the later edit, and a tab whose queued write was
+  superseded shows the text that actually won. A storage event carrying a corrupt value re-reads
+  the key first, so a value repaired in the meantime is kept, and a write that failed on a full
+  quota no longer counts against the 200-draft cap and evicts stored drafts. Drafts for a
+  `local-thread-*` id stay in memory and move to the real thread id once the daemon returns it;
+  temporary ids are never persisted. The empty-inbox Start a thread box now keeps its draft per
+  host and folder like the New thread dialog. The file walk checks its ignore list before the
+  depth cap, so a deep `node_modules` no longer marks the index truncated; `@` stays closed after
+  a decomposed accent (`e` + U+0301); switching workspaces clears the picker instead of flashing
+  the previous workspace's files or claiming the new one is empty before its index lands; and the
+  flip-below fallback uses the caret line's measured height. The dead single-blob draft migration
+  was removed: no released build wrote that format.
+- **The empty-inbox Start box starts from what is on screen.** Pressing Start — clicked or
+  reached with Tab — blurs the folder field on the way to the button, and that blur used to swap
+  the task box to the typed folder's draft before the send; Start now carries the visible task to
+  the folder as typed. The box also restores the folder and draft last used on the host, instead
+  of always opening on `~/code` and ignoring them. The automatic first-project choice is not
+  remembered as the last folder; it shows that folder's draft, and text typed while it is on
+  screen is saved with that folder, so a reload brings back the same folder and text. It is
+  skipped while the box holds unsent text, and a typed folder that already has its own saved
+  draft keeps it: the keystroke stays with the slot it was typed in rather than replacing text
+  nobody is looking at. When Start loses focus without being pressed and focus leaves the
+  composer, the folder field's skipped commit runs then, so the box shows that folder's draft
+  before the next keystroke can land anywhere. The box is blanked only when the draft it sent was
+  actually cleared and it is still on the slot it sent, so a Start that finishes after the person
+  switched folders leaves that folder's draft in the box and in storage; it re-reads the slot when
+  the New thread dialog closes or another tab writes it, so the dialog's text appears in the inbox.
+  In the composer, `↵` in the `/` menu runs the command ranked for the query on screen
+  (and keeps the text when nothing matches), never a row left from a menu whose trigger the same
+  keystroke replaced, and a recall made while a recalled prompt is sending
+  stays on screen instead of the draft recall had preserved. A thread whose create fails no longer
+  leaves the text typed into its optimistic box behind under the temporary id.
 - **Preview follow-ups from the HTML preview review.** A descriptorless `srcset` candidate followed
   by a comma (`data:image/png;base64,AAAA, local.png 2x`) no longer swallows the candidate after
   it: the trailing comma ends the candidate, so the workspace image is inlined or removed and

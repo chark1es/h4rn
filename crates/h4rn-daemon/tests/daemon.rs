@@ -25,8 +25,9 @@ use h4rn_harness::FakeHarness;
 use h4rn_protocol::{
     AgentState, ApprovalDecision, AutoResumePolicy, ClientFrame, ClientRequest, DeviceId,
     DeviceInfo, Event, HarnessKind, HostId, Item, MessageRole, ProtoError, ProtoErrorCode,
-    ProxyProfileDraft, ResponseBody, ResumeState, ServerFrame, ThreadFilter, ThreadId, ThreadTab,
-    ToolCallStatus, Topic, TurnStatus, UsageGroupBy, UsageRange, UsageScope,
+    ProxyProfileDraft, ResponseBody, ResumeState, ServerFrame, TextGenerationSettings,
+    ThreadFilter, ThreadId, ThreadTab, TitleModelMode, TitleModelSetting, ToolCallStatus, Topic,
+    TurnStatus, UsageGroupBy, UsageRange, UsageScope,
 };
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
@@ -107,6 +108,15 @@ async fn boot_inner(
     harness: FakeHarness,
     isolated: bool,
 ) -> TestDaemon {
+    boot_inner_with_text_generation(options, harness, isolated, None).await
+}
+
+async fn boot_inner_with_text_generation(
+    options: ThreadManagerOptions,
+    harness: FakeHarness,
+    isolated: bool,
+    text_generation: Option<Arc<h4rn_daemon::text_generation::TextGenerationService>>,
+) -> TestDaemon {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = Config {
         data_dir: dir.path().to_path_buf(),
@@ -119,10 +129,15 @@ async fn boot_inner(
     };
 
     let mut builder = DaemonBuilder::new(config)
+        // Titles never spawn the machine's own Claude Code.
+        .without_title_agents()
         .with_harness_registry(Arc::new(OfflineRegistry))
         // No test may run a package manager against the machine's real CLIs.
         .with_update_runner(Arc::new(RefusingRunner))
         .with_lifecycle(options);
+    if let Some(service) = text_generation {
+        builder = builder.with_text_generation(service);
+    }
     builder = if isolated {
         builder.with_catalog(Arc::new(
             h4rn_daemon::harnesses::StaticHarnessCatalog::with(Arc::new(harness)),
@@ -1211,6 +1226,8 @@ async fn restored_threads_replay_after_a_daemon_restart() {
     };
 
     let daemon = DaemonBuilder::new(config.clone())
+        // Titles never spawn the machine's own Claude Code.
+        .without_title_agents()
         .with_harness(Arc::new(FakeHarness::new()))
         .with_lifecycle(options.clone())
         .build()
@@ -1245,6 +1262,8 @@ async fn restored_threads_replay_after_a_daemon_restart() {
 
     // Reboot against the same data directory.
     let rebooted = DaemonBuilder::new(config)
+        // Titles never spawn the machine's own Claude Code.
+        .without_title_agents()
         .with_harness(Arc::new(FakeHarness::new()))
         .with_lifecycle(options)
         .build()
@@ -1982,6 +2001,8 @@ async fn a_restart_rehydrates_the_summary_resume_target() {
         network_port: 0,
     };
     let rebooted = DaemonBuilder::new(config)
+        // Titles never spawn the machine's own Claude Code.
+        .without_title_agents()
         .with_harness(Arc::new(FakeHarness::new()))
         .with_lifecycle(resume_options())
         .build()
@@ -2886,6 +2907,293 @@ async fn a_message_appended_to_an_active_turn_replaces_the_stale_schedule() {
         ResumeState::Cancelled,
         "a new message supersedes the stale resume"
     );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_fixture_coding_agent_writes_the_generated_thread_title() {
+    let support = tempfile::tempdir().expect("support dir");
+    // The fixture records its argv and stdin beside itself, so run a copy in
+    // the temp directory rather than the one in the repo.
+    let fixture = support.path().join("fake-title-agent.sh");
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-title-agent.sh"),
+        &fixture,
+    )
+    .expect("copy fixture");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    let service = Arc::new(
+        h4rn_daemon::text_generation::TextGenerationService::open(support.path())
+            .expect("open text generation")
+            .with_file_keys()
+            .expect("file keys")
+            .with_agent_install(HarnessKind::ClaudeCode, &fixture),
+    );
+    service
+        .set_settings(TextGenerationSettings {
+            title: TitleModelSetting {
+                mode: TitleModelMode::CodingAgent,
+                harness: Some(HarnessKind::ClaudeCode),
+                generator_id: None,
+                model: None,
+            },
+        })
+        .await
+        .expect("select the coding agent");
+    let daemon = boot_inner_with_text_generation(
+        ThreadManagerOptions::default(),
+        FakeHarness::new(),
+        true,
+        Some(service),
+    )
+    .await;
+    let host = host_id_for(&daemon).await;
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    client
+        .request(ClientRequest::Subscribe {
+            topics: vec![Topic::All],
+            since_seq: None,
+        })
+        .await
+        .expect("subscribe");
+    let summary = create_with_host(
+        &mut client,
+        host,
+        "Fix the flaky auth test",
+        HarnessKind::ClaudeCode,
+    )
+    .await;
+    assert_eq!(summary.title, "Fix the flaky auth test");
+    let thread_id = summary.thread_id.clone();
+
+    client
+        .wait_event(|event| {
+            matches!(
+                event,
+                Event::ThreadUpserted(summary)
+                    if summary.thread_id == thread_id && summary.title == "Fixture title"
+            )
+        })
+        .await;
+
+    // Read the row back through the protocol as the authoritative check.
+    let renamed = thread_summary(&mut client, &summary.thread_id).await;
+    assert_eq!(renamed.title, "Fixture title");
+    daemon.stop().await;
+}
+
+/// A test daemon may never start the host's own `claude` or `codex`.
+///
+/// A fake `claude` is put first on `PATH`; an ordinary thread must create,
+/// keep its first-line title and never run it.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_ordinary_thread_never_starts_the_hosts_coding_agent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fake_bin = tempfile::tempdir().expect("fake bin");
+    let marker = fake_bin.path().join("invoked");
+    let script = fake_bin.path().join("claude");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nprintf 'a title from the host\\n'\n",
+            marker.display()
+        ),
+    )
+    .expect("write the fake claude");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    // PATH is process-global, so this test runs alone while it is changed and
+    // a guard puts the old value back even if an assertion panics. An async
+    // mutex because the test awaits the daemon while it holds the lock.
+    static PATH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _path_lock = PATH_LOCK.lock().await;
+    struct RestorePath(Option<std::ffi::OsString>);
+    impl Drop for RestorePath {
+        fn drop(&mut self) {
+            if let Some(path) = self.0.take() {
+                // SAFETY: the lock above serializes PATH changes in this test
+                // binary, and the value is the one this test replaced.
+                unsafe { std::env::set_var("PATH", path) };
+            }
+        }
+    }
+    let original = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![fake_bin.path().to_path_buf()];
+    paths.extend(std::env::split_paths(&original));
+    let joined = std::env::join_paths(paths).expect("join PATH");
+    let _restore = RestorePath(Some(original));
+    // SAFETY: see the guard above.
+    unsafe { std::env::set_var("PATH", &joined) };
+
+    let daemon = boot_isolated().await;
+    let host = host_id_for(&daemon).await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    let summary = create_with_host(
+        &mut client,
+        host,
+        "Keep this title",
+        HarnessKind::ClaudeCode,
+    )
+    .await;
+    // A title job that wrongly fell back to the host's claude would start it
+    // immediately; this is ample time for the marker to appear.
+    tokio::time::sleep(Duration::from_millis(750)).await;
+    assert!(!marker.exists(), "a test daemon started the host's claude");
+    let read_back = thread_summary(&mut client, &summary.thread_id).await;
+    assert_eq!(read_back.title, "Keep this title");
+    daemon.stop().await;
+}
+
+/// A Codex thread in Coding-agent mode keeps its first-line title and never
+/// starts Codex: h4rn does not use Codex as a title backend.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_codex_thread_keeps_its_first_line_and_never_starts_codex() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let support = tempfile::tempdir().expect("support dir");
+    let marker = support.path().join("codex-started");
+    let script = support.path().join("codex");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nprintf 'Codex title\\n'\n",
+            marker.display()
+        ),
+    )
+    .expect("write the fake codex");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let service = Arc::new(
+        h4rn_daemon::text_generation::TextGenerationService::open(support.path())
+            .expect("open text generation")
+            .with_file_keys()
+            .expect("file keys")
+            // Even an explicit install cannot make Codex a title backend.
+            .with_agent_install(HarnessKind::Codex, &script),
+    );
+    service
+        .set_settings(TextGenerationSettings {
+            title: TitleModelSetting::default(),
+        })
+        .await
+        .expect("coding agent mode");
+    let daemon = boot_inner_with_text_generation(
+        ThreadManagerOptions::default(),
+        FakeHarness::new().with_kind(HarnessKind::Codex),
+        true,
+        Some(service),
+    )
+    .await;
+    let host = host_id_for(&daemon).await;
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    let summary = create_with_host(&mut client, host, "Keep this title", HarnessKind::Codex).await;
+    assert_eq!(summary.title, "Keep this title");
+    // A wrongly used Codex backend would start immediately; this is ample time.
+    tokio::time::sleep(Duration::from_millis(750)).await;
+    assert!(
+        !marker.exists(),
+        "a Codex thread started Codex for its title"
+    );
+    let read_back = thread_summary(&mut client, &summary.thread_id).await;
+    assert_eq!(read_back.title, "Keep this title");
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_provider_test_does_not_block_the_connection() {
+    use h4rn_protocol::{TextGeneratorDraft, TextGeneratorKind};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    let server = wiremock::MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(1))
+                .set_body_json(serde_json::json!({
+                    "choices": [{ "message": { "content": "ok" } }]
+                })),
+        )
+        .mount(&server)
+        .await;
+
+    let support = tempfile::tempdir().expect("support dir");
+    let service = Arc::new(
+        h4rn_daemon::text_generation::TextGenerationService::open(support.path())
+            .expect("open text generation")
+            .with_file_keys()
+            .expect("file keys"),
+    );
+    let generator = service
+        .add_generator(TextGeneratorDraft {
+            name: "Slow local".into(),
+            kind: TextGeneratorKind::OpenAiCompatible,
+            base_url: format!("{}/v1", server.uri()),
+            model: "tiny-model".into(),
+            api_key: None,
+        })
+        .await
+        .expect("add generator");
+    let daemon = boot_inner_with_text_generation(
+        ThreadManagerOptions::default(),
+        FakeHarness::new(),
+        true,
+        Some(Arc::clone(&service)),
+    )
+    .await;
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    let test_id = client
+        .send(ClientRequest::TestTextGenerator {
+            generator_id: generator.id.clone(),
+            model: None,
+        })
+        .await;
+    let list_id = client.send(ClientRequest::ListHosts).await;
+
+    let mut order = Vec::new();
+    let mut report_ok = None;
+    while order.len() < 2 {
+        if let ServerFrame::Response { id, result } = client.read_frame().await {
+            match id {
+                id if id == test_id => {
+                    let body = result.expect("test result");
+                    match body {
+                        ResponseBody::TextGeneratorTested { report } => {
+                            report_ok = Some(report.ok);
+                        }
+                        other => panic!("unexpected test response: {other:?}"),
+                    }
+                    order.push("test");
+                }
+                id if id == list_id => {
+                    result.expect("hosts result");
+                    order.push("hosts");
+                }
+                other => panic!("unexpected response id {other}"),
+            }
+        }
+    }
+    assert_eq!(
+        order,
+        vec!["hosts", "test"],
+        "a pending Test must not hold the read loop"
+    );
+    assert_eq!(report_ok, Some(true));
     daemon.stop().await;
 }
 

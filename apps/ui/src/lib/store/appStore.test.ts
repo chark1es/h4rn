@@ -14,7 +14,7 @@ vi.mock("@/lib/client/config", () => ({
 
 import { onManualPlacement } from "@/features/notifications/placement";
 import { drafts, flushDrafts, readThreadDraft } from "@/lib/drafts";
-import { getState, loadThreads, setThreadTab, store } from "./appStore";
+import { applyEvent, createThread, getState, loadThreads, setThreadTab, store } from "./appStore";
 
 function hostSummary(hostId: string): HostSummary {
   return {
@@ -110,6 +110,125 @@ describe("loadThreads", () => {
 
     expect(readThreadDraft("load_host_b", "not_in_the_list")).toBe("still unsent");
     expect(readThreadDraft("load_host_other", "another_machine")).toBe("keep for later");
+  });
+});
+
+describe("a create reply and a generated title in either order", () => {
+  const created = { ...threadSummary({ threadId: "th_race", host: "host_race" }) };
+  created.title = "Fix the build";
+
+  function generatedUpsert() {
+    return {
+      seq: 9,
+      event: {
+        type: "thread_upserted" as const,
+        ...threadSummary({ threadId: "th_race", host: "host_race" }),
+        title: "Generated title",
+      },
+    };
+  }
+
+  function createInput() {
+    return {
+      host: "host_race" as never,
+      harness: "claude_code" as const,
+      workspacePath: "~/code",
+      model: "claude-sonnet-4-5",
+      prompt: "Fix the build",
+    };
+  }
+
+  beforeEach(() => {
+    fake.response.current = null;
+    fake.request.mockClear();
+    seedHosts(["host_race"]);
+  });
+
+  it("keeps the upsert when the generated title was projected first", async () => {
+    // The event wins the race and is projected before the reply arrives.
+    store.setState(applyEvent(getState(), generatedUpsert()));
+    fake.response.current = {
+      type: "thread_created",
+      thread_id: "th_race",
+      turn_id: "turn_race",
+      summary: created,
+    };
+
+    await createThread(createInput());
+
+    expect(getState().threads.th_race?.title).toBe("Generated title");
+  });
+
+  it("lets the upsert replace the create reply when it arrives second", async () => {
+    fake.response.current = {
+      type: "thread_created",
+      thread_id: "th_race",
+      turn_id: "turn_race",
+      summary: created,
+    };
+
+    await createThread(createInput());
+    expect(getState().threads.th_race?.title).toBe("Fix the build");
+
+    store.setState(applyEvent(getState(), generatedUpsert()));
+    expect(getState().threads.th_race?.title).toBe("Generated title");
+  });
+});
+
+describe("createThread draft handoff", () => {
+  beforeEach(() => {
+    fake.request.mockClear();
+    fake.response.current = null;
+    seedHosts(["handoff_host"]);
+  });
+
+  it("moves the temporary thread's draft to the id the daemon returns", async () => {
+    const realId = "thread_after_create";
+    fake.response.current = {
+      type: "thread_created",
+      thread_id: realId,
+      summary: threadSummary({ threadId: realId, host: "handoff_host" }),
+    };
+
+    const created = createThread({
+      host: "handoff_host",
+      harness: "claude_code",
+      workspacePath: "~/code",
+      model: "claude-sonnet-4-5",
+      prompt: "start this",
+    });
+    const tempId = getState().pendingCreates[0]?.tempId ?? "";
+    expect(tempId.startsWith("local-thread-")).toBe(true);
+
+    // The optimistic thread is visible while the daemon starts it, so the box
+    // can be typed in; that text must follow the thread to its real id.
+    drafts.writeThreadDraft("handoff_host", tempId, "typed while starting");
+    expect(await created).toBe(true);
+
+    expect(readThreadDraft("handoff_host", tempId)).toBe("");
+    expect(readThreadDraft("handoff_host", realId)).toBe("typed while starting");
+  });
+
+  it("drops the temporary thread's draft when the create fails", async () => {
+    fake.request.mockRejectedValueOnce(new Error("the host is unreachable"));
+
+    const created = createThread({
+      host: "handoff_host",
+      harness: "claude_code",
+      workspacePath: "~/code",
+      model: "claude-sonnet-4-5",
+      prompt: "start this",
+    });
+    const tempId = getState().pendingCreates[0]?.tempId ?? "";
+    expect(tempId.startsWith("local-thread-")).toBe(true);
+
+    // The optimistic thread is on screen, so the box can be typed in.
+    drafts.writeThreadDraft("handoff_host", tempId, "typed while starting");
+    expect(await created).toBe(false);
+
+    // Nothing will ever reconcile this id, and another session could reuse it:
+    // its memory-only draft must not outlive the failed create.
+    expect(readThreadDraft("handoff_host", tempId)).toBe("");
   });
 });
 

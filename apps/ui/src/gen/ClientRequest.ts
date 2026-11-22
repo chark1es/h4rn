@@ -28,6 +28,10 @@ import type { SkillConflictResolution } from "./SkillConflictResolution";
 import type { SkillSource } from "./SkillSource";
 import type { SubagentRequest } from "./SubagentRequest";
 import type { TerminalId } from "./TerminalId";
+import type { TextGenerationSettings } from "./TextGenerationSettings";
+import type { TextGeneratorDraft } from "./TextGeneratorDraft";
+import type { TextGeneratorId } from "./TextGeneratorId";
+import type { TextGeneratorPatch } from "./TextGeneratorPatch";
 import type { ThreadFilter } from "./ThreadFilter";
 import type { ThreadId } from "./ThreadId";
 import type { ThreadTab } from "./ThreadTab";
@@ -1062,7 +1066,43 @@ force: boolean,
  * Clear all: apply the same exclusions as `paths: None` — never a
  * thread workspace — to the given paths.
  */
-bulk: boolean, } | { "type": "list_projects", 
+bulk: boolean, } | { "type": "list_text_generators" } | { "type": "add_text_generator", 
+/**
+ * Generator to add.
+ */
+generator: TextGeneratorDraft, } | { "type": "update_text_generator", 
+/**
+ * Generator to change.
+ */
+generator_id: TextGeneratorId, 
+/**
+ * Fields to change.
+ */
+patch: TextGeneratorPatch, } | { "type": "remove_text_generator", 
+/**
+ * Generator to remove.
+ */
+generator_id: TextGeneratorId, } | { "type": "test_text_generator", 
+/**
+ * Generator to test.
+ */
+generator_id: TextGeneratorId, 
+/**
+ * Model to test; `None` uses the generator's stored model.
+ */
+model: string | null, } | { "type": "get_text_generation_settings" } | { "type": "set_text_generation_settings", 
+/**
+ * New settings.
+ */
+settings: TextGenerationSettings, } | { "type": "rename_thread", 
+/**
+ * Thread to rename.
+ */
+thread_id: ThreadId, 
+/**
+ * New title, trimmed; empty is refused.
+ */
+title: string, } | { "type": "list_projects", 
 /**
  * Host to list.
  */

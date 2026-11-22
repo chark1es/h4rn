@@ -54,6 +54,8 @@ async fn boot() -> TestDaemon {
         network_port: 0,
     };
     let daemon = DaemonBuilder::new(config)
+        // Titles never spawn the machine's own claude or codex.
+        .without_title_agents()
         .with_harness(Arc::new(FakeHarness::new()))
         .build()
         .await
