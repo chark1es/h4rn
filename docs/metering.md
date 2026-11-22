@@ -139,7 +139,10 @@ schedule is armed the thread stays in Working, queued input is held, and the
 schedule can be cancelled (`CancelResume`) or fired immediately (`ResumeNow`).
 Cancelling the pause, or sending a message while a requeued turn is parked
 behind it, releases that turn instead of leaving it pending with nothing to
-deliver it; a Send's own message queues behind the parked turn. A release never
+deliver it; a Send's own message queues behind the parked turn. A send that only
+finds a stale pause — one that parks no prompt, because an older report armed it
+while a replacement turn was already pending — drops it quietly, with no release
+and no change of phase. A release never
 waits on a storage write: if the ledger or the journal cannot record it, the
 error is logged and the prompt is still delivered, because the schedule it was
 waiting for is already gone. A released thread is projected as running, not as
@@ -154,10 +157,15 @@ startup resync is unresolved too — a ledger read that failed does not turn the
 prompt into a settled turn that the next boot would replace with the policy's
 prompt. A schedule that did not survive the restart releases the prompt
 instead, recording the release and dropping the limit exactly as a cancellation
-does. The restart restores the
+does — but only when a prompt is really parked: a pending turn whose text is
+saved on the thread row. An idle thread whose schedule is cancelled, or one
+whose cancellation already released its prompt, just loses the stale pause,
+with no release event and no change of phase. The restart restores the
 schedule ids from the ledger independently of the limit history: a failed limit
 read only leaves the reset time unknown for now, and the ticker retries the
-resync until both reads succeed, so a restored pause never stays unnamed. The
+resync until every read succeeds — the schedule list, the limit history and the
+per-schedule re-check that confirms a restored row — so a restored pause never
+stays unnamed and a failed re-check is not left waiting for the next restart. The
 retry waits start at a second and double up to a minute, so a ledger that stays
 unreadable does not rewrite every thread's summary on every tick; the wait is
 measured on a monotonic clock, so moving the system clock backwards cannot

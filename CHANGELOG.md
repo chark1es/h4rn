@@ -124,6 +124,17 @@ All notable changes to h4rn are recorded here. The format follows
   instead when it is gone.
 - **A system clock change no longer delays a resume retry.** Retry waits are measured on a
   monotonic clock, so moving the clock backwards cannot stretch the wait past its cap.
+- **A resume check that cannot re-read one schedule is retried.** The startup pass could read the
+  schedule list and the limit history, fail on the per-schedule re-check that confirms a restored
+  row, and then never retry: the thread's pause stayed unnamed and a restored prompt could wait
+  forever. Any partial failure now leaves the resync unresolved, so the ticker runs the pass again
+  and the due schedule fires.
+- **A cancelled pause no longer releases a prompt it never held.** Cancelling an idle thread's
+  schedule after a retry had snapshotted it — or sending while an older pause is armed that does not
+  hold the pending turn — used to record a release and flip the thread to Thinking even though
+  nothing was parked. Now only a prompt that is really parked (a pending turn whose prompt is saved
+  on the thread row) is released; a stale pause is dropped without a release or a phase change, and
+  a cancel that already released the prompt is not released twice.
 - **Large Azure DevOps pull requests load within the page deadline.** Azure needs file contents to
   build a diff, so a 30-file page could not finish inside the UI's ten-second budget once the
   account's local request allowance ran out. A diff page now holds at most eight files (eighteen
