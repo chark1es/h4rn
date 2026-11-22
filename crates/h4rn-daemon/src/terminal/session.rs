@@ -1794,8 +1794,8 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
-        // The close path has no hangup wait on Windows; it ends the process
-        // through the cloned handle and must report the exit soon after.
+        // The close path has no hangup wait on Windows; it must end the
+        // process through the cloned handle without waiting for the child.
         let started = Instant::now();
         tokio::time::timeout(Duration::from_secs(5), session.kill_with_grace())
             .await
@@ -1808,8 +1808,19 @@ mod tests {
         let _ = release_tx.send(());
         holder.join().expect("the lock holder joins");
 
+        // ConPTY keeps the console's output pipe open until the pseudoconsole
+        // is closed, so the reader never reaches EOF here and no exit notice is
+        // written. The child handle is what proves the cloned killer ended the
+        // console process, which is the close contract on Windows.
         let deadline = Instant::now() + Duration::from_secs(10);
-        while session.info().exit.is_none() {
+        loop {
+            let exited = {
+                let mut child = lock(&session.child);
+                child.try_wait().ok().flatten()
+            };
+            if exited.is_some() {
+                break;
+            }
             assert!(Instant::now() < deadline, "the console must be terminated");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
