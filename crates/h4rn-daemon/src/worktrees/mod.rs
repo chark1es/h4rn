@@ -2013,7 +2013,8 @@ fn worktree_remove(repo: &Path, path: &Path, force: bool) -> Result<(), String> 
     git::run_with_timeout(repo, args, CLEAR_GIT_TIMEOUT).map(|_| ())
 }
 
-/// The reason a nested-checkout scan could not finish (forceable).
+/// The reason a nested-checkout scan could not finish (not forceable: the scan
+/// must finish even for a forced clear).
 const NESTED_SCAN_UNKNOWN: &str = "could not check for nested checkouts";
 
 #[cfg(test)]

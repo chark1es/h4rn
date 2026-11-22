@@ -505,7 +505,10 @@ selection does no filesystem work at all.
   hidden-files `git ls-files -v`, and `git worktree remove` with the `git
   status` it runs) also runs with `-c core.fsmonitor=false
   -c core.untrackedCache=false -c core.trustctime=true
-  -c core.checkStat=default`. A filesystem monitor hook that reports nothing
+  -c core.checkStat=default -c core.ignoreCase=false`. With
+  `core.ignoreCase=true` on a case-sensitive filesystem an untracked `README`
+  beside a tracked `readme` would be invisible; forcing case sensitivity can
+  only over-report on a case-insensitive one, which skips. A filesystem monitor hook that reports nothing
   changed, a stale untracked cache, or reduced stat checks (a same-size edit
   that kept its indexed mtime) would otherwise let git trust its index and miss
   an edit or a new file.
@@ -514,8 +517,13 @@ selection does no filesystem work at all.
   replacement ref (`refs/replace/*`) or a graft (`<common>/info/grafts`, or an
   inherited `GIT_GRAFT_FILE`) could otherwise rewrite parent links so an
   unmerged owned branch passes the ancestry check, or a detached commit looks
-  reachable. Inherited `GIT_CONFIG_PARAMETERS`/`GIT_CONFIG_COUNT` config is
-  dropped too; the safety-relevant keys are forced with `-c` regardless.
+  reachable. Inherited `GIT_CONFIG_PARAMETERS`/`GIT_CONFIG_COUNT` config and
+  redirected `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`/`GIT_CONFIG_NOSYSTEM` are
+  dropped too, so git reads the user's normal configuration: a redirected global
+  config could otherwise set keys that are not forced (`core.excludesFile`
+  hiding every untracked file). The subagent result card's `git status` uses the
+  same overrides with `--untracked-files=normal --ignore-submodules=none`, off
+  the async runtime.
 - Without `force`, an existing checkout must still be on the branch the listing
   gave it. If the current branch differs, the entry is skipped as
   `checkout is no longer on <branch>`; force removes the replacement checkout

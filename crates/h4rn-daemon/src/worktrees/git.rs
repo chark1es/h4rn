@@ -252,9 +252,12 @@ const LOCATION_VARS: &[&str] = &[
 /// calls always look at the disk themselves. Reduced stat checks
 /// (`core.trustctime=false`, `core.checkStat=minimal`) would likewise let a
 /// same-size edit that kept its indexed mtime read as clean, so the full stat
-/// comparison is forced. `-c` reaches the `git status` that
-/// `git worktree remove` runs in a child process too.
-pub const SAFETY_CONFIG: [&str; 8] = [
+/// comparison is forced. `core.ignoreCase=true` on a case-sensitive
+/// filesystem would make an untracked `README` beside a tracked `readme`
+/// invisible, so case is always significant here (on a case-insensitive
+/// filesystem this can only over-report, which skips). `-c` reaches the
+/// `git status` that `git worktree remove` runs in a child process too.
+pub const SAFETY_CONFIG: [&str; 10] = [
     "-c",
     "core.fsmonitor=false",
     "-c",
@@ -263,6 +266,8 @@ pub const SAFETY_CONFIG: [&str; 8] = [
     "core.trustctime=true",
     "-c",
     "core.checkStat=default",
+    "-c",
+    "core.ignoreCase=false",
 ];
 
 /// Strips inherited variables that would redirect git or add noise, and sets
@@ -284,11 +289,17 @@ pub(crate) fn sanitize(command: &mut Command) {
     for name in TRACE_VARS.iter().chain(LOCATION_VARS).chain(
         [
             "GIT_REPLACE_REF_BASE",
-            // Inherited `-c` / `GIT_CONFIG_KEY_n` config. The safety-relevant
-            // keys are forced with `-c` and would win anyway; dropping these
-            // keeps everything else at the repository's own configuration.
+            // Inherited `-c` / `GIT_CONFIG_KEY_n` config, and redirected
+            // global/system config files. The safety-relevant keys are forced
+            // with `-c` and would win anyway, but a redirected global config
+            // can set keys we do not force (`core.excludesFile` hiding every
+            // untracked file); dropping these leaves git reading the user's
+            // normal configuration, as for a daemon started normally.
             "GIT_CONFIG_PARAMETERS",
             "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_SYSTEM",
+            "GIT_CONFIG_NOSYSTEM",
         ]
         .iter(),
     ) {

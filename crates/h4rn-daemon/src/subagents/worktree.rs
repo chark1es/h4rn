@@ -101,7 +101,15 @@ pub fn changes(worktree: &Path) -> Vec<SubagentFileChange> {
         .arg("-C")
         .arg(worktree)
         .args(crate::worktrees::git::SAFETY_CONFIG)
-        .args(["status", "--porcelain", "--untracked-files=all"])
+        // `normal` collapses an untracked directory to one row, so a child's
+        // `dist/` cannot flood the result card, while still overriding a
+        // config that hides untracked files.
+        .args([
+            "status",
+            "--porcelain",
+            "--untracked-files=normal",
+            "--ignore-submodules=none",
+        ])
         .output();
     let Ok(output) = output else {
         return Vec::new();

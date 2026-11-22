@@ -1217,16 +1217,20 @@ impl Inner {
         if let Some(repo) = &repo
             && let Some(worktree) = &worktree
         {
-            result.files_changed = worktree::changes(worktree);
             let delete_branch = matches!(
                 state,
                 SubagentState::Cancelled | SubagentState::BudgetExceeded
             );
-            worktree::remove(
-                repo,
-                worktree,
-                delete_branch.then_some(view.branch.as_deref()).flatten(),
-            );
+            let (repo, worktree) = (repo.clone(), worktree.clone());
+            let branch = delete_branch.then(|| view.branch.clone()).flatten();
+            // Both shell out to git; keep them off the runtime.
+            result.files_changed = tokio::task::spawn_blocking(move || {
+                let changes = worktree::changes(&worktree);
+                worktree::remove(&repo, &worktree, branch.as_deref());
+                changes
+            })
+            .await
+            .unwrap_or_default();
         }
         if state == SubagentState::Failed || state == SubagentState::BudgetExceeded {
             let records = self.records.lock().await;

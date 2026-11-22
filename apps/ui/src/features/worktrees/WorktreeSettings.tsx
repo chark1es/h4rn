@@ -270,7 +270,9 @@ export function WorktreeSettings() {
 
       <ConfirmDialog
         open={confirmAll !== null}
-        title={`Remove ${clearAllCount} ${clearAllCount === 1 ? "worktree" : "worktrees"}?`}
+        title={
+          clearAllCount === 1 ? "Remove 1 worktree?" : `Remove up to ${clearAllCount} worktrees?`
+        }
         description={clearAllDescription(keptThreads)}
         confirmLabel="Clear all"
         onOpenChange={(open) => {

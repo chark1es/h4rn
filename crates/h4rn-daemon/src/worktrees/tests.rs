@@ -5618,3 +5618,115 @@ fn grafts_do_not_make_a_detached_commit_look_reachable() {
     );
     assert!(linked.is_dir());
 }
+
+#[test]
+fn ignore_case_does_not_hide_an_untracked_case_variant() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-ignore-case", "ignore-case-branch");
+    std::fs::write(linked.join("notes"), "tracked\n").expect("notes");
+    run(&linked, &["add", "notes"]);
+    run(&linked, &["commit", "-q", "-m", "notes"]);
+    run(&linked, &["config", "core.ignoreCase", "true"]);
+    // An untracked file that differs from a tracked one only by case.
+    std::fs::write(linked.join("NOTES"), "untracked work\n").expect("NOTES");
+    let plain = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .current_dir(&linked)
+        .output()
+        .expect("plain status");
+    assert!(
+        plain.stdout.is_empty(),
+        "with core.ignoreCase=true plain git misses the untracked file"
+    );
+
+    let target = entry(&linked, &fixture.repo, Some("ignore-case-branch"), false);
+    assert_eq!(
+        clear_one(&target, false, &fixture.data_dir())
+            .err()
+            .as_deref(),
+        Some("has uncommitted changes")
+    );
+    assert!(linked.join("NOTES").is_file());
+}
+
+#[test]
+fn a_redirected_global_config_does_not_hide_untracked_work() {
+    let scratch = tempfile::tempdir().expect("tempdir");
+    let ignore_all = scratch.path().join("ignore-all");
+    std::fs::write(&ignore_all, "*\n").expect("ignore file");
+    let global = scratch.path().join("global-config");
+    std::fs::write(
+        &global,
+        format!("[core]\n\texcludesFile = {}\n", ignore_all.display()),
+    )
+    .expect("global config");
+    let mut command = std::process::Command::new(std::env::current_exe().expect("test binary"));
+    command.args([
+        "--exact",
+        "worktrees::tests::untracked_work_under_a_redirected_global_config",
+        "--ignored",
+        "--test-threads=1",
+    ]);
+    command.env("GIT_CONFIG_GLOBAL", &global);
+    let output = command.output().expect("run the child test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore = "run by a_redirected_global_config_does_not_hide_untracked_work with GIT_CONFIG_GLOBAL set"]
+fn untracked_work_under_a_redirected_global_config() {
+    let global = std::env::var_os("GIT_CONFIG_GLOBAL")
+        .expect("run through a_redirected_global_config_does_not_hide_untracked_work");
+    // The fixture helpers run plain git, which would refuse to add ignored
+    // files; build the scenario without the redirect.
+    // SAFETY: single-threaded child process (`--test-threads=1`).
+    unsafe { std::env::remove_var("GIT_CONFIG_GLOBAL") };
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-redirected-global", "redirected-global-branch");
+    std::fs::write(linked.join("work.txt"), "untracked work\n").expect("work");
+    // SAFETY: as above.
+    unsafe { std::env::set_var("GIT_CONFIG_GLOBAL", &global) };
+    let plain = std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .current_dir(&linked)
+        .output()
+        .expect("plain status");
+    assert!(
+        plain.stdout.is_empty(),
+        "the redirected global config hides the untracked file from plain git"
+    );
+
+    let target = entry(
+        &linked,
+        &fixture.repo,
+        Some("redirected-global-branch"),
+        false,
+    );
+    assert_eq!(
+        clear_one(&target, false, &fixture.data_dir())
+            .err()
+            .as_deref(),
+        Some("has uncommitted changes")
+    );
+    assert!(linked.join("work.txt").is_file());
+}
+
+#[test]
+fn the_result_card_lists_untracked_files_whatever_the_config() {
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-result-card", "result-card-branch");
+    run(&linked, &["config", "status.showUntrackedFiles", "no"]);
+    std::fs::write(linked.join("left-behind.txt"), "child work\n").expect("work");
+    let changes = crate::subagents::worktree::changes(&linked);
+    assert!(
+        changes
+            .iter()
+            .any(|change| change.path == "left-behind.txt" && change.status == "??"),
+        "{changes:?}"
+    );
+}
