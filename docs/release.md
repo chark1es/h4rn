@@ -77,6 +77,15 @@ This writes a minisign private key and `~/.tauri/h4rn.key.pub`.
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — its password, if one was set.
 - `H4RN_UPDATER_PUBKEY` — contents of `~/.tauri/h4rn.key.pub`.
 
+The two updater secrets are a pair. `H4RN_UPDATER_PUBKEY` gives every desktop
+and daemon build the key it verifies with, while `TAURI_SIGNING_PRIVATE_KEY`
+produces the signature (`SHA256SUMS.sig`, and the desktop `.sig` files). A
+release with the public key but without the private key publishes no
+`SHA256SUMS.sig`, and every daemon built with that public key then refuses to
+self-update. To make that impossible, the release workflow fails when
+`H4RN_UPDATER_PUBKEY` is set and `TAURI_SIGNING_PRIVATE_KEY` is empty. Set both
+or neither.
+
 Back the private key up offline. If it is lost, no installed copy can verify a
 future update and users must reinstall manually.
 
@@ -150,39 +159,53 @@ archive's SHA-256. The signature is required: a release that only signs the
 archive does not bind the version or the target, so it is refused.
 
 Replacement is serialized per installation by a lock file beside the binary. A
-second `h4rnd update` exits with an explanation instead of racing, and staging
-files are created exclusively under unique names.
-On Unix the new binary is written beside the old one, fsynced, and renamed over
-the install path in one step, with the old binary hard-linked to
-`h4rnd.previous` first; `--rollback` is also a single rename. A crash therefore
-leaves a runnable binary at the install path.
+second invocation (`update`, `--rollback` or startup recovery) exits with an
+explanation instead of racing, and staging files are created exclusively under
+unique names. On Unix the new binary is written beside the old one, fsynced, and
+renamed over the install path in one step, and `--rollback` is also a single
+rename. A crash therefore leaves a runnable binary at the install path.
 
-On Windows a running executable cannot be replaced in place. The update keeps a
-copy at `h4rnd.previous.exe`, renames the running `h4rnd.exe` to
-`h4rnd.old.exe`, and moves the new binary in; if that is interrupted, the next
-start restores `h4rnd.old.exe` (or `h4rnd.previous.exe`) before doing anything
-else. Recovery derives the install path from the moved-aside name, so it works
-even though `h4rnd.exe` is missing. The scheduled task installed by
-`h4rnd service install` runs a small inline recovery step (passed to PowerShell
-with `-Command`, so there is no writable script file) that performs the same
-restore at logon, so a machine whose update was cut off still comes back up.
-Without a service, run the moved-aside binary (for example
+The rollback copy is never written straight to `h4rnd.previous`: the old binary
+is copied into a unique temp file beside it, fsynced, and renamed over
+`h4rnd.previous`, with its size and SHA-256 recorded in a sidecar. `--rollback`
+refuses a backup that is missing, empty, not executable (on Unix) or does not
+match that record, so a copy interrupted by a crash or power loss can never
+replace the installed binary. On Windows a running executable cannot be replaced
+in place. The update keeps that copy at `h4rnd.previous.exe`, renames the
+running `h4rnd.exe` to `h4rnd.old.exe`, and moves the new binary in; if that is
+interrupted, the next start restores `h4rnd.old.exe` (or `h4rnd.previous.exe`)
+before doing anything else. Recovery derives the install path from the
+moved-aside name, so it works even though `h4rnd.exe` is missing. The scheduled
+task installed by `h4rnd service install` runs a small inline recovery step
+(passed to PowerShell with `-Command`, so there is no writable script file) that
+performs the same restore at logon, so a machine whose update was cut off still
+comes back up. Without a service, run the moved-aside binary (for example
 `h4rnd.old.exe --version`) and it repairs the install path.
 
 The update restarts the service only when the registered unit, plist or task
 runs the binary that was replaced. If it launches a different installation, the
 update says which path that is and leaves it alone; if the restart fails, the
 binary is still installed and the command warns with `h4rnd service restart` as
-the next step.
+the next step. On Windows the restart's stop step (`schtasks /End`, or
+`Stop-ScheduledTask`) is best-effort because it fails when the task is not
+running; only the start step must succeed.
 
 A running daemon that reports an active turn stops the update with an
 explanation unless `--force` is passed. The guard fails closed and is checked
 again immediately before the binary is replaced: a daemon that is running but
 does not answer its health check, or one whose health response omits
 `active_turns`, also blocks the update unless `--force` is passed. `--rollback`
-uses the same guard. A build with no `H4RN_UPDATER_PUBKEY` refuses to replace
-the binary and prints the manual download, verify and restart steps instead. A
-release needs the signed `SHA256SUMS` for its daemon to update itself.
+uses the same guard. If a turn starts after the new binary is installed but
+before the restart, the update keeps the installed binary, skips the restart,
+and tells you to restart h4rnd when the turn finishes with
+`h4rnd service restart`, so the turn is never cut off. A build with no
+`H4RN_UPDATER_PUBKEY` refuses to replace the binary and prints the manual
+download, verify and restart steps instead. A release needs the signed
+`SHA256SUMS` for its daemon to update itself.
+
+Release metadata requests have a short total timeout (20 s). Asset downloads do
+not: a large archive may legitimately take minutes, so they are bounded by a
+30 s idle/read timeout and give up only when the transfer stops making progress.
 
 ## 4. Repository secrets and variables
 
@@ -194,7 +217,7 @@ verbatim by the workflow.
 | Name | Kind | Purpose |
 |---|---|---|
 | `GITHUB_TOKEN` | automatic | Draft release, asset upload, GHCR push. No setup. |
-| `H4RN_UPDATER_PUBKEY` | secret | Minisign public key for the desktop and daemon updaters. Without it neither build is updater-capable. |
+| `H4RN_UPDATER_PUBKEY` | secret | Minisign public key for the desktop and daemon updaters. Requires `TAURI_SIGNING_PRIVATE_KEY`; the workflow refuses a release with the public key alone. |
 
 ### Optional, per platform
 
@@ -203,7 +226,7 @@ unsigned desktop bundles and compiles the iOS simulator app.
 
 | Name | Platform | Purpose |
 |---|---|---|
-| `TAURI_SIGNING_PRIVATE_KEY` | updater | Minisign private key. Enables `.sig` + `latest.json`. |
+| `TAURI_SIGNING_PRIVATE_KEY` | updater | Minisign private key. Required whenever `H4RN_UPDATER_PUBKEY` is set; enables `.sig`, `SHA256SUMS.sig` and `latest.json`. |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | updater | Password for the private key. |
 | `H4RN_UPDATER_ENDPOINT` | updater | **Repository variable**, not a secret. Update manifest URL. |
 | `WINDOWS_CERTIFICATE_BASE64` | Windows | Base64 of an Authenticode `.pfx`. |

@@ -41,6 +41,19 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Require the signing key when the updater key is configured
+        env:
+          H4RN_UPDATER_PUBKEY: ${{ secrets.H4RN_UPDATER_PUBKEY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          # The two updater secrets are a pair: without the private key the
+          # release has no SHA256SUMS.sig, and every daemon built with the
+          # public key refuses to self-update from it.
+          if [[ -n "${H4RN_UPDATER_PUBKEY}" && -z "${TAURI_SIGNING_PRIVATE_KEY}" ]]; then
+            echo "H4RN_UPDATER_PUBKEY is set but TAURI_SIGNING_PRIVATE_KEY is missing." >&2
+            echo "Set both, or neither: a daemon release without a signed SHA256SUMS cannot update itself." >&2
+            exit 1
+          fi
       - name: Create draft release
         id: release
         env:

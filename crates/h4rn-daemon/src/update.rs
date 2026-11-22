@@ -17,16 +17,17 @@
 //! unique name. A second invocation refuses to start instead of racing.
 //!
 //! On Unix the binary is replaced and rolled back with a single `rename` over
-//! the target, after hard-linking the old binary to `h4rnd.previous`, so an
-//! interrupted update always leaves a runnable binary at the install path. On
-//! Windows a running executable cannot be replaced in place: the old binary is
-//! moved to `h4rnd.old.exe` and the new one moved in. Startup recovery (in
-//! `main`, before argument parsing) takes the same lock and restores the old
-//! binary if the install path is missing, deriving the install path from the
-//! moved-aside name so it works even when `h4rnd.exe` does not exist. The
-//! scheduled task installed by `h4rnd service install` runs a small inline
-//! recovery step before the daemon, so a machine whose update was cut off still
-//! comes back up without a reinstall.
+//! the target, after the old binary is copied into a unique temp file, fsynced
+//! and renamed over `h4rnd.previous`, so an interrupted update always leaves a
+//! runnable binary at the install path. On Windows a running executable cannot
+//! be replaced in place: the old binary is backed up the same way, then moved to
+//! `h4rnd.old.exe` and the new one moved in. Startup recovery (in `main`, before
+//! argument parsing) takes the same lock and restores the old binary if the
+//! install path is missing, deriving the install path from the moved-aside name
+//! so it works even when `h4rnd.exe` does not exist. The scheduled task installed
+//! by `h4rnd service install` runs a small inline recovery step before the
+//! daemon, so a machine whose update was cut off still comes back up without a
+//! reinstall.
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Write};
@@ -52,6 +53,15 @@ const REPOSITORY_OVERRIDE: Option<&str> = option_env!("H4RN_REPOSITORY");
 const UPDATER_PUBKEY: Option<&str> = option_env!("H4RN_UPDATER_PUBKEY");
 const PLACEHOLDER_PUBKEY: &str = "__H4RN_UPDATER_PUBKEY__";
 const MAX_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
+/// How long a release metadata request may take end to end. Release JSON is
+/// small, so a slow response means the network or GitHub is unhealthy.
+const METADATA_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long an asset download may go without receiving any bytes. A total
+/// timeout would abort a large archive on a slow connection, so the download
+/// client only gives up when the transfer stalls.
+const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long an asset download may take to establish its connection.
+const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long the health probe may take before the daemon counts as unreachable.
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(1000);
 /// How long a TCP connect may take before deciding nothing is listening.
@@ -150,7 +160,10 @@ impl ReleaseInfo {
 
 /// The GitHub Releases client.
 pub struct ReleaseClient {
+    /// Metadata requests, bounded by a short total timeout.
     http: reqwest::Client,
+    /// Asset downloads, bounded by an idle/read timeout instead of a total one.
+    downloads: reqwest::Client,
     api_base: String,
     repository: ReleaseRepository,
 }
@@ -166,13 +179,38 @@ impl ReleaseClient {
         repository: ReleaseRepository,
         api_base: impl Into<String>,
     ) -> Result<Self> {
+        Self::with_timeouts(
+            repository,
+            api_base,
+            METADATA_TIMEOUT,
+            DOWNLOAD_IDLE_TIMEOUT,
+        )
+    }
+
+    /// A client with explicit timeouts, so a test does not have to wait 20 s.
+    fn with_timeouts(
+        repository: ReleaseRepository,
+        api_base: impl Into<String>,
+        metadata_timeout: Duration,
+        download_idle_timeout: Duration,
+    ) -> Result<Self> {
+        let user_agent = format!("h4rnd/{}", crate::version());
         let http = reqwest::Client::builder()
-            .user_agent(format!("h4rnd/{}", crate::version()))
-            .timeout(Duration::from_secs(60))
+            .user_agent(user_agent.clone())
+            .timeout(metadata_timeout)
             .build()
-            .context("build the release HTTP client")?;
+            .context("build the release metadata HTTP client")?;
+        // No total timeout: a large archive may legitimately take minutes.
+        // `read_timeout` fires only when the connection stops making progress.
+        let downloads = reqwest::Client::builder()
+            .user_agent(user_agent)
+            .connect_timeout(DOWNLOAD_CONNECT_TIMEOUT)
+            .read_timeout(download_idle_timeout)
+            .build()
+            .context("build the release download HTTP client")?;
         Ok(Self {
             http,
+            downloads,
             api_base: api_base.into().trim_end_matches('/').to_owned(),
             repository,
         })
@@ -220,9 +258,12 @@ impl ReleaseClient {
     }
 
     /// Downloads one asset, refusing an unreasonably large response.
+    ///
+    /// The transfer is bounded by an idle timeout, not a total one, so a slow
+    /// but healthy link can finish while a stalled connection is abandoned.
     pub async fn download(&self, url: &str) -> Result<Vec<u8>> {
         let response = self
-            .http
+            .downloads
             .get(url)
             .send()
             .await
@@ -625,8 +666,8 @@ impl UpdateLock {
         match Self::try_acquire(current)? {
             Some(lock) => Ok(lock),
             None => bail!(
-                "another `h4rnd update` is already running for {}; wait for it to finish \
-                 (lock: {})",
+                "another h4rnd update, rollback or recovery is already running for {}; wait for \
+                 it to finish (lock: {})",
                 current.display(),
                 update_lock_path(current).display()
             ),
@@ -708,14 +749,171 @@ fn stage_binary(current: &Path, bytes: &[u8]) -> Result<PathBuf> {
     }))
 }
 
-fn copy_file(from: &Path, to: &Path) -> Result<()> {
-    let _ = std::fs::remove_file(to);
-    std::fs::copy(from, to)
-        .with_context(|| format!("copy {} to {}", from.display(), to.display()))?;
-    if let Ok(file) = std::fs::File::open(to) {
+/// The checksum sidecar that describes the rollback backup.
+fn previous_checksum_path(previous: &Path) -> PathBuf {
+    let Some(name) = previous.file_name().and_then(|name| name.to_str()) else {
+        return previous.with_extension("sha256");
+    };
+    previous.with_file_name(format!("{name}.sha256"))
+}
+
+/// Copies `current` to a uniquely named temp file, fsyncs it, and renames it
+/// over `previous`.
+///
+/// The backup is never written straight to `h4rnd.previous`: an interrupted
+/// copy leaves the previous backup (or no backup) in place, never a truncated
+/// file that `--rollback` could install. The size and SHA-256 are recorded in a
+/// sidecar after the rename so a later rollback can refuse a damaged file.
+fn write_backup(from: &Path, to: &Path) -> Result<()> {
+    let parent = from
+        .parent()
+        .context("the current executable has no parent directory")?;
+    let metadata = std::fs::metadata(from).with_context(|| format!("read {}", from.display()))?;
+    let mut source =
+        std::fs::File::open(from).with_context(|| format!("open {}", from.display()))?;
+    let mut hasher = Sha256::new();
+    let mut last_error = None;
+    for attempt in 0..16u32 {
+        let temp = parent.join(staging_name(from, attempt));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        let mut file = match options.open(&temp) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_error = Some(error);
+                continue;
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("create backup file {}", temp.display()));
+            }
+        };
+        let copied = (|| -> std::io::Result<()> {
+            let mut buffer = [0u8; 64 * 1024];
+            loop {
+                let read = source.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                hasher.update(&buffer[..read]);
+                file.write_all(&buffer[..read])?;
+            }
+            file.sync_all()
+        })();
+        if let Err(error) = copied {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error).with_context(|| format!("write backup file {}", temp.display()));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = metadata.permissions().mode();
+            if let Err(error) =
+                std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(mode | 0o111))
+            {
+                let _ = std::fs::remove_file(&temp);
+                return Err(error).with_context(|| format!("make {} executable", temp.display()));
+            }
+        }
+        drop(file);
+        if let Err(error) = std::fs::rename(&temp, to) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error).with_context(|| format!("move the backup into {}", to.display()));
+        }
+        fsync_dir(parent);
+        // Advisory only: without it, rollback still checks size and, on Unix,
+        // the executable bit, for a backup written by an older build.
+        let _ = write_backup_checksum(to, &hex::encode(hasher.finalize()), metadata.len());
+        return Ok(());
+    }
+    Err(last_error.map(anyhow::Error::from).unwrap_or_else(|| {
+        anyhow::anyhow!("could not create a backup file next to {}", from.display())
+    }))
+}
+
+fn write_backup_checksum(previous: &Path, hash: &str, size: u64) -> std::io::Result<()> {
+    let path = previous_checksum_path(previous);
+    std::fs::write(&path, format!("{hash} {size}\n"))?;
+    if let Ok(file) = std::fs::File::open(&path) {
         let _ = file.sync_all();
     }
     Ok(())
+}
+
+/// Reads the hint written after a completed backup.
+fn read_backup_checksum(previous: &Path) -> Option<(String, u64)> {
+    let text = std::fs::read_to_string(previous_checksum_path(previous)).ok()?;
+    let mut fields = text.split_whitespace();
+    let hash = fields.next()?;
+    let size = fields.next()?.parse::<u64>().ok()?;
+    (hash.len() == 64 && hash.chars().all(|ch| ch.is_ascii_hexdigit()))
+        .then(|| (hash.to_ascii_lowercase(), size))
+}
+
+fn file_sha256(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path).with_context(|| format!("read {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("read {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// Refuses a backup that is missing, empty, not executable, or does not match
+/// the checksum recorded when it was written.
+fn check_previous_binary(previous: &Path) -> Result<()> {
+    let metadata = match std::fs::metadata(previous) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            bail!(
+                "no previous binary at {}; only one update can be rolled back",
+                previous.display()
+            );
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("inspect {}", previous.display()));
+        }
+    };
+    if metadata.len() == 0 {
+        bail!(
+            "the previous binary at {} is empty, so it cannot be installed; run `h4rnd update` \
+             again or install h4rnd",
+            previous.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            bail!(
+                "the previous binary at {} is not executable, so it cannot be installed; run \
+                 `h4rnd update` again or install h4rnd",
+                previous.display()
+            );
+        }
+    }
+    if let Some((hash, size)) = read_backup_checksum(previous)
+        && (size != metadata.len() || file_sha256(previous).ok().as_deref() != Some(hash.as_str()))
+    {
+        bail!(
+            "the previous binary at {} does not match its recorded checksum, so the backup copy \
+             was probably interrupted; run `h4rnd update` again or install h4rnd",
+            previous.display()
+        );
+    }
+    Ok(())
+}
+
+/// Removes the checksum sidecar after the backup has been consumed.
+fn remove_backup_checksum(previous: &Path) {
+    let _ = std::fs::remove_file(previous_checksum_path(previous));
 }
 
 /// Replaces `current` with `bytes`, keeping the old binary as `h4rnd.previous`.
@@ -739,14 +937,9 @@ pub fn replace_binary(current: &Path, bytes: &[u8]) -> Result<()> {
 
 #[cfg(not(windows))]
 fn replace_binary_unix(current: &Path, staged: &Path) -> Result<()> {
-    let previous = previous_binary_path(current);
-    // A hard link keeps the old binary alive under `.previous` while the
-    // staged file replaces the executable's path with one rename. If linking
-    // is not supported on this filesystem, a copy has the same guarantee.
-    let _ = std::fs::remove_file(&previous);
-    if std::fs::hard_link(current, &previous).is_err() {
-        copy_file(current, &previous)?;
-    }
+    // The backup is copied to a temp file and renamed over `.previous`, so an
+    // interrupted copy cannot leave a truncated rollback target.
+    write_backup(current, &previous_binary_path(current))?;
     std::fs::rename(staged, current)
         .with_context(|| format!("replace {} with the staged binary", current.display()))
 }
@@ -756,8 +949,9 @@ fn replace_binary_windows(current: &Path, staged: &Path) -> Result<()> {
     let old = old_binary_path(current);
     let previous = previous_binary_path(current);
     // Back up the running binary before touching it. Copying a running image is
-    // allowed on Windows; if the backup fails, the installation is untouched.
-    copy_file(current, &previous)?;
+    // allowed on Windows; the copy is staged and renamed so an interruption
+    // cannot leave a truncated `h4rnd.previous.exe`.
+    write_backup(current, &previous)?;
     let _ = std::fs::remove_file(&old);
     std::fs::rename(current, &old)
         .with_context(|| format!("move the running binary to {}", old.display()))?;
@@ -780,12 +974,9 @@ fn replace_binary_windows(_current: &Path, _staged: &Path) -> Result<()> {
 /// Swaps `h4rnd.previous` back in.
 pub fn rollback_binary(current: &Path) -> Result<()> {
     let previous = previous_binary_path(current);
-    if !previous.exists() {
-        bail!(
-            "no previous binary at {}; only one update can be rolled back",
-            previous.display()
-        );
-    }
+    // A missing, empty, non-executable or truncated backup must never replace
+    // a working installation.
+    check_previous_binary(&previous)?;
     let parent = current.parent();
     if cfg!(windows) {
         rollback_binary_windows(current, &previous)?;
@@ -795,6 +986,7 @@ pub fn rollback_binary(current: &Path) -> Result<()> {
         std::fs::rename(&previous, current)
             .with_context(|| format!("restore {}", current.display()))?;
     }
+    remove_backup_checksum(&previous);
     if let Some(parent) = parent {
         fsync_dir(parent);
     }
@@ -1107,6 +1299,15 @@ pub async fn check_daemon_idle(addr: SocketAddr, service_active: bool, force: bo
     Ok(())
 }
 
+/// Why the service must not be restarted after the binary was already
+/// replaced, or `None` when the restart can go ahead.
+///
+/// The binary is already installed at this point, so a turn that started since
+/// the last check is left running: the user restarts h4rnd when it finishes.
+pub fn restart_skip_reason(state: &DaemonState, force: bool) -> Option<String> {
+    if force { None } else { state_refusal(state) }
+}
+
 /// Runs one `h4rnd update`.
 pub async fn run(config: &Config, options: UpdateOptions) -> Result<()> {
     if options.rollback && (options.check || options.version.is_some()) {
@@ -1122,6 +1323,16 @@ pub async fn run(config: &Config, options: UpdateOptions) -> Result<()> {
         check_daemon_idle(addr, crate::service::is_active(), options.force).await?;
         rollback_binary(&current)?;
         println!("Restored the previous h4rnd binary.");
+        // A turn can start between the guard and the restart; the restored
+        // binary is already in place, so leave the daemon alone.
+        let state = daemon_state(addr, crate::service::is_active()).await;
+        if let Some(problem) = restart_skip_reason(&state, options.force) {
+            println!("The binary was restored, but {problem}.");
+            println!(
+                "binary updated; restart h4rnd when the turn finishes (`h4rnd service restart`)"
+            );
+            return Ok(());
+        }
         restart_or_explain(&current);
         return Ok(());
     }
@@ -1192,6 +1403,15 @@ pub async fn run(config: &Config, options: UpdateOptions) -> Result<()> {
         release.version,
         current.display()
     );
+    // A turn can start between the guard above and the restart. The new binary
+    // is already installed, so keep it and let the user restart when the turn
+    // finishes instead of interrupting the work.
+    let state = daemon_state(addr, crate::service::is_active()).await;
+    if let Some(problem) = restart_skip_reason(&state, options.force) {
+        println!("The binary was updated, but {problem}.");
+        println!("binary updated; restart h4rnd when the turn finishes (`h4rnd service restart`)");
+        return Ok(());
+    }
     restart_or_explain(&current);
     Ok(())
 }
@@ -1514,10 +1734,12 @@ mod tests {
         let (_dir, current) = install_dir();
         replace_binary(&current, b"new").unwrap();
         assert_eq!(std::fs::read(&current).unwrap(), b"new");
-        assert_eq!(
-            std::fs::read(previous_binary_path(&current)).unwrap(),
-            b"old"
-        );
+        let previous = previous_binary_path(&current);
+        assert_eq!(std::fs::read(&previous).unwrap(), b"old");
+        // The backup carries a size and SHA-256 recorded after the copy.
+        let checksum = read_backup_checksum(&previous).expect("the backup records its checksum");
+        assert_eq!(checksum.0, sha256_hex(b"old"));
+        assert_eq!(checksum.1, 3);
         // The staged file was renamed into place, not left behind.
         assert_eq!(remove_staging_files(&current), 0);
         assert!(!staged_path(&current).exists());
@@ -1528,16 +1750,85 @@ mod tests {
                 std::fs::metadata(&current).unwrap().permissions().mode() & 0o111,
                 0
             );
+            assert_ne!(
+                std::fs::metadata(&previous).unwrap().permissions().mode() & 0o111,
+                0,
+                "the backup must be installable"
+            );
         }
 
         rollback_binary(&current).unwrap();
         assert_eq!(std::fs::read(&current).unwrap(), b"old");
-        assert!(!previous_binary_path(&current).exists());
+        assert!(!previous.exists());
+        assert!(
+            !previous_checksum_path(&previous).exists(),
+            "the consumed backup's checksum sidecar is removed"
+        );
         assert!(
             !failed_binary_path(&current).exists(),
             "rollback needs no intermediate moved-aside file on Unix"
         );
         assert!(rollback_binary(&current).is_err());
+    }
+
+    #[test]
+    fn an_interrupted_backup_cannot_be_rolled_back() {
+        let (_dir, current) = install_dir();
+        let previous = previous_binary_path(&current);
+        // The copy was cut off before it wrote anything: an empty file at the
+        // final name (an older layout) is not installable.
+        std::fs::write(&previous, b"").unwrap();
+        let error = rollback_binary(&current).unwrap_err();
+        assert!(error.to_string().contains("is empty"), "{error}");
+        assert_eq!(
+            std::fs::read(&current).unwrap(),
+            b"old",
+            "a refused rollback must not touch the installed binary"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&previous, b"old").unwrap();
+            std::fs::set_permissions(&previous, std::fs::Permissions::from_mode(0o644)).unwrap();
+            let error = rollback_binary(&current).unwrap_err();
+            assert!(error.to_string().contains("not executable"), "{error}");
+            assert_eq!(std::fs::read(&current).unwrap(), b"old");
+        }
+
+        // No backup at all is refused as before.
+        let _ = std::fs::remove_file(&previous);
+        assert!(rollback_binary(&current).is_err());
+        assert_eq!(std::fs::read(&current).unwrap(), b"old");
+
+        // A copy cut off before its rename leaves only a staging file: there is
+        // still no backup to install, and the installed binary is untouched.
+        let staging = staged_path(&current);
+        std::fs::write(&staging, b"old").unwrap();
+        assert!(rollback_binary(&current).is_err());
+        assert_eq!(std::fs::read(&current).unwrap(), b"old");
+        assert!(!previous.exists());
+        let _ = std::fs::remove_file(&staging);
+    }
+
+    #[test]
+    fn a_damaged_backup_is_refused_by_its_checksum() {
+        let (_dir, current) = install_dir();
+        replace_binary(&current, b"new").unwrap();
+        let previous = previous_binary_path(&current);
+        std::fs::write(&previous, b"truncated").unwrap();
+        let error = rollback_binary(&current).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not match its recorded checksum"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(&current).unwrap(),
+            b"new",
+            "a damaged backup must not replace the installed binary"
+        );
     }
 
     #[test]
@@ -1573,7 +1864,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("another `h4rnd update` is already running"),
+                .contains("another h4rnd update, rollback or recovery is already running"),
             "unexpected error: {error}"
         );
         assert!(UpdateLock::try_acquire(&current).unwrap().is_none());
@@ -1714,6 +2005,35 @@ mod tests {
         assert!(check_daemon_idle(addr, true, false).await.is_err());
     }
 
+    #[test]
+    fn a_turn_that_starts_after_the_install_skips_the_restart() {
+        let idle = DaemonState::Running {
+            version: Some("1.0.0".into()),
+            active_turns: Some(0),
+        };
+        assert!(restart_skip_reason(&idle, false).is_none());
+        assert!(restart_skip_reason(&DaemonState::Stopped, false).is_none());
+
+        let busy = DaemonState::Running {
+            version: Some("1.0.0".into()),
+            active_turns: Some(1),
+        };
+        let reason = restart_skip_reason(&busy, false).expect("a started turn skips the restart");
+        assert!(reason.contains("1 active turn"), "{reason}");
+        let unknown = DaemonState::Running {
+            version: Some("1.0.0".into()),
+            active_turns: None,
+        };
+        assert!(restart_skip_reason(&unknown, false).is_some());
+        let unreachable = DaemonState::Unreachable {
+            addr: "127.0.0.1:47800".parse().unwrap(),
+        };
+        assert!(restart_skip_reason(&unreachable, false).is_some());
+
+        // --force restarts anyway, as it allowed the update in the first place.
+        assert!(restart_skip_reason(&busy, true).is_none());
+    }
+
     #[tokio::test]
     async fn an_ephemeral_port_cannot_be_probed_and_fails_closed() {
         let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -1804,5 +2124,81 @@ mod tests {
             .unwrap()
             .replace("PLACEHOLDER", &server.uri());
         assert_eq!(client.download(&url).await.unwrap(), b"checksums");
+    }
+
+    fn test_repository() -> ReleaseRepository {
+        ReleaseRepository {
+            owner: "chark1es".to_owned(),
+            name: "h4rn".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn release_metadata_requests_time_out_quickly() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/chark1es/h4rn/releases/latest"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_secs(3))
+                    .set_body_raw(r#"{"tag_name":"v9.9.9"}"#, "application/json"),
+            )
+            .mount(&server)
+            .await;
+
+        // Metadata is small: a slow answer is abandoned instead of waiting.
+        let client = ReleaseClient::with_timeouts(
+            test_repository(),
+            server.uri(),
+            Duration::from_millis(150),
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        let error = client.latest().await.unwrap_err();
+        let message = format!("{error:#}").to_ascii_lowercase();
+        assert!(
+            message.contains("timed out") || message.contains("timeout"),
+            "expected a timeout, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_asset_download_times_out_instead_of_waiting_for_a_total_limit() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 2048];
+            let _ = socket.read(&mut request).await;
+            // Headers arrive, then the transfer stalls with no body bytes.
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n")
+                .await
+                .unwrap();
+            socket.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            let _ = socket.write_all(b"hello").await;
+        });
+
+        let client = ReleaseClient::with_timeouts(
+            test_repository(),
+            "http://127.0.0.1:9",
+            Duration::from_secs(5),
+            Duration::from_millis(150),
+        )
+        .unwrap();
+        let url = format!("http://{addr}/archive");
+        let error = client.download(&url).await.unwrap_err();
+        let message = format!("{error:#}").to_ascii_lowercase();
+        assert!(
+            message.contains("timed out") || message.contains("timeout"),
+            "expected an idle timeout, got: {message}"
+        );
+        server.abort();
     }
 }

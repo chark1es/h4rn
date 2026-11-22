@@ -27,11 +27,29 @@ All notable changes to h4rn are recorded here. The format follows
   `--force`. Builds without a public key refuse to self-update and print manual
   steps instead. Release builds with the signing key now publish
   `SHA256SUMS.sig`; an archive signature alone is not accepted.
+- **The updater secrets are a pair.** `H4RN_UPDATER_PUBKEY` gives a build the key
+  it verifies with, and `TAURI_SIGNING_PRIVATE_KEY` produces `SHA256SUMS.sig`. A
+  release with the public key but no private key now fails in the release
+  workflow instead of publishing archives every daemon refuses to install.
 - **Updates are one-at-a-time and interruption-safe.** An advisory lock beside the
   binary serializes updates, rollbacks and startup recovery, and staging files are
   created exclusively with unique names. On Unix the replace and the rollback are
   each a single `rename` over the install path; on Windows the moved-aside binary
   is restored by the next start (or by the scheduled task's recovery step).
+- **A backup is written atomically and checked before it is used.** The rollback
+  copy no longer goes straight to `h4rnd.previous`: it is copied into a unique
+  temp file beside it, fsynced and renamed over the backup, with its size and
+  SHA-256 recorded after the copy. `--rollback` refuses a backup that is missing,
+  empty, not executable on Unix or does not match that record, so an interrupted
+  copy can never replace the installed binary.
+- **A turn that starts during the final step is not cut off.** The idle check is
+  repeated after the new binary is in place and immediately before the restart.
+  If a turn started, the binary stays installed, the restart is skipped, and the
+  update says to run `h4rnd service restart` when the turn finishes. Release
+  metadata requests keep a short total timeout; asset downloads use a 30 s
+  idle timeout and no total limit, so a large archive on a slow link can finish.
+  On Windows a failed `/End` when the task is not running is harmless and only
+  the start step must succeed.
 - **`h4rnd update` checks the daemon again right before replacing the binary**,
   so a turn that starts during the download still blocks the restart. The guard
   fails closed: a daemon that is active or listening but does not answer

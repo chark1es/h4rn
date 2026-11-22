@@ -104,7 +104,11 @@ console. Development builds have no updater key, so `h4rnd update` refuses to
 self-update and prints the manual steps; release builds require a minisign
 signature over `SHA256SUMS` before replacing the binary, hold a per-installation
 lock while they do it, and refuse while a turn is running (or while a daemon
-cannot be checked) unless you pass `--force`.
+cannot be checked) unless you pass `--force`. A rollback backup is staged and
+renamed into place, and `--rollback` refuses one that is missing, empty or
+damaged. If a turn starts after the new binary is installed but before the
+restart, the update keeps the binary and asks you to run `h4rnd service restart`
+when the turn finishes.
 
 ## Protocol bindings
 

@@ -275,9 +275,7 @@ fn restart_current_service() -> Result<()> {
         ServicePlatform::Windows => {
             ensure_available("schtasks")?;
             let task = windows_task_name();
-            for command in windows_restart_commands(&task) {
-                run_checked(&command)?;
-            }
+            run_windows_restart(&task, |command| run_checked(command).map(|_| ()))?;
             println!("Restarted scheduled task {task}.");
         }
     }
@@ -1122,12 +1120,31 @@ pub fn windows_uninstall_command(script: &Path, task: &str) -> CommandSpec {
     )
 }
 
-/// The Task Scheduler restart commands.
-pub fn windows_restart_commands(task: &str) -> Vec<CommandSpec> {
+/// The Task Scheduler restart steps, with whether each one must succeed.
+///
+/// `/End` fails harmlessly when the task is not running, so only `/Run` is
+/// checked. `h4rnd service restart` and the update's restart use this list.
+pub fn windows_restart_steps(task: &str) -> Vec<(CommandSpec, bool)> {
     vec![
-        CommandSpec::new("schtasks", ["/End", "/TN", task]),
-        CommandSpec::new("schtasks", ["/Run", "/TN", task]),
+        (CommandSpec::new("schtasks", ["/End", "/TN", task]), false),
+        (CommandSpec::new("schtasks", ["/Run", "/TN", task]), true),
     ]
+}
+
+/// Runs the restart steps: a failed stop (`/End` on a task that is not running)
+/// is ignored, while a failed start is returned.
+fn run_windows_restart<F>(task: &str, mut run: F) -> Result<()>
+where
+    F: FnMut(&CommandSpec) -> Result<()>,
+{
+    for (command, required) in windows_restart_steps(task) {
+        if required {
+            run(&command)?;
+        } else {
+            let _ = run(&command);
+        }
+    }
+    Ok(())
 }
 
 /// The Task Scheduler status query.
@@ -1166,7 +1183,7 @@ pub fn windows_task_executable_command(task: &str) -> CommandSpec {
                  $task = Get-ScheduledTask -TaskName {}; \
                  if ($null -ne $task) {{ \
                    $task.Actions | ForEach-Object {{ \
-                     $_.Execute + \"`t\" + $_.Arguments.Replace(\"`r\", ' ').Replace(\"`n\", ' ').Replace(\"`t\", ' ') \
+                     $_.Execute + \"`t\" + $(if ($null -ne $_.Arguments) {{ $_.Arguments }} else {{ '' }}).Replace(\"`r\", ' ').Replace(\"`n\", ' ').Replace(\"`t\", ' ') \
                    }} \
                  }}",
                 powershell_quote(task)
@@ -1695,9 +1712,21 @@ mod tests {
                 "h4rn-alice",
             ]
         );
+        let restart = windows_restart_steps("h4rn-alice");
         assert_eq!(
-            windows_restart_commands("h4rn-alice")[1],
-            CommandSpec::new("schtasks", ["/Run", "/TN", "h4rn-alice"])
+            restart,
+            vec![
+                // `/End` may fail when the task is not running; only `/Run` is
+                // required.
+                (
+                    CommandSpec::new("schtasks", ["/End", "/TN", "h4rn-alice"]),
+                    false
+                ),
+                (
+                    CommandSpec::new("schtasks", ["/Run", "/TN", "h4rn-alice"]),
+                    true
+                ),
+            ]
         );
         let status = windows_status_command("h4rn-alice");
         assert!(
@@ -1715,6 +1744,14 @@ mod tests {
                 .iter()
                 .any(|arg| arg.contains(".Replace(\"`r\", ' ')")),
             "action output must be flattened to one line"
+        );
+        // An action without arguments has a null `Arguments`, which used to
+        // throw before any output was printed.
+        assert!(
+            action.args.iter().any(|arg| {
+                arg.contains("$(if ($null -ne $_.Arguments) { $_.Arguments } else { '' })")
+            }),
+            "the action query must tolerate a null Arguments value"
         );
     }
 
@@ -1743,6 +1780,29 @@ mod tests {
         assert!(!file.exists());
         assert!(!directory.exists());
         drop(second);
+    }
+
+    #[test]
+    fn a_windows_restart_ignores_a_failed_stop_but_not_a_failed_start() {
+        let mut seen = Vec::new();
+        run_windows_restart("h4rn-alice", |command| {
+            seen.push(command.args[0].clone());
+            if command.args[0] == "/End" {
+                anyhow::bail!("the task is not running");
+            }
+            Ok(())
+        })
+        .expect("a stop that fails because nothing is running is harmless");
+        assert_eq!(seen, ["/End", "/Run"]);
+
+        let error = run_windows_restart("h4rn-alice", |command| {
+            if command.args[0] == "/Run" {
+                anyhow::bail!("schtasks refused to start the task");
+            }
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("refused to start"), "{error}");
     }
 
     #[test]
