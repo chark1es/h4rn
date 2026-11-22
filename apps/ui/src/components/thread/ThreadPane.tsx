@@ -15,6 +15,7 @@ import {
   ensureThread,
   interruptThread,
   navigate,
+  PREVIEW_EVENT,
   requestComposerFocus,
   retryThread,
   setPanelTab,
@@ -96,7 +97,7 @@ export function ThreadPane({ threadId }: { threadId: string }) {
   const isPhone = useIsPhone();
   // Mount on first open, then keep the panel (and its PTYs) alive while hidden.
   const [terminalMounted, setTerminalMounted] = useState(terminalOpen);
-  const [phonePanel, setPhonePanel] = useState<"changes" | "subagents" | null>(null);
+  const [phonePanel, setPhonePanel] = useState<"changes" | "subagents" | "preview" | null>(null);
   const [approvalSheetOpen, setApprovalSheetOpen] = useState(false);
   // The shortcut and the palette open the terminal through the store, not
   // the header button, so mount on any open.
@@ -119,6 +120,18 @@ export function ThreadPane({ threadId }: { threadId: string }) {
     window.addEventListener("h4rn:subagents", handler);
     return () => window.removeEventListener("h4rn:subagents", handler);
   }, [isPhone]);
+
+  // An HTML link in the stream opens the preview; a phone shows it in the
+  // panel sheet, a desktop has already opened the right panel's tab.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ threadId?: string }>).detail;
+      if (detail?.threadId && detail.threadId !== threadId) return;
+      if (isPhone) setPhonePanel("preview");
+    };
+    window.addEventListener(PREVIEW_EVENT, handler);
+    return () => window.removeEventListener(PREVIEW_EVENT, handler);
+  }, [isPhone, threadId]);
 
   // The composer's `/` menu asks for the phone sheet by event: it does not own
   // the sheet's state, and on a phone the desktop panel tab would go nowhere.

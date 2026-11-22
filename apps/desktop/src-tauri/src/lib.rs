@@ -19,6 +19,7 @@ mod commands;
 mod daemon;
 mod diagnostics;
 mod platform;
+mod preview;
 mod settings;
 mod tray;
 mod updates;
@@ -70,10 +71,19 @@ pub fn run() {
         )
         .manage(DaemonState::default())
         .manage(UpdateState::default())
+        .manage(preview::PreviewStore::default())
+        // A prepared preview gets its own origin, because a `srcdoc` frame
+        // would inherit this window's `script-src 'self'` policy.
+        .register_uri_scheme_protocol(preview::PREVIEW_SCHEME, |context, request| {
+            let store = context.app_handle().state::<preview::PreviewStore>();
+            preview::respond(&store, &request)
+        })
         .invoke_handler(tauri::generate_handler![
             commands::daemon_endpoints,
             commands::auth_loopback,
             commands::open_external,
+            preview::preview_prepare,
+            preview::preview_release,
             commands::keychain_get,
             commands::keychain_set,
             commands::keychain_delete,

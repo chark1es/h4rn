@@ -70,6 +70,7 @@ const mock = vi.hoisted(() => {
 vi.mock("@/lib/store/appStore", () => ({
   useApp: (selector: (state: unknown) => unknown) => selector(mock.state),
   getState: () => mock.state,
+  PREVIEW_EVENT: "h4rn:preview",
   ensureThread: mock.ensureThread,
   interruptThread: mock.interruptThread,
   navigate: mock.navigate,
@@ -188,7 +189,7 @@ describe("ThreadPane phone / commands", () => {
     const focus = vi.spyOn(input, "focus");
     fireEvent.keyDown(input, { key: "Enter" });
 
-    const dialog = await screen.findByRole("dialog", { name: "Changes and subagents" });
+    const dialog = await screen.findByRole("dialog", { name: "Thread panel" });
     expect(dialog).toBeTruthy();
     // The sheet is modal: focus moves into it, so typing no longer edits the
     // draft behind it.
@@ -210,7 +211,7 @@ describe("ThreadPane phone / commands", () => {
     typeInto("/chan");
     await waitFor(() => expect(screen.getByRole("option", { name: /Open changes/ })).toBeTruthy());
     fireEvent.keyDown(composer(), { key: "Enter" });
-    await screen.findByRole("dialog", { name: "Changes and subagents" });
+    await screen.findByRole("dialog", { name: "Thread panel" });
 
     typeInto("/sub");
     await waitFor(() =>

@@ -65,7 +65,7 @@ pub use connect::*;
 pub use forge::*;
 pub use fs::{
     DiffAgainst, FileEntry, FileEntryKind, FsChangeKind, FsCreateKind, FsDeleteResult, FsDiff,
-    FsFileContent, FsListing, FsSearchBatch, FsSearchMatch, FsTurnChanges, FsTurnFile,
+    FsFileContent, FsListing, FsOmitted, FsSearchBatch, FsSearchMatch, FsTurnChanges, FsTurnFile,
     FsWriteConflict, FsWriteResult, GitFileStatus,
 };
 pub use harness::{

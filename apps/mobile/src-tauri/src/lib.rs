@@ -20,6 +20,8 @@ use tauri::Manager;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use tauri::plugin::PluginHandle;
 
+mod preview;
+
 #[cfg(target_os = "ios")]
 tauri::ios_plugin_binding!(init_plugin_h4rn_secret_store);
 
@@ -173,6 +175,14 @@ fn deep_link_current(app: tauri::AppHandle) -> Vec<String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
+        // A prepared preview gets its own origin, because a `srcdoc` frame
+        // would inherit this window's `script-src 'self'` policy.
+        .manage(preview::PreviewStore::default())
+        .register_uri_scheme_protocol(preview::PREVIEW_SCHEME, |context, request| {
+            use tauri::Manager as _;
+            let store = context.app_handle().state::<preview::PreviewStore>();
+            preview::respond(&store, &request)
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_deep_link::init())
@@ -202,7 +212,9 @@ pub fn run() {
             secret_get,
             secret_set,
             secret_delete,
-            deep_link_current
+            deep_link_current,
+            preview::preview_prepare,
+            preview::preview_release
         ])
         .setup(|_app| {
             // Warm-start deep links are pushed into the WebView as a DOM event
