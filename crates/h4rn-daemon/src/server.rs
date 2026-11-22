@@ -1031,12 +1031,13 @@ impl Connection {
                     host,
                     workspace,
                     path,
+                    bytes_base64,
                 } => {
                     if let Some(error) = self.local_host_error(&host) {
                         return Some(error_frame(id, error));
                     }
                     let fs = Arc::clone(&self.state.fs);
-                    fs_block(fs, move |fs| fs.read(&workspace, &path))
+                    fs_block(fs, move |fs| fs.read_with(&workspace, &path, bytes_base64))
                         .await
                         .map(|file| ResponseBody::FsFile { file })
                 }

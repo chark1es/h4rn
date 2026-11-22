@@ -3,6 +3,7 @@ import { type ReactNode, useEffect, useState } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
+import { PreviewPanel } from "@/features/preview/PreviewPanel";
 import { DelegateDialog } from "@/features/subagents/DelegateDialog";
 import {
   loadSubagents,
@@ -14,7 +15,7 @@ import type { SubagentView, ThreadSummary } from "@/gen";
 import { glyphForAgentState } from "@/lib/agent";
 import { harnessLabel, harnessSeed, machineSeed, subagentSeed } from "@/lib/entities";
 import { absoluteTime, tokens } from "@/lib/format";
-import { openInIde, openThread, setPanelTab } from "@/lib/store/appStore";
+import { openInIde, openThread, setPanelTab, useApp } from "@/lib/store/appStore";
 import { FileDiff } from "./FileDiff";
 import { usePanelChanges } from "./usePanelChanges";
 
@@ -153,7 +154,7 @@ export function PhonePanelSheet({
   onReview,
 }: {
   thread: ThreadSummary;
-  initialTab: "changes" | "subagents";
+  initialTab: "changes" | "subagents" | "preview";
   onClose: () => void;
   onReview?: () => void;
 }) {
@@ -162,8 +163,14 @@ export function PhonePanelSheet({
   const files = changes.changes?.files ?? [];
   const subagents = useSubagentCount(thread.thread_id);
   const views = useSubagentViews(thread.thread_id);
+  const preview = useApp((state) => state.ui.preview);
+  const previewPath = preview?.threadId === thread.thread_id ? preview.path : null;
+  const tabState = tab === "preview" && !previewPath ? "changes" : tab;
 
   useEffect(() => setTab(initialTab), [initialTab]);
+  useEffect(() => {
+    if (!previewPath && tab === "preview") setTab("changes");
+  }, [previewPath, tab]);
   useEffect(() => {
     if (tab === "subagents") void loadSubagents(thread.thread_id);
   }, [tab, thread.thread_id]);
@@ -183,12 +190,7 @@ export function PhonePanelSheet({
         aria-label="Close changes and subagents"
         onClick={onClose}
       />
-      <div
-        className="q-ph-sheet large"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Changes and subagents"
-      >
+      <div className="q-ph-sheet large" role="dialog" aria-modal="true" aria-label="Thread panel">
         <div className="q-grab" />
         <div className="q-ph-sh-nav">
           <span style={{ width: 64 }} />
@@ -198,19 +200,32 @@ export function PhonePanelSheet({
           </button>
         </div>
         <div className="q-ph-seg" style={{ padding: "0 16px 10px" }}>
-          <div className="q-seg" role="tablist" aria-label="Changes and subagents">
+          <div className="q-seg" role="tablist" aria-label="Changes, preview and subagents">
             <button
               type="button"
               role="tab"
-              aria-selected={tab === "changes"}
+              aria-selected={tabState === "changes"}
               onClick={() => setTab("changes")}
             >
               Changes {files.length > 0 ? <span className="c q-num">{files.length}</span> : null}
             </button>
+            {previewPath ? (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={tabState === "preview"}
+                onClick={() => {
+                  setPanelTab("preview");
+                  setTab("preview");
+                }}
+              >
+                Preview
+              </button>
+            ) : null}
             <button
               type="button"
               role="tab"
-              aria-selected={tab === "subagents"}
+              aria-selected={tabState === "subagents"}
               onClick={() => {
                 setPanelTab("subagents");
                 setTab("subagents");
@@ -225,7 +240,14 @@ export function PhonePanelSheet({
           </div>
         </div>
 
-        {tab === "subagents" ? (
+        {tabState === "preview" ? (
+          <PreviewPanel
+            key={`${thread.thread_id}:${previewPath ?? "empty"}`}
+            thread={thread}
+            path={previewPath}
+            variant="phone"
+          />
+        ) : tabState === "subagents" ? (
           <div className="q-ph-body">
             <div className="q-ph-gh" style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <span>

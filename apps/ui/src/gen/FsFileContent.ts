@@ -38,6 +38,13 @@ binary: boolean,
  */
 truncated: boolean, 
 /**
+ * Raw bytes as standard base64, when the read asked for them.
+ *
+ * This is how the HTML preview inlines binary assets such as images and
+ * fonts. It is `None` for ordinary text reads.
+ */
+bytes_base64: string | null, 
+/**
  * Last modification time, when available.
  */
 modified_at: string | null, 

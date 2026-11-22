@@ -3,7 +3,8 @@ import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { resolvedTheme, useApp } from "@/lib/store/appStore";
+import { previewPathFromLink } from "@/features/preview/htmlPreview";
+import { openPreview, resolvedTheme, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 
 function languageOf(className: string | undefined): string | null {
@@ -78,11 +79,26 @@ function CodeBlock({ code, language }: { code: string; language: string | null }
 }
 
 const components: Components = {
-  a: ({ children, href }) => (
-    <a href={href} target="_blank" rel="noreferrer noopener">
-      {children}
-    </a>
-  ),
+  a: ({ children, href }) => {
+    const preview = href ? previewPathFromLink(href) : null;
+    return (
+      <a
+        href={href}
+        target="_blank"
+        rel="noreferrer noopener"
+        onClick={
+          preview
+            ? (event) => {
+                event.preventDefault();
+                openPreview(preview);
+              }
+            : undefined
+        }
+      >
+        {children}
+      </a>
+    );
+  },
   code: ({ className, children }) => {
     const text = String(children ?? "").replace(/\n$/, "");
     const language = languageOf(className);

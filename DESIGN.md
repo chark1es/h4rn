@@ -215,7 +215,7 @@ Three columns at most, and only one of them is on the left.
 ┌────────────────────┬──────────────────────────────────────┬────────────────────────┐
 │ sidebar            │ main                                 │ right panel            │
 ├────────────────────┼──────────────────────────────────────┼────────────────────────┤
-│ h4rn            ▢ ✎│ Title      Thread|IDE  >_  ▢         │ Changes Files Subagents│
+│ h4rn            ▢ ✎│ Title      Thread|IDE  >_  ▢         │ Changes Files Preview │
 │ Search or run    ⌘K│ provenance                           │                        │
 │Working Done Settled │                                      │ vs agent|vs HEAD  turns│
 │ ▣ api  atlas      ⌄│ stream  ─or─  IDE editor             │ file list              │
@@ -231,7 +231,7 @@ Three columns at most, and only one of them is on the left.
 
 1. **One left column, always the sidebar.** Nothing else docks on the left: not a second list, not a settings nav, not a file tree. Destinations that used to have their own list column either take over the sidebar (Settings, including MCP servers and Skills, swap the thread list for a settings nav with a back button) or render their list in the main area (Pull requests).
 2. **The main area shows one thing:** the selected thread, the selected thread's project in the IDE, or a page (Usage, a pull request, a settings page). The Thread | IDE toggle sits in the same place in both views.
-3. **One right panel, scoped to the selected thread.** Tabs: **Changes** (agent diff, by turn, or vs HEAD), **Files** (the thread's workspace tree), **Subagents** (tree + details). It is closed by default; its open/closed state, width and last tab are remembered per window, and its content follows whatever thread is selected. It never holds a second thread, a terminal, or app navigation.
+3. **One right panel, scoped to the selected thread.** Tabs: **Changes** (agent diff, by turn, or vs HEAD), **Files** (the thread's workspace tree), **Preview** (one sandboxed HTML file the agent wrote), **Subagents** (tree + details). It is closed by default; its open/closed state, width and last tab are remembered per window, and its content follows whatever thread is selected. It never holds a second thread, a terminal, or app navigation.
 4. **The terminal is a drawer in the main area**, under the composer, so an approval card is never pushed off screen by it. It belongs to the thread's worktree and appears in both views.
 5. **Only blue can survive a collapse.** Hiding the sidebar leaves a show-sidebar button in the main header; if any thread needs you, that button carries the accent pip. A collapsed project group shows its thread count and the accent dot. The Subagents tab shows the accent dot when a child is waiting on an approval.
 6. **Resizing** uses an 8 px hit area on the shared hairline. On hover, drag or keyboard focus the hairline turns into a 2 px `focus` line. Arrow keys move it 16 px. Widths persist per window. The main area never goes below 560 px; past that the right panel closes before the sidebar does.
@@ -321,7 +321,8 @@ Every command is ⌘ (Ctrl on Windows and Linux) plus a key, with optional ⇧ o
 
 **Right panel.** 60 px header aligned with the thread header's hairline, holding text tabs with a 2 px `fg` underline (not accent) and counts in `fg-3`, plus a close button. Under it is a 44 px tool bar per tab, a scrolling body, and an optional footer.
 - *Changes:* `vs agent | vs HEAD` segment, a turn scope menu ("All 3 turns ▾": all turns, latest turn, turn n, branch vs base), and totals. Then a "Claude Code on atlas · 2 files since 12:03" line, the file list (mono path with a dimmed directory, `New` badge, +/−), and stacked diffs with sticky file headers whose long lines wrap. The footer has Revert all… and Open in IDE ⌘E. In IDE view the diffs fold away and the file list opens files in the editor.
-- *Files:* filter field (⌘P), the workspace tree with git markers (`M` in `warn`, `A` in `ok`), and an "Agent changes" row pinned to the bottom that jumps to Changes.
+- *Files:* filter field (⌘P), the workspace tree with git markers (`M` in `warn`, `A` in `ok`), and an "Agent changes" row pinned to the bottom that jumps to Changes. An `.html`/`.htm` row carries a quiet "Open preview" action.
+- *Preview:* the file name and a reload button, then the page in a sandboxed frame on the page's own ground. A quiet notice sits above it when workspace assets were skipped. There is no browser chrome: the page runs scripts but cannot reach h4rn, its cookies or its storage.
 - *Subagents:* the tree and details below. Empty states name what will appear there.
 
 **Subagents tab.** A real tree. The parent sits at the top, and children hang off 1 px elbow connectors. Each node shows state, title, elapsed time, a "host · harness" line with blobatars, a state/turn/token line, and a 3 px budget bar while running. Failed or cancelled children stay in the tree with their reason. The selected node expands into a key/value block (runs on, model, context handoff, budget, approvals, credential location).
@@ -393,6 +394,6 @@ The owner asked for T3 Code's single left panel: one left panel, one collapsible
 - **Kept h4rn's lifecycle as a segment instead of T3's stacked Active / Working / Snoozed / Settled sections.** h4rn has a Done state that T3 lacks, and stacking three sections under project folders would show each project up to three times. The segment keeps one level of grouping.
 - **Moved secondary destinations to the footer, the palette and Settings.** Pull requests, Usage, MCP & skills and Settings are a click or two keys away, and none of them claims a column. Settings (with MCP servers and Skills inside it) temporarily takes over the sidebar, as T3's settings route does. Hosts and devices became a footer menu that still shows presence at a glance.
 - **Put the file tree in the right panel.** In IDE view the tree is the Files tab. A narrow tree pane inside the main area would have recreated the two-left-columns look the owner rejected, and the same Files tab also serves thread view, so the tree has one home. ⌘P makes the tree optional.
-- **Scoped the right panel to the thread.** Changes, Files and Subagents all answer "what has this thread touched or spawned?". The terminal stays a bottom drawer (as in T3) because it is interactive, wide, and belongs under the conversation, not beside it.
+- **Scoped the right panel to the thread.** Changes, Files, Preview and Subagents all answer "what has this thread touched or spawned?". The terminal stays a bottom drawer (as in T3) because it is interactive, wide, and belongs under the conversation, not beside it.
 - **Mapped the right panel to one sheet on phone** (Changes | Subagents) rather than two pushed screens. The thread stays one swipe away and the pattern matches the approval sheet.
 - **Kept attention from hiding.** The accent survives every collapse: the pip on the show-sidebar button, the dot on a collapsed project group, the dot on the Subagents tab, and the "Needs approval" thread chip in IDE view.

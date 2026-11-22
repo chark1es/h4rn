@@ -256,6 +256,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
           host: target.host,
           workspace: target.path,
           path,
+          bytes_base64: false,
         });
         if (response.type !== "fs_file") return;
         const file = response.file;
@@ -753,6 +754,7 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
             host: target.host,
             workspace: target.path,
             path,
+            bytes_base64: false,
           });
           if (response.type !== "fs_file") continue;
           if (response.file.content === null && !response.file.binary && !response.file.truncated) {

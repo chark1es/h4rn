@@ -5,6 +5,18 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **Preview HTML files in the right panel.** A report, chart or mockup the agent wrote can be
+  opened from the Files tab's new action on `.html`/`.htm` rows, or from a relative HTML link in
+  an agent message. The Preview tab reads the file through the daemon, inlines its relative CSS,
+  JS, images and fonts from inside the workspace (up to 10 MB), and renders it in a
+  `sandbox="allow-scripts"` iframe with `srcdoc` and a `default-src 'none'` CSP, so page scripts
+  run without gaining access to h4rn, its cookies or its storage. It reloads when the file changes
+  on disk, expands to full width in the main area, and opens in the phone panel sheet. Files
+  outside the workspace, over the size limit, or not UTF-8 show a plain message instead. MCP Apps,
+  a headless browser and dev-server proxying are not part of this change.
+
 ### Fixed
 
 - **Closing a terminal ends its background jobs.** With job control, `sleep 1000 &` runs in its own

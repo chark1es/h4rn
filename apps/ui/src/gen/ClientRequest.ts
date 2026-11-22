@@ -294,7 +294,14 @@ workspace: string,
 /**
  * Workspace-relative file path.
  */
-path: string, } | { "type": "fs_write", 
+path: string, 
+/**
+ * Also return the raw bytes as standard base64.
+ *
+ * The HTML preview uses this to inline relative images, fonts and
+ * other binary assets as `data:` URLs. Text reads leave it unset.
+ */
+bytes_base64: boolean, } | { "type": "fs_write", 
 /**
  * Host that owns the filesystem.
  */

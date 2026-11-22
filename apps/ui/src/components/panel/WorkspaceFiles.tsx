@@ -1,5 +1,6 @@
 import {
   ChevronRightIcon,
+  EyeIcon,
   FileCodeIcon,
   FileIcon,
   FolderIcon,
@@ -11,6 +12,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ShortcutCaps } from "@/components/common/Kbd";
 
 import { gitBadge } from "@/features/ide/useIdeSession";
+import { isHtmlPath } from "@/features/preview/htmlPreview";
 import type { FileEntry, FsListing, FsTurnChanges, HostId, ProtoError } from "@/gen";
 import { toProtoError } from "@/lib/client/errors";
 import { getClient, openInIde, useApp } from "@/lib/store/appStore";
@@ -51,6 +53,78 @@ function entryIcon(entry: FileEntry, open: boolean) {
 }
 
 /**
+ * One row of the workspace tree.
+ *
+ * A file row opens the IDE when clicked. An HTML file also carries an
+ * "Open preview" action beside it, so the panel's Preview tab is one click
+ * away without changing what a click on the name does.
+ */
+export function WorkspaceFileRow({
+  entry,
+  depth,
+  open,
+  active,
+  onToggle,
+  onOpenFile,
+  onOpenPreview,
+}: {
+  entry: FileEntry;
+  depth: number;
+  open: boolean;
+  active: boolean;
+  onToggle: (path: string) => void;
+  onOpenFile: (path: string) => void;
+  onOpenPreview: (path: string) => void;
+}) {
+  const badge = gitBadge(entry.git_status);
+  const directory = entry.kind === "directory";
+  const row = (
+    <button
+      type="button"
+      role="treeitem"
+      aria-expanded={directory ? open : undefined}
+      aria-selected={active || undefined}
+      aria-label={entry.name}
+      title={entry.path}
+      className={cn("q-fnode", active && "sel")}
+      style={{ ["--d" as string]: depth }}
+      onClick={() => (directory ? onToggle(entry.path) : onOpenFile(entry.path))}
+    >
+      {directory ? (
+        <ChevronRightIcon
+          className={cn("q-icon s12 q-fchev", open && "open")}
+          strokeWidth={1.5}
+          aria-hidden
+        />
+      ) : (
+        <span style={{ width: 12 }} />
+      )}
+      {entryIcon(entry, open)}
+      <span className="grow q-mono" style={{ fontSize: 12 }}>
+        {entry.name}
+      </span>
+      {badge ? <span className={cn("gs", badge.tone)}>{badge.letter}</span> : null}
+    </button>
+  );
+
+  if (directory || !isHtmlPath(entry.path)) return row;
+  return (
+    <div className="q-frow">
+      {row}
+      <button
+        type="button"
+        className="q-fopen"
+        aria-label={`Open preview of ${entry.name}`}
+        title="Open preview"
+        onClick={() => onOpenPreview(entry.path)}
+      >
+        <EyeIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+      </button>
+    </div>
+  );
+}
+
+/**
  * The panel's Files tab (and the single file tree in Layout v2). It fetches
  * directories lazily and opens files in the IDE's project tabs.
  */
@@ -62,12 +136,15 @@ export function WorkspaceFiles({
   onOpenAgentChanges,
   activePath = null,
   agentChangesLabel = null,
+  onOpenPreview,
 }: {
   host: HostId;
   workspace: string;
   workspaceName: string;
   agentChanges: FsTurnChanges | null;
   onOpenAgentChanges: () => void;
+  /** Opens one HTML file in the panel's Preview tab. */
+  onOpenPreview: (path: string) => void;
   /** The file the editor has open, highlighted in the tree. */
   activePath?: string | null;
   /** The IDE footer names the thread and agent instead of a bare count. */
@@ -205,43 +282,18 @@ export function WorkspaceFiles({
               </span>
             </button>
             {rootOpen
-              ? rows.map((row) => {
-                  const open = row.entry.kind === "directory" && expanded[row.entry.path] === true;
-                  const badge = gitBadge(row.entry.git_status);
-                  return (
-                    <button
-                      key={row.entry.path}
-                      type="button"
-                      role="treeitem"
-                      aria-expanded={row.entry.kind === "directory" ? open : undefined}
-                      aria-selected={activePath === row.entry.path || undefined}
-                      aria-label={row.entry.name}
-                      title={row.entry.path}
-                      className={cn("q-fnode", activePath === row.entry.path && "sel")}
-                      style={{ ["--d" as string]: row.depth + 1 }}
-                      onClick={() =>
-                        row.entry.kind === "directory"
-                          ? toggle(row.entry.path)
-                          : openInIde(row.entry.path)
-                      }
-                    >
-                      {row.entry.kind === "directory" ? (
-                        <ChevronRightIcon
-                          className={cn("q-icon s12 q-fchev", open && "open")}
-                          strokeWidth={1.5}
-                          aria-hidden
-                        />
-                      ) : (
-                        <span style={{ width: 12 }} />
-                      )}
-                      {entryIcon(row.entry, open)}
-                      <span className="grow q-mono" style={{ fontSize: 12 }}>
-                        {row.entry.name}
-                      </span>
-                      {badge ? <span className={cn("gs", badge.tone)}>{badge.letter}</span> : null}
-                    </button>
-                  );
-                })
+              ? rows.map((row) => (
+                  <WorkspaceFileRow
+                    key={row.entry.path}
+                    entry={row.entry}
+                    depth={row.depth + 1}
+                    open={row.entry.kind === "directory" && expanded[row.entry.path] === true}
+                    active={activePath === row.entry.path}
+                    onToggle={toggle}
+                    onOpenFile={openInIde}
+                    onOpenPreview={onOpenPreview}
+                  />
+                ))
               : null}
           </div>
         )}

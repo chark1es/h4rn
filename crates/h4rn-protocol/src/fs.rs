@@ -130,6 +130,12 @@ pub struct FsFileContent {
     pub binary: bool,
     /// True when the file is over the edit size limit.
     pub truncated: bool,
+    /// Raw bytes as standard base64, when the read asked for them.
+    ///
+    /// This is how the HTML preview inlines binary assets such as images and
+    /// fonts. It is `None` for ordinary text reads.
+    #[serde(default)]
+    pub bytes_base64: Option<String>,
     /// Last modification time, when available.
     pub modified_at: Option<DateTime<Utc>>,
     /// What to do about a refusal, when there is one.
@@ -333,6 +339,7 @@ mod tests {
             size_bytes: 12,
             binary: false,
             truncated: false,
+            bytes_base64: None,
             modified_at: None,
             hint: None,
         };

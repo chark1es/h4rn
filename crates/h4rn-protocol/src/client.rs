@@ -266,6 +266,12 @@ pub enum ClientRequest {
         workspace: String,
         /// Workspace-relative file path.
         path: String,
+        /// Also return the raw bytes as standard base64.
+        ///
+        /// The HTML preview uses this to inline relative images, fonts and
+        /// other binary assets as `data:` URLs. Text reads leave it unset.
+        #[serde(default)]
+        bytes_base64: bool,
     },
     /// Write one file, refusing to overwrite a version the client did not see.
     FsWrite {

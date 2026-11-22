@@ -240,6 +240,19 @@ impl FsService {
 
     /// Reads one file with size, binary and encoding detection.
     pub fn read(&self, workspace: &str, rel: &str) -> Result<FsFileContent, FsError> {
+        self.read_with(workspace, rel, false)
+    }
+
+    /// Reads one file, optionally including the raw bytes as base64.
+    ///
+    /// The HTML preview asks for the bytes so it can inline a relative image
+    /// or font as a `data:` URL. Text reads keep the previous shape.
+    pub fn read_with(
+        &self,
+        workspace: &str,
+        rel: &str,
+        bytes_base64: bool,
+    ) -> Result<FsFileContent, FsError> {
         let root = self.workspace(workspace)?;
         let path = resolve_inside(&root, rel, ResolveMode::Existing)?;
         if !path.is_file() {
@@ -259,6 +272,7 @@ impl FsService {
                 size_bytes: size,
                 binary: false,
                 truncated: true,
+                bytes_base64: None,
                 modified_at,
                 hint: Some(format!(
                     "This file is {:.1} MiB; the editor refuses files over {} MiB. Open it in a terminal instead.",
@@ -270,6 +284,10 @@ impl FsService {
 
         let bytes = fs::read(&path).map_err(|error| FsError::Io(error.to_string()))?;
         let etag = text::etag(&bytes);
+        let raw = bytes_base64.then(|| {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
+        });
         match text::decode(&bytes) {
             Some(decoded) => Ok(FsFileContent {
                 path: rel_path,
@@ -279,6 +297,7 @@ impl FsService {
                 size_bytes: size,
                 binary: false,
                 truncated: false,
+                bytes_base64: raw,
                 modified_at,
                 hint: None,
             }),
@@ -290,6 +309,7 @@ impl FsService {
                 size_bytes: size,
                 binary: true,
                 truncated: false,
+                bytes_base64: raw,
                 modified_at,
                 hint: Some(
                     "This looks like a binary file. h4rn does not edit binaries; use a terminal or your IDE."

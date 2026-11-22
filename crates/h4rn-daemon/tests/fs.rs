@@ -107,6 +107,30 @@ fn symlink_escape_is_rejected() {
     assert!(matches!(error, FsError::Forbidden(_)), "got {error:?}");
 }
 
+#[test]
+fn read_returns_raw_bytes_only_when_asked() {
+    let fixture = Fixture::new();
+    let png = [0x89_u8, 0x50, 0x4e, 0x47, 0x00, 0xff];
+    fs::write(fixture.workspace.join("pixel.png"), png).expect("write png");
+
+    let text = fixture
+        .service
+        .read(fixture.workspace(), "pixel.png")
+        .expect("read as text");
+    assert!(text.content.is_none(), "binary files have no text");
+    assert!(
+        text.bytes_base64.is_none(),
+        "ordinary reads do not carry bytes"
+    );
+
+    let raw = fixture
+        .service
+        .read_with(fixture.workspace(), "pixel.png", true)
+        .expect("read as bytes");
+    assert_eq!(raw.bytes_base64.as_deref(), Some("iVBORwD/"));
+    assert!(raw.binary);
+}
+
 #[cfg(unix)]
 #[test]
 fn diff_does_not_follow_a_symlink_outside_the_workspace() {

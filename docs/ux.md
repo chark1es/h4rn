@@ -131,9 +131,9 @@ The command palette (`⌘K`) is an overlay, not a route. Every route above is de
   or a page. The `Thread | IDE` toggle (⌘E) sits in the same place in both views, next to the
   terminal and right-panel buttons.
 - **One right panel, scoped to the selected thread.** Tabs: **Changes** (agent diff by turn or
-  vs HEAD), **Files** (the thread's workspace tree), **Subagents** (tree and details). Closed by
-  default; open/closed state, width and last tab are remembered in `localStorage`. It never
-  holds a second thread, app navigation, or the terminal.
+  vs HEAD), **Files** (the thread's workspace tree), **Preview** (one HTML file, sandboxed), and
+  **Subagents** (tree and details). Closed by default; open/closed state, width and last tab are
+  remembered in `localStorage`. It never holds a second thread, app navigation, or the terminal.
 - **Terminal** stays a bottom drawer under the composer (`T`), not a panel tab.
 - **IDE.** ⌘E switches the main area to the IDE for the selected thread's project: tabs, the
   `Edit | vs HEAD | vs agent` strip, the "Changes by <agent> in <thread> since …" scope strip,
@@ -156,12 +156,40 @@ The command palette (`⌘K`) is an overlay, not a route. Every route above is de
 - A thread is a full-screen push: back chevron, title, state word, overflow. Bottom navigation is
   hidden; the composer sits above the safe area and standby is a sticky card above it.
 - The right panel becomes **one** large-detent sheet over the thread with a `Changes | Subagents`
-  segment (blue dot when a child needs you) and Done. Changes shows the file list and the first
-  file's diff; Subagents shows the tree and details. **Files and the IDE are desktop-only**, and
-  the sheet says so.
+  segment (blue dot when a child needs you) and Done, plus **Preview** while an HTML file is open.
+  Changes shows the file list and the first file's diff; Subagents shows the tree and details;
+  Preview renders the page sandboxed. **Files and the IDE are desktop-only**, and the sheet says
+  so.
 - Terminal is a full-screen sheet with the key bar.
 - **Touch**: 44×44 px minimum; no hover-only affordances; long-press opens the same context menu as right-click; swipe-back is supported but every screen also has a visible back button.
 - **Pull to refresh** on Inbox, Hosts, Usage and PR list. It is the only gesture that mutates data by itself.
+
+### HTML preview
+
+Agents write HTML reports, charts and mockups. The right panel's **Preview** tab renders one
+without leaving h4rn.
+
+- Open it from the action on an `.html`/`.htm` row in **Files**, or from a relative `.html` link in
+  an agent message. The tab names the file, has a reload button, and reloads itself when the file
+  or one of its assets changes on disk.
+- The file is read through the daemon's fs read request and drawn in an
+  `<iframe sandbox="allow-scripts">` through `srcdoc`, with a CSP of
+  `default-src 'none'; img-src data: https:; style-src 'unsafe-inline' https:; script-src
+  'unsafe-inline' https:; font-src data: https:; connect-src https:`. Page scripts run; the page
+  cannot read h4rn, its cookies, its storage or its origin.
+- Relative CSS, JS, images and fonts from the same folder or elsewhere inside the workspace are
+  inlined as `<style>`, `<script>` or `data:` URLs. Anything outside the workspace root, or over
+  10 MB in total, is left out and the tab says how many files were skipped. Absolute `https:`
+  assets load from their CDN.
+- Links in the page open in the system browser (a new tab in the browser app), never inside the
+  frame.
+- **Expand** opens the preview full-width in the main area; **Back to thread** returns it to the
+  panel. On a phone it opens in the existing panel sheet, which gains a Preview segment while a
+  file is open.
+- A missing file, a file that is not UTF-8, or one over the size limit gets a plain inline message
+  with Reload; the panel never crashes.
+- Not supported yet: MCP Apps rendering, a headless browser, and proxying a page's own development
+  server. A page that needs a dev server must use absolute `https:` URLs for its assets.
 
 ### Pane behaviour
 
@@ -172,7 +200,7 @@ The command palette (`⌘K`) is an overlay, not a route. Every route above is de
 | New thread | 640 px dialog | 480 px sheet | Full-screen sheet |
 | Delete/revoke | Alert dialog | Alert dialog | Confirmation sheet |
 | Command palette | Centered 560 px | Centered 560 px | Full-height search sheet |
-| Right panel | Third column or hidden | Overlay | `Changes \| Subagents` sheet |
+| Right panel | Third column or hidden | Overlay | `Changes \| Subagents \| Preview` sheet |
 | Settings | Takes over the sidebar | Takes over the sidebar | Pushed page |
 | Multi-select rows | `X`, shift-click | Long-press | Long-press → Select mode |
 
