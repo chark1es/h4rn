@@ -99,8 +99,13 @@ briefly for that report, and applies its limit before the turn settles, so the
 schedule is armed and the message queued behind the turn stays paused. The
 reset a turn already applied is kept on the turn, not only on the live
 schedule, so an exit report that repeats it cannot arm a new schedule after the
-person cancelled the resume during the wait; a newer reset still arms one. A
-death between turns publishes one diagnostic row; it does not raise a failure,
+person cancelled the resume during the wait; a newer reset still arms one. The
+same applies when the death is reported only by the exit, with no EOF first: the
+live session carries the reset it applied into the dying entry. When several
+deaths are waiting for their exit reports, each schedule remembers the
+generation that armed it, and an older generation's later, earlier reset keeps
+its own row but cannot replace the newer generation's pause.
+A death between turns publishes one diagnostic row; it does not raise a failure,
 so a thread whose auto-resume just armed stays Scheduled (and a thread with no
 limit is not turned into an Error asking for attention by the agent's exit
 alone). Each death between turns is tracked by its session generation, so a
@@ -125,8 +130,11 @@ schedule is armed the thread stays in Working, queued input is held, and the
 schedule can be cancelled (`CancelResume`) or fired immediately (`ResumeNow`).
 
 When a schedule fires, the daemon starts a new turn with the policy prompt and
-marks the schedule `Fired`. With `failover = true` and an active proxy profile,
-it asks the proxy for another model/account that is not cooling down, records
+marks the schedule `Fired`. If a failed write had put its prompt back for a
+retry when the limit armed, that requeued turn is what the schedule delivers,
+instead of the policy prompt, so the person's message is not replaced. With
+`failover = true` and an active proxy profile, it asks the proxy for another
+model/account that is not cooling down, records
 that choice on the schedule (and emits it in `ScheduleChanged`), and uses the
 model for the resumed session. A failed resume moves to `Waiting` with
 `last_error` instead of silently losing the thread.

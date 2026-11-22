@@ -714,6 +714,19 @@ closed-transport completion applies to a `Failed` report only: when ACP already 
 `Completed`, a Stop that arrives while the exit report is still on its way leaves it completed — the
 work was done, and the person's Stop never reached the agent.
 
+**Addendum: a cancelled resume survives an exit-only death, and the newest pause wins.** The
+bridge can report `LimitHit` and then `Exit` with the same reset with no EOF or read error in
+between. The session is still live when the limit arms, so the slot itself now remembers the reset
+that generation applied and hands it to the dying entry when the death is noticed; an exit-only
+report that repeats it cannot re-arm the resume the person cancelled. When several dead generations
+are waiting for their exit reports, a schedule records which generation armed it. An older
+generation's later report, and a typed limit on its stream, keeps its own diagnostic row but never
+replaces a schedule a newer generation armed, so the thread waits for the newest provider reset.
+Finally, a failed write that lost its session and puts its prompt back still honors the adapter's
+typed limit: it arms the schedule under the same lock, holds the requeued turn behind it, and the
+schedule's firing delivers that turn (not the policy's resume prompt) on a fresh session. The
+two-death test now holds the mocked clock until both exit reports have been delivered.
+
 ## ADR-027: Push notifications are metadata-only wake signals
 
 **Status:** Proposed

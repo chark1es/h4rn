@@ -47,6 +47,14 @@ All notable changes to h4rn are recorded here. The format follows
   overwrote the first and the first death's row and reset were lost. They are kept per session now,
   and each pump finalizes only its own. A reset a death already applied is also kept with it, so an
   exit report that repeats a reset after the person cancelled the resume no longer arms it again.
+- **Auto-resume stays cancelled, waits for the newest reset, and covers retried writes.** A
+  `LimitHit` followed by an `Exit` with the same reset, with no EOF in between, used to re-arm the
+  pause after the person cancelled it; the live session now remembers the reset it applied and hands
+  it to the death. When two dead sessions are waiting for their exit reports, an older one's later,
+  earlier reset no longer replaces the newer one's schedule: both deaths keep their row, but the
+  thread waits for the newest reset. Finally, a failed write whose session was lost still honors the
+  adapter's typed limit: the retry is held behind the schedule and delivered when it fires, instead
+  of running straight into the paused provider.
 - **One provider limit arms one schedule.** The bridge can report one pause twice: the prompt's
   typed limit before the completion and the same reset on the exit report after it. The
   closed-completion wait now collects those limits and applies one after the wait, preferring the
