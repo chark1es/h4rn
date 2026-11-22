@@ -1535,6 +1535,18 @@ impl ThreadManager {
             .map_err(|error| ManagerError::Internal(error.to_string()))
     }
 
+    /// The journal head, for the subscribe answer's replay boundary.
+    ///
+    /// The caller must hold [`ThreadManager::lock_append`] so no event can be
+    /// allocated above the returned sequence between the read and going live.
+    pub async fn journal_head(&self) -> Result<u64, ManagerError> {
+        self.inner
+            .journal
+            .head()
+            .await
+            .map_err(|error| ManagerError::Internal(error.to_string()))
+    }
+
     /// Starts the background placement ticker.
     pub fn start_ticker(&self) {
         let mut slot = self

@@ -2182,6 +2182,15 @@ class MockDaemon {
     this.handlers.onBinary?.(bytes.buffer as ArrayBuffer);
   }
 
+  /** The highest durable sequence any thread's mock journal has emitted. */
+  private wireHead(): number {
+    let head = 0;
+    for (const entry of this.threads.values()) {
+      for (const record of entry.wire) head = Math.max(head, record.seq);
+    }
+    return head;
+  }
+
   private handle(frame: ClientFrame): void {
     const { body } = frame;
     if (
@@ -2269,7 +2278,7 @@ class MockDaemon {
         return;
       }
       case "subscribe":
-        this.ok(frame.id, { type: "ack" });
+        this.ok(frame.id, { type: "subscribed", replay_through: this.wireHead() });
         return;
       case "create_thread": {
         const id = `thr_new_${++this.created}`;

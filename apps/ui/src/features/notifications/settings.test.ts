@@ -61,4 +61,13 @@ describe("notification settings", () => {
       hostOffline: false,
     });
   });
+
+  it("shows a default permission as off without losing the preference", async () => {
+    const settings = await import("./settings");
+    expect(settings.displayedNotificationSetting("default", true)).toBe(false);
+    expect(settings.getNotificationSettings().approvals).toBe(true);
+    expect(settings.displayedNotificationSetting("granted", true)).toBe(true);
+    expect(settings.displayedNotificationSetting("unknown", true)).toBe(true);
+    expect(settings.displayedNotificationSetting("denied", true)).toBe(false);
+  });
 });

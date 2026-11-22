@@ -32,6 +32,13 @@ pub use updates::UpdateState;
 /// Build and run the desktop shell.
 pub fn run() {
     let app = tauri::Builder::default()
+        // A second launch focuses the running app instead of starting another
+        // daemon and window. On Linux the AppIndicator can exist without a
+        // tray host ever showing it, so this is the guaranteed way back to a
+        // hidden window; macOS dock clicks arrive as `RunEvent::Reopen` below.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            tray::show_main(app);
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_deep_link::init())
@@ -156,9 +163,20 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building the h4rn desktop shell");
 
-    app.run(|handle, event| {
-        if matches!(event, RunEvent::Exit) {
-            handle.state::<DaemonState>().shutdown();
+    app.run(|handle, event| match event {
+        RunEvent::Exit => handle.state::<DaemonState>().shutdown(),
+        // A dock click on macOS with no visible window (or with one behind
+        // other apps) is the same request as a second launch: show and focus
+        // the window that "Keep running in tray" hid.
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen {
+            has_visible_windows,
+            ..
+        } => {
+            if tray::reopen_action(has_visible_windows) == tray::Reveal::ShowAndFocus {
+                tray::show_main(handle);
+            }
         }
+        _ => {}
     });
 }

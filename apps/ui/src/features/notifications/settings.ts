@@ -80,3 +80,19 @@ export function useNotificationSettings(): NotificationSettings {
     () => current,
   );
 }
+
+/**
+ * What a notification switch shows for the current OS permission.
+ *
+ * A `default` permission means the OS has not been asked yet, so every switch
+ * reads off even when this device's stored preference is on: showing it on
+ * would promise a notification the OS will not deliver. The preference is
+ * kept, and turning a switch on is what asks. `denied` has no switch at all.
+ */
+export function displayedNotificationSetting(
+  permission: "granted" | "denied" | "default" | "unknown",
+  stored: boolean,
+): boolean {
+  if (permission === "default" || permission === "denied") return false;
+  return stored;
+}

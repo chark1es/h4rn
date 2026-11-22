@@ -9,11 +9,13 @@ import {
   notificationChannel,
 } from "@/features/notifications/channel";
 import {
+  displayedNotificationSetting,
   type NotificationSettingKey,
   setNotificationSetting,
   useNotificationSettings,
 } from "@/features/notifications/settings";
 import { ProxySettings } from "@/features/proxy/ProxySettings";
+import { useRemote } from "@/features/remote/remoteStore";
 import { LiveAccountForm, LiveHostsForm } from "@/features/remote/SettingsRemote";
 import { AboutSettings } from "@/features/updates/AboutSettings";
 import { AutoResumeSettings } from "@/features/usage/AutoResumeSettings";
@@ -161,7 +163,7 @@ function GeneralForm() {
                 {shellSettings !== null && !trayAvailable
                   ? "No tray icon was created, so closing the window quits h4rn"
                   : keepInTray
-                    ? "Closing the window keeps h4rn in the tray"
+                    ? "Closing the window keeps h4rn in the tray — open h4rn again to show it"
                     : "Closing the window quits h4rn"}
               </div>
             </div>
@@ -278,6 +280,12 @@ function NotificationsForm() {
   const channel = useMemo(notificationChannel, []);
   const settings = useNotificationSettings();
   const shell = secretShell();
+  const signedIn = useRemote((state) => state.user !== null);
+  const linkedMachineCount = useRemote((state) => state.linkedMachines.length);
+  // Host presence comes from the relay for the machines this device is linked
+  // to. A direct-only session has no signal for other hosts, so the row is
+  // hidden rather than shown as a dead switch.
+  const relayPresence = signedIn && linkedMachineCount > 0;
   const [permission, setPermission] = useState<NotificationPermissionState | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -309,11 +317,12 @@ function NotificationsForm() {
         setPermission(state);
         // The desktop shell cannot report a permission; the OS still decides
         // whether a notification appears, so the switch is allowed to mean
-        // "ask for this" there. A browser that refused stays off.
-        if (state !== "granted" && state !== "unknown") {
-          setNotificationSetting(key, false);
-          return;
+        // "ask for this" there. A browser that refused keeps the stored
+        // preference but shows no switch at all.
+        if (state === "granted" || state === "unknown") {
+          setNotificationSetting(key, true);
         }
+        return;
       } catch (cause) {
         setError(describeError(cause));
         return;
@@ -322,6 +331,10 @@ function NotificationsForm() {
     setNotificationSetting(key, next);
   };
 
+  const rows = relayPresence
+    ? NOTIFICATION_ROWS
+    : NOTIFICATION_ROWS.filter((row) => row.key !== "hostOffline");
+
   return (
     <div className="q-form">
       <h1>Notifications</h1>
@@ -329,7 +342,7 @@ function NotificationsForm() {
       {channel ? (
         <div className="q-group">
           <h2>On this device</h2>
-          {NOTIFICATION_ROWS.map((row) => (
+          {rows.map((row) => (
             <div className="q-field" key={row.key}>
               <div className="lab">
                 <div className="t">{row.title}</div>
@@ -342,7 +355,7 @@ function NotificationsForm() {
                   <span className="q-muted">Blocked in system settings</span>
                 ) : (
                   <Toggle
-                    checked={settings[row.key]}
+                    checked={displayedNotificationSetting(permission, settings[row.key])}
                     label={row.label}
                     onChange={(next) => void change(row.key, next)}
                   />
@@ -350,6 +363,12 @@ function NotificationsForm() {
               </div>
             </div>
           ))}
+          {!relayPresence ? (
+            <p className="s q-muted">
+              Host offline alerts need a host linked through the relay. This device has none, so
+              there is no other host to watch.
+            </p>
+          ) : null}
           {error ? (
             <p className="s" role="alert" style={{ color: "var(--danger)" }}>
               {error}

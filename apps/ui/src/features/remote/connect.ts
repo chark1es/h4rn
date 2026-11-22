@@ -387,8 +387,9 @@ export class ConnectClient {
     return this.authorizedJson<ConnectMeResponse>("GET", "/v1/me");
   }
 
-  async machines(): Promise<MachineSummary[]> {
-    return this.authorizedJson<MachineSummary[]>("GET", "/v1/machines");
+  async machines(options: { linked?: boolean } = {}): Promise<MachineSummary[]> {
+    const query = options.linked ? "?linked=true" : "";
+    return this.authorizedJson<MachineSummary[]>("GET", `/v1/machines${query}`);
   }
 
   async devices(): Promise<ConnectDevice[]> {

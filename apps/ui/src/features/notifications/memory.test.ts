@@ -37,4 +37,26 @@ describe("notifier memory", () => {
     memory.startTurn("thr_1");
     expect(memory.failureAnnounced("thr_1")).toBe(false);
   });
+
+  it("remembers a live completion until it is announced", () => {
+    const memory = new NotificationMemory();
+    memory.completeTurn("thr_1", "completed", 1_000);
+    expect(memory.hasLiveCompletion("thr_1")).toBe(true);
+    memory.announceFinished("thr_1");
+    expect(memory.hasLiveCompletion("thr_1")).toBe(false);
+  });
+
+  it("does not treat a replayed completion as a live announcement", () => {
+    const memory = new NotificationMemory();
+    memory.completeTurn("thr_1", "completed", 1_000, false);
+    expect(memory.lastTurn("thr_1")).toEqual({ status: "completed", error: null });
+    expect(memory.hasLiveCompletion("thr_1")).toBe(false);
+  });
+
+  it("forgets a live completion when a new turn starts", () => {
+    const memory = new NotificationMemory();
+    memory.completeTurn("thr_1", "completed", 1_000);
+    memory.startTurn("thr_1");
+    expect(memory.hasLiveCompletion("thr_1")).toBe(false);
+  });
 });

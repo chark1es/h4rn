@@ -9,7 +9,6 @@
 import type {
   ApprovalKind,
   Event,
-  HostSummary,
   MachineSummary,
   ThreadId,
   ThreadSummary,
@@ -28,6 +27,8 @@ export type NotificationDraft = {
   title: string;
   body: string;
   threadId: ThreadId | null;
+  /** The approval this draft announces, so its resolution can cancel it. */
+  approvalId?: string;
 };
 
 /** What the person can already see, at the moment the decision is made. */
@@ -91,6 +92,8 @@ export function draftForEnvelope(
     threads: Record<ThreadId, ThreadSummary>;
     settings: NotificationSettings;
     focus: FocusSnapshot;
+    /** A subagent child thread: its parent mirrors the approval already. */
+    childThread?: boolean;
   },
 ): NotificationDraft | null {
   if (envelope.replayed) return null;
@@ -104,18 +107,24 @@ export function draftForEvent(
     threads: Record<ThreadId, ThreadSummary>;
     settings: NotificationSettings;
     focus: FocusSnapshot;
+    /** A subagent child thread: its parent mirrors the approval already. */
+    childThread?: boolean;
   },
 ): NotificationDraft | null {
   const { threads, settings, focus } = options;
 
   if (event.type === "approval_requested") {
     if (!settings.approvals) return null;
+    // A child thread's approval is mirrored on the parent with a namespaced
+    // id, so announcing the child's own copy would notify twice.
+    if (options.childThread) return null;
     const draft: NotificationDraft = {
       key: threadKey(event.thread_id),
       kind: "approval",
       title: threadTitle(threads, event.thread_id),
       body: approvalBody(event.kind, event.prompt),
       threadId: event.thread_id,
+      approvalId: event.approval_id,
     };
     return alreadyVisible(draft, focus) ? null : draft;
   }
@@ -190,11 +199,21 @@ export function finishedDraft(
     lastTurn: LastTurn | null;
     /** A failure for this same turn was already announced. */
     announcedFailure?: boolean;
+    /** A live (not replayed) `turn_completed` for the current turn was seen. */
+    liveCompletion?: boolean;
   },
 ): NotificationDraft | null {
+  // A child thread finishes with its subagent, and the parent's mirrored
+  // approval already covers the moment a person is needed.
+  if (next.parent_thread_id) return null;
   const transition = finishedTransition(previous, next);
   if (!transition) return null;
   if (!options.settings.finishedTurns) return null;
+  // The summary moving to Done is not news by itself: a different client may
+  // have moved the thread, or the list may have healed a gap after a failed
+  // subscribe. Only a live completion for this thread's current turn makes
+  // this the end of something the person was waiting for.
+  if (!options.liveCompletion) return null;
   if (transition === "done" && options.announcedFailure) return null;
   if (transition === "failure" && !isFailureStatus(options.lastTurn)) return null;
   const draft: NotificationDraft = {
@@ -258,6 +277,7 @@ export function dueNotifications(
         title: pending.title,
         body: pending.body,
         threadId: pending.threadId,
+        ...(pending.approvalId === undefined ? {} : { approvalId: pending.approvalId }),
       });
     } else {
       remaining[key] = pending;
@@ -278,15 +298,18 @@ export function nextDeadline(queue: NotificationQueue): number | null {
 /** What the hosts poll knows about one host. */
 export type HostState = { name: string; online: boolean };
 
-/** Everything the sidebar's presence rows read, in one snapshot. */
+/** Everything the notifier's presence rows read, in one snapshot. */
 export type PresenceSource = {
   connection: ConnectionStatus;
   signedIn: boolean;
-  /** Connect machines, when this device is signed in to a relay. */
+  /**
+   * Connect machines this device is linked to, as reported by the relay. Only
+   * the relay has an independent reachability signal, so a direct session has
+   * no presence to report.
+   */
   machines: MachineSummary[];
   activeMachineId: string | null;
-  /** Hosts the connected daemon reported in its hello. */
-  hosts: Record<string, HostSummary>;
+  /** Host id of the daemon this client is connected to (hello's local host). */
   localHostId: string | null;
 };
 
@@ -294,31 +317,49 @@ export type PresenceSource = {
  * The same presence the sidebar shows, shaped for the notifier.
  *
  * The live transport is authoritative for the host this client is connected
- * to, so the relay can never report our own working host as offline. Other
- * machines keep connect's presence; a direct session uses the daemon's host
- * list. With no working transport the client learns nothing and returns
- * `null`, which resets the baseline instead of inventing a transition.
+ * to, so the relay can never report our own working host as offline. That is
+ * true even when no machine was picked by hand: `hello`'s local host names the
+ * machine the transport is actually talking to. Other linked machines keep
+ * connect's presence. With no relay list there is no independent signal, so
+ * this returns `null` (direct sessions hide the row rather than show a switch
+ * that can never fire).
  */
 export function hostPresence(source: PresenceSource): Record<string, HostState> | null {
   if (source.connection !== "online") return null;
+  if (!source.signedIn || source.machines.length === 0) return null;
   const next: Record<string, HostState> = {};
 
-  if (source.signedIn && source.machines.length > 0) {
-    for (const machine of source.machines) {
-      const online =
-        machine.id === source.activeMachineId ? source.connection === "online" : machine.online;
-      const hosts =
-        machine.hosts.length > 0 ? machine.hosts : [{ id: machine.id, name: machine.name }];
-      for (const host of hosts) next[host.id] = { name: host.name, online };
-    }
-  } else {
-    for (const host of Object.values(source.hosts)) {
-      const active = source.localHostId !== null && host.host_id === source.localHostId;
-      next[host.host_id] = { name: host.name, online: active ? true : host.online };
+  for (const machine of source.machines) {
+    const hosts =
+      machine.hosts.length > 0 ? machine.hosts : [{ id: machine.id, name: machine.name }];
+    const connected =
+      machine.id === source.activeMachineId ||
+      (source.localHostId !== null && hosts.some((host) => host.id === source.localHostId));
+    for (const host of hosts) {
+      next[host.id] = { name: host.name, online: connected ? true : machine.online };
     }
   }
 
   return Object.keys(next).length > 0 ? next : null;
+}
+
+/**
+ * Whether a queued host alert is still true at delivery time.
+ *
+ * The queue waits out the quiet period, so the host may have come back (or
+ * this client may have lost its transport) before the message is due. In that
+ * case the alert is stale and must be dropped.
+ */
+export function stillOffline(
+  draft: NotificationDraft,
+  presence: Record<string, HostState> | null,
+  connection: ConnectionStatus,
+): boolean {
+  if (draft.kind !== "host_offline") return true;
+  if (connection !== "online" || presence === null) return false;
+  const hostId = draft.key.startsWith("host:") ? draft.key.slice("host:".length) : "";
+  const host = presence[hostId];
+  return host !== undefined && !host.online;
 }
 
 /**
@@ -348,4 +389,24 @@ export function offlineTransitions(
     if (!alreadyVisible(draft, focus)) drafts.push(draft);
   }
   return drafts;
+}
+
+/**
+ * Drops a thread's queued approval when that exact approval is answered.
+ *
+ * The queue is keyed per thread, so a newer approval that re-queued the same
+ * key keeps its place: only a resolution of the approval the draft names
+ * cancels it.
+ */
+export function dropResolvedApproval(
+  queue: NotificationQueue,
+  threadId: ThreadId,
+  approvalId: string,
+): NotificationQueue {
+  const key = threadKey(threadId);
+  const pending = queue[key];
+  if (!pending || pending.approvalId !== approvalId) return queue;
+  const next = { ...queue };
+  delete next[key];
+  return next;
 }

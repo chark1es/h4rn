@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import type {
   ApprovalKind,
   Event,
-  HostSummary,
   MachineSummary,
   ThreadId,
   ThreadSummary,
@@ -16,6 +15,7 @@ import {
   COALESCE_MAX_MS,
   draftForEnvelope,
   draftForEvent,
+  dropResolvedApproval,
   dueNotifications,
   enqueue,
   type FocusSnapshot,
@@ -27,6 +27,7 @@ import {
   type NotificationQueue,
   offlineTransitions,
   type PresenceSource,
+  stillOffline,
 } from "./logic";
 import { NOTIFICATION_DEFAULTS, type NotificationSettings } from "./settings";
 
@@ -127,7 +128,19 @@ describe("approval notifications", () => {
       title: "Fix the flaky auth test",
       body: "Wants to run: rm -rf node_modules",
       threadId: THREAD,
+      approvalId: "ap_1",
     });
+  });
+
+  it("skips a child thread because the parent already mirrors its approval", () => {
+    expect(
+      draftForEvent(approval(), {
+        threads: threads(),
+        settings: settings(),
+        focus: focus(),
+        childThread: true,
+      }),
+    ).toBeNull();
   });
 
   it("stays quiet when the person is already looking at that thread", () => {
@@ -190,13 +203,31 @@ describe("approval notifications", () => {
 });
 
 describe("finished-turn notifications", () => {
-  it("announces a thread that lands in Done", () => {
-    const draft = finishedDraft(wasIn(), summary(THREAD, { tab: "done", agent_state: "done" }), {
-      settings: settings(),
-      focus: focus(),
-      lastTurn: lastTurn("completed"),
+  /** A Done/failure draft with a live completion unless a test says otherwise. */
+  function finished(
+    next: ThreadSummary,
+    options: {
+      previous?: Pick<ThreadSummary, "tab" | "needs_attention" | "agent_state">;
+      settings?: NotificationSettings;
+      focus?: FocusSnapshot;
+      lastTurn?: LastTurn;
+      announcedFailure?: boolean;
+      liveCompletion?: boolean;
+    } = {},
+  ) {
+    return finishedDraft(options.previous ?? wasIn(), next, {
+      settings: options.settings ?? settings(),
+      focus: options.focus ?? focus(),
+      lastTurn: options.lastTurn ?? lastTurn("completed"),
+      liveCompletion: options.liveCompletion ?? true,
+      ...(options.announcedFailure === undefined
+        ? {}
+        : { announcedFailure: options.announcedFailure }),
     });
-    expect(draft).toEqual({
+  }
+
+  it("announces a thread that lands in Done", () => {
+    expect(finished(summary(THREAD, { tab: "done", agent_state: "done" }))).toEqual({
       key: `thread:${THREAD}`,
       kind: "finished",
       title: "Fix the flaky auth test",
@@ -206,80 +237,93 @@ describe("finished-turn notifications", () => {
   });
 
   it("stays quiet when the next queued turn starts in the same update", () => {
-    expect(
-      finishedDraft(wasIn(), summary(THREAD, { tab: "working" }), {
-        settings: settings(),
-        focus: focus(),
-        lastTurn: lastTurn("completed"),
-      }),
-    ).toBeNull();
+    expect(finished(summary(THREAD, { tab: "working" }))).toBeNull();
   });
 
   it("announces an interrupted turn that lands in Done", () => {
-    const draft = finishedDraft(wasIn(), summary(THREAD, { tab: "done" }), {
-      settings: settings(),
-      focus: focus(),
+    const draft = finished(summary(THREAD, { tab: "done" }), {
       lastTurn: lastTurn("interrupted"),
     });
     expect(draft?.body).toBe("Finished: the turn is done.");
   });
 
   it("names the error when the turn failed", () => {
-    const draft = finishedDraft(wasIn(), summary(THREAD, { tab: "done", agent_state: "error" }), {
-      settings: settings(),
-      focus: focus(),
+    const draft = finished(summary(THREAD, { tab: "done", agent_state: "error" }), {
       lastTurn: lastTurn("failed", "the provider rejected the model"),
     });
     expect(draft?.body).toBe("Failed: the provider rejected the model");
   });
 
   it("falls back to a plain failure sentence", () => {
-    const draft = finishedDraft(wasIn(), summary(THREAD, { tab: "done", agent_state: "error" }), {
-      settings: settings(),
-      focus: focus(),
+    const draft = finished(summary(THREAD, { tab: "done", agent_state: "error" }), {
       lastTurn: lastTurn("failed"),
     });
     expect(draft?.body).toBe("Failed: the turn ended with an error.");
   });
 
   it("announces a failure as soon as the thread raises its hand", () => {
-    const draft = finishedDraft(
-      wasIn(),
+    const draft = finished(
       summary(THREAD, {
         tab: "working",
         needs_attention: true,
         agent_state: "error",
       }),
-      { settings: settings(), focus: focus(), lastTurn: lastTurn("failed", "the host went away") },
+      { lastTurn: lastTurn("failed", "the host went away") },
     );
     expect(draft?.body).toBe("Failed: the host went away");
   });
 
   it("does not repeat a failure when the same turn reaches Done", () => {
     expect(
-      finishedDraft(
-        wasIn({ needs_attention: true, agent_state: "error" }),
-        summary(THREAD, { tab: "done", needs_attention: true, agent_state: "error" }),
-        {
-          settings: settings(),
-          focus: focus(),
-          lastTurn: lastTurn("failed", "the host went away"),
-          announcedFailure: true,
-        },
-      ),
+      finished(summary(THREAD, { tab: "done", needs_attention: true, agent_state: "error" }), {
+        previous: wasIn({ needs_attention: true, agent_state: "error" }),
+        lastTurn: lastTurn("failed", "the host went away"),
+        announcedFailure: true,
+      }),
+    ).toBeNull();
+  });
+
+  it("stays quiet when another client moved the thread to Done", () => {
+    // No live `turn_completed` for this thread's current turn: only the
+    // summary changed, and that is someone else's action, not news.
+    expect(
+      finished(summary(THREAD, { tab: "done", agent_state: "done" }), {
+        liveCompletion: false,
+      }),
+    ).toBeNull();
+  });
+
+  it("stays quiet for a replayed completion followed by a live summary tick", () => {
+    // The completion arrived only in the replay, so the later live Done tick
+    // is history healing itself, not a finished turn.
+    expect(
+      finished(summary(THREAD, { tab: "done", agent_state: "done" }), {
+        lastTurn: lastTurn("completed"),
+        liveCompletion: false,
+      }),
+    ).toBeNull();
+  });
+
+  it("stays quiet for a subagent child thread", () => {
+    expect(
+      finishedDraft(wasIn(), summary(THREAD, { tab: "done", parent_thread_id: OTHER }), {
+        settings: settings(),
+        focus: focus(),
+        lastTurn: lastTurn("completed"),
+        liveCompletion: true,
+      }),
     ).toBeNull();
   });
 
   it("keeps a mid-turn error that is not a failed turn quiet", () => {
     expect(
-      finishedDraft(
-        wasIn(),
+      finished(
         summary(THREAD, {
           tab: "working",
           needs_attention: true,
           agent_state: "error",
         }),
-        { settings: settings(), focus: focus(), lastTurn: lastTurn("completed") },
+        { lastTurn: lastTurn("completed") },
       ),
     ).toBeNull();
   });
@@ -295,36 +339,31 @@ describe("finished-turn notifications", () => {
         settings: settings(),
         focus: focus(),
         lastTurn: lastTurn("completed"),
+        liveCompletion: true,
       }),
     ).toBeNull();
   });
 
   it("says nothing again once the thread is already Done", () => {
     expect(
-      finishedDraft(wasIn({ tab: "done" }), summary(THREAD, { tab: "done" }), {
-        settings: settings(),
-        focus: focus(),
-        lastTurn: lastTurn("completed"),
+      finished(summary(THREAD, { tab: "done" }), {
+        previous: wasIn({ tab: "done" }),
       }),
     ).toBeNull();
   });
 
   it("stays quiet for the open thread", () => {
     expect(
-      finishedDraft(wasIn(), summary(THREAD, { tab: "done" }), {
-        settings: settings(),
+      finished(summary(THREAD, { tab: "done" }), {
         focus: focus({ windowFocused: true, openThreadId: THREAD }),
-        lastTurn: lastTurn("completed"),
       }),
     ).toBeNull();
   });
 
   it("respects the Finished turns switch", () => {
     expect(
-      finishedDraft(wasIn(), summary(THREAD, { tab: "done" }), {
+      finished(summary(THREAD, { tab: "done" }), {
         settings: settings({ finishedTurns: false }),
-        focus: focus(),
-        lastTurn: lastTurn("completed"),
       }),
     ).toBeNull();
   });
@@ -387,6 +426,33 @@ describe("coalescing", () => {
   });
 });
 
+describe("resolved approvals", () => {
+  function queued(approvalId: string, prompt: string): NotificationQueue {
+    const event = approval(THREAD, "command", prompt);
+    if (event.type !== "approval_requested") throw new Error("unexpected event");
+    const draft = draftForEvent(
+      { ...event, approval_id: approvalId },
+      {
+        threads: threads(),
+        settings: settings(),
+        focus: focus(),
+      },
+    );
+    if (!draft) throw new Error("expected a draft");
+    return enqueue({}, draft, 1_000);
+  }
+
+  it("drops a thread's queued approval when that approval is answered", () => {
+    const queue = dropResolvedApproval(queued("ap_1", "npm test"), THREAD, "ap_1");
+    expect(queue).toEqual({});
+  });
+
+  it("keeps a newer approval that re-queued the same thread", () => {
+    const queue = dropResolvedApproval(queued("ap_2", "npm run build"), THREAD, "ap_1");
+    expect(queue[`thread:${THREAD}`]?.body).toBe("Wants to run: npm run build");
+  });
+});
+
 describe("host offline", () => {
   const previous: Record<string, HostState> = {
     host_atlas: { name: "atlas", online: true },
@@ -410,26 +476,12 @@ describe("host offline", () => {
     };
   }
 
-  function host(hostId: string, online: boolean): HostSummary {
-    return {
-      host_id: hostId,
-      name: hostId,
-      platform: "linux",
-      online,
-      last_seen: "2026-11-21T00:00:00Z",
-      harnesses: [],
-      latency_ms: null,
-      path: null,
-    };
-  }
-
   function source(patch: Partial<PresenceSource> = {}): PresenceSource {
     return {
       connection: "online",
       signedIn: true,
       machines: [machine("m_atlas", "atlas", false), machine("m_buildbox", "buildbox", true)],
       activeMachineId: "m_atlas",
-      hosts: {},
       localHostId: null,
       ...patch,
     };
@@ -442,7 +494,35 @@ describe("host offline", () => {
     expect(next?.m_atlas).toEqual({ name: "atlas", online: true });
   });
 
-  it("notifies only for another paired machine that actually went offline", () => {
+  it("trusts the host named by hello even when no machine was picked", () => {
+    // A direct connection through a relay has no `activeMachineId`, but
+    // `hello.local_host` names the machine the transport is talking to.
+    const next = hostPresence(
+      source({
+        activeMachineId: null,
+        localHostId: "m_atlas",
+        machines: [machine("m_atlas", "atlas", false)],
+      }),
+    );
+    expect(next?.m_atlas).toEqual({ name: "atlas", online: true });
+  });
+
+  it("has no presence for a direct-only session", () => {
+    // No relay list means no independent reachability signal; the row is
+    // hidden rather than fed a guess.
+    expect(
+      hostPresence(
+        source({
+          signedIn: false,
+          machines: [],
+          activeMachineId: null,
+        }),
+      ),
+    ).toBeNull();
+    expect(hostPresence(source({ machines: [], activeMachineId: null }))).toBeNull();
+  });
+
+  it("notifies only for another linked machine that actually went offline", () => {
     const before = hostPresence(source());
     const after = hostPresence(
       source({
@@ -461,23 +541,43 @@ describe("host offline", () => {
     });
   });
 
-  it("uses the daemon's hosts for a direct session", () => {
-    const next = hostPresence(
-      source({
-        signedIn: false,
-        machines: [],
-        activeMachineId: null,
-        hosts: {
-          host_local: host("host_local", false),
-          host_remote: host("host_remote", false),
-        },
-        localHostId: "host_local",
-      }),
+  it("drops a queued host alert if the host came back before delivery", () => {
+    const draft = {
+      key: "host:host_atlas",
+      kind: "host_offline" as const,
+      title: "atlas",
+      body: "",
+      threadId: null,
+    };
+    const presence = {
+      host_atlas: { name: "atlas", online: true },
+    };
+    expect(stillOffline(draft, presence, "online")).toBe(false);
+  });
+
+  it("drops a queued host alert if this client disconnected", () => {
+    const draft = {
+      key: "host:host_atlas",
+      kind: "host_offline" as const,
+      title: "atlas",
+      body: "",
+      threadId: null,
+    };
+    expect(stillOffline(draft, previous, "degraded")).toBe(false);
+    expect(stillOffline(draft, null, "online")).toBe(false);
+  });
+
+  it("delivers a queued host alert that is still true", () => {
+    const draft = {
+      key: "host:host_atlas",
+      kind: "host_offline" as const,
+      title: "atlas",
+      body: "",
+      threadId: null,
+    };
+    expect(stillOffline(draft, { host_atlas: { name: "atlas", online: false } }, "online")).toBe(
+      true,
     );
-    expect(next).toEqual({
-      host_local: { name: "host_local", online: true },
-      host_remote: { name: "host_remote", online: false },
-    });
   });
 
   it("knows nothing while this client is disconnected", () => {

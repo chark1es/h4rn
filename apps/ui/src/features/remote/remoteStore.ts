@@ -72,6 +72,8 @@ export type RemoteState = {
   device: ConnectDevice | null;
   devices: ConnectDevice[];
   machines: MachineSummary[];
+  /** The machines this device is linked to (or runs), for presence rows. */
+  linkedMachines: MachineSummary[];
   pairings: PairingInfo[];
   activeMachineId: string | null;
   active: ActiveRemote | null;
@@ -139,6 +141,7 @@ function createInitialState(): RemoteState {
     device: null,
     devices: [],
     machines: [],
+    linkedMachines: [],
     pairings: [],
     activeMachineId: active?.machineId ?? null,
     active,
@@ -321,6 +324,7 @@ export function initializeRemote(): void {
         mockDevice("mock-phone", "iPhone 16 Pro", "mobile"),
       ],
       machines: mockMachines(config.scenario),
+      linkedMachines: mockMachines(config.scenario),
       pairings: [],
       activeMachineId: readActiveRemote()?.machineId ?? MOCK_MACHINE_ID,
       lastSyncAt: Date.now(),
@@ -515,9 +519,12 @@ export async function refresh(): Promise<void> {
     return;
   }
   try {
-    const [me, machines, pairings] = await Promise.all([
+    const [me, machines, linkedMachines, pairings] = await Promise.all([
       client.me(),
       client.machines(),
+      // This device's links decide which machines can appear in presence
+      // rows; the full list feeds the machine picker.
+      client.machines({ linked: true }),
       client.listPairings().catch(() => [] as PairingInfo[]),
     ]);
     const device =
@@ -528,6 +535,7 @@ export async function refresh(): Promise<void> {
       device,
       devices: me.devices,
       machines,
+      linkedMachines,
       pairings,
       activeMachineId: remoteStore.getState().activeMachineId,
       lastSyncAt: Date.now(),

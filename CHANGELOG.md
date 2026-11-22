@@ -10,25 +10,36 @@ All notable changes to h4rn are recorded here. The format follows
 - **Notifications, Open at login and the tray are real settings.** Settings → Notifications now
   controls OS notifications on the desktop app (the Tauri notification plugin) and in the browser
   (the Web Notification API, asked for only when a switch is turned on; there is no separate
-  Allow button). Approvals and waiting questions, finished and failed turns, and a paired machine
+  Allow button). Approvals and waiting questions, finished and failed turns, and a linked machine
   going offline notify only when the window is not focused or a different thread is open.
-  Finished and failed turns follow the daemon's thread summary: a turn that hands off to a queued
-  turn says nothing, an interrupted turn that lands in Done notifies, and a token or turn limit
-  reads as “Stopped”, never “Finished”. A burst in one thread waits for a quiet period (1 s of no
-  new event, capped at 3 s) and announces the latest message. Clicking a notification focuses h4rn
-  and opens the thread. Events replayed after a reconnect are history and stay quiet. The choices
-  persist per device (`h4rn.notifications`): approvals and finished turns on, host offline off.
-  In the browser a denied OS permission is shown as “Blocked in system settings”; the desktop
-  notification plugin cannot detect a blocked permission, so Settings says nothing about it there
-  rather than claiming a state it does not know. Host offline uses the same live presence the
-  hosts list shows: the connection to the active host wins over the relay's report, and other
-  paired machines are watched while this client is connected.
+  Replay follows the journal-head boundary named by the subscribe answer, so a live approval that
+  arrives while the handshake is still in flight notifies on a first connect and after a reconnect,
+  while events at or below the boundary stay quiet. Finished and failed turns follow the daemon's
+  thread summary and need a live completion for the current turn: a thread moved to Done by another
+  client, or a replayed completion followed by a live tick, says nothing. The list re-seeds the
+  baseline whenever the client becomes ready, so a gap healed by a list cannot announce history. A
+  turn that hands off to a queued turn says nothing, an interrupted turn that lands in Done
+  notifies, and a token or turn limit reads as “Stopped”, never “Finished”. A burst in one thread
+  waits for a quiet period (1 s of no new event, capped at 3 s) and announces the latest message.
+  Clicking a notification focuses h4rn and opens the thread. Subagent child threads stay quiet (the
+  parent's mirrored approval already covers them), and an answered approval cancels that thread's
+  queued notification unless a newer approval replaced it. The choices persist per device
+  (`h4rn.notifications`): approvals and finished turns on, host offline off. In the browser a
+  denied OS permission is shown as “Blocked in system settings”, and a still-undecided permission
+  renders the switches off without forgetting the stored choice; the desktop notification plugin
+  cannot detect a blocked permission, so Settings says nothing about it there rather than claiming
+  a state it does not know. Host offline covers only the machines this device is linked to through
+  the relay; the live transport is always online, matched through `hello`'s local host even when no
+  machine was picked, and a queued alert is re-checked before delivery. A direct-only session hides
+  the row and says why.
 - **Open at login** registers the desktop app as a login item through the autostart plugin.
 - **Keep running in tray** adds an Open h4rn / Quit tray icon and makes the window's close button
   hide h4rn instead of quitting while agents keep working; the shell stores the choice so the
-  close handler knows it before the UI loads. Hide-on-close is only enabled when the tray icon was
-  actually created: if the shell cannot add one, closing quits as before and Settings disables the
-  switch with an explanation. Both startup rows are hidden in the browser and on mobile.
+  close handler knows it before the UI loads. Launching h4rn a second time shows and focuses the
+  hidden window, and a macOS dock click does the same, so a tray icon the Linux desktop never shows
+  cannot trap the app. Hide-on-close is only enabled when the tray icon was actually created: if
+  the shell cannot add one, closing quits as before and Settings disables the switch with an
+  explanation. Both startup rows are hidden in the browser and on mobile.
 - The mobile build does not send notifications yet, and Settings says so instead of offering
   switches that do nothing.
 

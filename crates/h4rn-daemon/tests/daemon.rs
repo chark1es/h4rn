@@ -632,6 +632,59 @@ async fn reconnecting_with_since_seq_replays_without_gaps() {
 }
 
 #[tokio::test]
+async fn subscribe_answers_with_the_journal_head_it_served() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    let first = client
+        .request(ClientRequest::Subscribe {
+            topics: vec![Topic::All],
+            since_seq: None,
+        })
+        .await
+        .expect("subscribe");
+    let ResponseBody::Subscribed { replay_through } = first else {
+        panic!("subscribe must name its replay boundary: {first:?}");
+    };
+
+    // A first connect starts at the live edge: everything the new thread emits
+    // after the subscribe answer is above the boundary the daemon named.
+    create_with_host(&mut client, host, "boundary", HarnessKind::ClaudeCode).await;
+    let last_seq = loop {
+        let (seq, event) = client.next_event().await;
+        assert!(
+            seq > replay_through,
+            "live sequence {seq} must be above the served head {replay_through}"
+        );
+        if matches!(event, Event::TurnCompleted { .. }) {
+            break seq;
+        }
+    };
+    drop(client);
+
+    let mut resumed = Client::connect(&daemon).await;
+    resumed.hello().await;
+    let replay = resumed
+        .request(ClientRequest::Subscribe {
+            topics: vec![Topic::All],
+            since_seq: Some(last_seq),
+        })
+        .await
+        .expect("resubscribe");
+    let ResponseBody::Subscribed { replay_through } = replay else {
+        panic!("resubscribe must name its replay boundary: {replay:?}");
+    };
+    assert!(
+        replay_through >= last_seq,
+        "the boundary {replay_through} must cover the cursor {last_seq}"
+    );
+
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn send_message_starts_a_new_turn_and_clears_a_pin() {
     let daemon = boot().await;
     let host = host_id_for(&daemon).await;

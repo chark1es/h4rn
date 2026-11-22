@@ -12,6 +12,23 @@ use tauri::{AppHandle, Manager, WindowEvent};
 
 use crate::settings::{self, ShellSettingsState, TrayAvailability};
 
+/// What a dock click or second launch asks the shell to do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub enum Reveal {
+    /// Show the main window, restore it and focus it.
+    ShowAndFocus,
+}
+
+/// The action for a reopen request.
+///
+/// macOS can report a visible window that is merely behind another app, and a
+/// tray-only app has no other way back, so both answers reveal the window.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub fn reopen_action(_has_visible_windows: bool) -> Reveal {
+    Reveal::ShowAndFocus
+}
+
 /// Brings the main window back from the tray.
 pub fn show_main(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
@@ -72,4 +89,18 @@ pub fn watch_window(app: &AppHandle) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reopen_always_shows_and_focuses_the_window() {
+        // macOS can send Reopen with `has_visible_windows: true` when the
+        // window is behind other apps; both cases must reveal it, because a
+        // tray-only app has no other way back.
+        assert_eq!(reopen_action(false), Reveal::ShowAndFocus);
+        assert_eq!(reopen_action(true), Reveal::ShowAndFocus);
+    }
 }
