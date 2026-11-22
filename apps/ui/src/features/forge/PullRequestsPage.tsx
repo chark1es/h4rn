@@ -1178,7 +1178,17 @@ function PrDetail({
                 aria-selected={tab === "files"}
                 onClick={() => setTab("files")}
               >
-                Files <span className="c">{pr.changed_files}</span>
+                Files{" "}
+                <span
+                  className="c"
+                  title={
+                    pr.changed_files_known
+                      ? undefined
+                      : "The forge did not report how many files changed"
+                  }
+                >
+                  {pr.changed_files_known ? pr.changed_files : "—"}
+                </span>
               </button>
             </div>
 

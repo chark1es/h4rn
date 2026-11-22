@@ -452,6 +452,8 @@ pub fn redact(value: &str) -> String {
             || word.starts_with("glpat-")
             || word.starts_with("github_pat_")
             || word.starts_with("ATBB")
+            // Atlassian API tokens have used the ATATT prefix since 2023.
+            || word.starts_with("ATATT")
         {
             output.push_str("[redacted]");
         } else {
@@ -660,6 +662,7 @@ mod tests {
         );
         assert_eq!(redact("glpat-xyz"), "[redacted]");
         assert_eq!(redact("ATBBtoken"), "[redacted]");
+        assert_eq!(redact("ATATT3xFfGF0abc"), "[redacted]");
     }
 
     #[test]

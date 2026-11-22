@@ -87,7 +87,7 @@ impl ForgeKind {
     ///
     /// GitHub does. GitLab, Gitea, Forgejo, Bitbucket Cloud and Azure DevOps
     /// do not expose a device grant for this use case, so they use a personal
-    /// A personal access token or OAuth access token the user creates.
+    /// access token or OAuth access token the user creates.
     pub fn supports_device_flow(self) -> bool {
         matches!(self, Self::GitHub)
     }
@@ -362,6 +362,11 @@ pub struct ForgePullRequest {
     pub deletions: u32,
     /// Files changed.
     pub changed_files: u32,
+    /// Whether the forge could count the changed files.
+    ///
+    /// `false` means the count is unknown (a diffstat page failed or hit its
+    /// cap), not that the PR changes no files; clients show it as unknown.
+    pub changed_files_known: bool,
     /// Commits in the PR.
     pub commits: u32,
     /// When it was opened.

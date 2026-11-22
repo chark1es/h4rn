@@ -57,13 +57,19 @@ pub fn pr_context_for_agent(
     } else if matches!(pr.mergeable, ForgeMergeable::Mergeable) {
         state.push_str(" · mergeable");
     }
+    let files = if pr.changed_files_known {
+        format!(
+            "{} file{}",
+            pr.changed_files,
+            if pr.changed_files == 1 { "" } else { "s" }
+        )
+    } else {
+        "an unknown number of files".to_owned()
+    };
     let _ = writeln!(
         out,
-        "- State: {state} · Diff: +{} −{} across {} file{}",
-        pr.additions,
-        pr.deletions,
-        pr.changed_files,
-        if pr.changed_files == 1 { "" } else { "s" }
+        "- State: {state} · Diff: +{} −{} across {files}",
+        pr.additions, pr.deletions
     );
     if let Some(head) = &summary.head_sha {
         let short = &head[..head.len().min(12)];
@@ -309,6 +315,7 @@ mod tests {
             additions: 12,
             deletions: 3,
             changed_files: 2,
+            changed_files_known: true,
             commits: 1,
             created_at: Utc::now(),
             reviewers: vec![ForgeReview {

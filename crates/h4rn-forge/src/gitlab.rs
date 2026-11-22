@@ -622,6 +622,7 @@ fn map_mr_detail(repo: &ForgeRepoRef, value: &Value) -> Result<ForgePullRequest>
         additions: 0,
         deletions: 0,
         changed_files,
+        changed_files_known: true,
         commits: 0,
         created_at: parse_datetime(&value["created_at"], "created_at")
             .unwrap_or_else(|_| chrono::Utc::now()),

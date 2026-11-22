@@ -133,6 +133,30 @@ All notable changes to h4rn are recorded here. The format follows
 - **Bitbucket Cloud recognises its SSH host.** `git@ssh.bitbucket.org:workspace/repo.git` and
   `ssh://git@ssh.bitbucket.org/workspace/repo.git` resolve to the `https://bitbucket.org` account,
   like the web and `bitbucket.org` SSH forms.
+- **Azure DevOps checks fail closed.** If the iteration, status or policy-evaluation request fails,
+  the checks request now fails instead of reporting the green rows as passing; a branch gate that
+  could not be read is never a pass.
+- **Azure DevOps fork pull requests read the source side from the fork.** When a PR names a
+  `forkSource.repository`, the old side comes from the target repository and the new side from the
+  fork, where the source commit lives. A 404 for a side the change says exists is an error rather
+  than a silently invented addition or deletion.
+- **Bitbucket Cloud follows the cursor it is given.** The PR list carries the same-origin `next` URL
+  forward as the next page instead of rebuilding `page=N`, so an opaque cursor keeps its filters and
+  pages do not repeat.
+- **Bitbucket Cloud Mine and Review requested work for personal tokens.** The author filter matches
+  `author.nickname` or `author.display_name`, because the viewer login can fall back to the display
+  name. Workspace, project and repository access tokens have no user identity, so those two filters
+  say “unsupported” with that reason instead of showing an empty list.
+- **Bitbucket Cloud base-URL errors never repeat the input.** A non-root path is rejected with the
+  same fixed wording Azure DevOps uses, and `ATATT…` Atlassian API tokens are redacted from error
+  messages like `ATBB…` already was.
+- **Honest Bitbucket Cloud counts and anchors.** A failed or capped diffstat leaves the changed-file
+  count unknown (`changed_files_known: false`) so the PR header shows “—” instead of “0”; a
+  file-level inline comment is no longer marked outdated; and the comments page reports `has_more`
+  only when the last page it read linked a `next` page.
+- **The Bitbucket token form says Pull requests: read and write**, matching the documented scopes,
+  and with several detected Bitbucket checkouts it lets the person choose which repository proves
+  an access token (the first is used by default).
 
 - **A second launch hands its deep link to the running app.** Launching h4rn while it is already
   running (including from a hidden tray) used to focus the window and drop the `h4rn://` link that

@@ -49,19 +49,31 @@ credential it cannot prove. The client lists open PRs (`state=OPEN`; the UI
 has no lifecycle filter, so merged and declined PRs are not listed) and uses
 the documented `q=` filter for author, reviewer and source-branch lists, so
 pagination stays server-side and pages never repeat; reviewer lists also ask
-for the documented partial-response addition `fields=+values.reviewers`. It
-reads the PR's raw unified diff from `/pullrequests/{id}/diff` (the API
-redirects that to the repository diff), rebuilds threads from the comment
-`parent` chain, and maps the commit's build statuses onto checks. A root
-comment's `resolution` object marks a thread resolved when the workspace
-reports it; otherwise threads are unresolved. Bitbucket does have a
-resolve-comment endpoint (`POST .../comments/{id}/resolve`), but this client
-does not call it yet, so `resolve_threads` is `false`. Diffs are paginated
-locally. Additions, deletions and the changed-file count come from `/diffstat`;
-when its five-page cap is reached while a further page exists the size is
-reported as unknown (zero) rather than as a partial total. Bitbucket does not
-report a credential's scopes, so the account row leaves them unknown instead
-of reading GitHub's `x-oauth-scopes` header.
+for the documented partial-response addition `fields=+values.reviewers`. The
+Mine filter matches both `author.nickname` and `author.display_name`, because
+the viewer login can fall back to the display name. A workspace, project or
+repository access token has no user identity, so Mine and Review requested
+answer `unsupported` with that reason instead of returning an empty list that
+looks like “no pull requests”. The PR list carries the same-origin `next` URL
+the server returned as the cursor for the next page instead of rebuilding
+`page=N`, so an opaque cursor keeps its filters. It reads the PR's raw unified
+diff from `/pullrequests/{id}/diff` (the API redirects that to the repository
+diff), rebuilds threads from the comment `parent` chain, and maps the commit's
+build statuses onto checks. A root comment's `resolution` object marks a
+thread resolved when the workspace reports it; otherwise threads are
+unresolved. Bitbucket does have a resolve-comment endpoint
+(`POST .../comments/{id}/resolve`), but this client does not call it yet, so
+`resolve_threads` is `false`. A file-level comment (no line anchor) is never
+marked outdated: without an explicit API flag there is no line that could have
+moved. The comments page reports `has_more` only when the last page it read
+still linked a `next` page; a list that happens to end at a page boundary is
+not “more”. Diffs are paginated locally. Additions, deletions and the
+changed-file count come from `/diffstat`; when its five-page cap is reached
+while a further page exists, or the diffstat request fails, the counts are
+left at zero and `changed_files_known` is `false`, so the UI shows the file
+count as unknown rather than “0”. Bitbucket does not report a credential's
+scopes, so the account row leaves them unknown instead of reading GitHub's
+`x-oauth-scopes` header.
 
 Azure DevOps Services uses REST 7.1. `ForgeRepoRef.base_url` carries the
 organization (`https://dev.azure.com/acme`) and `owner` carries the project.
@@ -77,21 +89,29 @@ rather than a patch. The client reads the latest iteration's
 `commonRefCommit` (old) and `sourceRefCommit` (new), pages the change entries,
 and downloads only the files on the requested diff page through
 `items?includeContentMetadata=true`, using `contentMetadata.isBinary` to mark
-binaries. A page holds at most eight files: the worst case is two content
+binaries. A PR from a fork names the fork in `forkSource.repository`: the old
+side is read from the target repository and the new side from the fork, where
+its source commit exists. A 404 for a side the change says exists is an error,
+not an absent file, because it means the wrong repository or commit was read.
+A page holds at most eight files: the worst case is two content
 reads per file plus the two metadata reads, eighteen requests, which fits the
 UI's ten-second deadline inside the default 120-requests-per-minute account
 budget even when the local token bucket is empty. Files whose change keeps
 their bytes (a pure `rename`, `branch` or `merge`) download nothing, and at
 most six content requests run at once. A per-request cache avoids downloading
 a blob twice. The PR detail only counts changed files from the
-iteration metadata; it never downloads contents. `/pullrequests/{id}/threads`
-supplies both general comments and inline threads; thread statuses `fixed`,
-`closed`, `wontFix` and `byDesign` are resolved. Checks are PR statuses plus
-policy evaluations requested with `api-version=7.1-preview.1`; the project id
-comes from the PR's `repository.project.id`. Statuses carry an optional
-`iterationId`: PR-level statuses (no iteration) and those for the current
-iteration are kept, so a failure from an earlier push cannot outlive the code
-it tested. Each policy evaluation is a separate row keyed by its evaluation
+iteration metadata; it never downloads contents. When the iteration or its
+change entries cannot be read, `changed_files_known` is `false` and the UI
+shows the count as unknown. `/pullrequests/{id}/threads` supplies both general
+comments and inline threads; thread statuses `fixed`, `closed`, `wontFix` and
+`byDesign` are resolved. Checks are PR statuses plus policy evaluations
+requested with `api-version=7.1-preview.1`; the project id comes from the PR's
+`repository.project.id`. If the status, iteration or policy-evaluation request
+fails, the whole checks request fails instead of reporting the surviving green
+rows as passing: a branch gate that could not be read is never a pass.
+Statuses carry an optional `iterationId`: PR-level statuses (no iteration) and
+those for the current iteration are kept, so a failure from an earlier push
+cannot outlive the code it tested. Each policy evaluation is a separate row keyed by its evaluation
 and configuration ids, so two configurations with the same display name do not
 collapse into one; `configuration.isBlocking` marks required rows; and a
 policy outcome wins only over a *status* with the same name. Change types are
@@ -170,8 +190,9 @@ Azure DevOps base URL may include one organization segment
 for the cloud services; Server/Data Center and Azure DevOps Server are rejected
 when the host file is read because their APIs differ. The well-known hosts
 `github.com`, `gitlab.com`, `codeberg.org`, `gitea.com`, `bitbucket.org`,
-`dev.azure.com` and `ssh.dev.azure.com` are preloaded and can be overridden, and
-every `<org>.visualstudio.com` host is recognised as Azure DevOps.
+`ssh.bitbucket.org`, `dev.azure.com` and `ssh.dev.azure.com` are preloaded and
+can be overridden, and every `<org>.visualstudio.com` host is recognised as
+Azure DevOps.
 
 The data directory is `$H4RN_DATA_DIR`, or the platform default
 (`$XDG_DATA_HOME/h4rn`, `~/Library/Application Support/h4rn`,
@@ -219,9 +240,11 @@ access tokens use HTTP Basic with an empty username. Bitbucket accounts record
 which scheme validated (`bitbucket_api_token` or `bitbucket_access_token`) so
 a restart keeps the same credential type. App passwords were retired by
 Atlassian in July 2026 and are not accepted by the form or the docs. Bitbucket Cloud and Azure DevOps base URLs must
-be plain `https://` origins without credentials, a query or a fragment, and
-Bitbucket Cloud and Azure DevOps Server/Data Center hosts are rejected before
-anything is stored.
+be plain `https://` origins without credentials, a path, a query or a fragment,
+and Bitbucket Cloud and Azure DevOps Server/Data Center hosts are rejected
+before anything is stored. Neither provider's base-URL errors repeat the input,
+because a path or query can carry a secret; Atlassian's `ATATT…` token prefix
+and `ATBB…` are redacted from error messages like GitHub's and GitLab's.
 
 The daemon compares the scopes the forge reports with the least-privilege set
 and surfaces extras in the account row (`ForgeAccount.scopes`), so an
@@ -385,11 +408,14 @@ discussions and jobs; Gitea/Forgejo PRs, raw diff, comments, reviews, statuses;
 Bitbucket Cloud PRs, diffstat (including the paging cap), the `/diff`
 redirect, comment `parent` chains, build statuses, basic/bearer auth,
 repository-token validation with both account endpoints rejecting, the
-documented `q=` filters and duplicate-free pages, `ssh.bitbucket.org`, and
-same-origin `next` handling; Azure DevOps PRs, raw iteration arrays,
-changed-file contents, the 100-file per-page budget, threads, statuses across
-iterations, same-name policy evaluations, `undelete` change types, PAT auth,
-commit `continuationToken` pages and per-page diff contents. They also cover the
+documented `q=` filters and duplicate-free pages, an opaque `next` cursor on
+the second PR page, comments `has_more` at the page cap, file-level comments,
+`ssh.bitbucket.org`, and same-origin `next` handling; Azure DevOps PRs, raw
+iteration arrays, changed-file contents, the 100-file per-page budget, threads,
+statuses across iterations, same-name policy evaluations, a failed policy
+read, fork PRs whose source side exists only in the fork, unexpected item
+404s, `undelete` change types, PAT auth, commit `continuationToken` pages and
+per-page diff contents. They also cover the
 remote-URL parsing matrix (including percent-decoded segments and the legacy
 `vs-ssh.visualstudio.com` host), diff parsing and pagination, the local
 unified-diff builder, and the agent-context renderer.

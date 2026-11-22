@@ -164,6 +164,38 @@ impl AzureDevOpsClient {
             .await
     }
 
+    /// The repository that holds the source commit.
+    ///
+    /// A PR from a fork names the fork in `forkSource.repository`; its source
+    /// commit exists only there, so the new side of every diff must be read
+    /// from that repository. Without a fork the source side is the PR's own
+    /// repository.
+    fn source_repo(&self, repo: &ForgeRepoRef, pr: &Value) -> Result<ForgeRepoRef> {
+        let Some(fork) = pr
+            .get("forkSource")
+            .and_then(|value| value.get("repository"))
+        else {
+            return Ok(repo.clone());
+        };
+        if fork.is_null() {
+            return Ok(repo.clone());
+        }
+        let name = optional_text(fork, "name")
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                ForgeError::Parse("the pull request's fork source names no repository".into())
+            })?;
+        let project = optional_text(&fork["project"], "name")
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| repo.owner.clone());
+        Ok(ForgeRepoRef {
+            forge: ForgeKind::AzureDevOps,
+            base_url: repo.base_url.clone(),
+            owner: project,
+            repo: name,
+        })
+    }
+
     async fn identity_id(&self) -> Result<String> {
         let value = self
             .http
@@ -233,8 +265,13 @@ impl AzureDevOpsClient {
         Ok(entries)
     }
 
-    /// File content and metadata at one commit. A 404 means the path does not
-    /// exist there (an added or deleted file's other side).
+    /// File content and metadata at one commit.
+    ///
+    /// Only sides the change says exist are requested (an added file's old
+    /// side and a deleted file's new side are never fetched), so a 404 here is
+    /// unexpected: it means the wrong repository or commit was read, not that
+    /// the file is absent. It stays an error instead of quietly turning the
+    /// file into a deletion or an addition.
     async fn item_content(
         &self,
         repo: &ForgeRepoRef,
@@ -247,60 +284,87 @@ impl AzureDevOpsClient {
             urlencode(&format!("/{}", path.trim_start_matches('/'))),
             urlencode(commit)
         );
-        match self.http.get_json(&url).await {
-            Ok(value) => Ok(ItemContent::present(
-                optional_text(&value, "content"),
-                value["contentMetadata"]["isBinary"]
-                    .as_bool()
-                    .or_else(|| value["isBinary"].as_bool())
-                    .unwrap_or(false),
-            )),
-            Err(ForgeError::NotFound(_)) | Err(ForgeError::Http { status: 404, .. }) => {
-                Ok(ItemContent::missing())
-            }
-            Err(error) => Err(error),
-        }
+        let value = self.http.get_json(&url).await?;
+        Ok(ItemContent::present(
+            optional_text(&value, "content"),
+            value["contentMetadata"]["isBinary"]
+                .as_bool()
+                .or_else(|| value["isBinary"].as_bool())
+                .unwrap_or(false),
+        ))
     }
 
     /// Fetches the old and new contents for one page of files, at most
-    /// [`CONTENT_CONCURRENCY`] requests at a time. A cache keyed by path and
-    /// commit keeps a rename from downloading the same blob twice, and a file
-    /// whose change keeps its bytes (a pure rename) downloads nothing.
+    /// [`CONTENT_CONCURRENCY`] requests at a time.
+    ///
+    /// The old side comes from the target repository and the new side from
+    /// `source` — the fork's repository when the PR comes from a fork, because
+    /// its source commit exists only there. A cache keyed by repository, path
+    /// and commit keeps a rename from downloading the same blob twice, and a
+    /// file whose change keeps its bytes (a pure rename) downloads nothing.
+    #[allow(clippy::too_many_arguments)]
     async fn page_file_diffs(
         &self,
         repo: &ForgeRepoRef,
+        source: &ForgeRepoRef,
         files: &[ChangedFile],
         old_ref: &str,
         new_ref: &str,
     ) -> Result<Vec<ForgeFileDiff>> {
-        let mut requests: Vec<(String, String)> = Vec::new();
+        let mut requests: Vec<(String, String, String, String)> = Vec::new();
         for file in files {
             if !file.content_changed {
                 continue;
             }
             if file.status != ForgeFileStatus::Added {
-                requests.push((file.original.clone(), old_ref.to_owned()));
+                requests.push((
+                    repo.owner.clone(),
+                    repo.repo.clone(),
+                    file.original.clone(),
+                    old_ref.to_owned(),
+                ));
             }
             if file.status != ForgeFileStatus::Deleted {
-                requests.push((file.path.clone(), new_ref.to_owned()));
+                requests.push((
+                    source.owner.clone(),
+                    source.repo.clone(),
+                    file.path.clone(),
+                    new_ref.to_owned(),
+                ));
             }
         }
         requests.sort();
         requests.dedup();
 
-        let fetched =
-            futures::stream::iter(requests.into_iter().map(|(path, commit)| async move {
-                let content = self.item_content(repo, &path, &commit).await;
-                ((path, commit), content)
-            }))
-            .buffer_unordered(CONTENT_CONCURRENCY)
-            .collect::<Vec<_>>()
-            .await;
+        let fetched = futures::stream::iter(requests.into_iter().map(
+            |(project, name, path, commit)| async move {
+                let lookup = ForgeRepoRef {
+                    forge: ForgeKind::AzureDevOps,
+                    base_url: self.base_url.clone(),
+                    owner: project,
+                    repo: name,
+                };
+                let content = self.item_content(&lookup, &path, &commit).await;
+                ((lookup.owner, lookup.repo, path, commit), content)
+            },
+        ))
+        .buffer_unordered(CONTENT_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
 
-        let mut cache: HashMap<(String, String), ItemContent> = HashMap::new();
+        let mut cache: HashMap<(String, String, String, String), ItemContent> = HashMap::new();
         for (key, content) in fetched {
             cache.insert(key, content?);
         }
+
+        let key = |repo: &ForgeRepoRef, path: &str, commit: &str| {
+            (
+                repo.owner.clone(),
+                repo.repo.clone(),
+                path.to_owned(),
+                commit.to_owned(),
+            )
+        };
 
         let mut diffs = Vec::with_capacity(files.len());
         let missing = ItemContent::missing();
@@ -309,14 +373,14 @@ impl AzureDevOpsClient {
                 &missing
             } else {
                 cache
-                    .get(&(file.original.clone(), old_ref.to_owned()))
+                    .get(&key(repo, &file.original, old_ref))
                     .unwrap_or(&missing)
             };
             let new = if file.status == ForgeFileStatus::Deleted || !file.content_changed {
                 &missing
             } else {
                 cache
-                    .get(&(file.path.clone(), new_ref.to_owned()))
+                    .get(&key(source, &file.path, new_ref))
                     .unwrap_or(&missing)
             };
             let binary = old.binary || new.binary;
@@ -484,6 +548,7 @@ impl Forge for AzureDevOpsClient {
             && let Ok(entries) = self.change_entries(repo, number, &iteration).await
         {
             pr.changed_files = changed_files(&entries).len() as u32;
+            pr.changed_files_known = true;
         }
         pr.commits = self
             .all_commits(repo, number)
@@ -508,6 +573,8 @@ impl Forge for AzureDevOpsClient {
         // files keep the worst case within both.
         let per_page = per_page.clamp(1, DIFF_PAGE_FILES);
         let page = page.max(1);
+        let pr = self.fetch_pr(repo, number).await?;
+        let source = self.source_repo(repo, &pr)?;
         let iteration = self.latest_iteration(repo, number).await?;
         let old_ref = iteration["commonRefCommit"]["commitId"]
             .as_str()
@@ -525,7 +592,7 @@ impl Forge for AzureDevOpsClient {
         let start = ((page - 1) * per_page) as usize;
         let end = (start + per_page as usize).min(total);
         let files = if start < total {
-            self.page_file_diffs(repo, &changed[start..end], old_ref, new_ref)
+            self.page_file_diffs(repo, &source, &changed[start..end], old_ref, new_ref)
                 .await?
         } else {
             Vec::new()
@@ -617,7 +684,9 @@ impl Forge for AzureDevOpsClient {
         Ok(ForgeCommentPage {
             repo: repo.clone(),
             number,
-            has_more: threads.len() >= 500,
+            // This endpoint returns the PR's threads in one answer and has no
+            // next page, so there is never more to fetch.
+            has_more: false,
             comments,
             threads: review_threads,
             reviews,
@@ -631,26 +700,26 @@ impl Forge for AzureDevOpsClient {
             .as_str()
             .map(ToOwned::to_owned)
             .ok_or_else(|| ForgeError::Parse("the pull request has no source commit".into()))?;
-        // The current iteration scopes the iteration-level statuses; the
-        // PR-level statuses (no `iterationId`) always stay.
+        // A missing source must never look like a pass. The iteration scopes
+        // the iteration-level statuses, and the policy evaluations are the
+        // branch gate; when either cannot be read the request fails instead of
+        // returning the remaining green rows as "Passing".
         let current_iteration = self
             .latest_iteration(repo, number)
-            .await
-            .ok()
-            .and_then(|iteration| iteration["id"].as_u64());
-        let mut checks = Vec::new();
-        if let Ok(value) = self
+            .await?
+            .get("id")
+            .and_then(Value::as_u64);
+        let statuses = self
             .http
             .get_json(&versioned(&format!(
                 "{}/statuses",
                 self.pr_api(repo, number)
             )))
-            .await
-        {
-            for status in value["value"].as_array().into_iter().flatten() {
-                if status_is_current(status, current_iteration) {
-                    checks.push(map_status(status));
-                }
+            .await?;
+        let mut checks = Vec::new();
+        for status in statuses["value"].as_array().into_iter().flatten() {
+            if status_is_current(status, current_iteration) {
+                checks.push(map_status(status));
             }
         }
         // A policy row is never merged with another policy row: two
@@ -659,62 +728,63 @@ impl Forge for AzureDevOpsClient {
         // failure. A policy only reconciles with a *status* of the same name,
         // because the policy is the branch gate.
         let status_count = checks.len();
-        if let Some(project_id) = optional_text(&pr["repository"]["project"], "id") {
-            let artifact = urlencode(&format!(
-                "vstfs:///CodeReview/CodeReviewId/{project_id}/{number}"
-            ));
-            let url = format!(
-                "{}/{}/_apis/policy/evaluations?artifactId={artifact}&api-version={POLICY_API_VERSION}",
-                self.api,
-                urlencode(&repo.owner)
-            );
-            if let Ok(value) = self.http.get_json(&url).await {
-                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-                // A status is reconciled with at most one policy; a second
-                // same-named policy stays its own row.
-                let mut reconciled: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
-                for evaluation in value["value"].as_array().into_iter().flatten() {
-                    let policy = &evaluation["configuration"];
-                    let evaluation_id = optional_text(evaluation, "evaluationId")
-                        .or_else(|| optional_text(policy, "id"))
-                        .or_else(|| policy["id"].as_u64().map(|id| id.to_string()))
-                        .unwrap_or_default();
-                    if !evaluation_id.is_empty() && !seen.insert(evaluation_id) {
-                        continue;
-                    }
-                    let type_name = optional_text(&policy["type"], "displayName");
-                    let name = optional_text(&policy["settings"], "displayName")
-                        .or_else(|| type_name.clone())
-                        .unwrap_or_else(|| "policy".into());
-                    let required = policy["isBlocking"].as_bool();
-                    let status =
-                        azure_policy_status(evaluation["status"].as_str().unwrap_or_default());
-                    if !reconciled.contains(&name)
-                        && let Some(existing) = checks[..status_count]
-                            .iter_mut()
-                            .find(|check| check.name == name)
-                    {
-                        existing.required = required;
-                        existing.status = status;
-                        if existing.description.is_none() {
-                            existing.description = type_name;
-                        }
-                        reconciled.insert(name);
-                        continue;
-                    }
-                    checks.push(ForgeCheck {
-                        name,
-                        status,
-                        details_url: None,
-                        description: type_name,
-                        started_at: None,
-                        completed_at: None,
-                        duration_ms: None,
-                        required,
-                    });
-                }
+        let project_id = optional_text(&pr["repository"]["project"], "id").ok_or_else(|| {
+            ForgeError::Parse(
+                "the pull request has no project id, so its policy evaluations cannot be read"
+                    .into(),
+            )
+        })?;
+        let artifact = urlencode(&format!(
+            "vstfs:///CodeReview/CodeReviewId/{project_id}/{number}"
+        ));
+        let url = format!(
+            "{}/{}/_apis/policy/evaluations?artifactId={artifact}&api-version={POLICY_API_VERSION}",
+            self.api,
+            urlencode(&repo.owner)
+        );
+        let evaluations = self.http.get_json(&url).await?;
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // A status is reconciled with at most one policy; a second
+        // same-named policy stays its own row.
+        let mut reconciled: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for evaluation in evaluations["value"].as_array().into_iter().flatten() {
+            let policy = &evaluation["configuration"];
+            let evaluation_id = optional_text(evaluation, "evaluationId")
+                .or_else(|| optional_text(policy, "id"))
+                .or_else(|| policy["id"].as_u64().map(|id| id.to_string()))
+                .unwrap_or_default();
+            if !evaluation_id.is_empty() && !seen.insert(evaluation_id) {
+                continue;
             }
+            let type_name = optional_text(&policy["type"], "displayName");
+            let name = optional_text(&policy["settings"], "displayName")
+                .or_else(|| type_name.clone())
+                .unwrap_or_else(|| "policy".into());
+            let required = policy["isBlocking"].as_bool();
+            let status = azure_policy_status(evaluation["status"].as_str().unwrap_or_default());
+            if !reconciled.contains(&name)
+                && let Some(existing) = checks[..status_count]
+                    .iter_mut()
+                    .find(|check| check.name == name)
+            {
+                existing.required = required;
+                existing.status = status;
+                if existing.description.is_none() {
+                    existing.description = type_name;
+                }
+                reconciled.insert(name);
+                continue;
+            }
+            checks.push(ForgeCheck {
+                name,
+                status,
+                details_url: None,
+                description: type_name,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+                required,
+            });
         }
         Ok(finish_checks(repo, number, sha, checks))
     }
@@ -945,6 +1015,7 @@ fn map_pr_detail(repo: &ForgeRepoRef, value: &Value) -> Result<ForgePullRequest>
         additions: 0,
         deletions: 0,
         changed_files: 0,
+        changed_files_known: false,
         commits: 0,
         created_at: parse_datetime(&value["creationDate"], "creationDate")
             .unwrap_or_else(|_| Utc::now()),

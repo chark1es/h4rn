@@ -35,7 +35,7 @@ const SCOPES: Record<ForgeKind, string> = {
   gitea: "a token with repo scope on the repositories you want to see",
   forgejo: "a token with repo scope on the repositories you want to see",
   bitbucket:
-    "an Atlassian API token (Account: read, Repositories: read, Pull requests: write) with your Atlassian account email, or a workspace, project or repository access token (app passwords were retired in July 2026)",
+    "an Atlassian API token (Account: read, Repositories: read, Pull requests: read and write) with your Atlassian account email, or a workspace, project or repository access token (app passwords were retired in July 2026)",
   azure_devops: "a personal access token with Code: read & write",
 };
 
@@ -163,6 +163,7 @@ function AddAccountForm({
   const [baseUrl, setBaseUrl] = useState(DEFAULT_BASE.github);
   const [username, setUsername] = useState("");
   const [token, setToken] = useState("");
+  const [repositoryKey, setRepositoryKey] = useState("");
   const [busy, setBusy] = useState(false);
 
   const changeForge = (next: ForgeKind) => {
@@ -176,17 +177,25 @@ function AddAccountForm({
   const missingOrganization =
     forge === "azure_devops" && baseUrl.trim().replace(/\/$/, "") === "https://dev.azure.com";
 
-  // The detected workspace remote for this host. Bitbucket access tokens need
-  // it because they cannot read `/user` or `/user/workspaces`.
+  // The detected workspace remotes for this host. Bitbucket access tokens need
+  // one because they cannot read `/user` or `/user/workspaces`; with several
+  // checkouts the person picks which repository proves the token.
   const normalizedBase = baseUrl.trim().replace(/\/$/, "");
-  const detectedRepo: ForgeRepoRef | null =
+  const candidateRepos: ForgeRepoRef[] =
     forge === "bitbucket"
-      ? (repositories.find(
-          (remote) =>
-            remote.repo.forge === "bitbucket" &&
-            remote.repo.base_url.replace(/\/$/, "") === normalizedBase,
-        )?.repo ?? null)
-      : null;
+      ? repositories
+          .filter(
+            (remote) =>
+              remote.repo.forge === "bitbucket" &&
+              remote.repo.base_url.replace(/\/$/, "") === normalizedBase,
+          )
+          .map((remote) => remote.repo)
+      : [];
+  const repositoryName = (repo: ForgeRepoRef) => `${repo.owner}/${repo.repo}`;
+  const detectedRepo: ForgeRepoRef | null =
+    candidateRepos.find((repo) => repositoryName(repo) === repositoryKey) ??
+    candidateRepos[0] ??
+    null;
   const accessTokenWithoutRepository =
     forge === "bitbucket" && username.trim() === "" && detectedRepo === null;
 
@@ -303,6 +312,28 @@ function AddAccountForm({
                 this form can detect it.
               </span>
             ) : null}
+          </div>
+        </div>
+      ) : null}
+      {forge === "bitbucket" && candidateRepos.length > 1 ? (
+        <div className="q-field">
+          <div className="lab">
+            <div className="t">Validate against</div>
+            <div className="s">
+              Which detected Bitbucket repository proves this account. The first is used by default.
+            </div>
+          </div>
+          <div className="ctl">
+            <ChipSelect
+              label="Bitbucket repository to validate against"
+              value={detectedRepo ? repositoryName(detectedRepo) : ""}
+              width={300}
+              options={candidateRepos.map((repo) => ({
+                value: repositoryName(repo),
+                label: repositoryName(repo),
+              }))}
+              onChange={setRepositoryKey}
+            />
           </div>
         </div>
       ) : null}

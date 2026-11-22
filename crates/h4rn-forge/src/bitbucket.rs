@@ -19,6 +19,9 @@
 //! Bitbucket Server and Data Center are not supported; they use a different
 //! API (`/rest/api/1.0`) and are rejected before this client is built.
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use async_trait::async_trait;
 use chrono::Utc;
 use h4rn_protocol::{
@@ -35,7 +38,7 @@ use crate::common::{
 };
 use crate::error::{ForgeError, Result};
 use crate::http::{ForgeHttp, basic_auth_header};
-use crate::remote::{api_base_url, validate_base_url};
+use crate::remote::{api_base_url, validate_base_url_for};
 use crate::{Forge, ForgeViewer, PrPage};
 
 /// Bitbucket Cloud REST v2 client.
@@ -44,6 +47,10 @@ pub struct BitbucketClient {
     api: String,
     base_url: String,
     username: Option<String>,
+    /// Cursors learned from a collection's `next` link, keyed by the URL of
+    /// the first page (without `page`). `pages[i]` is the URL of page `i + 1`;
+    /// a missing entry falls back to the documented `page` parameter.
+    cursors: Mutex<HashMap<String, Vec<Option<String>>>>,
 }
 
 impl BitbucketClient {
@@ -58,7 +65,7 @@ impl BitbucketClient {
         username: Option<&str>,
         requests_per_minute: u32,
     ) -> Result<Self> {
-        let base_url = validate_base_url(base_url)?;
+        let base_url = validate_base_url_for(ForgeKind::Bitbucket, base_url)?;
         let api = api_base_url(ForgeKind::Bitbucket, &base_url);
         let username = username
             .map(str::trim)
@@ -83,7 +90,45 @@ impl BitbucketClient {
             api,
             base_url,
             username,
+            cursors: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// The URL to request for one page of a collection.
+    ///
+    /// Bitbucket links the next page in the response body, so the cursor it
+    /// returns is carried forward verbatim instead of rebuilding `page=N`:
+    /// the server may use an opaque cursor, and a rebuilt page number would
+    /// then repeat rows or skip them. A page with no learned cursor falls back
+    /// to the documented parameter (the first page, or a jump to a page this
+    /// client never reached).
+    fn page_url(&self, base: &str, page: u32) -> String {
+        let learned = self
+            .cursors
+            .lock()
+            .ok()
+            .and_then(|cursors| {
+                cursors
+                    .get(base)
+                    .and_then(|pages| pages.get(page.saturating_sub(1) as usize))
+                    .cloned()
+            })
+            .flatten();
+        learned.unwrap_or_else(|| with_query(base, &[("page", page.to_string())]))
+    }
+
+    /// Remembers the `next` link a page returned as the cursor for the page
+    /// after it.
+    fn remember_cursor(&self, base: &str, page: u32, next: Option<String>) {
+        let Ok(mut cursors) = self.cursors.lock() else {
+            return;
+        };
+        let pages = cursors.entry(base.to_owned()).or_default();
+        let index = page as usize;
+        if pages.len() <= index {
+            pages.resize(index + 1, None);
+        }
+        pages[index] = next;
     }
 
     fn repo_url(&self, repo: &ForgeRepoRef) -> String {
@@ -102,15 +147,20 @@ impl BitbucketClient {
     /// Reads every page of a Bitbucket collection (it links the next page in
     /// the body, not a `Link` header). A `next` link on another origin is not
     /// followed: the request would carry this account's Authorization header.
-    async fn get_pages(&self, url: &str, max_pages: usize) -> Result<Vec<Value>> {
+    ///
+    /// The flag is true only when more data remains: the page cap was reached
+    /// while a same-origin `next` link still existed.
+    async fn get_pages(&self, url: &str, max_pages: usize) -> Result<(Vec<Value>, bool)> {
         let mut values = Vec::new();
         let mut next = Some(url.to_owned());
         let mut pages = 0;
+        let mut has_more = false;
         while let Some(current) = next {
-            pages += 1;
-            if pages > max_pages {
+            if pages == max_pages {
+                has_more = true;
                 break;
             }
+            pages += 1;
             let value = self.http.get_json(&current).await?;
             if let Some(array) = value["values"].as_array() {
                 values.extend(array.iter().cloned());
@@ -118,7 +168,7 @@ impl BitbucketClient {
             next = optional_text(&value, "next")
                 .filter(|next| crate::http::same_origin(next, &self.api));
         }
-        Ok(values)
+        Ok((values, has_more))
     }
 
     async fn fetch_pr(&self, repo: &ForgeRepoRef, number: u32) -> Result<Value> {
@@ -187,9 +237,27 @@ impl BitbucketClient {
         })
     }
 
+    /// The viewer behind a personal token, for the filters that need a user
+    /// identity.
+    ///
+    /// A workspace, project or repository access token is a workspace, not a
+    /// person: `/user` rejects it and the workspace slug is not an author.
+    /// Those tokens get an honest "not supported" instead of an empty list.
+    async fn user_viewer_for_list(&self) -> Result<ForgeViewer> {
+        self.user_viewer().await.map_err(|error| match error {
+            ForgeError::Unauthorized { .. } | ForgeError::Forbidden { .. } => {
+                ForgeError::Unsupported(
+                    "Mine and review-requested lists need a personal account; a workspace, project or repository access token has no user identity. Add an Atlassian API token with your account email to use them."
+                        .into(),
+                )
+            }
+            other => other,
+        })
+    }
+
     /// Proves a repository-scoped token against the repository it was granted
-    /// for. The workspace slug is the account login, which is what the Mine
-    /// filter compares against.
+    /// for. The workspace slug names the account, but it is not a person, so
+    /// it cannot answer the Mine filter.
     async fn repository_viewer(&self, repo: &ForgeRepoRef) -> Option<ForgeViewer> {
         self.http.get_json(&self.repo_url(repo)).await.ok()?;
         Some(ForgeViewer {
@@ -285,7 +353,6 @@ impl Forge for BitbucketClient {
         let mut query: Vec<(&str, String)> = vec![
             ("state", "OPEN".to_owned()),
             ("pagelen", "50".to_owned()),
-            ("page", page.to_string()),
             ("sort", "-updated_on".to_owned()),
         ];
         // Author, reviewer and source-branch filters all have a documented
@@ -295,11 +362,22 @@ impl Forge for BitbucketClient {
         match filter {
             ForgePrFilter::Open => {}
             ForgePrFilter::Mine => {
-                let viewer = self.viewer_for(Some(repo)).await?;
-                query.push(("q", format!("author.nickname = {}", quote(&viewer.login))));
+                // The viewer login can fall back to `display_name` when the
+                // token cannot read a nickname, so match both.
+                let viewer = self.user_viewer_for_list().await?;
+                let mut author = format!("author.nickname = {}", quote(&viewer.login));
+                if let Some(name) = viewer
+                    .display_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty() && *name != viewer.login)
+                {
+                    author.push_str(&format!(" OR author.display_name = {}", quote(name)));
+                }
+                query.push(("q", author));
             }
             ForgePrFilter::ReviewRequested => {
-                let viewer = self.viewer_for(Some(repo)).await?;
+                let viewer = self.user_viewer_for_list().await?;
                 query.push((
                     "q",
                     format!("reviewers.nickname = {}", quote(&viewer.login)),
@@ -313,7 +391,8 @@ impl Forge for BitbucketClient {
                 query.push(("q", format!("source.branch.name = {}", quote(branch))));
             }
         }
-        let url = with_query(&format!("{}/pullrequests", self.repo_url(repo)), &query);
+        let base = with_query(&format!("{}/pullrequests", self.repo_url(repo)), &query);
+        let url = self.page_url(&base, page);
         let value = self.http.get_json(&url).await?;
         let items = value["values"]
             .as_array()
@@ -324,8 +403,10 @@ impl Forge for BitbucketClient {
             .collect::<Vec<_>>();
         // A `next` link on another origin is never followed; treat it as the
         // end of the list rather than promising another page.
-        let has_more = optional_text(&value, "next")
-            .is_some_and(|next| crate::http::same_origin(&next, &self.api));
+        let next =
+            optional_text(&value, "next").filter(|next| crate::http::same_origin(next, &self.api));
+        let has_more = next.is_some();
+        self.remember_cursor(&base, page, next);
         Ok(PrPage {
             prs,
             page,
@@ -341,6 +422,7 @@ impl Forge for BitbucketClient {
             pr.additions = additions;
             pr.deletions = deletions;
             pr.changed_files = files;
+            pr.changed_files_known = true;
         }
         pr.commits = self.commit_count(repo, number).await.unwrap_or(0);
         pr.reviewers = map_reviewers(&value);
@@ -388,14 +470,17 @@ impl Forge for BitbucketClient {
     async fn list_comments(&self, repo: &ForgeRepoRef, number: u32) -> Result<ForgeCommentPage> {
         validate_repo(repo)?;
         let url = format!("{}/comments?pagelen=100", self.pr_url(repo, number));
-        let values = self.get_pages(&url, 10).await?;
+        let (values, has_more) = self.get_pages(&url, 10).await?;
         let (comments, threads) = group_comments(&values);
         let pr = self.fetch_pr(repo, number).await.unwrap_or(Value::Null);
         let reviews = map_reviewers(&pr);
         Ok(ForgeCommentPage {
             repo: repo.clone(),
             number,
-            has_more: values.len() >= 1_000,
+            // Only true when the tenth page still linked a next page this
+            // client did not read; a short page is the end even if it had
+            // exactly as many rows as some earlier fetch.
+            has_more,
             comments,
             threads,
             reviews,
@@ -414,7 +499,10 @@ impl Forge for BitbucketClient {
             self.repo_url(repo),
             urlencode(&sha)
         );
-        let values = self.get_pages(&url, 5).await.unwrap_or_default();
+        let (values, _) = self
+            .get_pages(&url, 5)
+            .await
+            .unwrap_or_else(|_| (Vec::new(), false));
         let checks = values.iter().map(map_status).collect::<Vec<_>>();
         Ok(finish_checks(repo, number, sha, checks))
     }
@@ -422,14 +510,14 @@ impl Forge for BitbucketClient {
     async fn list_commits(&self, repo: &ForgeRepoRef, number: u32) -> Result<ForgeCommits> {
         validate_repo(repo)?;
         let url = format!("{}/commits?pagelen=100", self.pr_url(repo, number));
-        let values = self.get_pages(&url, 5).await?;
+        let (values, truncated) = self.get_pages(&url, 5).await?;
         let mut commits = values.iter().filter_map(map_commit).collect::<Vec<_>>();
         // Bitbucket does not promise an order; the tab reads oldest first.
         commits.sort_by_key(|commit| commit.authored_at);
         Ok(ForgeCommits {
             repo: repo.clone(),
             number,
-            truncated: values.len() >= 500,
+            truncated,
             commits,
         })
     }
@@ -580,6 +668,7 @@ fn map_pr_detail(repo: &ForgeRepoRef, value: &Value) -> Result<ForgePullRequest>
         additions: 0,
         deletions: 0,
         changed_files: 0,
+        changed_files_known: false,
         commits: 0,
         created_at: parse_datetime(&value["created_on"], "created_on")
             .unwrap_or_else(|_| Utc::now()),
@@ -771,7 +860,10 @@ fn group_comments(values: &[Value]) -> (Vec<ForgeComment>, Vec<ForgeReviewThread
             line,
             side,
             resolved: !root["resolution"].is_null(),
-            outdated: inline["to"].as_u64().is_none() && inline["from"].as_u64().is_none(),
+            // A file-level comment has no line to be outdated about, and
+            // Bitbucket reports no explicit flag for a line that moved. Only
+            // the API can say a thread is outdated; this one never guesses.
+            outdated: false,
             comments,
         });
     }
@@ -886,5 +978,26 @@ mod tests {
         assert!(threads[0].resolved);
         assert_eq!(threads[0].comments.len(), 2);
         assert_eq!(threads[0].comments[1].in_reply_to.as_deref(), Some("1"));
+        // The root anchors a line, so it is not a file-level note.
+        assert!(!threads[0].outdated);
+    }
+
+    #[test]
+    fn bitbucket_file_level_comment_is_not_outdated() {
+        let comments = vec![json!({
+            "id": 7,
+            "content": {"raw": "A note on the whole file"},
+            "user": {"nickname": "bob"},
+            "created_on": "2024-05-01T10:00:00Z",
+            "inline": {"path": "src/lib.rs", "from": null, "to": null}
+        })];
+        let (_, threads) = group_comments(&comments);
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].path, "src/lib.rs");
+        assert_eq!(threads[0].line, None);
+        assert!(
+            !threads[0].outdated,
+            "a file-level comment has no line that could move"
+        );
     }
 }

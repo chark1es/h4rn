@@ -738,6 +738,7 @@ fn map_pr_detail(repo: &ForgeRepoRef, value: &Value) -> Result<ForgePullRequest>
         additions: value["additions"].as_u64().unwrap_or(0) as u32,
         deletions: value["deletions"].as_u64().unwrap_or(0) as u32,
         changed_files: value["changed_files"].as_u64().unwrap_or(0) as u32,
+        changed_files_known: true,
         commits: value["commits"].as_u64().unwrap_or(0) as u32,
         created_at: parse_datetime(&value["created_at"], "created_at")
             .unwrap_or_else(|_| Utc::now()),

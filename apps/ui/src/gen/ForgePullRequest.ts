@@ -41,6 +41,13 @@ deletions: number,
  */
 changed_files: number, 
 /**
+ * Whether the forge could count the changed files.
+ *
+ * `false` means the count is unknown (a diffstat page failed or hit its
+ * cap), not that the PR changes no files; clients show it as unknown.
+ */
+changed_files_known: boolean, 
+/**
  * Commits in the PR.
  */
 commits: number, 

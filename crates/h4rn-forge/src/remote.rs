@@ -185,6 +185,13 @@ pub fn validate_cloud_base_url(kind: ForgeKind, base_url: &str) -> Result<()> {
             "{display} base URLs must not include a query or fragment"
         )));
     }
+    if kind == ForgeKind::Bitbucket && parsed.path() != "/" && !parsed.path().is_empty() {
+        // A path can carry a secret; say the rule without repeating the input,
+        // the way Azure DevOps does.
+        return Err(ForgeError::InvalidRequest(
+            "the Bitbucket Cloud base URL must be the host with no path".into(),
+        ));
+    }
     let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
     match kind {
         ForgeKind::Bitbucket if host != "bitbucket.org" => Err(ForgeError::InvalidRequest(
@@ -233,6 +240,35 @@ pub fn validate_base_url(value: &str) -> Result<String> {
 /// `https://acme.visualstudio.com/DefaultCollection` host. Every other forge
 /// must be hosted at the origin.
 pub fn validate_base_url_for(kind: ForgeKind, value: &str) -> Result<String> {
+    if kind == ForgeKind::Bitbucket {
+        // Bitbucket Cloud is an origin, like Azure DevOps: errors describe the
+        // rule and never echo the input, whose path may hold a secret.
+        let trimmed = value.trim().trim_end_matches('/');
+        let parsed = Url::parse(trimmed).map_err(|_| {
+            ForgeError::InvalidRequest("the Bitbucket Cloud base URL is not a valid URL".into())
+        })?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(ForgeError::InvalidRequest(
+                "the Bitbucket Cloud base URL must use http or https".into(),
+            ));
+        }
+        if parsed.host_str().is_none() {
+            return Err(ForgeError::InvalidRequest(
+                "the Bitbucket Cloud base URL has no host".into(),
+            ));
+        }
+        if parsed.query().is_some() || parsed.fragment().is_some() {
+            return Err(ForgeError::InvalidRequest(
+                "the Bitbucket Cloud base URL must not include a query or fragment".into(),
+            ));
+        }
+        if parsed.path() != "/" && !parsed.path().is_empty() {
+            return Err(ForgeError::InvalidRequest(
+                "the Bitbucket Cloud base URL must be the host with no path".into(),
+            ));
+        }
+        return Ok(trimmed.to_owned());
+    }
     if kind != ForgeKind::AzureDevOps {
         return validate_base_url(value);
     }
@@ -936,6 +972,28 @@ mod tests {
         let error = validate_cloud_base_url(
             ForgeKind::AzureDevOps,
             "https://placeholder-secret.example.com",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!error.contains("placeholder-secret"), "{error}");
+
+        // Bitbucket Cloud follows the same rule: its path, query or fragment
+        // may carry a secret and the error never repeats it.
+        for value in [
+            "https://bitbucket.org/placeholder-secret",
+            "https://bitbucket.org?placeholder-secret=1",
+            "https://bitbucket.org#placeholder-secret",
+            "not a url placeholder-secret",
+        ] {
+            let error = validate_base_url_for(ForgeKind::Bitbucket, value)
+                .unwrap_err()
+                .to_string();
+            assert!(!error.contains("placeholder-secret"), "{error}");
+            assert!(!error.contains(value), "{error}");
+        }
+        let error = validate_cloud_base_url(
+            ForgeKind::Bitbucket,
+            "https://bitbucket.org/placeholder-secret",
         )
         .unwrap_err()
         .to_string();
