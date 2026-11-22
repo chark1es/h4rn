@@ -210,6 +210,17 @@ All notable changes to h4rn are recorded here. The format follows
   Finally, a parked prompt whose ledger schedule did not survive a restart is released exactly as a
   cancel releases it — recorded as `LimitResumeReleased` with the limit cleared — instead of running
   while the thread still claims to be rate limited.
+- **Auto-resume round 4: shutdown, restart and firing keep the parked prompt and its own turn.** A
+  graceful daemon shutdown now leaves a prompt parked behind an armed schedule exactly as it is, so
+  reopening restores the dispatch and the schedule delivers the person's message instead of the
+  policy's "continue". The restart resync restores schedule ids from the ledger even when the limit
+  history cannot be read, and the ticker retries a failed ledger read until it succeeds, so a
+  restored pause never stays unnamed. A fire only releases the pending turn its own pause parks: a
+  Send's startup that merely happens to be pending is left alone and spends no attempt. If a claimed
+  fire then finds the record no longer names its schedule, it marks the attempt `Cancelled` with
+  "superseded before delivery" instead of leaving it looking `Fired`, and a newer row that replaced
+  the attempt is untouched. A release whose journal append fails is no longer hidden by a cached
+  summary: the next tick publishes the running state.
 - **A request refused after an agent death names what actually closed.** The client keeps the close
   it observed (stdout EOF, a failed read, a writer failure or the process exit) and uses it when a
   later request is rejected, so a stdout death no longer looks like a dead writer in the failure row.

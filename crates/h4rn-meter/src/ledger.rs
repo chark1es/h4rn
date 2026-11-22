@@ -165,6 +165,13 @@ pub struct MeterStore {
     /// delivery path survives a storage error instead of stranding the turn it
     /// was releasing.
     fail_schedule_finish: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Test-only: makes the next N `limits` reads fail, so a test can prove the
+    /// startup resync restores schedule ids without the limit history and
+    /// retries the read on a later tick.
+    fail_limit_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Test-only: how many `limits` reads were attempted, so a test can prove
+    /// the retry actually ran.
+    limit_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl MeterStore {
@@ -199,6 +206,8 @@ impl MeterStore {
         let store = Self {
             pool,
             fail_schedule_finish: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fail_limit_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            limit_reads: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         store.ensure_schema().await?;
         Ok(store)
@@ -214,6 +223,25 @@ impl MeterStore {
     pub fn fail_schedule_finish_for_tests(&self) {
         self.fail_schedule_finish
             .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Makes the next `count` [`Self::limits`] reads fail.
+    ///
+    /// Test hook: the startup resync must restore schedule ids even when the
+    /// limit history cannot be read, and retry the read on later ticks.
+    /// Nothing in production calls this.
+    #[doc(hidden)]
+    pub fn fail_next_limit_reads_for_tests(&self, count: usize) {
+        self.fail_limit_reads
+            .store(count, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// How many [`Self::limits`] reads were attempted.
+    ///
+    /// Test hook paired with [`Self::fail_next_limit_reads_for_tests`].
+    #[doc(hidden)]
+    pub fn limit_reads_for_tests(&self) -> usize {
+        self.limit_reads.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Adds a column to an existing database created before it existed.
@@ -519,6 +547,17 @@ impl MeterStore {
 
     /// Newest limit observations first.
     pub async fn limits(&self, limit: u32) -> Result<Vec<LimitRecord>, StoreError> {
+        self.limit_reads
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self
+            .fail_limit_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+        {
+            self.fail_limit_reads
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            return Err(StoreError::Data("injected limit read failure".to_owned()));
+        }
         let rows = sqlx::query("SELECT * FROM meter_limits ORDER BY observed_at DESC LIMIT ?")
             .bind(i64::from(limit))
             .fetch_all(&self.pool)
