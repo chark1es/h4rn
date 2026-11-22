@@ -651,11 +651,22 @@ impl AcpClient {
                 }
             }
         };
-        if let Some(receiver) = receiver {
+        if let Some(mut receiver) = receiver {
+            // The reader queues the last replayed frames before it resolves
+            // the reply, so some history can still sit in the channel once the
+            // call settles. Drain it now, or it would surface as output of the
+            // next turn.
+            while let Ok(event) = receiver.try_recv() {
+                if !matches!(event, AcpEvent::SessionUpdate { .. }) {
+                    kept.push(event);
+                }
+            }
+            // Hand back what arrived during the load before anything newer can
+            // be read, so a permission request or an error keeps its order.
+            for event in kept {
+                let _ = self.shared.events_tx.send(event).await;
+            }
             *lock(&self.shared.events_rx) = Some(receiver);
-        }
-        for event in kept {
-            let _ = self.shared.events_tx.send(event).await;
         }
         result
     }

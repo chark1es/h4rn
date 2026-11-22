@@ -273,7 +273,14 @@ export function NewThreadDialog() {
     harness === "acp" ? acpRuntimeModeChoices(agentModes) : THREAD_RUNTIME_MODES;
   const modeManagedByAgent = harness === "acp" && runtimeModeChoices.length === 0;
   useEffect(() => {
-    if (!open || modeManagedByAgent || runtimeModeChoices.length === 0) return;
+    if (!open) return;
+    // An agent that manages its own mode gets no choice from this dialog, so
+    // don't carry over one picked for another harness.
+    if (modeManagedByAgent) {
+      if (runtimeMode !== "approval_required") setRuntimeMode("approval_required");
+      return;
+    }
+    if (runtimeModeChoices.length === 0) return;
     if (runtimeModeChoices.some((choice) => choice.value === runtimeMode)) return;
     const first = runtimeModeChoices[0];
     if (first) setRuntimeMode(first.value);
