@@ -86,6 +86,34 @@ describe("host offline row visibility", () => {
     ).toEqual({ kind: "hidden" });
   });
 
+  it("stays hidden on a cached sign-in before the relay answers", async () => {
+    const settings = await import("./settings");
+    // `initializeRemote` sets `signed_in` from cached credentials before
+    // `refresh()` answers; the row must wait instead of calling the relay old.
+    expect(
+      settings.hostOfflineVisibility({
+        phase: "signed_in",
+        signedIn: true,
+        linkedSupported: null,
+        linkedMachineCount: 0,
+      }),
+    ).toEqual({ kind: "hidden" });
+  });
+
+  it("never calls a relay old when the first linked fetch failed", async () => {
+    const settings = await import("./settings");
+    // A failed fetch leaves `linkedSupported` null: nothing says the relay
+    // dropped its filter, so no "update the relay" note is shown.
+    expect(
+      settings.hostOfflineVisibility({
+        phase: "signed_in",
+        signedIn: true,
+        linkedSupported: null,
+        linkedMachineCount: 0,
+      }),
+    ).toEqual({ kind: "hidden" });
+  });
+
   it("appears for a filtered relay with linked machines", async () => {
     const settings = await import("./settings");
     expect(

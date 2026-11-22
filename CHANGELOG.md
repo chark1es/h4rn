@@ -39,9 +39,11 @@ All notable changes to h4rn are recorded here. The format follows
   and failed turns follow the daemon's
   thread summary and need a live completion for the current turn: a thread moved to Done by another
   client, or a replayed completion followed by a live tick, says nothing. A live completion is spent
-  on the one daemon transition it caused: a manual tab move by the person discards it, and a
-  re-seeded baseline clears every remembered completion. The list re-seeds the
-  baseline whenever the client becomes ready, so a gap healed by a list cannot announce history. A
+  on the one daemon transition it caused: a manual tab move by the person discards it once the
+  daemon accepts the move, and a reconnect clears every remembered completion. A routine list
+  refresh re-seeds the daemon's placement but keeps a live completion, and for a thread that still
+  holds one it keeps the last streamed summary as the baseline, so a list that answers Done first
+  cannot swallow the live upsert. A
   turn that hands off to a queued turn says nothing, an interrupted turn that lands in Done reads
   “Stopped: the turn was interrupted.”, and a token or turn limit reads as “Stopped”, never
   “Finished”. A burst in one thread
@@ -55,8 +57,11 @@ All notable changes to h4rn are recorded here. The format follows
   renders the switches off without forgetting the stored choice; the desktop notification plugin
   cannot detect a blocked permission, so Settings says nothing about it there rather than claiming
   a state it does not know. Host offline covers only the machines this device is linked to through
-  the relay; the live transport is always online, matched by `hello`'s local host's name even when
-  no machine was picked, and a due alert fetches linked presence once more before delivery and is
+  the relay; the live transport is always online, named by the machine the person picked or the
+  machine this device is paired with (connect records its id on the device), and only when neither
+  exists does `hello`'s local host name stand in — and only when exactly one linked machine owns a
+  host of that name, since a shared name can no longer say which machine the transport reached. A
+  due alert fetches linked presence once more before delivery and is
   dropped if the host came back, the fetch failed or the client disconnected. A direct-only session
   hides the row and says why. On Linux the desktop notification plugin passes `replaces_id = 0`, so
   a later message for the same key stacks instead of replacing; coalescing still limits it to one
@@ -122,10 +127,13 @@ All notable changes to h4rn are recorded here. The format follows
   relay now marks a filtered machine list with `x-h4rn-machine-filter: linked` (and exposes it to
   browsers). A client that sees no marker treats the list as unsupported, keeps its presence rows
   off and says the relay is too old, instead of announcing hosts on the whole account.
-- **Presence identifies the connected host by machine id.** A hostname fallback is used only when
-  no machine was picked, and only when exactly one machine owns a host of that name, so two paired
-  machines with the same hostname cannot mask each other. The name match applies per host, so
-  working in one WSL distribution does not mark the Windows host or its siblings online.
+- **Presence identifies the connected host by machine id.** The machine the person picked, or the
+  machine this device is paired with, names the connected machine without relying on a hostname; the
+  name fallback is used only when neither id exists, and only when exactly one linked machine owns a
+  host of that name, so two paired machines with the same hostname cannot mask each other. An
+  ambiguous name leaves those hosts out of presence, so a new same-named machine cannot announce
+  the one in use offline. The name match applies per host, so working in one WSL distribution does
+  not mark the Windows host or its siblings online.
 - **A failed tab move leaves no placement note.** The notifier hears about a manual move into Done
   or Settled only after the daemon accepts it, so a rejected move cannot spend a remembered live
   completion.
@@ -135,8 +143,43 @@ All notable changes to h4rn are recorded here. The format follows
 - **A browser `Notification` constructor that throws is reported once.** Permission revoked between
   the check and the constructor, or a context that forbids notifications, no longer throws again
   for every message: the channel logs the first failure and then degrades quietly for the page.
+  Settings reads the same page state, so it can say notifications stopped working on this page
+  (reload to try again) without confusing that with an OS permission.
 - **The Host offline row waits for the first account answer.** Settings no longer flashes the "no
   linked host" explanation before the relay has had a chance to say what is linked.
+- **A failed linked-presence fetch no longer reads as an old relay.** Whether the relay honours
+  `?linked=true` is tri-state: unknown until a successful answer arrives, `false` only when that
+  answer lacks the filter marker. A failed first fetch keeps it unknown, so Settings hides the row
+  instead of telling the person to update a relay that may be current, and a cached sign-in that is
+  `signed_in` before `refresh()` answers waits the same way.
+- **A machine this client is connected to is never announced offline.** The connected machine is
+  identified by a verified id that needs no manual pick: the machine the person picked, or the
+  machine this device is paired with (connect records it on the device). The local host's name is
+  only the fallback when neither exists, and a name shared by two machines now leaves those hosts
+  out of presence entirely instead of feeding them the relay's answer. Adding a second same-named
+  machine can no longer raise an offline alert for the first.
+- **A live frame queued just behind the subscribe reply still notifies.** The journal head named by
+  the reply is kept as an acknowledged cursor for the next reconnect, separate from the position of
+  frames actually delivered. A first-connect approval that reaches the socket after the reply, with
+  a sequence the reply's head already covers, is therefore delivered as live news instead of being
+  deduplicated away.
+- **A failure alerts even when the thread was already moved to Done.** The turn's own live
+  completion is the signal, independently of where the tab sits: a person who moves a running
+  thread to Done still hears that its turn failed, while a manual move with no new failure stays
+  quiet. One failure is announced once per turn, whether it arrives from the outcome or from the
+  summary's raised hand. Token and turn limits stay with the summary, since the daemon may resume
+  from them.
+- **A list refresh that answers Done first no longer swallows a live completion.** For a thread
+  with an unannounced live completion, a routine refresh keeps the last streamed summary as the
+  baseline instead of adopting the list's Done placement, so the live upsert that follows is still
+  the endpoint it announces.
+- **A browser notification failure is one page state.** Settings and delivery share the fact that
+  the `Notification` constructor stopped working on this page. Settings says notifications stopped
+  working there and need a reload, separately from the OS permission, which is still reported as it
+  is; before, only the notifier knew, and Settings could only offer the OS-blocked sentence.
+- **Open at login keeps real read failures visible.** The toggle is hidden only for the known
+  unsupported case (the shell has no autostart plugin); any other failure to read the login item
+  keeps the row and shows an error line instead of pretending the setting does not exist.
 - **Large Azure DevOps pull requests load within the page deadline.** Azure needs file contents to
   build a diff, so a 30-file page could not finish inside the UI's ten-second budget once the
   account's local request allowance ran out. A diff page now holds at most eight files (eighteen
@@ -215,12 +258,15 @@ All notable changes to h4rn are recorded here. The format follows
   started the second process. The single-instance plugin now has its `deep-link` feature, so it
   passes the second launch's arguments to the deep-link plugin before the focus callback, and the
   running window opens what the link names.
-- **The "Connected host is online" check matches by name.** The relay mints its own machine and
+- **The machine this client is connected to is always online.** The relay mints its own machine and
   host ids when a machine registers, so its `MachineHost.id` never equals the id `hello` reports
   for the local host. The notifier compared those ids, decided its own working host was offline,
-  and could announce a host the person was actively using. It now resolves `hello`'s local host to
-  its name through the daemon's host list (the same pairing the sidebar uses) and matches the
-  relay's host by name, ignoring case.
+  and could announce a host the person was actively using. It now names the connected machine by the
+  machine the person picked or the machine this device is paired with, and falls back to
+  `hello`'s local host name through the daemon's host list (the same pairing the sidebar uses, case
+  ignored) only when neither exists and exactly one linked machine owns a host of that name. Two
+  machines sharing a name match neither, so neither can mask the other or be announced offline
+  while the transport is talking to it.
 - **A first-connect subscribe is replay-free whatever its success answer looks like.** An older
   daemon may answer a live-edge subscribe with the protocol's plain `{type:"ack"}`, or with
   `subscribed` and no boundary. Both are successful acceptances of `since_seq: null`, so the

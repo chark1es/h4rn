@@ -7,6 +7,7 @@ import { HarnessSettings } from "@/features/harnesses/HarnessSettings";
 import {
   type NotificationPermissionState,
   notificationChannel,
+  useBrowserNotificationsUnavailable,
 } from "@/features/notifications/channel";
 import {
   displayedNotificationSetting,
@@ -109,12 +110,28 @@ function GeneralForm() {
  *
  * `unsupported` is not an error: a desktop build without the autostart plugin
  * has no real state to show, so the row is left out instead of offering a
- * switch that cannot work.
+ * switch that cannot work. Every other read failure is a real problem and is
+ * shown as an error line with the row, rather than hidden as if the plugin
+ * were missing.
  */
 type AutostartState =
   | { status: "loading" }
   | { status: "ready"; enabled: boolean }
-  | { status: "unsupported" };
+  | { status: "unsupported" }
+  | { status: "error" };
+
+/**
+ * Whether an autostart read failed because this shell simply has no plugin.
+ *
+ * Only the shell's own "no such plugin/command" answer counts. A permission
+ * error, a refused command or anything else the OS reports is a failure the
+ * person should see, not a reason to pretend the setting does not exist.
+ */
+export function autostartUnsupported(message: string): boolean {
+  return /plugin:autostart|plugin (?:is )?not found|command not found|no such (?:command|plugin)|not allowed/i.test(
+    message,
+  );
+}
 
 /**
  * Settings → General → Startup: the login item and the tray.
@@ -137,10 +154,19 @@ export function StartupSettings() {
       .then((enabled) => {
         if (!cancelled) setAutostart({ status: "ready", enabled });
       })
-      .catch(() => {
-        // A shell without the plugin is not a failed read; there is simply no
-        // login item to control here.
-        if (!cancelled) setAutostart({ status: "unsupported" });
+      .catch((cause: unknown) => {
+        if (cancelled) return;
+        const reason = describeError(cause);
+        if (autostartUnsupported(reason)) {
+          // A shell without the plugin is not a failed read; there is simply
+          // no login item to control here.
+          setAutostart({ status: "unsupported" });
+          return;
+        }
+        // Anything else (a blocked permission, a refused command) is a real
+        // failure: keep the row and say what went wrong.
+        setAutostart({ status: "error" });
+        setError(reason);
       });
     void shell
       .shellSettings()
@@ -193,13 +219,13 @@ export function StartupSettings() {
           <div className="ctl">
             {autostart.status === "loading" ? (
               <span className="q-faint">Checking…</span>
-            ) : (
+            ) : autostart.status === "ready" ? (
               <Toggle
                 checked={autostart.enabled}
                 label="Open at login"
                 onChange={(next) => void changeAutostart(next)}
               />
-            )}
+            ) : null}
           </div>
         </div>
       ) : null}
@@ -329,6 +355,7 @@ function NotificationsForm() {
     linkedMachineCount,
   });
   const relayPresence = hostOffline.kind === "available";
+  const pageUnavailable = useBrowserNotificationsUnavailable();
   const [permission, setPermission] = useState<NotificationPermissionState | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -411,6 +438,11 @@ function NotificationsForm() {
               {hostOffline.kind === "relay-too-old"
                 ? "This relay does not report which machines this device is linked to. Update the relay to get host offline alerts."
                 : "Host offline alerts need a host linked through the relay. This device has none, so there is no other host to watch."}
+            </p>
+          ) : null}
+          {channel.kind === "browser" && pageUnavailable ? (
+            <p className="s q-muted" role="status">
+              Notifications stopped working on this page. Reload h4rn to try again.
             </p>
           ) : null}
           {error ? (

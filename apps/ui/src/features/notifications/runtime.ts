@@ -10,7 +10,7 @@
 
 import { getRemoteState, type RemoteState, remoteStore } from "@/features/remote/remoteStore";
 import { currentConnectClient } from "@/features/remote/session";
-import type { MachineSummary, ThreadId, ThreadSummary } from "@/gen";
+import type { ConnectDevice, MachineSummary, ThreadId, ThreadSummary } from "@/gen";
 import type { ConnectionStatus, EventEnvelope } from "@/lib/client/types";
 import {
   type AppState,
@@ -35,6 +35,7 @@ import {
   dueNotifications,
   enqueue,
   type FocusSnapshot,
+  failedOutcomeDraft,
   finishedDraft,
   finishedTransition,
   type HostState,
@@ -69,10 +70,21 @@ export type RuntimeState = Pick<
 >;
 
 /** The bits of remote state the notifier reads. */
-export type RuntimeRemote = Pick<
-  RemoteState,
-  "user" | "linkedMachines" | "linkedSupported" | "activeMachineId"
->;
+export type RuntimeRemote = {
+  user: RemoteState["user"];
+  linkedMachines: MachineSummary[];
+  /**
+   * Whether the relay honoured `?linked=true`; `null` until a successful
+   * linked answer arrives.
+   */
+  linkedSupported: boolean | null;
+  activeMachineId: string | null;
+  /**
+   * This device as connect registered it. A paired client carries the
+   * machine's id, which names the connected machine without a manual pick.
+   */
+  device: ConnectDevice | null;
+};
 
 /** One linked-machine answer from connect. */
 export type PresenceClient = {
@@ -396,6 +408,31 @@ export class NotificationRuntime {
     if (event.type === "turn_started") this.memory.startTurn(event.thread_id);
     if (event.type === "turn_completed") {
       this.memory.completeTurn(event.thread_id, event.status, this.now(), !envelope.replayed);
+      // The completion is the turn's own outcome, wherever the tab sits. A
+      // person who already moved a running thread to Done still needs to hear
+      // that its turn failed; the summary may never raise `needs_attention`
+      // there, so placement must not be the thing that decides this.
+      if (!envelope.replayed) {
+        const threadId = event.thread_id;
+        const isChild =
+          this.childThreads.has(threadId) ||
+          this.deps.state().threads[threadId]?.parent_thread_id != null;
+        const failed = failedOutcomeDraft(threadId, {
+          threads: this.deps.state().threads,
+          settings: this.deps.settings(),
+          focus: this.deps.focus(),
+          lastTurn: this.memory.lastTurn(threadId),
+          announcedFailure: this.memory.failureAnnounced(threadId),
+          childThread: isChild,
+        });
+        if (failed !== null) {
+          // The outcome was the announcement: a later Done summary for the
+          // same turn has nothing left to say.
+          this.memory.announceFailure(threadId);
+          this.memory.announceFinished(threadId);
+        }
+        this.queueDraft(failed);
+      }
     }
 
     if (event.type === "thread_upserted") {
@@ -471,13 +508,14 @@ export class NotificationRuntime {
       // others' hosts.
       machines: this.machines ?? remote.linkedMachines,
       activeMachineId: remote.activeMachineId,
+      pairedMachineId: remote.device?.machine_id ?? null,
       localHostName: state.localHostId ? (state.hosts[state.localHostId]?.name ?? null) : null,
     });
   }
 
   /** Whether the relay said it filtered `?linked=true` for this device. */
   private linkedAvailable(): boolean {
-    return this.linkedSupported ?? this.deps.remote().linkedSupported;
+    return this.linkedSupported ?? this.deps.remote().linkedSupported ?? false;
   }
 
   /** Whether this session has the relay presence that makes the row meaningful. */
@@ -516,11 +554,24 @@ export class NotificationRuntime {
    * baseline: if it says Done, a later summary update is not the moment a turn
    * finished. Remembered live completions belong to that same stream, so a
    * gap recovery clears them too.
+   *
+   * A routine refresh is not a gap recovery, though. When it returns Done for
+   * a thread whose live completion has not been announced yet, the list has
+   * simply outrun the stream: adopting its placement as the baseline would
+   * swallow the very transition the completion is about to explain. Those
+   * threads keep the last streamed summary as their baseline until the live
+   * upsert arrives.
    */
   private reseedSummaries(clearCompletions = false): void {
+    const streamed = new Map(this.summaries);
     this.summaries.clear();
     if (clearCompletions) this.memory.clearCompletions();
     this.seedSummaries();
+    if (!clearCompletions) {
+      for (const [threadId, summary] of streamed) {
+        if (this.memory.hasLiveCompletion(threadId)) this.summaries.set(threadId, summary);
+      }
+    }
     this.lastThreadsSyncAt = this.deps.state().lastSyncAt;
   }
 

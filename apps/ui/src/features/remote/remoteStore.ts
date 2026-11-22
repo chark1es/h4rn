@@ -78,10 +78,13 @@ export type RemoteState = {
   /**
    * Whether the relay honoured `?linked=true`.
    *
-   * An older relay answers with every machine on the account and no marker;
-   * `linkedMachines` is then empty so nothing pretends to be a link.
+   * Tri-state: `null` until a successful linked answer arrives, `false` only
+   * when a successful answer lacks the marker. An older relay answers with
+   * every machine on the account and no marker; `linkedMachines` is then empty
+   * so nothing pretends to be a link. A failed fetch leaves this untouched, so
+   * a first failure stays `null` rather than accusing the relay.
    */
-  linkedSupported: boolean;
+  linkedSupported: boolean | null;
   pairings: PairingInfo[];
   activeMachineId: string | null;
   active: ActiveRemote | null;
@@ -150,7 +153,7 @@ function createInitialState(): RemoteState {
     devices: [],
     machines: [],
     linkedMachines: [],
-    linkedSupported: false,
+    linkedSupported: null,
     pairings: [],
     activeMachineId: active?.machineId ?? null,
     active,

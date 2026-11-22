@@ -251,6 +251,45 @@ function isFailureStatus(lastTurn: LastTurn | null): boolean {
   );
 }
 
+/**
+ * A notification for a turn that reported a failure outcome on the live stream.
+ *
+ * This is the turn itself, not a tab placement: a thread the person already
+ * moved to Done still has a turn that can fail, and the summary may never
+ * raise `needs_attention` because the thread is past Working. The outcome
+ * event is the one signal that is independent of where the tab sits, so a
+ * real failure alerts even there. One failure is announced once per turn; the
+ * summary path and this one share `announcedFailure`.
+ */
+export function failedOutcomeDraft(
+  threadId: ThreadId,
+  options: {
+    threads: Record<ThreadId, ThreadSummary>;
+    settings: NotificationSettings;
+    focus: FocusSnapshot;
+    lastTurn: LastTurn | null;
+    /** A failure for this same turn was already announced. */
+    announcedFailure?: boolean;
+    /** A subagent child thread: its parent mirrors the moment. */
+    childThread?: boolean;
+  },
+): NotificationDraft | null {
+  if (options.childThread) return null;
+  if (!options.settings.finishedTurns) return null;
+  // Only a real failure. Token and turn limits are stops the daemon may be
+  // resuming from, and their attention state still comes from the summary.
+  if (options.lastTurn?.status !== "failed") return null;
+  if (options.announcedFailure) return null;
+  const draft: NotificationDraft = {
+    key: threadKey(threadId),
+    kind: "finished",
+    title: threadTitle(options.threads, threadId),
+    body: finishedBody(options.lastTurn),
+    threadId,
+  };
+  return alreadyVisible(draft, options.focus) ? null : draft;
+}
+
 function threadKey(threadId: ThreadId): string {
   return `thread:${threadId}`;
 }
@@ -328,7 +367,17 @@ export type PresenceSource = {
    * no presence to report.
    */
   machines: MachineSummary[];
+  /** The machine the person picked by hand, if any. */
   activeMachineId: string | null;
+  /**
+   * The machine this client is paired with, as connect records it on this
+   * device (`ConnectDevice.machine_id`).
+   *
+   * Unlike `activeMachineId`, this needs no manual pick: a paired phone or
+   * browser already knows which machine the relay handed it to, so the live
+   * transport can vouch for that machine even before the person chooses one.
+   */
+  pairedMachineId: string | null;
   /**
    * Name of the host this client is connected to (`hello`'s local host id
    * resolved through the daemon's host list).
@@ -346,13 +395,15 @@ export type PresenceSource = {
  *
  * The live transport is authoritative for the host this client is connected
  * to, so the relay can never report our own working host as offline. Which
- * host that is comes from the machine this session picked when there is one;
- * only with no machine picked does the local host's name stand in, because
- * connect mints its own machine and host ids. A name shared by two machines
- * cannot say which one the transport reached, so the fallback matches neither
- * (keying on machine id avoids one masking the other). Presence is per host,
- * never per machine: a Windows host and its WSL distributions are separate
- * rows, and working in one must not mark the others online.
+ * machine that is comes from a verified id: the machine the person picked, or
+ * the machine this device is paired with. Only when neither exists does the
+ * local host's name stand in, because connect mints its own machine and host
+ * ids. A name shared by two machines cannot say which one the transport
+ * reached, so those hosts are left out of presence entirely instead of
+ * feeding the relay's (possibly stale) answer for a machine in active use.
+ * Presence is per host, never per machine: a Windows host and its WSL
+ * distributions are separate rows, and working in one must not mark the
+ * others online.
  *
  * Other linked machines keep connect's presence. With no relay list there is
  * no independent signal, so this returns `null` (direct sessions hide the row
@@ -363,20 +414,33 @@ export function hostPresence(source: PresenceSource): Record<string, HostState> 
   if (!source.signedIn || source.machines.length === 0) return null;
   const localHostName = source.localHostName?.toLowerCase() ?? null;
 
-  // A machine picked by hand is exact, as long as the list still names it.
-  // Without one, the local host's name is the only bridge; it identifies a
-  // machine only when exactly one owns a host of that name.
-  const pickedMachineId =
-    source.activeMachineId !== null &&
-    source.machines.some((machine) => machine.id === source.activeMachineId)
-      ? source.activeMachineId
+  const known = (machineId: string | null) =>
+    machineId !== null && source.machines.some((machine) => machine.id === machineId)
+      ? machineId
       : null;
-  let connectedMachineId = pickedMachineId;
+  const pickedMachineId = known(source.activeMachineId);
+  const pairedMachineId = known(source.pairedMachineId);
+  let connectedMachineId = pickedMachineId ?? pairedMachineId;
+  /** Hosts an ambiguous name match can no longer speak for. */
+  const suppressed = new Set<string>();
   if (connectedMachineId === null && localHostName !== null) {
-    const matches = source.machines.filter((machine) =>
-      machineHosts(machine).some((host) => host.name.toLowerCase() === localHostName),
-    );
-    if (matches.length === 1) connectedMachineId = matches[0]?.id ?? null;
+    const matches: Array<{ machineId: string; hostId: string }> = [];
+    for (const machine of source.machines) {
+      for (const host of machineHosts(machine)) {
+        if (host.name.toLowerCase() === localHostName) {
+          matches.push({ machineId: machine.id, hostId: host.id });
+        }
+      }
+    }
+    const match = matches.length === 1 ? matches[0] : undefined;
+    if (match) {
+      connectedMachineId = match.machineId;
+    } else {
+      // Two machines answer to the same name: neither can be trusted as the
+      // one the transport reached. Leaving them out of presence means no
+      // offline transition can ever be raised for them.
+      for (const ambiguous of matches) suppressed.add(ambiguous.hostId);
+    }
   }
 
   const next: Record<string, HostState> = {};
@@ -388,11 +452,10 @@ export function hostPresence(source: PresenceSource): Record<string, HostState> 
         ? hosts.find((host) => host.name.toLowerCase() === localHostName)
         : undefined;
     for (const host of hosts) {
+      if (suppressed.has(host.id)) continue;
       // The transport vouches for the one host it is talking to. Without a
-      // name match it vouches for the picked machine's hosts as a group.
-      const local =
-        connectedMachine &&
-        (namedHost === undefined ? pickedMachineId !== null : host.id === namedHost.id);
+      // name match it vouches for the connected machine's hosts as a group.
+      const local = connectedMachine && (namedHost === undefined || host.id === namedHost.id);
       next[host.id] = { name: host.name, online: local ? true : machine.online };
     }
   }

@@ -95,7 +95,7 @@ function signedIn() {
     user: { id: "user-1", email: null, display_name: "Dev", avatar_url: null },
     machines: [MACHINE],
     linkedMachines: [],
-    linkedSupported: false,
+    linkedSupported: null,
     lastSyncAt: null,
     active: null,
     activeMachineId: null,
@@ -221,8 +221,27 @@ describe("account refresh", () => {
     expect(state.phase).toBe("signed_in");
     expect(state.machines).toEqual([MACHINE]);
     expect(state.linkedMachines).toEqual([]);
-    expect(state.linkedSupported).toBe(false);
+    // A failed fetch says nothing about the relay: it must not read as an
+    // older relay that ignored `?linked=true`.
+    expect(state.linkedSupported).toBeNull();
     expect(state.error).toBeNull();
+  });
+
+  it("stays unknown while the first linked fetch is still pending", async () => {
+    const client = fakeClient();
+    client.linkedMachines = vi.fn(
+      () => new Promise<never>(() => undefined),
+    ) as unknown as typeof client.linkedMachines;
+    setConnectClient(client as never);
+
+    // The cached sign-in already says signed_in; the relay has not answered
+    // about linked machines yet, so this must not read as an older relay.
+    void refresh();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const state = getRemoteState();
+    expect(state.phase).toBe("signed_in");
+    expect(state.linkedSupported).toBeNull();
   });
 
   it("does not treat an older relay's unfiltered list as this device's links", async () => {

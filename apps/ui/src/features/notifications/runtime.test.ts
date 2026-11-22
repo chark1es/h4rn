@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { Event, MachineSummary, ThreadId, ThreadSummary } from "@/gen";
+import type {
+  ConnectDevice,
+  Event,
+  HostSummary,
+  MachineSummary,
+  ThreadId,
+  ThreadSummary,
+} from "@/gen";
 import type { EventEnvelope } from "@/lib/client/types";
 
 import type {
@@ -82,6 +89,36 @@ function machine(id: string, name: string, online: boolean): MachineSummary {
   };
 }
 
+/** This device as connect registered it, optionally paired with a machine. */
+function device(machineId: string | null): ConnectDevice {
+  return {
+    id: "device-1",
+    kind: "web",
+    name: "h4rn web",
+    machine_id: machineId,
+    proof_public_key: "proof",
+    noise_static_public_key: null,
+    platform: "web",
+    created_at: "2026-11-21T00:00:00Z",
+    last_seen: null,
+    revoked_at: null,
+    scopes: [],
+  };
+}
+
+function host(hostId: string, name: string): HostSummary {
+  return {
+    host_id: hostId,
+    name,
+    platform: "linux",
+    online: true,
+    last_seen: "2026-11-21T00:00:00Z",
+    harnesses: [],
+    latency_ms: null,
+    path: null,
+  };
+}
+
 function approvalRequested(threadId: ThreadId): Event {
   return {
     type: "approval_requested",
@@ -141,6 +178,7 @@ type Harness = {
 
 function harness(options: {
   threads?: Record<ThreadId, ThreadSummary>;
+  state?: Partial<RuntimeState>;
   settings?: Partial<NotificationSettings>;
   remote?: Partial<RuntimeRemote>;
   client?: PresenceClient | null;
@@ -162,12 +200,14 @@ function harness(options: {
     hosts: {},
     lastSyncAt: 1,
     localHostId: null,
+    ...options.state,
   };
   let remote: RuntimeRemote = {
     user: { id: "user-1", email: null, display_name: "Dev", avatar_url: null },
     linkedMachines: [],
     linkedSupported: true,
     activeMachineId: null,
+    device: null,
     ...options.remote,
   };
   const settings: NotificationSettings = {
@@ -285,6 +325,25 @@ describe("notification runtime wiring", () => {
     expect(h.shown[0]?.body).toBe("Finished: the turn is done.");
   });
 
+  it("keeps the streamed baseline when a refresh returns Done before the upsert", async () => {
+    vi.useFakeTimers();
+    const h = harness({});
+    h.runtime.start();
+
+    h.emit(turnCompleted(THREAD));
+    // The list refresh answers first, and it already says Done. Adopting that
+    // as the baseline would swallow the live upsert that is about to arrive.
+    h.updateState({
+      threads: { [THREAD]: threadSummary(THREAD, { tab: "done", agent_state: "done" }) },
+      lastSyncAt: 2,
+    });
+    h.emit(threadUpserted(threadSummary(THREAD, { tab: "done", agent_state: "done" })));
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.shown).toHaveLength(1);
+    expect(h.shown[0]?.body).toBe("Finished: the turn is done.");
+  });
+
   it("drops remembered completions when the stream recovers", async () => {
     vi.useFakeTimers();
     const h = harness({});
@@ -387,6 +446,52 @@ describe("notification runtime wiring", () => {
     expect(h.shown).toHaveLength(0);
   });
 
+  it("alerts when the turn of a thread moved to Done by hand fails", async () => {
+    vi.useFakeTimers();
+    const h = harness({});
+    h.runtime.start();
+
+    // The person moves the running thread to Done. That is a placement, and
+    // the daemon's summary will never raise its hand for it again.
+    h.place(THREAD);
+    h.emit(
+      threadUpserted(
+        threadSummary(THREAD, { tab: "done", agent_state: "done", placed_by_user: true }),
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(h.shown).toHaveLength(0);
+
+    // Its turn then fails. The outcome event is independent of the tab, so
+    // the failure still needs the person.
+    h.emit(turnCompleted(THREAD, "failed"));
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.shown).toHaveLength(1);
+    expect(h.shown[0]?.body).toBe("Failed: the turn ended with an error.");
+  });
+
+  it("announces one failure per turn, from the outcome then the summary", async () => {
+    vi.useFakeTimers();
+    const h = harness({});
+    h.runtime.start();
+
+    h.emit(turnCompleted(THREAD, "failed"));
+    h.emit(
+      threadUpserted(
+        threadSummary(THREAD, {
+          tab: "working",
+          needs_attention: true,
+          agent_state: "error",
+        }),
+      ),
+    );
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(h.shown).toHaveLength(1);
+    expect(h.shown[0]?.body).toBe("Failed: the turn ended with an error.");
+  });
+
   it("withdraws an approval queued before its thread is named a child", async () => {
     vi.useFakeTimers();
     const h = harness({ threads: {} });
@@ -425,6 +530,48 @@ describe("host offline delivery", () => {
     h.updateRemote({ linkedMachines: [offline] });
     return h;
   }
+
+  it("never announces the paired machine offline while the transport is up", async () => {
+    vi.useFakeTimers();
+    const h = harness({
+      settings: { hostOffline: true },
+      // No manual pick: the device registration already names the machine
+      // this client is paired with.
+      remote: { linkedMachines: [online], device: device("m_atlas") },
+    });
+    h.runtime.start();
+
+    // The relay now reports that machine offline, but this client is talking
+    // to it right now.
+    h.updateRemote({ linkedMachines: [offline] });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(h.shown).toHaveLength(0);
+  });
+
+  it("does not announce a shared-name machine when a second one appears", async () => {
+    vi.useFakeTimers();
+    const h = harness({
+      settings: { hostOffline: true },
+      state: {
+        localHostId: "h_atlas",
+        hosts: { h_atlas: host("h_atlas", "atlas") },
+      },
+      // The connected machine is only known by the local host's name.
+      remote: { linkedMachines: [machine("m_one", "atlas", true)], device: null },
+    });
+    h.runtime.start();
+
+    // A second machine with the same hostname registers. The name no longer
+    // says which machine the transport reached, so neither may take the
+    // relay's offline presence for the machine in active use.
+    h.updateRemote({
+      linkedMachines: [machine("m_one", "atlas", false), machine("m_two", "atlas", false)],
+    });
+
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(h.shown).toHaveLength(0);
+  });
 
   it("drops an alert when a fresh presence fetch says the host is back", async () => {
     vi.useFakeTimers();

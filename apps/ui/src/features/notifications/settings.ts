@@ -109,17 +109,23 @@ export type HostOfflineVisibility =
  *
  * Nothing is known before the account's first answer, so the row and its
  * explanation both stay away: a flash of "no linked host" would claim the
- * device has no links when the fetch simply has not finished. A relay that
- * ignores `?linked=true` cannot say which machines are linked, so it gets its
- * own note instead of pretending the whole account belongs here.
+ * device has no links when the fetch simply has not finished. `linkedSupported`
+ * is tri-state for that reason: `null` means no successful linked answer has
+ * arrived yet (a failed fetch keeps it `null`), so this cannot mistake a
+ * missing answer for an older relay. A relay that ignores `?linked=true` and
+ * answers successfully without the marker is `false` and gets its own note
+ * instead of pretending the whole account belongs here.
  */
 export function hostOfflineVisibility(remote: {
   phase: string;
   signedIn: boolean;
-  linkedSupported: boolean;
+  linkedSupported: boolean | null;
   linkedMachineCount: number;
 }): HostOfflineVisibility {
   if (remote.phase === "loading") return { kind: "hidden" };
+  // A cached sign-in is `signed_in` before `refresh()` answers. The row must
+  // wait for the relay's first successful answer rather than call it old.
+  if (remote.linkedSupported === null) return { kind: "hidden" };
   if (remote.signedIn && remote.linkedSupported && remote.linkedMachineCount > 0) {
     return { kind: "available" };
   }

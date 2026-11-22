@@ -20,6 +20,7 @@ import {
   dueNotifications,
   enqueue,
   type FocusSnapshot,
+  failedOutcomeDraft,
   finishedBody,
   finishedDraft,
   type HostState,
@@ -415,6 +416,64 @@ describe("finished-turn notifications", () => {
   });
 });
 
+describe("a failed turn's own outcome", () => {
+  function outcome(
+    status: TurnStatus,
+    options: {
+      threads?: Record<ThreadId, ThreadSummary>;
+      settings?: NotificationSettings;
+      focus?: FocusSnapshot;
+      announcedFailure?: boolean;
+      childThread?: boolean;
+    } = {},
+  ) {
+    return failedOutcomeDraft(THREAD, {
+      threads: options.threads ?? { [THREAD]: summary(THREAD, { tab: "done" }) },
+      settings: options.settings ?? settings(),
+      focus: options.focus ?? focus(),
+      lastTurn: lastTurn(status),
+      ...(options.announcedFailure === undefined
+        ? {}
+        : { announcedFailure: options.announcedFailure }),
+      ...(options.childThread === undefined ? {} : { childThread: options.childThread }),
+    });
+  }
+
+  it("announces a failure wherever the thread sits, including Done", () => {
+    // The summary's error transition never comes for a thread already in Done,
+    // but the turn still failed while the person was waiting for it.
+    const draft = outcome("failed");
+    expect(draft).toEqual({
+      key: `thread:${THREAD}`,
+      kind: "finished",
+      title: "Fix the flaky auth test",
+      body: "Failed: the turn ended with an error.",
+      threadId: THREAD,
+    });
+  });
+
+  it("says nothing for a successful, interrupted or limited turn", () => {
+    expect(outcome("completed")).toBeNull();
+    expect(outcome("interrupted")).toBeNull();
+    // A limit is a stop the daemon may resume from; its attention state comes
+    // from the summary, not from this outcome path.
+    expect(outcome("token_limit")).toBeNull();
+    expect(outcome("turn_limit")).toBeNull();
+  });
+
+  it("does not repeat a failure the summary already announced", () => {
+    expect(outcome("failed", { announcedFailure: true })).toBeNull();
+  });
+
+  it("stays quiet for a child thread, the switch, or the open thread", () => {
+    expect(outcome("failed", { childThread: true })).toBeNull();
+    expect(outcome("failed", { settings: settings({ finishedTurns: false }) })).toBeNull();
+    expect(
+      outcome("failed", { focus: focus({ windowFocused: true, openThreadId: THREAD }) }),
+    ).toBeNull();
+  });
+});
+
 describe("coalescing", () => {
   function approvalDraft(prompt: string) {
     const draft = draftForEvent(approval(THREAD, "command", prompt), {
@@ -544,6 +603,7 @@ describe("host offline", () => {
       signedIn: true,
       machines: [machine("m_atlas", "atlas", false), machine("m_buildbox", "buildbox", true)],
       activeMachineId: "m_atlas",
+      pairedMachineId: null,
       localHostName: null,
       ...patch,
     };
@@ -585,9 +645,10 @@ describe("host offline", () => {
   });
 
   it("does not merge two machines that share a hostname", () => {
-    // With no machine picked, the name cannot say which of the two the live
-    // transport reached. Neither is marked online, so one cannot mask the
-    // other's relay presence.
+    // With no verified machine id and no pick, the name cannot say which of
+    // the two the live transport reached. Neither is fed relay presence, so
+    // one cannot mask the other's presence and neither can raise an offline
+    // alert for the machine the person is actually using.
     const next = hostPresence(
       source({
         activeMachineId: null,
@@ -595,8 +656,22 @@ describe("host offline", () => {
         machines: [machine("m_one", "atlas", false), machine("m_two", "atlas", false)],
       }),
     );
-    expect(next?.m_one).toEqual({ name: "atlas", online: false });
-    expect(next?.m_two).toEqual({ name: "atlas", online: false });
+    expect(next).toBeNull();
+  });
+
+  it("keys the connected machine by the paired device's machine id", () => {
+    // A paired phone or browser knows its machine from connect without the
+    // person picking one, so the relay can never report it offline.
+    const next = hostPresence(
+      source({
+        activeMachineId: null,
+        pairedMachineId: "m_one",
+        localHostName: null,
+        machines: [machine("m_one", "atlas", false), machine("m_two", "atlas", false)],
+      }),
+    );
+    expect(next?.m_one).toEqual({ name: "atlas", online: true });
+    expect(next?.m_two?.online).toBe(false);
   });
 
   it("keys the connected machine by id when one was picked", () => {

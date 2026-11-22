@@ -389,6 +389,46 @@ describe("H4rnClient", () => {
     }
   });
 
+  it("delivers a first-connect frame that arrives after the subscribe reply", async () => {
+    vi.useFakeTimers();
+    try {
+      let answerSubscribe: Reply | null = null;
+      const { client, events, transports } = harness(
+        () =>
+          new FakeTransport((frame, reply) => {
+            if (frame.body.type !== "subscribe") return false;
+            answerSubscribe = reply;
+            return true;
+          }),
+      );
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      const transport = transports[0];
+      if (!transport) throw new Error("transport was not created");
+
+      // The daemon serves the live edge at journal head 7 and queues an
+      // approval behind its answer. The frame reaches this socket after the
+      // reply, with a sequence the reply's head already covers; it is still
+      // news, not history, and must not be deduplicated against that head.
+      (answerSubscribe as Reply | null)?.({
+        type: "subscribed",
+        replay_through: 7,
+      });
+      await settle();
+      transport.emit(7, approvalEvent("ap_after_reply"));
+      await settle();
+
+      expect(events.map((envelope) => envelope.seq)).toEqual([7]);
+      expect(events[0]?.replayed).toBeUndefined();
+      const live = events[0];
+      if (!live) throw new Error("live event was not delivered");
+      expect(draftForEnvelope(live, notificationOptions())).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("treats a live event after the reconnect replay boundary as news", async () => {
     vi.useFakeTimers();
     try {
@@ -738,6 +778,39 @@ describe("H4rnClient", () => {
 
     const subscribe = transports[1]?.sent.find((frame) => frame.body.type === "subscribe");
     expect(subscribe?.body).toMatchObject({ type: "subscribe", since_seq: 5 });
+  });
+
+  it("resumes a first connect from the head its reply acknowledged", async () => {
+    vi.useFakeTimers();
+    try {
+      let answerSubscribe: Reply | null = null;
+      const { client, transports } = harness(
+        () =>
+          new FakeTransport((frame, reply) => {
+            if (frame.body.type !== "subscribe") return false;
+            answerSubscribe = reply;
+            return true;
+          }),
+      );
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      // A live-edge subscribe replayed nothing but the daemon named head 9:
+      // a reconnect must not ask to replay that skipped history.
+      (answerSubscribe as Reply | null)?.({
+        type: "subscribed",
+        replay_through: 9,
+      });
+      await settle();
+      transports[0]?.drop();
+      await vi.advanceTimersByTimeAsync(20);
+      await settle();
+
+      const subscribe = transports[1]?.sent.find((frame) => frame.body.type === "subscribe");
+      expect(subscribe?.body).toMatchObject({ type: "subscribe", since_seq: 9 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps retrying at the capped interval instead of giving up", async () => {
