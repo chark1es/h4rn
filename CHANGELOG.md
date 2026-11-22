@@ -5,6 +5,40 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **Unsent composer text survives a reload, an app restart or Android killing the webview.** Every
+  draft is stored under its own key for a host and thread, so one tab never erases another
+  thread's draft; for the same thread the most recent edit wins. Writes happen after a short
+  debounce and are flushed when the page hides. Drafts
+  from the previous single-blob store are migrated on first launch. A sent message clears only the
+  text that was sent: a newer draft written in another tab while the message was in flight stays,
+  and a failed send keeps the text so it can be retried. Every write carries its own revision (a
+  timestamp plus a per-tab id), so two tabs writing in the same moment cannot be confused, and a
+  send clears only the revision the composer was showing rather than whatever storage holds when
+  the reply finishes; a removal that failed is retried only while storage still holds that
+  revision. Drafts nobody has touched in 30 days are dropped when the app loads, and the store
+  keeps at most 200, dropping the oldest; a draft whose age cannot be read is never treated as the
+  oldest, and a corrupt value is dropped from storage. Attachment bytes are never persisted: a
+  restored draft is its text, and files must be attached again. A draft changed in another tab
+  appears in the open composer only when that composer has no unsaved edit of its own.
+- **The new-thread box follows the host and folder you see.** Its prompt is saved per host and
+  folder, and the last folder used on a host is remembered for the next time the dialog opens. The
+  box stays disabled with a quiet “Connecting…” until a host is known, so no text is typed before
+  there is a slot to keep it in. The folder's draft switches only when you commit the folder (leave
+  the field, press Enter, or pick a project), not on every keystroke; an empty folder means the
+  default one it will use. Switching folders, or the daemon's own host changing before you pick
+  one, shows that slot's text and moves nothing. Start sends exactly the text on screen to the
+  folder on screen, even when you typed the folder but did not commit it, and clears only the slot
+  that text came from — only while it still holds what was sent.
+- **The composer recalls earlier prompts.** With the caret on the first line and nothing selected,
+  `↑` walks back through the prompts already sent in this thread and `↓` walks forward, finally
+  restoring the text that was in progress. Recalling a prompt does not touch the stored draft, so a
+  reload still brings back what you were typing; editing the recalled text replaces it. Multi-line
+  prompts keep stepping with the caret at their first line. The history is read from the thread's
+  own user messages, so it needs no separate copy and works on any device that can see the thread.
+  Typing leaves history mode, and an open menu or IME composition leaves the arrow keys alone.
+
 ### Fixed
 
 - **Closing a terminal ends its background jobs.** With job control, `sleep 1000 &` runs in its own

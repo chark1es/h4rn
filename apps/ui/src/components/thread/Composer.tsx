@@ -20,21 +20,42 @@ import {
 } from "@/features/proxy/proxyStore";
 import type { ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
+import { caretOnFirstLine, sentPrompts, stepPromptHistory } from "@/lib/composerHistory";
+import {
+  clearThreadDraftIfRevision,
+  type DraftRevision,
+  flushDrafts,
+  readThreadDraft,
+  readThreadDraftEntry,
+  subscribeDraftChanges,
+  writeThreadDraft,
+} from "@/lib/drafts";
 import { harnessLabel } from "@/lib/entities";
-import { sendMessage, useApp } from "@/lib/store/appStore";
+import { getState, sendMessage, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
-
-const drafts = new Map<string, string>();
 
 export function Composer({ summary }: { summary: ThreadSummary }) {
   const focusNonce = useApp((state) => state.ui.focusComposerNonce);
   const connection = useApp((state) => state.connection.status);
   const hostOnline = useApp((state) => state.hosts[summary.host]?.online ?? false);
   const hostName = useApp((state) => state.hosts[summary.host]?.name ?? summary.host);
-  const [text, setText] = useState(() => drafts.get(summary.thread_id) ?? "");
+  const [text, setText] = useState(() => readThreadDraft(summary.host, summary.thread_id));
   const [sending, setSending] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const ref = useRef<HTMLTextAreaElement | null>(null);
+  /**
+   * The revision of the text this composer is showing: set when the draft is
+   * loaded, when it is written, and when another tab's change is adopted.
+   */
+  const revision = useRef<DraftRevision | null>(null);
+  /** The thread this component is showing now; a send started on another must not touch it. */
+  const shownThread = useRef({ host: summary.host, threadId: summary.thread_id });
+  /** -1 while the in-progress text is showing; otherwise an index into sent prompts. */
+  const historyIndex = useRef(-1);
+  /** The in-progress text captured before the first ArrowUp. */
+  const historyDraft = useRef("");
+
   useProxyCatalog();
   useProxy((state) => state.profiles);
   const proxyActive = proxyOverrideFor(summary.harness);
@@ -53,18 +74,36 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   });
 
   useEffect(() => {
-    setText(drafts.get(summary.thread_id) ?? "");
+    shownThread.current = { host: summary.host, threadId: summary.thread_id };
+    const entry = readThreadDraftEntry(summary.host, summary.thread_id);
+    setText(entry.text);
+    revision.current = entry.revision;
+    historyIndex.current = -1;
+    historyDraft.current = "";
     requestAnimationFrame(() => {
       const element = ref.current;
       if (!element) return;
       element.style.height = "auto";
       element.style.height = `${Math.min(element.scrollHeight, 132)}px`;
     });
-  }, [summary.thread_id]);
+  }, [summary.host, summary.thread_id]);
 
   useEffect(() => {
     if (focusNonce > 0) ref.current?.focus();
   }, [focusNonce]);
+
+  // Another tab may edit this thread's draft. Adopt its text only while this
+  // composer has no unsaved edit of its own.
+  useEffect(() => {
+    return subscribeDraftChanges((change) => {
+      if (change.scope !== "thread") return;
+      if (change.host !== summary.host || change.target !== summary.thread_id) return;
+      historyIndex.current = -1;
+      historyDraft.current = "";
+      revision.current = change.revision;
+      setText(change.text);
+    });
+  }, [summary.host, summary.thread_id]);
 
   const newThreadOpen = useApp((state) => state.ui.newThreadOpen);
   useAttachShortcut(attachments.openPicker, !newThreadOpen);
@@ -77,8 +116,35 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   };
 
   const update = (value: string) => {
+    historyIndex.current = -1;
+    historyDraft.current = "";
     setText(value);
-    drafts.set(summary.thread_id, value);
+    revision.current = writeThreadDraft(summary.host, summary.thread_id, value);
+  };
+
+  const recall = (direction: "backward" | "forward"): boolean => {
+    const element = ref.current;
+    if (!element) return false;
+    const step = stepPromptHistory({
+      direction,
+      prompts: sentPrompts(getState().logs[summary.thread_id]),
+      state: { index: historyIndex.current, draft: historyDraft.current },
+      current: element.value,
+    });
+    if (!step) return false;
+    historyIndex.current = step.index;
+    historyDraft.current = step.draft;
+    // Recall never touches the stored draft: the user's in-progress text
+    // stays there until they edit the recalled prompt or send something.
+    // The caret starts at the top so another ArrowUp keeps walking back
+    // through a multi-line prompt instead of moving inside it.
+    setText(step.text);
+    requestAnimationFrame(() => {
+      element.focus();
+      element.setSelectionRange(0, 0);
+      autosize();
+    });
+    return true;
   };
 
   const insertMention = () => {
@@ -97,16 +163,37 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   const submit = async () => {
     if (!writable || sending || attachments.blockedReason) return;
     if (!text.trim() && attachments.attachments.length === 0) return;
+    // Send exactly what is on screen, and remember the revision it was loaded
+    // or written under. A newer draft written elsewhere while this send waits
+    // must not be cleared.
     const value = text;
+    const submitted = revision.current;
+    const submittedHost = summary.host;
+    const submittedThread = summary.thread_id;
+    // Store the draft before the send waits so a second tab's edit during the
+    // request is not hidden behind this tab's pending write.
+    flushDrafts();
     setSending(true);
-    const ok = await sendMessage(summary.thread_id, value, attachments.attachments);
+    const ok = await sendMessage(submittedThread, value, attachments.attachments);
     setSending(false);
-    if (ok) {
-      drafts.delete(summary.thread_id);
+    if (!ok) return;
+    // Clear only the draft that was sent. If this tab typed again, or another
+    // tab saved newer text, that text stays in the box and in storage.
+    const cleared = clearThreadDraftIfRevision(submittedHost, submittedThread, submitted);
+    // The pane may have switched threads while the send waited. The new
+    // thread's box belongs to that thread, so leave its text and files alone.
+    const stillShowing =
+      shownThread.current.host === submittedHost &&
+      shownThread.current.threadId === submittedThread;
+    if (!stillShowing) return;
+    historyIndex.current = -1;
+    historyDraft.current = "";
+    if (cleared) {
+      revision.current = null;
       setText("");
-      attachments.clear();
-      requestAnimationFrame(autosize);
     }
+    attachments.clear();
+    requestAnimationFrame(autosize);
   };
 
   const canSend =
@@ -145,7 +232,34 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
         if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
           event.preventDefault();
           void submit();
+          return;
         }
+        if (
+          (event.key !== "ArrowUp" && event.key !== "ArrowDown") ||
+          event.nativeEvent.isComposing ||
+          menuOpen ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.altKey ||
+          event.shiftKey
+        ) {
+          return;
+        }
+        const element = event.currentTarget;
+        if (event.key === "ArrowUp") {
+          // The first-line rule decides whether recall starts; once history
+          // mode is open the caret sits at the top of the recalled text and
+          // further ArrowUps keep walking back even through several lines.
+          if (
+            historyIndex.current < 0 &&
+            !caretOnFirstLine(element.value, element.selectionStart ?? 0, element.selectionEnd ?? 0)
+          ) {
+            return;
+          }
+          if (recall("backward")) event.preventDefault();
+          return;
+        }
+        if (historyIndex.current >= 0 && recall("forward")) event.preventDefault();
       }}
     />
   );
@@ -298,7 +412,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
           </button>
           <span className="grow" />
 
-          <DropdownMenu>
+          <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen}>
             <DropdownMenuTrigger asChild>
               <button
                 type="button"
