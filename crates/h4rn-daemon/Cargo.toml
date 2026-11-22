@@ -20,6 +20,7 @@ blake3.workspace = true
 chrono.workspace = true
 clap.workspace = true
 dirs.workspace = true
+flate2.workspace = true
 futures.workspace = true
 grep-regex.workspace = true
 grep-searcher.workspace = true
@@ -38,15 +39,19 @@ ignore.workspace = true
 image.workspace = true
 infer.workspace = true
 keyring.workspace = true
+minisign-verify.workspace = true
 notify.workspace = true
 portable-pty.workspace = true
 qrcode.workspace = true
 rand.workspace = true
 reqwest.workspace = true
+semver.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
 subtle.workspace = true
+tar.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-tungstenite.workspace = true
@@ -54,11 +59,14 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
 uuid.workspace = true
+zip.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
 [dev-dependencies]
+blake2.workspace = true
+ed25519-dalek.workspace = true
 h4rn-connect.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

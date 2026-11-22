@@ -5,6 +5,25 @@ All notable changes to h4rn are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- **The daemon can run as a per-user service.** `h4rnd service install` writes the
+  shipped systemd user unit (or launch agent, or Windows scheduled task) with the
+  running binary's absolute path and current data directory, then enables and
+  starts it. `status` reports installed/active/enabled, `restart` and `logs` work
+  on every platform, and `uninstall` stops and removes the service without touching
+  the data directory. Installation is idempotent, refuses a binary under
+  `target/debug` or a temp directory unless `--force`, and mentions
+  `loginctl enable-linger` on Linux when lingering is off.
+- **`h4rnd update` installs signed daemon releases.** It finds the latest GitHub
+  release for the repository baked in at build time, downloads the archive for
+  this target triple and `SHA256SUMS`, verifies the hash and a minisign signature
+  against the compiled `H4RN_UPDATER_PUBKEY`, and replaces the binary atomically.
+  The previous binary is kept for `h4rnd update --rollback`; a running service is
+  restarted, and an active turn stops the update unless `--force`. Builds without
+  a public key refuse to self-update and print manual steps instead. Release
+  builds with the signing key now publish `SHA256SUMS.sig`.
+
 ### Fixed
 
 - **Closing a terminal ends its background jobs.** With job control, `sleep 1000 &` runs in its own

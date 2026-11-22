@@ -8,7 +8,8 @@
 //! the wire contract.
 //!
 //! Phase 1b ships:
-//! - config, CLI (`serve`, `token`, `doctor`) and data-directory defaults;
+//! - config, CLI (`serve`, `token`, `doctor`, `service`, `update`) and
+//!   data-directory defaults;
 //! - 256-bit local access-token authentication for the WebSocket upgrade;
 //! - `GET /healthz` and `GET /ws`;
 //! - Hello, ListHosts, ListThreads, GetThread, CreateThread, SendMessage,
@@ -38,10 +39,12 @@ pub mod projects;
 pub mod remote;
 pub mod secrets;
 pub mod server;
+pub mod service;
 pub mod subagents;
 pub mod supervisor;
 pub mod terminal;
 pub mod threads;
+pub mod update;
 pub mod worktrees;
 
 pub use cli::{Cli, Command};
@@ -90,6 +93,24 @@ pub async fn run(config: Config, command: Command) -> anyhow::Result<()> {
             label,
             scopes,
         } => pair(&config, direct, label, scopes).await,
+        Command::Service { command } => service::run(&config, command),
+        Command::Update {
+            check,
+            version,
+            rollback,
+            force,
+        } => {
+            update::run(
+                &config,
+                update::UpdateOptions {
+                    check,
+                    version,
+                    rollback,
+                    force,
+                },
+            )
+            .await
+        }
     }
 }
 

@@ -76,6 +76,32 @@ bun run desktop                  # tauri dev against apps/ui
 bun run web                      # copy the UI build into apps/web/dist
 ```
 
+## Background daemon
+
+Build and install `h4rnd` outside the build directory, then let it manage its
+own per-user service and updates:
+
+```sh
+cargo build --release -p h4rn-daemon
+install -m 0755 target/release/h4rnd ~/.local/bin/h4rnd   # Linux/macOS
+
+h4rnd service install      # log-in service; idempotent
+h4rnd service status       # installed / active / enabled
+h4rnd service restart
+h4rnd service logs
+h4rnd service uninstall    # keeps the data directory
+
+h4rnd update --check       # current vs latest release
+h4rnd update               # signed update; restarts the service
+```
+
+The service runs as your user, not root, because the agents it supervises need
+your credentials. On Linux, `service status` says when lingering is off and
+prints the `loginctl enable-linger` command to keep the daemon running after
+logout. Development builds have no updater key, so `h4rnd update` refuses to
+self-update and prints the manual steps; release builds verify the archive
+against `SHA256SUMS` and its minisign signature before replacing the binary.
+
 ## Protocol bindings
 
 `h4rn-protocol` is the single source of truth. TypeScript under `apps/ui/src/gen/` is generated,

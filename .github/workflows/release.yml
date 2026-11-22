@@ -178,6 +178,13 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
+    env:
+      # The updater key is compiled in so `h4rnd update` can verify a release;
+      # an empty secret leaves the daemon unable to self-update, which is the
+      # documented safe default. The repository becomes the GitHub Releases
+      # source baked into the binary.
+      H4RN_UPDATER_PUBKEY: ${{ secrets.H4RN_UPDATER_PUBKEY }}
+      H4RN_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -416,6 +423,9 @@ jobs:
     name: Publish release assets
     needs: [prepare, desktop, daemon, android, ios, connect-image]
     runs-on: ubuntu-latest
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
       # Download only the release payloads by name: docker/build-push-action
@@ -450,6 +460,32 @@ jobs:
             | sort -z \
             | xargs -0 sha256sum >"$RUNNER_TEMP/sums.txt"
           mv "$RUNNER_TEMP/sums.txt" SHA256SUMS
+      - uses: oven-sh/setup-bun@v2
+        if: env.TAURI_SIGNING_PRIVATE_KEY != ''
+        with:
+          bun-version: 1.4.4
+      - name: Install signing tooling
+        if: env.TAURI_SIGNING_PRIVATE_KEY != ''
+        run: bun install --frozen-lockfile
+      - name: Sign checksums
+        if: env.TAURI_SIGNING_PRIVATE_KEY != ''
+        run: |
+          # Sign SHA256SUMS with the same minisign key the desktop updater
+          # uses. `h4rnd update` refuses a release without this signature.
+          sums="${RUNNER_TEMP}/SHA256SUMS.txt"
+          cp "${GITHUB_WORKSPACE}/dist/SHA256SUMS" "${sums}"
+          if [[ "${TAURI_SIGNING_PRIVATE_KEY}" == *"untrusted comment"* ]]; then
+            key="${RUNNER_TEMP}/h4rn.key"
+            printf '%s\n' "${TAURI_SIGNING_PRIVATE_KEY}" >"${key}"
+            chmod 600 "${key}"
+            bun run --cwd apps/desktop tauri signer sign -f "${key}" "${sums}"
+            rm -f "${key}"
+          else
+            # A base64 key from `tauri signer generate` is passed literally.
+            bun run --cwd apps/desktop tauri signer sign "${sums}"
+          fi
+          mv "${sums}.sig" "${GITHUB_WORKSPACE}/dist/SHA256SUMS.sig"
+          rm -f "${sums}"
       - name: Upload assets and publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

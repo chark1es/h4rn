@@ -26,12 +26,17 @@ verification builds in §8.
 | iOS | `h4rn-<run>.ipa` when Apple signing secrets are present; the simulator compile always runs |
 | Relay image | `ghcr.io/<owner>/h4rn-connect:<version>`, `:latest` and `:sha-<commit>` for `linux/amd64` and `linux/arm64` |
 | Manifests | `packaging-manifests.tar.gz` with winget, Homebrew cask and AUR files |
-| Checksums | `SHA256SUMS` covering every other asset |
+| Checksums | `SHA256SUMS` covering every other asset, plus `SHA256SUMS.sig` when the updater key is set |
 
 Each `h4rnd` archive also contains `README.txt` and the platform service files
 (`contrib/h4rnd.service` for systemd, `contrib/dev.h4rn.h4rnd.plist` for
 launchd, or the two Windows scheduled-task scripts). Every archive has a
 sibling `.sha256`.
+
+When `TAURI_SIGNING_PRIVATE_KEY` is set, the publish job signs `SHA256SUMS`
+with that minisign key and uploads `SHA256SUMS.sig`. `h4rnd update` requires
+that signature; a release built without the key can still be installed by hand
+but refuses to self-update.
 
 Draft releases are created first, so a failed matrix leaves a draft rather than
 a half-public release. `publish` only flips the release to public after desktop,
@@ -123,6 +128,36 @@ signed bundle, verifies it against `plugins.updater.pubkey`, and relaunches.
 - **Web and mobile** show no notice. Mobile updates come from the App Store and
   Google Play.
 
+### Daemon self-update
+
+`h4rnd update` installs the daemon from the same GitHub release, and uses the
+same `H4RN_UPDATER_PUBKEY`. The daemon jobs compile the key in and bake in the
+release repository (`H4RN_REPOSITORY`, defaulting to the workspace
+`repository`), so the binary knows where to look without a mock or local
+endpoint.
+
+```sh
+h4rnd update --check          # print current and latest
+h4rnd update                  # install the latest release
+h4rnd update --version 1.2.3  # pin a version
+h4rnd update --rollback       # restore h4rnd.previous
+```
+
+The update downloads the archive for the build's target triple (macOS uses the
+universal archive), checks its SHA-256 against `SHA256SUMS`, and verifies the
+minisign signature over `SHA256SUMS` (or over the archive) against the compiled
+key. It then writes the new binary beside the running one, fsyncs it, renames it
+into place, and keeps the old binary as `h4rnd.previous`. On Windows the running
+binary is renamed to `h4rnd.old` first; an interrupted rename is completed on
+the next start.
+
+If the service is installed the update restarts it; otherwise the command asks
+you to restart `h4rnd`. A running daemon that reports an active turn stops the
+update with an explanation unless `--force` is passed. A build with no
+`H4RN_UPDATER_PUBKEY` refuses to replace the binary and prints the manual
+download, verify and restart steps instead. A release needs the signed
+`SHA256SUMS` for its daemon to update itself.
+
 ## 4. Repository secrets and variables
 
 Set these under **Settings → Secrets and variables → Actions**. Names are used
@@ -133,7 +168,7 @@ verbatim by the workflow.
 | Name | Kind | Purpose |
 |---|---|---|
 | `GITHUB_TOKEN` | automatic | Draft release, asset upload, GHCR push. No setup. |
-| `H4RN_UPDATER_PUBKEY` | secret | Minisign public key for the updater. Without it the build is not updater-capable. |
+| `H4RN_UPDATER_PUBKEY` | secret | Minisign public key for the desktop and daemon updaters. Without it neither build is updater-capable. |
 
 ### Optional, per platform
 
@@ -326,7 +361,8 @@ Both need Docker and an OrbitID image (`H4RN_ORBITID_SOURCE`, default `$HOME/.t3
 4. Required secrets from §4 are present; the updater key is backed up.
 5. Push the tag. Watch the draft release until every matrix job is green.
 6. Download `SHA256SUMS` and one artifact per platform; verify with
-   `sha256sum -c` / `shasum -a 256 -c`.
+   `sha256sum -c` / `shasum -a 256 -c`, and verify `SHA256SUMS.sig` when the
+   updater key is configured.
 7. Confirm the relay image manifest lists both architectures:
    `docker buildx imagetools inspect ghcr.io/<owner>/h4rn-connect:<version>`.
 8. Confirm `latest.json` points at this version if the updater is enabled, and

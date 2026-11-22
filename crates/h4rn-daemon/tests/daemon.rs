@@ -426,6 +426,21 @@ async fn create_with_model(
 }
 
 #[tokio::test]
+async fn healthz_reports_no_active_turns_when_idle() {
+    let daemon = boot().await;
+    let health: serde_json::Value = reqwest::get(format!("http://{}/healthz", daemon.addr))
+        .await
+        .expect("fetch healthz")
+        .json()
+        .await
+        .expect("parse healthz");
+    assert_eq!(health["status"], "ok");
+    assert_eq!(health["version"], h4rn_daemon::version());
+    assert_eq!(health["active_turns"], 0);
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn rejects_missing_and_wrong_tokens() {
     let daemon = boot().await;
     let url = format!("ws://{}/ws", daemon.addr);
