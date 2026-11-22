@@ -1625,14 +1625,25 @@ async fn azure_mine_and_reviewer_filters_use_the_viewer_identity() {
 
 #[tokio::test]
 async fn azure_rejects_a_malformed_comment_id() {
-    let server = azure_server().await;
+    // The comment id goes into the JSON body, the thread id into the path;
+    // both are parsed first, so a bad id costs no request at all.
+    let server = MockServer::start().await;
     let client = AzureDevOpsClient::new(&format!("{}/acme", server.uri()), "pat", 120).unwrap();
     let repo = azure_repo(&server.uri());
-    let error = client
-        .reply(&repo, 7, Some("101"), "not-a-number", "Fixed.")
-        .await
-        .unwrap_err();
-    assert!(matches!(error, ForgeError::InvalidRequest(_)), "{error:?}");
+    for comment_id in ["not-a-number", "-1", "99999999999999999999"] {
+        let error = client
+            .reply(&repo, 7, Some("101"), comment_id, "Fixed.")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, ForgeError::InvalidRequest(_)),
+            "comment id {comment_id:?}: {error:?}"
+        );
+    }
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "an invalid comment id must not send a request"
+    );
 }
 
 #[tokio::test]
@@ -1782,7 +1793,12 @@ async fn bitbucket_rejects_an_invalid_comment_id_before_posting() {
     let server = MockServer::start().await;
     let client = BitbucketClient::new(&server.uri(), "ATBB-token", None, 120).unwrap();
     let repo = bitbucket_repo(&server.uri());
-    for comment_id in ["not-a-number", "-1", "9100/../../comments"] {
+    for comment_id in [
+        "not-a-number",
+        "-1",
+        "99999999999999999999",
+        "9100/../../comments",
+    ] {
         let error = client
             .reply(&repo, 42, Some("9100"), comment_id, "Fixed.")
             .await

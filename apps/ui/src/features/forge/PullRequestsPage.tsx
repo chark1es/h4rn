@@ -125,6 +125,31 @@ function duration(ms: bigint | null): string {
   return `${minutes}m ${String(Math.round(seconds % 60)).padStart(2, "0")}s`;
 }
 
+function errorMessage(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
+}
+
+/** One tab's own load failure, with the rest of the PR still on screen. */
+function TabError({
+  title,
+  message,
+  onRetry,
+}: {
+  title: string;
+  message: string;
+  onRetry: () => void;
+}) {
+  return (
+    <div className="q-empty" style={{ margin: "18px 0" }}>
+      <h3>{title}</h3>
+      <p>{message}</p>
+      <button type="button" className="q-btn secondary" onClick={onRetry}>
+        Retry
+      </button>
+    </div>
+  );
+}
+
 /**
  * "View log" and "Re-run failed" under a checks list. View log is a link to
  * the forge's own log page. Re-run is the forge's API where it has one; where
@@ -769,6 +794,10 @@ function PrDetail({
   const [diffLoading, setDiffLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [commentsError, setCommentsError] = useState<string | null>(null);
+  const [diffError, setDiffError] = useState<string | null>(null);
+  const [commitsError, setCommitsError] = useState<string | null>(null);
+  const [checksError, setChecksError] = useState<string | null>(null);
   const [tab, setTab] = useState<"conversation" | "commits" | "checks" | "files">("conversation");
   const [reloadNonce, setReloadNonce] = useState(0);
   const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
@@ -795,31 +824,64 @@ function PrDetail({
     let cancelled = false;
     setLoading(true);
     setError(null);
-    Promise.all([
-      api().getPr(repo, number),
-      api().comments(repo, number),
-      api()
-        .checks(repo, number)
-        .catch(() => null),
-      api().getDiff(repo, number, 1),
-      api()
-        .commits(repo, number)
-        .catch(() => null),
-    ])
-      .then(([detail, page, checksResult, diff, commitList]) => {
+    setCommentsError(null);
+    setDiffError(null);
+    setCommitsError(null);
+    setChecksError(null);
+    // The detail gates the page; every tab loads on its own so one failed
+    // request (a diff, a comment page) cannot hide the PR header and checks.
+    api()
+      .getPr(repo, number)
+      .then((detail) => {
         if (cancelled) return;
         setPr(detail);
-        setComments(page);
-        setChecks(checksResult);
-        setCommits(commitList);
-        setDiffPage(diff);
-        setDiffFiles(diff.files);
         setLoading(false);
       })
       .catch((cause: unknown) => {
         if (cancelled) return;
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setError(errorMessage(cause));
         setLoading(false);
+      });
+    api()
+      .comments(repo, number)
+      .then((page) => {
+        if (cancelled) return;
+        setComments(page);
+      })
+      .catch((cause: unknown) => {
+        if (cancelled) return;
+        setCommentsError(errorMessage(cause));
+      });
+    api()
+      .checks(repo, number)
+      .then((result) => {
+        if (cancelled) return;
+        setChecks(result);
+      })
+      .catch((cause: unknown) => {
+        if (cancelled) return;
+        setChecksError(errorMessage(cause));
+      });
+    api()
+      .getDiff(repo, number, 1)
+      .then((diff) => {
+        if (cancelled) return;
+        setDiffPage(diff);
+        setDiffFiles(diff.files);
+      })
+      .catch((cause: unknown) => {
+        if (cancelled) return;
+        setDiffError(errorMessage(cause));
+      });
+    api()
+      .commits(repo, number)
+      .then((commitList) => {
+        if (cancelled) return;
+        setCommits(commitList);
+      })
+      .catch((cause: unknown) => {
+        if (cancelled) return;
+        setCommitsError(errorMessage(cause));
       });
     return () => {
       cancelled = true;
@@ -1211,45 +1273,23 @@ function PrDetail({
                   )}
                 </div>
 
-                {comments?.comments.map((comment) => (
-                  <div className="q-cmt" key={comment.comment_id}>
-                    <div className="q-cmt-h">
-                      <EntityAvatar
-                        seed={userSeed(comment.author)}
-                        kind="user"
-                        label={comment.author}
-                        size={18}
-                      />
-                      <b>{comment.author}</b> · {relativeAge(comment.created_at)}
-                      {comment.comment_id.startsWith("tmp_") ? (
-                        <span className="q-faint"> · sending…</span>
-                      ) : null}
-                    </div>
-                    <Markdown text={comment.body} />
-                  </div>
-                ))}
-
-                {comments?.threads.map((thread) => (
-                  <div className="q-cmt" key={thread.thread_id}>
-                    <div className="q-cmt-h">
-                      <MessageSquareIcon className="q-icon s14 q-faint" aria-hidden />
-                      <span className="q-mono">
-                        {thread.path}
-                        {thread.line !== null ? ` · line ${thread.line}` : ""}
-                      </span>
-                      {thread.resolved ? (
-                        <span className="q-badge ok" style={{ height: 18 }}>
-                          Resolved
-                        </span>
-                      ) : (
-                        <span className="q-faint">Unresolved</span>
-                      )}
-                      {thread.outdated ? <span className="q-faint">· outdated</span> : null}
-                    </div>
-                    <ThreadQuote thread={thread} files={diffFiles} />
-                    {thread.comments.map((comment) => (
-                      <div key={comment.comment_id} style={{ marginBottom: 10 }}>
-                        <div className="q-cmt-h" style={{ marginBottom: 2 }}>
+                {commentsError ? (
+                  <TabError
+                    title="Comments did not load"
+                    message={commentsError}
+                    onRetry={() => setReloadNonce((value) => value + 1)}
+                  />
+                ) : (
+                  <>
+                    {comments?.comments.map((comment) => (
+                      <div className="q-cmt" key={comment.comment_id}>
+                        <div className="q-cmt-h">
+                          <EntityAvatar
+                            seed={userSeed(comment.author)}
+                            kind="user"
+                            label={comment.author}
+                            size={18}
+                          />
                           <b>{comment.author}</b> · {relativeAge(comment.created_at)}
                           {comment.comment_id.startsWith("tmp_") ? (
                             <span className="q-faint"> · sending…</span>
@@ -1258,110 +1298,152 @@ function PrDetail({
                         <Markdown text={comment.body} />
                       </div>
                     ))}
-                    {replyOpen[thread.thread_id] || (replyDrafts[thread.thread_id] ?? "") !== "" ? (
-                      <div className="q-cmt-reply">
-                        <textarea
-                          className="q-input"
-                          rows={2}
-                          ref={focusOnMount}
-                          placeholder={`Reply to ${thread.comments.at(-1)?.author ?? "review"}`}
-                          value={replyDrafts[thread.thread_id] ?? ""}
-                          onChange={(event) =>
-                            setReplyDrafts((current) => ({
-                              ...current,
-                              [thread.thread_id]: event.target.value,
-                            }))
-                          }
-                          aria-label={`Reply to ${thread.path}`}
-                        />
+
+                    {comments?.threads.map((thread) => (
+                      <div className="q-cmt" key={thread.thread_id}>
+                        <div className="q-cmt-h">
+                          <MessageSquareIcon className="q-icon s14 q-faint" aria-hidden />
+                          <span className="q-mono">
+                            {thread.path}
+                            {thread.line !== null ? ` · line ${thread.line}` : ""}
+                          </span>
+                          {thread.resolved ? (
+                            <span className="q-badge ok" style={{ height: 18 }}>
+                              Resolved
+                            </span>
+                          ) : (
+                            <span className="q-faint">Unresolved</span>
+                          )}
+                          {thread.outdated ? <span className="q-faint">· outdated</span> : null}
+                        </div>
+                        <ThreadQuote thread={thread} files={diffFiles} />
+                        {thread.comments.map((comment) => (
+                          <div key={comment.comment_id} style={{ marginBottom: 10 }}>
+                            <div className="q-cmt-h" style={{ marginBottom: 2 }}>
+                              <b>{comment.author}</b> · {relativeAge(comment.created_at)}
+                              {comment.comment_id.startsWith("tmp_") ? (
+                                <span className="q-faint"> · sending…</span>
+                              ) : null}
+                            </div>
+                            <Markdown text={comment.body} />
+                          </div>
+                        ))}
+                        {replyOpen[thread.thread_id] ||
+                        (replyDrafts[thread.thread_id] ?? "") !== "" ? (
+                          <div className="q-cmt-reply">
+                            <textarea
+                              className="q-input"
+                              rows={2}
+                              ref={focusOnMount}
+                              placeholder={`Reply to ${thread.comments.at(-1)?.author ?? "review"}`}
+                              value={replyDrafts[thread.thread_id] ?? ""}
+                              onChange={(event) =>
+                                setReplyDrafts((current) => ({
+                                  ...current,
+                                  [thread.thread_id]: event.target.value,
+                                }))
+                              }
+                              aria-label={`Reply to ${thread.path}`}
+                            />
+                            <div className="q-cmt-a">
+                              <button
+                                type="button"
+                                className="q-btn primary"
+                                disabled={
+                                  (replyDrafts[thread.thread_id] ?? "").trim() === "" ||
+                                  replyBusy[thread.thread_id]
+                                }
+                                onClick={() => void submitReply(thread)}
+                              >
+                                {replyBusy[thread.thread_id] ? "Sending…" : "Send reply"}
+                              </button>
+                              <button
+                                type="button"
+                                className="q-btn ghost"
+                                onClick={() => {
+                                  setReplyOpen((current) => ({
+                                    ...current,
+                                    [thread.thread_id]: false,
+                                  }));
+                                  setReplyDrafts((current) => ({
+                                    ...current,
+                                    [thread.thread_id]: "",
+                                  }));
+                                }}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        ) : null}
                         <div className="q-cmt-a">
                           <button
                             type="button"
-                            className="q-btn primary"
-                            disabled={
-                              (replyDrafts[thread.thread_id] ?? "").trim() === "" ||
-                              replyBusy[thread.thread_id]
+                            className="q-btn secondary"
+                            onClick={() =>
+                              setReplyOpen((current) => ({ ...current, [thread.thread_id]: true }))
                             }
-                            onClick={() => void submitReply(thread)}
                           >
-                            {replyBusy[thread.thread_id] ? "Sending…" : "Send reply"}
+                            <MessageSquareIcon className="q-icon s14" aria-hidden />
+                            Reply
                           </button>
                           <button
                             type="button"
-                            className="q-btn ghost"
-                            onClick={() => {
-                              setReplyOpen((current) => ({
-                                ...current,
-                                [thread.thread_id]: false,
-                              }));
-                              setReplyDrafts((current) => ({ ...current, [thread.thread_id]: "" }));
-                            }}
+                            className="q-btn secondary"
+                            disabled={handBusy || !linkedThread}
+                            title={
+                              linkedThread
+                                ? `Send to ${linkedThread.title}`
+                                : "Open a thread first so the agent has a workspace"
+                            }
+                            onClick={() => void handToAgent(thread)}
                           >
-                            Cancel
+                            <HandIcon className="q-icon s14" aria-hidden />
+                            {handoff === thread.thread_id ? "Handing…" : "Hand to agent"}
                           </button>
                         </div>
                       </div>
-                    ) : null}
-                    <div className="q-cmt-a">
-                      <button
-                        type="button"
-                        className="q-btn secondary"
-                        onClick={() =>
-                          setReplyOpen((current) => ({ ...current, [thread.thread_id]: true }))
-                        }
-                      >
-                        <MessageSquareIcon className="q-icon s14" aria-hidden />
-                        Reply
-                      </button>
-                      <button
-                        type="button"
-                        className="q-btn secondary"
-                        disabled={handBusy || !linkedThread}
-                        title={
-                          linkedThread
-                            ? `Send to ${linkedThread.title}`
-                            : "Open a thread first so the agent has a workspace"
-                        }
-                        onClick={() => void handToAgent(thread)}
-                      >
-                        <HandIcon className="q-icon s14" aria-hidden />
-                        {handoff === thread.thread_id ? "Handing…" : "Hand to agent"}
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                    ))}
 
-                <div style={{ marginTop: 18 }}>
-                  <div className="q-composer">
-                    <textarea
-                      aria-label={`Comment on #${number}`}
-                      placeholder={`Comment on #${number}`}
-                      value={commentDraft}
-                      onChange={(event) => setCommentDraft(event.target.value)}
-                    />
-                    <div className="q-comp-f">
-                      <span className="grow" />
-                      <span className="q-faint" style={{ fontSize: 11.5 }}>
-                        {forgeLabel(repo.forge)}
-                      </span>
-                      <button
-                        type="button"
-                        className="q-btn primary"
-                        disabled={commentDraft.trim() === "" || commentBusy}
-                        onClick={() => void submitComment()}
-                      >
-                        <MessageSquareTextIcon className="q-icon s14" aria-hidden />
-                        {commentBusy ? "Posting…" : "Comment"}
-                      </button>
+                    <div style={{ marginTop: 18 }}>
+                      <div className="q-composer">
+                        <textarea
+                          aria-label={`Comment on #${number}`}
+                          placeholder={`Comment on #${number}`}
+                          value={commentDraft}
+                          onChange={(event) => setCommentDraft(event.target.value)}
+                        />
+                        <div className="q-comp-f">
+                          <span className="grow" />
+                          <span className="q-faint" style={{ fontSize: 11.5 }}>
+                            {forgeLabel(repo.forge)}
+                          </span>
+                          <button
+                            type="button"
+                            className="q-btn primary"
+                            disabled={commentDraft.trim() === "" || commentBusy}
+                            onClick={() => void submitComment()}
+                          >
+                            <MessageSquareTextIcon className="q-icon s14" aria-hidden />
+                            {commentBusy ? "Posting…" : "Comment"}
+                          </button>
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                </div>
+                  </>
+                )}
               </>
             ) : null}
 
             {tab === "commits" ? (
               <div>
-                {commits && commits.commits.length > 0 ? (
+                {commitsError ? (
+                  <TabError
+                    title="Commits did not load"
+                    message={commitsError}
+                    onRetry={() => setReloadNonce((value) => value + 1)}
+                  />
+                ) : commits && commits.commits.length > 0 ? (
                   <>
                     {commits.commits.map((commit) => (
                       <div className="q-commit" key={commit.sha}>
@@ -1409,7 +1491,13 @@ function PrDetail({
 
             {tab === "checks" ? (
               <div>
-                {checks ? (
+                {checksError ? (
+                  <TabError
+                    title="Checks did not load"
+                    message={checksError}
+                    onRetry={() => setReloadNonce((value) => value + 1)}
+                  />
+                ) : checks ? (
                   <>
                     <div className="q-muted" style={{ marginBottom: 10 }}>
                       {checksLabel(checks.state, checks.passed, checks.total)} ·{" "}
@@ -1459,67 +1547,79 @@ function PrDetail({
 
             {tab === "files" ? (
               <div>
-                {diffFiles.map((file) => {
-                  const { directory, name } = splitPath(file.path);
-                  const rows = parsePatch(file.patch);
-                  return (
-                    <div key={file.path} className="q-dfile">
-                      <div className="q-dfile-h">
-                        <span className="p q-mono">
-                          <span className="q-faint">{directory}</span>
-                          {name}
-                        </span>
-                        <span className="grow" />
-                        <span className="q-num q-pm">
-                          <span className="q-add">+{file.additions}</span>{" "}
-                          <span className="q-del">−{file.deletions}</span>
-                        </span>
-                      </div>
-                      {rows.length > 0 ? (
-                        <div
-                          className="q-hunk"
-                          style={{ font: "12px/18px var(--mono)", background: "var(--bg-sunk)" }}
-                        >
-                          {rows.map((row) =>
-                            row.kind === "hunk" ? (
-                              <div className="hh" key={`${file.path}:hunk:${row.text}`}>
-                                {row.text}
+                {diffError ? (
+                  <TabError
+                    title="The diff did not load"
+                    message={diffError}
+                    onRetry={() => setReloadNonce((value) => value + 1)}
+                  />
+                ) : null}
+                {!diffError
+                  ? diffFiles.map((file) => {
+                      const { directory, name } = splitPath(file.path);
+                      const rows = parsePatch(file.patch);
+                      return (
+                        <div key={file.path} className="q-dfile">
+                          <div className="q-dfile-h">
+                            <span className="p q-mono">
+                              <span className="q-faint">{directory}</span>
+                              {name}
+                            </span>
+                            <span className="grow" />
+                            <span className="q-num q-pm">
+                              <span className="q-add">+{file.additions}</span>{" "}
+                              <span className="q-del">−{file.deletions}</span>
+                            </span>
+                          </div>
+                          {rows.length > 0 ? (
+                            <div
+                              className="q-hunk"
+                              style={{
+                                font: "12px/18px var(--mono)",
+                                background: "var(--bg-sunk)",
+                              }}
+                            >
+                              {rows.map((row) =>
+                                row.kind === "hunk" ? (
+                                  <div className="hh" key={`${file.path}:hunk:${row.text}`}>
+                                    {row.text}
+                                  </div>
+                                ) : (
+                                  <div
+                                    key={`${file.path}:${row.newLine ?? row.oldLine ?? row.text}`}
+                                    className={
+                                      row.kind === "add"
+                                        ? "q-ln a"
+                                        : row.kind === "del"
+                                          ? "q-ln d"
+                                          : "q-ln"
+                                    }
+                                  >
+                                    <span className="n">{row.newLine ?? row.oldLine ?? ""}</span>
+                                    <span className="sg" aria-hidden>
+                                      {row.kind === "add" ? "+" : row.kind === "del" ? "−" : " "}
+                                    </span>
+                                    <span className="q-cx">{row.text || " "}</span>
+                                  </div>
+                                ),
+                              )}
+                            </div>
+                          ) : (
+                            <div className="q-hunk">
+                              <div className="hh">
+                                {file.binary
+                                  ? "Binary file"
+                                  : file.truncated
+                                    ? "Patch truncated by the forge"
+                                    : "No inline patch"}
                               </div>
-                            ) : (
-                              <div
-                                key={`${file.path}:${row.newLine ?? row.oldLine ?? row.text}`}
-                                className={
-                                  row.kind === "add"
-                                    ? "q-ln a"
-                                    : row.kind === "del"
-                                      ? "q-ln d"
-                                      : "q-ln"
-                                }
-                              >
-                                <span className="n">{row.newLine ?? row.oldLine ?? ""}</span>
-                                <span className="sg" aria-hidden>
-                                  {row.kind === "add" ? "+" : row.kind === "del" ? "−" : " "}
-                                </span>
-                                <span className="q-cx">{row.text || " "}</span>
-                              </div>
-                            ),
+                            </div>
                           )}
                         </div>
-                      ) : (
-                        <div className="q-hunk">
-                          <div className="hh">
-                            {file.binary
-                              ? "Binary file"
-                              : file.truncated
-                                ? "Patch truncated by the forge"
-                                : "No inline patch"}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-                {diffPage?.has_more ? (
+                      );
+                    })
+                  : null}
+                {diffPage?.has_more && !diffError ? (
                   <div style={{ padding: "12px 0" }}>
                     <button
                       type="button"
@@ -1577,7 +1677,7 @@ function PrDetail({
                 ))
               ) : (
                 <p className="q-faint" style={{ fontSize: 12, margin: "4px 0" }}>
-                  No checks reported.
+                  {checksError ? "Checks did not load." : "No checks reported."}
                 </p>
               )}
               {checks && checks.checks.length > 0 ? (

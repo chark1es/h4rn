@@ -194,11 +194,12 @@ impl Forge for GitLabClient {
         pr.reviewers = self.reviewers(repo, number, &value).await;
         pr.summary.review = aggregate_review(&pr.reviewers);
         // GitLab omits line counts on the MR, so the detail sums the diff once.
-        // An `overflow` answer means the list of changes was cut off: a partial
-        // sum would be a wrong number, so the counts stay unknown instead.
-        if let Ok((_, additions, deletions, files, overflow)) =
+        // An `overflow` answer, or a change GitLab collapsed or left out as too
+        // large, means the list is incomplete: a partial sum would be a wrong
+        // number, so the counts stay unknown instead.
+        if let Ok((_, additions, deletions, files, truncated)) =
             self.change_stats(repo, number).await
-            && !overflow
+            && !truncated
         {
             pr.additions = additions;
             pr.deletions = deletions;
@@ -519,8 +520,10 @@ impl GitLabClient {
     /// The MR's changes, their summed line counts and whether GitLab cut the
     /// list off.
     ///
-    /// When `overflow` is true the `changes` array is incomplete, so its line
-    /// totals and file count would be partial; the caller keeps them unknown.
+    /// When `overflow` is true the `changes` array is incomplete, and a change
+    /// marked `collapsed` or `too_large` carries an incomplete patch of its
+    /// own. Either way the line totals and file count would be partial; the
+    /// caller keeps them unknown.
     async fn change_stats(
         &self,
         repo: &ForgeRepoRef,
@@ -543,7 +546,8 @@ impl GitLabClient {
         }
         let files = changes.len() as u32;
         let overflow = value["overflow"].as_bool().unwrap_or(false);
-        Ok((value, additions, deletions, files, overflow))
+        let truncated = overflow || changes.iter().any(change_truncated);
+        Ok((value, additions, deletions, files, truncated))
     }
 }
 
@@ -677,22 +681,42 @@ fn map_change(value: &Value) -> ForgeFileDiff {
         additions,
         deletions,
         binary: diff.is_empty() && !value["new_file"].as_bool().unwrap_or(false),
-        truncated: value["collapsed"].as_bool().unwrap_or(false),
+        truncated: change_truncated(value),
         patch: (!diff.is_empty()).then_some(diff),
     }
 }
 
+/// Counts a change's added and removed lines by the first character inside a
+/// hunk.
+///
+/// Only the file header before the first `@@` is a marker; inside a hunk a
+/// content line that itself begins `+++` or `---` is still an added or removed
+/// line.
 fn count_diff(diff: &str) -> (u32, u32) {
     let mut additions = 0;
     let mut deletions = 0;
+    let mut in_hunk = false;
     for line in diff.lines() {
-        if line.starts_with('+') && !line.starts_with("+++") {
+        if line.starts_with("@@") {
+            in_hunk = true;
+            continue;
+        }
+        if !in_hunk {
+            continue;
+        }
+        if line.starts_with('+') {
             additions += 1;
-        } else if line.starts_with('-') && !line.starts_with("---") {
+        } else if line.starts_with('-') {
             deletions += 1;
         }
     }
     (additions, deletions)
+}
+
+/// Whether GitLab cut this change's patch short (`collapsed`) or omitted it
+/// because it was too large (`too_large`).
+fn change_truncated(value: &Value) -> bool {
+    value["collapsed"].as_bool().unwrap_or(false) || value["too_large"].as_bool().unwrap_or(false)
 }
 
 fn map_note_comment(value: &Value) -> Option<ForgeComment> {

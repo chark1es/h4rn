@@ -328,17 +328,17 @@ impl ForgeHttp {
     /// Removes the configured credential, then anything that looks like a
     /// token, from a message before it reaches a client or a log.
     ///
-    /// The account's own secret is matched verbatim first: an Azure DevOps
-    /// pasted in a JSON error body, a Basic header echoed back, or a
-    /// percent-encoded copy inside a URL all contain it. The pattern-based
-    /// [`redact`] pass stays as a second layer for credentials that do not
-    /// belong to this account (a proxy or a shared error page).
+    /// The account's own secret is matched first: an Azure DevOps PAT pasted
+    /// in a JSON error body, a Basic header echoed back, or a percent-encoded
+    /// copy inside a URL all contain it. Percent escapes match whichever case
+    /// the server echoed (`%2f` is `%2F`), because a JSON body, a URL and the
+    /// value this client generated need not agree on hex case. The
+    /// pattern-based [`redact`] pass stays as a second layer for credentials
+    /// that do not belong to this account (a proxy or a shared error page).
     fn sanitize(&self, value: &str) -> String {
         let mut output = value.to_owned();
         for secret in &self.secrets {
-            if output.contains(secret) {
-                output = output.replace(secret, "[redacted]");
-            }
+            output = redact_secret(&output, secret);
         }
         redact(&output)
     }
@@ -463,13 +463,13 @@ fn response_message(body: &str) -> String {
         for key in ["message", "error", "detail", "errors"] {
             if let Some(message) = value.get(key) {
                 if let Some(text) = message.as_str() {
-                    return redact(text);
+                    return text.to_owned();
                 }
-                return redact(&message.to_string());
+                return message.to_string();
             }
         }
     }
-    redact(trimmed)
+    trimmed.to_owned()
 }
 
 /// Token prefixes that identify a forge credential. Azure DevOps personal
@@ -517,6 +517,61 @@ fn token_run_len(value: &str) -> usize {
         })
         .map(|(index, _)| index)
         .unwrap_or(value.len())
+}
+
+/// Replaces one configured secret, matching percent escapes regardless of hex
+/// case.
+///
+/// The plain form is tried first. When the secret contains a percent escape, a
+/// second pass compares both sides with every `%xx` escape uppercased, so
+/// `%2f`, `%2F` and a mixed spelling all match while Base64's own case stays
+/// exact. Uppercasing changes no byte lengths or offsets, so the match index
+/// in the normalised copy is the index to replace in the original.
+fn redact_secret(value: &str, secret: &str) -> String {
+    if value.contains(secret) {
+        return value.replace(secret, "[redacted]");
+    }
+    if !secret.contains('%') {
+        return value.to_owned();
+    }
+    let needle = normalize_escapes(secret);
+    let mut output = String::with_capacity(value.len());
+    let mut rest = value;
+    loop {
+        let Some(index) = normalize_escapes(rest).find(&needle) else {
+            output.push_str(rest);
+            break;
+        };
+        output.push_str(&rest[..index]);
+        output.push_str("[redacted]");
+        rest = &rest[index + secret.len()..];
+    }
+    output
+}
+
+/// Uppercases the hex digits of every `%xx` escape in `value`.
+fn normalize_escapes(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut output = String::with_capacity(value.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'%'
+            && index + 2 < bytes.len()
+            && bytes[index + 1].is_ascii_hexdigit()
+            && bytes[index + 2].is_ascii_hexdigit()
+        {
+            output.push('%');
+            output.push(bytes[index + 1].to_ascii_uppercase() as char);
+            output.push(bytes[index + 2].to_ascii_uppercase() as char);
+            index += 3;
+        } else {
+            let ch = value[index..].chars().next().unwrap_or('\u{fffd}');
+            output.push(ch);
+            index += ch.len_utf8();
+        }
+    }
+    output
 }
 
 /// Every spelling of a configured credential that an error body or a URL can
@@ -842,6 +897,74 @@ mod tests {
         assert!(!message.contains(pat), "{message}");
         assert!(!message.contains(&encoded), "{message}");
         assert!(!message.contains("azp%2F7Kq%2B2f9Xr3Lm0"), "{message}");
+        assert!(message.contains("[redacted]"), "{message}");
+    }
+
+    #[test]
+    fn configured_secret_matches_lowercase_percent_escapes() {
+        use base64::Engine as _;
+        // A PAT containing `/`, `+` and `=` so its percent-encoded spelling
+        // exercises `%2f`, `%2b` and `%3d`; the Basic header adds another
+        // `%3d` for the Base64 padding. Servers do not agree on hex case.
+        let pat = "azp/7Kq+2f9Xr3Lm0=";
+        let encoded = base64::engine::general_purpose::STANDARD.encode(format!(":{pat}"));
+        let client = ForgeHttp::new(
+            ForgeKind::AzureDevOps,
+            "https://dev.azure.test/acme",
+            basic_auth_header("", pat),
+            "application/json",
+            120,
+        )
+        .unwrap();
+        let lowered = |value: &str| {
+            value
+                .replace("%2F", "%2f")
+                .replace("%2B", "%2b")
+                .replace("%3D", "%3d")
+        };
+        let pat_escaped = lowered(&encode_path_segment(pat));
+        let basic_escaped = lowered(&encode_path_segment(&format!("Basic {encoded}")));
+        assert!(
+            pat_escaped.contains("%2f")
+                && pat_escaped.contains("%2b")
+                && pat_escaped.contains("%3d"),
+            "{pat_escaped}"
+        );
+        assert!(basic_escaped.contains("%3d"), "{basic_escaped}");
+
+        let body = format!(
+            r#"{{"message":"bad PAT \"{pat}\"; Authorization: Basic {encoded}; saw {pat_escaped} and {basic_escaped}"}}"#
+        );
+        let message = error_for(&client, body);
+        assert!(!message.contains(pat), "{message}");
+        assert!(!message.contains(&encoded), "{message}");
+        assert!(!message.contains(&pat_escaped), "{message}");
+        assert!(!message.contains(&basic_escaped), "{message}");
+        assert!(!message.contains("%2f"), "{message}");
+        assert!(!message.contains("%2b"), "{message}");
+        assert!(message.contains("[redacted]"), "{message}");
+    }
+
+    #[test]
+    fn configured_secret_is_redacted_before_pattern_redaction() {
+        // The pattern pass treats `ghp_tail` as a token and would leave the
+        // `azp_secret,` half of this credential in the message. The
+        // configured-secret pass must run first so the whole value goes.
+        let pat = "azp_secret,ghp_tail";
+        let client = ForgeHttp::new(
+            ForgeKind::AzureDevOps,
+            "https://dev.azure.test/acme",
+            basic_auth_header("", pat),
+            "application/json",
+            120,
+        )
+        .unwrap();
+        let message = error_for(
+            &client,
+            format!(r#"{{"message":"bad PAT \"{pat}\" was rejected"}}"#),
+        );
+        assert!(!message.contains("azp_secret"), "{message}");
+        assert!(!message.contains("ghp_tail"), "{message}");
         assert!(message.contains("[redacted]"), "{message}");
     }
 

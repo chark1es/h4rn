@@ -27,9 +27,12 @@ GitLab uses REST v4 throughout. Pipelines and their jobs are mapped onto the
 normalised checks shape; merge-request discussions become threads. The merge
 request object carries no line totals, so `get_pr` sums the `/changes` diffs
 once and reports the real additions and deletions (`line_counts_known` is
-`true`). When GitLab answers with `overflow: true` the changes list was cut
-off; a partial sum would be a wrong number, so the totals stay unknown and the
-UI and the agent handoff say so.
+`true`). A line is counted by its first character inside a hunk, so content
+that itself begins `+++` or `---` is an added or removed line rather than a
+file header. When GitLab answers with `overflow: true` the changes list was cut
+off, and a change marked `collapsed` (a shortened patch) or `too_large` (an
+omitted one) is incomplete too; a partial sum would be a wrong number, so the
+totals stay unknown and the UI and the agent handoff say so.
 
 Gitea and Forgejo share one client. Forgejo is API-compatible for everything the
 PR view needs. Two differences are handled explicitly:
@@ -120,10 +123,11 @@ empty `changeEntries: []` is a real zero and stays known.
 comments and inline threads; a 200 whose body lacks its `value` collection is
 an error, not an empty discussion, while `value: []` is a valid empty list.
 Thread statuses `fixed`, `closed`, `wontFix` and `byDesign` are resolved.
-Replies parse the caller's thread and comment ids as positive 32-bit integers
-before they are put in the request path, so a malformed id returns
-`InvalidRequest` and sends nothing. Checks are PR statuses plus policy
-evaluations requested with `api-version=7.1-preview.1`; the project id comes
+Replies parse the caller's thread id (which goes into the request URL) and
+comment id (which goes into the JSON body) as positive 32-bit integers before
+either is used, so a malformed id returns `InvalidRequest` and sends nothing.
+Checks are PR statuses plus policy evaluations requested with
+`api-version=7.1-preview.1`; the project id comes
 from the PR's `repository.project.id`. Both endpoints always send a `value`
 collection, so a 200 whose status or policy body lacks one is an error rather
 than an empty result; a valid `value: []` really is empty. If the status, iteration or
@@ -243,9 +247,10 @@ forge and base URL match when it is omitted. For Azure DevOps the legacy
 `https://<org>.visualstudio.com` and
 `https://<org>.visualstudio.com/DefaultCollection` forms name the same
 account, so a remote spelled either way resolves an account added with the
-other. The UI's account lookup applies the same equivalence (trailing slashes
-and host case ignored), so a `DefaultCollection` checkout enables the PR view
-for an account added without the segment and the other way round.
+other. The UI's account lookup applies the same equivalence: trailing slashes,
+host case and the `DefaultCollection` segment's letter case are ignored, so a
+`DefaultCollection` checkout enables the PR view for an account added without
+the segment and the other way round.
 
 Tokens are stored with the OS keychain under service `h4rn-forge` and account
 id when a keychain is available. Headless Linux and WSL fall back to an
@@ -437,10 +442,11 @@ against the forge's own limits:
 
 Error messages redact the account's own configured credential first, verbatim
 and in every form an error body or URL can echo it: quoted inside a JSON
-message, percent-encoded, or Base64 inside a Basic header. A second
-pattern-based pass removes anything that still looks like a GitHub, GitLab or
-Atlassian token. The redacted message is what reaches a log or a protocol
-error; the raw response body never does.
+message, percent-encoded (the `%xx` escapes match whichever hex case the server
+used), or Base64 inside a Basic header. A second, pattern-based pass removes
+anything that still looks like a GitHub, GitLab or Atlassian token. The
+redacted message is what reaches a log or a protocol error; the raw response
+body never does.
 
 ## Testing
 
@@ -461,7 +467,9 @@ without a nickname and a namesake account) and duplicate-free pages, an opaque
 `next` cursor on the second PR page, a distant page served by the documented
 `page` parameter, comments `has_more` at the page cap, file-level comments and
 `inline.outdated` threads,
-`ssh.bitbucket.org`, and same-origin `next` handling; Azure DevOps PRs, raw
+`ssh.bitbucket.org`, and same-origin `next` handling; GitLab overflow,
+`collapsed` and `too_large` changes and content lines that begin `+++`/`---`;
+Azure DevOps PRs, raw
 iteration arrays, changed-file contents, the 100-file per-page budget, threads,
 statuses across iterations, same-name policy evaluations, missing versus empty
 `value` collections, a failed policy read, PRs without `_links`, unknown line

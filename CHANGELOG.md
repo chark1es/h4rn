@@ -108,20 +108,30 @@ All notable changes to h4rn are recorded here. The format follows
 - **Forge errors never repeat the account's own credential.** Every client now
   redacts the configured token verbatim before an error leaves it or reaches a
   log, including a token quoted in a JSON error body, a percent-encoded copy
-  from a URL, and the Base64 Basic credential Azure DevOps can echo back. The
-  pattern-based token redaction stays as a second layer.
-- **Azure DevOps comment ids are parsed before they become a URL.** A reply's
-  thread and comment ids must be positive 32-bit integers; an invalid one
-  returns `InvalidRequest` without sending a request.
+  from a URL and the Base64 Basic credential Azure DevOps can echo back.
+  Percent escapes match whichever hex case the server used (`%2f` is `%2F`),
+  and the configured secret is removed before the pattern-based token pass,
+  which stays as a second layer.
+- **Azure DevOps reply ids are parsed before they are used.** A reply's thread
+  id goes into the request URL and its comment id into the JSON body; both must
+  be positive 32-bit integers, and an invalid one returns `InvalidRequest`
+  without sending a request.
 - **A `DefaultCollection` Azure DevOps checkout finds its account in the UI.**
   Account matching applies the daemon's alias rule
   (`https://acme.visualstudio.com` equals
-  `https://acme.visualstudio.com/DefaultCollection`, host case and trailing
-  slashes ignored), so Open PR works whichever spelling the remote uses.
+  `https://acme.visualstudio.com/DefaultCollection`, host case, the segment's
+  letter case and trailing slashes ignored), so Open PR works whichever
+  spelling the remote uses.
 - **GitLab merge requests report their real line totals.** `get_pr` already
-  summed the `/changes` diffs; it now marks the counts known so the UI and the
-  agent handoff show them. A truncated answer (`overflow: true`) leaves them
-  unknown instead of reporting a partial sum.
+  summed the `/changes` diffs; it now counts added and removed lines by their
+  first character inside a hunk (content that itself begins `+++` or `---`
+  counts) and marks the totals known so the UI and the agent handoff show
+  them. A truncated answer (`overflow: true`, or a change marked `collapsed` or
+  `too_large`) leaves them unknown instead of reporting a partial sum.
+- **One failed request no longer hides the whole pull request.** The detail,
+  comments, checks, diff and commits load independently, so a diff or comment
+  error is shown inside its own tab while the PR header, checks and the rest
+  of the detail stay on screen.
 - **Azure DevOps missing collections are errors, not empty answers.** A 200
   without `threads` or `changeEntries` is a parse error, while an explicit
   empty list stays empty; a missing `changeEntries` leaves

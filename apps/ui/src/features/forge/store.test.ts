@@ -165,6 +165,22 @@ describe("account matching", () => {
     ).toBe("a1");
   });
 
+  test("matches a lowercase DefaultCollection suffix", () => {
+    const azure: ForgeAccount = {
+      ...account,
+      forge: "azure_devops",
+      base_url: "https://acme.visualstudio.com",
+    };
+    expect(
+      accountForRepo([azure], {
+        forge: "azure_devops",
+        base_url: "https://acme.visualstudio.com/defaultcollection/",
+        owner: "platform",
+        repo: "widget",
+      })?.account_id,
+    ).toBe("a1");
+  });
+
   test("keeps DefaultCollection distinct for a non-Visual Studio host", () => {
     const azure: ForgeAccount = {
       ...account,
