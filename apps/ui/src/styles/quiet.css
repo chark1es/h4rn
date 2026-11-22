@@ -456,6 +456,118 @@ fieldset.q-seg-fs {
   background: var(--accent-soft);
 }
 
+/* Linked pull requests: the header badge and its quiet panel. */
+.q-pr-badge {
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+}
+.q-pr-badge:hover {
+  background: var(--hover);
+}
+.q-pr-more {
+  color: var(--fg-3);
+}
+.q-pr-links {
+  display: flex;
+  flex-direction: column;
+  max-height: 320px;
+  overflow: auto;
+}
+.q-pr-link {
+  min-width: 0;
+  padding: 6px 4px;
+  border-radius: 4px;
+}
+.q-pr-link + .q-pr-link {
+  border-top: 1px solid var(--line);
+}
+.q-pr-link:hover {
+  background: var(--hover);
+}
+.q-pr-link-main {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.q-pr-link-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--fg);
+  text-decoration: none;
+}
+.q-pr-link-title:hover {
+  text-decoration: underline;
+}
+.q-pr-link-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.q-pr-link-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--fg-3);
+}
+.q-pr-link-meta .q-danger {
+  color: var(--danger);
+}
+.q-pr-link-meta .q-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+}
+.q-pr-link-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.q-pr-link-form input {
+  flex: 1;
+}
+.q-pr-picks {
+  display: flex;
+  flex-direction: column;
+  max-height: 280px;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+  padding-top: 4px;
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+}
+.q-pr-pick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--fg);
+  text-align: left;
+  cursor: pointer;
+}
+.q-pr-pick:hover {
+  background: var(--hover);
+}
+.q-pr-pick-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Identity + state */
 .q-blob {
   display: inline-block;

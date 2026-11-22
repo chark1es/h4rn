@@ -51,6 +51,7 @@ const CAPABILITIES: ForgeCapabilityEntry[] = [
       diff_pagination: true,
       graphql: true,
       rerun_checks: true,
+      conditional_poll: true,
     },
   },
   {
@@ -66,6 +67,7 @@ const CAPABILITIES: ForgeCapabilityEntry[] = [
       diff_pagination: true,
       graphql: false,
       rerun_checks: true,
+      conditional_poll: false,
     },
   },
   {
@@ -81,6 +83,7 @@ const CAPABILITIES: ForgeCapabilityEntry[] = [
       diff_pagination: false,
       graphql: false,
       rerun_checks: false,
+      conditional_poll: false,
     },
   },
   {
@@ -96,6 +99,7 @@ const CAPABILITIES: ForgeCapabilityEntry[] = [
       diff_pagination: false,
       graphql: false,
       rerun_checks: false,
+      conditional_poll: false,
     },
   },
   {
@@ -111,6 +115,7 @@ const CAPABILITIES: ForgeCapabilityEntry[] = [
       diff_pagination: false,
       graphql: false,
       rerun_checks: false,
+      conditional_poll: false,
     },
   },
   {
@@ -126,6 +131,7 @@ const CAPABILITIES: ForgeCapabilityEntry[] = [
       diff_pagination: false,
       graphql: false,
       rerun_checks: false,
+      conditional_poll: false,
     },
   },
 ];

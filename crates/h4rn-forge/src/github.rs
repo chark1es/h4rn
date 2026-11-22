@@ -403,6 +403,12 @@ impl Forge for GitHubClient {
         Ok(pr)
     }
 
+    async fn pr_changed(&self, repo: &ForgeRepoRef, number: u32) -> Result<Option<bool>> {
+        validate_repo(repo)?;
+        let url = format!("{}/pulls/{number}", self.repo_url(repo));
+        self.http.probe_json(&url).await
+    }
+
     async fn get_diff(
         &self,
         repo: &ForgeRepoRef,

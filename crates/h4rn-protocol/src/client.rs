@@ -915,6 +915,61 @@ pub enum ClientRequest {
         /// Creation target when `thread_id` is absent.
         target: Option<crate::forge::ForgeAgentTarget>,
     },
+    /// Link a pull request to a thread.
+    ///
+    /// Linking reads the PR once from the forge so the answer carries its
+    /// current state, and keeps the link in the thread journal across a restart.
+    LinkPullRequest {
+        /// Thread that will hold the link.
+        thread_id: ThreadId,
+        /// Account to read the PR with; the matching account when omitted.
+        account_id: Option<String>,
+        /// Repository.
+        repo: crate::forge::ForgeRepoRef,
+        /// PR number.
+        number: u32,
+    },
+    /// Remove a pull request link from a thread, ending any watch on it.
+    UnlinkPullRequest {
+        /// Thread that holds the link.
+        thread_id: ThreadId,
+        /// Repository.
+        repo: crate::forge::ForgeRepoRef,
+        /// PR number.
+        number: u32,
+    },
+    /// List a thread's linked pull requests with their latest forge state.
+    ListThreadPullRequests {
+        /// Thread to list.
+        thread_id: ThreadId,
+    },
+    /// Threads that link to one pull request, for the PR page.
+    ListPrThreads {
+        /// Repository.
+        repo: crate::forge::ForgeRepoRef,
+        /// PR number.
+        number: u32,
+    },
+    /// Watch a linked pull request so the agent wakes when it changes.
+    ///
+    /// The watch is daemon memory: links survive a restart, watches do not.
+    WatchPullRequest {
+        /// Thread that will be woken.
+        thread_id: ThreadId,
+        /// Repository.
+        repo: crate::forge::ForgeRepoRef,
+        /// PR number.
+        number: u32,
+    },
+    /// Stop watching a linked pull request.
+    UnwatchPullRequest {
+        /// Thread that watches it.
+        thread_id: ThreadId,
+        /// Repository.
+        repo: crate::forge::ForgeRepoRef,
+        /// PR number.
+        number: u32,
+    },
     /// One cross-harness subagent operation (ADR-038).
     ///
     /// Like [`ClientRequest::Mcp`], every operation rides this single envelope
@@ -1091,6 +1146,8 @@ impl ClientRequest {
             | Self::ForgeListPrComments { .. }
             | Self::ForgeListChecks { .. }
             | Self::ForgeListPrCommits { .. }
+            | Self::ListThreadPullRequests { .. }
+            | Self::ListPrThreads { .. }
             | Self::ListProjects { .. }
             | Self::GetNetworkAccess
             | Self::ListDirectDevices => View,
@@ -1112,6 +1169,10 @@ impl ClientRequest {
             | Self::ForgeComment { .. }
             | Self::ForgeOpenPr { .. }
             | Self::ForgeHandPrToAgent { .. }
+            | Self::LinkPullRequest { .. }
+            | Self::UnlinkPullRequest { .. }
+            | Self::WatchPullRequest { .. }
+            | Self::UnwatchPullRequest { .. }
             | Self::RenameProject { .. }
             | Self::RemoveProject { .. } => Approve,
             Self::TerminalOpen { .. }
@@ -1251,6 +1312,54 @@ mod tests {
             (
                 ClientRequest::ForgeRerunChecks {
                     account_id: None,
+                    repo: repo(),
+                    number: 1,
+                },
+                Approve,
+            ),
+            // Linking and watching change thread-owned state; listing them
+            // only reads.
+            (
+                ClientRequest::ListThreadPullRequests {
+                    thread_id: thread(),
+                },
+                View,
+            ),
+            (
+                ClientRequest::ListPrThreads {
+                    repo: repo(),
+                    number: 1,
+                },
+                View,
+            ),
+            (
+                ClientRequest::LinkPullRequest {
+                    thread_id: thread(),
+                    account_id: None,
+                    repo: repo(),
+                    number: 1,
+                },
+                Approve,
+            ),
+            (
+                ClientRequest::UnlinkPullRequest {
+                    thread_id: thread(),
+                    repo: repo(),
+                    number: 1,
+                },
+                Approve,
+            ),
+            (
+                ClientRequest::WatchPullRequest {
+                    thread_id: thread(),
+                    repo: repo(),
+                    number: 1,
+                },
+                Approve,
+            ),
+            (
+                ClientRequest::UnwatchPullRequest {
+                    thread_id: thread(),
                     repo: repo(),
                     number: 1,
                 },
@@ -1462,5 +1571,74 @@ mod tests {
         let back: ClientFrame = serde_json::from_str(&json).unwrap();
         assert_eq!(frame, back);
         assert!(json.contains("\"type\":\"set_thread_tab\""));
+    }
+
+    #[test]
+    fn link_requests_round_trip_with_stable_tags() {
+        let repo = crate::forge::ForgeRepoRef {
+            forge: crate::forge::ForgeKind::GitHub,
+            base_url: "https://github.com".into(),
+            owner: "o".into(),
+            repo: "r".into(),
+        };
+        for request in [
+            ClientRequest::LinkPullRequest {
+                thread_id: ThreadId::new("th_1"),
+                account_id: Some("acct_1".into()),
+                repo: repo.clone(),
+                number: 4,
+            },
+            ClientRequest::UnlinkPullRequest {
+                thread_id: ThreadId::new("th_1"),
+                repo: repo.clone(),
+                number: 4,
+            },
+            ClientRequest::ListThreadPullRequests {
+                thread_id: ThreadId::new("th_1"),
+            },
+            ClientRequest::ListPrThreads {
+                repo: repo.clone(),
+                number: 4,
+            },
+            ClientRequest::WatchPullRequest {
+                thread_id: ThreadId::new("th_1"),
+                repo: repo.clone(),
+                number: 4,
+            },
+            ClientRequest::UnwatchPullRequest {
+                thread_id: ThreadId::new("th_1"),
+                repo,
+                number: 4,
+            },
+        ] {
+            let frame = ClientFrame {
+                id: 2,
+                body: request.clone(),
+            };
+            let json = serde_json::to_string(&frame).unwrap();
+            let back: ClientFrame = serde_json::from_str(&json).unwrap();
+            assert_eq!(frame, back);
+        }
+    }
+
+    #[test]
+    fn a_capabilities_row_from_an_older_daemon_still_parses() {
+        let row: crate::forge::ForgeCapabilityEntry = serde_json::from_value(serde_json::json!({
+            "forge": "github",
+            "capabilities": {
+                "device_flow": true,
+                "review_threads": true,
+                "resolve_threads": true,
+                "nested_replies": true,
+                "inline_review_comments": true,
+                "checks": true,
+                "pipelines": false,
+                "diff_pagination": true,
+                "graphql": true,
+                "rerun_checks": true
+            }
+        }))
+        .unwrap();
+        assert!(!row.capabilities.conditional_poll);
     }
 }

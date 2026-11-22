@@ -238,6 +238,21 @@ impl ForgeHttp {
         self.json(response)
     }
 
+    /// GETs JSON conditionally and only reports whether a `304` was served.
+    ///
+    /// `Some(false)` is a `304` served from the ETag cache; `Some(true)` means
+    /// the server returned a body (either it changed or this was the first
+    /// read). `None` is never returned here, but the trait method that uses it
+    /// keeps the tri-state for forges that cannot answer at all.
+    pub async fn probe_json(&self, url: &str) -> Result<Option<bool>> {
+        let response = self.request(Method::GET, url, None, true).await?;
+        if response.from_cache {
+            return Ok(Some(false));
+        }
+        self.json(response)?;
+        Ok(Some(true))
+    }
+
     /// GETs a text body, returning its content type.
     pub async fn get_text(&self, url: &str) -> Result<(String, Option<String>)> {
         let response = self.request(Method::GET, url, None, false).await?;

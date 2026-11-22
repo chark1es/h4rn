@@ -48,4 +48,9 @@ graphql: boolean,
  * pipelines). Gitea, Forgejo, Bitbucket Cloud and Azure DevOps expose no
  * equivalent for the PR surface.
  */
-rerun_checks: boolean, };
+rerun_checks: boolean, 
+/**
+ * PR detail can be probed with a conditional GET (`ETag`/`304`) before
+ * reading the whole PR. The watch uses it to stay inside the rate limit.
+ */
+conditional_poll: boolean, };

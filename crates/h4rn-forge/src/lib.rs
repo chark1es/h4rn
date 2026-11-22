@@ -112,6 +112,19 @@ pub trait Forge: Send + Sync {
     /// Fetches one PR's detail.
     async fn get_pr(&self, repo: &ForgeRepoRef, number: u32) -> Result<ForgePullRequest>;
 
+    /// Whether the PR detail changed since this client last read it.
+    ///
+    /// `Some(false)` means a conditional request got a `304 Not Modified` and
+    /// the caller can reuse the last read. `Some(true)` means the forge
+    /// returned a body (it changed, or this is the first read) and the caller
+    /// must read the PR. `None` means the forge cannot answer cheaply. Only
+    /// forges whose [`ForgeCapabilities::conditional_poll`] is true override
+    /// this.
+    async fn pr_changed(&self, repo: &ForgeRepoRef, number: u32) -> Result<Option<bool>> {
+        let _ = (repo, number);
+        Ok(None)
+    }
+
     /// Fetches one page of the PR diff.
     async fn get_diff(
         &self,
@@ -244,6 +257,7 @@ pub fn capabilities(kind: ForgeKind) -> ForgeCapabilities {
             diff_pagination: true,
             graphql: true,
             rerun_checks: true,
+            conditional_poll: true,
         },
         ForgeKind::GitLab => ForgeCapabilities {
             device_flow: false,
@@ -256,6 +270,7 @@ pub fn capabilities(kind: ForgeKind) -> ForgeCapabilities {
             diff_pagination: true,
             graphql: false,
             rerun_checks: true,
+            conditional_poll: false,
         },
         ForgeKind::Gitea => ForgeCapabilities {
             device_flow: false,
@@ -268,6 +283,7 @@ pub fn capabilities(kind: ForgeKind) -> ForgeCapabilities {
             diff_pagination: false,
             graphql: false,
             rerun_checks: false,
+            conditional_poll: false,
         },
         ForgeKind::Forgejo => ForgeCapabilities {
             device_flow: false,
@@ -280,6 +296,7 @@ pub fn capabilities(kind: ForgeKind) -> ForgeCapabilities {
             diff_pagination: false,
             graphql: false,
             rerun_checks: false,
+            conditional_poll: false,
         },
         ForgeKind::Bitbucket => ForgeCapabilities {
             device_flow: false,
@@ -295,6 +312,7 @@ pub fn capabilities(kind: ForgeKind) -> ForgeCapabilities {
             diff_pagination: false,
             graphql: false,
             rerun_checks: false,
+            conditional_poll: false,
         },
         ForgeKind::AzureDevOps => ForgeCapabilities {
             device_flow: false,
@@ -308,6 +326,7 @@ pub fn capabilities(kind: ForgeKind) -> ForgeCapabilities {
             graphql: false,
             // Re-queuing a pipeline needs the Builds API and a broader token.
             rerun_checks: false,
+            conditional_poll: false,
         },
     }
 }
@@ -373,6 +392,20 @@ mod tests {
         assert!(capabilities(ForgeKind::Bitbucket).nested_replies);
         assert!(!capabilities(ForgeKind::Bitbucket).resolve_threads);
         assert!(capabilities(ForgeKind::AzureDevOps).inline_review_comments);
+    }
+
+    #[test]
+    fn only_github_advertises_conditional_pr_polling() {
+        assert!(capabilities(ForgeKind::GitHub).conditional_poll);
+        for kind in [
+            ForgeKind::GitLab,
+            ForgeKind::Gitea,
+            ForgeKind::Forgejo,
+            ForgeKind::Bitbucket,
+            ForgeKind::AzureDevOps,
+        ] {
+            assert!(!capabilities(kind).conditional_poll, "{kind:?}");
+        }
     }
 
     #[test]

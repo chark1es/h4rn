@@ -7,6 +7,20 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Threads remember the pull requests that belong to them, and can watch one for you.** Link a
+  PR by pasting its URL or picking it from the repository's open PRs in the command palette
+  (`Link pull request…`), or let opening a PR from h4rn link it automatically. Links are stored in
+  the thread journal, so they survive a restart, and the thread header shows a quiet badge with the
+  PR number, its state and `+N` for more; the badge opens a linked-items panel with open, watch and
+  unlink. The PR page lists the threads that link to it. A linked PR can be watched: while the
+  thread is active the daemon polls every two minutes, sharing one poll across threads watching the
+  same PR, and wakes the agent with a plain-language message when a check fails, the required checks
+  pass, the remaining checks finish after a failure, someone else comments or reviews, the branch
+  starts to conflict, or the PR merges or closes. GitHub is polled conditionally, so an unchanged PR
+  costs no full read. Each event is reported once per watch; a watch ends after ten comment-only
+  wakes in a row, eight failed reads in a row, or when the thread is settled, and a rate limit only
+  pauses it. The state beside every link is read from the forge, and a failed read is shown as
+  unavailable rather than guessed.
 - **The daemon can run as a per-user service.** `h4rnd service install` writes the
   shipped systemd user unit (or launch agent, or Windows scheduled task) with the
   running binary's absolute path and current data directory, then enables and

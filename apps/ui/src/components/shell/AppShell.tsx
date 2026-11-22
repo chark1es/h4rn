@@ -34,6 +34,7 @@ import {
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts, useAttachShortcut } from "@/features/attachments/use-attachments";
+import { LinkPullRequestDialog } from "@/features/forge/LinkPullRequestDialog";
 import { IdePane } from "@/features/ide/IdePane";
 import { McpApprovalCard } from "@/features/mcp/McpApprovalCard";
 import { ensureMcpEvents } from "@/features/mcp/store";
@@ -54,7 +55,14 @@ import { useViewportWidth } from "@/hooks/use-viewport-width";
 import { HARNESS_LABELS, harnessLabel, harnessSeed, machineSeed } from "@/lib/entities";
 import { projectName } from "@/lib/grouping";
 import { titleWithShortcut } from "@/lib/keybindings";
-import { createThread, navigate, openAddProject, panelFits, useApp } from "@/lib/store/appStore";
+import {
+  closeLinkPullRequest,
+  createThread,
+  navigate,
+  openAddProject,
+  panelFits,
+  useApp,
+} from "@/lib/store/appStore";
 import { defaultThreadHostId, localOnlyHostOptions } from "@/lib/thread-hosts";
 import { activeThread } from "@/lib/thread-selection";
 
@@ -554,6 +562,7 @@ export function AppShell() {
   const layout = useApp((state) => state.ui.layout);
   const threads = useApp((state) => state.threads);
   const selectedThreadId = useApp((state) => state.ui.selectedThreadId);
+  const linkPrOpen = useApp((state) => state.ui.linkPrOpen);
   const isPhone = useIsPhone();
   // The relay can hand this daemon a shared call at any time, so the approval
   // stream must run before the owner visits the MCP screen.
@@ -603,6 +612,11 @@ export function AppShell() {
         <NewThreadDialog />
         <AddProjectDialog />
         <CommandPalette />
+        <LinkPullRequestDialog
+          open={linkPrOpen}
+          thread={thread ?? null}
+          onClose={closeLinkPullRequest}
+        />
         <ShortcutsDialog />
         <Toasts />
       </div>
@@ -650,6 +664,11 @@ export function AppShell() {
       <NewThreadDialog />
       <AddProjectDialog />
       <CommandPalette />
+      <LinkPullRequestDialog
+        open={linkPrOpen}
+        thread={thread ?? null}
+        onClose={closeLinkPullRequest}
+      />
       <ShortcutsDialog />
       <Toasts />
     </div>

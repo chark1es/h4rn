@@ -975,7 +975,71 @@ thread_id: ThreadId | null,
 /**
  * Creation target when `thread_id` is absent.
  */
-target: ForgeAgentTarget | null, } | { "type": "subagent", 
+target: ForgeAgentTarget | null, } | { "type": "link_pull_request", 
+/**
+ * Thread that will hold the link.
+ */
+thread_id: ThreadId, 
+/**
+ * Account to read the PR with; the matching account when omitted.
+ */
+account_id: string | null, 
+/**
+ * Repository.
+ */
+repo: ForgeRepoRef, 
+/**
+ * PR number.
+ */
+number: number, } | { "type": "unlink_pull_request", 
+/**
+ * Thread that holds the link.
+ */
+thread_id: ThreadId, 
+/**
+ * Repository.
+ */
+repo: ForgeRepoRef, 
+/**
+ * PR number.
+ */
+number: number, } | { "type": "list_thread_pull_requests", 
+/**
+ * Thread to list.
+ */
+thread_id: ThreadId, } | { "type": "list_pr_threads", 
+/**
+ * Repository.
+ */
+repo: ForgeRepoRef, 
+/**
+ * PR number.
+ */
+number: number, } | { "type": "watch_pull_request", 
+/**
+ * Thread that will be woken.
+ */
+thread_id: ThreadId, 
+/**
+ * Repository.
+ */
+repo: ForgeRepoRef, 
+/**
+ * PR number.
+ */
+number: number, } | { "type": "unwatch_pull_request", 
+/**
+ * Thread that watches it.
+ */
+thread_id: ThreadId, 
+/**
+ * Repository.
+ */
+repo: ForgeRepoRef, 
+/**
+ * PR number.
+ */
+number: number, } | { "type": "subagent", 
 /**
  * Operation to perform.
  */

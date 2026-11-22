@@ -1,0 +1,1990 @@
+//! Thread ↔ pull request links and the PR watch.
+//!
+//! A link is durable metadata owned by the thread journal: the forge account,
+//! repository and PR number. The state shown beside a link always comes from a
+//! fresh forge read; a failed read is reported as such, never cached as if it
+//! were true.
+//!
+//! A watch is daemon memory. While the thread is active, the daemon polls the
+//! PR every two minutes — one poll shared by every thread watching the same
+//! PR — and appends a plain-language message that starts a turn when
+//! something the reviewer would care about changed.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use h4rn_forge::{ForgeError, capabilities};
+use h4rn_protocol::{
+    ForgeAccount, ForgeChecks, ForgeChecksState, ForgeCommentPage, ForgeMergeable, ForgePrState,
+    ForgePrSummary, ForgePullRequest, ForgeRepoRef, ForgeReviewState, PrLinkedThread, ProtoError,
+    ProtoErrorCode, ThreadId, ThreadPullRequest, ThreadTab,
+};
+use serde::{Deserialize, Serialize};
+use tokio::task::JoinHandle;
+
+use crate::forge::ForgeServiceError;
+use crate::journal::{Journal, JournalError};
+use crate::threads::ThreadManager;
+
+/// How often a watched PR is polled.
+pub const WATCH_POLL_SECS: u64 = 120;
+/// Consecutive wakes that brought only comments before a watch ends.
+const MAX_COMMENT_ONLY_WAKES: u32 = 10;
+/// Consecutive failed reads before a watch ends.
+const MAX_FAILED_READS: u32 = 8;
+/// Shortest pause applied when a forge reports a rate limit without a reset.
+const DEFAULT_RATE_LIMIT_PAUSE_SECS: u64 = 120;
+
+/// One durable thread → pull request link.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrLinkRecord {
+    /// Thread that holds the link.
+    pub thread_id: ThreadId,
+    /// Account the daemon reads the PR with.
+    pub account_id: String,
+    /// Repository.
+    pub repo: ForgeRepoRef,
+    /// PR/MR number.
+    pub number: u32,
+    /// When the link was created.
+    pub linked_at: DateTime<Utc>,
+}
+
+/// A failure while linking or reading a linked PR.
+#[derive(Debug, thiserror::Error)]
+pub enum PrLinkError {
+    /// The thread does not exist on this daemon.
+    #[error("thread {0} was not found")]
+    ThreadNotFound(String),
+    /// No link matches the request.
+    #[error("{0}")]
+    NotLinked(String),
+    /// The forge failed.
+    #[error("{0}")]
+    Forge(String),
+    /// The journal failed.
+    #[error("{0}")]
+    Journal(String),
+}
+
+impl PrLinkError {
+    /// Maps the failure onto the protocol error class and a user hint.
+    pub fn into_proto(self) -> ProtoError {
+        match self {
+            Self::ThreadNotFound(message) => ProtoError::new(
+                ProtoErrorCode::NotFound,
+                message,
+                "Refresh the thread list and try again",
+            ),
+            Self::NotLinked(message) => ProtoError::new(
+                ProtoErrorCode::InvalidRequest,
+                message,
+                "Link the pull request before watching it",
+            ),
+            Self::Forge(message) => ProtoError::new(
+                ProtoErrorCode::Internal,
+                message,
+                "Check the forge account and try again",
+            ),
+            Self::Journal(message) => ProtoError::new(
+                ProtoErrorCode::Internal,
+                message,
+                "Check the daemon log for journal details",
+            ),
+        }
+    }
+}
+
+impl From<JournalError> for PrLinkError {
+    fn from(error: JournalError) -> Self {
+        Self::Journal(error.to_string())
+    }
+}
+
+/// A forge read the watch needs.
+#[derive(Debug, Clone)]
+pub enum PrSourceError {
+    /// The account's quota is exhausted; the watch pauses and resumes later.
+    RateLimited {
+        /// Seconds the forge asked the caller to wait, when it said.
+        retry_after: Option<u64>,
+    },
+    /// Any other read failure.
+    Other(String),
+}
+
+impl PrSourceError {
+    fn message(&self) -> String {
+        match self {
+            Self::RateLimited { .. } => "the forge rate limit paused the watch".into(),
+            Self::Other(message) => message.clone(),
+        }
+    }
+}
+
+impl From<ForgeServiceError> for PrSourceError {
+    fn from(error: ForgeServiceError) -> Self {
+        match error {
+            ForgeServiceError::Forge(ForgeError::RateLimited {
+                retry_after_secs, ..
+            }) => Self::RateLimited {
+                retry_after: retry_after_secs,
+            },
+            other => Self::Other(other.to_string()),
+        }
+    }
+}
+
+/// The forge reads the service performs.
+///
+/// A trait rather than a concrete [`crate::forge::ForgeService`] so the watch
+/// state machine is tested against a scripted forge without a socket.
+#[async_trait]
+pub trait PrSource: Send + Sync {
+    /// Picks the account for a repository and returns its id.
+    async fn resolve_account(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+    ) -> Result<String, PrSourceError>;
+
+    /// The authenticated login for an account, used to ignore the person's own
+    /// comments and reviews.
+    fn account_login(&self, account_id: &str) -> Option<String>;
+
+    /// Reads one PR's detail.
+    async fn get_pr(
+        &self,
+        account_id: &str,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<ForgePullRequest, PrSourceError>;
+
+    /// Whether the PR detail changed, when the forge can answer cheaply.
+    async fn pr_changed(
+        &self,
+        account_id: &str,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<Option<bool>, PrSourceError>;
+
+    /// Reads comments, review threads and reviews.
+    async fn list_comments(
+        &self,
+        account_id: &str,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<ForgeCommentPage, PrSourceError>;
+
+    /// Reads the head commit's checks.
+    async fn list_checks(
+        &self,
+        account_id: &str,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<ForgeChecks, PrSourceError>;
+}
+
+/// What the watch needs from the thread manager.
+#[async_trait]
+pub trait PrWakeSink: Send + Sync {
+    /// The thread's title, or `None` when it does not exist.
+    async fn thread_title(&self, thread_id: &ThreadId) -> Option<String>;
+
+    /// Whether the thread is still active: present and not settled (archived).
+    async fn is_active(&self, thread_id: &ThreadId) -> bool;
+
+    /// Starts a turn in the thread like a queued prompt.
+    async fn wake(&self, thread_id: &ThreadId, message: String) -> Result<(), String>;
+}
+
+/// The daemon's thread manager as a wake sink.
+pub struct ThreadWakeSink {
+    manager: Arc<ThreadManager>,
+}
+
+impl ThreadWakeSink {
+    /// Builds the sink for one manager.
+    pub fn new(manager: Arc<ThreadManager>) -> Self {
+        Self { manager }
+    }
+}
+
+#[async_trait]
+impl PrWakeSink for ThreadWakeSink {
+    async fn thread_title(&self, thread_id: &ThreadId) -> Option<String> {
+        self.manager
+            .thread_summary(thread_id)
+            .await
+            .map(|summary| summary.title)
+    }
+
+    async fn is_active(&self, thread_id: &ThreadId) -> bool {
+        self.manager
+            .thread_summary(thread_id)
+            .await
+            .is_some_and(|summary| summary.tab != ThreadTab::Settled)
+    }
+
+    async fn wake(&self, thread_id: &ThreadId, message: String) -> Result<(), String> {
+        self.manager
+            .send_message(thread_id, message, Vec::new())
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
+/// The service behind the link and watch requests.
+pub struct PrLinkService {
+    journal: Arc<dyn Journal>,
+    source: Arc<dyn PrSource>,
+    sink: Arc<dyn PrWakeSink>,
+    watches: Mutex<WatchRegistry>,
+    poller: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl PrLinkService {
+    /// Builds the service. Call [`Self::start`] to begin polling.
+    pub fn new(
+        journal: Arc<dyn Journal>,
+        source: Arc<dyn PrSource>,
+        sink: Arc<dyn PrWakeSink>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            journal,
+            source,
+            sink,
+            watches: Mutex::new(WatchRegistry::default()),
+            poller: Mutex::new(None),
+        })
+    }
+
+    /// Starts the two-minute poll loop.
+    pub fn start(self: &Arc<Self>) {
+        let service = Arc::clone(self);
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(WATCH_POLL_SECS));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // The first tick fires immediately; poll right away so a watch
+            // registered just before startup is not idle for two minutes.
+            loop {
+                interval.tick().await;
+                service.poll_once().await;
+            }
+        });
+        if let Ok(mut poller) = self.poller.lock() {
+            *poller = Some(handle);
+        }
+    }
+
+    /// Stops the poll loop. Watches in memory go with it.
+    pub fn shutdown(&self) {
+        if let Ok(mut poller) = self.poller.lock()
+            && let Some(handle) = poller.take()
+        {
+            handle.abort();
+        }
+    }
+
+    fn lock_watches(&self) -> std::sync::MutexGuard<'_, WatchRegistry> {
+        self.watches
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Links a PR after reading it once, so the caller gets its current state.
+    pub async fn link(
+        &self,
+        thread_id: &ThreadId,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<ThreadPullRequest, PrLinkError> {
+        if self.sink.thread_title(thread_id).await.is_none() {
+            return Err(PrLinkError::ThreadNotFound(thread_id.as_str().to_owned()));
+        }
+        let account_id = self
+            .source
+            .resolve_account(account_id, repo)
+            .await
+            .map_err(source_error)?;
+        let pr = self
+            .source
+            .get_pr(&account_id, repo, number)
+            .await
+            .map_err(source_error)?;
+        let record = PrLinkRecord {
+            thread_id: thread_id.clone(),
+            account_id,
+            repo: repo.clone(),
+            number,
+            linked_at: Utc::now(),
+        };
+        self.journal.upsert_pr_link(&record).await?;
+        Ok(self.thread_pull(record, Some(pr.summary), None))
+    }
+
+    /// Records a link the caller already read (the PR it just opened).
+    pub async fn link_known(
+        &self,
+        thread_id: &ThreadId,
+        account_id: &str,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<(), PrLinkError> {
+        let record = PrLinkRecord {
+            thread_id: thread_id.clone(),
+            account_id: account_id.to_owned(),
+            repo: repo.clone(),
+            number,
+            linked_at: Utc::now(),
+        };
+        self.journal.upsert_pr_link(&record).await?;
+        Ok(())
+    }
+
+    /// Removes one link and ends any watch on it.
+    pub async fn unlink(
+        &self,
+        thread_id: &ThreadId,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<(), PrLinkError> {
+        self.journal.remove_pr_link(thread_id, repo, number).await?;
+        let mut watches = self.lock_watches();
+        for key in matching_keys(&watches, repo, number) {
+            if let Some(watched) = watches.prs.get_mut(&key) {
+                watched.watchers.remove(thread_id.as_str());
+                if watched.watchers.is_empty() {
+                    watches.prs.remove(&key);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Lists a thread's links with the latest state from the forge.
+    pub async fn list(&self, thread_id: &ThreadId) -> Result<Vec<ThreadPullRequest>, PrLinkError> {
+        if self.sink.thread_title(thread_id).await.is_none() {
+            return Err(PrLinkError::ThreadNotFound(thread_id.as_str().to_owned()));
+        }
+        let records = self.journal.pr_links_for_thread(thread_id).await?;
+        let mut pulls = Vec::with_capacity(records.len());
+        for record in records {
+            let (summary, error) = match self
+                .source
+                .get_pr(&record.account_id, &record.repo, record.number)
+                .await
+            {
+                Ok(pr) => (Some(pr.summary), None),
+                Err(error) => (None, Some(error.message())),
+            };
+            pulls.push(self.thread_pull(record, summary, error));
+        }
+        Ok(pulls)
+    }
+
+    /// Threads that link to one PR, for the PR page.
+    pub async fn list_for_pr(
+        &self,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<Vec<PrLinkedThread>, PrLinkError> {
+        let records = self.journal.pr_links_for_pr(repo, number).await?;
+        let watching = self.watching_threads(repo, number);
+        let mut threads = Vec::with_capacity(records.len());
+        for record in records {
+            let Some(title) = self.sink.thread_title(&record.thread_id).await else {
+                continue;
+            };
+            threads.push(PrLinkedThread {
+                thread_id: record.thread_id.clone(),
+                title,
+                watching: watching.contains(record.thread_id.as_str()),
+            });
+        }
+        Ok(threads)
+    }
+
+    /// Starts watching a linked PR and takes the baseline snapshot now.
+    pub async fn watch(
+        &self,
+        thread_id: &ThreadId,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<(), PrLinkError> {
+        let record = self
+            .journal
+            .pr_links_for_thread(thread_id)
+            .await?
+            .into_iter()
+            .find(|record| record.repo == *repo && record.number == number)
+            .ok_or_else(|| {
+                PrLinkError::NotLinked(format!(
+                    "{}#{number} is not linked to this thread",
+                    repo.full_name()
+                ))
+            })?;
+        let key = PrKey::from_record(&record);
+        {
+            let mut watches = self.lock_watches();
+            let watched = watches.prs.entry(key.clone()).or_default();
+            watched
+                .watchers
+                .entry(thread_id.as_str().to_owned())
+                .or_default();
+        }
+
+        // The first read is the baseline: events that happened before the
+        // watch started are not news. A transient failure leaves the watch
+        // running; the first successful read becomes the baseline.
+        match self.read_full(&record.account_id, repo, number).await {
+            Ok(snapshot) => {
+                let mut watches = self.lock_watches();
+                if let Some(watched) = watches.prs.get_mut(&key) {
+                    watched.failure_seen =
+                        snapshot.checks.pending > 0 && snapshot.checks.failed > 0;
+                    watched.baseline = Some(snapshot);
+                    watched.paused_until = None;
+                }
+            }
+            Err(error) => {
+                tracing::debug!(
+                    repo = %repo.full_name(),
+                    pr = number,
+                    error = %error.message(),
+                    "initial PR watch read failed"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Stops watching one PR.
+    pub fn unwatch(&self, thread_id: &ThreadId, repo: &ForgeRepoRef, number: u32) {
+        let mut watches = self.lock_watches();
+        for key in matching_keys(&watches, repo, number) {
+            if let Some(watched) = watches.prs.get_mut(&key) {
+                watched.watchers.remove(thread_id.as_str());
+                if watched.watchers.is_empty() {
+                    watches.prs.remove(&key);
+                }
+            }
+        }
+    }
+
+    fn watching_threads(&self, repo: &ForgeRepoRef, number: u32) -> HashSet<String> {
+        let watches = self.lock_watches();
+        watches
+            .prs
+            .iter()
+            .filter(|(key, _)| key.repo == *repo && key.number == number)
+            .flat_map(|(_, watched)| watched.watchers.keys().cloned())
+            .collect()
+    }
+
+    fn thread_pull(
+        &self,
+        record: PrLinkRecord,
+        summary: Option<ForgePrSummary>,
+        error: Option<String>,
+    ) -> ThreadPullRequest {
+        let watching = self.watching_threads(&record.repo, record.number);
+        ThreadPullRequest {
+            watching: watching.contains(record.thread_id.as_str()),
+            repo: record.repo,
+            number: record.number,
+            account_id: record.account_id,
+            summary,
+            error,
+            linked_at: record.linked_at,
+        }
+    }
+
+    /// Reads a fresh snapshot. With a previous snapshot and a forge that can
+    /// answer cheaply, an unchanged PR detail is reused and only checks and
+    /// comments are read.
+    async fn read_snapshot(
+        &self,
+        account_id: &str,
+        repo: &ForgeRepoRef,
+        number: u32,
+        previous: Option<&PrSnapshot>,
+    ) -> Result<PrSnapshot, PrSourceError> {
+        if let Some(previous) = previous
+            && capabilities(repo.forge).conditional_poll
+            && self.source.pr_changed(account_id, repo, number).await? == Some(false)
+        {
+            let comments = self.source.list_comments(account_id, repo, number).await?;
+            let checks = self.source.list_checks(account_id, repo, number).await?;
+            return Ok(PrSnapshot {
+                summary: previous.summary.clone(),
+                mergeable: previous.mergeable,
+                checks,
+                comments,
+            });
+        }
+        self.read_full(account_id, repo, number).await
+    }
+
+    async fn read_full(
+        &self,
+        account_id: &str,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<PrSnapshot, PrSourceError> {
+        let pr = self.source.get_pr(account_id, repo, number).await?;
+        let comments = self.source.list_comments(account_id, repo, number).await?;
+        let checks = self.source.list_checks(account_id, repo, number).await?;
+        Ok(PrSnapshot {
+            summary: pr.summary,
+            mergeable: pr.mergeable,
+            checks,
+            comments,
+        })
+    }
+
+    /// One poll of every watched PR, shared by all its threads.
+    pub async fn poll_once(&self) {
+        let keys: Vec<PrKey> = {
+            let watches = self.lock_watches();
+            watches
+                .prs
+                .iter()
+                .filter(|(_, watched)| !watched.watchers.is_empty())
+                .filter(|(_, watched)| {
+                    watched
+                        .paused_until
+                        .is_none_or(|until| until <= Instant::now())
+                })
+                .map(|(key, _)| key.clone())
+                .collect()
+        };
+
+        for key in keys {
+            let (baseline, viewer) = {
+                let watches = self.lock_watches();
+                let Some(watched) = watches.prs.get(&key) else {
+                    continue;
+                };
+                let viewer = self
+                    .source
+                    .account_login(&key.account_id)
+                    .unwrap_or_default();
+                (watched.baseline.clone(), viewer)
+            };
+
+            let snapshot = match self
+                .read_snapshot(&key.account_id, &key.repo, key.number, baseline.as_ref())
+                .await
+            {
+                Ok(snapshot) => snapshot,
+                Err(PrSourceError::RateLimited { retry_after }) => {
+                    let pause = retry_after
+                        .filter(|seconds| *seconds > 0)
+                        .unwrap_or(DEFAULT_RATE_LIMIT_PAUSE_SECS)
+                        .max(5);
+                    if let Some(watched) = self.lock_watches().prs.get_mut(&key) {
+                        watched.paused_until = Some(Instant::now() + Duration::from_secs(pause));
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    self.record_failed_read(&key, &error.message());
+                    continue;
+                }
+            };
+
+            let threads: Vec<ThreadId> = {
+                let watches = self.lock_watches();
+                watches
+                    .prs
+                    .get(&key)
+                    .map(|watched| {
+                        watched
+                            .watchers
+                            .keys()
+                            .map(|thread| ThreadId::new(thread.clone()))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            };
+            let mut inactive = HashSet::new();
+            for thread_id in &threads {
+                if !self.sink.is_active(thread_id).await {
+                    inactive.insert(thread_id.as_str().to_owned());
+                }
+            }
+
+            let wakes = {
+                let mut watches = self.lock_watches();
+                let Some(watched) = watches.prs.get_mut(&key) else {
+                    continue;
+                };
+                for thread in &inactive {
+                    watched.watchers.remove(thread);
+                }
+                if watched.watchers.is_empty() {
+                    continue;
+                }
+                watched.observe(snapshot, &viewer)
+            };
+
+            for wake in wakes {
+                if wake.ends_watch {
+                    self.remove_watch(&key, &wake.thread_id);
+                }
+                if !wake.message.is_empty()
+                    && let Err(error) = self.sink.wake(&wake.thread_id, wake.message).await
+                {
+                    tracing::debug!(thread = %wake.thread_id, %error, "PR watch wake failed");
+                }
+            }
+        }
+
+        // Forget PRs whose last watcher went away.
+        let mut watches = self.lock_watches();
+        watches
+            .prs
+            .retain(|_, watched| !watched.watchers.is_empty());
+    }
+
+    fn remove_watch(&self, key: &PrKey, thread_id: &ThreadId) {
+        let mut watches = self.lock_watches();
+        let Some(watched) = watches.prs.get_mut(key) else {
+            return;
+        };
+        watched.watchers.remove(thread_id.as_str());
+        if watched.watchers.is_empty() {
+            watches.prs.remove(key);
+        }
+    }
+
+    fn record_failed_read(&self, key: &PrKey, message: &str) {
+        let mut watches = self.lock_watches();
+        let Some(watched) = watches.prs.get_mut(key) else {
+            return;
+        };
+        let mut ended = Vec::new();
+        for (thread, watch) in &mut watched.watchers {
+            watch.failed_reads += 1;
+            if watch.failed_reads >= MAX_FAILED_READS {
+                ended.push(thread.clone());
+            }
+        }
+        if !ended.is_empty() {
+            tracing::debug!(
+                pr = key.number,
+                %message,
+                threads = ?ended,
+                "PR watch ended after repeated failed reads"
+            );
+            for thread in ended {
+                watched.watchers.remove(&thread);
+            }
+        }
+    }
+}
+
+fn source_error(error: PrSourceError) -> PrLinkError {
+    PrLinkError::Forge(error.message())
+}
+
+fn matching_keys(watches: &WatchRegistry, repo: &ForgeRepoRef, number: u32) -> Vec<PrKey> {
+    watches
+        .prs
+        .keys()
+        .filter(|key| key.repo == *repo && key.number == number)
+        .cloned()
+        .collect()
+}
+
+/// Identity of one watched PR.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct PrKey {
+    account_id: String,
+    repo: ForgeRepoRef,
+    number: u32,
+}
+
+impl PrKey {
+    fn from_record(record: &PrLinkRecord) -> Self {
+        Self {
+            account_id: record.account_id.clone(),
+            repo: record.repo.clone(),
+            number: record.number,
+        }
+    }
+}
+
+#[derive(Default)]
+struct WatchRegistry {
+    prs: HashMap<PrKey, WatchedPr>,
+}
+
+#[derive(Default)]
+struct WatchedPr {
+    /// Last successful read. `None` until the first read succeeds.
+    baseline: Option<PrSnapshot>,
+    /// A failure was already reported for the current head commit.
+    failure_seen: bool,
+    paused_until: Option<Instant>,
+    watchers: BTreeMap<String, ThreadWatch>,
+}
+
+#[derive(Default)]
+struct ThreadWatch {
+    comment_only_wakes: u32,
+    failed_reads: u32,
+}
+
+struct Wake {
+    thread_id: ThreadId,
+    message: String,
+    ends_watch: bool,
+}
+
+impl WatchedPr {
+    /// Applies one successful snapshot and returns the wakes for every watcher.
+    fn observe(&mut self, snapshot: PrSnapshot, viewer: &str) -> Vec<Wake> {
+        let Some(previous) = self.baseline.take() else {
+            self.baseline = Some(snapshot);
+            return Vec::new();
+        };
+        let new_head = previous.summary.head_sha != snapshot.summary.head_sha;
+        let prior_failure = if new_head { false } else { self.failure_seen };
+        let events = events_between(&previous, &snapshot, viewer, prior_failure);
+        let terminal = matches!(
+            snapshot.summary.state,
+            ForgePrState::Merged | ForgePrState::Closed
+        );
+        let comment_only = !events.is_empty() && events.iter().all(WatchEvent::is_comment_only);
+
+        let mut wakes = Vec::new();
+        let mut ended = Vec::new();
+        for (thread, watch) in &mut self.watchers {
+            watch.failed_reads = 0;
+            if events.is_empty() {
+                continue;
+            }
+            if comment_only {
+                watch.comment_only_wakes += 1;
+            } else {
+                watch.comment_only_wakes = 0;
+            }
+            let last_comment =
+                comment_only && watch.comment_only_wakes >= MAX_COMMENT_ONLY_WAKES && !terminal;
+            if last_comment {
+                ended.push(thread.clone());
+            }
+            wakes.push(Wake {
+                thread_id: ThreadId::new(thread.clone()),
+                message: wake_message(&events, &snapshot),
+                ends_watch: terminal || last_comment,
+            });
+        }
+        for thread in ended {
+            tracing::debug!(thread, "PR watch ended after repeated comment-only wakes");
+            self.watchers.remove(&thread);
+        }
+
+        self.failure_seen = snapshot.checks.pending > 0 && snapshot.checks.failed > 0;
+        self.baseline = Some(snapshot);
+        wakes
+    }
+}
+
+/// The state a watch compares against.
+#[derive(Clone, Debug)]
+struct PrSnapshot {
+    summary: ForgePrSummary,
+    mergeable: ForgeMergeable,
+    checks: ForgeChecks,
+    comments: ForgeCommentPage,
+}
+
+/// What changed between two snapshots that is worth waking the agent for.
+#[derive(Clone, Debug, PartialEq)]
+enum WatchEvent {
+    CheckFailed {
+        names: Vec<String>,
+        url: String,
+    },
+    RequiredChecksPassed {
+        url: String,
+    },
+    ChecksFinishedAfterFailure {
+        passed: u32,
+        failed: u32,
+        url: String,
+    },
+    Comment {
+        author: String,
+        excerpt: String,
+        url: String,
+    },
+    Review {
+        author: String,
+        state: ForgeReviewState,
+        url: String,
+    },
+    Conflict {
+        url: String,
+    },
+    Merged {
+        url: String,
+    },
+    Closed {
+        url: String,
+    },
+}
+
+impl WatchEvent {
+    fn is_comment_only(&self) -> bool {
+        matches!(self, Self::Comment { .. } | Self::Review { .. })
+    }
+}
+
+fn events_between(
+    previous: &PrSnapshot,
+    next: &PrSnapshot,
+    viewer: &str,
+    prior_failure: bool,
+) -> Vec<WatchEvent> {
+    let mut events = Vec::new();
+    let url = if next.summary.web_url.is_empty() {
+        next.summary.repo.pr_web_url(next.summary.number)
+    } else {
+        next.summary.web_url.clone()
+    };
+
+    match (previous.summary.state, next.summary.state) {
+        (ForgePrState::Merged | ForgePrState::Closed, _) => {}
+        (_, ForgePrState::Merged) => events.push(WatchEvent::Merged { url: url.clone() }),
+        (_, ForgePrState::Closed) => events.push(WatchEvent::Closed { url: url.clone() }),
+        _ => {}
+    }
+
+    if previous.mergeable != ForgeMergeable::Conflicting
+        && next.mergeable == ForgeMergeable::Conflicting
+        && !matches!(
+            next.summary.state,
+            ForgePrState::Merged | ForgePrState::Closed
+        )
+    {
+        events.push(WatchEvent::Conflict { url: url.clone() });
+    }
+
+    let previous_failures = failure_keys(&previous.checks);
+    let next_failures = failure_keys(&next.checks);
+    if !next_failures.is_empty() && next_failures != previous_failures {
+        let names = next
+            .checks
+            .checks
+            .iter()
+            .filter(|check| check.status.is_failure())
+            .map(|check| check.name.clone())
+            .collect();
+        events.push(WatchEvent::CheckFailed {
+            names,
+            url: url.clone(),
+        });
+    }
+
+    let previous_required = required_all_pass(&previous.checks);
+    let next_required = required_all_pass(&next.checks);
+    if previous_required == Some(false) && next_required == Some(true) {
+        events.push(WatchEvent::RequiredChecksPassed { url: url.clone() });
+    }
+
+    if prior_failure && previous.checks.pending > 0 && next.checks.pending == 0 {
+        events.push(WatchEvent::ChecksFinishedAfterFailure {
+            passed: next.checks.passed,
+            failed: next.checks.failed,
+            url: url.clone(),
+        });
+    }
+
+    // Comments and reviews are compared by id (plus author, so a provider
+    // that reuses ids cannot hide one). Only someone other than the account
+    // wakes the agent.
+    let known_comments = comment_keys(&previous.comments);
+    for comment in &next.comments.comments {
+        let key = format!("{}:{}", comment.comment_id, comment.author);
+        if known_comments.contains(&key) || same_login(&comment.author, viewer) {
+            continue;
+        }
+        events.push(WatchEvent::Comment {
+            author: comment.author.clone(),
+            excerpt: excerpt(&comment.body),
+            url: comment.web_url.clone().unwrap_or_else(|| url.clone()),
+        });
+    }
+    for thread in &next.comments.threads {
+        for comment in &thread.comments {
+            let key = format!("{}:{}", comment.comment_id, comment.author);
+            if known_comments.contains(&key) || same_login(&comment.author, viewer) {
+                continue;
+            }
+            events.push(WatchEvent::Comment {
+                author: comment.author.clone(),
+                excerpt: excerpt(&comment.body),
+                url: comment.web_url.clone().unwrap_or_else(|| url.clone()),
+            });
+        }
+    }
+
+    let known_reviews = review_keys(&previous.comments);
+    for review in &next.comments.reviews {
+        let key = review_key(review);
+        if known_reviews.contains(&key) || same_login(&review.author, viewer) {
+            continue;
+        }
+        events.push(WatchEvent::Review {
+            author: review.author.clone(),
+            state: review.state,
+            url: url.clone(),
+        });
+    }
+
+    events
+}
+
+fn comment_keys(page: &ForgeCommentPage) -> HashSet<String> {
+    let mut keys = HashSet::new();
+    for comment in &page.comments {
+        keys.insert(format!("{}:{}", comment.comment_id, comment.author));
+    }
+    for thread in &page.threads {
+        for comment in &thread.comments {
+            keys.insert(format!("{}:{}", comment.comment_id, comment.author));
+        }
+    }
+    keys
+}
+
+fn review_keys(page: &ForgeCommentPage) -> HashSet<String> {
+    page.reviews.iter().map(review_key).collect()
+}
+
+fn review_key(review: &h4rn_protocol::ForgeReview) -> String {
+    format!(
+        "{}:{:?}:{}",
+        review.author,
+        review.state,
+        review
+            .submitted_at
+            .map(|at| at.to_rfc3339())
+            .unwrap_or_default()
+    )
+}
+
+/// A stable fingerprint of the failing checks, including completion time so a
+/// re-run that fails again is new news.
+fn failure_keys(checks: &ForgeChecks) -> Vec<String> {
+    let mut keys: Vec<String> = checks
+        .checks
+        .iter()
+        .filter(|check| check.status.is_failure())
+        .map(|check| {
+            format!(
+                "{}:{:?}:{}",
+                check.name,
+                check.status,
+                check
+                    .completed_at
+                    .map(|at| at.to_rfc3339())
+                    .unwrap_or_default()
+            )
+        })
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// `Some(true)` when every required check passed, `Some(false)` when a
+/// required check is not passing, `None` when the forge cannot say which
+/// checks are required (or names none).
+fn required_all_pass(checks: &ForgeChecks) -> Option<bool> {
+    let required: Vec<_> = checks
+        .checks
+        .iter()
+        .filter(|check| check.required == Some(true))
+        .collect();
+    if required.is_empty() {
+        return None;
+    }
+    Some(
+        checks.state != ForgeChecksState::Unknown
+            && required.iter().all(|check| check.status.is_success()),
+    )
+}
+
+fn same_login(author: &str, viewer: &str) -> bool {
+    !viewer.is_empty() && author.eq_ignore_ascii_case(viewer)
+}
+
+fn excerpt(body: &str) -> String {
+    let flat = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > 160 {
+        format!("{}…", flat.chars().take(160).collect::<String>())
+    } else {
+        flat
+    }
+}
+
+/// A plain-language message that names what changed, with links.
+fn wake_message(events: &[WatchEvent], snapshot: &PrSnapshot) -> String {
+    let number = snapshot.summary.number;
+    let title = &snapshot.summary.title;
+    let mut lines = Vec::new();
+    for event in events {
+        lines.push(match event {
+            WatchEvent::CheckFailed { names, url } => format!(
+                "Checks failed on PR #{number} “{title}”: {}. {url}",
+                names.join(", ")
+            ),
+            WatchEvent::RequiredChecksPassed { url } => format!(
+                "The required checks passed on PR #{number} “{title}”. {url}"
+            ),
+            WatchEvent::ChecksFinishedAfterFailure {
+                passed,
+                failed,
+                url,
+            } => format!(
+                "The other checks on PR #{number} “{title}” finished: {passed} passed, {failed} failed. {url}"
+            ),
+            WatchEvent::Comment {
+                author,
+                excerpt,
+                url,
+            } => format!("{author} commented on PR #{number} “{title}”: “{excerpt}”. {url}"),
+            WatchEvent::Review {
+                author,
+                state,
+                url,
+            } => format!(
+                "{author} left a review on PR #{number} “{title}” ({}). {url}",
+                review_label(*state)
+            ),
+            WatchEvent::Conflict { url } => {
+                format!("PR #{number} “{title}” now has merge conflicts. {url}")
+            }
+            WatchEvent::Merged { url } => {
+                format!("PR #{number} “{title}” was merged. {url} The watch has ended.")
+            }
+            WatchEvent::Closed { url } => {
+                format!(
+                    "PR #{number} “{title}” was closed without merging. {url} The watch has ended."
+                )
+            }
+        });
+    }
+    lines.join("\n")
+}
+
+fn review_label(state: ForgeReviewState) -> &'static str {
+    match state {
+        ForgeReviewState::Approved => "approved",
+        ForgeReviewState::ChangesRequested => "changes requested",
+        ForgeReviewState::Commented => "commented",
+        ForgeReviewState::Pending => "review pending",
+        ForgeReviewState::Dismissed => "review dismissed",
+    }
+}
+
+/// Maps the daemon's forge service onto the watch's source shape.
+pub struct ForgePrSource {
+    forge: Arc<crate::forge::ForgeService>,
+}
+
+impl ForgePrSource {
+    /// Wraps the daemon's forge service.
+    pub fn new(forge: Arc<crate::forge::ForgeService>) -> Self {
+        Self { forge }
+    }
+}
+
+#[async_trait]
+impl PrSource for ForgePrSource {
+    async fn resolve_account(
+        &self,
+        account_id: Option<&str>,
+        repo: &ForgeRepoRef,
+    ) -> Result<String, PrSourceError> {
+        self.forge
+            .resolve_account_id(account_id, repo)
+            .map_err(PrSourceError::from)
+    }
+
+    fn account_login(&self, account_id: &str) -> Option<String> {
+        self.forge
+            .list_accounts()
+            .0
+            .into_iter()
+            .find(|account: &ForgeAccount| account.account_id == account_id)
+            .and_then(|account| account.username)
+    }
+
+    async fn get_pr(
+        &self,
+        account_id: &str,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<ForgePullRequest, PrSourceError> {
+        self.forge
+            .get_pr(Some(account_id), repo, number)
+            .await
+            .map_err(PrSourceError::from)
+    }
+
+    async fn pr_changed(
+        &self,
+        account_id: &str,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<Option<bool>, PrSourceError> {
+        self.forge
+            .pr_changed(Some(account_id), repo, number)
+            .await
+            .map_err(PrSourceError::from)
+    }
+
+    async fn list_comments(
+        &self,
+        account_id: &str,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<ForgeCommentPage, PrSourceError> {
+        self.forge
+            .list_comments(Some(account_id), repo, number)
+            .await
+            .map_err(PrSourceError::from)
+    }
+
+    async fn list_checks(
+        &self,
+        account_id: &str,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<ForgeChecks, PrSourceError> {
+        self.forge
+            .list_checks(Some(account_id), repo, number)
+            .await
+            .map_err(PrSourceError::from)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, HashSet};
+
+    use chrono::TimeZone;
+    use h4rn_protocol::{
+        ForgeCheck, ForgeCheckStatus, ForgeComment, ForgeRerunSupport, ForgeReview,
+    };
+
+    use super::*;
+    use crate::journal::SqliteJournal;
+
+    fn at(seconds: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, seconds)
+            .single()
+            .expect("valid time")
+    }
+
+    fn repo() -> ForgeRepoRef {
+        ForgeRepoRef {
+            forge: h4rn_protocol::ForgeKind::GitHub,
+            base_url: "https://github.com".into(),
+            owner: "h4rn".into(),
+            repo: "api".into(),
+        }
+    }
+
+    fn thread(name: &str) -> ThreadId {
+        ThreadId::new(name)
+    }
+
+    fn summary(state: ForgePrState, head: &str) -> ForgePrSummary {
+        ForgePrSummary {
+            repo: repo(),
+            number: 7,
+            title: "Add PR watch".into(),
+            state,
+            author: "alice".into(),
+            head_branch: "h4rn/pr-watch".into(),
+            base_branch: "main".into(),
+            head_sha: Some(head.into()),
+            updated_at: at(1),
+            web_url: "https://github.com/h4rn/api/pull/7".into(),
+            checks: ForgeChecksState::Unknown,
+            review: ForgeReviewState::Commented,
+            draft: false,
+        }
+    }
+
+    fn detail(state: ForgePrState, head: &str, mergeable: ForgeMergeable) -> ForgePullRequest {
+        ForgePullRequest {
+            summary: summary(state, head),
+            body: String::new(),
+            labels: Vec::new(),
+            mergeable,
+            base_sha: Some("base".into()),
+            additions: 1,
+            deletions: 0,
+            changed_files: 1,
+            changed_files_known: true,
+            line_counts_known: true,
+            commits: 1,
+            created_at: at(0),
+            reviewers: Vec::new(),
+            merge_commit_sha: None,
+        }
+    }
+
+    fn check(
+        name: &str,
+        status: ForgeCheckStatus,
+        required: Option<bool>,
+        completed: Option<u32>,
+    ) -> ForgeCheck {
+        ForgeCheck {
+            name: name.into(),
+            status,
+            details_url: None,
+            description: None,
+            started_at: Some(at(0)),
+            completed_at: completed.map(at),
+            duration_ms: None,
+            required,
+        }
+    }
+
+    fn checks(head: &str, checks: Vec<ForgeCheck>) -> ForgeChecks {
+        let total = checks.len() as u32;
+        let passed = checks
+            .iter()
+            .filter(|check| check.status.is_success())
+            .count() as u32;
+        let failed = checks
+            .iter()
+            .filter(|check| check.status.is_failure())
+            .count() as u32;
+        let pending = checks
+            .iter()
+            .filter(|check| check.status.is_pending())
+            .count() as u32;
+        let state = if failed > 0 {
+            ForgeChecksState::Failing
+        } else if pending > 0 {
+            ForgeChecksState::Pending
+        } else if total > 0 {
+            ForgeChecksState::Passing
+        } else {
+            ForgeChecksState::Unknown
+        };
+        ForgeChecks {
+            repo: repo(),
+            number: 7,
+            head_sha: head.into(),
+            state,
+            total,
+            passed,
+            failed,
+            pending,
+            checks,
+            rerun: ForgeRerunSupport {
+                supported: true,
+                reason: None,
+            },
+            updated_at: at(1),
+        }
+    }
+
+    fn comments(comments: Vec<ForgeComment>, reviews: Vec<ForgeReview>) -> ForgeCommentPage {
+        ForgeCommentPage {
+            repo: repo(),
+            number: 7,
+            comments,
+            threads: Vec::new(),
+            reviews,
+            has_more: false,
+        }
+    }
+
+    fn comment(id: &str, author: &str, body: &str) -> ForgeComment {
+        ForgeComment {
+            comment_id: id.into(),
+            author: author.into(),
+            body: body.into(),
+            created_at: at(2),
+            updated_at: None,
+            web_url: Some(format!(
+                "https://github.com/h4rn/api/pull/7#issuecomment-{id}"
+            )),
+        }
+    }
+
+    struct MockState {
+        pr: ForgePullRequest,
+        checks: ForgeChecks,
+        comments: ForgeCommentPage,
+        changed: Option<bool>,
+        error: Option<PrSourceError>,
+        get_pr_calls: usize,
+        check_calls: usize,
+    }
+
+    struct MockSource {
+        state: Mutex<MockState>,
+        logins: Mutex<HashMap<String, String>>,
+    }
+
+    impl MockSource {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                state: Mutex::new(MockState {
+                    pr: detail(ForgePrState::Open, "sha-1", ForgeMergeable::Mergeable),
+                    checks: checks(
+                        "sha-1",
+                        vec![check(
+                            "build",
+                            ForgeCheckStatus::InProgress,
+                            Some(true),
+                            None,
+                        )],
+                    ),
+                    comments: comments(Vec::new(), Vec::new()),
+                    changed: None,
+                    error: None,
+                    get_pr_calls: 0,
+                    check_calls: 0,
+                }),
+                logins: Mutex::new(HashMap::from([("acct_1".into(), "me".into())])),
+            })
+        }
+
+        fn state(&self) -> std::sync::MutexGuard<'_, MockState> {
+            self.state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+
+        fn set(&self, update: impl FnOnce(&mut MockState)) {
+            update(&mut self.state());
+        }
+
+        fn get_pr_calls(&self) -> usize {
+            self.state().get_pr_calls
+        }
+
+        fn check_calls(&self) -> usize {
+            self.state().check_calls
+        }
+
+        fn reset_calls(&self) {
+            let mut state = self.state();
+            state.get_pr_calls = 0;
+            state.check_calls = 0;
+        }
+    }
+
+    #[async_trait]
+    impl PrSource for MockSource {
+        async fn resolve_account(
+            &self,
+            _account_id: Option<&str>,
+            _repo: &ForgeRepoRef,
+        ) -> Result<String, PrSourceError> {
+            Ok("acct_1".into())
+        }
+
+        fn account_login(&self, account_id: &str) -> Option<String> {
+            self.logins
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(account_id)
+                .cloned()
+        }
+
+        async fn get_pr(
+            &self,
+            _account_id: &str,
+            _repo: &ForgeRepoRef,
+            _number: u32,
+        ) -> Result<ForgePullRequest, PrSourceError> {
+            let mut state = self.state();
+            state.get_pr_calls += 1;
+            if let Some(error) = &state.error {
+                return Err(error.clone());
+            }
+            Ok(state.pr.clone())
+        }
+
+        async fn pr_changed(
+            &self,
+            _account_id: &str,
+            _repo: &ForgeRepoRef,
+            _number: u32,
+        ) -> Result<Option<bool>, PrSourceError> {
+            let state = self.state();
+            if let Some(error) = &state.error {
+                return Err(error.clone());
+            }
+            Ok(state.changed)
+        }
+
+        async fn list_comments(
+            &self,
+            _account_id: &str,
+            _repo: &ForgeRepoRef,
+            _number: u32,
+        ) -> Result<ForgeCommentPage, PrSourceError> {
+            let state = self.state();
+            if let Some(error) = &state.error {
+                return Err(error.clone());
+            }
+            Ok(state.comments.clone())
+        }
+
+        async fn list_checks(
+            &self,
+            _account_id: &str,
+            _repo: &ForgeRepoRef,
+            _number: u32,
+        ) -> Result<ForgeChecks, PrSourceError> {
+            let mut state = self.state();
+            state.check_calls += 1;
+            if let Some(error) = &state.error {
+                return Err(error.clone());
+            }
+            Ok(state.checks.clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct MockSink {
+        active: Mutex<HashSet<String>>,
+        titles: Mutex<HashMap<String, String>>,
+        wakes: Mutex<Vec<(String, String)>>,
+    }
+
+    impl MockSink {
+        fn add(&self, thread_id: &ThreadId) {
+            self.active
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(thread_id.as_str().to_owned());
+            self.titles
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(thread_id.as_str().to_owned(), "Watch the PR".into());
+        }
+
+        fn deactivate(&self, thread_id: &ThreadId) {
+            self.active
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(thread_id.as_str());
+        }
+
+        fn wakes(&self) -> Vec<(String, String)> {
+            self.wakes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl PrWakeSink for MockSink {
+        async fn thread_title(&self, thread_id: &ThreadId) -> Option<String> {
+            self.titles
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(thread_id.as_str())
+                .cloned()
+        }
+
+        async fn is_active(&self, thread_id: &ThreadId) -> bool {
+            self.active
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .contains(thread_id.as_str())
+        }
+
+        async fn wake(&self, thread_id: &ThreadId, message: String) -> Result<(), String> {
+            self.wakes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push((thread_id.as_str().to_owned(), message));
+            Ok(())
+        }
+    }
+
+    async fn service() -> (Arc<PrLinkService>, Arc<MockSource>, Arc<MockSink>) {
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::in_memory().await.expect("in-memory journal"));
+        service_with_journal(journal)
+    }
+
+    fn service_with_journal(
+        journal: Arc<dyn Journal>,
+    ) -> (Arc<PrLinkService>, Arc<MockSource>, Arc<MockSink>) {
+        let source = MockSource::new();
+        let sink = Arc::new(MockSink::default());
+        let service = PrLinkService::new(journal, source.clone(), sink.clone());
+        (service, source, sink)
+    }
+
+    async fn watched(service: &Arc<PrLinkService>, sink: &Arc<MockSink>, thread_id: &ThreadId) {
+        sink.add(thread_id);
+        service
+            .link_known(thread_id, "acct_1", &repo(), 7)
+            .await
+            .expect("link");
+        service.watch(thread_id, &repo(), 7).await.expect("watch");
+    }
+
+    #[tokio::test]
+    async fn links_survive_a_restart() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("journal.db");
+        let thread_id = thread("th_link");
+        {
+            let journal: Arc<dyn Journal> =
+                Arc::new(SqliteJournal::connect(&path).await.expect("journal"));
+            let (service, _source, sink) = service_with_journal(journal);
+            sink.add(&thread_id);
+            let pull = service
+                .link(&thread_id, None, &repo(), 7)
+                .await
+                .expect("link");
+            assert_eq!(pull.number, 7);
+            assert_eq!(pull.summary.expect("summary").title, "Add PR watch");
+        }
+
+        let journal: Arc<dyn Journal> =
+            Arc::new(SqliteJournal::connect(&path).await.expect("reopen journal"));
+        let (service, _source, sink) = service_with_journal(journal);
+        sink.add(&thread_id);
+        let pulls = service.list(&thread_id).await.expect("list after restart");
+        assert_eq!(pulls.len(), 1);
+        assert_eq!(pulls[0].repo, repo());
+        assert_eq!(pulls[0].number, 7);
+        assert!(pulls[0].summary.is_some());
+        assert!(!pulls[0].watching);
+    }
+
+    #[tokio::test]
+    async fn a_link_can_be_removed_and_is_reverse_listed() {
+        let (service, _source, sink) = service().await;
+        let thread_id = thread("th_link");
+        sink.add(&thread_id);
+        service
+            .link(&thread_id, None, &repo(), 7)
+            .await
+            .expect("link");
+        let threads = service.list_for_pr(&repo(), 7).await.expect("reverse");
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].thread_id, thread_id);
+        assert_eq!(threads[0].title, "Watch the PR");
+
+        service
+            .unlink(&thread_id, &repo(), 7)
+            .await
+            .expect("unlink");
+        assert!(service.list(&thread_id).await.expect("list").is_empty());
+        assert!(
+            service
+                .list_for_pr(&repo(), 7)
+                .await
+                .expect("reverse")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_checks_wake_once_with_a_link() {
+        let (service, source, sink) = service().await;
+        let thread_id = thread("th_checks");
+        watched(&service, &sink, &thread_id).await;
+
+        source.set(|state| {
+            state.checks = checks(
+                "sha-1",
+                vec![check(
+                    "build",
+                    ForgeCheckStatus::Failure,
+                    Some(true),
+                    Some(3),
+                )],
+            );
+        });
+        service.poll_once().await;
+        let wakes = sink.wakes();
+        assert_eq!(wakes.len(), 1, "{wakes:?}");
+        assert!(wakes[0].1.contains("Checks failed"));
+        assert!(wakes[0].1.contains("build"));
+        assert!(wakes[0].1.contains("https://github.com/h4rn/api/pull/7"));
+
+        // The same state is not news twice.
+        service.poll_once().await;
+        assert_eq!(sink.wakes().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn passing_required_checks_wake_once() {
+        let (service, source, sink) = service().await;
+        let thread_id = thread("th_required");
+        watched(&service, &sink, &thread_id).await;
+
+        source.set(|state| {
+            state.checks = checks(
+                "sha-1",
+                vec![check(
+                    "build",
+                    ForgeCheckStatus::Success,
+                    Some(true),
+                    Some(3),
+                )],
+            );
+        });
+        service.poll_once().await;
+        let wakes = sink.wakes();
+        assert_eq!(wakes.len(), 1, "{wakes:?}");
+        assert!(wakes[0].1.contains("required checks passed"));
+
+        service.poll_once().await;
+        assert_eq!(sink.wakes().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn required_checks_are_skipped_when_the_forge_cannot_say() {
+        let (service, source, sink) = service().await;
+        let thread_id = thread("th_required_unknown");
+        watched(&service, &sink, &thread_id).await;
+
+        source.set(|state| {
+            state.checks = checks(
+                "sha-1",
+                vec![check("build", ForgeCheckStatus::Success, None, Some(3))],
+            );
+        });
+        service.poll_once().await;
+        assert!(sink.wakes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn other_checks_finishing_after_a_failure_wake_once() {
+        let (service, source, sink) = service().await;
+        let thread_id = thread("th_finish");
+        source.set(|state| {
+            state.checks = checks(
+                "sha-1",
+                vec![
+                    check("build", ForgeCheckStatus::InProgress, Some(true), None),
+                    check("test", ForgeCheckStatus::InProgress, Some(false), None),
+                ],
+            );
+        });
+        watched(&service, &sink, &thread_id).await;
+
+        source.set(|state| {
+            state.checks = checks(
+                "sha-1",
+                vec![
+                    check("build", ForgeCheckStatus::Failure, Some(true), Some(3)),
+                    check("test", ForgeCheckStatus::InProgress, Some(false), None),
+                ],
+            );
+        });
+        service.poll_once().await;
+        assert_eq!(sink.wakes().len(), 1);
+        assert!(sink.wakes()[0].1.contains("Checks failed"));
+
+        source.set(|state| {
+            state.checks = checks(
+                "sha-1",
+                vec![
+                    check("build", ForgeCheckStatus::Failure, Some(true), Some(3)),
+                    check("test", ForgeCheckStatus::Success, Some(false), Some(4)),
+                ],
+            );
+        });
+        service.poll_once().await;
+        let wakes = sink.wakes();
+        assert_eq!(wakes.len(), 2, "{wakes:?}");
+        assert!(wakes[1].1.contains("other checks"));
+        assert!(wakes[1].1.contains("1 passed, 1 failed"));
+
+        service.poll_once().await;
+        assert_eq!(sink.wakes().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn comments_and_reviews_from_others_wake_once_but_own_do_not() {
+        let (service, source, sink) = service().await;
+        let thread_id = thread("th_comments");
+        watched(&service, &sink, &thread_id).await;
+
+        source.set(|state| {
+            state.comments = comments(
+                vec![comment("c1", "alice", "Looks good")],
+                vec![ForgeReview {
+                    author: "bob".into(),
+                    state: ForgeReviewState::ChangesRequested,
+                    submitted_at: Some(at(5)),
+                    body: Some("Please add a test".into()),
+                }],
+            );
+        });
+        service.poll_once().await;
+        let wakes = sink.wakes();
+        assert_eq!(wakes.len(), 1, "{wakes:?}");
+        assert!(wakes[0].1.contains("alice commented"));
+        assert!(wakes[0].1.contains("bob left a review"));
+        assert!(wakes[0].1.contains("changes requested"));
+
+        // My own comment is never news.
+        source.set(|state| {
+            state.comments = comments(
+                vec![
+                    comment("c1", "alice", "Looks good"),
+                    comment("c2", "me", "Thanks"),
+                ],
+                Vec::new(),
+            );
+        });
+        service.poll_once().await;
+        assert_eq!(sink.wakes().len(), 1);
+
+        // The same comments are not reported again.
+        service.poll_once().await;
+        assert_eq!(sink.wakes().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_new_conflict_wakes_once() {
+        let (service, source, sink) = service().await;
+        let thread_id = thread("th_conflict");
+        watched(&service, &sink, &thread_id).await;
+
+        source.set(|state| {
+            state.pr = detail(ForgePrState::Open, "sha-1", ForgeMergeable::Conflicting);
+        });
+        service.poll_once().await;
+        assert_eq!(sink.wakes().len(), 1);
+        assert!(sink.wakes()[0].1.contains("merge conflicts"));
+
+        service.poll_once().await;
+        assert_eq!(sink.wakes().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn merging_wakes_once_and_ends_the_watch() {
+        let (service, source, sink) = service().await;
+        let thread_id = thread("th_merge");
+        watched(&service, &sink, &thread_id).await;
+
+        source.set(|state| {
+            state.pr = detail(ForgePrState::Merged, "sha-1", ForgeMergeable::Mergeable);
+        });
+        service.poll_once().await;
+        let wakes = sink.wakes();
+        assert_eq!(wakes.len(), 1, "{wakes:?}");
+        assert!(wakes[0].1.contains("was merged"));
+        assert!(wakes[0].1.contains("watch has ended"));
+        assert!(service.watching_threads(&repo(), 7).is_empty());
+
+        source.set(|state| {
+            state.comments = comments(vec![comment("c9", "alice", "after")], Vec::new());
+        });
+        service.poll_once().await;
+        assert_eq!(sink.wakes().len(), 1);
+        // The link survives the watch ending.
+        assert_eq!(service.list(&thread_id).await.expect("list").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn closing_wakes_and_ends_the_watch() {
+        let (service, source, sink) = service().await;
+        let thread_id = thread("th_close");
+        watched(&service, &sink, &thread_id).await;
+
+        source.set(|state| {
+            state.pr = detail(ForgePrState::Closed, "sha-1", ForgeMergeable::Mergeable);
+        });
+        service.poll_once().await;
+        let wakes = sink.wakes();
+        assert_eq!(wakes.len(), 1);
+        assert!(wakes[0].1.contains("closed without merging"));
+        assert!(service.watching_threads(&repo(), 7).is_empty());
+    }
+
+    #[tokio::test]
+    async fn ten_comment_only_wakes_end_the_watch() {
+        let (service, source, sink) = service().await;
+        let thread_id = thread("th_comments_end");
+        watched(&service, &sink, &thread_id).await;
+
+        for index in 0..MAX_COMMENT_ONLY_WAKES {
+            source.set(|state| {
+                state.comments = comments(
+                    vec![comment(
+                        &format!("c{index}"),
+                        "alice",
+                        &format!("comment {index}"),
+                    )],
+                    Vec::new(),
+                );
+            });
+            service.poll_once().await;
+        }
+        assert_eq!(sink.wakes().len(), MAX_COMMENT_ONLY_WAKES as usize);
+        assert!(service.watching_threads(&repo(), 7).is_empty());
+    }
+
+    #[tokio::test]
+    async fn eight_failed_reads_end_the_watch() {
+        let (service, source, sink) = service().await;
+        let thread_id = thread("th_fail_reads");
+        watched(&service, &sink, &thread_id).await;
+
+        source.set(|state| {
+            state.error = Some(PrSourceError::Other("network down".into()));
+        });
+        for _ in 0..MAX_FAILED_READS {
+            service.poll_once().await;
+        }
+        assert!(service.watching_threads(&repo(), 7).is_empty());
+        assert!(sink.wakes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_pauses_instead_of_counting_failed_reads() {
+        let (service, source, sink) = service().await;
+        let thread_id = thread("th_rate_limit");
+        watched(&service, &sink, &thread_id).await;
+
+        source.set(|state| {
+            state.error = Some(PrSourceError::RateLimited {
+                retry_after: Some(60),
+            });
+        });
+        for _ in 0..(MAX_FAILED_READS + 4) {
+            service.poll_once().await;
+        }
+        assert_eq!(service.watching_threads(&repo(), 7).len(), 1);
+        assert!(sink.wakes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn two_threads_on_one_pr_share_one_poll() {
+        let (service, source, sink) = service().await;
+        let first = thread("th_shared_a");
+        let second = thread("th_shared_b");
+        watched(&service, &sink, &first).await;
+        watched(&service, &sink, &second).await;
+
+        source.reset_calls();
+        source.set(|state| {
+            state.checks = checks(
+                "sha-1",
+                vec![check(
+                    "build",
+                    ForgeCheckStatus::Failure,
+                    Some(true),
+                    Some(3),
+                )],
+            );
+        });
+        service.poll_once().await;
+
+        assert_eq!(source.get_pr_calls(), 1);
+        assert_eq!(source.check_calls(), 1);
+        let wakes = sink.wakes();
+        assert_eq!(wakes.len(), 2, "{wakes:?}");
+        assert_eq!(
+            wakes
+                .iter()
+                .map(|(thread, _)| thread.as_str())
+                .collect::<HashSet<_>>(),
+            HashSet::from(["th_shared_a", "th_shared_b"])
+        );
+    }
+
+    #[tokio::test]
+    async fn an_archived_thread_stops_watching_but_keeps_its_link() {
+        let (service, _source, sink) = service().await;
+        let thread_id = thread("th_archive");
+        watched(&service, &sink, &thread_id).await;
+
+        sink.deactivate(&thread_id);
+        service.poll_once().await;
+        assert!(service.watching_threads(&repo(), 7).is_empty());
+        assert_eq!(service.list(&thread_id).await.expect("list").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn watching_requires_a_link() {
+        let (service, _source, sink) = service().await;
+        let thread_id = thread("th_unlinked");
+        sink.add(&thread_id);
+        let error = service
+            .watch(&thread_id, &repo(), 7)
+            .await
+            .expect_err("watching an unlinked PR must fail");
+        assert!(matches!(error, PrLinkError::NotLinked(_)));
+    }
+
+    #[tokio::test]
+    async fn relinking_after_unlinking_does_not_replay_old_news() {
+        let (service, source, sink) = service().await;
+        let thread_id = thread("th_relink");
+        watched(&service, &sink, &thread_id).await;
+
+        source.set(|state| {
+            state.checks = checks(
+                "sha-1",
+                vec![check(
+                    "build",
+                    ForgeCheckStatus::Failure,
+                    Some(true),
+                    Some(3),
+                )],
+            );
+        });
+        service.poll_once().await;
+        assert_eq!(sink.wakes().len(), 1);
+
+        service.unwatch(&thread_id, &repo(), 7);
+        service
+            .unlink(&thread_id, &repo(), 7)
+            .await
+            .expect("unlink");
+        watched(&service, &sink, &thread_id).await;
+        service.poll_once().await;
+        assert_eq!(sink.wakes().len(), 1, "re-watching must not repeat news");
+    }
+
+    #[tokio::test]
+    async fn a_conditional_poll_reuses_the_last_pr_detail() {
+        let (service, source, sink) = service().await;
+        let thread_id = thread("th_conditional");
+        watched(&service, &sink, &thread_id).await;
+
+        source.reset_calls();
+        source.set(|state| {
+            state.changed = Some(false);
+        });
+        service.poll_once().await;
+        assert_eq!(source.get_pr_calls(), 0, "304 must skip the detail read");
+        assert_eq!(source.check_calls(), 1, "checks are still read");
+    }
+}

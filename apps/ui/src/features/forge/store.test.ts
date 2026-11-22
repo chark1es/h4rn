@@ -19,10 +19,13 @@ import {
   checksLabel,
   ForgeApi,
   forgeLabel,
+  linkedPullLabel,
   logCheck,
   mergeableLabel,
   mergeDiffPages,
   parsePatch,
+  parsePullRequestUrl,
+  prWebUrl,
   removeComment,
   replaceComment,
   requiredMark,
@@ -483,5 +486,167 @@ describe("ForgeApi commits and re-run", () => {
   test("rejects an unexpected response instead of guessing", async () => {
     const request = vi.fn().mockResolvedValue({ type: "ack" });
     await expect(new ForgeApi(request).commits(repo, 7)).rejects.toThrow("expected forge_commits");
+  });
+});
+
+describe("pull request links", () => {
+  test("prWebUrl follows each forge's route shape", () => {
+    expect(prWebUrl(repo, 12)).toBe("https://github.com/h4rn/api/pull/12");
+    expect(prWebUrl({ ...repo, forge: "gitlab" }, 12)).toBe(
+      "https://github.com/h4rn/api/-/merge_requests/12",
+    );
+    expect(prWebUrl({ ...repo, forge: "forgejo" }, 12)).toBe(
+      "https://github.com/h4rn/api/pulls/12",
+    );
+  });
+
+  test("a GitHub pull URL names its repository and number", () => {
+    expect(parsePullRequestUrl("https://github.com/h4rn/api/pull/42/files")).toEqual({
+      repo,
+      number: 42,
+    });
+  });
+
+  test("a GitLab merge request keeps nested groups", () => {
+    expect(parsePullRequestUrl("https://gitlab.com/team/platform/api/-/merge_requests/9")).toEqual({
+      repo: {
+        forge: "gitlab",
+        base_url: "https://gitlab.com",
+        owner: "team/platform",
+        repo: "api",
+      },
+      number: 9,
+    });
+  });
+
+  test("a Gitea pull URL uses the pulls route", () => {
+    expect(parsePullRequestUrl("https://codeberg.org/owner/repo/pulls/3")).toEqual({
+      repo: {
+        forge: "forgejo",
+        base_url: "https://codeberg.org",
+        owner: "owner",
+        repo: "repo",
+      },
+      number: 3,
+    });
+  });
+
+  test("a custom host is only accepted when a detected repository names it", () => {
+    expect(parsePullRequestUrl("https://ghe.example.test/h4rn/api/pull/5")).toBeNull();
+    expect(
+      parsePullRequestUrl("https://ghe.example.test/h4rn/api/pull/5", [
+        {
+          forge: "github",
+          base_url: "https://ghe.example.test",
+          owner: "h4rn",
+          repo: "api",
+        },
+      ]),
+    ).toEqual({
+      repo: {
+        forge: "github",
+        base_url: "https://ghe.example.test",
+        owner: "h4rn",
+        repo: "api",
+      },
+      number: 5,
+    });
+  });
+
+  test("unrelated and malformed URLs are refused", () => {
+    expect(parsePullRequestUrl("https://github.com/h4rn/api/issues/5")).toBeNull();
+    expect(parsePullRequestUrl("not a url")).toBeNull();
+    expect(parsePullRequestUrl("ftp://github.com/h4rn/api/pull/5")).toBeNull();
+  });
+
+  test("the badge label names the number and state", () => {
+    const summary: ForgePrSummary = {
+      repo,
+      number: 12,
+      title: "Add watching",
+      state: "open",
+      author: "alice",
+      head_branch: "h4rn/watch",
+      base_branch: "main",
+      head_sha: "abc",
+      updated_at: "2026-01-01T00:00:00Z",
+      web_url: "https://github.com/h4rn/api/pull/12",
+      checks: "pending",
+      review: "pending",
+      draft: false,
+    };
+    expect(
+      linkedPullLabel({
+        repo,
+        number: 12,
+        account_id: "a1",
+        summary,
+        error: null,
+        watching: true,
+        linked_at: "2026-01-01T00:00:00Z",
+      }),
+    ).toBe("#12 Open");
+  });
+});
+
+describe("Bitbucket and Azure DevOps pull request links", () => {
+  test("a Bitbucket Cloud pull request URL", () => {
+    expect(parsePullRequestUrl("https://bitbucket.org/acme/widget/pull-requests/12")).toEqual({
+      repo: {
+        forge: "bitbucket",
+        base_url: "https://bitbucket.org",
+        owner: "acme",
+        repo: "widget",
+      },
+      number: 12,
+    });
+  });
+
+  test("an Azure DevOps pull request URL keeps the organization in the base", () => {
+    expect(
+      parsePullRequestUrl("https://dev.azure.com/acme/My%20Project/_git/api/pullrequest/7"),
+    ).toEqual({
+      repo: {
+        forge: "azure_devops",
+        base_url: "https://dev.azure.com/acme",
+        owner: "My Project",
+        repo: "api",
+      },
+      number: 7,
+    });
+  });
+
+  test("a legacy Azure DevOps organization URL", () => {
+    expect(
+      parsePullRequestUrl("https://acme.visualstudio.com/Project/_git/api/pullrequest/7"),
+    ).toEqual({
+      repo: {
+        forge: "azure_devops",
+        base_url: "https://acme.visualstudio.com",
+        owner: "Project",
+        repo: "api",
+      },
+      number: 7,
+    });
+  });
+
+  test("prWebUrl uses the provider route for both", () => {
+    expect(
+      prWebUrl(
+        { forge: "bitbucket", base_url: "https://bitbucket.org", owner: "acme", repo: "widget" },
+        12,
+      ),
+    ).toBe("https://bitbucket.org/acme/widget/pull-requests/12");
+    expect(
+      prWebUrl(
+        {
+          forge: "azure_devops",
+          base_url: "https://dev.azure.com/acme",
+          owner: "Project",
+          repo: "api",
+        },
+        7,
+      ),
+    ).toBe("https://dev.azure.com/acme/Project/_git/api/pullrequest/7");
   });
 });

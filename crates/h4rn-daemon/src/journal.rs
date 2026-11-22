@@ -15,10 +15,13 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use h4rn_core::{EventStore, SqliteEventStore, StoreError, ThreadEvent};
 use h4rn_protocol::{
-    Event, HarnessKind, HostId, RuntimeMode, SubagentId, ThreadId, Usage, WorktreeRequest,
+    Event, ForgeKind, ForgeRepoRef, HarnessKind, HostId, RuntimeMode, SubagentId, ThreadId, Usage,
+    WorktreeRequest,
 };
 use serde_json::json;
 use sqlx::{Row, SqlitePool};
+
+use crate::pr_links::PrLinkRecord;
 
 /// Everything the daemon needs to rebuild a thread row without replaying it.
 #[derive(Clone, Debug, PartialEq)]
@@ -164,6 +167,30 @@ pub trait Journal: Send + Sync {
 
     /// The domain log for one thread, used to rebuild lifecycle state.
     async fn read_domain(&self, thread_id: &ThreadId) -> Result<Vec<ThreadEvent>, JournalError>;
+
+    /// Inserts or refreshes one thread → pull request link.
+    async fn upsert_pr_link(&self, link: &PrLinkRecord) -> Result<(), JournalError>;
+
+    /// Removes one thread → pull request link.
+    async fn remove_pr_link(
+        &self,
+        thread_id: &ThreadId,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<(), JournalError>;
+
+    /// Every PR link one thread holds, oldest link first.
+    async fn pr_links_for_thread(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<PrLinkRecord>, JournalError>;
+
+    /// Every thread that links one PR, oldest link first.
+    async fn pr_links_for_pr(
+        &self,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<Vec<PrLinkRecord>, JournalError>;
 }
 
 /// SQLite-backed journal.
@@ -257,6 +284,32 @@ impl SqliteJournal {
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_daemon_wire_events_thread_seq
              ON daemon_wire_events (thread_id, seq)",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Thread ↔ pull request links live beside the thread rows so they
+        // survive a restart. The PR's state is not stored: it is read from the
+        // forge whenever it is shown.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS daemon_pr_links (
+                thread_id  TEXT NOT NULL,
+                account_id TEXT NOT NULL,
+                forge      TEXT NOT NULL,
+                base_url   TEXT NOT NULL,
+                owner      TEXT NOT NULL,
+                repo       TEXT NOT NULL,
+                number     INTEGER NOT NULL,
+                linked_at  TEXT NOT NULL,
+                PRIMARY KEY (thread_id, forge, base_url, owner, repo, number)
+            )",
+        )
+        .execute(&self.pool)
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_daemon_pr_links_pr
+             ON daemon_pr_links (forge, base_url, owner, repo, number)",
         )
         .execute(&self.pool)
         .await?;
@@ -524,6 +577,113 @@ impl Journal for SqliteJournal {
             .map(|stored| stored.event)
             .collect())
     }
+
+    async fn upsert_pr_link(&self, link: &PrLinkRecord) -> Result<(), JournalError> {
+        sqlx::query(
+            "INSERT INTO daemon_pr_links
+                (thread_id, account_id, forge, base_url, owner, repo, number, linked_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(thread_id, forge, base_url, owner, repo, number) DO UPDATE SET
+                account_id = excluded.account_id",
+        )
+        .bind(link.thread_id.as_str())
+        .bind(&link.account_id)
+        .bind(link.repo.forge.slug())
+        .bind(&link.repo.base_url)
+        .bind(&link.repo.owner)
+        .bind(&link.repo.repo)
+        .bind(i64::from(link.number))
+        .bind(link.linked_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn remove_pr_link(
+        &self,
+        thread_id: &ThreadId,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<(), JournalError> {
+        sqlx::query(
+            "DELETE FROM daemon_pr_links
+             WHERE thread_id = ? AND forge = ? AND base_url = ? AND owner = ? AND repo = ?
+               AND number = ?",
+        )
+        .bind(thread_id.as_str())
+        .bind(repo.forge.slug())
+        .bind(&repo.base_url)
+        .bind(&repo.owner)
+        .bind(&repo.repo)
+        .bind(i64::from(number))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn pr_links_for_thread(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Result<Vec<PrLinkRecord>, JournalError> {
+        let rows = sqlx::query(
+            "SELECT thread_id, account_id, forge, base_url, owner, repo, number, linked_at
+             FROM daemon_pr_links WHERE thread_id = ?
+             ORDER BY linked_at ASC, rowid ASC",
+        )
+        .bind(thread_id.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(pr_link_from_row).collect()
+    }
+
+    async fn pr_links_for_pr(
+        &self,
+        repo: &ForgeRepoRef,
+        number: u32,
+    ) -> Result<Vec<PrLinkRecord>, JournalError> {
+        let rows = sqlx::query(
+            "SELECT thread_id, account_id, forge, base_url, owner, repo, number, linked_at
+             FROM daemon_pr_links
+             WHERE forge = ? AND base_url = ? AND owner = ? AND repo = ? AND number = ?
+             ORDER BY linked_at ASC, rowid ASC",
+        )
+        .bind(repo.forge.slug())
+        .bind(&repo.base_url)
+        .bind(&repo.owner)
+        .bind(&repo.repo)
+        .bind(i64::from(number))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(pr_link_from_row).collect()
+    }
+}
+
+fn pr_link_from_row(row: sqlx::sqlite::SqliteRow) -> Result<PrLinkRecord, JournalError> {
+    let forge: String = row.try_get("forge")?;
+    let linked_at: String = row.try_get("linked_at")?;
+    let number: i64 = row.try_get("number")?;
+    Ok(PrLinkRecord {
+        thread_id: ThreadId::new(row.try_get::<String, _>("thread_id")?),
+        account_id: row.try_get("account_id")?,
+        repo: ForgeRepoRef {
+            forge: ForgeKind::parse(&forge).ok_or_else(|| {
+                JournalError::Database(sqlx::Error::Protocol(format!(
+                    "unknown forge slug {forge:?} in daemon_pr_links"
+                )))
+            })?,
+            base_url: row.try_get("base_url")?,
+            owner: row.try_get("owner")?,
+            repo: row.try_get("repo")?,
+        },
+        number: u32::try_from(number).map_err(|_| {
+            JournalError::Database(sqlx::Error::Protocol(format!(
+                "PR number {number} does not fit in daemon_pr_links"
+            )))
+        })?,
+        linked_at: DateTime::parse_from_rfc3339(&linked_at)
+            .map(|value| value.with_timezone(&Utc))
+            .unwrap_or_else(|_| Utc::now()),
+    })
 }
 
 /// A helper for tests and diagnostics: the JSON shape of a thread row.

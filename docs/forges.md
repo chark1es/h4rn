@@ -349,6 +349,13 @@ read the flags instead of assuming all forges behave alike.
 | Server-side diff pagination | yes | yes | no | no | no | no |
 | GraphQL used | yes | no | no | no | no | no |
 | Re-run failed checks | yes (check suites) | yes (pipeline retry) | no | no | no | no |
+| Conditional PR poll | yes | no | no | no | no | no |
+
+The conditional PR poll is what the thread watch uses on GitHub: a
+`GET /pulls/{n}` with `If-None-Match` answers `304` when the detail did not
+change, so only checks and comments are read on that tick. The other forges
+read the PR every time, which spends more of their request budget for the same
+two-minute interval.
 
 Diff pagination on Gitea/Forgejo, Bitbucket Cloud and Azure DevOps is applied
 locally: the provider's diff (or changed-file list) is read and sliced by
@@ -422,6 +429,48 @@ Writes (`reply`, `comment`, `open_pr`, and follow-up messages from
 `hand_pr_to_agent`) are appended to `<data-dir>/forge-audit.jsonl` with time,
 action, account, forge, repository, PR number and non-secret metadata. The file
 is local and append-only.
+
+## Thread links and watching
+
+A thread can hold any number of pull requests from any of its forges. A link is
+the account, repository and number; the thread journal stores it in
+`daemon_pr_links`, so links survive a daemon restart. The PR's state is never
+part of the link: `ListThreadPullRequests` reads each linked PR from the forge
+and returns it with the link, and a failed read is returned as an `error` with
+no summary rather than as stale state.
+
+- `LinkPullRequest` validates the PR with the forge, stores the link and returns
+  the current state. `UnlinkPullRequest` removes the link and ends any watch.
+- `ListThreadPullRequests` fills the thread header badge and the linked-items
+  panel. `ListPrThreads` is the reverse lookup on the Pull requests page.
+- `ForgeOpenPr` links the PR it just opened automatically.
+- `WatchPullRequest` / `UnwatchPullRequest` start and stop the watch for one
+  linked PR.
+
+Watches live in daemon memory (links do not). While the thread is not settled,
+the daemon polls every two minutes and shares one poll between every thread
+watching the same PR. It wakes the agent by appending a user-visible message
+that starts a turn, naming what changed and linking to the PR or comment:
+
+- a check fails;
+- every required check passes (skipped when the forge cannot say which checks
+  are required — GitHub without branch-rule access, a Gitea token that is not
+  an administrator);
+- the remaining checks finish after a failure was reported;
+- someone other than the linked account comments or reviews (including inline
+  review comments);
+- the branch starts to conflict;
+- the PR merges or closes, which also ends that watch.
+
+Each event is reported once per watch, and re-watching starts a fresh baseline
+so old news is not repeated. A watch ends after ten wakes in a row that brought
+only comments or reviews, after eight failed reads in a row, or when the thread
+is settled or archived. A rate limit only pauses the watch until the forge's
+`retry-after` (or two minutes when it does not say); it is not a failed read.
+Comments and reviews from the linked account itself never wake the agent.
+
+Because the thread list is a client concern, a client that reconnects re-reads
+`ListThreadPullRequests`; watch changes do not add a journaled event.
 
 ## Polling, rate limits and caching
 

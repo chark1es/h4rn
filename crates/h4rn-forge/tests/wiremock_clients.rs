@@ -251,6 +251,47 @@ async fn github_etag_revalidation_serves_the_cached_body() {
 }
 
 #[tokio::test]
+async fn github_pr_changed_answers_from_the_etag_cache() {
+    let server = MockServer::start().await;
+
+    // The conditional mock is registered first: wiremock keeps registration
+    // order when two mocks have the same priority, and both match the path.
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/acme/widget/pulls/42"))
+        .and(header("if-none-match", "\"pr-42\""))
+        .respond_with(ResponseTemplate::new(304))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/acme/widget/pulls/42"))
+        .respond_with(json_body(github_pr_detail()).insert_header("etag", "\"pr-42\""))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/acme/widget/pulls/42/reviews"))
+        .respond_with(json_body(json!([])))
+        .mount(&server)
+        .await;
+
+    let mut other = github_pr_detail();
+    other["number"] = json!(43);
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/acme/widget/pulls/43"))
+        .respond_with(json_body(other).insert_header("etag", "\"pr-43\""))
+        .mount(&server)
+        .await;
+
+    let client = GitHubClient::new(&server.uri(), "ghp_test", 120).unwrap();
+    let repo = repo(ForgeKind::GitHub, &server.uri());
+
+    client.get_pr(&repo, 42).await.unwrap();
+    assert_eq!(client.pr_changed(&repo, 42).await.unwrap(), Some(false));
+    // A PR this client has never read has no cached validator; it must be
+    // read rather than reported unchanged.
+    assert_eq!(client.pr_changed(&repo, 43).await.unwrap(), Some(true));
+}
+
+#[tokio::test]
 async fn github_rate_limit_surfaces_retry_after() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

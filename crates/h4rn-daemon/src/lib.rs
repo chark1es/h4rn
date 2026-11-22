@@ -36,6 +36,7 @@ pub mod journal;
 pub mod mcp;
 pub mod mcp_peers;
 pub mod network_access;
+pub mod pr_links;
 pub mod projects;
 pub mod remote;
 pub mod secrets;
