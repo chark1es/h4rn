@@ -18,9 +18,10 @@
   A Windows update cannot replace a running executable: it moves h4rnd.exe to
   h4rnd.old.exe and then moves the new binary in. If that is interrupted,
   h4rnd.exe is briefly absent, so the task does not run the binary directly:
-  its action is a short inline recovery step (passed with -Command, never
-  written to a shared file) that puts h4rnd.old.exe, or the h4rnd.previous.exe
-  backup, back before starting the daemon.
+  its action is a short inline launcher (passed with -Command, never written to
+  a shared file). The launcher runs the daemon's own `--recover-only`, which
+  takes the same installation lock as an update and publishes a recovered
+  binary with a rename, then starts the recovered h4rnd.exe.
 
   Usage:
     .\install-scheduled-task.ps1 -Binary "C:\Program Files\h4rn\h4rnd.exe" `
@@ -35,7 +36,8 @@
 param(
   [string]$Binary = (Join-Path $PSScriptRoot "..\h4rnd.exe"),
   [string]$DataDir = (Join-Path $env:LOCALAPPDATA "h4rn"),
-  [string]$TaskName = "h4rn"
+  [string]$TaskName = "h4rn",
+  [string]$LegacyTaskName = "h4rn"
 )
 
 $ErrorActionPreference = "Stop"
@@ -56,13 +58,21 @@ $old = Join-Path $directory ($binaryName + ".old" + $binaryExt)
 # Single-quoted PowerShell literals: a quote is escaped by doubling it.
 $quote = { param($value) "'" + $value.Replace("'", "''") + "'" }
 
-# The task action. It is inline (there is no script file to keep private) and
-# uses single-quoted paths, so the only quoting that matters is PowerShell's.
+# The task action is inline (there is no script file to keep private) and uses
+# single-quoted paths, so the only quoting that matters is PowerShell's.
+#
+# Recovery is not a PowerShell copy any more: it runs the daemon's own
+# `--recover-only`, which takes the same installation lock as `h4rnd update` and
+# publishes a restored binary with a rename. If h4rnd.exe was moved aside, the
+# moved-aside image performs that recovery and the task then starts the install
+# path it recovered.
 $format = '$b = {0}; $p = {1}; $o = {2}; $d = {3}; ' +
-  'if (-not (Test-Path -LiteralPath $b)) {{ ' +
-  'if (Test-Path -LiteralPath $o) {{ Move-Item -LiteralPath $o -Destination $b -Force }} ' +
-  'elseif (Test-Path -LiteralPath $p) {{ Copy-Item -LiteralPath $p -Destination $b -Force }} ' +
-  '}}; & $b --data-dir $d serve; exit $LASTEXITCODE'
+  '$launcher = if (Test-Path -LiteralPath $b) {{ $b }} ' +
+  'elseif (Test-Path -LiteralPath $o) {{ $o }} ' +
+  'elseif (Test-Path -LiteralPath $p) {{ $p }} ' +
+  'else {{ throw "h4rnd.exe is missing and no backup exists" }}; ' +
+  '& $launcher --recover-only; if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}; ' +
+  '& $b --data-dir $d serve; exit $LASTEXITCODE'
 $values = (& $quote $Binary), (& $quote $previous), (& $quote $old), (& $quote $DataDir)
 $command = $format -f $values
 
@@ -91,6 +101,16 @@ Register-ScheduledTask `
   -Principal $principal `
   -Description "Local h4rn daemon: supervises coding-agent harnesses and serves the h4rn protocol on loopback." `
   -Force | Out-Null
+
+# Older releases used one machine-wide `h4rn` task. Migrate it now that the
+# per-account task is registered, so only one daemon starts at logon.
+if ($LegacyTaskName -and $LegacyTaskName -ne $TaskName) {
+  if (Get-ScheduledTask -TaskName $LegacyTaskName -ErrorAction SilentlyContinue) {
+    Stop-ScheduledTask -TaskName $LegacyTaskName -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $LegacyTaskName -Confirm:$false
+    Write-Host "Removed legacy scheduled task $LegacyTaskName"
+  }
+}
 
 Start-ScheduledTask -TaskName $TaskName
 

@@ -51,9 +51,13 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "DIRECTIVE", env = "H4RN_LOG")]
     pub log_level: Option<String>,
 
+    /// Finish an interrupted update and exit (used by the Windows logon task).
+    #[arg(long, hide = true)]
+    pub recover_only: bool,
+
     /// What to do.
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 /// Daemon subcommands.
@@ -170,7 +174,10 @@ impl Cli {
         if let Some(log_level) = self.log_level {
             config.log_level = log_level;
         }
-        Ok((config, self.command))
+        let command = self
+            .command
+            .ok_or_else(|| anyhow::anyhow!("a subcommand is required (try `h4rnd --help`)"))?;
+        Ok((config, command))
     }
 }
 
@@ -259,5 +266,19 @@ mod tests {
                 force: true,
             } if version == "1.2.3"
         ));
+    }
+
+    #[test]
+    fn recover_only_is_a_hidden_top_level_flag() {
+        let cli = Cli::try_parse_from(["h4rnd", "--recover-only"]).unwrap();
+        assert!(cli.recover_only);
+        assert!(cli.command.is_none());
+        let help = Cli::try_parse_from(["h4rnd", "--help"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            !help.contains("recover-only"),
+            "the internal flag stays out of help output"
+        );
     }
 }

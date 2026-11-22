@@ -25,9 +25,9 @@
 //! argument parsing) takes the same lock and restores the old binary if the
 //! install path is missing, deriving the install path from the moved-aside name
 //! so it works even when `h4rnd.exe` does not exist. The scheduled task installed
-//! by `h4rnd service install` runs a small inline recovery step before the
-//! daemon, so a machine whose update was cut off still comes back up without a
-//! reinstall.
+//! by `h4rnd service install` runs `h4rnd --recover-only` before the daemon, so a
+//! machine whose update was cut off comes back up through the same lock-protected
+//! recovery instead of a separate PowerShell copy.
 
 use std::collections::HashMap;
 use std::io::{Cursor, Read, Write};
@@ -214,6 +214,11 @@ impl ReleaseClient {
             api_base: api_base.into().trim_end_matches('/').to_owned(),
             repository,
         })
+    }
+
+    /// The repository this client reads releases from.
+    pub fn repository(&self) -> &ReleaseRepository {
+        &self.repository
     }
 
     /// The newest published release.
@@ -757,14 +762,96 @@ fn previous_checksum_path(previous: &Path) -> PathBuf {
     previous.with_file_name(format!("{name}.sha256"))
 }
 
+/// Publishes the backup's checksum sidecar.
+///
+/// Production always uses [`AtomicChecksum`]; the trait exists so a test can
+/// inject a publication failure inside the real backup copy instead of
+/// fabricating a file state.
+trait ChecksumPublisher {
+    /// Writes `contents` to `path` atomically.
+    fn publish(&self, path: &Path, staging_base: &Path, contents: &str) -> Result<()>;
+}
+
+struct AtomicChecksum;
+
+impl ChecksumPublisher for AtomicChecksum {
+    fn publish(&self, path: &Path, staging_base: &Path, contents: &str) -> Result<()> {
+        write_checksum_atomically(path, staging_base, contents)
+    }
+}
+
+/// Writes the sidecar through a unique temp file, fsyncs it, and renames it.
+///
+/// The old sidecar is removed before the backup is published, so a crash can
+/// never leave a checksum that describes a different backup.
+fn write_checksum_atomically(path: &Path, staging_base: &Path, contents: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("the backup checksum has no parent directory")?;
+    let mut last_error = None;
+    for attempt in 0..16u32 {
+        let temp = parent.join(staging_name(staging_base, attempt));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        let mut file = match options.open(&temp) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_error = Some(error);
+                continue;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("create the backup checksum file {}", temp.display())
+                });
+            }
+        };
+        let written = file
+            .write_all(contents.as_bytes())
+            .and_then(|()| file.sync_all())
+            .with_context(|| format!("write the backup checksum file {}", temp.display()));
+        if let Err(error) = written {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error);
+        }
+        drop(file);
+        if let Err(error) = std::fs::rename(&temp, path) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error)
+                .with_context(|| format!("move the backup checksum into {}", path.display()));
+        }
+        fsync_dir(parent);
+        return Ok(());
+    }
+    Err(last_error.map(anyhow::Error::from).unwrap_or_else(|| {
+        anyhow::anyhow!(
+            "could not create a backup checksum file next to {}",
+            path.display()
+        )
+    }))
+}
+
+/// Removes a checksum sidecar left by an earlier backup.
+fn remove_stale_checksum(previous: &Path) -> Result<()> {
+    let path = previous_checksum_path(previous);
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("remove the stale backup checksum {}", path.display())),
+    }
+}
+
 /// Copies `current` to a uniquely named temp file, fsyncs it, and renames it
 /// over `previous`.
 ///
 /// The backup is never written straight to `h4rnd.previous`: an interrupted
 /// copy leaves the previous backup (or no backup) in place, never a truncated
-/// file that `--rollback` could install. The size and SHA-256 are recorded in a
-/// sidecar after the rename so a later rollback can refuse a damaged file.
-fn write_backup(from: &Path, to: &Path) -> Result<()> {
+/// file that `--rollback` could install. Any old checksum sidecar is deleted
+/// before the new backup is published, and the new sidecar is written through a
+/// temp file and fsynced, so a crash cannot leave the two describing different
+/// files. A sidecar failure fails the update: the installed binary is not
+/// touched yet.
+fn write_backup<P: ChecksumPublisher>(from: &Path, to: &Path, publisher: &P) -> Result<()> {
     let parent = from
         .parent()
         .context("the current executable has no parent directory")?;
@@ -816,28 +903,27 @@ fn write_backup(from: &Path, to: &Path) -> Result<()> {
             }
         }
         drop(file);
+        // The old sidecar described the previous backup. Remove it before the
+        // new backup becomes visible so the pair is never inconsistent.
+        if let Err(error) = remove_stale_checksum(to) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error);
+        }
         if let Err(error) = std::fs::rename(&temp, to) {
             let _ = std::fs::remove_file(&temp);
             return Err(error).with_context(|| format!("move the backup into {}", to.display()));
         }
         fsync_dir(parent);
-        // Advisory only: without it, rollback still checks size and, on Unix,
-        // the executable bit, for a backup written by an older build.
-        let _ = write_backup_checksum(to, &hex::encode(hasher.finalize()), metadata.len());
+        publisher.publish(
+            &previous_checksum_path(to),
+            from,
+            &format!("{} {}\n", hex::encode(hasher.finalize()), metadata.len()),
+        )?;
         return Ok(());
     }
     Err(last_error.map(anyhow::Error::from).unwrap_or_else(|| {
         anyhow::anyhow!("could not create a backup file next to {}", from.display())
     }))
-}
-
-fn write_backup_checksum(previous: &Path, hash: &str, size: u64) -> std::io::Result<()> {
-    let path = previous_checksum_path(previous);
-    std::fs::write(&path, format!("{hash} {size}\n"))?;
-    if let Ok(file) = std::fs::File::open(&path) {
-        let _ = file.sync_all();
-    }
-    Ok(())
 }
 
 /// Reads the hint written after a completed backup.
@@ -918,14 +1004,22 @@ fn remove_backup_checksum(previous: &Path) {
 
 /// Replaces `current` with `bytes`, keeping the old binary as `h4rnd.previous`.
 pub fn replace_binary(current: &Path, bytes: &[u8]) -> Result<()> {
+    replace_binary_with(current, bytes, &AtomicChecksum)
+}
+
+fn replace_binary_with<P: ChecksumPublisher>(
+    current: &Path,
+    bytes: &[u8],
+    publisher: &P,
+) -> Result<()> {
     let parent = current
         .parent()
         .context("the current executable has no parent directory")?;
     let staged = stage_binary(current, bytes)?;
     let result = if cfg!(windows) {
-        replace_binary_windows(current, &staged)
+        replace_binary_windows(current, &staged, publisher)
     } else {
-        replace_binary_unix(current, &staged)
+        replace_binary_unix(current, &staged, publisher)
     };
     if result.is_err() {
         let _ = std::fs::remove_file(&staged);
@@ -936,22 +1030,30 @@ pub fn replace_binary(current: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 #[cfg(not(windows))]
-fn replace_binary_unix(current: &Path, staged: &Path) -> Result<()> {
+fn replace_binary_unix<P: ChecksumPublisher>(
+    current: &Path,
+    staged: &Path,
+    publisher: &P,
+) -> Result<()> {
     // The backup is copied to a temp file and renamed over `.previous`, so an
     // interrupted copy cannot leave a truncated rollback target.
-    write_backup(current, &previous_binary_path(current))?;
+    write_backup(current, &previous_binary_path(current), publisher)?;
     std::fs::rename(staged, current)
         .with_context(|| format!("replace {} with the staged binary", current.display()))
 }
 
 #[cfg(windows)]
-fn replace_binary_windows(current: &Path, staged: &Path) -> Result<()> {
+fn replace_binary_windows<P: ChecksumPublisher>(
+    current: &Path,
+    staged: &Path,
+    publisher: &P,
+) -> Result<()> {
     let old = old_binary_path(current);
     let previous = previous_binary_path(current);
     // Back up the running binary before touching it. Copying a running image is
     // allowed on Windows; the copy is staged and renamed so an interruption
     // cannot leave a truncated `h4rnd.previous.exe`.
-    write_backup(current, &previous)?;
+    write_backup(current, &previous, publisher)?;
     let _ = std::fs::remove_file(&old);
     std::fs::rename(current, &old)
         .with_context(|| format!("move the running binary to {}", old.display()))?;
@@ -967,7 +1069,11 @@ fn replace_binary_windows(current: &Path, staged: &Path) -> Result<()> {
 }
 
 #[cfg(not(windows))]
-fn replace_binary_windows(_current: &Path, _staged: &Path) -> Result<()> {
+fn replace_binary_windows<P: ChecksumPublisher>(
+    _current: &Path,
+    _staged: &Path,
+    _publisher: &P,
+) -> Result<()> {
     unreachable!("the Windows replace path is only compiled on Windows")
 }
 
@@ -1099,6 +1205,15 @@ fn recover(current: &Path, report: &mut RecoveryReport) {
         }
     }
     if !current.exists() {
+        // A replace that lost both moved-aside names still has the rollback
+        // copy. Publish it atomically (temp beside the target, fsync, rename),
+        // never with a plain copy that a crash could truncate.
+        let previous = previous_binary_path(current);
+        if previous.exists() && copy_file_atomic(&previous, current).is_ok() {
+            report.restored = true;
+        }
+    }
+    if !current.exists() {
         // Nothing can be restored (for example, the staged binary and backup
         // were both lost). Leave every file for a person to inspect.
         return;
@@ -1106,6 +1221,85 @@ fn recover(current: &Path, report: &mut RecoveryReport) {
     let _ = std::fs::remove_file(old_binary_path(current));
     let _ = std::fs::remove_file(failed_binary_path(current));
     report.removed_staging = remove_staging_files(current);
+}
+
+/// Copies `from` to a unique temp file beside `to`, fsyncs it, and renames it
+/// over `to`. `to` is never partially written.
+fn copy_file_atomic(from: &Path, to: &Path) -> Result<()> {
+    let parent = to
+        .parent()
+        .context("the install path has no parent directory")?;
+    let metadata = std::fs::metadata(from).with_context(|| format!("read {}", from.display()))?;
+    let mut source =
+        std::fs::File::open(from).with_context(|| format!("open {}", from.display()))?;
+    let mut last_error = None;
+    for attempt in 0..16u32 {
+        let temp = parent.join(staging_name(to, attempt));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        let mut file = match options.open(&temp) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_error = Some(error);
+                continue;
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("create recovery file {}", temp.display()));
+            }
+        };
+        let copied = std::io::copy(&mut source, &mut file).and_then(|_| file.sync_all());
+        if let Err(error) = copied {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error).with_context(|| format!("write recovery file {}", temp.display()));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = metadata.permissions().mode();
+            if let Err(error) =
+                std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(mode | 0o111))
+            {
+                let _ = std::fs::remove_file(&temp);
+                return Err(error).with_context(|| format!("make {} executable", temp.display()));
+            }
+        }
+        drop(file);
+        if let Err(error) = std::fs::rename(&temp, to) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(error).with_context(|| format!("publish {}", to.display()));
+        }
+        fsync_dir(parent);
+        return Ok(());
+    }
+    Err(last_error.map(anyhow::Error::from).unwrap_or_else(|| {
+        anyhow::anyhow!("could not create a recovery file next to {}", to.display())
+    }))
+}
+
+/// Runs the startup recovery for the Windows logon task and fails when another
+/// update holds the installation lock.
+///
+/// The scheduled task calls `h4rnd --recover-only`, so it uses the same lock,
+/// restore rules and atomic publication as `h4rnd update` instead of a separate
+/// PowerShell copy.
+pub fn recover_only() -> Result<RecoveryReport> {
+    let executable = std::env::current_exe().context("locate the running h4rnd executable")?;
+    let executable = crate::service::strip_verbatim_prefix(executable);
+    recover_only_for(&executable)
+}
+
+/// [`recover_only`] for an explicit executable, testable without `current_exe`.
+pub fn recover_only_for(executable: &Path) -> Result<RecoveryReport> {
+    let report = startup_recovery_for(executable);
+    if report.skipped_locked {
+        bail!(
+            "another h4rnd update, rollback or recovery is running for {}; not starting the \
+             daemon yet",
+            install_path_for(executable).display()
+        );
+    }
+    Ok(report)
 }
 
 /// Whether a file name is one of this installation's staging files.
@@ -1308,32 +1502,150 @@ pub fn restart_skip_reason(state: &DaemonState, force: bool) -> Option<String> {
     if force { None } else { state_refusal(state) }
 }
 
+/// The daemon an update or rollback must not interrupt.
+///
+/// The registered service is resolved first: its own unit/plist/task names the
+/// executable and the health endpoint, so the guard never probes the updater's
+/// own `--bind` (which may belong to a different daemon or to nothing at all).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct UpdateTarget {
+    /// What the platform service manager has registered.
+    pub registered: crate::service::RegisteredTarget,
+    /// The updater's own bind, probed only when no service is installed.
+    pub standalone_health: SocketAddr,
+}
+
+impl UpdateTarget {
+    /// Resolves the target for this host.
+    pub(crate) fn resolve(config: &Config) -> Self {
+        Self {
+            registered: crate::service::registered_target(),
+            standalone_health: health_addr(config.bind),
+        }
+    }
+}
+
+/// Checks the daemon that this update would have to restart.
+async fn check_target_idle(target: &UpdateTarget, force: bool) -> Result<()> {
+    match &target.registered {
+        crate::service::RegisteredTarget::Unverified { reason } => {
+            let problem = unverified_refusal(reason);
+            if !force {
+                bail!("{problem}; pass --force to update without checking the service");
+            }
+            println!("warning: {problem}; continuing because --force was passed");
+            Ok(())
+        }
+        crate::service::RegisteredTarget::NotInstalled => {
+            check_daemon_idle(target.standalone_health, false, force).await
+        }
+        crate::service::RegisteredTarget::Runs { health, .. } => {
+            check_daemon_idle(*health, crate::service::is_active(), force).await
+        }
+    }
+}
+
+/// Why the restart must be skipped after the binary was already replaced.
+async fn target_restart_skip_reason(target: &UpdateTarget, force: bool) -> Option<String> {
+    if force {
+        return None;
+    }
+    match &target.registered {
+        crate::service::RegisteredTarget::Unverified { reason } => Some(unverified_refusal(reason)),
+        crate::service::RegisteredTarget::NotInstalled => {
+            let state = daemon_state(target.standalone_health, false).await;
+            restart_skip_reason(&state, false)
+        }
+        crate::service::RegisteredTarget::Runs { health, .. } => {
+            let state = daemon_state(*health, crate::service::is_active()).await;
+            restart_skip_reason(&state, false)
+        }
+    }
+}
+
+fn unverified_refusal(reason: &str) -> String {
+    format!(
+        "the registered h4rnd service could not be verified ({reason}), so the daemon that \
+         would restart could not be checked"
+    )
+}
+
+/// Everything one update run needs, so the whole flow can be tested without
+/// reaching GitHub or touching the real service manager.
+pub(crate) struct UpdateDeps {
+    /// The binary being replaced or rolled back.
+    pub current: PathBuf,
+    /// The daemon that must be idle before the restart.
+    pub target: UpdateTarget,
+    /// Release client; `None` for `--rollback`.
+    pub client: Option<ReleaseClient>,
+    /// The compiled minisign key, passed in so tests do not need a signed build.
+    pub public_key: Option<String>,
+    /// Restarts the service; a test records whether it ran.
+    pub restart: Box<dyn Fn(&Path) -> crate::service::RestartOutcome>,
+}
+
 /// Runs one `h4rnd update`.
 pub async fn run(config: &Config, options: UpdateOptions) -> Result<()> {
     if options.rollback && (options.check || options.version.is_some()) {
         bail!("--rollback cannot be combined with --check or --version");
     }
     let current = crate::service::current_binary_path()?;
-    let addr = health_addr(config.bind);
+    let client = if options.rollback {
+        None
+    } else {
+        Some(ReleaseClient::new(ReleaseRepository::configured()?)?)
+    };
+    let target = if options.check {
+        // `--check` reads release metadata only and must not depend on the
+        // service manager being available.
+        UpdateTarget {
+            registered: crate::service::RegisteredTarget::NotInstalled,
+            standalone_health: health_addr(config.bind),
+        }
+    } else {
+        UpdateTarget::resolve(config)
+    };
+    run_with(
+        options,
+        UpdateDeps {
+            current,
+            target,
+            client,
+            public_key: configured_public_key().map(str::to_owned),
+            restart: Box::new(crate::service::restart_after_update),
+        },
+    )
+    .await
+}
+
+/// The update flow, with its external effects injected.
+pub(crate) async fn run_with(options: UpdateOptions, deps: UpdateDeps) -> Result<()> {
+    let UpdateDeps {
+        current,
+        target,
+        client,
+        public_key,
+        restart,
+    } = deps;
 
     if options.rollback {
         // One update at a time, and the same fail-closed guard as an update:
         // rolling back while a turn runs would interrupt it just as badly.
         let _lock = UpdateLock::acquire(&current)?;
-        check_daemon_idle(addr, crate::service::is_active(), options.force).await?;
+        check_target_idle(&target, options.force).await?;
         rollback_binary(&current)?;
         println!("Restored the previous h4rnd binary.");
         // A turn can start between the guard and the restart; the restored
         // binary is already in place, so leave the daemon alone.
-        let state = daemon_state(addr, crate::service::is_active()).await;
-        if let Some(problem) = restart_skip_reason(&state, options.force) {
+        if let Some(problem) = target_restart_skip_reason(&target, options.force).await {
             println!("The binary was restored, but {problem}.");
             println!(
                 "binary updated; restart h4rnd when the turn finishes (`h4rnd service restart`)"
             );
             return Ok(());
         }
-        restart_or_explain(&current);
+        restart_or_explain(&current, &restart);
         return Ok(());
     }
 
@@ -1346,8 +1658,8 @@ pub async fn run(config: &Config, options: UpdateOptions) -> Result<()> {
         Some(UpdateLock::acquire(&current)?)
     };
 
-    let repository = ReleaseRepository::configured()?;
-    let client = ReleaseClient::new(repository.clone())?;
+    let client = client.context("an update needs a release client")?;
+    let repository = client.repository().clone();
     let release = match options.version.as_deref() {
         Some(version) => client.release(version).await?,
         None => client.latest().await?,
@@ -1367,7 +1679,7 @@ pub async fn run(config: &Config, options: UpdateOptions) -> Result<()> {
         return Ok(());
     }
 
-    let Some(public_key) = configured_public_key() else {
+    let Some(public_key) = public_key.as_deref() else {
         print_manual_steps(&repository, &release);
         bail!("self-update is disabled in this build (no H4RN_UPDATER_PUBKEY)");
     };
@@ -1381,8 +1693,9 @@ pub async fn run(config: &Config, options: UpdateOptions) -> Result<()> {
         )
     })?;
 
-    // Fail before downloading anything when a turn is in flight.
-    check_daemon_idle(addr, crate::service::is_active(), options.force).await?;
+    // Fail before downloading anything when the daemon that would restart is
+    // busy, using the service's endpoint rather than this process's bind.
+    check_target_idle(&target, options.force).await?;
 
     let asset_name = archive_name(&release.version, TARGET_TRIPLE);
     let archive = client.download(release.asset(&asset_name)?).await?;
@@ -1395,7 +1708,7 @@ pub async fn run(config: &Config, options: UpdateOptions) -> Result<()> {
 
     // A turn that started while the download ran must not be cut off by the
     // restart below.
-    check_daemon_idle(addr, crate::service::is_active(), options.force).await?;
+    check_target_idle(&target, options.force).await?;
 
     replace_binary(&current, &binary)?;
     println!(
@@ -1406,13 +1719,12 @@ pub async fn run(config: &Config, options: UpdateOptions) -> Result<()> {
     // A turn can start between the guard above and the restart. The new binary
     // is already installed, so keep it and let the user restart when the turn
     // finishes instead of interrupting the work.
-    let state = daemon_state(addr, crate::service::is_active()).await;
-    if let Some(problem) = restart_skip_reason(&state, options.force) {
+    if let Some(problem) = target_restart_skip_reason(&target, options.force).await {
         println!("The binary was updated, but {problem}.");
         println!("binary updated; restart h4rnd when the turn finishes (`h4rnd service restart`)");
         return Ok(());
     }
-    restart_or_explain(&current);
+    restart_or_explain(&current, &restart);
     Ok(())
 }
 
@@ -1432,10 +1744,10 @@ fn report_versions(release: &ReleaseInfo) {
 ///
 /// A restart failure is a warning: the binary is already installed and the
 /// user can restart the service by hand.
-fn restart_or_explain(current: &Path) {
+fn restart_or_explain(current: &Path, restart: &dyn Fn(&Path) -> crate::service::RestartOutcome) {
     use crate::service::RestartOutcome;
 
-    match crate::service::restart_after_update(current) {
+    match restart(current) {
         RestartOutcome::Restarted => {
             println!("Restarted the h4rnd service.");
         }
@@ -1528,6 +1840,145 @@ mod tests {
 
     fn staged_path(current: &Path) -> PathBuf {
         current.parent().unwrap().join(staging_name(current, 0))
+    }
+
+    /// Serves `/healthz` answers in order, one connection per probe.
+    struct HealthStub {
+        addr: SocketAddr,
+        hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Drop for HealthStub {
+        fn drop(&mut self) {
+            self.task.abort();
+        }
+    }
+
+    async fn health_stub(turns: Vec<usize>) -> HealthStub {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        let task = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let index = counter.fetch_add(1, Ordering::SeqCst);
+                let turns = turns
+                    .get(index)
+                    .or_else(|| turns.last())
+                    .copied()
+                    .unwrap_or(0);
+                let body =
+                    format!("{{\"status\":\"ok\",\"version\":\"1.0.0\",\"active_turns\":{turns}}}");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let mut request = [0u8; 2048];
+                let _ = socket.read(&mut request).await;
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        HealthStub { addr, hits, task }
+    }
+
+    fn counting_restart(
+        count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Box<dyn Fn(&Path) -> crate::service::RestartOutcome> {
+        Box::new(move |_| {
+            count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            crate::service::RestartOutcome::Restarted
+        })
+    }
+
+    fn release_archive(binary: &[u8]) -> Vec<u8> {
+        if TARGET_TRIPLE.contains("windows") {
+            let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            writer
+                .start_file(
+                    "h4rnd-v9.9.9/h4rnd.exe",
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
+            writer.write_all(binary).unwrap();
+            writer.finish().unwrap().into_inner()
+        } else {
+            tar_gz_with_binary(binary)
+        }
+    }
+
+    /// A mocked release that this binary would install.
+    async fn mock_release(
+        binary: &[u8],
+        version: &str,
+        key: &SigningKey,
+    ) -> (wiremock::MockServer, ReleaseClient, String) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let archive = release_archive(binary);
+        let name = archive_name(version, TARGET_TRIPLE);
+        let (sums, signature) = signed_sums(&archive, &name, key);
+        let assets = format!(
+            r#"{{"tag_name":"v{version}","assets":[
+                {{"name":"SHA256SUMS","browser_download_url":"{base}/sums"}},
+                {{"name":"SHA256SUMS.sig","browser_download_url":"{base}/sums.sig"}},
+                {{"name":{name},"browser_download_url":"{base}/archive"}}]}}"#,
+            base = server.uri(),
+            name = serde_json::to_string(&name).unwrap(),
+        );
+        Mock::given(method("GET"))
+            .and(path("/repos/chark1es/h4rn/releases/latest"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(assets, "application/json"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/sums"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(sums))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/sums.sig"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(signature))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/archive"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(archive))
+            .mount(&server)
+            .await;
+        let client = ReleaseClient::with_api_base(test_repository(), server.uri()).unwrap();
+        let (_, public_key) = test_key();
+        (server, client, public_key)
+    }
+
+    fn target_for(
+        registered: crate::service::RegisteredTarget,
+        standalone_health: SocketAddr,
+    ) -> UpdateTarget {
+        UpdateTarget {
+            registered,
+            standalone_health,
+        }
+    }
+
+    /// Publishes the real backup but fails the checksum step.
+    struct FailingChecksum;
+
+    impl ChecksumPublisher for FailingChecksum {
+        fn publish(&self, _path: &Path, _base: &Path, _contents: &str) -> Result<()> {
+            Err(anyhow::anyhow!("injected checksum publication failure"))
+        }
     }
 
     #[test]
@@ -2163,6 +2614,358 @@ mod tests {
             message.contains("timed out") || message.contains("timeout"),
             "expected a timeout, got: {message}"
         );
+    }
+
+    #[test]
+    fn publishing_a_backup_replaces_the_old_checksum_sidecar() {
+        let (_dir, current) = install_dir();
+        replace_binary(&current, b"first").unwrap();
+        let previous = previous_binary_path(&current);
+        let checksum_path = previous_checksum_path(&previous);
+        // A sidecar left over from an older backup must not survive.
+        std::fs::write(&checksum_path, format!("{} 999\n", "0".repeat(64))).unwrap();
+
+        replace_binary(&current, b"second").unwrap();
+        let (hash, size) = read_backup_checksum(&previous).expect("the new backup has a checksum");
+        assert_eq!(hash, sha256_hex(b"first"));
+        assert_eq!(size, 5);
+        assert!(
+            !std::fs::read_to_string(&checksum_path)
+                .unwrap_or_default()
+                .contains(&"0".repeat(64)),
+            "the stale checksum is gone"
+        );
+    }
+
+    #[test]
+    fn a_failed_checksum_publication_fails_the_update_without_a_stale_sidecar() {
+        let (_dir, current) = install_dir();
+        replace_binary(&current, b"first").unwrap();
+        let previous = previous_binary_path(&current);
+        // The sidecar describes the current backup.
+        assert!(previous_checksum_path(&previous).exists());
+
+        // The real copy and rename of `.previous` run; only the publication of
+        // its checksum fails, as an I/O error would.
+        let error = replace_binary_with(&current, b"second", &FailingChecksum).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("injected checksum publication failure"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(&current).unwrap(),
+            b"first",
+            "a failed update must leave the installed binary in place"
+        );
+        assert_eq!(
+            std::fs::read(&previous).unwrap(),
+            b"first",
+            "the new backup was copied before the checksum failed"
+        );
+        assert!(
+            !previous_checksum_path(&previous).exists(),
+            "no stale checksum may describe the new backup"
+        );
+        // No staging or checksum temp file is left behind.
+        assert_eq!(remove_staging_files(&current), 0);
+    }
+
+    #[tokio::test]
+    async fn a_download_can_outlast_the_idle_timeout_when_bytes_keep_arriving() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 2048];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 23\r\n\r\n")
+                .await
+                .unwrap();
+            // Six chunks, 100 ms apart: 600 ms in total, longer than the 250 ms
+            // idle timeout, but no single gap reaches it.
+            for chunk in [
+                b"hello".as_slice(),
+                b" world",
+                b"!",
+                b"..",
+                b"....",
+                b".....",
+            ] {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                socket.write_all(chunk).await.unwrap();
+                socket.flush().await.unwrap();
+            }
+            let _ = socket.shutdown().await;
+        });
+
+        let client = ReleaseClient::with_timeouts(
+            test_repository(),
+            "http://127.0.0.1:9",
+            Duration::from_secs(5),
+            Duration::from_millis(250),
+        )
+        .unwrap();
+        let url = format!("http://{addr}/archive");
+        let bytes = client
+            .download(&url)
+            .await
+            .expect("a transfer longer than the idle timeout still succeeds");
+        assert_eq!(bytes, b"hello world!...........");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn a_busy_service_blocks_the_update_even_when_the_cli_port_is_idle() {
+        let idle = health_stub(vec![0]).await;
+        let busy = health_stub(vec![1]).await;
+        let (_dir, current) = install_dir();
+        let (_server, client, public_key) =
+            mock_release(b"new binary", "9.9.9", &test_key().0).await;
+        let restarts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let error = run_with(
+            UpdateOptions::default(),
+            UpdateDeps {
+                current: current.clone(),
+                target: target_for(
+                    crate::service::RegisteredTarget::Runs {
+                        binary: current.clone(),
+                        health: busy.addr,
+                    },
+                    idle.addr,
+                ),
+                client: Some(client),
+                public_key: Some(public_key),
+                restart: counting_restart(restarts.clone()),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("active turn"), "{error}");
+        assert_eq!(restarts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read(&current).unwrap(), b"old");
+        assert_eq!(
+            idle.hits.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "the updater's own bind is never mistaken for the service"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_busy_service_blocks_the_rollback_even_when_the_cli_port_is_idle() {
+        let idle = health_stub(vec![0]).await;
+        let busy = health_stub(vec![1]).await;
+        let (_dir, current) = install_dir();
+        replace_binary(&current, b"new binary").unwrap();
+        let restarts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let error = run_with(
+            UpdateOptions {
+                rollback: true,
+                ..UpdateOptions::default()
+            },
+            UpdateDeps {
+                current: current.clone(),
+                target: target_for(
+                    crate::service::RegisteredTarget::Runs {
+                        binary: current.clone(),
+                        health: busy.addr,
+                    },
+                    idle.addr,
+                ),
+                client: None,
+                public_key: None,
+                restart: counting_restart(restarts.clone()),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("active turn"), "{error}");
+        assert_eq!(restarts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read(&current).unwrap(), b"new binary");
+        assert_eq!(idle.hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn an_idle_service_that_turns_busy_before_the_restart_skips_it() {
+        // Idle before the download and before the replace, busy for the probe
+        // immediately before the restart.
+        let service = health_stub(vec![0, 0, 1]).await;
+        let (_dir, current) = install_dir();
+        let (_server, client, public_key) =
+            mock_release(b"new binary", "9.9.9", &test_key().0).await;
+        let restarts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        run_with(
+            UpdateOptions::default(),
+            UpdateDeps {
+                current: current.clone(),
+                target: target_for(
+                    crate::service::RegisteredTarget::Runs {
+                        binary: current.clone(),
+                        health: service.addr,
+                    },
+                    service.addr,
+                ),
+                client: Some(client),
+                public_key: Some(public_key),
+                restart: counting_restart(restarts.clone()),
+            },
+        )
+        .await
+        .expect("the binary is installed even when the turn starts late");
+
+        assert_eq!(
+            std::fs::read(&current).unwrap(),
+            b"new binary",
+            "the binary is already installed"
+        );
+        assert_eq!(
+            restarts.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a turn that starts before the restart must not be cut off"
+        );
+        assert!(
+            service.hits.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "the service is probed before the replace and before the restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_idle_service_that_turns_busy_before_the_rollback_restart_skips_it() {
+        let service = health_stub(vec![0, 1]).await;
+        let (_dir, current) = install_dir();
+        replace_binary(&current, b"new binary").unwrap();
+        let restarts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        run_with(
+            UpdateOptions {
+                rollback: true,
+                ..UpdateOptions::default()
+            },
+            UpdateDeps {
+                current: current.clone(),
+                target: target_for(
+                    crate::service::RegisteredTarget::Runs {
+                        binary: current.clone(),
+                        health: service.addr,
+                    },
+                    service.addr,
+                ),
+                client: None,
+                public_key: None,
+                restart: counting_restart(restarts.clone()),
+            },
+        )
+        .await
+        .expect("the rollback completes even when the turn starts late");
+
+        assert_eq!(std::fs::read(&current).unwrap(), b"old");
+        assert_eq!(restarts.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn an_unverifiable_service_refuses_without_force() {
+        let (_dir, current) = install_dir();
+        let restarts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let error = run_with(
+            UpdateOptions {
+                rollback: true,
+                ..UpdateOptions::default()
+            },
+            UpdateDeps {
+                current: current.clone(),
+                target: target_for(
+                    crate::service::RegisteredTarget::Unverified {
+                        reason: "the unit has no readable ExecStart".to_owned(),
+                    },
+                    // An idle daemon here must not make an unverified service
+                    // look safe.
+                    "127.0.0.1:9".parse().unwrap(),
+                ),
+                client: None,
+                public_key: None,
+                restart: counting_restart(restarts.clone()),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("could not be verified"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("--force"), "{error}");
+        assert_eq!(restarts.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(std::fs::read(&current).unwrap(), b"old");
+    }
+
+    #[test]
+    fn recovery_publishes_the_rollback_copy_atomically() {
+        let (_dir, current) = install_dir();
+        let previous = previous_binary_path(&current);
+        // Only the rollback backup exists: a replace that lost both the
+        // install path and the moved-aside name.
+        std::fs::write(&previous, b"previous binary").unwrap();
+        std::fs::remove_file(&current).unwrap();
+
+        let report = recover_only_for(&previous).unwrap();
+        assert!(report.restored);
+        assert_eq!(std::fs::read(&current).unwrap(), b"previous binary");
+        assert!(
+            previous.exists(),
+            "the rollback copy stays available after recovery"
+        );
+        assert_eq!(remove_staging_files(&current), 0);
+    }
+
+    #[test]
+    fn recover_only_skips_while_an_update_holds_the_lock() {
+        let (_dir, current) = install_dir();
+        let old = old_binary_path(&current);
+        std::fs::rename(&current, &old).unwrap();
+        let staging = staged_path(&current);
+        std::fs::write(&staging, b"staged").unwrap();
+
+        let held = UpdateLock::acquire(&current).unwrap();
+        let error = recover_only_for(&old).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("another h4rnd update, rollback or recovery is running"),
+            "{error}"
+        );
+        assert!(!current.exists(), "the update's files are untouched");
+        assert!(old.exists());
+        assert!(staging.exists());
+        drop(held);
+
+        let report = recover_only_for(&old).unwrap();
+        assert!(report.restored);
+        assert_eq!(std::fs::read(&current).unwrap(), b"old");
+        assert!(!old.exists());
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn recovery_restores_the_failed_image_after_an_interrupted_rollback() {
+        let (_dir, current) = install_dir();
+        // A rollback moved the installed binary aside and died before the
+        // backup was renamed in.
+        let failed = failed_binary_path(&current);
+        std::fs::rename(&current, &failed).unwrap();
+        let report = recover_only_for(&failed).unwrap();
+        assert!(report.restored);
+        assert_eq!(std::fs::read(&current).unwrap(), b"old");
+        assert!(!failed.exists());
     }
 
     #[tokio::test]

@@ -11,6 +11,12 @@ async fn main() -> anyhow::Result<()> {
     // per-installation lock as an update and works from a moved-aside image.
     h4rn_daemon::update::startup_recovery();
     let cli = Cli::parse();
+    if cli.recover_only {
+        // The scheduled task's launcher: take the same lock as an update and
+        // publish a recovered binary atomically, then exit.
+        h4rn_daemon::update::recover_only()?;
+        return Ok(());
+    }
     let (config, command) = cli.into_parts()?;
     init_tracing(&config.log_level);
     h4rn_daemon::run(config, command).await

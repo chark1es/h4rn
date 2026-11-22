@@ -16,8 +16,12 @@ All notable changes to h4rn are recorded here. The format follows
   `target/debug` or a temp directory unless `--force`, and mentions
   `loginctl enable-linger` on Linux when lingering is off. Reinstalling an
   unchanged launch agent that is already running leaves it alone. On Windows the
-  task is named per account (`h4rn-<user>`) and runs a small recovery step before
-  the daemon, so it still starts after an interrupted update.
+  task is named per account (`h4rn-<user>`) and runs `h4rnd --recover-only`
+  before the daemon, so it still starts after an interrupted update and takes
+  the updater's installation lock. A task that an older release registered under
+  the machine-wide `h4rn` name is removed by the next install or uninstall. The
+  systemd unit keeps a `$` in the executable path literal (systemd does not
+  expand variables there) while still escaping `$$` in arguments.
 - **`h4rnd update` installs signed daemon releases.** It finds the latest GitHub
   release for the repository baked in at build time, downloads the archive for
   this target triple and `SHA256SUMS`, verifies the hash and a minisign signature
@@ -36,12 +40,15 @@ All notable changes to h4rn are recorded here. The format follows
   created exclusively with unique names. On Unix the replace and the rollback are
   each a single `rename` over the install path; on Windows the moved-aside binary
   is restored by the next start (or by the scheduled task's recovery step).
-- **A backup is written atomically and checked before it is used.** The rollback
-  copy no longer goes straight to `h4rnd.previous`: it is copied into a unique
-  temp file beside it, fsynced and renamed over the backup, with its size and
-  SHA-256 recorded after the copy. `--rollback` refuses a backup that is missing,
-  empty, not executable on Unix or does not match that record, so an interrupted
-  copy can never replace the installed binary.
+- **A backup and its checksum are published together.** The rollback copy no
+  longer goes straight to `h4rnd.previous`: it is copied into a unique temp file
+  beside it, fsynced and renamed over the backup. The old checksum sidecar is
+  deleted before the new backup appears, and the new one is written through its
+  own temp file, fsynced and renamed; a failure while writing it fails the update
+  before the installed binary is touched, and the two files can never describe
+  different copies. `--rollback` refuses a backup that is missing, empty, not
+  executable on Unix or does not match that record, so an interrupted copy can
+  never replace the installed binary.
 - **A turn that starts during the final step is not cut off.** The idle check is
   repeated after the new binary is in place and immediately before the restart.
   If a turn started, the binary stays installed, the restart is skipped, and the
@@ -50,20 +57,28 @@ All notable changes to h4rn are recorded here. The format follows
   idle timeout and no total limit, so a large archive on a slow link can finish.
   On Windows a failed `/End` when the task is not running is harmless and only
   the start step must succeed.
-- **`h4rnd update` checks the daemon again right before replacing the binary**,
-  so a turn that starts during the download still blocks the restart. The guard
+- **`h4rnd update` probes the daemon it will actually restart.** The guard
+  resolves the registered unit, plist or task first and reads that service's own
+  `H4RN_BIND` (systemd drop-ins and `%h` included), not the updater's `--bind`,
+  so an idle second daemon on the CLI's port cannot make a busy service look
+  safe. If the service's executable or endpoint cannot be read, the update and
+  `--rollback` refuse unless `--force` is passed. The guard is checked again
+  right before the binary is replaced and again just before the restart, and it
   fails closed: a daemon that is active or listening but does not answer
-  `/healthz` blocks the update, as does a health response without `active_turns`,
-  unless `--force` is passed. `--rollback` uses the same guard. The update only
-  restarts the service when that unit/plist/task runs the binary being replaced;
-  a failed restart is a warning, not a failed update.
+  `/healthz` blocks the update, as does a health response without `active_turns`.
+  The update only restarts the service when that unit/plist/task runs the binary
+  being replaced; a failed restart is a warning, not a failed update. The Linux
+  restart decision reads the effective `ExecStart` (fragment plus drop-ins, with
+  `%h` expanded) instead of the base unit text.
 - **Windows service reporting has two limits.** `h4rnd service status` reports
   `enabled: unknown` there, because Task Scheduler's states do not map cleanly to
   "starts at logon", and `h4rnd service logs` prints guidance instead of following
   a file because the task runs without a console and the daemon writes no log
   file. Task names are per account, and a task installed by an older release
-  (which started `h4rnd.exe` directly) keeps working and is updated the next time
-  `h4rnd service install` runs.
+  (which started `h4rnd.exe` directly) keeps working and is migrated the next
+  time `h4rnd service install` runs. macOS service status reports
+  `enabled: unknown` unless `launchctl print-disabled` could be read, instead of
+  assuming the agent is enabled.
 - **Bitbucket Cloud and Azure DevOps pull requests.** The forge layer now understands two more
   providers. Bitbucket Cloud takes an Atlassian API token (account email plus token, HTTP Basic) or
   a workspace, project or repository access token (Bearer); app passwords were retired in July 2026
