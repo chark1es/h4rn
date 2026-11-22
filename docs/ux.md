@@ -176,7 +176,7 @@ without leaving h4rn.
   `<iframe sandbox="allow-scripts">` (never `allow-same-origin`) with a CSP of
   `default-src 'none'; img-src data: https:; media-src data: https:; object-src data:; style-src
   'unsafe-inline' https:; script-src 'unsafe-inline' https:; font-src data: https:; connect-src
-  `https:`. The prepared document always starts with a trusted `<!doctype html>` and that policy
+  https:`. The prepared document always starts with a trusted `<!doctype html>` and that policy
   meta; the workspace document follows, with its own leading doctype dropped and any leading
   comments now after the policy. Nothing scans the untrusted file for a doctype or a comment
   terminator, so a malformed prefix (`<!-->`, `<!--->`, `<!-- x --!>`) cannot put workspace bytes
@@ -185,7 +185,9 @@ without leaving h4rn.
 - The desktop and mobile shells serve the prepared document from their own `h4rn-preview` origin
   with that policy as a response header. A `srcdoc` frame would inherit the window's
   `script-src 'self'`, so page scripts would never run in a packaged build. The browser build has
-  no such origin (and no CSP that blocks inline scripts), so it keeps `srcdoc`.
+  no such origin (and no CSP that blocks inline scripts), so it keeps `srcdoc`. The shell returns
+  only the URL; the bridge token is the one already written into the document, so a frame has one
+  token rather than two.
 - Relative CSS, JS, images, fonts and media from the same folder or elsewhere inside the workspace
   are inlined as `<style>`, `<script>` or `data:` URLs. That covers `srcset` candidates, `<img>`,
   `<source>`, `<video>/<audio>/<track>`, `<object data>`, `<embed src>`, SVG `href`/`xlink:href` and
@@ -197,14 +199,20 @@ without leaving h4rn.
   (Noise) transport, which closes a session on an oversized frame; the plain loopback WebSocket has
   no frame bound of its own, so a large thread listing or the editor's full 2 MiB read is delivered
   whole there. Each binary asset may be up to 360 KiB; all embedded copies together may be up to
-  10 MB. The budget is charged for every copy at the moment it is inserted, including a file
-  reached again through an imported stylesheet, and the page is never built past the cap: an
-  insertion that would not fit is left out and reported as skipped. Assets are fetched until the
-  budget is spent. A `srcset` keeps its `data:` and `https:` candidates as written and inlines (or
-  removes and reports) each workspace candidate. Anything missing, outside the workspace root, or
-  over a size limit is removed from the page (it is never left as a relative URL that would hit the
-  preview origin) and the tab says how many files were skipped. Absolute `https:` assets load from
-  their CDN.
+  10 MB. The budget covers the whole serialized document: the trusted prefix (doctype and CSP
+  meta) and the bridge script are reserved up front, and every insertion is charged along with the
+  markup it generates — the `<style>`/`<script>` wrapper, a `url("…")` pair, the bytes a rewritten
+  tag adds (`target` and `rel` on an anchor, the quotes around a `data:` URL, escaped attribute
+  text) and the backslash that escaping a `</script` or `</style` adds to inlined text. The budget
+  is charged for every copy at the moment it is inserted, including a file reached again through
+  an imported stylesheet, and the page is never built past the cap: a near-cap page renders with
+  its last asset left out and reported as skipped instead of failing as too large. Assets are
+  fetched until the budget is spent. A `srcset` keeps its `data:` and `https:` candidates as
+  written and inlines (or removes and reports) each workspace candidate; a trailing comma ends a
+  descriptorless candidate, so the workspace candidate after it is still rewritten. Anything
+  missing, outside the workspace root, or over a size limit is removed from the page (it is never
+  left as a relative URL that would hit the preview origin) and the tab says how many files were
+  skipped. Absolute `https:` assets load from their CDN.
 - A link clicked in the page never opens by itself. The tab shows an inline bar — "Open
   example.com in your browser?" with **Open** and **Cancel** — and only that click hands an
   `http:`/`https:` URL to the system browser. The page controls everything inside the frame,
@@ -218,18 +226,33 @@ without leaving h4rn.
   (over 400 KiB of text, or under it but too large once escaped) gets a plain inline message with
   Reload. The selected file stays watched on every outcome, so recreating it (or fixing its
   encoding) reloads the preview without closing the tab; after a reconnect, a sign-in or a machine
-  switch the workspace watch is re-sent on the new connection.
+  switch every held workspace watch is re-sent on the new connection, including one retained while
+  that connection was still starting.
 - **Android WebViews without document-start scripts.** Wry 0.57 injects the shell's
   initialization scripts into HTML served from a custom protocol when the WebView lacks
   `DOCUMENT_START_SCRIPT`, and prepends their hashes to `script-src`; a CSP with hashes ignores
-  `'unsafe-inline'`, so the page's scripts and the link bridge never run. The preview cannot opt
-  out of that fallback from the shell side, so it detects it: the bridge posts
-  `h4rn:preview-ready` when it runs, and if the frame loads without that message the preview is
-  turned off with a plain notice asking for an updated Android System WebView. This was verified by
-  reading Wry 0.57.2's Android `inject_scripts_into_html` path, by the shell's unit test that the
-  served policy is the documented `script-src 'unsafe-inline' https:` header with no hashes (all
-  desktop and current Android WebViews keep the frame), and by the panel test that a frame without
-  a ready message is replaced by the notice. It cannot be verified on an old WebView in CI.
+  `'unsafe-inline'`, so the page's scripts and the link bridge never run. The shells report their
+  platform and whether the WebView supports document-start scripts before the frame is created;
+  on the phone that capability command runs off the main thread, so the platform's version lookup
+  cannot freeze the window while the panel waits. The Android shell compares the reported WebView
+  version with the feature's WebView 84 baseline (androidx.webkit maps
+  `WebViewFeature.DOCUMENT_START_SCRIPT` to that version, and Wry checks the feature in
+  `src/android/kotlin/RustWebView.kt`). A version that cannot be read, or a capability command
+  that fails, is reported as unknown and treated as unsupported — never as supported. Only on Android without that support does the panel turn the
+  preview off with a notice asking for an updated Android System WebView; that notice has its own
+  **Reload**, which re-asks the shell once the person has updated the WebView. Unknown
+  capabilities show the generic note instead. On every other device a missing bridge message is
+  something else — an unclosed comment can swallow the bridge, or a policy can block inline
+  scripts — so the panel shows a plain "Preview scripts didn’t start" note with Reload. Reload
+  re-asks the capability question along with re-reading the file, so a notice clears when the
+  WebView answers differently. That deadline scales with the prepared document (one second plus
+  ten milliseconds per two KiB, capped at twenty seconds), so a large page that is slow to parse is
+  not mistaken for blocked scripts. This was verified by reading Wry 0.57.2's Android
+  `inject_scripts_into_html` path, by the shells' unit tests that the capability report and the
+  served `script-src 'unsafe-inline' https:` header carry no hashes, by version-parsing tests
+  (below 84 is unsupported, unreadable is unknown), and by the panel tests for Android with and
+  without document-start support, for desktop, for unknown, and for Reload clearing the notice. It
+  cannot be verified on an old WebView in CI.
 - Not supported yet: MCP Apps rendering, a headless browser, and proxying a page's own development
   server. A page that needs a dev server must use absolute `https:` URLs for its assets.
 

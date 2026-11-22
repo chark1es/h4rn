@@ -6,7 +6,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceFileRow } from "@/components/panel/WorkspaceFiles";
 import type { FileEntry } from "@/gen";
 import { closePreview, getState, openPreview, useApp } from "@/lib/store/appStore";
-import { PreviewFrame } from "./PreviewPanel";
+import { PreviewFrame, previewReadyTimeoutMs } from "./PreviewPanel";
+
+const bridgeTimeout = previewReadyTimeoutMs(new TextEncoder().encode("<p>hi</p>").length);
 
 const { openExternalUrl } = vi.hoisted(() => ({
   openExternalUrl: vi.fn(async (_url: string) => undefined),
@@ -191,19 +193,108 @@ describe("preview link bridge", () => {
     expect(container.querySelector(".q-pv-link")?.textContent).toContain("second.example");
   });
 
-  it("turns the preview off when the frame never reports its bridge running", () => {
+  it("shows the Android notice from the shell's capability report, without waiting", () => {
+    const reload = vi.fn();
+    const { root, container } = render(
+      <PreviewFrame
+        srcdoc="<p>hi</p>"
+        url={null}
+        token="t1"
+        title="Preview"
+        capabilities={{ platform: "android", documentStartScripts: false }}
+        onReload={reload}
+      />,
+    );
+    roots.push(root);
+    expect(container.querySelector("iframe")).toBeNull();
+    expect(container.textContent).toContain("Update Android System WebView");
+    // Updating the WebView happens outside the app; Reload asks the shell
+    // again and clears the notice when the capability changed.
+    const button = [...container.querySelectorAll("button")].find(
+      (entry) => entry.textContent === "Reload",
+    );
+    act(() => button?.click());
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the generic note with Reload when the capability is unknown", () => {
+    const reload = vi.fn();
+    const { root, container } = render(
+      <PreviewFrame
+        srcdoc="<p>hi</p>"
+        url={null}
+        token="t1"
+        title="Preview"
+        capabilities={{ platform: "unknown", documentStartScripts: "unknown" }}
+        onReload={reload}
+      />,
+    );
+    roots.push(root);
+    // A shell that could not read its WebView's version is not "supported":
+    // the page is not framed, and the note offers Reload instead of an Android
+    // upgrade.
+    expect(container.querySelector("iframe")).toBeNull();
+    expect(container.textContent).toContain("Preview scripts didn’t start");
+    expect(container.textContent).toContain("couldn’t read this WebView’s capability report");
+    expect(container.textContent).not.toContain("Android System WebView");
+    const button = [...container.querySelectorAll("button")].find(
+      (entry) => entry.textContent === "Reload",
+    );
+    act(() => button?.click());
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the generic note on an Android WebView that supports document-start scripts", () => {
     vi.useFakeTimers();
     try {
       const { root, container } = render(
-        <PreviewFrame srcdoc="<p>hi</p>" url={null} token="t1" title="Preview" />,
+        <PreviewFrame
+          srcdoc="<p>hi</p>"
+          url={null}
+          token="t1"
+          title="Preview"
+          capabilities={{ platform: "android", documentStartScripts: true }}
+        />,
       );
       roots.push(root);
       act(() => frame(container).dispatchEvent(new Event("load")));
       act(() => {
-        vi.advanceTimersByTime(900);
+        vi.advanceTimersByTime(bridgeTimeout);
       });
       expect(container.querySelector("iframe")).toBeNull();
-      expect(container.textContent).toContain("can’t run scripts in a preview");
+      expect(container.textContent).toContain("Preview scripts didn’t start");
+      expect(container.textContent).not.toContain("Android System WebView");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("offers Reload for a desktop frame that never reports its bridge running", () => {
+    vi.useFakeTimers();
+    try {
+      const reload = vi.fn();
+      const { root, container } = render(
+        <PreviewFrame
+          srcdoc="<p>hi</p>"
+          url={null}
+          token="t1"
+          title="Preview"
+          capabilities={{ platform: "desktop", documentStartScripts: true }}
+          onReload={reload}
+        />,
+      );
+      roots.push(root);
+      act(() => frame(container).dispatchEvent(new Event("load")));
+      act(() => {
+        vi.advanceTimersByTime(bridgeTimeout);
+      });
+      expect(container.textContent).toContain("Preview scripts didn’t start");
+      expect(container.textContent).not.toContain("Android System WebView");
+      const button = [...container.querySelectorAll("button")].find(
+        (entry) => entry.textContent === "Reload",
+      );
+      act(() => button?.click());
+      expect(reload).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
@@ -220,13 +311,21 @@ describe("preview link bridge", () => {
       ready(iframe.contentWindow, "t1");
       act(() => iframe.dispatchEvent(new Event("load")));
       act(() => {
-        vi.advanceTimersByTime(900);
+        vi.advanceTimersByTime(bridgeTimeout);
       });
       expect(container.querySelector("iframe")).not.toBeNull();
-      expect(container.textContent).not.toContain("can’t run scripts in a preview");
+      expect(container.textContent).not.toContain("Preview scripts didn’t start");
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("scales the ready deadline with the document size", () => {
+    expect(previewReadyTimeoutMs(0)).toBe(1_000);
+    expect(previewReadyTimeoutMs(2 * 1024 * 1024)).toBeGreaterThan(
+      previewReadyTimeoutMs(64 * 1024),
+    );
+    expect(previewReadyTimeoutMs(64 * 1024 * 1024)).toBe(20_000);
   });
 
   it("renders the shell URL as src and keeps srcdoc when there is none", () => {

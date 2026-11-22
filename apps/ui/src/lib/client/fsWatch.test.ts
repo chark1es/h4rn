@@ -139,6 +139,31 @@ describe("workspace watch refcount", () => {
     expect(replacement.requests.at(-1)).toEqual({ type: "fs_unwatch", workspace: "/work" });
   });
 
+  it("re-sends a watch retained before a replacement client is ready", () => {
+    const first = retainWorkspaceWatch("host_1", "/work");
+    const replacement = replaceClient();
+    // A second workspace is retained before the replacement client's first
+    // ready notice. Sending it must not count the earlier watch as sent too.
+    const second = retainWorkspaceWatch("host_1", "/other");
+    expect(replacement.requests).toEqual([
+      { type: "fs_watch", host: "host_1", workspace: "/other", paths: [] },
+    ]);
+
+    ready(replacement, false);
+    expect(replacement.requests).toEqual([
+      { type: "fs_watch", host: "host_1", workspace: "/other", paths: [] },
+      { type: "fs_watch", host: "host_1", workspace: "/work", paths: [] },
+    ]);
+
+    // Both are now outstanding on this client; a later ready sends nothing.
+    ready(replacement, false);
+    expect(replacement.requests).toHaveLength(2);
+
+    first();
+    second();
+    expect(watchedWorkspaces()).toEqual([]);
+  });
+
   it("sends one watch per workspace after a client replacement", () => {
     const ide = retainWorkspaceWatch("host_1", "/work");
     const preview = retainWorkspaceWatch("host_1", "/work");

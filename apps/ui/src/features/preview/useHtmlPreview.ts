@@ -18,6 +18,12 @@ export type HtmlPreview = {
   loading: boolean;
   failure: PreviewFailure | null;
   reload: () => void;
+  /**
+   * Counts reloads: the manual action and a change on disk. Anything that must
+   * be re-asked of the shell on Reload (the WebView's capabilities) depends on
+   * it.
+   */
+  revision: number;
 };
 
 const EMPTY: HtmlPreview = {
@@ -25,6 +31,7 @@ const EMPTY: HtmlPreview = {
   loading: false,
   failure: null,
   reload: () => undefined,
+  revision: 0,
 };
 
 async function readFile(
@@ -172,5 +179,5 @@ export function useHtmlPreview(thread: ThreadSummary | null, path: string | null
   }, [workspace, path]);
 
   if (!thread || !path) return EMPTY;
-  return { document, loading, failure, reload };
+  return { document, loading, failure, reload, revision: nonce };
 }

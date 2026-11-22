@@ -213,6 +213,7 @@ pub fn run() {
             secret_set,
             secret_delete,
             deep_link_current,
+            preview::preview_capabilities,
             preview::preview_prepare,
             preview::preview_release
         ])

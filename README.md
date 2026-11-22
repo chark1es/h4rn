@@ -108,9 +108,9 @@ lock while they do it, and refuse while a turn is running (or while a daemon
 cannot be checked) unless you pass `--force`. The busy check follows the
 registered service's own endpoint, starting with a `--bind` in its command line
 and then its `H4RN_BIND`, not the `--bind` of the update command.
-A rollback backup is staged and renamed into place with its checksum, so a
-failed publication leaves the previous one usable, and `--rollback` refuses a
-backup that is missing, empty or damaged. If a turn starts
+A rollback backup is staged and renamed into place, so a failed publication
+leaves the previous one usable, and `--rollback` refuses a backup that is
+missing, empty or damaged. If a turn starts
 after the new binary is installed but before the restart, the update keeps the
 binary and asks you to run `h4rnd service restart` when the turn finishes.
 
