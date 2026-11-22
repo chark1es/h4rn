@@ -55,6 +55,17 @@ All notable changes to h4rn are recorded here. The format follows
   thread waits for the newest reset. Finally, a failed write whose session was lost still honors the
   adapter's typed limit: the retry is held behind the schedule and delivered when it fires, instead
   of running straight into the paused provider.
+- **A paused requeued prompt is never stranded, and the pause belongs to the session that reported
+  it.** A failed write that put its prompt back behind a typed limit left the turn Pending when the
+  person then cancelled the resume or sent a message: clearing the schedule removed the only thing
+  that would deliver it. Both actions now release that turn. A Send queues its message behind it,
+  so the parked prompt runs first. An older session generation's delayed exit report no longer
+  marks the live replacement's reset as applied, and a requeued write's pause names the generation
+  that claimed the write instead of `None`. A newer generation that confirms the same reset takes
+  ownership of the pause without re-arming it, so an older generation's later, earlier reset can no
+  longer replace it. A firing schedule re-checks under the record lock that the pause is still its
+  own before it clears anything or hands off delivery. Finally, a typed limit without a reset time
+  on a requeued write waits the meter's unknown-reset backoff instead of retrying immediately.
 - **One provider limit arms one schedule.** The bridge can report one pause twice: the prompt's
   typed limit before the completion and the same reset on the exit report after it. The
   closed-completion wait now collects those limits and applies one after the wait, preferring the

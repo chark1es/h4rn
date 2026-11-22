@@ -104,7 +104,11 @@ same applies when the death is reported only by the exit, with no EOF first: the
 live session carries the reset it applied into the dying entry. When several
 deaths are waiting for their exit reports, each schedule remembers the
 generation that armed it, and an older generation's later, earlier reset keeps
-its own row but cannot replace the newer generation's pause.
+its own row but cannot replace the newer generation's pause. A reset applied by
+one generation is never recorded on another, and a requeued write's pause names
+the generation that claimed the write. When a newer generation confirms the
+same reset, the pause keeps its attempt and jitter and transfers to that
+generation, so an older generation's delayed report cannot replace it later.
 A death between turns publishes one diagnostic row; it does not raise a failure,
 so a thread whose auto-resume just armed stays Scheduled (and a thread with no
 limit is not turned into an Error asking for attention by the agent's exit
@@ -128,11 +132,18 @@ reports of the same kind are compared by detail.
 Schedules are persisted in SQLite and replayed after a daemon restart. While a
 schedule is armed the thread stays in Working, queued input is held, and the
 schedule can be cancelled (`CancelResume`) or fired immediately (`ResumeNow`).
+Cancelling the pause, or sending a message while a requeued turn is parked
+behind it, releases that turn instead of leaving it pending with nothing to
+deliver it; a Send's own message queues behind the parked turn.
 
 When a schedule fires, the daemon starts a new turn with the policy prompt and
 marks the schedule `Fired`. If a failed write had put its prompt back for a
 retry when the limit armed, that requeued turn is what the schedule delivers,
-instead of the policy prompt, so the person's message is not replaced. With
+instead of the policy prompt, so the person's message is not replaced. The fire
+re-checks under the record lock that the pause on the thread is the schedule it
+claimed: a newer limit that replaced it while the attempt was being claimed
+leaves the newer pause alone and starts nothing. An unknown reset on that
+requeued-write path waits the backoff above rather than retrying immediately. With
 `failover = true` and an active proxy profile, it asks the proxy for another
 model/account that is not cooling down, records
 that choice on the schedule (and emits it in `ScheduleChanged`), and uses the

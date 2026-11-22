@@ -727,6 +727,20 @@ typed limit: it arms the schedule under the same lock, holds the requeued turn b
 schedule's firing delivers that turn (not the policy's resume prompt) on a fresh session. The
 two-death test now holds the mocked clock until both exit reports have been delivered.
 
+**Addendum: a paused requeued prompt is released by the person's action, and only its own session
+owns the pause.** Clearing the schedule is a decision, not a state to leave a turn in: when the
+person cancels the resume, or a Send supersedes the pause while the active turn's prompt is still
+Pending, the parked turn is released for delivery (a Send's own message queues behind it and runs
+second). Applied resets are recorded only on the session generation that reported them, so an older
+generation's delayed exit cannot consume the live replacement's own reset; a requeued write's pause
+names the generation that claimed the write rather than an empty slot. A newer generation that
+confirms the same reset takes ownership of the existing pause without changing its attempt or jitter,
+so an older generation's delayed earlier reset cannot replace it. A fire re-checks the schedule's
+identity on the record under the record lock before it clears the pause or hands off delivery; if a
+newer limit replaced it while the attempt was claimed, the old fire does nothing. Finally, a typed
+limit without a reset time on the requeued-write path waits the meter's unknown-reset backoff like
+any other reset-less limit instead of retrying at once.
+
 ## ADR-027: Push notifications are metadata-only wake signals
 
 **Status:** Proposed
