@@ -1494,8 +1494,10 @@ pub fn hidden_file(worktree: &Path, limit: Duration) -> Result<Option<PathBuf>, 
 /// For a registration whose checkout directory is gone: git skips its own
 /// cleanliness check then, and removing the registration deletes the admin dir
 /// and the index with it, so anything staged there would be lost. Runs
-/// `git -C <admin> --git-dir=. diff-index --cached --quiet <treeish> --`, bounded by
-/// `limit` (trace variables stripped like every call here). `Ok(true)` when
+/// `git -C <admin> --git-dir=. diff-index --cached --quiet
+/// --ignore-submodules=none <treeish> --`, bounded by `limit` (trace and
+/// location variables stripped like every call here); a staged submodule update
+/// counts even when the submodule is configured `ignore = all`. `Ok(true)` when
 /// git exits 0, or when there is no `index` file at all (nothing is staged);
 /// `Ok(false)` when it exits 1. Anything else (an index that is not a regular
 /// file or cannot be checked, a tree-ish that does not resolve, such as an
@@ -1797,13 +1799,13 @@ fn probe_mode_support(admin: &Path) -> (Option<bool>, Option<bool>) {
 }
 
 /// The errors a filesystem without symlink support returns from `symlink(2)`.
-#[cfg(unix)]
 ///
 /// `EPERM` is deliberately not among them: a filesystem without symlinks can
 /// return it, but so can a security policy denying `symlinkat` on one that
 /// stores symlinks fine, and treating that as "unsupported" would switch the
 /// symlink comparison off. It is inconclusive (forced, not cached), so on a
 /// FAT-like filesystem a repository that tracks symlinks needs "Remove anyway".
+#[cfg(unix)]
 fn symlinks_unsupported(error: &std::io::Error) -> bool {
     matches!(error.raw_os_error(), Some(code) if code == libc::ENOSYS || code == libc::EOPNOTSUPP)
         || error.kind() == std::io::ErrorKind::Unsupported

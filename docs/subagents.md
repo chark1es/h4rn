@@ -612,11 +612,10 @@ selection does no filesystem work at all.
   `has staged changes` (forceable) when its registration's index holds staged
   work. Git skips its own cleanliness check for a missing checkout and deletes
   the admin dir, index included, so `git -C <admin dir> --git-dir=. diff-index
-  --cached --quiet --ignore-submodules=none <tree-ish> --` (a staged
-  submodule update counts even when the submodule is configured
-  `ignore = all`) (bounded, trace and location variables
-  stripped) compares
-  the index with the registration's `HEAD`: its detached commit, or its
+  --cached --quiet --ignore-submodules=none <tree-ish> --` (bounded, trace and
+  location variables stripped) compares the index with the registration's
+  `HEAD`. A staged submodule update counts even when the submodule is
+  configured `ignore = all`. The `HEAD` is its detached commit, or its
   branch's current tip (`refs/heads/<b>`). Exit 0 is clean and exit 1 is
   staged work. Unknown is never clean: an unknown `HEAD`, an unborn branch, an
   index that is not a regular file or cannot be checked, or any other git
