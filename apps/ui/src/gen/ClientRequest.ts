@@ -16,6 +16,8 @@ import type { HarnessKind } from "./HarnessKind";
 import type { HostId } from "./HostId";
 import type { McpRequest } from "./McpRequest";
 import type { McpServerInput } from "./McpServerInput";
+import type { PairScope } from "./PairScope";
+import type { ProjectSource } from "./ProjectSource";
 import type { ProxyFailoverPolicy } from "./ProxyFailoverPolicy";
 import type { ProxyProfileDraft } from "./ProxyProfileDraft";
 import type { ProxyProfileId } from "./ProxyProfileId";
@@ -524,7 +526,13 @@ host: HostId,
 /**
  * Candidate ids from [`ResponseBody::SkillsImportPreview`].
  */
-candidate_ids: Array<string>, } | { "type": "skills_conflicts", 
+candidate_ids: Array<string>, 
+/**
+ * Also take over each selected harness folder whose content matches
+ * the registry: h4rn writes its marker there (no skill file changes)
+ * and records the install, so later versions from sync replace it.
+ */
+manage: boolean, } | { "type": "skills_conflicts", 
 /**
  * Host that owns the registry.
  */
@@ -663,7 +671,23 @@ device_id: DeviceId,
 /**
  * `true` admits the device, `false` revokes it.
  */
-confirm: boolean, } | { "type": "get_limits" } | { "type": "list_resets" } | { "type": "cancel_resume", 
+confirm: boolean, } | { "type": "get_network_access" } | { "type": "set_network_access", 
+/**
+ * Whether the listener should be running.
+ */
+enabled: boolean, } | { "type": "create_direct_pairing", 
+/**
+ * Scopes the new device is granted; `view` and `approve` when empty.
+ */
+scopes: Array<PairScope>, 
+/**
+ * Label shown next to the QR; the host name when absent.
+ */
+label: string | null, } | { "type": "cancel_direct_pairing" } | { "type": "list_direct_devices" } | { "type": "revoke_direct_device", 
+/**
+ * The device's Noise static key, hex, from [`Self::ListDirectDevices`].
+ */
+key: string, } | { "type": "get_limits" } | { "type": "list_resets" } | { "type": "cancel_resume", 
 /**
  * Thread whose schedule is cleared.
  */
@@ -933,4 +957,48 @@ force: boolean,
  * Clear all: apply the same exclusions as `paths: None` — never a
  * thread workspace — to the given paths.
  */
-bulk: boolean, };
+bulk: boolean, } | { "type": "list_projects", 
+/**
+ * Host to list.
+ */
+host: HostId, } | { "type": "add_project", 
+/**
+ * Host that owns the folder.
+ */
+host: HostId, 
+/**
+ * Where the project comes from.
+ */
+source: ProjectSource, 
+/**
+ * Display name; defaults to the folder name.
+ */
+name: string | null, } | { "type": "rename_project", 
+/**
+ * Host that owns the project.
+ */
+host: HostId, 
+/**
+ * Project to rename.
+ */
+project_id: string, 
+/**
+ * New display name.
+ */
+name: string, } | { "type": "remove_project", 
+/**
+ * Host that owns the project.
+ */
+host: HostId, 
+/**
+ * Project to remove.
+ */
+project_id: string, } | { "type": "browse_directories", 
+/**
+ * Host to browse.
+ */
+host: HostId, 
+/**
+ * Directory to list; `None` or `~` lists the home directory.
+ */
+path: string | null, };

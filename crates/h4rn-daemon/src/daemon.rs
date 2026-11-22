@@ -20,6 +20,7 @@ use crate::harnesses::{HarnessCatalog, StaticHarnessCatalog};
 use crate::hosts::HostInventory;
 use crate::journal::{Journal, SqliteJournal};
 use crate::mcp::McpService;
+use crate::network_access::NetworkAccess;
 use crate::remote::{
     ConnectClient, DeviceRegistry, RemoteState, TailscaleMode, advertised_addresses,
     pairing::{
@@ -93,10 +94,11 @@ impl DaemonBuilder {
         self
     }
 
-    /// Enables the Noise-encrypted multipath transport (ADR-009, ADR-010).
+    /// Replaces the Noise-encrypted multipath transport (ADR-009, ADR-010).
     ///
-    /// Without this (and without `H4RN_SECURE=1`) `/secure` answers 404 and
-    /// remote clients are expected to use an SSH tunnel or Tailscale.
+    /// A daemon always runs a secure service; this injects one with a specific
+    /// identity or allowlist (tests and embedders). Network access decides
+    /// whether it is exposed beyond loopback.
     pub fn with_secure(mut self, secure: Arc<SecureService>) -> Self {
         self.secure = Some(secure);
         self
@@ -170,6 +172,10 @@ impl DaemonBuilder {
     /// Builds the daemon, opening storage and restoring thread projections.
     pub async fn build(self) -> anyhow::Result<Daemon> {
         self.config.ensure_data_dir()?;
+        // Resolve the daemon-owned setting once: it decides whether the secure
+        // transport is exposed on a LAN interface and is persisted so the CLI
+        // and the desktop agree.
+        let network_access_enabled = self.config.network_access_enabled();
 
         let catalog: Arc<dyn HarnessCatalog> = match self.catalog {
             Some(catalog) => catalog,
@@ -269,6 +275,11 @@ impl DaemonBuilder {
             }
         }
         manager.set_snapshot_store(fs.snapshots());
+        let projects = Arc::new(
+            crate::projects::ProjectService::open(&self.config.data_dir, hosts.local_id())
+                .map_err(|error| anyhow::anyhow!("open the project list: {error}"))?
+                .with_fs(Arc::clone(&fs)),
+        );
 
         let forge = ForgeService::open(&self.config.data_dir)
             .map_err(|error| anyhow::anyhow!("open the forge service: {error}"))?;
@@ -308,7 +319,7 @@ impl DaemonBuilder {
 
         let secure = match self.secure {
             Some(service) => Some(service),
-            None => secure_from_env(identity.clone(), remote.is_some())?,
+            None => Some(secure_from_env(identity.clone())?),
         };
 
         if let Some(service) = &secure {
@@ -436,6 +447,7 @@ impl DaemonBuilder {
         Ok(Daemon {
             config: self.config,
             harness_versions,
+            projects,
             manager,
             subagents,
             worktrees,
@@ -454,6 +466,7 @@ impl DaemonBuilder {
             supervisor: self.supervisor,
             proxy,
             meter,
+            network_access_enabled,
         })
     }
 }
@@ -481,6 +494,9 @@ pub struct Daemon {
     proxy: Arc<h4rn_proxy::ProxyService>,
     meter: Arc<h4rn_meter::MeterHub>,
     harness_versions: Arc<crate::harness_versions::HarnessVersionService>,
+    projects: Arc<crate::projects::ProjectService>,
+    /// The network-listener setting resolved at build time.
+    network_access_enabled: bool,
 }
 
 impl Daemon {
@@ -559,7 +575,7 @@ impl Daemon {
         // tailnet, so the extra listener shares the primary port. A bind
         // failure is not fatal: the relay and any LAN address still work.
         if self.config.tailscale == TailscaleMode::Auto
-            && let Some(ip) = crate::remote::tailscale::tailnet_ip()
+            && let Some(ip) = crate::remote::tailscale::tailnet_ip_async().await
         {
             let addr = SocketAddr::new(ip, addrs[0].port());
             if !addrs.contains(&addr) {
@@ -600,6 +616,12 @@ impl Daemon {
         let secure = self.secure;
         let mcp = Arc::clone(&self.mcp);
         let config = self.config.clone();
+        let (network, network_commands) = NetworkAccess::new(
+            config.data_dir.clone(),
+            config.network_port,
+            secure.clone(),
+            Arc::clone(&devices),
+        );
         let state = AppState {
             manager: Arc::clone(&self.manager),
             subagents: Arc::clone(&self.subagents),
@@ -614,12 +636,25 @@ impl Daemon {
             secure: secure.clone(),
             remote: remote.as_ref().map(|remote| Arc::clone(&remote.audit)),
             devices: Arc::clone(&devices),
+            network: Arc::clone(&network),
             mcp: Arc::clone(&mcp),
             started: std::time::Instant::now(),
             proxy: Arc::clone(&self.proxy),
             meter: Arc::clone(&self.meter),
             harness_versions: Arc::clone(&self.harness_versions),
+            projects: Arc::clone(&self.projects),
         };
+
+        // The network listener serves a restricted router: liveness and the
+        // two Noise routes only. Starting it here means `bind()` returns a
+        // daemon whose reported state is already the truth.
+        network
+            .start(
+                server::network_router(state.clone()),
+                self.network_access_enabled,
+                network_commands,
+            )
+            .await;
 
         let mut remote_tasks = Vec::new();
         // A failed peer admission retries on its own backoff timer instead of
@@ -669,6 +704,7 @@ impl Daemon {
 
         Ok(BoundDaemon {
             app: server::router(state),
+            network,
             listeners,
             addrs,
             manager: self.manager,
@@ -687,6 +723,8 @@ impl Daemon {
 /// A daemon with sockets bound, ready for [`BoundDaemon::serve`].
 pub struct BoundDaemon {
     app: axum::Router,
+    /// The dedicated LAN/tailnet listener, when network access is on.
+    network: Arc<NetworkAccess>,
     listeners: Vec<TcpListener>,
     addrs: Vec<SocketAddr>,
     manager: Arc<ThreadManager>,
@@ -709,6 +747,11 @@ impl BoundDaemon {
     /// Every bound address, primary first.
     pub fn addrs(&self) -> &[SocketAddr] {
         &self.addrs
+    }
+
+    /// The network access handle (tests and diagnostics).
+    pub fn network(&self) -> Arc<NetworkAccess> {
+        Arc::clone(&self.network)
     }
 
     /// Thread manager for in-process tests.
@@ -739,6 +782,7 @@ impl BoundDaemon {
     ) -> anyhow::Result<()> {
         let Self {
             app,
+            network,
             listeners,
             addrs,
             manager,
@@ -759,6 +803,9 @@ impl BoundDaemon {
         );
 
         server::serve_all(listeners, app, shutdown).await?;
+        // Close the LAN/tailnet listener before the services it routes to go
+        // away, so no new remote session starts during shutdown.
+        network.shutdown().await;
         // Stop the relay connector and pairing watcher before tearing down the
         // thread manager so no new session starts during shutdown.
         for task in remote_tasks {
@@ -776,20 +823,15 @@ impl BoundDaemon {
     }
 }
 
-/// Builds the secure service when remote access needs it.
+/// Builds the secure service the daemon always runs.
 ///
-/// It is enabled by `H4RN_SECURE=1`, by a signed-in connect session and by
-/// `H4RN_PAIRING_PSK`. The identity lives in the data directory as a `0600`
-/// file; the same identity is the connect device proof and the pairing key.
-fn secure_from_env(
-    identity: DeviceIdentity,
-    remote: bool,
-) -> anyhow::Result<Option<Arc<SecureService>>> {
-    let forced = std::env::var("H4RN_SECURE").as_deref() == Ok("1");
+/// The transport identity and the Noise endpoint exist in every daemon so the
+/// UI can turn network access on later without a restart. Exposure is what the
+/// network-access setting controls: until it is on, `/secure` is reachable on
+/// loopback only, and every handshake still needs a paired key or the one-time
+/// secret from `H4RN_PAIRING_PSK`.
+fn secure_from_env(identity: DeviceIdentity) -> anyhow::Result<Arc<SecureService>> {
     let env_psk = std::env::var("H4RN_PAIRING_PSK").ok();
-    if !forced && !remote && env_psk.is_none() {
-        return Ok(None);
-    }
     let mut options = SecureOptions::new(identity);
     if let Some(value) = env_psk {
         let value = value.trim();
@@ -802,7 +844,7 @@ fn secure_from_env(
         psk.copy_from_slice(&bytes);
         options = options.with_psk(psk);
     }
-    Ok(Some(Arc::new(SecureService::new(options))))
+    Ok(Arc::new(SecureService::new(options)))
 }
 
 /// Periodically ingests the fork's per-call performance records.
@@ -907,9 +949,13 @@ fn provider_label(proxy_provider: Option<&str>, model: &str) -> Option<String> {
 }
 
 /// Pushes unsynced ledger rows to h4rn-connect in idempotent batches.
+///
+/// Offline this retries every tick, but only the first failure after a success
+/// is warned about: a missing network must not fill the log every 30 seconds.
 async fn usage_sync_loop(meter: Arc<h4rn_meter::MeterHub>, client: Arc<ConnectClient>) {
     let mut ticker = tokio::time::interval(std::time::Duration::from_secs(30));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut failing = false;
     loop {
         ticker.tick().await;
         if !client.is_logged_in() {
@@ -930,6 +976,13 @@ async fn usage_sync_loop(meter: Arc<h4rn_meter::MeterHub>, client: Arc<ConnectCl
         };
         match client.post_usage(&request).await {
             Ok(response) => {
+                if failing {
+                    failing = false;
+                    tracing::info!(
+                        accepted = response.accepted,
+                        "usage sync recovered; queued rows are uploading again"
+                    );
+                }
                 let ids: Vec<String> = rows.iter().map(|row| row.row_id.clone()).collect();
                 if let Err(error) = meter.mark_synced(&ids).await {
                     tracing::warn!(%error, "could not mark synced usage rows");
@@ -940,7 +993,13 @@ async fn usage_sync_loop(meter: Arc<h4rn_meter::MeterHub>, client: Arc<ConnectCl
                     "synced the usage ledger"
                 );
             }
-            Err(error) => tracing::warn!(%error, "usage sync failed; the rows stay queued"),
+            Err(error) if failing => {
+                tracing::debug!(%error, "usage sync is still failing; the rows stay queued");
+            }
+            Err(error) => {
+                failing = true;
+                tracing::warn!(%error, "usage sync failed; the rows stay queued");
+            }
         }
     }
 }
@@ -962,7 +1021,13 @@ async fn publish_presence(state: AppState, client: Arc<ConnectClient>, config: C
         let relay = client
             .credentials()
             .map(|credentials| credentials.connect_url);
-        let addresses = advertised_addresses(&config, relay.as_deref());
+        // Address discovery may run the tailscale CLI, which blocks.
+        let addresses = {
+            let config = config.clone();
+            tokio::task::spawn_blocking(move || advertised_addresses(&config, relay.as_deref()))
+                .await
+                .unwrap_or_default()
+        };
         if let Err(error) = client.update_addresses(addresses).await {
             tracing::debug!(%error, "could not publish addresses to connect");
         }
@@ -1021,15 +1086,31 @@ async fn watch_direct_pairing(
                 match pairing.psk() {
                     Ok(psk) => match service.psk() {
                         Some(current) if current != psk => {
-                            // Never replace a secret someone else armed. An
-                            // operator PSK or a concurrent pairing keeps
-                            // precedence; the file stays for operator review
-                            // until it expires.
-                            tracing::warn!(
-                                label = ?pairing.label,
-                                "a direct pairing is waiting but another pairing secret is already armed; leaving it untouched"
-                            );
-                            blocked = Some(pairing.psk.clone());
+                            let current_hex = hex::encode(current);
+                            if applied.as_deref() == Some(current_hex.as_str()) {
+                                // The live secret came from a file this
+                                // watcher applied: an earlier CLI QR or a UI
+                                // offer. A newer offer replaces it, so the CLI
+                                // and the UI take turns instead of deadlocking
+                                // on whichever armed first.
+                                devices.arm_direct(pairing.scopes.clone());
+                                service.set_psk(psk);
+                                applied = Some(pairing.psk.clone());
+                                tracing::info!(
+                                    label = ?pairing.label,
+                                    expires_at = pairing.expires_at,
+                                    "replaced the open direct pairing"
+                                );
+                            } else {
+                                // Never replace a secret someone else armed. An
+                                // operator PSK keeps precedence; the file stays
+                                // for operator review until it expires.
+                                tracing::warn!(
+                                    label = ?pairing.label,
+                                    "a direct pairing is waiting but another pairing secret is already armed; leaving it untouched"
+                                );
+                                blocked = Some(pairing.psk.clone());
+                            }
                         }
                         _ => {
                             // Arm the scopes first: the device that pairs with

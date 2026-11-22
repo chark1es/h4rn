@@ -16,6 +16,8 @@ import type {
   BlobInfo,
   ClientFrame,
   ClientRequest,
+  DirectDevice,
+  DirectoryListing,
   Event,
   FsTurnChanges,
   HarnessKind,
@@ -32,6 +34,9 @@ import type {
   McpTestCallResult,
   McpToolInfo,
   McpTransportView,
+  PairScope,
+  Project,
+  ProjectSource,
   ProtoError,
   ProxyEnvLine,
   ProxyHarnessOverride,
@@ -116,6 +121,11 @@ type SkillsBody = Extract<ClientRequest, { type: `skills_${string}` }>;
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
+
+/** Every direct pairing starts from view + approve unless scopes are asked for. */
+const DEFAULT_DIRECT_SCOPES: PairScope[] = ["view", "approve"];
+const PAIR_SCOPE_ORDER: readonly PairScope[] = ["view", "approve", "terminal", "files", "admin"];
+const NETWORK_PORT = 47810;
 
 const iso = (offsetMs = 0) => new Date(Date.now() + offsetMs).toISOString();
 
@@ -1264,42 +1274,76 @@ function mockSyncStatus(): SkillSyncStatus {
   };
 }
 
-function buildSkillImportPreview(): SkillImportPreview {
+/**
+ * What a scan of the harness folders finds. `imported` names are in the
+ * registry already (so they read as duplicates); `adopted` paths carry h4rn's
+ * marker after an import with `manage`.
+ */
+function buildSkillImportPreview(
+  imported: ReadonlySet<string> = new Set(),
+  adopted: ReadonlySet<string> = new Set(),
+): SkillImportPreview {
+  const found = [
+    {
+      id: "cand_release_notes",
+      name: "release-notes",
+      description: "Draft release notes from merged pull requests.",
+      version: "b7e2d41",
+      source_path: "~/.claude/skills/release-notes",
+      harness: "claude_code" as const,
+      conflict: null,
+      duplicate: imported.has("release-notes"),
+    },
+    {
+      id: "cand_changelog",
+      name: "changelog",
+      description: "Keep CHANGELOG.md in step with tagged releases.",
+      version: "4c90aa2",
+      source_path: "~/.claude/skills/changelog",
+      harness: "claude_code" as const,
+      conflict: null,
+      duplicate: imported.has("changelog"),
+    },
+    {
+      id: "cand_pdf",
+      name: "pdf",
+      description: "Read, split, merge and fill PDF files.",
+      version: "a4c8e21",
+      source_path: "~/.codex/skills/pdf",
+      harness: "codex" as const,
+      conflict: null,
+      duplicate: true,
+    },
+    {
+      id: "cand_browser",
+      name: "browser",
+      description: "Drive the in-app browser: open pages, click, type and screenshot.",
+      version: "3f6a1c0",
+      source_path: "~/.claude/skills/browser",
+      harness: "claude_code" as const,
+      conflict: null,
+      duplicate: true,
+      managed: true,
+    },
+    {
+      id: "cand_docs",
+      name: "docs",
+      description: "Read and edit shared documents without losing comments.",
+      version: "f1a7c30",
+      source_path: "~/.config/opencode/skills/docs",
+      harness: "opencode" as const,
+      conflict: "a different version already uses this name",
+      duplicate: false,
+    },
+  ];
+  const candidates = found.map((candidate) => ({
+    ...candidate,
+    managed: candidate.managed === true || adopted.has(candidate.source_path),
+  }));
   return {
-    candidates: [
-      {
-        id: "cand_release_notes",
-        name: "release-notes",
-        description: "Draft release notes from merged pull requests.",
-        version: "b7e2d41",
-        source_path: "~/.claude/skills/release-notes",
-        harness: "claude_code",
-        conflict: null,
-        duplicate: false,
-      },
-      {
-        id: "cand_pdf",
-        name: "pdf",
-        description: "Read, split, merge and fill PDF files.",
-        version: "a4c8e21",
-        source_path: "~/.codex/skills/pdf",
-        harness: "codex",
-        conflict: null,
-        duplicate: true,
-      },
-      {
-        id: "cand_docs",
-        name: "docs",
-        description: "Read and edit shared documents without losing comments.",
-        version: "f1a7c30",
-        source_path: "~/.config/opencode/skills/docs",
-        harness: "opencode",
-        conflict: "a different version already uses this name",
-        duplicate: false,
-      },
-    ],
-    conflicts: 1,
-    duplicates: 1,
+    candidates,
+    conflicts: candidates.filter((candidate) => candidate.conflict).length,
+    duplicates: candidates.filter((candidate) => candidate.duplicate).length,
   };
 }
 
@@ -1843,6 +1887,32 @@ class MockDaemon {
   private skillInventory: SkillInventory;
   private skillConflicts: SkillConflict[];
   private skillPreview: SkillImportPreview | null = null;
+  /** Registered projects and the fake folder tree the add-project browser walks. */
+  private projects: Project[] = [
+    {
+      id: "prj_infra",
+      host: "atlas",
+      path: "/home/you/code/infra",
+      name: "infra",
+      created_at: new Date(Date.now() - 86_400_000).toISOString(),
+      git: true,
+    },
+  ];
+  private folders = new Map<string, { git: boolean }>([
+    ["/home/you", { git: false }],
+    ["/home/you/code", { git: false }],
+    ["/home/you/code/api", { git: true }],
+    ["/home/you/code/h4rn", { git: true }],
+    ["/home/you/code/h4rn-connect", { git: true }],
+    ["/home/you/code/web", { git: true }],
+    ["/home/you/code/desktop", { git: true }],
+    ["/home/you/code/infra", { git: true }],
+    ["/home/you/code/scratch", { git: false }],
+    ["/home/you/Documents", { git: false }],
+    ["/home/you/Downloads", { git: false }],
+  ]);
+  /** Harness folders that carry the h4rn marker after an import with `manage`. */
+  private adoptedSkillPaths = new Set<string>();
   private syncEmitted = false;
   private readonly forge = new MockForge();
   private created = 0;
@@ -1864,6 +1934,16 @@ class MockDaemon {
   private harnessUpdating = new Set<HarnessKind>();
   private worktrees: TrackedWorktree[] = mockWorktrees();
   private proxyCatalogs = new Map<string, ProxyModelCatalog>();
+  private networkAccess = { enabled: false };
+  /** Devices paired directly; seeded so Settings shows a realistic list. */
+  private directDevices: DirectDevice[] = [
+    {
+      key: "3f9a1c0e".padEnd(64, "0"),
+      scopes: ["view", "approve"],
+      paired_at: new Date(Date.now() - 3 * 86_400_000).toISOString(),
+      connected: false,
+    },
+  ];
 
   constructor(
     private readonly handlers: TransportHandlers,
@@ -2121,7 +2201,7 @@ class MockDaemon {
         this.ok(frame.id, {
           type: "hello",
           protocol_version: 1,
-          server_version: "1.0.0-mock",
+          server_version: "1.0.1-mock",
           device_id: "mock-device",
           local_host: "atlas",
           hosts: this.hosts,
@@ -2650,6 +2730,64 @@ class MockDaemon {
       case "confirm_pairing":
         this.ok(frame.id, { type: "ack" });
         return;
+      case "get_network_access":
+        this.ok(frame.id, this.networkSnapshot());
+        return;
+      case "set_network_access": {
+        this.networkAccess.enabled = body.enabled;
+        this.ok(frame.id, this.networkSnapshot());
+        return;
+      }
+      case "create_direct_pairing": {
+        if (!this.networkAccess.enabled) {
+          this.err(
+            frame.id,
+            "conflict",
+            "Turn on network access first",
+            "Enable it above, then try again.",
+          );
+          return;
+        }
+        const requested = body.scopes.length > 0 ? body.scopes : DEFAULT_DIRECT_SCOPES;
+        const held = new Set<PairScope>(["view", ...requested]);
+        const scopes = PAIR_SCOPE_ORDER.filter((scope) => held.has(scope));
+        const expiresAt = Math.floor((Date.now() + 10 * 60_000) / 1_000);
+        const addresses = this.networkAddresses();
+        const primary = addresses[0] ?? "192.168.1.24:47810";
+        const secondary = addresses[1] ?? "100.101.7.42:47810";
+        this.ok(frame.id, {
+          type: "direct_pairing_offer",
+          uri:
+            `h4rn://pair?e=${encodeURIComponent(primary)}` +
+            `&d=${"ab".repeat(32)}&p=${"cd".repeat(32)}` +
+            `&a=${encodeURIComponent(secondary)}&l=This%20computer`,
+          expires_at: expiresAt,
+          addresses,
+          scopes,
+        });
+        return;
+      }
+      case "cancel_direct_pairing":
+        this.ok(frame.id, { type: "ack" });
+        return;
+      case "list_direct_devices":
+        this.ok(frame.id, { type: "direct_devices", devices: this.directDevices });
+        return;
+      case "revoke_direct_device": {
+        const before = this.directDevices.length;
+        this.directDevices = this.directDevices.filter((device) => device.key !== body.key);
+        if (this.directDevices.length === before) {
+          this.err(
+            frame.id,
+            "not_found",
+            "no device paired directly with that key",
+            "Refresh the paired devices list; it may already be removed",
+          );
+          return;
+        }
+        this.ok(frame.id, { type: "direct_devices", devices: this.directDevices });
+        return;
+      }
       case "list_resets":
         this.ok(frame.id, {
           type: "resets",
@@ -2730,6 +2868,40 @@ class MockDaemon {
         this.resumePolicy = body.policy;
         this.ok(frame.id, { type: "ack" });
         return;
+      case "list_projects":
+        this.ok(frame.id, { type: "projects", projects: this.projects });
+        return;
+      case "add_project":
+        this.addProject(frame.id, body.host, body.source, body.name);
+        return;
+      case "rename_project": {
+        const project = this.projects.find((entry) => entry.id === body.project_id);
+        if (!project) {
+          this.err(frame.id, "not_found", `no project ${body.project_id}`, null);
+          return;
+        }
+        project.name = body.name.trim() || project.name;
+        this.ok(frame.id, { type: "project", project: { ...project } });
+        return;
+      }
+      case "remove_project":
+        this.projects = this.projects.filter((entry) => entry.id !== body.project_id);
+        this.ok(frame.id, { type: "ack" });
+        return;
+      case "browse_directories": {
+        const listing = this.browse(body.path);
+        if (!listing) {
+          this.err(
+            frame.id,
+            "invalid_request",
+            `cannot open ${body.path}`,
+            "Check the path, or start from your home folder.",
+          );
+          return;
+        }
+        this.ok(frame.id, { type: "directories", listing });
+        return;
+      }
       case "list_harness_versions":
         this.ok(frame.id, { type: "harness_versions", harnesses: this.harnessVersions });
         return;
@@ -2962,6 +3134,26 @@ class MockDaemon {
 
   private sortedMcp(): McpServerView[] {
     return [...this.mcpServers].sort((left, right) => left.name.localeCompare(right.name));
+  }
+
+  // -------------------------------------------------------------------------
+  // Network access
+  // -------------------------------------------------------------------------
+
+  private networkAddresses(): string[] {
+    if (!this.networkAccess.enabled) return [];
+    return ["192.168.1.24:47810", "100.101.7.42:47810"];
+  }
+
+  private networkSnapshot(): ResponseBody {
+    return {
+      type: "network_access",
+      enabled: this.networkAccess.enabled,
+      listening: this.networkAccess.enabled,
+      port: NETWORK_PORT,
+      addresses: this.networkAddresses(),
+      error: null,
+    };
   }
 
   private handleMcp(id: number, request: McpRequest): void {
@@ -3326,7 +3518,10 @@ class MockDaemon {
         return;
       }
       case "skills_import_preview": {
-        const preview = buildSkillImportPreview();
+        const preview = buildSkillImportPreview(
+          new Set(this.skillInventory.skills.map((skill) => skill.name)),
+          this.adoptedSkillPaths,
+        );
         this.skillPreview = preview;
         this.ok(id, { type: "skills_import_preview", preview });
         return;
@@ -3335,7 +3530,9 @@ class MockDaemon {
         const preview = this.skillPreview ?? buildSkillImportPreview();
         const ids = new Set(request.candidate_ids);
         for (const candidate of preview.candidates) {
-          if (!ids.has(candidate.id) || candidate.duplicate || candidate.conflict) continue;
+          if (!ids.has(candidate.id) || candidate.conflict) continue;
+          if (request.manage) this.adoptedSkillPaths.add(candidate.source_path);
+          if (candidate.duplicate) continue;
           if (this.skillInventory.skills.some((skill) => skill.name === candidate.name)) continue;
           const skill = skillFromSource(
             { type: "harness_dir", harness: candidate.harness, path: candidate.source_path },
@@ -4191,6 +4388,108 @@ class MockDaemon {
     if (this.disposed) return;
     const frame: ServerFrame = { kind: "response", id, result: { Ok: result } };
     this.handlers.onMessage(wire(frame));
+  }
+
+  private expand(path: string): string {
+    const trimmed = path.trim().replace(/\/+$/, "") || "/";
+    if (trimmed === "~") return "/home/you";
+    if (trimmed.startsWith("~/")) return `/home/you/${trimmed.slice(2)}`;
+    return trimmed;
+  }
+
+  private browse(path: string | null): DirectoryListing | null {
+    const target = this.expand(path ?? "~");
+    if (!this.folders.has(target)) return null;
+    const entries = [...this.folders.entries()]
+      .filter(([candidate]) => {
+        const parent = candidate.slice(0, candidate.lastIndexOf("/")) || "/";
+        return parent === target && candidate !== target;
+      })
+      .map(([candidate, info]) => ({
+        name: candidate.slice(candidate.lastIndexOf("/") + 1),
+        path: candidate,
+        git: info.git,
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    const parent = target.slice(0, target.lastIndexOf("/")) || null;
+    return {
+      path: target,
+      parent: parent && parent !== target ? parent : null,
+      home: "/home/you",
+      entries,
+      git: this.folders.get(target)?.git ?? false,
+    };
+  }
+
+  private addProject(id: number, host: string, source: ProjectSource, name: string | null): void {
+    let path: string;
+    let git = false;
+    if (source.type === "existing") {
+      path = this.expand(source.path);
+      if (!this.folders.has(path)) {
+        this.err(id, "invalid_request", `${path} is not a folder`, "Pick an existing folder.");
+        return;
+      }
+      git = this.folders.get(path)?.git ?? false;
+    } else {
+      const parent = this.expand(source.parent);
+      const folder =
+        source.type === "new_folder"
+          ? source.name.trim()
+          : ((source.name?.trim() ||
+              source.url
+                .trim()
+                .replace(/\/+$/, "")
+                .split(/[/:]/)
+                .pop()
+                ?.replace(/\.git$/, "")) ??
+            "");
+      if (!folder || folder.includes("/") || folder.startsWith("-") || folder === "..") {
+        this.err(id, "invalid_request", `“${folder}” is not a folder name`, "Use one folder name.");
+        return;
+      }
+      path = `${parent}/${folder}`;
+      if (this.folders.has(path)) {
+        this.err(
+          id,
+          "invalid_request",
+          `${path} already exists`,
+          "Choose another name, or open the existing folder instead.",
+        );
+        return;
+      }
+      if (
+        source.type === "clone" &&
+        !/^(https?:|git@|ssh:|[\w.-]+\/[\w.-]+$)/.test(source.url.trim())
+      ) {
+        this.err(
+          id,
+          "invalid_request",
+          `“${source.url}” is not a repository URL`,
+          "Paste an HTTPS or SSH clone URL, or type owner/repo for GitHub.",
+        );
+        return;
+      }
+      git = source.type === "clone" || source.git_init;
+      this.folders.set(path, { git });
+    }
+    const existing = this.projects.find((entry) => entry.path === path);
+    if (existing) {
+      this.ok(id, { type: "project", project: existing });
+      return;
+    }
+    const project: Project = {
+      id: uid("prj"),
+      host,
+      path,
+      name: name?.trim() || path.slice(path.lastIndexOf("/") + 1),
+      created_at: iso(),
+      git,
+    };
+    this.projects = [...this.projects, project];
+    // A clone takes a moment on a real host; mirror that so the busy state shows.
+    const delay = source.type === "clone" ? 900 : 120;
+    window.setTimeout(() => this.ok(id, { type: "project", project }), delay);
   }
 
   private err(id: number, code: ProtoError["code"], message: string, hint: string | null): void {

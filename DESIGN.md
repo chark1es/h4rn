@@ -242,31 +242,52 @@ Three columns at most, and only one of them is on the left.
 
 **Why a segmented control and not T3's stacked sections.** h4rn's lifecycle is a filter on attention, not a shelf. With Working / Done / Settled as a segment, the project grouping stays one level deep, and each project appears once on screen instead of once per section. Done stays a visible debt with its own count. Snoozed is the last row of Working (a sheet or popover on click), and Settled pages older threads behind "Show older".
 
-**Footer.** `● 3 of 4 hosts ▾` opens the hosts menu (presence, latency, route, Pair a device…, Manage hosts), followed by icon buttons for Pull requests (with the open count), MCP & skills, Usage and Settings. Each has a tooltip with its shortcut and a palette entry. This replaces the old nav list and the Hosts group.
+**Projects.** A "Projects" heading sits above the groups with two quiet icons: a sort menu (projects by Recent activity, Date added, Name or Manual; threads by Recent activity or Name, stored per device) and Add project. Add project is a dialog with three choices, as in T3 Code: *Open folder* (browse the host's folders), *New folder* (name, location, optional `git init`) and *Clone repository* (HTTPS/SSH URL or `owner/repo`, location, folder name). A one-line mono summary always says what will happen ("Creates ~/code/demo and runs git init"). The daemon keeps registered projects in `projects.json`, so a project shows before its first thread ("No threads yet. Start one"). Each group header has a ⋯ menu (New thread here, Rename…, Copy path, Remove from sidebar; folders that only have threads offer Keep in the sidebar) and can be dragged to reorder, which switches the sort to Manual. Removing never touches the folder.
+
+**Footer.** `● 3 of 4 hosts ▾` opens the hosts menu (presence, latency, route, Pair a device…, Manage hosts), followed by icon buttons for Pull requests, Usage and Settings (MCP servers and skills live under Settings → Tools). Each has a tooltip with its shortcut and a palette entry. This replaces the old nav list and the Hosts group.
 
 **IDE view.** ⌘E switches the main area to the IDE for the **selected thread's project**: editor tabs, path bar with `Edit | vs HEAD | vs agent`, the scope strip ("Changes by Claude Code in *Fix flaky auth test* since 12:03 · Revert file · Accept"), the code view, and the status bar. The file tree lives in the right panel's **Files** tab, not in a second left column. Selecting a thread in another project switches the IDE to that project's workspace and restores its open tabs ("Restored 3 tabs" appears quietly at the end of the tab strip). Tabs are kept per project. The header names the workspace (monogram, host, path) and carries a **thread chip** with the state glyph and title ("Needs approval" in accent when it applies). Clicking the chip, or pressing ⌘E, returns to the thread. The thread's context stays reachable in three places: the chip, the scope strip, and the Changes tab, which in IDE view collapses to a file list because the editor shows the diff. While the agent is still writing a file, the strip says so and Accept waits until the turn ends. A thread without a workspace shows "No files open in *project*" with ⌘P and Show files.
 
 ### Shortcuts
 
+Every command is ⌘ (Ctrl on Windows and Linux) plus a key, with optional ⇧ or ⌥. There are no single-key shortcuts and no `G`-sequences, so typing can never run a command. The registry is `apps/ui/src/lib/keybindings.ts`; Settings → Shortcuts rebinds any of them per device, and tooltips, the palette and the ⌘/ sheet all read the current binding.
+
 | Keys | Action |
 |---|---|
-| ⌘K | Search or run (palette) |
-| ⌘B | Show / hide sidebar |
-| ⌘E | Thread ↔ IDE |
-| ⌘⌥B | Show / hide right panel (opens to the last tab; Files in IDE view) |
-| D | Right panel → Changes |
-| ⌘J | Right panel → Subagents |
-| ⌘P | Open file in the selected thread's project (IDE) |
-| T | Terminal drawer |
-| ⌘⇧N | New thread (project picker; the `+` on a group skips it) |
-| ⌘↵ / ⌘⌫ | Approve / deny the pending request |
-| A | Acknowledge (Done) |
-| ⌘. | Interrupt turn |
-| G P · G M · G U · G H | Pull requests · MCP & skills · Usage · Hosts |
-| ⌘, | Settings |
-| Esc | Close palette / leave Settings |
-
-Single-letter keys only fire when focus is not in a text field.
+| `⌘K` | Search or run |
+| `⌘/` | Keyboard shortcuts |
+| `⌘⇧N` | New thread |
+| `⌘,` | Settings |
+| `⌘⇧L` | Toggle light and dark |
+| `⌘⇧H` | Go to threads |
+| `⌘⇧P` | Go to pull requests |
+| `⌘⇧U` | Go to usage |
+| `⌘⇧M` | Go to MCP servers and skills |
+| `⌘1` | Show Working |
+| `⌘2` | Show Done |
+| `⌘3` | Show Settled |
+| `⌘⌥↓` | Next thread |
+| `⌘⌥↑` | Previous thread |
+| `⌘L` | Focus the composer |
+| `⌘↵` | Approve pending action |
+| `⌘⌫` | Deny pending action |
+| `⌘.` | Interrupt turn |
+| `⌘[` | Previous message |
+| `⌘]` | Next message |
+| `⌘⇧S` | Settle thread |
+| `⌘⇧A` | Acknowledge (Done) |
+| `⌘⌥S` | Snooze for an hour |
+| `⌘⌥P` | Keep in Working |
+| `⌘⌥U` | Reopen a settled thread |
+| `⌘U` | Attach files |
+| `⌘B` | Toggle sidebar |
+| `⌘⌥B` | Toggle right panel |
+| `⌘E` | Switch thread and IDE |
+| <code>⌘`</code> | Toggle terminal |
+| `⌘⇧D` | Show changes |
+| `⌘J` | Show subagents |
+| `⌘P` | Find a file |
+| Esc | Close palette or dialog / leave Settings |
 
 ## Motion
 
@@ -315,9 +336,9 @@ Single-letter keys only fire when focus is not in a text field.
 
 **Pull request.** No list column: the main area shows the PR with a breadcrumb ("Pull requests / 3 open / dev/api") that opens the list page. The sidebar keeps the thread list. Header (title, number, state badge, `head → base`, commits, author, Open on GitHub), text tabs with a 2 px underline in `fg` (not accent), a conversation with review comments that quote their diff context, and per-comment Reply / Hand to agent buttons. Hand to agent opens a popover: this thread or a new thread, a note that the agent won't push without approval, and send. The right column shows checks (glyph, name, required, duration, View log, Re-run failed), reviewers, and the linked thread (a link that selects it in the sidebar).
 
-**Settings.** Takes over the sidebar instead of adding a column. It has a back button with "Settings" as the title, "Search settings", and nav groups (General, Appearance, Notifications, Shortcuts / *Machines*: Hosts, Devices, Providers / *Tools*: MCP servers, Skills / *Account*: Account & relay). Esc or ‹ returns to the threads. The footer stays the same. The main area is a 760–880 px form column made of label/control rows separated by hairlines.
+**Settings.** Takes over the sidebar instead of adding a column. It has a back button with "Settings" as the title, "Search settings", and nav groups (General, Appearance, Notifications, Shortcuts / *Machines*: Hosts & devices, Harnesses, Providers / *Tools*: MCP servers, Skills / *Account*: Account & relay). Esc or ‹ returns to the threads. The footer stays the same. The main area is a 760–880 px form column made of label/control rows separated by hairlines.
 - *Hosts:* a table with WSL distros indented under their Windows host as separate rows. Host detail lists harnesses with version, state, credential source, and Restart/Start.
-- *Devices:* a pair panel with the QR code (on white in both themes so it scans), an 8-character code, a live expiry countdown, scope checkboxes, Copy link and New code. A paired-devices table offers per-device Revoke.
+- *Hosts & devices:* one page for the machines that run agents and the devices that supervise them: Machines, Hosts, Devices and Connection. Pair a device (or `/settings/devices`) opens a pair panel at the top with the QR code (on white in both themes so it scans), an 8-character code, a live expiry countdown, scope checkboxes, Copy link and New code. A paired-devices table offers per-device Revoke.
 - *Providers (CLIProxyAPI):* base URL and Probe, the probe results as glyph + key + value, two separate secret rows (management key, access key), a models table with aliases and a custom alias badge, per-harness override switches (off means keep the harness's own credential) with the exact config path and a redacted preview diff, a verified test request, and "Apply and restart" that names the turn it will interrupt.
 
 **Command palette.** 620 px, 14 px radius, `dialog` shadow over a scrim. It has a context chip for the focused thread. The "This thread" group comes first (approve, deny, changes, subagents, interrupt). Next is View (open *project* in the IDE, right panel, terminal, sidebar), then Threads and New thread in *project*, then Go to (Pull requests, MCP & skills, Usage, Hosts, Pair a device, Settings). Secondary destinations are always reachable here. Every row shows its shortcut, and the footer explains the keys and which hosts are being searched.

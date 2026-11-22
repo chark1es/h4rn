@@ -1,0 +1,53 @@
+# h4rn-connect on Coolify (autodeploy from git).
+#
+# Build context is the repo root; Coolify rebuilds on every push to the
+# tracked branch. The proxy domains (h4rn.spwnd.dev and h4rn-connect.spwnd.dev,
+# both routed to the `connect` service on 8787) and the secrets are set in
+# Coolify, not here. Required variables: H4RN_PG_PASSWORD, H4RN_CONNECT_KEK,
+# H4RN_CONNECT_SIGNING_KEY, H4RN_CONNECT_PUBLIC_BASE_URL.
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: h4rn
+      POSTGRES_PASSWORD: ${H4RN_PG_PASSWORD:?}
+      POSTGRES_DB: h4rn
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U h4rn -d h4rn"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  connect:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "8787"
+    environment:
+      H4RN_CONNECT_BIND: 0.0.0.0:8787
+      H4RN_CONNECT_PUBLIC_BASE_URL: ${H4RN_CONNECT_PUBLIC_BASE_URL:?}
+      H4RN_CONNECT_DATABASE_URL: postgres://h4rn:${H4RN_PG_PASSWORD}@postgres:5432/h4rn
+      H4RN_CONNECT_KEK: ${H4RN_CONNECT_KEK:?}
+      H4RN_CONNECT_SIGNING_KEY: ${H4RN_CONNECT_SIGNING_KEY:?}
+      H4RN_CONNECT_MODE: ${H4RN_CONNECT_MODE:-self_hosted}
+      H4RN_CONNECT_CORS_ORIGINS: ${H4RN_CONNECT_CORS_ORIGINS:-}
+      H4RN_CONNECT_TRUST_FORWARDED_FOR: ${H4RN_CONNECT_TRUST_FORWARDED_FOR:-false}
+      H4RN_CONNECT_OIDC_PROVIDERS: ${H4RN_CONNECT_OIDC_PROVIDERS:-[]}
+      RUST_LOG: ${RUST_LOG:-h4rn_connect=info,tower_http=info}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  postgres-data:

@@ -99,6 +99,8 @@ async fn boot_in(data_dir: std::path::PathBuf, catalog: Arc<StaticHarnessCatalog
         extra_bind: None,
         log_level: "off".to_owned(),
         tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
+        network_access: None,
+        network_port: 0,
     };
     let options = ThreadManagerOptions {
         settings: LifecycleSettings::default()

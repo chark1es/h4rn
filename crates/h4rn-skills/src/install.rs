@@ -281,6 +281,72 @@ fn write_marker(directory: &Path, marker: &ManagedMarker) -> Result<(), SkillErr
     Ok(())
 }
 
+/// Why [`adopt_folder`] left a folder alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AdoptOutcome {
+    /// The marker was written (or the harness added to an existing one).
+    Adopted,
+    /// Another registry skill already owns the folder.
+    OwnedByOther,
+    /// The folder's files differ from the registry version.
+    ContentDiffers,
+    /// The folder is not where h4rn installs this skill for the harness
+    /// (a project-scope folder, or a directory name that does not match the
+    /// skill name), so later installs would not replace it.
+    NotInstallPath,
+}
+
+/// Takes ownership of a user-installed skill folder without touching its
+/// files: when its content matches `version` and it sits where
+/// [`install_bundle`] would put the skill, h4rn writes its marker so the copy
+/// is updated by later versions and removed with the skill.
+pub fn adopt_folder(
+    root: &Path,
+    directory: &Path,
+    harness: HarnessKind,
+    skill_id: &str,
+    skill_name: &str,
+    version: &str,
+) -> Result<AdoptOutcome, SkillError> {
+    let expected = root.join(skill_dir_name(skill_name)?);
+    let same = match (
+        std::fs::canonicalize(&expected),
+        std::fs::canonicalize(directory),
+    ) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    };
+    if !same {
+        return Ok(AdoptOutcome::NotInstallPath);
+    }
+    if let Some(mut marker) = read_marker(directory) {
+        if marker.skill_id != skill_id {
+            return Ok(AdoptOutcome::OwnedByOther);
+        }
+        if !marker.harnesses.contains(&harness) {
+            marker.harnesses.push(harness);
+            write_marker(directory, &marker)?;
+        }
+        return Ok(AdoptOutcome::Adopted);
+    }
+    let bundle = crate::model::read_bundle(directory)?;
+    if bundle.version() != version {
+        return Ok(AdoptOutcome::ContentDiffers);
+    }
+    write_marker(
+        directory,
+        &ManagedMarker {
+            managed_by: MANAGED_BY.to_owned(),
+            skill_id: skill_id.to_owned(),
+            skill_name: bundle.manifest.name.clone(),
+            version: version.to_owned(),
+            harnesses: vec![harness],
+            installed_at: Utc::now(),
+        },
+    )?;
+    Ok(AdoptOutcome::Adopted)
+}
+
 /// Removes one harness's ownership of a managed copy.
 pub fn uninstall_bundle(
     root: &Path,
@@ -334,7 +400,10 @@ pub fn scan_root(root: &Path, harness: HarnessKind) -> Result<Vec<InstalledSkill
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
         let path = entry.path();
-        if !entry.file_type()?.is_dir() {
+        // `Path::is_dir` follows symlinks, unlike `DirEntry::file_type`: tools
+        // such as `npx skills` link each skill folder in from `~/.agents/skills`,
+        // and the harness reads the link like a folder. A broken link is skipped.
+        if !path.is_dir() {
             continue;
         }
         let name = entry.file_name();
@@ -475,5 +544,22 @@ mod tests {
             marker.harnesses,
             vec![HarnessKind::Codex, HarnessKind::Antigravity]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_finds_symlinked_skill_folders_and_skips_broken_links() {
+        let shared = tempfile::tempdir().unwrap();
+        let linked = shared.path().join("linked");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::fs::write(linked.join(SKILL_FILE), "---\nname: linked\n---\n").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(&linked, root.path().join("linked")).unwrap();
+        std::os::unix::fs::symlink(shared.path().join("gone"), root.path().join("gone")).unwrap();
+
+        let found = scan_root(root.path(), HarnessKind::ClaudeCode).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path, root.path().join("linked"));
+        assert!(found[0].version.is_some());
     }
 }

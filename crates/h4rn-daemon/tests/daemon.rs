@@ -114,6 +114,8 @@ async fn boot_inner(
         extra_bind: None,
         log_level: "off".to_owned(),
         tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
+        network_access: None,
+        network_port: 0,
     };
 
     let mut builder = DaemonBuilder::new(config)
@@ -1042,6 +1044,8 @@ async fn restored_threads_replay_after_a_daemon_restart() {
         extra_bind: None,
         log_level: "off".to_owned(),
         tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
+        network_access: None,
+        network_port: 0,
     };
     let options = ThreadManagerOptions {
         settings: LifecycleSettings::default()
@@ -1812,6 +1816,8 @@ async fn a_restart_rehydrates_the_summary_resume_target() {
         extra_bind: None,
         log_level: "off".to_owned(),
         tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
+        network_access: None,
+        network_port: 0,
     };
     let rebooted = DaemonBuilder::new(config)
         .with_harness(Arc::new(FakeHarness::new()))

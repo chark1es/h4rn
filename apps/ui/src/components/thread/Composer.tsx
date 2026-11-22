@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
-import { useAttachmentDrafts } from "@/features/attachments/use-attachments";
+import { useAttachmentDrafts, useAttachShortcut } from "@/features/attachments/use-attachments";
 import {
   proxyModelsFor,
   proxyOverrideFor,
@@ -66,16 +66,8 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     if (focusNonce > 0) ref.current?.focus();
   }, [focusNonce]);
 
-  useEffect(() => {
-    const handler = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "u") {
-        event.preventDefault();
-        attachments.openPicker();
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [attachments.openPicker]);
+  const newThreadOpen = useApp((state) => state.ui.newThreadOpen);
+  useAttachShortcut(attachments.openPicker, !newThreadOpen);
 
   const autosize = () => {
     const element = ref.current;

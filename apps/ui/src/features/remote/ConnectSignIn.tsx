@@ -153,7 +153,7 @@ export function ConnectSignIn({ compact = false }: { compact?: boolean }) {
             <div className="q-banner err wrap q-signin-err" role="alert">
               <AlertCircleIcon className="q-icon s14 ic" strokeWidth={1.5} aria-hidden />
               <div className="grow">
-                <b>Can't reach h4rn-connect at {relayHost(connectUrl)}.</b> It may not be running.
+                <b>Can’t reach h4rn-connect at {relayHost(connectUrl)}.</b> It may not be running.
                 <details className="q-signin-details">
                   <summary>Details</summary>
                   <span className="q-mono">{providersError}</span>

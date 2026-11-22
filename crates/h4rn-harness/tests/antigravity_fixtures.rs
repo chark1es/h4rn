@@ -11,6 +11,7 @@ use h4rn_harness::acp::{
     AcpPermissionRequest, AcpPromptResult, AcpServerInfo, AcpSessionInfo, AcpToolKind,
     AcpToolStatus, AcpUpdate, parse_session_update,
 };
+use h4rn_harness::merge_transport_detail;
 use h4rn_protocol::{AgentState, TurnStatus};
 use serde_json::Value;
 
@@ -380,4 +381,40 @@ fn stream_json_fallback_replays_a_real_turn() {
     assert_eq!(parser.agent_state(), AgentState::Done);
     assert_eq!(parser.last_turn().map(|turn| turn.num_turns), Some(1));
     assert!(parser.touched_paths().is_empty());
+}
+
+/// A stderr-less exit report is the death's specific account even when its text
+/// is shorter than the generic stdout-close notice: it names the row, and only
+/// two reports of the same kind are compared by detail.
+#[test]
+fn an_exit_report_beats_the_generic_close_notice() {
+    assert_eq!(
+        merge_transport_detail(
+            "the ACP agent stdout closed".into(),
+            true,
+            "agy exited (exit status: 7)".into(),
+            false,
+        ),
+        "agy exited (exit status: 7)"
+    );
+    // A generic notice that arrives after the exit report adds nothing.
+    assert_eq!(
+        merge_transport_detail(
+            "agy exited (exit status: 7)".into(),
+            false,
+            "the ACP agent stdout closed".into(),
+            true,
+        ),
+        "agy exited (exit status: 7)"
+    );
+    // Two reports of one kind keep the more detailed text.
+    assert_eq!(
+        merge_transport_detail(
+            "agy exited (exit status: 7)".into(),
+            false,
+            "agy exited (exit status: 7): the session died mid-turn".into(),
+            false,
+        ),
+        "agy exited (exit status: 7): the session died mid-turn"
+    );
 }

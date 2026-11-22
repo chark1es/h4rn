@@ -173,7 +173,9 @@ each harness to the matrix T3 gets right:
 prompt path line is added for every attachment on every harness — `[Attached image "x.png" is
 saved at: /abs/path]` — so a model can always fall back to reading the file when a native block
 was not negotiated. Phase 2 keeps PDFs on that fallback; native document blocks land with the
-per-harness capability work.
+per-harness capability work. Text that is inlined is read through the same module: UTF-8,
+UTF-16LE and UTF-16BE byte-order marks are decoded (a UTF-8 BOM is stripped), and bytes that are
+not text in those encodings stay a path reference rather than becoming replacement characters.
 
 ## ADR-009: Multipath transport with a path-agnostic session layer
 
@@ -483,6 +485,215 @@ request). The UI does not offer rewind or in-session compaction, both of which `
 ACP, and any clean-tree or diff check allow-lists the empty `.gemini/skills` and `.agents/skills`
 directories it creates at session start. The tradeoff is a deliberately smaller feature set for
 this harness than for Claude/Codex, which is preferable to buttons that silently do nothing.
+
+**Addendum: ACP normalization that the UI can trust.** `session/prompt` is only reported as
+written once the client has flushed the frame to the agent's stdin; an interrupt therefore always
+sends `session/cancel` after the prompt it cancels. Waiting for writer-queue space and waiting for
+the flush share one ten-second deadline, and every other frame (cancel, model and mode changes,
+approvals, notifications, `session/close`) waits under the same deadline; on expiry the writer task
+is stopped and the agent killed, so a blocked frame cannot reach it later and a full queue cannot
+stall Stop past that deadline. Replies the reader sends while answering the agent (`fs/*` responses,
+permission answers) go through that same bounded queue, so a full writer queue cannot park the
+reader either. Such a timeout ends the turn with exactly one failure row and detaches the dead
+session, so the next message starts a fresh one; an agent the client killed itself does not publish
+a second exit-error row, and a writer task that fails on an I/O error marks the client closed so the
+daemon detaches it. A Stop belongs to one turn: a Stop that arrives before that turn's prompt is
+dispatched, including while the session is still starting, ends the turn as interrupted without
+writing anything, and a Stop for a turn that already ended does not cancel the turn that replaced
+it. A thread starts at most one agent at a time: every startup carries a generation, so a startup
+that returns after a restart or shutdown discards the session it made instead of attaching it, and
+every detach names the generation it inspected so it cannot drop a session it never saw. Each turn
+ends through one settlement, which publishes exactly one `TurnCompleted` (and at most one error row
+for the losing side of a Stop-versus-failure race), promotes the next queued message to the active
+turn under the same record lock so a later Send queues behind it, and leaves a late failure report
+from an already-detached session out. Stop reasons are not flattened: only `end_turn` is a normal completion, `max_tokens` and
+`max_turn_requests` end the turn as a visible early stop, `cancelled` is an interrupt, and a refusal
+or an unknown reason is a failure. The interrupt flag belongs to one prompt: it is cleared when that
+prompt takes the running slot and set only while it is running, so a late Stop (or a rejected second
+send) cannot colour the next turn.
+`tool_call_update` is merged into the tool row's last non-empty title, kind, input and locations, so
+a status-only update never renames a tool or empties its expanded input, and the id is forgotten
+once the call finishes.
+
+**Addendum: one pump, one session.** Each event pump carries the generation of the session it
+serves and drops every event once the record no longer holds that session live; every path that
+detaches a session also aborts its pump. A late completion from a dead transport therefore cannot
+settle the turn that replaced its own. The pump reads a session's transport health from a
+lock-free flag the adapter publishes, never from the session lock: `send` may hold that lock for a
+whole turn, waiting for a reply that only the pump's draining can deliver, so waiting on it there
+would deadlock a harness with a bounded event queue. A startup that reached the thread after its
+turn was stopped starts no session at all and leaves the slot free for the next message, and a
+startup failure ends only the turn that startup captured; any turn that arrived later gets its own
+startup attempt instead of a failure for a session it never asked for. A stream that ends while the
+promoted turn's prompt was never written leaves that turn for a fresh session instead of failing
+it. Error rows are tagged where the death happens: the ACP writer-error path, a closed or exited
+agent, and a prompt that failed because the transport died report a distinct transport-death event,
+and only those reports and the daemon's failed-write row for the same turn collapse into one row,
+which keeps the agent's stderr text. Any other harness diagnostic is always its own row, so one
+buffered before a death can no longer take the failure's place. A writer I/O error marks the client
+closed and kills the agent's process group before any caller is woken, so an agent that closed
+stdin cannot outlive the failure. A failover that arrives while a startup is still booting the old
+model supersedes that startup, so the resume starts on the new model. A prompt result without a
+string `stopReason` is a failure, never an implicit `end_turn`: ACP requires the field, and every
+recorded turn end in `crates/h4rn-harness/tests/fixtures` sends it, so a reply that omits it is
+malformed rather than a normal completion.
+
+**Addendum: a startup's death is the turn's, and a death has one row.** A turn may move off the
+previous turn's session once: if that agent exits while a promoted message is still waiting, the
+message gets one fresh startup. But a session started for a turn is that turn's only attempt: if it
+loses its event stream before its prompt is claimed, the turn fails ("the agent exited before it
+accepted the prompt", with the agent's stderr when there is any) and the queue advances, instead of
+a replacement session being started for the same turn forever. A transport death is often reported
+more than once (the bridge's generic stdout-close notice, the prompt failure that carries the agent's
+stderr, an exit row): the first report is held for the turn's settlement, later ones only sharpen its
+detail, and the settlement publishes the most specific of them as the turn's one row, so the generic
+notice can never hide the stderr. A frame the client's writer drops because the writer task exited
+tears the transport down before the caller is woken, so a prompt error never leaves an open client
+behind it. A writer that fails on an I/O error reports what the pipe said ("Broken pipe"), not just
+that the writer exited, so the daemon's one failure row for the write names the real cause; when the
+agent also left a diagnostic on stderr, the row keeps both. Detaching a dead session and settling the
+turn it leaves behind happen under one record lock, so no delivery can see the empty slot and start
+a replacement for a turn that is about to be marked failed. When the pump instead hands a still
+pending turn to a fresh startup, the dead session's held transport report is dropped with it: the
+retry must not inherit that session's death as its error row.
+
+**Addendum: a failed startup clears and settles together, and a death waits for its report.** A
+startup that fails clears the slot it owns and settles the turn it captured under one record lock,
+so a second startup scheduled for the same turn runs either before that failure (and sees its
+`Starting` slot) or after the turn has ended (and starts nothing); it can never take the empty slot
+and write the prompt just before the failure is recorded. When stdout closes before the agent is
+reaped, the prompt that wakes on the EOF waits up to 500 ms for the supervisor's exit report and the
+stderr drain, then merges the exit status and the agent's last stderr line into the turn's one row.
+A rate-limit reset that only the exit report carries still reaches the auto-resume schedule exactly
+as an exit report on its own does. A writer that sees stdin close likewise waits for the stderr
+reader to drain the pipe before it wakes the caller, so a diagnostic printed in the same step as the
+close is part of the failure row.
+
+**Addendum: a write deadline keeps the reset, and an idle death has one row.** A prompt that never
+reaches an agent that stopped reading stdin fails on the write deadline, and that path collects the
+same bounded stderr tail and exit report as a closed transport; a reset time printed there becomes
+the typed limit, so the daemon persists the schedule and the message queued behind it waits instead
+of running straight into the limit. A typed limit is rendered as the message alone under a
+`Rate limited:` prefix rather than as a rejected write. Between turns the bridge reports the same
+death twice as well (the generic close, then the exit status with the stderr it drained); those
+reports are held per session generation and published as one row, so the exit status and the stderr
+are never lost to the generic notice.
+
+**Addendum: a death is published from its report, and the pump ends with its session.** A live
+adapter keeps its event sender alive for as long as the daemon holds its session, so a session's
+stream does not end when the agent dies: it only ends once the daemon drops the session. An idle
+death therefore publishes its row as soon as the exit/status report for that generation arrives
+(the generic stdout close alone gets a 500 ms window for that report, the same window a failed
+prompt waits for), and the dead session is detached under the same record lock, so the next message
+starts a fresh agent. A pump that settles a turn on a closed transport, or publishes an idle death,
+detaches and shuts its session down, schedules any successor and then returns: it never waits for a
+stream end the session it still holds keeps from happening. Every other detach (a Stop, a restart, a
+model change, a failed prompt write, a shutdown) aborts the session's pump, so exactly one path
+ends each pump. The `agy-fixture` peer gained the two deaths that happen outside a turn: an answer
+followed by an exit, and an answer followed by a stopped stdin reader and a reset on stderr, which
+the write deadline turns into a typed limit.
+
+**Addendum: a completion on a closed transport waits for its exit report, and a death does not raise
+a failure.** ACP can answer `end_turn` and only then exit, with the provider's reset on the exit
+report rather than on the turn. The completion therefore gets the same 500 ms window for that
+report that every other death gets, and a limit it carries is armed while the turn still owns the
+record, before the completion detaches the session and promotes the queue; otherwise the queued
+message would start at once on a fresh agent. A row published for a death between turns is a
+diagnostic, not a failed turn: it never raises a failure, so a thread whose auto-resume just armed
+stays Scheduled (as on main, where only the wire row was published). When several reports describe
+one death, the exit/status report (`retryable: false`) always wins over the generic stdout-close
+notice (`retryable: true`) even when its text is shorter, and only reports of the same kind are
+compared by detail. The `agy-fixture` peer models both new orderings, plus a mid-turn exit with no
+stderr at all.
+
+**Addendum: a death names its end, and the restart, write and registration paths re-check.** A
+transport death now says which part of the transport reported it (stdout EOF, a stdout read error, a
+writer failure, or the process exit). Only the exit kind is the process's final account, so a read
+error that is also non-retryable no longer ends the wait for the exit report's status, stderr and
+rate-limit reset; both a completion on a closed transport and a death between turns keep waiting for
+that kind. A `Write` report between turns is terminal instead: the writer's teardown kills the
+process on purpose, so the adapter suppresses the exit report and no later event can sharpen or
+contradict that row. Every non-deliberate exit publishes its exit report even when its stderr carries a typed
+limit, so the limit arms auto-resume and the pump still learns that the session is dead and detaches
+it; an idle death therefore reaches the next Send as a fresh session rather than as a failed write on
+a dead one. Events buffered inside the exit-report window are applied to the completing turn before
+it settles, and the idle fallback prefers a queued report over its deadline, so a tool update that
+completed behind a closed completion is part of the turn it belongs to. Two ownership checks moved
+under the lock they guard: a proxy restart re-checks that no turn became active under the same lock
+as its detach and skips the thread when one did (the new routing applies on the next session start),
+and an ACP request checks the closed state under the pending-map lock, so the reader's final drain
+either drains it or registration rejects it instead of leaving a waiter behind. A prompt write that
+lost its session to a restart, a shutdown or a model change puts its still-claimed prompt back and
+delivers it on the live session or a fresh startup instead of returning with the turn Working. The
+`agy-fixture` peer models the exit-only idle death by holding stdout open from a keeper process, so
+no EOF can announce the death.
+
+**Addendum: a Stop survives a lost session, and a buffered approval expires with its turn.** Stop is
+recorded on the turn's dispatch even when the prompt is already claimed: if the session detaches
+before the cancel can reach it, the failed write settles the turn interrupted instead of putting the
+prompt back, so a Stop the person saw acknowledged never replays on a fresh session. The prompt path
+now reports the close the client observed (stdout EOF, read error, writer failure or process exit)
+rather than always calling a stdout close a write failure. Inside the closed-completion window an
+approval that arrives behind the completion is dropped instead of published: it was never visible,
+and the turn's settlement detaches the transport, so no session could ever receive an answer.
+Finally, only the exit report ends that window, and it carries the provider reset itself: an ordinary
+limit notification without a reset no longer ends the wait before the exit's reset arrives to arm
+auto-resume.
+
+**Addendum: a Stop that was not delivered is retried, and recovery is one decision.** A Stop records
+its intent on a claimed turn so a failed write can never replay the prompt, but a cancel that failed
+with the session still open is not a stop: every later Stop on that claimed turn tries the cancel
+again, and only a cancel that had no session left (or a session already closed) counts as done.
+Whether a prompt whose session detaches goes back to the queue or its stopped turn ends interrupted
+is one operation under the dispatch lock. Split into a check and a later requeue, a Stop landing
+between them made the requeue fail and returned without settling, leaving the turn Working with no
+delivery; now the same interleaving either requeues or settles, never neither. Finally, the wait for
+a closed transport's exit report prefers a ready report over its deadline, as the idle fallback does,
+so a completion whose report and deadline are ready at the same poll keeps the exit's status, stderr
+and rate-limit reset.
+
+**Addendum: one provider limit arms one schedule, and a closed transport keeps the reason it died.**
+Inside the closed-completion window the adapter can report one pause twice: the prompt path's typed
+limit lands before the completion and the exit report carries the same reset after it. The window now
+collects its limits and applies one after the wait, preferring the exit report's reset, and a limit
+the turn already armed for that reset is never replaced: the schedule keeps its first attempt and
+therefore its jitter instead of being silently bumped. A request rejected because the transport is
+already closed now names the close the client observed (stdout EOF, a failed read, a writer failure
+or the process exit) rather than always blaming a write, so the daemon's one failure row says what
+actually ended the agent.
+
+**Addendum: a cancelled resume stays cancelled, and a Stop outranks the death that follows it.** The
+reset a turn already applied is kept on the turn's own record, not only in the live schedule, so the
+exit report's repeat of that reset cannot arm a new schedule after the person cancelled the resume
+while the report was still arriving; a different, newer reset still arms one. When a stopped turn's
+session dies before the cancel can be delivered, the turn ends interrupted and the transport report
+that arrives behind the Stop is dropped instead of becoming an error row: the person already ended
+the turn, and a limit the report carried was applied on its own event. The generic stdout-close
+notice also keeps the kind the reader observed, so a failed read is not reported as an EOF.
+
+**Addendum: a dead reader leaves the slot, and a stopped turn's failed completion stays quiet.** An
+idle session whose reader fails (a stdout read error or EOF) is detached from the thread's slot as
+soon as that failure is known, not when the exit report finally arrives. The pump keeps the session
+and its stream, because the exit report can still sharpen the one diagnostic row and carry the
+provider's reset, but delivery no longer sees it: a message sent in that bounded window starts a
+fresh agent instead of claiming a transport that can never take the prompt. The held report survives
+the new turn that message starts, because it belongs to the dead generation rather than to that
+turn. The exit report's reset is armed once, without replacing a schedule the adapter's typed limit
+already armed for it. Separately, a turn the person stopped and whose ACP session then dies ends
+interrupted, not failed, even when the adapter reports its `TurnCompleted{Failed}` after the cancel
+closed the transport: the same rule the stream end already followed, with the death's report dropped
+so it takes no error row.
+
+**Addendum: every dying generation keeps its own death, and only a failed completion follows a Stop.**
+Pending idle deaths are kept by session generation, not in one slot. The first dead session's
+replacement can be started by a Send and die too before the first exit report arrives; each pump now
+finalizes only its own generation, so both deaths publish their own row and their own reset instead
+of the second overwriting the first. The reset a death already applied is likewise kept on that
+death, so an exit report that repeats it cannot arm a new schedule after the person cancelled the
+resume during the window, even though the live schedule is gone. Finally, the Stop override on a
+closed-transport completion applies to a `Failed` report only: when ACP already reported the turn
+`Completed`, a Stop that arrives while the exit report is still on its way leaves it completed — the
+work was done, and the person's Stop never reached the agent.
 
 ## ADR-027: Push notifications are metadata-only wake signals
 

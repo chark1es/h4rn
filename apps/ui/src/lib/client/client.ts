@@ -198,12 +198,37 @@ type ResponseOfRest<T extends ClientRequest["type"]> = T extends "hello"
                                                                                                 type: "proxy_failover";
                                                                                               }
                                                                                             >
-                                                                                          : Extract<
-                                                                                              ResponseBody,
-                                                                                              {
-                                                                                                type: "ack";
-                                                                                              }
-                                                                                            >;
+                                                                                          : T extends
+                                                                                                | "get_network_access"
+                                                                                                | "set_network_access"
+                                                                                            ? Extract<
+                                                                                                ResponseBody,
+                                                                                                {
+                                                                                                  type: "network_access";
+                                                                                                }
+                                                                                              >
+                                                                                            : T extends
+                                                                                                  | "list_direct_devices"
+                                                                                                  | "revoke_direct_device"
+                                                                                              ? Extract<
+                                                                                                  ResponseBody,
+                                                                                                  {
+                                                                                                    type: "direct_devices";
+                                                                                                  }
+                                                                                                >
+                                                                                              : T extends "create_direct_pairing"
+                                                                                                ? Extract<
+                                                                                                    ResponseBody,
+                                                                                                    {
+                                                                                                      type: "direct_pairing_offer";
+                                                                                                    }
+                                                                                                  >
+                                                                                                : Extract<
+                                                                                                    ResponseBody,
+                                                                                                    {
+                                                                                                      type: "ack";
+                                                                                                    }
+                                                                                                  >;
 
 export type ResponseOf<T extends ClientRequest["type"]> = T extends "list_worktrees"
   ? Extract<ResponseBody, { type: "worktrees" }>
@@ -247,7 +272,7 @@ const DEFAULT_DEVICE: DeviceInfo = {
   device_id: "web",
   name: "h4rn web",
   platform: "web",
-  app_version: "1.0.0",
+  app_version: "1.0.1",
 };
 
 const FATAL_CLOSE_CODES = new Map<number, { message: string; hint: string }>([

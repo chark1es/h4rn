@@ -12,7 +12,7 @@ import {
 
 function status(overrides: Partial<AppUpdateStatus> = {}): AppUpdateStatus {
   return {
-    current_version: "1.0.0",
+    current_version: "1.0.1",
     available: { version: "1.1.0", notes: null },
     checked_at_ms: 1_700_000_000_000,
     auto_check: true,

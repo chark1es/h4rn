@@ -37,6 +37,25 @@ import { deleteSecret, getSecret, setSecret } from "./secretStore";
 
 const CREDENTIALS_KEY = "credentials";
 
+/**
+ * Upper bound on one relay request. The relay is optional infrastructure; a
+ * hung connect deployment must not leave a sign-in or settings page spinning
+ * forever. Long-lived flows (device-code polling) make one bounded request per
+ * poll and keep their own loop semantics.
+ */
+export const CONNECT_REQUEST_TIMEOUT_MS = 8_000;
+
+/** A signal that aborts one relay request after `ms`. */
+export function requestTimeoutSignal(ms = CONNECT_REQUEST_TIMEOUT_MS): AbortSignal {
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    return AbortSignal.timeout(ms);
+  }
+  // Older webviews (and some test runtimes) lack AbortSignal.timeout.
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), ms);
+  return controller.signal;
+}
+
 /** Connect's `expires_in` is an i64 on the wire, a number in JSON. */
 export type SessionTokens = {
   access_token: string;
@@ -173,6 +192,7 @@ async function publicJson<T>(
     method: init.method ?? "GET",
     headers: { "content-type": "application/json" },
     ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+    signal: requestTimeoutSignal(),
   });
   if (!response.ok) throw await readError(response);
   if (response.status === 204) return undefined as T;
@@ -347,6 +367,7 @@ export class ConnectClient {
         "x-h4rn-nonce": proof.nonce,
       },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: requestTimeoutSignal(),
     });
     if (response.status === 401 && !retried) {
       await this.refresh();
@@ -452,11 +473,31 @@ export class ConnectClient {
     return url.toString();
   }
 
+  /**
+   * Ends the session on the relay without touching local credentials.
+   *
+   * Deliberately skips refresh and persistence: sign-out deletes the stored
+   * credentials in parallel, and a token refresh here could write them back.
+   */
+  async revokeSession(timeoutMs = CONNECT_REQUEST_TIMEOUT_MS): Promise<void> {
+    const proof = await this.proof("POST", "/v1/auth/logout");
+    await fetch(join(this.connectUrl, "/v1/auth/logout"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${this.credentials.tokens.access_token}`,
+        "x-h4rn-proof": proof.proof,
+        "x-h4rn-timestamp": proof.timestamp,
+        "x-h4rn-nonce": proof.nonce,
+      },
+      body: JSON.stringify({ refresh_token: this.credentials.tokens.refresh_token }),
+      signal: requestTimeoutSignal(timeoutMs),
+    });
+  }
+
   async logout(): Promise<void> {
     try {
-      await this.authorized("POST", "/v1/auth/logout", {
-        refresh_token: this.credentials.tokens.refresh_token,
-      });
+      await this.revokeSession();
     } catch {
       // Local sign-out must still succeed when the relay is unreachable.
     }

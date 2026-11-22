@@ -1,5 +1,12 @@
 import type * as React from "react";
 
+import {
+  bindingFor,
+  type CommandId,
+  chordKeys,
+  isApplePlatform,
+  useKeybindingsVersion,
+} from "@/lib/keybindings";
 import { cn } from "@/lib/utils";
 
 /** Key glyphs as strokes, so every platform's font can render them. */
@@ -31,6 +38,19 @@ const KEY_GLYPHS: Record<string, React.ReactNode> = {
       <path d="m19 12-7 7-7-7" />
     </>
   ),
+  "←": (
+    <>
+      <path d="m12 19-7-7 7-7" />
+      <path d="M19 12H5" />
+    </>
+  ),
+  "→": (
+    <>
+      <path d="M5 12h14" />
+      <path d="m12 5 7 7-7 7" />
+    </>
+  ),
+  "⌥": <path d="M3 5h6l6 14h6M15 5h6" />,
 };
 
 const KEY_LABELS: Record<string, string> = {
@@ -40,6 +60,9 @@ const KEY_LABELS: Record<string, string> = {
   "⇧": "Shift",
   "↑": "Up",
   "↓": "Down",
+  "←": "Left",
+  "→": "Right",
+  "⌥": "Option",
 };
 
 function keyLabel(value: string): string {
@@ -78,6 +101,12 @@ export function KeyCaps({ value }: { value: string }) {
   );
 }
 
+/** Keycaps for a command's current binding; follows rebinding live. */
+export function ShortcutCaps({ command }: { command: CommandId }) {
+  useKeybindingsVersion();
+  return <KeyCaps value={chordKeys(bindingFor(command)).join(" ")} />;
+}
+
 export function Kbd({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
     <kbd
@@ -92,8 +121,7 @@ export function Kbd({ children, className }: { children: React.ReactNode; classN
   );
 }
 
-export const isApple =
-  typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
+export const isApple = isApplePlatform;
 
 /** Platform-appropriate key labels. Glyphs only where the platform shows them. */
 export const MOD = isApple ? "⌘" : "Ctrl";

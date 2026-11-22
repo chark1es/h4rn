@@ -14,7 +14,6 @@ import {
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
-import { MOD, SHIFT } from "@/components/common/Kbd";
 import { SidebarReveal } from "@/components/shell/Sidebar";
 import {
   DropdownMenu,
@@ -30,6 +29,7 @@ import { useViewportWidth } from "@/hooks/use-viewport-width";
 import { glyphForThread } from "@/lib/agent";
 import { harnessLabel, harnessSeed, machineSeed } from "@/lib/entities";
 import { absoluteDateTime, relativeAge } from "@/lib/format";
+import { shortcutText, titleWithShortcut } from "@/lib/keybindings";
 import {
   acknowledgeThread,
   interruptThread,
@@ -64,7 +64,7 @@ export function ViewCluster({
         className="q-seg inline q-viewseg"
         role="tablist"
         aria-label="View"
-        title={`Switch view  ${MOD}E`}
+        title={titleWithShortcut("Switch view", "view.toggle")}
       >
         <button
           type="button"
@@ -89,7 +89,7 @@ export function ViewCluster({
           className={cn("q-ibtn", terminalOpen && "on")}
           aria-label="Toggle terminal"
           aria-pressed={terminalOpen}
-          title="Terminal  T"
+          title={titleWithShortcut("Terminal", "terminal.toggle")}
           onClick={onToggleTerminal}
         >
           <TerminalIcon className="q-icon" strokeWidth={1.5} aria-hidden />
@@ -100,7 +100,7 @@ export function ViewCluster({
         className={cn("q-ibtn", panelOpen && "on")}
         aria-label="Right panel"
         aria-pressed={panelOpen}
-        title={`Right panel  ${MOD}⌥B`}
+        title={titleWithShortcut("Right panel", "panel.toggle")}
         onClick={togglePanel}
       >
         <PanelRightIcon className="q-icon" strokeWidth={1.5} aria-hidden />
@@ -194,9 +194,7 @@ export function ThreadHeader({
         <DropdownMenuItem onSelect={toggleTheme}>
           <SunMoonIcon aria-hidden />
           Toggle theme
-          <span className="ml-auto text-small text-fg-3">
-            {MOD} {SHIFT} L
-          </span>
+          <span className="ml-auto text-small text-fg-3">{shortcutText("theme.toggle")}</span>
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem disabled>

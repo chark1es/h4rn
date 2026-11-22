@@ -228,7 +228,7 @@ impl SkillsService {
         harnesses: &[HarnessKind],
         name_override: Option<&str>,
     ) -> Result<SkillSummary, SkillError> {
-        let mut loaded = source::load_source(source)?;
+        let mut loaded = source::load_source_async(source).await?;
         if let Some(name) = name_override.filter(|name| !name.trim().is_empty()) {
             model::rename_bundle(&mut loaded.bundle, name)?;
         }
@@ -294,7 +294,7 @@ impl SkillsService {
         source: &SkillSource,
     ) -> Result<SkillSummary, SkillError> {
         let existing = self.registry.get(skill_id).await?;
-        let loaded = source::load_source(source)?;
+        let loaded = source::load_source_async(source).await?;
         if loaded.bundle.version() == existing.version {
             return self.summary_now(&existing).await;
         }
@@ -389,12 +389,93 @@ impl SkillsService {
         Ok(import::scan(&self.layouts, &self.registry).await?.preview)
     }
 
-    /// Imports the selected candidates.
-    pub async fn import_commit(&self, candidate_ids: &[String]) -> Result<u32, SkillError> {
-        let outcomes =
-            import::commit(&self.layouts, &self.registry, candidate_ids, Utc::now()).await?;
+    /// Imports the selected candidates. With `manage`, each imported or
+    /// already-present folder whose files match the registry version is
+    /// adopted: h4rn writes its marker there and records the install, so sync
+    /// keeps the copy current. Returns how many candidates were imported plus
+    /// adopted.
+    pub async fn import_commit(
+        &self,
+        candidate_ids: &[String],
+        manage: bool,
+    ) -> Result<u32, SkillError> {
+        let now = Utc::now();
+        let outcomes = import::commit(&self.layouts, &self.registry, candidate_ids, now).await?;
+        let mut count = 0u32;
+        for outcome in &outcomes {
+            let (skill_id, target, added) = match outcome {
+                import::CommitOutcome::Added { skill_id, target } => (skill_id, target, true),
+                import::CommitOutcome::Duplicate { skill_id, target } => (skill_id, target, false),
+                import::CommitOutcome::Conflict(_) => continue,
+            };
+            let adopted = manage && self.adopt(skill_id, target, now).await?;
+            if added || adopted {
+                count += 1;
+            }
+        }
         self.emit_changed();
-        Ok(outcomes.len() as u32)
+        Ok(count)
+    }
+
+    /// Adopts one imported folder; returns whether h4rn now manages it.
+    async fn adopt(
+        &self,
+        skill_id: &str,
+        target: &import::ImportTarget,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<bool, SkillError> {
+        let Some(root) = self
+            .layout(target.harness)
+            .and_then(|layout| layout.user_root.clone())
+        else {
+            return Ok(false);
+        };
+        let record = self.registry.get(skill_id).await?;
+        let outcome = install::adopt_folder(
+            &root,
+            &target.path,
+            target.harness,
+            &record.id,
+            &record.name,
+            &record.version,
+        )?;
+        if outcome != install::AdoptOutcome::Adopted {
+            tracing::info!(
+                skill = %record.name,
+                path = %target.path.display(),
+                ?outcome,
+                "left a harness skill folder unmanaged"
+            );
+            return Ok(false);
+        }
+        // Every harness that reads this root shares the copy (Codex and
+        // OpenCode can point at the same folder), so record each of them.
+        for layout in &self.layouts {
+            if layout.user_root.as_deref() != Some(root.as_path()) {
+                continue;
+            }
+            if layout.harness != target.harness {
+                install::adopt_folder(
+                    &root,
+                    &target.path,
+                    layout.harness,
+                    &record.id,
+                    &record.name,
+                    &record.version,
+                )?;
+            }
+            self.registry
+                .set_install(
+                    &record.id,
+                    layout.harness,
+                    &self.machine_id,
+                    &target.path.display().to_string(),
+                    true,
+                    now,
+                )
+                .await?;
+        }
+        Ok(true)
     }
 
     /// Conflicts the UI can render.
@@ -726,6 +807,92 @@ mod tests {
         )
         .unwrap();
         dir
+    }
+
+    fn claude_root(service: &SkillsService) -> PathBuf {
+        service
+            .layout(HarnessKind::ClaudeCode)
+            .and_then(|layout| layout.user_root.clone())
+            .unwrap()
+    }
+
+    fn write_skill(dir: &Path, name: &str, note: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Demo {note}\n---\n\n{note}\n"),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn import_with_manage_adopts_the_harness_folder() {
+        let (_dir, service) = service().await;
+        let root = claude_root(&service);
+        let folder = root.join("lint");
+        write_skill(&folder, "lint", "one");
+
+        let preview = service.import_preview().await.unwrap();
+        let candidate = &preview.candidates[0];
+        assert!(!candidate.managed);
+        let count = service
+            .import_commit(std::slice::from_ref(&candidate.id), true)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+
+        let marker = install::read_marker(&folder).expect("adopted folder carries the marker");
+        let inventory = service.list().await.unwrap();
+        let skill = &inventory.skills[0];
+        assert_eq!(marker.skill_id, skill.id);
+        let claude = skill
+            .installs
+            .iter()
+            .find(|state| state.harness == HarnessKind::ClaudeCode)
+            .unwrap();
+        assert!(claude.managed && claude.enabled && claude.installed);
+        // The skill's own files are untouched.
+        assert_eq!(
+            std::fs::read_to_string(folder.join("SKILL.md")).unwrap(),
+            "---\nname: lint\ndescription: Demo one\n---\n\none\n"
+        );
+        // A rescan reports it as managed.
+        let rescan = service.import_preview().await.unwrap();
+        assert!(rescan.candidates[0].managed && rescan.candidates[0].duplicate);
+    }
+
+    #[tokio::test]
+    async fn import_without_manage_leaves_the_folder_user_owned() {
+        let (_dir, service) = service().await;
+        let folder = claude_root(&service).join("lint");
+        write_skill(&folder, "lint", "one");
+        let preview = service.import_preview().await.unwrap();
+        service
+            .import_commit(std::slice::from_ref(&preview.candidates[0].id), false)
+            .await
+            .unwrap();
+        assert!(install::read_marker(&folder).is_none());
+    }
+
+    #[tokio::test]
+    async fn a_duplicate_can_be_adopted_later_but_a_renamed_folder_cannot() {
+        let (_dir, service) = service().await;
+        let root = claude_root(&service);
+        write_skill(&root.join("lint"), "lint", "one");
+        write_skill(&root.join("my-review"), "review", "two");
+        let preview = service.import_preview().await.unwrap();
+        let ids: Vec<String> = preview.candidates.iter().map(|c| c.id.clone()).collect();
+        service.import_commit(&ids, false).await.unwrap();
+
+        let again = service.import_preview().await.unwrap();
+        assert!(again.candidates.iter().all(|c| c.duplicate && !c.managed));
+        let ids: Vec<String> = again.candidates.iter().map(|c| c.id.clone()).collect();
+        let adopted = service.import_commit(&ids, true).await.unwrap();
+        // "lint" sits where h4rn installs it; "my-review" does not match its
+        // skill name, so a later install would not replace it.
+        assert_eq!(adopted, 1);
+        assert!(install::read_marker(&root.join("lint")).is_some());
+        assert!(install::read_marker(&root.join("my-review")).is_none());
     }
 
     #[tokio::test]

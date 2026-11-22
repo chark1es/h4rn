@@ -584,7 +584,7 @@ async function main() {
     const footer = page.locator('[title="Hosts and connection"]');
     await footer.click();
     await page.getByRole("menuitem", { name: /Sign in to h4rn-connect/ }).click();
-    await page.getByRole("heading", { name: "Devices", exact: true }).waitFor();
+    await page.getByRole("heading", { name: "Hosts & devices", exact: true }).waitFor();
     const relayInput = page.getByLabel("h4rn-connect URL");
     await relayInput.fill(relayUrl);
     await page.getByRole("button", { name: "Use", exact: true }).click();
@@ -592,7 +592,7 @@ async function main() {
     // OrbitID authorizes the pre-seeded browser session, redirects to
     // /auth/callback, and the app reloads the route it left. Reaching the
     // signed-in Devices panel proves the full redirect round trip.
-    await page.getByRole("heading", { name: /^Pair a device/ }).waitFor({
+    await page.getByRole("heading", { name: /^Pair through relay/ }).waitFor({
       timeout: 60_000,
     });
     if (new URL(page.url()).origin !== uiOrigin) {
@@ -614,7 +614,7 @@ async function main() {
       .getByRole("menu", { name: "Hosts" })
       .getByRole("menuitem", { name: /Pair a device/ })
       .click();
-    await hostUi.getByRole("heading", { name: /^Pair a device/ }).waitFor();
+    await hostUi.getByRole("heading", { name: /^Pair through relay/ }).waitFor();
     const qr = hostUi.getByRole("img", { name: "Pairing QR code for atlas" });
     await qr.waitFor({ timeout: 30_000 });
     await hostUi.getByRole("button", { name: "Copy link", exact: true }).click();
@@ -680,7 +680,7 @@ async function main() {
     // Revoke this browser's device; the daemon drops the allowlisted key and
     // the live relay session ends.
     await hostsMenu.getByRole("menuitem", { name: /Pair a device/ }).click();
-    await page.getByRole("heading", { name: "Devices", exact: true }).waitFor();
+    await page.getByRole("heading", { name: "Hosts & devices", exact: true }).waitFor();
     const deviceRow = page.getByRole("row").filter({ hasText: "this device" });
     await deviceRow.waitFor({ timeout: 20_000 });
     const logMark = logs.length;
@@ -720,7 +720,7 @@ async function main() {
     const code = (await page.locator(".q-code-big").textContent())?.trim();
     if (!code) throw new Error("the sign-in panel did not show a device code");
     await approveDeviceCode(orbitBase, orbit.sessionJwt, code);
-    await page.getByRole("heading", { name: /^Pair a device/ }).waitFor({ timeout: 30_000 });
+    await page.getByRole("heading", { name: /^Pair through relay/ }).waitFor({ timeout: 30_000 });
 
     // Pair by the typed short code with a restricted scope. This second
     // browser makes the pairing, drops "Approve and reply" (connect recreates

@@ -1,4 +1,4 @@
-import { ALT, BACKSPACE, ENTER, ESC, Kbd, MOD, SHIFT } from "@/components/common/Kbd";
+import { ENTER, ESC, KeyCaps, SHIFT, ShortcutCaps } from "@/components/common/Kbd";
 import {
   Dialog,
   DialogContent,
@@ -6,55 +6,15 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { closeShortcuts, useApp } from "@/lib/store/appStore";
+import { COMMAND_GROUPS, COMMANDS } from "@/lib/keybindings";
+import { closeShortcuts, navigate, useApp } from "@/lib/store/appStore";
 
-const GROUPS: Array<{ title: string; rows: Array<[string, string]> }> = [
-  {
-    title: "Global",
-    rows: [
-      ["Command palette", `${MOD} K`],
-      ["Shortcut sheet", "?"],
-      ["New thread", `${MOD} ${SHIFT} N`],
-      ["Toggle theme", `${MOD} ${SHIFT} L`],
-      ["Settings", `${MOD} ,`],
-      ["Close overlay", ESC],
-    ],
-  },
-  {
-    title: "Inbox",
-    rows: [
-      ["Focus search", "/"],
-      ["Next / previous row", "J / K"],
-      ["Open row", ENTER],
-      ["Working / Done / Settled", `${ALT} 1 / 2 / 3`],
-      ["Acknowledge", "A"],
-      ["Snooze", "S"],
-      ["Keep in Working", "P"],
-      ["Go to Inbox / Hosts", "G I / G H"],
-    ],
-  },
-  {
-    title: "Thread",
-    rows: [
-      ["Reply / focus composer", "R"],
-      ["Approve / Go", `${MOD} ${ENTER}`],
-      ["Deny / Hold", `${MOD} ${BACKSPACE}`],
-      ["Interrupt turn", `${MOD} .`],
-      ["Settle now", `${SHIFT} S`],
-      ["Previous / next message", "[ / ]"],
-      ["Terminal / Diff / Files", "T / D / F"],
-    ],
-  },
-  {
-    title: "Composer",
-    rows: [
-      ["Send", ENTER],
-      ["Newline", `${SHIFT} ${ENTER}`],
-      ["Mention file or host", "@"],
-      ["Slash command", "/"],
-      ["Attach (Phase 2)", `${MOD} U`],
-    ],
-  },
+/** Keys that edit text rather than run commands. */
+const TYPING: Array<[string, string[]]> = [
+  ["Send", [ENTER]],
+  ["New line", [SHIFT, ENTER]],
+  ["Mention a file or host", ["@"]],
+  ["Close a dialog or go back", [ESC]],
 ];
 
 export function ShortcutsDialog() {
@@ -62,38 +22,63 @@ export function ShortcutsDialog() {
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : closeShortcuts())}>
-      <DialogContent className="max-h-[85dvh] overflow-y-auto sm:max-w-[620px]">
+      <DialogContent
+        className="sm:max-w-[680px]"
+        onOpenAutoFocus={(event) => event.preventDefault()}
+      >
         <DialogHeader>
           <DialogTitle>Keyboard shortcuts</DialogTitle>
           <DialogDescription>
-            Every pointer action has a key. Sequences use G, then a letter, within 900 ms.
+            Every command is Cmd or Ctrl plus a key, so typing never triggers one. Change any of
+            them in{" "}
+            <button
+              type="button"
+              className="q-link"
+              onClick={() => {
+                closeShortcuts();
+                navigate({
+                  kind: "placeholder",
+                  surface: "settings",
+                  path: "/settings/shortcuts",
+                });
+              }}
+            >
+              Settings → Shortcuts
+            </button>
+            .
           </DialogDescription>
         </DialogHeader>
 
-        <div className="grid gap-4 sm:grid-cols-2">
-          {GROUPS.map((group) => (
-            <section key={group.title} className="space-y-1">
-              <h3 className="text-[12px] font-medium text-[var(--fg-3)]">{group.title}</h3>
+        <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
+          {COMMAND_GROUPS.map((group) => (
+            <section key={group} className="space-y-1">
+              <h3 className="text-[12px] font-medium text-[var(--fg-3)]">{group}</h3>
               <dl className="divide-y divide-line/70">
-                {group.rows.map(([label, keys]) => (
-                  <div key={label} className="flex items-center justify-between gap-2 py-1">
-                    <dt className="text-[12.5px] text-[var(--fg-2)]">{label}</dt>
-                    <dd className="flex shrink-0 items-center gap-1">
-                      {keys.split(" / ").map((part) => (
-                        <Kbd key={part}>{part}</Kbd>
-                      ))}
+                {COMMANDS.filter((command) => command.group === group).map((command) => (
+                  <div key={command.id} className="flex items-center justify-between gap-2 py-1">
+                    <dt className="text-[12.5px] text-[var(--fg-2)]">{command.label}</dt>
+                    <dd className="q-pal-kbd shrink-0">
+                      <ShortcutCaps command={command.id} />
                     </dd>
                   </div>
                 ))}
               </dl>
             </section>
           ))}
+          <section className="space-y-1">
+            <h3 className="text-[12px] font-medium text-[var(--fg-3)]">While typing</h3>
+            <dl className="divide-y divide-line/70">
+              {TYPING.map(([label, keys]) => (
+                <div key={label} className="flex items-center justify-between gap-2 py-1">
+                  <dt className="text-[12.5px] text-[var(--fg-2)]">{label}</dt>
+                  <dd className="q-pal-kbd shrink-0">
+                    <KeyCaps value={keys.join(" ")} />
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </section>
         </div>
-
-        <p className="text-[11.5px] text-[var(--fg-3)]">
-          Browser-reserved combinations (Ctrl/Cmd N, T, W) are not intercepted. On the web build,
-          use the rail or palette for those routes.
-        </p>
       </DialogContent>
     </Dialog>
   );

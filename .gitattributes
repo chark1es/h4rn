@@ -1,0 +1,4 @@
+# sqlx embeds each migration's text and stores its SHA-384 checksum. A CRLF
+# checkout (the Windows CI runner) would embed different bytes, and the daemon
+# would then refuse every database an LF build created.
+*.sql text eol=lf

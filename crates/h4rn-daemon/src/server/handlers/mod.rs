@@ -14,6 +14,8 @@ use crate::server::Connection;
 pub(super) mod forge;
 pub(super) mod harness_versions;
 pub(super) mod mcp;
+pub(super) mod network_access;
+pub(super) mod projects;
 pub(super) mod proxy;
 pub(super) mod skills;
 pub(super) mod subagents;
@@ -78,6 +80,8 @@ declare_services! {
     Usage => usage,
     HarnessVersions => harness_versions,
     Worktrees => worktrees,
+    Projects => projects,
+    NetworkAccess => network_access,
 }
 
 /// Spawns every registered service's forwarder for one connection.

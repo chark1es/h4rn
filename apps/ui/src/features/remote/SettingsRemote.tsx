@@ -29,6 +29,8 @@ import { getClient, navigate, pushToast, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 
 import { ConnectSignIn, SignOutButton } from "./ConnectSignIn";
+import { UseThisMachineButton } from "./LocalMachineAction";
+import { NetworkAccessSettings } from "./NetworkAccess";
 import {
   DEFAULT_PAIR_SCOPES,
   formatShortCode,
@@ -46,6 +48,7 @@ import {
   refresh,
   renameDevice,
   revokeDevice,
+  shellKind,
   useRemote,
 } from "./remoteStore";
 
@@ -81,6 +84,18 @@ function relativeSeen(iso: string | null | undefined, now: number): string {
 
 function signedIn(user: unknown): boolean {
   return user !== null;
+}
+
+/**
+ * A quiet line instead of an unexplained empty list: signed in, but the relay
+ * is unreachable, so the machine count says nothing about the world.
+ */
+function RelayUnreachable({ connectUrl }: { connectUrl: string }) {
+  return (
+    <p className="q-muted" style={{ fontSize: 12, margin: "0 0 10px" }} role="status">
+      Can’t reach {connectUrl}.
+    </p>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -194,7 +209,11 @@ function MachineRows({
   );
 }
 
-export function LiveHostsForm() {
+/**
+ * Hosts and the devices that supervise them, on one page. `/settings/devices`
+ * opens it with the pairing code showing.
+ */
+export function LiveHostsForm({ pairing: pairFirst = false }: { pairing?: boolean }) {
   const hosts = useApp((state) => state.hosts);
   const connection = useApp((state) => state.connection);
   const phase = useRemote((state) => state.phase);
@@ -202,7 +221,10 @@ export function LiveHostsForm() {
   const activeId = useRemote((state) => state.activeMachineId);
   const busy = useRemote((state) => state.busy);
   const user = useRemote((state) => state.user);
+  const active = useRemote((state) => state.active);
   const connectUrl = useRemote((state) => state.connectUrl);
+  const error = useRemote((state) => state.error);
+  const mobile = shellKind() === "mobile";
   const now = useNow();
   const rows = useMemo(
     () =>
@@ -216,15 +238,17 @@ export function LiveHostsForm() {
   );
   const isSignedIn = signedIn(user);
   const hostId = rows[0]?.host_id;
+  const [pairOpen, setPairOpen] = useState(pairFirst);
+  useEffect(() => setPairOpen(pairFirst), [pairFirst]);
 
   return (
     <div className="q-form" style={{ maxWidth: 880 }}>
       <div className="q-form-head">
         <div style={{ flex: 1 }}>
-          <h1>Hosts</h1>
+          <h1>Hosts & devices</h1>
           <p className="lead">
-            Machines that run agents. WSL distros are separate hosts with their own harnesses,
-            credentials and settings.
+            Hosts are machines that run agents; WSL distros are separate hosts with their own
+            harnesses and credentials. Devices are the phones and computers you supervise them from.
           </p>
         </div>
         <button
@@ -244,14 +268,59 @@ export function LiveHostsForm() {
         <button
           type="button"
           className="q-btn primary"
-          onClick={() =>
-            navigate({ kind: "placeholder", surface: "settings", path: "/settings/devices" })
-          }
+          aria-expanded={pairOpen}
+          aria-controls="pair-device"
+          onClick={() => {
+            if (!isSignedIn) {
+              pushToast({
+                variant: "info",
+                title: "Sign in to pair a device.",
+                description: "Pairing goes through h4rn-connect. Sign in under Remote access.",
+              });
+              return;
+            }
+            setPairOpen(true);
+            requestAnimationFrame(() =>
+              document.getElementById("pair-device")?.scrollIntoView({ block: "nearest" }),
+            );
+          }}
         >
           <QrCodeIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-          Pair a device
+          Pair through relay
         </button>
       </div>
+
+      <NetworkAccessSettings />
+
+      {active ? (
+        <div className="q-group">
+          <h2>Connected machine</h2>
+          <div className="q-field">
+            <div className="lab">
+              <div className="t">
+                {connection.status === "online"
+                  ? `Connected to ${active.machineName} through h4rn-connect`
+                  : connection.status === "connecting"
+                    ? `Connecting to ${active.machineName}…`
+                    : `Can’t reach ${active.machineName}`}
+              </div>
+              <div className="s">
+                {connection.status === "online"
+                  ? mobile
+                    ? "This app can disconnect and keep working offline."
+                    : "The local daemon is always available as well."
+                  : mobile
+                    ? "The remote path is down. Pick another machine, or disconnect."
+                    : "The remote path is down. This machine can still run agents."}
+              </div>
+            </div>
+            <div className="ctl">
+              <span style={{ flex: 1 }} />
+              <UseThisMachineButton verb={connection.status === "online" ? "disconnect" : "use"} />
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {!isSignedIn ? (
         <div className="q-group">
@@ -264,26 +333,39 @@ export function LiveHostsForm() {
         </div>
       ) : null}
 
+      {isSignedIn && pairOpen ? <PairDeviceGroup onClose={() => setPairOpen(false)} /> : null}
+      {isSignedIn ? <PairingConfirmations /> : null}
+
       {isSignedIn ? (
         machines.length > 0 ? (
-          <MachineRows
-            machines={machines}
-            activeId={activeId}
-            connection={connection}
-            busy={busy}
-            now={now}
-          />
+          <>
+            {error ? <RelayUnreachable connectUrl={connectUrl} /> : null}
+            <MachineRows
+              machines={machines}
+              activeId={activeId}
+              connection={connection}
+              busy={busy}
+              now={now}
+            />
+          </>
         ) : (
           <div className="q-group">
             <h2>Machines</h2>
-            <p className="desc">
-              No machine has logged in to this relay yet. Run{" "}
-              <span className="q-mono">h4rnd login --connect {connectUrl}</span> on a host.
-            </p>
+            {error ? (
+              <RelayUnreachable connectUrl={connectUrl} />
+            ) : (
+              <p className="desc">
+                No machine has logged in to this relay yet. Run{" "}
+                <span className="q-mono">h4rnd login --connect {connectUrl}</span> on a host.
+              </p>
+            )}
           </div>
         )
       ) : null}
 
+      <div className="q-group" style={{ marginBottom: 0 }}>
+        <h2>Hosts</h2>
+      </div>
       <table className="q-tbl" style={{ marginBottom: 36 }}>
         <thead>
           <tr>
@@ -349,6 +431,8 @@ export function LiveHostsForm() {
           })}
         </tbody>
       </table>
+
+      {isSignedIn ? <PairedDevicesGroup /> : null}
 
       <div className="q-group">
         <h2>Connection</h2>
@@ -600,10 +684,51 @@ function usePairingConfirmations(enabled: boolean): {
   return { entries, decide };
 }
 
-export function LiveDevicesForm() {
+/** Incoming pairing requests waiting for the owner to compare codes. */
+function PairingConfirmations() {
+  const isSignedIn = useRemote((state) => state.user !== null);
+  const { entries: confirmations, decide: decidePairing } = usePairingConfirmations(isSignedIn);
+  if (confirmations.length === 0) return null;
+  return (
+    <div className="q-group">
+      {confirmations.map((entry) => (
+        <fieldset key={entry.device_id} className="q-sas-host">
+          <legend className="q-muted" style={{ fontSize: 12 }}>
+            {entry.device_name} wants to connect. Its screen shows
+          </legend>
+          <div className="q-sas-code num" data-testid="host-sas">
+            {entry.sas}
+          </div>
+          <div className="q-faint" style={{ fontSize: 12 }}>
+            Approve only if both codes match. Until then the device cannot reach this host.
+          </div>
+          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+            <button
+              type="button"
+              className="q-btn primary"
+              data-testid="confirm-pairing"
+              onClick={() => void decidePairing(entry.device_id, true)}
+            >
+              Confirm device
+            </button>
+            <button
+              type="button"
+              className="q-btn danger"
+              data-testid="reject-pairing"
+              onClick={() => void decidePairing(entry.device_id, false)}
+            >
+              Reject
+            </button>
+          </div>
+        </fieldset>
+      ))}
+    </div>
+  );
+}
+
+/** QR code and short code for adding a phone or computer. */
+function PairDeviceGroup({ onClose }: { onClose: () => void }) {
   const user = useRemote((state) => state.user);
-  const device = useRemote((state) => state.device);
-  const devices = useRemote((state) => state.devices);
   const machines = useRemote((state) => state.machines);
   const activeId = useRemote((state) => state.activeMachineId);
   const pairing = useRemote((state) => state.pairing);
@@ -615,7 +740,6 @@ export function LiveDevicesForm() {
   const [copied, setCopied] = useState(false);
   const [scopes, setScopes] = useState<PairScope[]>(() => [...DEFAULT_PAIR_SCOPES]);
   const expiring = useRef(false);
-  const { entries: confirmations, decide: decidePairing } = usePairingConfirmations(isSignedIn);
 
   useEffect(() => {
     if (!machineId && available[0]) setMachineId(available[0].id);
@@ -652,226 +776,200 @@ export function LiveDevicesForm() {
   const remainingText = `${Math.floor(remaining / 60_000)}:${String(
     Math.floor((remaining % 60_000) / 1_000),
   ).padStart(2, "0")}`;
-  const liveDevices = devices.filter((candidate) => !candidate.revoked_at);
 
   return (
-    <div className="q-form" style={{ maxWidth: 840 }}>
-      <h1>Devices</h1>
-      <p className="lead">
-        Phones and computers that can reach your hosts. Each device gets its own scopes, and you can
-        revoke one without touching the others.
-      </p>
-
-      {!isSignedIn ? (
-        <ConnectSignIn compact />
-      ) : (
-        <>
-          <div className="q-group">
-            <h2>
-              Pair a device <span className="grow" />
-              {pairing ? (
-                <span className="q-faint q-num" style={{ fontSize: 12, fontWeight: 400 }}>
-                  Expires in <span data-countdown="pair">{remainingText}</span>
-                </span>
-              ) : null}
-            </h2>
-            <div style={{ paddingTop: 12 }}>
-              <div className="q-field" style={{ borderTop: "1px solid var(--line)" }}>
-                <div className="lab">
-                  <div className="t">Machine</div>
-                  <div className="s">The paired device can reach this machine's hosts.</div>
-                </div>
-                <div className="ctl">
-                  <ChipSelect
-                    label="Machine to pair with"
-                    value={machineId}
-                    placeholder="No machines"
-                    width={200}
-                    options={available.map((machine) => ({
-                      value: machine.id,
-                      label: machine.name,
-                    }))}
-                    onChange={(next) => {
-                      setMachineId(next);
-                      dismissPairing();
-                    }}
-                  />
-                </div>
+    <div className="q-group" id="pair-device">
+      <h2>
+        Pair through relay <span className="grow" />
+        {pairing ? (
+          <span className="q-faint q-num" style={{ fontSize: 12, fontWeight: 400 }}>
+            Expires in <span data-countdown="pair">{remainingText}</span>
+          </span>
+        ) : null}
+        <button
+          type="button"
+          className="q-btn ghost"
+          style={{ height: 24, marginLeft: 8 }}
+          onClick={onClose}
+        >
+          Done
+        </button>
+      </h2>
+      <div style={{ paddingTop: 12 }}>
+        <div className="q-field" style={{ borderTop: "1px solid var(--line)" }}>
+          <div className="lab">
+            <div className="t">Machine</div>
+            <div className="s">The paired device can reach this machine's hosts.</div>
+          </div>
+          <div className="ctl">
+            <ChipSelect
+              label="Machine to pair with"
+              value={machineId}
+              placeholder="No machines"
+              width={200}
+              options={available.map((machine) => ({
+                value: machine.id,
+                label: machine.name,
+              }))}
+              onChange={(next) => {
+                setMachineId(next);
+                dismissPairing();
+              }}
+            />
+          </div>
+        </div>
+        {pairing ? (
+          <div
+            style={{
+              display: "flex",
+              gap: 28,
+              padding: "18px 0 4px",
+              borderTop: "1px solid var(--line)",
+            }}
+          >
+            <div className="q-qr">
+              <QrCode
+                value={pairing.qr}
+                label={`Pairing QR code for ${pairingMachine?.name ?? "this machine"}`}
+                size={148}
+              />
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div className="q-muted" style={{ fontSize: 12 }}>
+                Scan with the h4rn app, or enter this code
               </div>
-              {confirmations.map((entry) => (
-                <fieldset key={entry.device_id} className="q-sas-host">
-                  <legend className="q-muted" style={{ fontSize: 12 }}>
-                    {entry.device_name} wants to connect. Its screen shows
-                  </legend>
-                  <div className="q-sas-code num" data-testid="host-sas">
-                    {entry.sas}
-                  </div>
-                  <div className="q-faint" style={{ fontSize: 12 }}>
-                    Approve only if both codes match. Until then the device cannot reach this host.
-                  </div>
-                  <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-                    <button
-                      type="button"
-                      className="q-btn primary"
-                      data-testid="confirm-pairing"
-                      onClick={() => void decidePairing(entry.device_id, true)}
+              <div className="q-code-big" style={{ margin: "4px 0 2px" }}>
+                {formatShortCode(pairing.shortCode)}
+              </div>
+              <div className="q-faint" style={{ fontSize: 12, marginBottom: 14 }}>
+                Works once, for one device. Pairs with {pairingMachine?.name ?? "this machine"}.
+              </div>
+              <div className="q-pair-scopes">
+                {SCOPE_OPTIONS.map((scope) => (
+                  <label key={scope.id} className="q-pair-scope">
+                    <input
+                      type="checkbox"
+                      className="sr-only"
+                      checked={scope.locked || scopes.includes(scope.id)}
+                      disabled={scope.locked}
+                      onChange={() => setScopes((current) => toggleScope(current, scope.id))}
+                    />
+                    <span
+                      className={`q-check${scope.locked || scopes.includes(scope.id) ? " on" : ""}`}
+                      aria-hidden
                     >
-                      Confirm device
-                    </button>
-                    <button
-                      type="button"
-                      className="q-btn danger"
-                      data-testid="reject-pairing"
-                      onClick={() => void decidePairing(entry.device_id, false)}
-                    >
-                      Reject
-                    </button>
-                  </div>
-                </fieldset>
-              ))}
-              {pairing ? (
-                <div
-                  style={{
-                    display: "flex",
-                    gap: 28,
-                    padding: "18px 0 4px",
-                    borderTop: "1px solid var(--line)",
+                      {scope.locked || scopes.includes(scope.id) ? (
+                        <CheckIcon className="q-icon s12" strokeWidth={2} />
+                      ) : null}
+                    </span>
+                    <span>
+                      <span style={{ fontWeight: 500 }}>{scope.label}</span>
+                      {scope.sub ? <span className="q-faint sub">{scope.sub}</span> : null}
+                    </span>
+                  </label>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  className="q-btn secondary"
+                  onClick={() => {
+                    void navigator.clipboard?.writeText(pairing.qr).then(() => {
+                      setCopied(true);
+                      window.setTimeout(() => setCopied(false), 1_500);
+                    });
                   }}
                 >
-                  <div className="q-qr">
-                    <QrCode
-                      value={pairing.qr}
-                      label={`Pairing QR code for ${pairingMachine?.name ?? "this machine"}`}
-                      size={148}
-                    />
-                  </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div className="q-muted" style={{ fontSize: 12 }}>
-                      Scan with the h4rn app, or enter this code
-                    </div>
-                    <div className="q-code-big" style={{ margin: "4px 0 2px" }}>
-                      {formatShortCode(pairing.shortCode)}
-                    </div>
-                    <div className="q-faint" style={{ fontSize: 12, marginBottom: 14 }}>
-                      Works once, for one device. Pairs with{" "}
-                      {pairingMachine?.name ?? "this machine"}.
-                    </div>
-                    <div className="q-pair-scopes">
-                      {SCOPE_OPTIONS.map((scope) => (
-                        <label key={scope.id} className="q-pair-scope">
-                          <input
-                            type="checkbox"
-                            className="sr-only"
-                            checked={scope.locked || scopes.includes(scope.id)}
-                            disabled={scope.locked}
-                            onChange={() => setScopes((current) => toggleScope(current, scope.id))}
-                          />
-                          <span
-                            className={`q-check${scope.locked || scopes.includes(scope.id) ? " on" : ""}`}
-                            aria-hidden
-                          >
-                            {scope.locked || scopes.includes(scope.id) ? (
-                              <CheckIcon className="q-icon s12" strokeWidth={2} />
-                            ) : null}
-                          </span>
-                          <span>
-                            <span style={{ fontWeight: 500 }}>{scope.label}</span>
-                            {scope.sub ? <span className="q-faint sub">{scope.sub}</span> : null}
-                          </span>
-                        </label>
-                      ))}
-                    </div>
-                    <div style={{ display: "flex", gap: 6, marginTop: 12, flexWrap: "wrap" }}>
-                      <button
-                        type="button"
-                        className="q-btn secondary"
-                        onClick={() => {
-                          void navigator.clipboard?.writeText(pairing.qr).then(() => {
-                            setCopied(true);
-                            window.setTimeout(() => setCopied(false), 1_500);
-                          });
-                        }}
-                      >
-                        {copied ? (
-                          <CheckIcon className="q-icon s14" strokeWidth={2} aria-hidden />
-                        ) : (
-                          <CopyIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                        )}
-                        {copied ? "Copied" : "Copy link"}
-                      </button>
-                      <button
-                        type="button"
-                        className="q-btn ghost"
-                        onClick={() => void createPairing(machineId, scopes)}
-                      >
-                        <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                        New code
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                <div className="q-field">
-                  <div className="lab">
-                    <div className="t">
-                      {phase === "signing_in" ? "Preparing a code…" : "No code yet"}
-                    </div>
-                  </div>
-                  <div className="ctl">
-                    <button
-                      type="button"
-                      className="q-btn secondary"
-                      disabled={!machineId}
-                      onClick={() => void createPairing(machineId, scopes)}
-                    >
-                      Generate a pairing code
-                    </button>
-                  </div>
-                </div>
-              )}
+                  {copied ? (
+                    <CheckIcon className="q-icon s14" strokeWidth={2} aria-hidden />
+                  ) : (
+                    <CopyIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                  )}
+                  {copied ? "Copied" : "Copy link"}
+                </button>
+                <button
+                  type="button"
+                  className="q-btn ghost"
+                  onClick={() => void createPairing(machineId, scopes)}
+                >
+                  <RefreshCwIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+                  New code
+                </button>
+              </div>
             </div>
           </div>
-
-          <div className="q-group">
-            <h2>
-              Paired devices{" "}
-              <span className="q-faint q-num" style={{ fontSize: 12, fontWeight: 400 }}>
-                {liveDevices.length}
-              </span>
-            </h2>
-            <table className="q-tbl">
-              <thead>
-                <tr>
-                  <th>Device</th>
-                  <th>Kind</th>
-                  <th>Scopes</th>
-                  <th>Last seen</th>
-                  <th />
-                </tr>
-              </thead>
-              <tbody>
-                {liveDevices.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="q-muted" style={{ padding: "16px 0" }}>
-                      No devices paired yet.
-                    </td>
-                  </tr>
-                ) : null}
-                {liveDevices.map((candidate) => (
-                  <DeviceRow
-                    key={candidate.id}
-                    device={candidate}
-                    current={candidate.id === device?.id}
-                    now={now}
-                    onRename={(name) => renameDevice(candidate.id, name)}
-                    onRevoke={() => revokeDevice(candidate.id)}
-                  />
-                ))}
-              </tbody>
-            </table>
+        ) : (
+          <div className="q-field">
+            <div className="lab">
+              <div className="t">
+                {phase === "signing_in" ? "Preparing a code…" : "No code yet"}
+              </div>
+            </div>
+            <div className="ctl">
+              <button
+                type="button"
+                className="q-btn secondary"
+                disabled={!machineId}
+                onClick={() => void createPairing(machineId, scopes)}
+              >
+                Generate a pairing code
+              </button>
+            </div>
           </div>
-        </>
-      )}
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Phones and computers that supervise the hosts. */
+function PairedDevicesGroup() {
+  const device = useRemote((state) => state.device);
+  const devices = useRemote((state) => state.devices);
+  const now = useNow();
+  const liveDevices = devices.filter((candidate) => !candidate.revoked_at);
+  return (
+    <div className="q-group">
+      <h2>
+        Devices{" "}
+        <span className="q-faint q-num" style={{ fontSize: 12, fontWeight: 400 }}>
+          {liveDevices.length}
+        </span>
+      </h2>
+      <p className="desc">
+        Phones and computers that can reach your hosts. Each gets its own scopes, and you can revoke
+        one without touching the others.
+      </p>
+      <table className="q-tbl">
+        <thead>
+          <tr>
+            <th>Device</th>
+            <th>Kind</th>
+            <th>Scopes</th>
+            <th>Last seen</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {liveDevices.length === 0 ? (
+            <tr>
+              <td colSpan={5} className="q-muted" style={{ padding: "16px 0" }}>
+                No devices paired yet.
+              </td>
+            </tr>
+          ) : null}
+          {liveDevices.map((candidate) => (
+            <DeviceRow
+              key={candidate.id}
+              device={candidate}
+              current={candidate.id === device?.id}
+              now={now}
+              onRename={(name) => renameDevice(candidate.id, name)}
+              onRevoke={() => revokeDevice(candidate.id)}
+            />
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -889,6 +987,8 @@ export function LiveAccountForm() {
     state.localHostId ? (state.hosts[state.localHostId]?.name ?? null) : null,
   );
   const machines = useRemote((state) => state.machines);
+  const active = useRemote((state) => state.active);
+  const error = useRemote((state) => state.error);
 
   return (
     <div className="q-form">
@@ -915,7 +1015,15 @@ export function LiveAccountForm() {
                 ) : connection.status === "connecting" ? (
                   <span className="q-muted">Connecting…</span>
                 ) : (
-                  <Health tone="danger">Offline</Health>
+                  <>
+                    <Health tone="danger">Offline</Health>
+                    {active ? (
+                      <>
+                        <span style={{ flex: 1 }} />
+                        <UseThisMachineButton />
+                      </>
+                    ) : null}
+                  </>
                 )}
               </div>
             </div>
@@ -935,9 +1043,16 @@ export function LiveAccountForm() {
                 <div className="s">Reached through h4rn-connect</div>
               </div>
               <div className="ctl">
-                <span className="q-muted q-num">
-                  {machines.filter((machine) => machine.online).length} online of {machines.length}
-                </span>
+                {error ? (
+                  <span className="q-muted" style={{ fontSize: 12 }} role="status">
+                    Can’t reach {connectUrl}.
+                  </span>
+                ) : (
+                  <span className="q-muted q-num">
+                    {machines.filter((machine) => machine.online).length} online of{" "}
+                    {machines.length}
+                  </span>
+                )}
                 <span style={{ flex: 1 }} />
                 <button
                   type="button"

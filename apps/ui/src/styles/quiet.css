@@ -192,6 +192,35 @@
 .q-btn .q-kbd {
   margin-left: 2px;
 }
+/* Settings → Shortcuts: a binding you can click to re-record. */
+.q-keybind {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-width: 112px;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: 6px;
+  box-shadow: inset 0 0 0 1px transparent;
+  transition:
+    background var(--dur-1),
+    box-shadow var(--dur-1);
+}
+.q-keybind:hover {
+  background: var(--hover);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+.q-keybind.on {
+  justify-content: center;
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--focus);
+  font-size: 12px;
+}
+.q-keybind:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
 .q-kbd + .q-kbd {
   margin-left: 2px;
 }
@@ -269,7 +298,8 @@
   color: var(--fg);
 }
 .q-seg > button[aria-selected="true"],
-.q-seg > button[aria-checked="true"] {
+.q-seg > button[aria-checked="true"],
+.q-seg > button[aria-pressed="true"] {
   background: var(--bg-raised);
   color: var(--fg);
   box-shadow:
@@ -279,7 +309,9 @@
 .q-tabs button[aria-selected="true"] {
   color: var(--fg);
 }
-.dark .q-seg > button[aria-selected="true"] {
+.dark .q-seg > button[aria-selected="true"],
+.dark .q-seg > button[aria-checked="true"],
+.dark .q-seg > button[aria-pressed="true"] {
   background: var(--fill-2);
   box-shadow: none;
 }
@@ -300,6 +332,11 @@
 }
 .q-seg.inline {
   display: inline-flex;
+}
+fieldset.q-seg-fs {
+  margin: 0;
+  border: 0;
+  min-width: 0;
 }
 .q-tabs button {
   height: 36px;
@@ -867,15 +904,6 @@
   background: var(--fill);
   color: var(--fg);
 }
-.q-side-dest-n {
-  position: absolute;
-  top: 1px;
-  right: 1px;
-  font-size: 10px;
-  line-height: 12px;
-  color: var(--fg-3);
-  font-variant-numeric: tabular-nums;
-}
 .q-hostpop {
   position: absolute;
   left: 8px;
@@ -1288,6 +1316,123 @@
   font-size: 12px;
   color: var(--fg-2);
   background: var(--bg);
+}
+/* Draft attachments above a composer's textarea. */
+.q-att-tray {
+  margin: 0 0 10px;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.q-att-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.q-att {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 44px;
+  max-width: 260px;
+  min-width: 0;
+  padding: 0 30px 0 6px;
+  border-radius: 9px;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--line);
+  overflow: hidden;
+}
+.q-att.bad {
+  box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--danger) 45%, transparent);
+}
+.q-att-ic {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 6px;
+  background: var(--fill);
+  color: var(--fg-2);
+  overflow: hidden;
+}
+.q-att.bad .q-att-ic {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.q-att-ic img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.q-att-tx {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 1px;
+}
+.q-att-nm {
+  font-size: 13px;
+  line-height: 17px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.q-att-meta {
+  font-size: 11.5px;
+  line-height: 15px;
+  color: var(--fg-3);
+  white-space: nowrap;
+}
+.q-att.bad .q-att-meta {
+  color: var(--danger);
+}
+.q-att-x {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  margin-top: -10px;
+  border-radius: 999px;
+  color: var(--fg-3);
+  transition:
+    background var(--dur-1),
+    color var(--dur-1);
+}
+.q-att-x:hover {
+  background: var(--fill-2);
+  color: var(--fg);
+}
+.q-att-x:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.q-att-bar {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  background: var(--accent);
+  transition: width var(--dur-2);
+}
+@media (pointer: coarse) {
+  .q-att-x {
+    width: 32px;
+    height: 32px;
+    margin-top: -16px;
+    right: 2px;
+  }
+  .q-att {
+    padding-right: 36px;
+  }
+}
+.q-ph-composer .q-att-tray {
+  margin: 0;
 }
 .q-ag-head {
   display: flex;
@@ -2290,7 +2435,7 @@
   min-width: 0;
 }
 .q-center-empty .q-box {
-  width: 420px;
+  width: min(680px, 100%);
   min-width: 0;
 }
 .q-cmt p {
@@ -2304,11 +2449,7 @@
 .q-center-empty .q-box p {
   max-width: none;
 }
-@media (max-width: 760px) {
-  .q-center-empty .q-box {
-    width: min(420px, calc(100% - 32px));
-  }
-}
+
 .q-chips {
   display: flex;
   flex-wrap: wrap;
@@ -2419,16 +2560,23 @@
     opacity: 0;
   }
 }
+/* Spotlight placement: horizontally centred in the window, high but never
+   taller than the window, so short windows scroll the list, not the page. */
 .q-palette {
+  --pal-top: clamp(16px, 12vh, 96px);
   position: fixed;
   transform: none;
   translate: none;
   z-index: 51;
-  left: 50%;
-  top: 96px;
-  width: 620px;
+  left: 0;
+  right: 0;
+  top: var(--pal-top);
+  width: min(620px, calc(100vw - 32px));
   max-width: none;
-  margin-left: -310px;
+  max-height: calc(100dvh - var(--pal-top) - 16px);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
   border-radius: 14px;
   background: var(--bg-raised);
   box-shadow:
@@ -2443,7 +2591,8 @@
     left: 0;
     width: 100%;
     height: 100%;
-    margin-left: 0;
+    max-height: none;
+    margin: 0;
     border-radius: 0;
   }
 }
@@ -2483,10 +2632,18 @@
   font-size: 12px;
   color: var(--fg-2);
 }
+.q-palette > [cmdk-root] {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
 .q-pal-list {
   /* Whole 34 px rows plus 6 px of padding either side: 13 units fit exactly
      (10 rows, 3 headings), so the resting list never slices a row in half. */
   max-height: 454px;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
   padding: 6px;
 }
@@ -3165,8 +3322,8 @@
   border-top: 1px solid var(--line);
 }
 .q-field .lab {
-  width: 200px;
-  flex: none;
+  flex: 0 1 320px;
+  min-width: 200px;
 }
 .q-ph-sheet-head .t {
   font-size: 17px;
@@ -3212,10 +3369,12 @@
   color: var(--fg-2);
   margin-top: 2px;
 }
+/* Controls sit at the trailing edge of the row; inputs still fill it. */
 .q-field .ctl {
   flex: 1;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 10px;
   min-width: 0;
 }
@@ -3323,6 +3482,40 @@
 }
 .q-pair-scope .q-check {
   margin-top: 2px;
+}
+/* Skills import: the "manage these folders" choice and greyed rows. */
+.q-skill-manage {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg-sunk);
+  box-shadow: inset 0 0 0 1px var(--line);
+  cursor: pointer;
+}
+.q-skill-manage .q-check {
+  margin-top: 1px;
+}
+.q-skill-manage-t {
+  display: block;
+  font-weight: 500;
+  color: var(--fg);
+}
+.q-skill-manage-s {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--fg-2);
+}
+.q-skill-manage:has(input:focus-visible) .q-check,
+.q-li:has(input:focus-visible) .q-check {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.q-li.q-li-off .t {
+  color: var(--fg-2);
 }
 .q-pair-scope .sub {
   display: block;
@@ -4802,9 +4995,23 @@
   }
   .q-field .lab {
     width: auto;
+    flex: none;
+    min-width: 0;
   }
   .q-field .ctl {
     flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+  /* A lone switch stays on the label's row, at its trailing edge. */
+  .q-field:has(> .ctl > .q-switch:only-child) {
+    flex-direction: row;
+    align-items: center;
+  }
+  .q-field:has(> .ctl > .q-switch:only-child) .lab {
+    flex: 1;
+  }
+  .q-field:has(> .ctl > .q-switch:only-child) .ctl {
+    flex: none;
   }
   .q-field .ctl > .q-input,
   .q-field .ctl > input {
@@ -4910,22 +5117,6 @@
   transform: rotate(90deg);
 }
 
-/* Footer pull-request badge sits inline after its icon. */
-.q-side-dest:has(.q-side-dest-n) {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: auto;
-  padding: 0 6px;
-  gap: 3px;
-}
-.q-side-dest .q-side-dest-n {
-  position: static;
-  font-size: 11px;
-  line-height: 14px;
-  color: var(--fg-2);
-}
-
 /* Harness CLI versions and app update notice (ADR-043). */
 .q-group-head {
   display: flex;
@@ -4976,4 +5167,215 @@
   position: absolute;
   inset: 0 auto 0 0;
   background: var(--fg-3);
+}
+
+/* Sidebar projects: menu, sort, drag, and the Add project dialog. */
+.q-pg-more {
+  position: absolute;
+  right: 50px;
+  width: 24px;
+  height: 24px;
+  opacity: 0;
+  background: var(--bg-side);
+  transition: opacity var(--dur-1);
+}
+.q-pg-h:hover .q-pg-more,
+.q-pg-h:focus-within .q-pg-more,
+.q-pg-more[data-state="open"] {
+  opacity: 1;
+}
+.q-pg-more:hover {
+  background: var(--hover);
+}
+/* Projects heading: sort menu and Add project sit at its trailing edge. */
+.q-proj-h {
+  padding: 6px 2px 6px 10px;
+}
+.q-proj-acts {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.q-proj-acts .q-ibtn {
+  color: var(--fg-3);
+}
+.q-proj-acts .q-ibtn:hover,
+.q-proj-acts .q-ibtn[data-state="open"] {
+  color: var(--fg);
+}
+/* Drag to reorder: the target shows a line where the project will land. */
+.q-pg-h[draggable="true"] {
+  cursor: default;
+}
+.q-pg-h.dragging {
+  opacity: 0.45;
+}
+.q-pg.q-pg-drop {
+  box-shadow: 0 -2px 0 var(--accent);
+  border-radius: 2px;
+}
+.q-pg-tail {
+  height: 28px;
+  margin-top: 6px;
+  border-radius: 6px;
+}
+.q-pg-tail.on {
+  box-shadow: inset 0 2px 0 var(--accent);
+}
+.q-pg-empty {
+  display: block;
+  width: 100%;
+  padding: 6px 10px 6px 34px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--fg-3);
+  text-align: left;
+}
+.q-pg-empty:hover {
+  background: var(--hover);
+  color: var(--fg-2);
+}
+/* Add project dialog */
+.q-addp-modes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+.q-addp-mode {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 1px var(--line);
+  color: var(--fg-2);
+  text-align: left;
+  transition:
+    background var(--dur-1),
+    box-shadow var(--dur-1);
+}
+.q-addp-mode:hover {
+  background: var(--hover);
+}
+.q-addp-mode[aria-checked="true"] {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px var(--focus);
+  color: var(--fg);
+}
+.q-addp-mode .q-icon {
+  margin-bottom: 4px;
+}
+.q-addp-mode-t {
+  font-weight: 600;
+  color: var(--fg);
+}
+.q-addp-mode-s {
+  font-size: 12px;
+  color: var(--fg-3);
+}
+.q-addp-mode .tick {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  color: var(--accent-tx);
+}
+.q-addp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.q-addp-field > .lab {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg-2);
+}
+.q-addp-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: var(--fg);
+}
+.q-addp-check:has(input:focus-visible) .q-check {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.q-addp-sum {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg-sunk);
+  font-size: 12px;
+  color: var(--fg-2);
+  overflow-wrap: anywhere;
+}
+/* Folder browser */
+.q-fb {
+  border-radius: 8px;
+  box-shadow: inset 0 0 0 1px var(--line);
+  overflow: hidden;
+}
+.q-fb-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px;
+  border-bottom: 1px solid var(--line);
+}
+.q-fb-bar .q-input {
+  flex: 1;
+  margin-left: 4px;
+  font-size: 12px;
+}
+.q-fb-list {
+  height: 196px;
+  overflow: auto;
+  padding: 4px;
+}
+.q-fb-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 6px;
+  color: var(--fg-2);
+  text-align: left;
+}
+.q-fb-row:hover,
+.q-fb-row:focus-visible {
+  background: var(--hover);
+  color: var(--fg);
+}
+.q-fb-nm {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.q-fb-row .tag {
+  font-size: 11px;
+}
+.q-fb-msg {
+  padding: 12px 8px;
+  font-size: 12px;
+  color: var(--fg-3);
+}
+.q-fb-msg.err {
+  color: var(--danger);
+}
+@media (max-width: 520px) {
+  .q-addp-modes {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.q-pg-rename {
+  height: 28px;
+  margin: 0 4px 0 6px;
+  font-weight: 600;
 }

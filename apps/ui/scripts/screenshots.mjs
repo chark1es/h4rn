@@ -324,7 +324,7 @@ const SHOTS = [
     name: "set-devices",
     device: "desktop",
     path: "/settings/devices",
-    wait: "text=Pair a device",
+    wait: "text=Pair through relay",
     settle: 1200,
   },
   {

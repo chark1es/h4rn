@@ -83,8 +83,32 @@ assigned a default.
 A harness limit becomes a `LimitHit` with the harness, provider/account, model,
 `reset_at` (when the provider says), any consumption numbers and the provider's
 message. The daemon records it, keeps the thread in Working and sets
-`AgentState::Scheduled` when auto-resume is armed. `GetLimits` returns the
-history plus the current policy, and `ListResets` returns schedules and history.
+`AgentState::Scheduled` when auto-resume is armed. The adapter is the only
+judge of whether a failure is a limit: a write that fails before its prompt
+reaches the agent carries a typed limit signal when the adapter parsed one, and
+the daemon never infers a limit from another harness's error text (an HTTP 413
+"payload size limit exceeded", for example, is an ordinary failed turn). A
+limit is only recorded while the failed write still owns the turn and its
+session, so a shutdown that interrupts the turn while the write is pending
+leaves no schedule behind. `GetLimits` returns the history plus the current
+policy, and `ListResets` returns schedules and history.
+
+An agent may also answer `end_turn` and only then exit, with the provider's
+reset on the exit report. The completion sees a closed transport, waits
+briefly for that report, and applies its limit before the turn settles, so the
+schedule is armed and the message queued behind the turn stays paused. The
+reset a turn already applied is kept on the turn, not only on the live
+schedule, so an exit report that repeats it cannot arm a new schedule after the
+person cancelled the resume during the wait; a newer reset still arms one. A
+death between turns publishes one diagnostic row; it does not raise a failure,
+so a thread whose auto-resume just armed stays Scheduled (and a thread with no
+limit is not turned into an Error asking for attention by the agent's exit
+alone). Each death between turns is tracked by its session generation, so a
+message that replaced the dead session and then died itself before the first
+exit report arrived still leaves both deaths with their own row and reset. When
+several reports describe one death, the exit/status report wins
+over the generic stdout-close notice even when its text is shorter; only
+reports of the same kind are compared by detail.
 
 ### Scheduling
 

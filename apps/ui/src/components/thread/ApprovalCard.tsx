@@ -1,6 +1,6 @@
 import { ChevronDownIcon, ShieldCheckIcon } from "lucide-react";
 
-import { BACKSPACE, ENTER, KeyCaps, MOD } from "@/components/common/Kbd";
+import { ShortcutCaps } from "@/components/common/Kbd";
 import type { ApprovalKind } from "@/gen";
 import { harnessLabel } from "@/lib/entities";
 import { tildePath } from "@/lib/format";
@@ -103,7 +103,7 @@ export function ApprovalCard({ threadId }: { threadId: string }) {
           aria-disabled={waiting || undefined}
           onClick={() => respond("deny")}
         >
-          Deny <KeyCaps value={`${MOD} ${BACKSPACE}`} />
+          Deny <ShortcutCaps command="approval.deny" />
         </button>
         <button
           type="button"
@@ -117,7 +117,7 @@ export function ApprovalCard({ threadId }: { threadId: string }) {
             "Approving…"
           ) : (
             <>
-              Approve <KeyCaps value={`${MOD} ${ENTER}`} />
+              Approve <ShortcutCaps command="approval.approve" />
             </>
           )}
         </button>

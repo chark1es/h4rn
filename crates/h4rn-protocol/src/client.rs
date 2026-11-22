@@ -458,6 +458,11 @@ pub enum ClientRequest {
         host: HostId,
         /// Candidate ids from [`ResponseBody::SkillsImportPreview`].
         candidate_ids: Vec<String>,
+        /// Also take over each selected harness folder whose content matches
+        /// the registry: h4rn writes its marker there (no skill file changes)
+        /// and records the install, so later versions from sync replace it.
+        #[serde(default)]
+        manage: bool,
     },
     /// List unresolved skill conflicts with the ids `SkillsResolveConflict`
     /// expects.
@@ -602,6 +607,45 @@ pub enum ClientRequest {
         device_id: DeviceId,
         /// `true` admits the device, `false` revokes it.
         confirm: bool,
+    },
+    /// Read the daemon's network-access setting and its dial addresses.
+    ///
+    /// Addresses are what another device on the same LAN or tailnet dials,
+    /// for example `192.168.1.20:47810`; they are empty while the listener is
+    /// off or failed to bind.
+    GetNetworkAccess,
+    /// Turn the dedicated network listener on or off.
+    ///
+    /// Enabling binds `<wildcard>:<network port>` (default `47810`) and serves
+    /// only `/healthz` and the Noise routes `/secure` and `/secure-mcp`;
+    /// plaintext `/ws` stays loopback-only. The setting is persisted in the
+    /// daemon data directory and applies without a restart.
+    SetNetworkAccess {
+        /// Whether the listener should be running.
+        enabled: bool,
+    },
+    /// Open a one-time direct (LAN/tailnet) pairing QR.
+    ///
+    /// Needs network access on and at least one non-loopback address. A new
+    /// offer replaces any pairing that is already open, so the CLI and the UI
+    /// never arm two secrets at once.
+    CreateDirectPairing {
+        /// Scopes the new device is granted; `view` and `approve` when empty.
+        #[serde(default)]
+        scopes: Vec<crate::connect::PairScope>,
+        /// Label shown next to the QR; the host name when absent.
+        #[serde(default)]
+        label: Option<String>,
+    },
+    /// Close the open direct pairing and disarm its one-time secret.
+    CancelDirectPairing,
+    /// List devices paired directly with this computer (LAN/tailnet QR or
+    /// `h4rnd pair --direct`). Devices paired through connect are not here.
+    ListDirectDevices,
+    /// Remove a directly paired device and drop its live sessions.
+    RevokeDirectDevice {
+        /// The device's Noise static key, hex, from [`Self::ListDirectDevices`].
+        key: String,
     },
     /// Read known usage limits and the auto-resume policy.
     GetLimits,
@@ -886,6 +930,50 @@ pub enum ClientRequest {
         #[serde(default)]
         bulk: bool,
     },
+    // ------------------------------------------------------------------
+    // Projects: sidebar folders that exist before their first thread.
+    // ------------------------------------------------------------------
+    /// List the registered projects on a host.
+    ListProjects {
+        /// Host to list.
+        host: HostId,
+    },
+    /// Add a project from an existing folder, a new folder or a clone.
+    ///
+    /// Adding a folder that is already registered returns that project.
+    AddProject {
+        /// Host that owns the folder.
+        host: HostId,
+        /// Where the project comes from.
+        source: crate::projects::ProjectSource,
+        /// Display name; defaults to the folder name.
+        #[serde(default)]
+        name: Option<String>,
+    },
+    /// Rename a project. The folder is not touched.
+    RenameProject {
+        /// Host that owns the project.
+        host: HostId,
+        /// Project to rename.
+        project_id: String,
+        /// New display name.
+        name: String,
+    },
+    /// Remove a project from the sidebar. Its folder and threads are kept.
+    RemoveProject {
+        /// Host that owns the project.
+        host: HostId,
+        /// Project to remove.
+        project_id: String,
+    },
+    /// List the folders inside one directory, for picking a project location.
+    BrowseDirectories {
+        /// Host to browse.
+        host: HostId,
+        /// Directory to list; `None` or `~` lists the home directory.
+        #[serde(default)]
+        path: Option<String>,
+    },
 }
 
 impl ClientRequest {
@@ -923,7 +1011,10 @@ impl ClientRequest {
             | Self::ForgeGetPrDiff { .. }
             | Self::ForgeListPrComments { .. }
             | Self::ForgeListChecks { .. }
-            | Self::ForgeListPrCommits { .. } => View,
+            | Self::ForgeListPrCommits { .. }
+            | Self::ListProjects { .. }
+            | Self::GetNetworkAccess
+            | Self::ListDirectDevices => View,
             Self::CreateThread { .. }
             | Self::SendMessage { .. }
             | Self::Interrupt { .. }
@@ -941,7 +1032,9 @@ impl ClientRequest {
             | Self::ForgeReply { .. }
             | Self::ForgeComment { .. }
             | Self::ForgeOpenPr { .. }
-            | Self::ForgeHandPrToAgent { .. } => Approve,
+            | Self::ForgeHandPrToAgent { .. }
+            | Self::RenameProject { .. }
+            | Self::RemoveProject { .. } => Approve,
             Self::TerminalOpen { .. }
             | Self::TerminalAttach { .. }
             | Self::TerminalList { .. }
@@ -959,7 +1052,9 @@ impl ClientRequest {
             | Self::FsWatch { .. }
             | Self::FsUnwatch { .. }
             | Self::FsDiff { .. }
-            | Self::FsTurnChanges { .. } => Files,
+            | Self::FsTurnChanges { .. }
+            | Self::AddProject { .. }
+            | Self::BrowseDirectories { .. } => Files,
             Self::McpUpsert { .. }
             | Self::McpRemove { .. }
             | Self::SkillsAdd { .. }
@@ -984,6 +1079,10 @@ impl ClientRequest {
             | Self::ForgeDeviceFlowPoll { .. }
             | Self::PairingConfirmations
             | Self::ConfirmPairing { .. }
+            | Self::SetNetworkAccess { .. }
+            | Self::CreateDirectPairing { .. }
+            | Self::CancelDirectPairing
+            | Self::RevokeDirectDevice { .. }
             | Self::ForgeImportCli { .. }
             | Self::UpdateHarness { .. }
             | Self::ClearWorktrees { .. } => Admin,
@@ -1168,6 +1267,25 @@ mod tests {
                 ClientRequest::ConfirmPairing {
                     device_id: DeviceId::new("dev_1"),
                     confirm: true,
+                },
+                Admin,
+            ),
+            // Reading the listener state is harmless; changing it, or opening
+            // a pairing window that admits a device, is administrative.
+            (ClientRequest::GetNetworkAccess, View),
+            (ClientRequest::SetNetworkAccess { enabled: true }, Admin),
+            (
+                ClientRequest::CreateDirectPairing {
+                    scopes: Vec::new(),
+                    label: None,
+                },
+                Admin,
+            ),
+            (ClientRequest::CancelDirectPairing, Admin),
+            (ClientRequest::ListDirectDevices, View),
+            (
+                ClientRequest::RevokeDirectDevice {
+                    key: "00".repeat(32),
                 },
                 Admin,
             ),

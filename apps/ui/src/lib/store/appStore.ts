@@ -20,6 +20,7 @@ import { createClientFromEnv, readBootConfig } from "@/lib/client/config";
 import { toProtoError } from "@/lib/client/errors";
 import type { ConnectionSnapshot, EventEnvelope } from "@/lib/client/types";
 import { pushRoute, type Route, readRoute, replaceRoute, routePath } from "@/lib/router";
+import { applyTerminalTheme } from "@/lib/terminalTheme";
 import { createThreadLog, foldEvent, type ThreadLog } from "./projection";
 
 export type Theme = "light" | "dark" | "system";
@@ -60,7 +61,12 @@ export type UiState = {
   filterOpen: boolean;
   moreOpen: boolean;
   limitsOpen: boolean;
-  sequenceHint: string | null;
+  /** Settings → Shortcuts is capturing a chord; global shortcuts stand down. */
+  recordingShortcut: boolean;
+  /** Host and folder the next New thread dialog starts with. */
+  newThreadPreset: { host: string; workspace: string } | null;
+  /** The Add project dialog is open. */
+  addProjectOpen: boolean;
   focusSearchNonce: number;
   focusComposerNonce: number;
   focusFilesNonce: number;
@@ -203,7 +209,9 @@ function createInitialState(): AppState {
       filterOpen: false,
       moreOpen: false,
       limitsOpen: false,
-      sequenceHint: null,
+      recordingShortcut: false,
+      newThreadPreset: null,
+      addProjectOpen: false,
       focusSearchNonce: 0,
       focusComposerNonce: 0,
       focusFilesNonce: 0,
@@ -389,8 +397,17 @@ export function closeShortcuts(): void {
   setUi({ shortcutsOpen: false });
 }
 
-export function openNewThread(): void {
-  setUi({ newThreadOpen: true, paletteOpen: false });
+/** Opens New thread, optionally starting in one project's folder. */
+export function openNewThread(preset?: { host: string; workspace: string }): void {
+  setUi({ newThreadOpen: true, paletteOpen: false, newThreadPreset: preset ?? null });
+}
+
+export function openAddProject(): void {
+  setUi({ addProjectOpen: true, paletteOpen: false });
+}
+
+export function closeAddProject(): void {
+  setUi({ addProjectOpen: false });
 }
 
 export function closeNewThread(): void {
@@ -689,9 +706,15 @@ export function startConnection(): void {
     media.addEventListener("change", () => {
       if (getState().ui.theme === "system") applyTheme("system");
     });
+    // A warm direct-pairing deep link stored its URI in the secret store; the
+    // transport is chosen at client construction, so rebuild it.
+    window.addEventListener("h4rn-direct-pair", () => {
+      restartConnection();
+    });
   }
 
   applyTheme(getState().ui.theme);
+  applyTerminalTheme();
   app.start();
 }
 

@@ -460,6 +460,8 @@ async fn boot_with_host(
         bind,
         extra_bind: None,
         tailscale: TailscaleMode::Off,
+        network_access: None,
+        network_port: 0,
         log_level: "off".to_owned(),
     };
     let options = ThreadManagerOptions {

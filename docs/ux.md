@@ -251,70 +251,51 @@ Quiet hours collapse pushes into one digest. Every push deep-links to the thread
 ### Global rules
 
 - Every action reachable by pointer is reachable by keyboard. Focus is always visible: 2 px cue ring at 2 px offset.
-- `?` opens the shortcut sheet. Shortcuts are discoverable in tooltips and the palette; no hidden modes.
-- Sequences use `G` then a letter, with a 900 ms window and a subtle status-bar hint (`G …`). A sequence never fires while a text field has focus.
-- Dangerous actions are never single-key. Approve is `⌘⏎`; deny is `⌘⌫`; both require the standby bar or approval row to have focus.
-- On the web build, browser-reserved combinations (`⌘N`, `⌘T`, `⌘W`) are not intercepted. `⌘⇧N` is the global New thread; `N` works when the list has focus.
-- Every shortcut is remappable in Settings → Shortcuts; the table below is the default.
+- Every command is a chord: `⌘` on macOS, `Ctrl` on Windows and Linux, plus one key, optionally with `⇧` or `⌥`. There are no single-key shortcuts and no `G`-sequences, so typing never runs a command.
+- `⌘/` opens the shortcut sheet. Shortcuts are discoverable in tooltips and the palette; no hidden modes.
+- A command that does not apply right now (approve with nothing pending, settle with no thread) leaves the key alone, so the browser or the focused editor still gets it. Code editors and the terminal handle their own chords first.
+- Every shortcut is remappable in Settings → Shortcuts (stored per device). A new binding must include `⌘`/`Ctrl` and may not collide with another command. The registry in `apps/ui/src/lib/keybindings.ts` is the default.
+- On the web build, browser-reserved combinations (`⌘N`, `⌘T`, `⌘W`, `Ctrl⇧N` in some browsers) cannot be intercepted; use the palette there.
 
 ### Shortcut map
 
-| Action | macOS | Windows / Linux | Context |
+| Action | macOS | Windows / Linux | Group |
 |---|---|---|---|
-| Command palette | `⌘K` | `Ctrl K` | Global |
-| Shortcut sheet | `?` | `?` | Global (not in inputs) |
-| New thread | `⌘⇧N` / `N` | `Ctrl⇧N` / `N` | Global / list focused |
-| Go to Inbox | `G` `I` | `G` `I` | Global |
-| Go to Hosts | `G` `H` | `G` `H` | Global |
-| Go to MCP & skills | `G` `M` | `G` `M` | Global |
-| Go to Usage | `G` `U` | `G` `U` | Global |
-| Go to IDE | `G` `E` | `G` `E` | Global |
-| Go to Pull requests | `G` `P` | `G` `P` | Global |
-| Show / hide sidebar | `⌘B` | `Ctrl B` | Global (not in inputs) |
-| Thread ↔ IDE | `⌘E` | `Ctrl E` | Thread |
-| Show / hide right panel | `⌘⌥B` | `Ctrl Alt B` | Thread / IDE |
-| Settings | `⌘,` | `Ctrl ,` | Global |
-| Toggle theme | `⌘⇧L` | `Ctrl⇧L` | Global |
-| Focus search | `/` | `/` | List |
-| Next / previous row | `J` / `K` | `J` / `K` | List |
-| Open row | `Enter` | `Enter` | List |
-| Select row | `X` | `X` | List |
-| Extend selection | `⇧X` | `Shift X` | List |
-| Working / Done / Settled | `⌥1` / `⌥2` / `⌥3` | `Alt 1/2/3` | Inbox |
-| Acknowledge (Done → Settled) | `A` | `A` | Done row |
-| Snooze… | `S` | `S` | Thread row |
-| Settle now | `⇧S` | `Shift S` | Thread |
-| Unsettle / reopen | `U` | `U` | Settled thread |
-| Pin to Working | `P` | `P` | Thread row |
-| Approve / Go | `⌘⏎` | `Ctrl Enter` | Standby bar / approval |
-| Deny / Hold | `⌘⌫` | `Ctrl Backspace` | Standby bar / approval |
-| Reply / focus composer | `R` | `R` | Thread |
-| Send | `⏎` | `Enter` | Composer |
-| Newline | `⇧⏎` | `Shift Enter` | Composer |
-| Mention file / host | `@` | `@` | Composer |
-| Slash commands | `/` | `/` | Composer (empty) |
-| Attach | `⌘U` | `Ctrl U` | Composer |
-| Edit last message | `↑` | `↑` | Empty composer |
-| Find in thread | `⌘F` | `Ctrl F` | Thread |
-| Interrupt turn | `⌘.` | `Ctrl .` | Thread |
-| Previous / next cue | `[` / `]` | `[` / `]` | Thread |
-| Terminal | `T` | `T` | Thread |
-| Changes panel | `D` | `D` | Thread |
-| Subagents | `⌘J` | `Ctrl J` | Thread |
-| Resume now | `⇧R` | `Shift R` | Limited thread |
-| Cancel auto-resume | `⌥R` | `Alt R` | Scheduled thread |
-| Clear terminal | `⌃L` | `Ctrl L` | Terminal focused |
-| Terminal font size | `⌘+` / `⌘−` / `⌘0` | `Ctrl +/−/0` | Terminal focused |
-| Quick open file | `⌘P` | `Ctrl P` | Thread / IDE |
-| Search in files | `⌘⇧F` | `Ctrl⇧F` | IDE |
-| Save file | `⌘S` | `Ctrl S` | IDE, editable |
-| Diff vs HEAD | `⌥D` | `Alt D` | IDE |
-| Diff vs agent changes | `⌥A` | `Alt A` | IDE |
-| Comment on PR | `C` | `C` | PR detail |
-| Reply to comment | `R` | `R` | PR comment focused |
-| Hand comment to agent | `H` | `H` | PR comment focused |
-| Open PR in browser | `O` | `O` | PR detail |
-| Close overlay | `Esc` | `Esc` | Any overlay |
+| Search or run | `⌘K` | `Ctrl+K` | General |
+| Keyboard shortcuts | `⌘/` | `Ctrl+/` | General |
+| New thread | `⌘⇧N` | `Ctrl+Shift+N` | General |
+| Settings | `⌘,` | `Ctrl+,` | General |
+| Toggle light and dark | `⌘⇧L` | `Ctrl+Shift+L` | General |
+| Go to threads | `⌘⇧H` | `Ctrl+Shift+H` | Navigate |
+| Go to pull requests | `⌘⇧P` | `Ctrl+Shift+P` | Navigate |
+| Go to usage | `⌘⇧U` | `Ctrl+Shift+U` | Navigate |
+| Go to MCP servers and skills | `⌘⇧M` | `Ctrl+Shift+M` | Navigate |
+| Show Working | `⌘1` | `Ctrl+1` | Navigate |
+| Show Done | `⌘2` | `Ctrl+2` | Navigate |
+| Show Settled | `⌘3` | `Ctrl+3` | Navigate |
+| Next thread | `⌘⌥↓` | `Ctrl+Alt+↓` | Navigate |
+| Previous thread | `⌘⌥↑` | `Ctrl+Alt+↑` | Navigate |
+| Focus the composer | `⌘L` | `Ctrl+L` | Thread |
+| Approve pending action | `⌘↵` | `Ctrl+Enter` | Thread |
+| Deny pending action | `⌘⌫` | `Ctrl+Backspace` | Thread |
+| Interrupt turn | `⌘.` | `Ctrl+.` | Thread |
+| Previous message | `⌘[` | `Ctrl+[` | Thread |
+| Next message | `⌘]` | `Ctrl+]` | Thread |
+| Settle thread | `⌘⇧S` | `Ctrl+Shift+S` | Thread |
+| Acknowledge (Done) | `⌘⇧A` | `Ctrl+Shift+A` | Thread |
+| Snooze for an hour | `⌘⌥S` | `Ctrl+Alt+S` | Thread |
+| Keep in Working | `⌘⌥P` | `Ctrl+Alt+P` | Thread |
+| Reopen a settled thread | `⌘⌥U` | `Ctrl+Alt+U` | Thread |
+| Attach files | `⌘U` | `Ctrl+U` | Thread |
+| Toggle sidebar | `⌘B` | `Ctrl+B` | Panels |
+| Toggle right panel | `⌘⌥B` | `Ctrl+Alt+B` | Panels |
+| Switch thread and IDE | `⌘E` | `Ctrl+E` | Panels |
+| Toggle terminal | <code>⌘`</code> | <code>Ctrl+`</code> | Panels |
+| Show changes | `⌘⇧D` | `Ctrl+Shift+D` | Panels |
+| Show subagents | `⌘J` | `Ctrl+J` | Panels |
+| Find a file | `⌘P` | `Ctrl+P` | Panels |
+
+Keys that edit text rather than run commands: `↵` sends, `⇧↵` adds a line, `@` mentions a file or host, `Esc` closes an overlay or leaves Settings. In the IDE, `⌘S` saves and `⌘⇧F` searches files.
 
 ### Command palette
 
@@ -360,7 +341,7 @@ The palette is grouped, fuzzy, and context-aware: commands that apply to the foc
 | View | Toggle context panel | — | Diff/files/terminal |
 | View | Toggle subagents | `⌘J` | Thread context panel |
 | View | Toggle theme | `⌘⇧L` | Light/dark/system |
-| View | Keyboard shortcuts | `?` | Sheet |
+| View | Keyboard shortcuts | `⌘/` | Sheet |
 | Account | Copy thread link | — | Deep link |
 | Account | Copy diagnostics | — | Redacted, for support |
 | Account | Lock app | — | Requires device auth |

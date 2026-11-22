@@ -31,6 +31,22 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "MODE", env = "H4RN_TAILSCALE")]
     pub tailscale: Option<String>,
 
+    /// Let other devices reach this daemon directly on the LAN or tailnet.
+    ///
+    /// Persisted in the data directory; `h4rnd pair --direct` needs it on.
+    #[arg(
+        long,
+        global = true,
+        value_name = "on|off",
+        env = "H4RN_NETWORK_ACCESS",
+        value_parser = parse_switch
+    )]
+    pub network_access: Option<bool>,
+
+    /// Port for the direct network listener (wildcard, Noise routes only).
+    #[arg(long, global = true, value_name = "PORT", env = "H4RN_NETWORK_PORT")]
+    pub network_port: Option<u16>,
+
     /// Log filter directive.
     #[arg(long, global = true, value_name = "DIRECTIVE", env = "H4RN_LOG")]
     pub log_level: Option<String>,
@@ -91,6 +107,14 @@ fn parse_scope(value: &str) -> Result<h4rn_protocol::PairScope, String> {
     })
 }
 
+fn parse_switch(value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" | "yes" => Ok(true),
+        "off" | "false" | "0" | "no" => Ok(false),
+        _ => Err(format!("expected on or off, not {value:?}")),
+    }
+}
+
 impl Cli {
     /// Resolves configuration and returns the subcommand.
     pub fn into_parts(self) -> Result<(Config, Command)> {
@@ -111,6 +135,15 @@ impl Cli {
                         "invalid tailscale mode {tailscale:?}; expected `auto` or `off`"
                     )
                 })?;
+        }
+        if let Some(network_access) = self.network_access {
+            config.network_access = Some(network_access);
+        }
+        if let Some(port) = self.network_port {
+            if port == 0 {
+                anyhow::bail!("--network-port must be between 1 and 65535");
+            }
+            config.network_port = port;
         }
         if let Some(log_level) = self.log_level {
             config.log_level = log_level;
@@ -145,5 +178,34 @@ mod tests {
     fn invalid_bind_is_rejected() {
         let cli = Cli::try_parse_from(["h4rnd", "--bind", "nonsense", "serve"]).unwrap();
         assert!(cli.into_parts().is_err());
+    }
+
+    #[test]
+    fn network_access_flags_apply_to_every_subcommand() {
+        let cli = Cli::try_parse_from([
+            "h4rnd",
+            "--network-access",
+            "on",
+            "--network-port",
+            "47910",
+            "pair",
+            "--direct",
+        ])
+        .unwrap();
+        let (config, command) = cli.into_parts().unwrap();
+        assert_eq!(config.network_access, Some(true));
+        assert_eq!(config.network_port, 47910);
+        assert!(matches!(command, Command::Pair { direct: true, .. }));
+    }
+
+    #[test]
+    fn an_unknown_network_access_value_is_rejected() {
+        assert!(Cli::try_parse_from(["h4rnd", "--network-access", "maybe", "serve"]).is_err());
+        assert!(
+            Cli::try_parse_from(["h4rnd", "--network-port", "0", "serve"])
+                .unwrap()
+                .into_parts()
+                .is_err()
+        );
     }
 }

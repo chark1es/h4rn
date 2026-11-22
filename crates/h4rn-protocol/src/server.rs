@@ -73,6 +73,19 @@ pub enum ServerFrame {
     },
 }
 
+/// A device paired directly (LAN/tailnet) with this computer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct DirectDevice {
+    /// Noise static key, hex. Identifies the device for a revoke.
+    pub key: String,
+    /// Scopes the device holds.
+    pub scopes: Vec<crate::connect::PairScope>,
+    /// When it paired; absent for devices paired before this was recorded.
+    pub paired_at: Option<DateTime<Utc>>,
+    /// Whether it has a live secure session right now.
+    pub connected: bool,
+}
+
 /// One durable event with its daemon-global sequence number.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
 pub struct SeqEvent {
@@ -450,6 +463,39 @@ pub enum ResponseBody {
         /// Newest first. An entry stays until the host confirms or rejects it.
         confirmations: Vec<crate::connect::PairingConfirmation>,
     },
+    /// The daemon's dedicated network listener and what a device would dial.
+    NetworkAccess {
+        /// Whether the persisted setting is on. A bind failure leaves this
+        /// true and reports `error`.
+        enabled: bool,
+        /// Whether a socket is bound and serving right now.
+        listening: bool,
+        /// Port the listener uses: the bound port, or the configured one while
+        /// it is off.
+        port: u16,
+        /// `host:port` candidates, most preferred first. Empty while the
+        /// listener is off.
+        addresses: Vec<String>,
+        /// Why the listener could not bind, when it could not.
+        error: Option<String>,
+    },
+    /// Devices paired directly with this computer.
+    DirectDevices {
+        /// Most recently paired first.
+        devices: Vec<DirectDevice>,
+    },
+    /// A one-time direct pairing QR and its advertised candidates.
+    DirectPairingOffer {
+        /// `h4rn://pair?...` payload to render as a QR.
+        uri: String,
+        /// Expiry, Unix seconds.
+        #[ts(type = "number")]
+        expires_at: i64,
+        /// `host:port` candidates the payload carries.
+        addresses: Vec<String>,
+        /// Scopes the paired device will hold.
+        scopes: Vec<crate::connect::PairScope>,
+    },
     /// A schedule was armed, moved or cleared.
     ResumeChanged {
         /// The current schedule, or `None` when none remains.
@@ -483,6 +529,21 @@ pub enum ResponseBody {
         skipped: Vec<crate::SkippedWorktree>,
         /// The fresh list after clearing.
         worktrees: Vec<crate::TrackedWorktree>,
+    },
+    /// Registered projects on one host, oldest first.
+    Projects {
+        /// Projects.
+        projects: Vec<crate::projects::Project>,
+    },
+    /// One project after it was added or renamed.
+    Project {
+        /// The project.
+        project: crate::projects::Project,
+    },
+    /// Folders inside one directory.
+    Directories {
+        /// The listing.
+        listing: crate::projects::DirectoryListing,
     },
     /// A request with no payload completed successfully.
     Ack,

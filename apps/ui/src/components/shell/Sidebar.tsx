@@ -26,8 +26,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
-import { KeyCaps, MOD, SHIFT } from "@/components/common/Kbd";
-import { ThreadRow } from "@/components/inbox/ThreadRow";
+import { ShortcutCaps } from "@/components/common/Kbd";
 import {
   harnessUpdateCount,
   useHarnesses,
@@ -35,13 +34,26 @@ import {
 } from "@/features/harnesses/harnessStore";
 import { serverStatus } from "@/features/mcp/labels";
 import { loadMcpServers, pendingMcpApprovals, useMcp } from "@/features/mcp/store";
-import { activateMachine, forgetMachine, useRemote } from "@/features/remote/remoteStore";
+import {
+  ProjectGroupSection,
+  ProjectsHeader,
+  ProjectsTail,
+  useProjectDrag,
+} from "@/features/projects/SidebarProjects";
+import { loadProjects, sidebarProjects, useProjects } from "@/features/projects/store";
+import { UseThisMachineButton } from "@/features/remote/LocalMachineAction";
+import {
+  activateMachine,
+  forgetMachine,
+  shellKind,
+  useRemote,
+} from "@/features/remote/remoteStore";
 import { loadSkills, useSkills } from "@/features/skills/store";
 import type { ThreadSummary, ThreadTab } from "@/gen";
 import { useNow } from "@/hooks/use-now";
 import { harnessLabel, machineSeed } from "@/lib/entities";
 import { absoluteTime, relativeAge } from "@/lib/format";
-import { groupThreads, monogram } from "@/lib/grouping";
+
 import {
   isSnoozed,
   needsAttention,
@@ -51,21 +63,18 @@ import {
   tabCounts,
   threadsForTab,
 } from "@/lib/inbox";
+import { type CommandId, titleWithShortcut } from "@/lib/keybindings";
 import { SETTINGS_SECTIONS, settingsPath } from "@/lib/settings";
 import {
-  acknowledgeThread,
   loadThreads,
   navigate,
+  openAddProject,
   openNewThread,
   openThread,
   setLibrarySelected,
   setSidebarWidth,
   setTab,
-  setThreadTab,
   setUi,
-  snoozeThread,
-  togglePin,
-  toggleProject,
   toggleSidebar,
   useApp,
 } from "@/lib/store/appStore";
@@ -257,6 +266,8 @@ function HostsPopover({
 }) {
   const user = useRemote((state) => state.user);
   const busy = useRemote((state) => state.busy);
+  const stored = useRemote((state) => state.active);
+  const mobile = shellKind() === "mobile";
   const online = rows.filter((row) => row.online).length;
   const active = rows.find((row) => row.active) ?? rows.find((row) => row.online);
   // The daemon answers but this host does not: that is an unreachable host,
@@ -290,7 +301,24 @@ function HostsPopover({
       </div>
       {rows.length === 0 ? (
         <div className="q-hp-empty">
-          No hosts yet. Run <span className="q-mono">h4rn host</span> on a machine.
+          {stored && connection.status === "online" ? (
+            <>
+              Connected to <b>{stored.machineName}</b>. Its host list isn’t available right now.
+            </>
+          ) : stored && connection.status === "connecting" ? (
+            <>
+              Connecting to <b>{stored.machineName}</b>…
+            </>
+          ) : stored ? (
+            <>
+              <b>{stored.machineName}</b> is unreachable.{" "}
+              {mobile ? "Disconnect to stop using it." : "Use this machine to keep working."}
+            </>
+          ) : (
+            <>
+              No hosts yet. Run <span className="q-mono">h4rn host</span> on a machine.
+            </>
+          )}
         </div>
       ) : (
         rows.map((row) => (
@@ -354,7 +382,7 @@ function HostsPopover({
         ))
       )}
       <div className="q-hp-conn">{connectionLine}</div>
-      {active?.active && active.machineId ? (
+      {stored ? (
         <button
           type="button"
           className="q-nav"
@@ -365,7 +393,7 @@ function HostsPopover({
           }}
         >
           <WifiOffIcon className="q-icon" strokeWidth={1.5} aria-hidden />
-          <span className="lbl">Disconnect from {active.name}</span>
+          <span className="lbl">Disconnect from {stored.machineName}</span>
         </button>
       ) : null}
       <div className="q-hp-sep" />
@@ -417,42 +445,36 @@ function HostsPopover({
 
 const NO_SKILLS: never[] = [];
 
-type Destination = "pr" | "library" | "usage" | "settings";
+/** MCP servers and skills live under Settings, so the library has no button of its own. */
+type Destination = "pr" | "usage" | "settings";
 
 const DESTINATIONS: Array<{
   key: Destination;
   label: string;
   icon: LucideIcon;
   path: string;
-  shortcut: string;
+  command: CommandId;
 }> = [
   {
     key: "pr",
     label: "Pull requests",
     icon: GitPullRequestIcon,
     path: "/pulls",
-    shortcut: "G P",
-  },
-  {
-    key: "library",
-    label: "MCP & skills",
-    icon: PlugIcon,
-    path: "/library",
-    shortcut: "G M",
+    command: "nav.pulls",
   },
   {
     key: "usage",
     label: "Usage",
     icon: ChartNoAxesColumnIcon,
     path: "/usage",
-    shortcut: "G U",
+    command: "nav.usage",
   },
   {
     key: "settings",
     label: "Settings",
     icon: SettingsIcon,
-    path: settingsPath("hosts"),
-    shortcut: "⌘,",
+    path: settingsPath("general"),
+    command: "settings.open",
   },
 ];
 
@@ -460,15 +482,12 @@ function SidebarFooter({
   destination,
   loading,
   offline,
-  noThreads,
   rows,
   connection,
 }: {
   destination: Destination | null;
   loading: boolean;
   offline: boolean;
-  /** No projects yet: nothing for the pull-request badge to count. */
-  noThreads: boolean;
   rows: HostRow[];
   connection: { status: string; latencyMs: number | null; transport: string };
 }) {
@@ -508,24 +527,16 @@ function SidebarFooter({
             className={cn("q-ibtn q-side-dest", destination === item.key && "on")}
             aria-current={destination === item.key ? "page" : undefined}
             aria-label={item.label}
-            title={`${item.label}  ${item.shortcut}`}
+            title={titleWithShortcut(item.label, item.command)}
             onClick={() =>
               navigate({
                 kind: "placeholder",
-                surface:
-                  item.key === "pr"
-                    ? "pulls"
-                    : item.key === "library"
-                      ? "library"
-                      : item.key === "usage"
-                        ? "usage"
-                        : "settings",
+                surface: item.key === "pr" ? "pulls" : item.key === "usage" ? "usage" : "settings",
                 path: item.path,
               })
             }
           >
             <item.icon className="q-icon" strokeWidth={1.5} aria-hidden />
-            {item.key === "pr" && !noThreads ? <span className="q-side-dest-n">3</span> : null}
           </button>
         ))}
       </div>
@@ -533,6 +544,43 @@ function SidebarFooter({
         <HostsPopover rows={rows} connection={connection} onClose={() => setPopoverOpen(false)} />
       ) : null}
     </>
+  );
+}
+
+function OfflineNotice({
+  connection,
+  remoteName,
+  onReconnect,
+}: {
+  connection: { lastConnectedAt: number | null };
+  remoteName: string | null;
+  onReconnect: () => void;
+}) {
+  return (
+    <div className="q-banner q-side-banner">
+      <span className="ic">
+        <WifiOffIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
+      </span>
+      <span className="grow">
+        {remoteName ? (
+          <b>Can’t reach {remoteName}.</b>
+        ) : (
+          <>
+            <b>Offline</b>
+            {connection.lastConnectedAt
+              ? ` · as of ${absoluteTime(new Date(connection.lastConnectedAt).toISOString())}`
+              : null}
+          </>
+        )}
+      </span>
+      {remoteName ? (
+        <UseThisMachineButton compact />
+      ) : (
+        <button type="button" className="q-btn ghost" style={{ height: 24 }} onClick={onReconnect}>
+          Reconnect
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -564,23 +612,33 @@ function ThreadsSidebar() {
   const state = useApp((s) => s);
   const now = useNow();
   const rows = useHostRows();
+  const stored = useRemote((state) => state.active);
 
   const counts = useMemo(() => tabCounts(state, now), [state, now]);
   const visible = useMemo(() => threadsForTab(state, tab, now), [state, tab, now]);
   const snoozed = useMemo(() => snoozedThreads(state, now), [state, now]);
-  const groups = useMemo(() => groupThreads(visible), [visible]);
-  const allEmpty = Object.keys(threads).length === 0 && !loading;
+  const projects = useProjects((value) => value.projects);
+  const prefs = useProjects((value) => value.prefs);
+  const localHostId = useApp((value) => value.localHostId);
+  const [dragging, setDragging] = useProjectDrag();
+  useEffect(() => {
+    if (localHostId) void loadProjects();
+  }, [localHostId]);
+  const groups = useMemo(
+    () => sidebarProjects({ visible, all: Object.values(threads), projects, prefs }),
+    [visible, threads, projects, prefs],
+  );
+  const groupKeys = useMemo(() => groups.map((group) => group.key), [groups]);
+  const allEmpty = Object.keys(threads).length === 0 && projects.length === 0 && !loading;
   const destination: Destination | null =
     route.kind === "placeholder"
       ? route.surface === "pulls"
         ? "pr"
-        : route.surface === "library"
-          ? "library"
-          : route.surface === "usage"
-            ? "usage"
-            : route.surface === "settings"
-              ? "settings"
-              : null
+        : route.surface === "usage"
+          ? "usage"
+          : route.surface === "settings"
+            ? "settings"
+            : null
       : null;
 
   const activate = (value: ThreadTab) => setTab(value);
@@ -595,7 +653,7 @@ function ThreadsSidebar() {
             type="button"
             className="q-ibtn"
             aria-label="Hide sidebar"
-            title={`Hide sidebar  ${MOD}B`}
+            title={titleWithShortcut("Hide sidebar", "sidebar.toggle")}
             onClick={toggleSidebar}
           >
             <PanelLeftIcon className="q-icon" strokeWidth={1.5} aria-hidden />
@@ -604,8 +662,8 @@ function ThreadsSidebar() {
             type="button"
             className="q-ibtn"
             aria-label="New thread"
-            title={`New thread  ${MOD}${SHIFT}N`}
-            onClick={openNewThread}
+            title={titleWithShortcut("New thread", "thread.new")}
+            onClick={() => openNewThread()}
           >
             <SquarePenIcon className="q-icon" strokeWidth={1.5} aria-hidden />
           </button>
@@ -617,7 +675,7 @@ function ThreadsSidebar() {
         >
           <SearchIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
           <span>Search or run</span>
-          <KeyCaps value={`${MOD} K`} />
+          <ShortcutCaps command="palette.toggle" />
         </button>
         {allEmpty ? null : (
           <div className="q-seg" role="tablist" aria-label="Thread state">
@@ -637,25 +695,11 @@ function ThreadsSidebar() {
       </div>
 
       {connection.status === "offline" && !error ? (
-        <div className="q-banner q-side-banner">
-          <span className="ic">
-            <WifiOffIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-          </span>
-          <span className="grow">
-            <b>Offline</b>
-            {connection.lastConnectedAt
-              ? ` · as of ${absoluteTime(new Date(connection.lastConnectedAt).toISOString())}`
-              : null}
-          </span>
-          <button
-            type="button"
-            className="q-btn ghost"
-            style={{ height: 24 }}
-            onClick={() => void loadThreads()}
-          >
-            Reconnect
-          </button>
-        </div>
+        <OfflineNotice
+          connection={connection}
+          remoteName={stored?.machineName ?? null}
+          onReconnect={() => void loadThreads()}
+        />
       ) : null}
 
       {error ? (
@@ -667,14 +711,18 @@ function ThreadsSidebar() {
             <b>Couldn’t reach {unreachableHostLabel(hosts)}.</b>{" "}
             {error.hint ?? "Showing cached threads."}
           </span>
-          <button
-            type="button"
-            className="q-btn ghost"
-            style={{ height: 24 }}
-            onClick={() => void loadThreads()}
-          >
-            Retry
-          </button>
+          {connection.status === "offline" && stored ? (
+            <UseThisMachineButton compact />
+          ) : (
+            <button
+              type="button"
+              className="q-btn ghost"
+              style={{ height: 24 }}
+              onClick={() => void loadThreads()}
+            >
+              Retry
+            </button>
+          )}
         </div>
       ) : null}
 
@@ -688,7 +736,7 @@ function ThreadsSidebar() {
               A project is a folder on one of your hosts. Every thread you start there is listed
               under it.
             </p>
-            <button type="button" className="q-btn secondary" onClick={openNewThread}>
+            <button type="button" className="q-btn secondary" onClick={openAddProject}>
               <FolderPlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
               Add a project…
             </button>
@@ -718,81 +766,29 @@ function ThreadsSidebar() {
                 Clear search
               </button>
             ) : tab === "working" ? (
-              <button type="button" className="q-btn secondary" onClick={openNewThread}>
+              <button type="button" className="q-btn secondary" onClick={() => openNewThread()}>
                 New thread
               </button>
             ) : null}
           </div>
         ) : (
-          groups.map((group) => {
-            const closed = layout.closedProjects[group.key] === true;
-            const you = group.threads.some((thread) => needsAttention(thread, now));
-            const active = group.threads.some((thread) => thread.thread_id === selectedId);
-            return (
-              <section
-                className="q-pg"
+          <>
+            <ProjectsHeader />
+            {groups.map((group) => (
+              <ProjectGroupSection
                 key={group.key}
-                aria-label={`${group.name} on ${group.host}`}
-              >
-                <div className={cn("q-pg-h", active && "act")}>
-                  <button
-                    type="button"
-                    className="q-pg-tog"
-                    aria-expanded={!closed}
-                    onClick={() => toggleProject(group.key)}
-                  >
-                    <span className="q-pmono" aria-hidden="true">
-                      {monogram(group.name)}
-                    </span>
-                    <span className="nm">{group.name}</span>
-                    <span className="hn">{hosts[group.host]?.name ?? group.host}</span>
-                    <span className="grow" />
-                    {closed ? (
-                      <>
-                        {you ? (
-                          <span className="q-dot you" role="img" aria-label="needs you" />
-                        ) : null}
-                        <span className="ct q-num">{group.threads.length}</span>
-                      </>
-                    ) : null}
-                    <ChevronDownIcon className="q-icon s12 chev" strokeWidth={1.5} aria-hidden />
-                  </button>
-                  <button
-                    type="button"
-                    className="q-ibtn q-pg-add"
-                    aria-label={`New thread in ${group.name} on ${group.host}`}
-                    title={`New thread in ${group.name}`}
-                    onClick={openNewThread}
-                  >
-                    <SquarePenIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
-                  </button>
-                </div>
-                {closed ? null : (
-                  <div className="q-rows">
-                    {group.threads.map((thread) => (
-                      <ThreadRow
-                        key={thread.thread_id}
-                        thread={thread}
-                        host={hosts[thread.host]}
-                        index={0}
-                        compact
-                        selected={selectedId === thread.thread_id}
-                        tabStop={selectedId === thread.thread_id}
-                        resumeAt={thread.resume_at ?? thread.limit?.reset_at ?? null}
-                        now={now}
-                        onOpen={() => openThread(thread.thread_id)}
-                        onAcknowledge={() => void acknowledgeThread(thread.thread_id)}
-                        onSettle={() => void setThreadTab(thread.thread_id, "settled")}
-                        onReopen={() => void setThreadTab(thread.thread_id, "done")}
-                        onPin={() => void togglePin(thread.thread_id)}
-                        onSnooze={(until) => void snoozeThread(thread.thread_id, until)}
-                      />
-                    ))}
-                  </div>
-                )}
-              </section>
-            );
-          })
+                group={group}
+                order={groupKeys}
+                dragging={dragging}
+                onDragging={setDragging}
+                hosts={hosts}
+                selectedId={selectedId}
+                closed={layout.closedProjects[group.key] === true}
+                now={now}
+              />
+            ))}
+            <ProjectsTail order={groupKeys} dragging={dragging} onDragging={setDragging} />
+          </>
         )}
 
         {tab === "working" && snoozed.length > 0 ? (
@@ -804,7 +800,6 @@ function ThreadsSidebar() {
         destination={destination}
         loading={loading}
         offline={connection.status === "offline"}
-        noThreads={allEmpty}
         rows={rows}
         connection={connection}
       />
@@ -916,7 +911,7 @@ function SettingsSidebar() {
   const skillsActive =
     route.kind === "placeholder" && route.path.replace(/\/+$/, "").endsWith("/skills");
   const section = route.kind === "placeholder" ? (route.path.split("/")[2] ?? "hosts") : "hosts";
-  const destination: Destination | null = library ? "library" : "settings";
+  const destination: Destination = "settings";
   let group: string | undefined;
 
   const go = (path: string) => navigate({ kind: "placeholder", surface: "settings", path });
@@ -971,7 +966,11 @@ function SettingsSidebar() {
               <button
                 type="button"
                 className="q-nav"
-                aria-current={!library && section === item.key ? "page" : undefined}
+                aria-current={
+                  !library && (section === "devices" ? "hosts" : section) === item.key
+                    ? "page"
+                    : undefined
+                }
                 onClick={() => go(settingsPath(item.key))}
               >
                 <item.icon className="q-icon" strokeWidth={1.5} aria-hidden />
@@ -981,9 +980,9 @@ function SettingsSidebar() {
                     {harnessUpdates}
                   </span>
                 ) : null}
-                {item.key === "hosts" || item.key === "devices" ? (
-                  <span className="ct q-num">
-                    {item.key === "hosts" ? rows.length : deviceCount}
+                {item.key === "hosts" ? (
+                  <span className="ct q-num" title={`${rows.length} hosts, ${deviceCount} devices`}>
+                    {rows.length}
                   </span>
                 ) : null}
               </button>
@@ -1062,7 +1061,6 @@ function SettingsSidebar() {
         destination={destination}
         loading={loading}
         offline={connection.status === "offline"}
-        noThreads={false}
         rows={rows}
         connection={connection}
       />
@@ -1120,7 +1118,7 @@ export function SidebarReveal() {
         type="button"
         className="q-ibtn"
         aria-label={needsYou > 0 ? "Show sidebar. 1 thread needs you" : "Show sidebar"}
-        title={`Show sidebar  ${MOD}B`}
+        title={titleWithShortcut("Show sidebar", "sidebar.toggle")}
         onClick={toggleSidebar}
       >
         <PanelLeftIcon className="q-icon" strokeWidth={1.5} aria-hidden />
@@ -1130,8 +1128,8 @@ export function SidebarReveal() {
         type="button"
         className="q-ibtn"
         aria-label="New thread"
-        title={`New thread  ${MOD}${SHIFT}N`}
-        onClick={openNewThread}
+        title={titleWithShortcut("New thread", "thread.new")}
+        onClick={() => openNewThread()}
       >
         <SquarePenIcon className="q-icon" strokeWidth={1.5} aria-hidden />
       </button>

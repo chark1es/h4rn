@@ -99,6 +99,8 @@ async fn a_settled_subagent_worktree_is_listed_and_cleared_over_the_wire() {
         extra_bind: None,
         log_level: "off".to_owned(),
         tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
+        network_access: None,
+        network_port: 0,
     };
     let daemon = DaemonBuilder::new(config)
         .with_catalog(Arc::new(catalog))
@@ -258,6 +260,8 @@ async fn clearing_a_worktree_while_its_child_still_works_skips_it() {
         extra_bind: None,
         log_level: "off".to_owned(),
         tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
+        network_access: None,
+        network_port: 0,
     };
     let daemon = DaemonBuilder::new(config)
         .with_catalog(Arc::new(catalog))
@@ -428,6 +432,8 @@ async fn a_thread_in_a_linked_checkout_of_a_bare_repository_is_tracked_and_its_s
         extra_bind: None,
         log_level: "off".to_owned(),
         tailscale: h4rn_daemon::remote::TailscaleMode::Auto,
+        network_access: None,
+        network_port: 0,
     };
     let daemon = DaemonBuilder::new(config)
         .with_catalog(Arc::new(catalog))

@@ -10,11 +10,52 @@ use std::path::Path;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use h4rn_protocol::ThreadId;
+use sha2::{Digest, Sha384};
+use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{SqlitePool, Transaction};
 
 use crate::lifecycle::ThreadEvent;
 use crate::store::{EventStore, StoreError, StoredEvent};
+
+static MIGRATOR: Migrator = sqlx::migrate!("./migrations");
+
+/// Rewrites the stored checksum of any applied migration whose SQL differs
+/// from the embedded copy only in line endings.
+///
+/// sqlx checksums the exact migration text, so a binary built from a CRLF
+/// checkout (the Windows release runner, before `.gitattributes` pinned SQL to
+/// LF) refuses a database an LF build created, and the reverse. The daemon
+/// then exits at startup. Same SQL, same schema: only the stamp is updated.
+async fn restamp_line_ending_checksums(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    let tracked: Option<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_optional(pool)
+    .await?;
+    if tracked.is_none() {
+        return Ok(());
+    }
+    for migration in MIGRATOR.iter() {
+        let lf = migration.sql.replace("\r\n", "\n");
+        let crlf = lf.replace('\n', "\r\n");
+        for variant in [lf, crlf] {
+            let digest = Sha384::digest(variant.as_bytes());
+            if digest.as_slice() == migration.checksum.as_ref() {
+                continue;
+            }
+            sqlx::query(
+                "UPDATE _sqlx_migrations SET checksum = ? WHERE version = ? AND checksum = ?",
+            )
+            .bind(migration.checksum.as_ref())
+            .bind(migration.version)
+            .bind(digest.as_slice())
+            .execute(pool)
+            .await?;
+        }
+    }
+    Ok(())
+}
 
 /// Durable SQLite-backed event log.
 #[derive(Debug, Clone)]
@@ -46,7 +87,8 @@ impl SqliteEventStore {
             .max_connections(1)
             .connect_with(options)
             .await?;
-        sqlx::migrate!("./migrations").run(&pool).await?;
+        restamp_line_ending_checksums(&pool).await?;
+        MIGRATOR.run(&pool).await?;
         Ok(Self { pool })
     }
 
@@ -206,6 +248,47 @@ mod tests {
         let all = reopened.read_since(&thread, 0).await.unwrap();
         assert_eq!(all.len(), 3, "the log survives a daemon restart");
         assert_eq!(all[2].seq, 3);
+    }
+
+    /// Stamps migration 1 with `checksum`, as another build would have.
+    async fn stamp_first_migration(path: &Path, checksum: &[u8]) {
+        let store = SqliteEventStore::connect(path).await.unwrap();
+        sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = 1")
+            .bind(checksum)
+            .execute(&store.pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn sqlite_opens_a_database_stamped_by_a_crlf_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.db");
+        let thread = ThreadId::new("th_crlf");
+        let first = MIGRATOR.iter().next().unwrap();
+        let other_endings = if first.sql.contains("\r\n") {
+            first.sql.replace("\r\n", "\n")
+        } else {
+            first.sql.replace('\n', "\r\n")
+        };
+        stamp_first_migration(&path, &Sha384::digest(other_endings.as_bytes())).await;
+        {
+            let store = SqliteEventStore::connect(&path).await.unwrap();
+            store.append(&thread, &events()).await.unwrap();
+        }
+        let reopened = SqliteEventStore::connect(&path)
+            .await
+            .expect("a line-ending-only checksum difference does not block startup");
+        assert_eq!(reopened.read_since(&thread, 0).await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn sqlite_still_rejects_a_modified_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("events.db");
+        stamp_first_migration(&path, &Sha384::digest(b"-- some other schema\n")).await;
+        let error = SqliteEventStore::connect(&path).await.unwrap_err();
+        assert!(matches!(error, StoreError::Migration(_)), "{error}");
     }
 
     #[tokio::test]

@@ -54,7 +54,10 @@ pub use codex::{
     ENV_MODEL_PROVIDER, ENV_WIRE_API, approval_from_request, approval_response, build_turn_input,
     detect_codex,
 };
-pub use fake::{FakeHarness, FakeSession, Gate, test_spec};
+pub use fake::{
+    EventInjector, FakeHarness, FakeSession, Gate, InterruptCount, SendCount, SessionModels,
+    test_spec,
+};
 pub use opencode::{
     ENV_CLIPROXY_API_KEY, ENV_CLIPROXY_BASE_URL, ENV_OPENCODE_API_KEY, ENV_OPENCODE_BASE_URL,
     ENV_OPENCODE_MODELS, ENV_OPENCODE_PACKAGE, ENV_OPENCODE_PROVIDER, MINIMUM_OPENCODE_VERSION,
@@ -173,12 +176,118 @@ pub enum HarnessEvent {
         usage: Usage,
     },
     /// A transport, protocol or harness failure.
+    ///
+    /// This is the ordinary diagnostic row: it is always published as its own
+    /// error. A transport that died is reported as [`Self::TransportClosed`]
+    /// instead, so the two are never confused.
     Error {
         /// What happened.
         message: String,
         /// Whether a retry is safe.
         retryable: bool,
     },
+    /// The session's write transport died under the turn.
+    ///
+    /// This is the same death the daemon reports when a prompt write fails, so
+    /// it is tagged where it is produced (the ACP bridge's writer-error path)
+    /// rather than inferred from the session's health afterwards: only these
+    /// two reports of one death are collapsed into one row, and any other
+    /// diagnostic still gets its own.
+    ///
+    /// A report without an exit status or stderr yet (the bridge's generic
+    /// stdout-close notice) is `retryable: true`; the report that carries the
+    /// exit status and the drained stderr is `retryable: false`. A death
+    /// reported between turns is held for the first report and published from
+    /// the second, so the row is never the generic notice.
+    ///
+    /// `kind` says which part of the transport died. Only [`Exit`] is the
+    /// process-exit report that can carry the provider's reset: a read error is
+    /// also `retryable: false`, but it is not the last account of the death.
+    ///
+    /// [`Exit`]: TransportCloseKind::Exit
+    TransportClosed {
+        /// What happened.
+        message: String,
+        /// Whether a retry is safe.
+        retryable: bool,
+        /// Which end of the transport reported the death.
+        kind: TransportCloseKind,
+        /// The provider reset the exit report's stderr named, when it named
+        /// one.
+        ///
+        /// Only an [`Exit`](TransportCloseKind::Exit) report can carry this:
+        /// the daemon would otherwise have to infer the reset from a document
+        /// beside the report, and a death reported without the usual typed
+        /// limit notification would silently lose it.
+        #[serde(default)]
+        reset_at: Option<DateTime<Utc>>,
+    },
+}
+
+/// Which part of a session's transport reported its death.
+///
+/// A transport can die in several ways, and one of them is final: only the
+/// agent's exit report can still carry its stderr and a provider reset after
+/// the stream is already unusable. The others may be followed by that report
+/// within the same bounded window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TransportCloseKind {
+    /// The agent's stdout ended (the bridge's generic close notice).
+    Eof,
+    /// Reading the agent's stdout failed.
+    Read,
+    /// Writing to the agent failed, timed out, or the writer exited.
+    Write,
+    /// The agent process exited and was reaped. Its report is the specific
+    /// account of the death, with the status and stderr it drained.
+    Exit,
+}
+
+/// The more specific of two messages that describe one failure of the same
+/// kind.
+///
+/// The agent's stderr is the most specific detail either report can add and it
+/// always spans an extra line, so a multi-line message wins; between equally
+/// detailed notices the longer one is kept. The adapter and the daemon share
+/// this rule so their merged failure rows pick the same text. Only reports of
+/// one kind are compared this way: [`merge_transport_detail`] decides between
+/// the generic close notice and the exit/status report.
+pub fn most_specific_detail(first: String, second: String) -> String {
+    let first_lines = first.lines().count();
+    let second_lines = second.lines().count();
+    match second_lines.cmp(&first_lines) {
+        std::cmp::Ordering::Greater => second,
+        std::cmp::Ordering::Less => first,
+        std::cmp::Ordering::Equal => {
+            if second.len() > first.len() {
+                second
+            } else {
+                first
+            }
+        }
+    }
+}
+
+/// Names one dead transport's failure row from two reports of it.
+///
+/// A report that carries the exit status or the drained stderr
+/// (`retryable: false`) is always the specific account of the death, even when
+/// its text is shorter than the generic stdout-close notice
+/// (`retryable: true`); a generic notice that arrives after it adds nothing.
+/// Only two reports of the same kind are compared by [`most_specific_detail`].
+/// The exit report's own message already appends its stderr when it drained
+/// any.
+pub fn merge_transport_detail(
+    held: String,
+    held_retryable: bool,
+    message: String,
+    retryable: bool,
+) -> String {
+    match (held_retryable, retryable) {
+        (true, false) => message,
+        (false, true) => held,
+        _ => most_specific_detail(held, message),
+    }
 }
 
 /// Harness adapter failures.
@@ -206,6 +315,26 @@ pub enum HarnessError {
         /// Underlying failure.
         message: String,
     },
+    /// The harness refused a prompt because of a provider usage limit.
+    ///
+    /// Only an adapter that parsed the limit out of its own failure detail
+    /// raises this. The daemon arms an auto-resume from this typed signal and
+    /// never from an arbitrary error's text, so a transport failure that
+    /// merely mentions a limit (an HTTP 413 payload limit, say) stays an
+    /// ordinary failed turn.
+    ///
+    /// The display is the message alone: the adapter already names the harness
+    /// and the failure, and the daemon prefixes the limit for the user.
+    #[error("{message}")]
+    RateLimited {
+        /// Harness involved.
+        harness: HarnessKind,
+        /// The failure detail, exactly as the harness reported it.
+        message: String,
+        /// The limit the adapter parsed, with its reset when the detail named
+        /// one.
+        limit: LimitSignal,
+    },
     /// The vendor protocol did not match what the adapter understands.
     #[error("{harness:?} protocol error: {message}")]
     Protocol {
@@ -224,6 +353,98 @@ pub enum HarnessError {
     },
 }
 
+impl HarnessError {
+    /// The provider limit this failure carries, when its adapter parsed one.
+    ///
+    /// This is the daemon's only limit signal from a failed write: an error
+    /// that does not carry one is an ordinary failure, whatever its text says.
+    pub fn limit(&self) -> Option<&LimitSignal> {
+        match self {
+            Self::RateLimited { limit, .. } => Some(limit),
+            _ => None,
+        }
+    }
+}
+
+/// A lock-free view of a session's transport health.
+///
+/// The daemon's event pump must never wait on a session's own lock: `send` may
+/// hold that lock for the length of a harness turn, and an adapter with a
+/// bounded event queue would then be unable to deliver the reply `send` waits
+/// for. A session that can lose its transport mid-turn publishes that fact here
+/// when it happens, so the pump (and the daemon's other non-blocking readers)
+/// can see it without locking.
+///
+/// The first close wins and keeps the reason it was closed for, so a request
+/// rejected afterwards names what actually happened (a stdout EOF is not a
+/// write failure).
+#[derive(Clone, Debug, Default)]
+pub struct TransportHealth(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+/// [`TransportHealth`]'s sentinel for a transport that is still open.
+const TRANSPORT_OPEN: u8 = 0;
+
+impl TransportCloseKind {
+    /// The byte [`TransportHealth`] stores for this kind.
+    const fn code(self) -> u8 {
+        match self {
+            Self::Eof => 1,
+            Self::Read => 2,
+            Self::Write => 3,
+            Self::Exit => 4,
+        }
+    }
+
+    /// The kind a stored byte names, if the transport has closed.
+    const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Eof),
+            2 => Some(Self::Read),
+            3 => Some(Self::Write),
+            4 => Some(Self::Exit),
+            _ => None,
+        }
+    }
+}
+
+impl TransportHealth {
+    /// A transport that is still healthy.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Marks the transport closed. Every later read sees it.
+    ///
+    /// The reason is the general writer failure; a path that observed a
+    /// specific close uses [`Self::close_with`] instead.
+    pub fn close(&self) {
+        self.close_with(TransportCloseKind::Write);
+    }
+
+    /// Marks the transport closed for the reason `kind` observed.
+    ///
+    /// The first close wins: a later teardown (a shutdown after the reader saw
+    /// EOF) must not rewrite the cause that actually ended the transport.
+    pub fn close_with(&self, kind: TransportCloseKind) {
+        let _ = self.0.compare_exchange(
+            TRANSPORT_OPEN,
+            kind.code(),
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        );
+    }
+
+    /// Whether the transport has closed.
+    pub fn is_closed(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst) != TRANSPORT_OPEN
+    }
+
+    /// The close the transport observed, when one was recorded.
+    pub fn close_kind(&self) -> Option<TransportCloseKind> {
+        TransportCloseKind::from_code(self.0.load(std::sync::atomic::Ordering::SeqCst))
+    }
+}
+
 /// A running harness session.
 #[async_trait]
 pub trait HarnessSession: Send {
@@ -231,6 +452,11 @@ pub trait HarnessSession: Send {
     async fn send(&mut self, input: UserInput) -> Result<(), HarnessError>;
 
     /// Interrupts the running turn without killing the session.
+    ///
+    /// The daemon holds this session's lock across both the claim and the wait
+    /// for `send` to return, so an adapter may keep issuing the cancel without
+    /// racing a prompt that is still being written: by the time `interrupt`
+    /// runs, a prompt whose `send` returned has already reached the harness.
     async fn interrupt(&mut self) -> Result<(), HarnessError>;
 
     /// Answers an approval request raised by the harness.
@@ -252,6 +478,27 @@ pub trait HarnessSession: Send {
 
     /// Stops the harness process and releases its resources.
     async fn shutdown(&mut self) -> Result<(), HarnessError>;
+
+    /// Whether the transport behind this session is already gone.
+    ///
+    /// A failed write can kill the transport without the event stream ending,
+    /// so the daemon asks this before it detaches the session: the next
+    /// message then starts a fresh one instead of writing to a dead pipe.
+    /// Callers that must not wait for the session lock read
+    /// [`Self::transport_health`] instead.
+    fn is_closed(&self) -> bool {
+        false
+    }
+
+    /// A lock-free view of this session's transport health.
+    ///
+    /// Adapters whose transport can die asynchronously (the ACP bridge, which
+    /// reports a writer failure on its own stream) publish it here. The daemon's
+    /// event pump samples this instead of [`Self::is_closed`], so draining an
+    /// adapter's events never waits on a `send` that holds the session lock.
+    fn transport_health(&self) -> Option<TransportHealth> {
+        None
+    }
 
     /// The harness-native session id, once the harness reported it.
     ///

@@ -33,6 +33,8 @@ pub mod hosts;
 pub mod journal;
 pub mod mcp;
 pub mod mcp_peers;
+pub mod network_access;
+pub mod projects;
 pub mod remote;
 pub mod secrets;
 pub mod server;
@@ -239,11 +241,20 @@ fn direct_pair(
     };
 
     config.ensure_data_dir()?;
+    // A direct QR points at the network listener; without it the address would
+    // be a dead end. Say so instead of printing an unusable QR.
+    if !config.network_access_enabled() {
+        anyhow::bail!(
+            "network access is off, so no device can reach this daemon directly; \
+             run `h4rnd serve --network-access on` (or enable it in Settings → Remote), then retry"
+        );
+    }
     let identity = daemon_identity(config)?;
     let endpoints = remote::advertised_addresses(config, None);
     if endpoints.is_empty() {
         anyhow::bail!(
-            "no LAN or Tailscale address found to advertise; pass --extra-bind or use connect pairing"
+            "no network address found to advertise; connect this machine to a LAN or tailnet, \
+             or pass --extra-bind, then retry"
         );
     }
     let label = label.or_else(|| Some(crate::hosts::hostname()));
