@@ -116,6 +116,14 @@ impl Viewer {
         self.notify.notify_waiters();
     }
 
+    /// Whether the whole credit window is outstanding.
+    ///
+    /// A viewer in this state cannot receive another chunk, so it has not seen
+    /// the output that asked the query it is supposedly answering.
+    pub fn credit_exhausted(&self) -> bool {
+        lock(&self.credit).is_exhausted()
+    }
+
     /// Waits until `bytes` fit in the credit window.
     ///
     /// Returns `false` when the viewer was detached while waiting.
@@ -149,6 +157,14 @@ pub struct Credit {
     bytes: usize,
 }
 
+impl Credit {
+    /// Whether nothing more fits until the viewer acknowledges.
+    fn is_exhausted(&self) -> bool {
+        self.outstanding.len() >= CREDIT_MAX_CHUNKS as usize
+            || self.bytes >= CREDIT_MAX_BYTES as usize
+    }
+}
+
 /// One attached viewer with its requested viewport.
 #[derive(Clone)]
 pub struct ViewerEntry {
@@ -161,8 +177,9 @@ pub struct ViewerEntry {
     /// Whether this viewer has answered a query on this terminal.
     ///
     /// At most one attached viewer owns replies at a time. The owner keeps
-    /// the role until it detaches; the next marked reply after that is
-    /// accepted from whichever viewer sends it.
+    /// the role until it detaches or stops receiving output (its credit
+    /// window is full); the next marked reply after that is accepted from
+    /// whichever viewer sends it.
     pub answers_queries: bool,
 }
 
@@ -487,12 +504,14 @@ impl Session {
     ///
     /// A marked `reply` is xterm's own answer to a terminal query, not typed
     /// input. Viewers share one PTY, so only the reply owner's answer is
-    /// written; a marked reply from any other viewer is dropped. Ownership is
-    /// claimed by the first marked reply and lasts until that viewer detaches.
-    /// Membership and ownership are decided under one lock, but the lock is
-    /// released before the PTY write: a reply is accepted when the viewer is
-    /// the owner at that check, even if the viewer detaches while the write is
-    /// in flight.
+    /// written; a marked reply from any other viewer is dropped. The first
+    /// viewer to send a marked reply owns the role until it detaches or stops
+    /// receiving output: a viewer whose credit window is full has not seen the
+    /// query, so another viewer's marked reply is accepted and takes over.
+    /// Membership, ownership and credit are decided under one lock, but the
+    /// lock is released before the PTY write: a reply is accepted when the
+    /// viewer is the owner at that check, even if the viewer detaches while
+    /// the write is in flight.
     pub fn write_viewer_input(
         &self,
         viewer_id: ViewerId,
@@ -531,12 +550,15 @@ impl Session {
         self.alive.load(Ordering::SeqCst)
     }
 
-    /// Hangs up, waits, then terminates with a short grace period so shells
-    /// can save state.
+    /// Hangs up, waits, then terminates with a grace period so shells and
+    /// their jobs can save state.
     ///
-    /// Windows has no POSIX sessions: closing the ConPTY ends the console
-    /// processes attached to it, and `child.kill()` below does that. The
-    /// SIGHUP below is a no-op there.
+    /// The order is: SIGHUP to the shell alone, 150 ms for it to forward the
+    /// hangup to its jobs, SIGTERM to the shell's process group, another
+    /// 150 ms for TERM handlers to clean up, then `child.kill()` and SIGKILL
+    /// for the group. Windows has no POSIX sessions or signals: the ConPTY
+    /// closes when the PTY is dropped, which ends the console processes
+    /// attached to it, and the SIGHUP/SIGTERM steps are no-ops there.
     pub async fn kill_with_grace(&self) {
         // Hang up first and wait, so the shell can run its hangup path and
         // its jobs hear SIGHUP; only then fall back to TERM and KILL for the
@@ -548,6 +570,9 @@ impl Session {
         if let Some(pgid) = self.process_group {
             signal_group(pgid, Signal::Term);
         }
+        // Keep the grace period after TERM so a job's cleanup handler can run
+        // before the group is killed.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         {
             let mut child = lock(&self.child);
             let _ = child.kill();
@@ -559,10 +584,25 @@ impl Session {
 }
 
 /// Whether `viewer_id` may write this marked reply, claiming ownership if the
-/// role is free. The caller holds the viewers lock.
+/// role is free or its holder has stopped receiving output. The caller holds
+/// the viewers lock, so the credit check and the hand-over are one decision.
 fn accepts_query_reply(viewers: &mut HashMap<ViewerId, ViewerEntry>, viewer_id: ViewerId) -> bool {
-    if let Some((owner, _)) = viewers.iter().find(|(_, entry)| entry.answers_queries) {
-        return *owner == viewer_id;
+    let owner = viewers
+        .iter()
+        .find(|(_, entry)| entry.answers_queries)
+        .map(|(id, entry)| (*id, Arc::clone(&entry.viewer)));
+    if let Some((owner_id, owner)) = owner {
+        if owner_id == viewer_id {
+            return true;
+        }
+        // A stalled owner has not seen the bytes that asked this query, so
+        // keeping the role would swallow every answer until it catches up.
+        if !owner.credit_exhausted() {
+            return false;
+        }
+    }
+    for entry in viewers.values_mut() {
+        entry.answers_queries = false;
     }
     match viewers.get_mut(&viewer_id) {
         Some(entry) => {

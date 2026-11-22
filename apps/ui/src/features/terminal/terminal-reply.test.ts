@@ -147,6 +147,30 @@ describe("terminal query replies", () => {
     }
   });
 
+  it("tracks every slot of a large batched palette query", async () => {
+    const term = new Terminal({ cols: 80, rows: 24 });
+    const tracker = new TerminalQueryTracker();
+    const hooks = registerTerminalQueryHooks(term.parser, tracker);
+    try {
+      // More slots than the old 32-entry window: xterm answers all of them,
+      // so every answer must still be marked as a reply.
+      const slots = Array.from({ length: 40 }, (_, index) => `${index};?`).join(";");
+      await parse(term, `\x1b]4;${slots}\x1b\\`);
+
+      for (let index = 0; index < 40; index += 1) {
+        expect(
+          tracker.take(`\x1b]4;${index};rgb:cccc/0000/0000\x1b\\`),
+          `palette slot ${index}`,
+        ).toBe(true);
+      }
+      // Every slot is used up; an identical report is input again.
+      expect(tracker.take("\x1b]4;39;rgb:cccc/0000/0000\x1b\\")).toBe(false);
+    } finally {
+      for (const hook of hooks) hook.dispose();
+      term.dispose();
+    }
+  });
+
   it("forgets a query xterm did not answer when its chunk is done", async () => {
     // Enable window reports so xterm's parser lets the window-size query
     // through to the hook.

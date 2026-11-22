@@ -278,7 +278,9 @@ impl TerminalManager {
     /// the same error as an unknown stream.
     ///
     /// A marked `reply` is xterm's answer to a terminal query. At most one
-    /// attached viewer may answer, so replies from the others are dropped.
+    /// attached viewer may answer, so replies from the others are dropped; the
+    /// role passes to another viewer when the owner detaches or stops
+    /// receiving output.
     pub fn input_by_stream(
         &self,
         stream_id: u32,
@@ -325,7 +327,11 @@ impl TerminalManager {
         terminals
     }
 
-    /// Closes one terminal and kills its process group.
+    /// Closes one terminal: viewers are closed, then the shell is hung up and
+    /// given time to forward the hangup to its jobs, terminated with a grace
+    /// period, and finally killed with its process group. Windows has no
+    /// POSIX signals; the ConPTY ends when the PTY is dropped, which closes
+    /// the console processes attached to it.
     pub async fn close(&self, terminal_id: &TerminalId) -> Result<(), TerminalError> {
         let session = {
             let mut sessions = lock(&self.sessions);

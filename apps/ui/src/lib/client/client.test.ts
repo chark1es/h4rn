@@ -97,6 +97,13 @@ class DeadTransport extends FakeTransport {
   }
 }
 
+/** A socket whose connection never completes: `onOpen` does not fire. */
+class PendingTransport extends FakeTransport {
+  override connect(handlers: TransportHandlers): void {
+    this.handlers = handlers;
+  }
+}
+
 type Harness = {
   client: H4rnClient;
   transports: FakeTransport[];
@@ -403,6 +410,45 @@ describe("H4rnClient", () => {
       await settle();
       expect(transports.length).toBe(3);
       expect(client.getSnapshot().attempt).toBe(0);
+      client.stop();
+    } finally {
+      Reflect.deleteProperty(globalThis, "window");
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores wakes while a fresh connect attempt is still opening", async () => {
+    vi.useFakeTimers();
+    const windowStub = new EventTarget();
+    Object.defineProperty(globalThis, "window", { value: windowStub, configurable: true });
+    try {
+      let opened = 0;
+      const { client, transports } = harness(
+        () => (opened++ === 0 ? new FakeTransport() : new PendingTransport()),
+        { reconnect: { baseMs: 60_000, maxMs: 60_000, jitter: 0, maxAttempts: 4 } },
+      );
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(client.getSnapshot().status).toBe("online");
+
+      // A wake skips the 60 s backoff; the new socket never finishes opening.
+      transports[0]?.drop();
+      windowStub.dispatchEvent(new Event("online"));
+      expect(transports.length).toBe(2);
+      expect(client.getSnapshot().status).toBe("degraded");
+
+      // Wakes in the first second of that attempt must not restart it.
+      windowStub.dispatchEvent(new Event("focus"));
+      windowStub.dispatchEvent(new Event("online"));
+      await settle();
+      expect(transports.length).toBe(2);
+      expect(transports[1]?.closed).toBe(false);
+
+      // Once the attempt is a second old, a wake may retry again.
+      await vi.advanceTimersByTimeAsync(1_100);
+      windowStub.dispatchEvent(new Event("focus"));
+      expect(transports.length).toBe(3);
       client.stop();
     } finally {
       Reflect.deleteProperty(globalThis, "window");

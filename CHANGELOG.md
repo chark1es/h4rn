@@ -9,19 +9,26 @@ All notable changes to h4rn are recorded here. The format follows
 
 - **Closing a terminal ends its background jobs.** With job control, `sleep 1000 &` runs in its own
   process group, so the old group-only signal left it running after the shell was gone. Closing a
-  terminal now sends SIGHUP to the shell, which forwards it to its jobs, and only then falls back to
-  SIGTERM and SIGKILL on the shell's process group. A `nohup` job and one that moved itself into
-  another session with `setsid` are left alone.
+  terminal now sends SIGHUP to the shell, waits for it to forward the hangup, keeps the grace period
+  after SIGTERM so cleanup handlers can run, and only then sends SIGKILL to the shell's process group
+  after `child.kill()`. A `nohup` job and one that moved itself into another session with `setsid`
+  are left alone.
 - **Only one attached viewer answers terminal queries.** Two xterm instances each answered device,
   cursor and colour queries, so a shell with a desktop and a phone attached received duplicate
   replies. The UI now marks xterm's own answers to just-asked queries, and the daemon writes the
-  first attached viewer's answer only; every other answer is dropped, while keystrokes and paste go
-  through from every viewer. The role passes to the next viewer when the owner detaches.
+  reply owner's answer only; every other answer is dropped, while keystrokes and paste go through
+  from every viewer. The first viewer to answer owns the role until it detaches or stops receiving
+  output; a viewer whose credit window is full has not seen the query, so another viewer's answer is
+  accepted and takes over.
+- **A batched colour query marks every answer it earns.** The query tracker kept at most 32 pending
+  answers, so an `OSC 4` palette query with more entries left its tail looking like typed input. It
+  now tracks the whole batch.
 - **The client keeps reconnecting.** After the fast backoff it used to stop after twelve attempts
   and stay offline until the user pressed Reconnect. It now keeps retrying at the capped interval
   and retries immediately when the browser comes back online, the window regains focus or the
-  document becomes visible. Auth failures still stop, and the banner's Reconnect button stays
-  available while it retries.
+  document becomes visible. A wake in the first second of a connect attempt is ignored, so a burst
+  of online/focus/visibility events does not tear down a socket that is still opening. Auth failures
+  still stop, and the banner's Reconnect button stays available while it retries.
 - **A Send during an idle agent's death starts a fresh agent.** When a stdout read failed or EOF
   arrived between turns, the session stayed in the slot for the bounded wait for the exit report, and
   a message sent in that window claimed it and failed on a dead write. The session now leaves the

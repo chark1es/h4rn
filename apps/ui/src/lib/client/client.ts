@@ -262,6 +262,15 @@ function isIdempotent(body: ClientRequest): boolean {
   return READ_PREFIXES.some((prefix) => body.type.startsWith(prefix));
 }
 
+/**
+ * A wake inside this window of a fresh connect attempt is ignored.
+ *
+ * Browser wakes arrive in bursts (online, then focus, then visibility), and
+ * `retryImmediately` would otherwise tear down a socket that is still
+ * opening and start the same attempt again.
+ */
+const WAKE_MIN_ATTEMPT_MS = 1_000;
+
 const DEFAULT_DEVICE: DeviceInfo = {
   device_id: "web",
   name: "h4rn web",
@@ -304,6 +313,8 @@ export class H4rnClient {
   private replaying = false;
   private replayBuffer: EventEnvelope[] = [];
   private attempt = 0;
+  /** Mockable wall-clock start of the in-flight connect attempt. */
+  private attemptStartedAt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   /** Retry as soon as the browser says the network or the app is back. */
@@ -602,6 +613,7 @@ export class H4rnClient {
     if (this.stopped || this.fatal) return;
 
     this.socketOpen = false;
+    this.attemptStartedAt = Date.now();
     const handlers: TransportHandlers = {
       onOpen: () => {
         this.socketOpen = true;
@@ -876,6 +888,9 @@ export class H4rnClient {
     // banner while the first socket is still opening. Once the client has
     // been ready, or a retry is already under way, wakes retry at once.
     if (!this.everReady && this.snapshot.status === "connecting") return;
+    // A fresh attempt is still opening: wakes arrive in bursts (online, then
+    // focus, then visibility) and each one must not restart the same attempt.
+    if (this.transport && Date.now() - this.attemptStartedAt < WAKE_MIN_ATTEMPT_MS) return;
     // Deterministic offline scenarios opt out of retries entirely.
     if ((this.options.reconnect?.maxAttempts ?? 12) === 0) return;
     this.clearReconnect();

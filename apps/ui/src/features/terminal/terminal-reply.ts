@@ -57,9 +57,6 @@ export type TerminalQueryParser = {
   ): { dispose(): void };
 };
 
-/** How many unanswered queries to remember before forgetting the oldest. */
-const MAX_PENDING = 32;
-
 type Expectation = {
   /** Monotonic position, so a finished chunk can settle only its own queries. */
   mark: number;
@@ -74,6 +71,12 @@ type Expectation = {
  * a stale counter must not swallow a later keystroke. Expectations also
  * expire with the output chunk that asked the question: a query xterm chose
  * not to answer must not make a later paste look like a reply.
+ *
+ * There is no cap: one command may query a whole palette (`OSC 4;0;?;1;?;…`)
+ * and xterm answers every slot, so a fixed window would forget the tail of a
+ * batch and leave those answers looking like typed input. Entries are removed
+ * as they are consumed or when their output chunk settles, so the list only
+ * grows with queries in the chunk being parsed.
  */
 export class TerminalQueryTracker {
   private readonly expected: Expectation[] = [];
@@ -82,7 +85,6 @@ export class TerminalQueryTracker {
   /** Records that xterm is about to send one `pattern`-shaped answer. */
   expect(pattern: RegExp): void {
     this.expected.push({ mark: ++this.nextMark, pattern });
-    if (this.expected.length > MAX_PENDING) this.expected.shift();
   }
 
   /** The position to settle from once xterm finishes the chunk being written. */
