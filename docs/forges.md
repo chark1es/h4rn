@@ -24,7 +24,15 @@ it enabled) the client falls back to grouping REST review comments by their
 reply chain and reports every thread as unresolved.
 
 GitLab uses REST v4 throughout. Pipelines and their jobs are mapped onto the
-normalised checks shape; merge-request discussions become threads.
+normalised checks shape; merge-request discussions become threads. The merge
+request object carries no line totals, so `get_pr` sums the `/changes` diffs
+once and reports the real additions and deletions (`line_counts_known` is
+`true`). A line is counted by its first character inside a hunk, so content
+that itself begins `+++` or `---` is an added or removed line rather than a
+file header. When GitLab answers with `overflow: true` the changes list was cut
+off, and a change marked `collapsed` (a shortened patch) or `too_large` (an
+omitted one) is incomplete too; a partial sum would be a wrong number, so the
+totals stay unknown and the UI and the agent handoff say so.
 
 Gitea and Forgejo share one client. Forgejo is API-compatible for everything the
 PR view needs. Two differences are handled explicitly:
@@ -86,7 +94,9 @@ Azure DevOps Services uses REST 7.1. `ForgeRepoRef.base_url` carries the
 organization (`https://dev.azure.com/acme`) and `owner` carries the project.
 Remote path segments are percent-decoded when detected (so `My%20Project`
 becomes the project name) and encoded again as path segments in requests;
-decoded separators and `..` are rejected. The legacy SSH host
+decoded separators and `..` are rejected, and a name that itself contains a
+`%` (a repository literally called `release%20notes`) keeps it as part of the
+name and is encoded as `%25`. The legacy SSH host
 `vs-ssh.visualstudio.com` derives `https://<org>.visualstudio.com` from its
 `v3/<org>/...` path. Pull requests map `active`/`completed`/`abandoned` onto
 open/merged/closed, but listing only asks for active PRs
@@ -108,14 +118,21 @@ their bytes (a pure `rename`, `branch` or `merge`) download nothing, and at
 most six content requests run at once. A per-request cache avoids downloading
 a blob twice. The PR detail only counts changed files from the
 iteration metadata; it never downloads contents. When the iteration or its
-change entries cannot be read, `changed_files_known` is `false` and the UI
-shows the count as unknown. `/pullrequests/{id}/threads` supplies both general
-comments and inline threads; thread statuses `fixed`, `closed`, `wontFix` and
-`byDesign` are resolved. Checks are PR statuses plus policy evaluations
-requested with `api-version=7.1-preview.1`; the project id comes from the PR's
-`repository.project.id`. Both endpoints always send a `value` collection, so a
-200 whose status or policy body lacks one is an error rather than an empty
-result; a valid `value: []` really is empty. If the status, iteration or
+change entries cannot be read, or a 200 omits the `changeEntries` collection,
+`changed_files_known` is `false` and the UI shows the count as unknown; an
+empty `changeEntries: []` is a real zero and stays known.
+`/pullrequests/{id}/threads` supplies both general
+comments and inline threads; a 200 whose body lacks its `value` collection is
+an error, not an empty discussion, while `value: []` is a valid empty list.
+Thread statuses `fixed`, `closed`, `wontFix` and `byDesign` are resolved.
+Replies parse the caller's thread id (which goes into the request URL) and
+comment id (which goes into the JSON body) as positive 32-bit integers before
+either is used, so a malformed id returns `InvalidRequest` and sends nothing.
+Checks are PR statuses plus policy evaluations requested with
+`api-version=7.1-preview.1`; the project id comes
+from the PR's `repository.project.id`. Both endpoints always send a `value`
+collection, so a 200 whose status or policy body lacks one is an error rather
+than an empty result; a valid `value: []` really is empty. If the status, iteration or
 policy-evaluation request
 fails, the whole checks request fails instead of reporting the surviving green
 rows as passing: a branch gate that could not be read is never a pass.
@@ -131,11 +148,15 @@ follow the server's `x-ms-continuationtoken` through `continuationToken`, not
 `$skip`. A PR's browser URL comes from `_links.web`; a response without it
 (an older API or a projection that omits links) falls back to
 `<repository.webUrl>/pullrequest/<id>`, or to the base URL, project and
-repository when the repository object names no web URL. Additions/deletions
-are unknown for Azure PRs (`line_counts_known` is `false`): the API does not
-report line counts without downloading every file, and the detail request
-deliberately does not do that, so the agent handoff says the counts are
-unknown instead of “+0 −0”.
+repository when the repository object names no web URL. That fallback encodes
+the project and repository as path segments, so a repository literally named
+`release%20notes` links to `release%2520notes` instead of a space. Additions
+and deletions are unknown for Azure PRs (`line_counts_known` is `false`): the
+API does not report line counts without downloading every file, and the detail
+request deliberately does not do that, so the agent handoff says the counts are
+unknown instead of “+0 −0”. A file diff's totals count every added or removed
+line inside a hunk, including content that itself begins `+++` or `---`; only
+the file header before the first hunk is a marker.
 
 Bitbucket Server / Data Center and Azure DevOps Server are not supported: they
 use different APIs and hosts, and this build only detects and speaks the cloud
@@ -178,7 +199,8 @@ Local paths and file remotes are rejected. Azure DevOps remotes keep the
 organization in `base_url` and the project in `owner`; the browser URL inserts
 the `_git` segment. Azure DevOps path segments are percent-decoded
 (`My%20Project`) and validated (a decoded separator, `..` or an empty segment
-is rejected) because they are encoded again in requests. Every other forge
+is rejected) because they are encoded again in requests; a literal `%` is part
+of the name (`release%20notes` becomes `release%2520notes`). Every other forge
 keeps its long-standing lenient path handling: a double slash such as
 `https://gitlab.com/team//repo.git` resolves like `team/repo`.
 
@@ -228,7 +250,10 @@ forge and base URL match when it is omitted. For Azure DevOps the legacy
 `https://<org>.visualstudio.com` and
 `https://<org>.visualstudio.com/DefaultCollection` forms name the same
 account, so a remote spelled either way resolves an account added with the
-other.
+other. The UI's account lookup applies the same equivalence: trailing slashes,
+host case and the `DefaultCollection` segment's letter case are ignored, so a
+`DefaultCollection` checkout enables the PR view for an account added without
+the segment and the other way round.
 
 Tokens are stored with the OS keychain under service `h4rn-forge` and account
 id when a keychain is available. Headless Linux and WSL fall back to an
@@ -402,9 +427,13 @@ is local and append-only.
 
 The daemon polls PRs it is watching for checks changes. The base interval is
 `H4RN_FORGE_POLL_SECS` (default 30, minimum 5); failures back off up to 300
-seconds. A state change broadcasts a transient `forges_checks_updated` event
+seconds. A state change broadcasts a transient `forge_checks_updated` event
 carrying the PR, aggregated state, counts and the connection's current durable
 `last_seq`. The event is not journaled, so a client that reconnects re-fetches.
+The PR page treats a pushed event as the freshest snapshot: it bumps a
+generation counter, and a checks request that was already in flight keeps an
+older generation, so its late answer (or failure) does not replace the pushed
+one.
 
 Each account gets a client with a local request budget,
 `H4RN_FORGE_RPM` (default 120 requests/minute). Every response is also checked
@@ -418,8 +447,23 @@ against the forge's own limits:
 - Pagination follows `link: rel="next"` when present and otherwise the
   page/`limit` contract, with a hard cap so a misbehaving server cannot loop.
 
-Error messages redact `token`, `authorization`, `private-token` and common
-credential query parameters before they reach a log or a protocol error.
+Error messages redact the account's own configured credential first, verbatim
+and in every form an error body or URL can echo it: quoted inside a JSON
+message, percent-encoded (the `%xx` escapes match whichever hex case the server
+used), or Base64 inside a Basic header. Every copy in a body is replaced, so a
+message that carries the plain value plus an uppercase- and a lowercase-escaped
+copy loses all three. A JSON body is redacted as decoded strings and object
+keys before a nested value is serialized into the message, so a credential
+containing a quote cannot come back as a JSON-escaped `\"` value and a
+credential used as a key cannot come back as a property name; the escaped
+spelling is also matched as a second layer. A JSON body with no known message
+key is serialized from the redacted decoded value, never from the raw body, so
+a `\/` or `\u00xx` spelling does not survive. Matching normalizes the text once
+and replaces every match offset in a single pass, so a body that echoes the
+credential thousands of times stays linear. A pattern-based pass removes
+anything that still looks like a GitHub, GitLab or Atlassian token. The
+redacted message is what reaches a log or a protocol error; the raw response
+body never does.
 
 ## Testing
 
@@ -440,7 +484,9 @@ without a nickname and a namesake account) and duplicate-free pages, an opaque
 `next` cursor on the second PR page, a distant page served by the documented
 `page` parameter, comments `has_more` at the page cap, file-level comments and
 `inline.outdated` threads,
-`ssh.bitbucket.org`, and same-origin `next` handling; Azure DevOps PRs, raw
+`ssh.bitbucket.org`, and same-origin `next` handling; GitLab overflow,
+`collapsed` and `too_large` changes and content lines that begin `+++`/`---`;
+Azure DevOps PRs, raw
 iteration arrays, changed-file contents, the 100-file per-page budget, threads,
 statuses across iterations, same-name policy evaluations, missing versus empty
 `value` collections, a failed policy read, PRs without `_links`, unknown line

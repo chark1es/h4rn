@@ -12,8 +12,11 @@ use crate::error::{ForgeError, Result};
 /// Validates a repository reference before it is used in a URL.
 ///
 /// Owners are single path segments everywhere except GitLab, where a namespace
-/// may contain `/`. Each segment must be non-empty and must not be `.` or
-/// `..`, and no segment may contain a percent-encoded slash trick.
+/// may contain `/`. Each segment must be non-empty and must not be `.` or `..`,
+/// or contain a character that would end or redirect the path. A literal `%`
+/// is allowed: names come decoded from the forge (`release%20notes` is a
+/// repository name, not an escaped space), and every segment is percent-encoded
+/// before it enters a URL, so `%` becomes `%25` rather than an escape.
 pub fn validate_repo(repo: &ForgeRepoRef) -> Result<()> {
     if repo.base_url.trim().is_empty() {
         return Err(ForgeError::InvalidRequest(
@@ -47,7 +50,6 @@ fn validate_segment(segment: &str) -> Result<()> {
         || segment.contains('\\')
         || segment.contains('?')
         || segment.contains('#')
-        || segment.contains('%')
     {
         return Err(ForgeError::InvalidRequest(format!(
             "invalid repository path segment {segment:?}"
@@ -318,6 +320,31 @@ mod tests {
         };
         assert!(validate_repo(&gitlab).is_ok());
         assert_eq!(encode_project_path(&gitlab), "team%2Fplatform%2Fapi");
+    }
+
+    #[test]
+    fn a_literal_percent_is_a_name_not_an_escape() {
+        // A decoded Azure project or repository name can hold `%`: the forge
+        // returns `release%20notes` for a repository literally named that.
+        // Every segment is percent-encoded before it enters a URL, so it is
+        // safe, and validation must not reject it.
+        let repo = ForgeRepoRef {
+            forge: ForgeKind::AzureDevOps,
+            base_url: "https://dev.azure.com/acme".into(),
+            owner: "My Project".into(),
+            repo: "release%20notes".into(),
+        };
+        assert!(validate_repo(&repo).is_ok());
+
+        // The checks that keep a segment a single safe path step still hold.
+        for segment in ["a/b", "a\\b", "a?b", "a#b", "..", ".", ""] {
+            let mut repo = repo.clone();
+            repo.repo = segment.into();
+            assert!(
+                validate_repo(&repo).is_err(),
+                "{segment:?} must not be a single path segment"
+            );
+        }
     }
 
     #[test]

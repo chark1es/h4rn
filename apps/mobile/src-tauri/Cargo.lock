@@ -1527,6 +1527,7 @@ dependencies = [
 name = "h4rn-mobile"
 version = "1.0.1"
 dependencies = [
+ "getrandom 0.3.4",
  "serde",
  "serde_json",
  "tauri",

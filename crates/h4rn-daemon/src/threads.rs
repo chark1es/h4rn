@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use futures::StreamExt;
@@ -85,6 +85,14 @@ pub trait McpSessionProvider: Send + Sync {
 pub trait Clock: Send + Sync + std::fmt::Debug {
     /// The current instant.
     fn now(&self) -> DateTime<Utc>;
+
+    /// A monotonic reading for waits that must ignore wall-clock changes.
+    ///
+    /// Retry deadlines use this instead of [`Self::now`]: the wall clock can
+    /// jump backwards (an NTP correction, a manual change) and must not stretch
+    /// a one-second wait into an hour. A manual clock advances both readings by
+    /// its own step so a test stays deterministic.
+    fn monotonic(&self) -> Instant;
 }
 
 /// The wall clock.
@@ -94,6 +102,10 @@ pub struct SystemClock;
 impl Clock for SystemClock {
     fn now(&self) -> DateTime<Utc> {
         Utc::now()
+    }
+
+    fn monotonic(&self) -> Instant {
+        Instant::now()
     }
 }
 
@@ -283,6 +295,13 @@ struct Inner {
     /// name it), so the resync is retried on the next ticks until both reads
     /// succeed instead of leaving every restored pause `Unnamed` forever.
     resync_pending: AtomicBool,
+    /// When the failed startup resync may be retried, and how long to wait.
+    ///
+    /// A ledger read that keeps failing must not clear every thread's cached
+    /// summary signature (and so re-append and broadcast it) on every tick, so
+    /// the retry starts a second apart and doubles up to a minute. The deadline
+    /// is monotonic: a wall-clock jump back must not stretch the wait.
+    resync_retry: std::sync::Mutex<ResyncRetry>,
     /// The clock every lifecycle decision reads.
     clock: Arc<dyn Clock>,
     /// Pauses a restart between inspecting a thread and detaching its session.
@@ -298,6 +317,13 @@ struct Inner {
     /// the old fire must not act on a pause that is no longer its own.
     #[cfg(test)]
     fire_pause: std::sync::Mutex<Option<Arc<FirePause>>>,
+    /// Pauses the startup resync between reading the ledger and binding a
+    /// record.
+    ///
+    /// Test-only: a newer limit can arm a schedule in that window, and the
+    /// retry must not restore the older ledger snapshot over it.
+    #[cfg(test)]
+    resync_pause: std::sync::Mutex<Option<Arc<ResyncPause>>>,
 }
 
 /// A test's hold on the fire's claim-to-act window.
@@ -314,6 +340,34 @@ struct FirePause {
 struct RestartPause {
     inspected: tokio::sync::Notify,
     resume: tokio::sync::Notify,
+}
+
+/// A test's hold on the resync's read-to-bind window.
+#[cfg(test)]
+#[derive(Default)]
+struct ResyncPause {
+    read: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
+/// The wait before a failed startup ledger resync is tried again.
+#[derive(Clone, Debug)]
+struct ResyncRetry {
+    /// When the next attempt may run. `None` means it may run now.
+    ///
+    /// A monotonic reading, so a wall-clock jump cannot move the wait.
+    at: Option<Instant>,
+    /// The wait that follows another failed attempt.
+    backoff: Duration,
+}
+
+impl Default for ResyncRetry {
+    fn default() -> Self {
+        Self {
+            at: None,
+            backoff: Duration::from_secs(1),
+        }
+    }
 }
 
 type ThreadHandle = Arc<Mutex<ThreadRecord>>;
@@ -1356,6 +1410,26 @@ impl ThreadRecord {
         })
     }
 
+    /// Whether the active, still-pending turn is the prompt stored on the row.
+    ///
+    /// The thread row's `parked` prompt is what a restart rebuilds the paused
+    /// dispatch from. A record restored from the journal has no in-memory pause
+    /// yet (the ledger is attached later), and one whose startup resync could
+    /// not read the ledger never binds one, so [`Self::parks_active_turn`] is
+    /// false for exactly the prompt that still needs a delivery owner. Shutdown
+    /// must leave that turn and its saved prompt alone for the same reason it
+    /// leaves an armed pause's turn alone.
+    fn parks_persisted_prompt(&self) -> bool {
+        self.active.as_ref().is_some_and(|active| {
+            active.dispatch.state() == DispatchState::Pending
+                && self
+                    .meta
+                    .parked
+                    .as_ref()
+                    .is_some_and(|parked| parked.turn_id == active.turn_id)
+        })
+    }
+
     /// Whether the thread's pause is the schedule with this ledger id.
     ///
     /// A fire claims an attempt in the ledger before it acts on the record, so
@@ -1493,11 +1567,14 @@ impl ThreadManager {
                 meter: std::sync::OnceLock::new(),
                 last_schedule_check: std::sync::Mutex::new(None),
                 resync_pending: AtomicBool::new(false),
+                resync_retry: std::sync::Mutex::new(ResyncRetry::default()),
                 clock,
                 #[cfg(test)]
                 restart_pause: std::sync::Mutex::new(None),
                 #[cfg(test)]
                 fire_pause: std::sync::Mutex::new(None),
+                #[cfg(test)]
+                resync_pause: std::sync::Mutex::new(None),
             }),
         };
         manager.inner.restore().await?;
@@ -1944,8 +2021,11 @@ impl ThreadManager {
             // A Send overrides a pause that was holding a requeued prompt: the
             // parked turn is delivered now and the new message queues behind
             // it. Leaving it pending here would strand it, because the schedule
-            // that would have delivered it is gone.
-            let release_pending = stale_schedule && record.pending_turn();
+            // that would have delivered it is gone. A pending turn the pause
+            // does not park is not a release, and an idle thread's stale pause
+            // holds no prompt to deliver at all.
+            let release_pending =
+                stale_schedule && record.pending_turn() && record.parks_persisted_prompt();
             record.queued.push_back(UserInput {
                 text: text.clone(),
                 attachments: harness_attachments,
@@ -1959,6 +2039,10 @@ impl ThreadManager {
                 // that prompt now: leave the paused phase and drop the limit
                 // that explained it. The turn itself was already counted.
                 domain.push(ThreadEvent::LimitResumeReleased { at: now });
+            }
+            if stale_schedule {
+                // The cancelled schedule explains nothing any more, so drop the
+                // pause it left behind even when it held no prompt to release.
                 record.meta.parked = None;
                 record.limit = None;
             }
@@ -2822,7 +2906,13 @@ impl ThreadManager {
                 // in the ledger. Settling it here would erase `parked_json` and
                 // leave the restarted daemon firing the policy's prompt instead
                 // of the person's, so that one turn is left exactly as it is.
+                // The same holds while the startup resync is unresolved: the
+                // record restored before the ledger was attached, or its
+                // ledger read failed, so it does not name the schedule yet —
+                // but the schedule is still armed, and a later boot will fire
+                // it.
                 if !record.parks_active_turn()
+                    && !record.parks_persisted_prompt()
                     && let Some(turn_id) =
                         record.active.as_ref().map(|active| active.turn_id.clone())
                 {
@@ -2868,6 +2958,11 @@ impl Inner {
         self.clock.now()
     }
 
+    /// The monotonic reading retry waits are measured against.
+    fn monotonic(&self) -> Instant {
+        self.clock.monotonic()
+    }
+
     fn local_host_is(&self, host: &HostId) -> bool {
         &self.local_host == host
     }
@@ -2877,9 +2972,14 @@ impl Inner {
     /// The schedule ids are restored independently of the limit history: a
     /// failed limit read only costs the reset time shown on the pause, while a
     /// lost schedule id would leave every restored record `Unnamed`, and no
-    /// due attempt could ever be fired for it. Either failed read marks the
-    /// resync pending so [`Self::tick`] retries it, rather than leaving the
-    /// schedule unnamed until the next restart.
+    /// due attempt could ever be fired for it. Any failed part of the pass —
+    /// either read, or the per-row re-check that confirms a restored schedule
+    /// before binding it — marks the resync pending so [`Self::tick`] runs the
+    /// whole pass again, rather than leaving the schedule unnamed until the
+    /// next restart. A retry never overwrites what
+    /// happened after it read the ledger: a newer limit can arm a schedule
+    /// between the read and the record lock, and that pause is newer than the
+    /// snapshot.
     async fn resync_meter_state(self: &Arc<Self>) {
         let Some(meter) = self.meter.get().cloned() else {
             return;
@@ -2888,7 +2988,7 @@ impl Inner {
             Ok(schedules) => schedules,
             Err(error) => {
                 tracing::warn!(%error, "could not re-read auto-resume schedules");
-                self.resync_pending.store(true, Ordering::Relaxed);
+                self.note_resync_failure();
                 return;
             }
         };
@@ -2897,7 +2997,6 @@ impl Inner {
             Ok(report) => report.limits,
             Err(error) => {
                 tracing::warn!(%error, "could not re-read the usage limit history");
-                self.resync_pending.store(true, Ordering::Relaxed);
                 limits_failed = true;
                 // The schedule ids are the pause's delivery owner, so restore
                 // them now; the retry above fills in the reset times.
@@ -2938,14 +3037,33 @@ impl Inner {
                 });
         }
 
+        // A newer limit can arm a schedule in the window between the ledger
+        // read above and the record lock below.
+        #[cfg(test)]
+        {
+            let pause = self
+                .resync_pause
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            if let Some(pause) = pause {
+                pause.read.notify_one();
+                pause.resume.notified().await;
+            }
+        }
+
         let handles: Vec<ThreadHandle> = {
             let threads = self.threads.lock().await;
             threads.values().cloned().collect()
         };
         let mut release: Vec<ThreadHandle> = Vec::new();
+        // A re-check that could not read the ledger leaves the record alone so a
+        // later retry decides what its pause is.
+        let mut recheck_failed = false;
         for handle in handles {
             let mut record = handle.lock().await;
             let key = record.meta.thread_id.as_str().to_owned();
+            let before = record.signature(&self.options.settings, self.now());
             let restored_parked = std::mem::take(&mut record.restored_parked);
             let parked_turn = restored_parked
                 .then(|| record.active.as_ref().map(|active| active.turn_id.clone()))
@@ -2953,27 +3071,116 @@ impl Inner {
                 // A retry of the resync must keep the prompt the first pass
                 // already bound to this pause; the journal flag was spent then.
                 .or_else(|| record.parked_turn_to_keep());
-            if let Some(restored) = armed.remove(&key) {
-                record.resume_at = Some(restored.resume_at);
-                record.scheduled_limit = Some(ScheduledLimit {
-                    reset_at: restored.reset_at,
-                    auto_resume: true,
-                    generation: None,
-                    // The ledger id is the pause's identity: a fire claimed for
-                    // this attempt must match it before it acts.
-                    schedule_id: Some(restored.schedule_id),
-                    // A prompt restored from the journal is what this pause was
-                    // holding; no other turn may be parked by it.
-                    parked_turn,
-                });
-            } else if restored_parked && record.pending_turn() {
-                // The pause did not survive (it was cancelled before the
-                // restart), so nothing would deliver the restored prompt.
+            // Only a snapshot that still describes the record's pause may
+            // refresh its limit details.
+            let mut refresh_limit = true;
+            let mut release_prompt = false;
+            let mut next_resume_at = None;
+            match armed.remove(&key) {
+                // Every pause names its ledger id: both places that arm one
+                // take the id from the row they just wrote, and a restored
+                // identity is the only other way to get a pause. A pause whose
+                // id is missing is therefore impossible, and an unresolved
+                // pause is exactly a record with no pause at all.
+                Some(restored) => match record.scheduled_limit.as_mut() {
+                    None => {
+                        // Cancelling takes this same record lock, so a person
+                        // can cancel the snapshotted schedule after the read
+                        // above and before this pass binds it. Binding the
+                        // cancelled row would leave the restored prompt waiting
+                        // for a fire that can never happen, so re-read that one
+                        // row under the lock and release the prompt when it is
+                        // no longer armed, exactly as the cancellation does.
+                        match meter.schedule(&restored.schedule_id).await {
+                            Ok(Some(schedule))
+                                if matches!(
+                                    schedule.state,
+                                    ResumeState::Scheduled | ResumeState::Waiting
+                                ) =>
+                            {
+                                next_resume_at = Some(restored.resume_at);
+                                record.scheduled_limit = Some(ScheduledLimit {
+                                    reset_at: restored.reset_at,
+                                    auto_resume: true,
+                                    generation: None,
+                                    // The ledger id is the pause's identity: a
+                                    // fire claimed for this attempt must match
+                                    // it before it acts.
+                                    schedule_id: Some(restored.schedule_id),
+                                    // A prompt restored from the journal is what
+                                    // this pause was holding; no other turn may
+                                    // be parked by it.
+                                    parked_turn,
+                                });
+                            }
+                            Ok(_) => {
+                                // The row was cancelled or finished after the
+                                // read above. Only a prompt that is really
+                                // parked needs a release: an idle thread, or
+                                // one whose cancel already released its prompt,
+                                // just loses the stale pause without a phase
+                                // change.
+                                release_prompt =
+                                    record.pending_turn() && record.parks_persisted_prompt();
+                                if !release_prompt {
+                                    record.resume_at = None;
+                                    record.meta.parked = None;
+                                }
+                                refresh_limit = false;
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    "could not re-read the restored auto-resume schedule"
+                                );
+                                recheck_failed = true;
+                                refresh_limit = false;
+                            }
+                        }
+                    }
+                    // The retry fills in the details the record's own attempt
+                    // is still missing.
+                    Some(scheduled)
+                        if scheduled.schedule_id.as_deref()
+                            == Some(restored.schedule_id.as_str()) =>
+                    {
+                        scheduled.reset_at = restored.reset_at;
+                        next_resume_at = Some(restored.resume_at);
+                    }
+                    // A newer limit armed a different schedule after this
+                    // resync read the ledger. That pause is newer than the
+                    // snapshot, so restoring this one would move the thread
+                    // back to an older reset and steal the parked prompt.
+                    Some(_) => refresh_limit = false,
+                },
+                None if record.scheduled_limit.is_none()
+                    && record.parks_persisted_prompt()
+                    && record.pending_turn() =>
+                {
+                    // No armed schedule names this thread, so nothing would
+                    // deliver the prompt the thread row still parks — whether
+                    // the pause never survived the restart or was cancelled
+                    // after an earlier pass read the ledger. An arm or a
+                    // cancellation holds this record lock across its ledger
+                    // write, so a pause that is about to exist is never seen
+                    // here as a missing row.
+                    release_prompt = true;
+                }
+                None => {
+                    // No schedule names this thread. A record whose pause is
+                    // newer than the snapshot keeps it (and its limit).
+                    if record.scheduled_limit.is_some() {
+                        refresh_limit = false;
+                    }
+                }
+            }
+            if release_prompt {
                 // Release it exactly as a cancel, a Send or a fire does: the
                 // prompt runs now, so the thread leaves the paused phase and
                 // the limit no longer explains a wait.
                 record.meta.parked = None;
                 record.limit = None;
+                record.resume_at = None;
                 let released = vec![ThreadEvent::LimitResumeReleased { at: self.now() }];
                 if let Err(error) = self.emit(&mut record, released, Vec::new()).await {
                     // The release still stands in memory; the projection
@@ -2983,23 +3190,81 @@ impl Inner {
                 }
                 release.push(handle.clone());
             }
-            // Only show a limit on a thread the limit still explains.
-            record.limit = if record.state.phase == h4rn_core::Phase::RateLimited
-                || record.scheduled_limit.is_some()
-            {
-                latest.remove(&key)
-            } else {
-                None
-            };
-            record.last_signature = None;
+            if let Some(at) = next_resume_at {
+                record.resume_at = Some(at);
+            }
+            // Only show a limit on a thread the limit still explains, and only
+            // from a snapshot that still describes this record's pause.
+            if !limits_failed && refresh_limit {
+                record.limit = if record.state.phase == h4rn_core::Phase::RateLimited
+                    || record.scheduled_limit.is_some()
+                {
+                    latest.remove(&key)
+                } else {
+                    None
+                };
+            }
+            // A retry that changes nothing must not re-append and re-broadcast
+            // the summary on every tick.
+            if record.signature(&self.options.settings, self.now()) != before {
+                record.last_signature = None;
+            }
         }
         for handle in release {
             self.spawn_advance(handle);
         }
         // Both reads landed: the ticker need not try again.
-        if !limits_failed {
+        if limits_failed || recheck_failed {
+            self.note_resync_failure();
+        } else {
             self.resync_pending.store(false, Ordering::Relaxed);
+            self.note_resync_success();
         }
+    }
+
+    /// Whether a failed startup resync may be retried yet.
+    fn resync_retry_due(&self) -> bool {
+        let retry = self
+            .resync_retry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        retry.at.is_none_or(|at| self.monotonic() >= at)
+    }
+
+    /// Records a failed resync and waits before the next attempt.
+    ///
+    /// Any partial failure leaves the resync unresolved: a pass that read the
+    /// schedule list and limit history but could not re-read one schedule row
+    /// has still not attached the pause that row owns, so the ticker must run
+    /// the whole pass again instead of leaving the restored prompt unnamed.
+    fn note_resync_failure(&self) {
+        self.resync_pending.store(true, Ordering::Relaxed);
+        let mut retry = self
+            .resync_retry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        retry.at = Some(self.monotonic() + retry.backoff);
+        retry.backoff = (retry.backoff * 2).min(Duration::from_secs(60));
+    }
+
+    /// Clears the wait after both reads landed.
+    fn note_resync_success(&self) {
+        *self
+            .resync_retry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = ResyncRetry::default();
+    }
+
+    /// Makes the next failed-resync retry due now.
+    ///
+    /// Test-only: the wait is time-based, and a test advances its own clock or
+    /// moves the gate aside instead of sleeping.
+    #[cfg(test)]
+    fn clear_resync_retry(&self) {
+        *self
+            .resync_retry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = ResyncRetry::default();
     }
 
     /// Resolves upload ids to committed blob metadata and materialises the
@@ -5799,9 +6064,11 @@ impl Inner {
     }
 
     async fn tick(self: &Arc<Self>) {
-        if self.resync_pending.load(Ordering::Relaxed) {
+        if self.resync_pending.load(Ordering::Relaxed) && self.resync_retry_due() {
             // The startup read failed; retry before firing anything that would
-            // depend on the ledger ids it could not attach.
+            // depend on the ledger ids it could not attach. The wait grows
+            // while the ledger stays unreadable, so a broken read does not
+            // rewrite every thread's summary on every tick.
             self.resync_meter_state().await;
         }
         let handles: Vec<ThreadHandle> = {
@@ -6144,6 +6411,16 @@ mod tests {
         host: HostId,
         journal: Arc<dyn Journal>,
     ) -> ThreadManager {
+        open_test_manager_with_clock(harness, host, journal, None).await
+    }
+
+    /// [`open_test_manager_with_journal`] with a clock the test moves by hand.
+    async fn open_test_manager_with_clock(
+        harness: FakeHarness,
+        host: HostId,
+        journal: Arc<dyn Journal>,
+        clock: Option<Arc<dyn Clock>>,
+    ) -> ThreadManager {
         ThreadManager::open(
             journal,
             Arc::new(StaticHarnessCatalog::with(Arc::new(harness))),
@@ -6151,12 +6428,81 @@ mod tests {
             ThreadManagerOptions {
                 // The manager only reacts to this test's own calls.
                 tick_interval: Duration::from_secs(3600),
+                clock,
                 ..ThreadManagerOptions::default()
             },
             None,
         )
         .await
         .expect("manager")
+    }
+
+    /// A clock that only moves when a test says so.
+    ///
+    /// Wall time and monotonic time advance together, but a test can move one
+    /// without the other: retry waits follow the monotonic reading, so a
+    /// wall-clock jump must not move them.
+    #[derive(Debug)]
+    struct ManualClock {
+        wall: std::sync::Mutex<DateTime<Utc>>,
+        /// Time elapsed since `base`, moved only by [`Self::advance`] and
+        /// [`Self::advance_monotonic`].
+        mono: std::sync::Mutex<Duration>,
+        base: Instant,
+    }
+
+    impl ManualClock {
+        fn new() -> Self {
+            Self {
+                wall: std::sync::Mutex::new(Utc::now()),
+                mono: std::sync::Mutex::new(Duration::ZERO),
+                base: Instant::now(),
+            }
+        }
+
+        /// Moves both readings forward by `by`.
+        fn advance(&self, by: chrono::Duration) {
+            self.shift_wall(by);
+            if let Ok(by) = by.to_std() {
+                self.advance_monotonic(by);
+            }
+        }
+
+        /// Moves only the wall clock, as an NTP correction or a manual change
+        /// would.
+        fn shift_wall(&self, by: chrono::Duration) {
+            let mut now = self
+                .wall
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *now += by;
+        }
+
+        /// Moves only the monotonic reading.
+        fn advance_monotonic(&self, by: Duration) {
+            let mut elapsed = self
+                .mono
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            *elapsed += by;
+        }
+    }
+
+    impl Clock for ManualClock {
+        fn now(&self) -> DateTime<Utc> {
+            *self
+                .wall
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+
+        fn monotonic(&self) -> Instant {
+            let elapsed = self
+                .mono
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.base + *elapsed
+        }
     }
 
     /// A journal whose next `append` calls fail on demand.
@@ -12258,6 +12604,136 @@ mod tests {
         assert_eq!(status, TurnStatus::Completed);
     }
 
+    /// A Send that cancels a stale pause releases no prompt the pause never
+    /// parked.
+    ///
+    /// An old agent's exit arms a pause while a Send's replacement turn is
+    /// pending. A second Send makes that pause stale, and cancelling it must
+    /// not emit a release for the replacement turn: the pause never held it,
+    /// and a release would move the thread's phase and spend an advance on a
+    /// prompt that already has an owner.
+    #[tokio::test]
+    async fn a_send_cancelling_a_stale_pause_releases_no_prompt() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(6);
+        let (harness, harness_events) = FakeHarness::new().with_event_injector();
+        let (harness, sessions) = harness.with_session_count();
+        let (harness, sends) = harness.with_send_count();
+        let (harness, start_gate) = harness.with_start_gate_after(1);
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        let dying_notify = handle.lock().await.dying_notify.clone();
+        let mut clock = HeldClock::hold();
+
+        // The first agent dies between turns; its exit report is still to come.
+        harness_events.emit(HarnessEvent::TransportClosed {
+            message: "the ACP agent stdout closed".into(),
+            retryable: true,
+            kind: TransportCloseKind::Eof,
+            reset_at: None,
+        });
+        dying_notify.notified().await;
+
+        // A Send starts the replacement, whose startup this test holds.
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        assert!(
+            handle.lock().await.pending_turn(),
+            "the replacement prompt waits for its startup"
+        );
+
+        // The dead agent's exit report arms a pause the replacement did not ask
+        // for.
+        harness_events.emit_to(
+            0,
+            HarnessEvent::TransportClosed {
+                message: "agy exited (exit status: 7): the first agent ended".into(),
+                retryable: false,
+                kind: TransportCloseKind::Exit,
+                reset_at: Some(reset_at),
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(5), next_error(&mut events))
+            .await
+            .expect("the death's exit report publishes its row");
+        {
+            let record = handle.lock().await;
+            assert!(record.scheduled_limit.is_some(), "the death armed a pause");
+            assert!(
+                !record.pause_parks_turn(&second.turn_id),
+                "the pause named a prompt it was not armed for"
+            );
+        }
+
+        // A second Send makes the pause stale and cancels it. The replacement
+        // turn was never parked by that pause, so nothing is released.
+        let third = manager
+            .send_message(&created.thread_id, "third".into(), Vec::new())
+            .await
+            .expect("send while paused");
+        assert_eq!(
+            third.turn_id, second.turn_id,
+            "a Send while a turn is running queues behind that turn"
+        );
+        let domain = manager
+            .inner
+            .journal
+            .read_domain(&created.thread_id)
+            .await
+            .expect("read the domain log");
+        assert!(
+            !domain
+                .iter()
+                .any(|event| matches!(event, ThreadEvent::LimitResumeReleased { .. })),
+            "the Send released a prompt the stale pause never parked"
+        );
+        {
+            let record = handle.lock().await;
+            assert!(record.scheduled_limit.is_none());
+            assert!(record.meta.parked.is_none());
+            assert!(record.limit.is_none());
+        }
+
+        // The replacement prompt still runs and the new message queues behind
+        // it; both complete on the startup this test held.
+        clock.release();
+        start_gate.release();
+        tokio::time::timeout(Duration::from_secs(10), sends.wait_for(3))
+            .await
+            .expect("the queued messages were never written");
+        let mut completed = Vec::new();
+        for _ in 0..2 {
+            let (turn, status) =
+                tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                    .await
+                    .expect("a queued message never completed");
+            assert_eq!(status, TurnStatus::Completed);
+            completed.push(turn);
+        }
+        assert!(completed.contains(&second.turn_id));
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), sessions.wait_for(2))
+                .await
+                .is_ok(),
+            "the replacement startup never began"
+        );
+    }
+
     /// A fire never releases a manual Send's pending startup.
     ///
     /// An old agent's exit arms a pause while a Send is starting a replacement
@@ -12659,6 +13135,1017 @@ mod tests {
         assert_eq!(sends.get(), 1);
     }
 
+    /// A shutdown while the startup resync is unresolved keeps the parked
+    /// prompt.
+    ///
+    /// The schedule read can fail on the boot after a parked prompt was
+    /// restored, so the record does not know the schedule that will deliver
+    /// it. Settling the restored turn in that window would clear `parked_json`
+    /// while the ledger stays armed, and the next boot would fire the policy's
+    /// prompt instead of the person's.
+    #[tokio::test]
+    async fn a_shutdown_during_a_failed_resync_keeps_the_parked_prompt() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal_path = workspace.path().join("journal.sqlite");
+        let meter_path = workspace.path().join("meter.sqlite");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(20);
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal"),
+        );
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter"),
+        );
+        let parked = park_requeued_turn_on(Some(reset_at), journal, meter, None).await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            thread_id,
+            second,
+            ..
+        } = parked;
+        // The first daemon stops without a chance to settle anything.
+        drop(manager);
+
+        // The next boot cannot read the schedule ledger and stops before the
+        // retry succeeds.
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal after restart"),
+        );
+        let (harness, _) = FakeHarness::new().with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host, journal).await;
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter after restart"),
+        );
+        meter.store().fail_next_schedule_reads_for_tests(1);
+        manager.set_meter(Arc::clone(&meter));
+        manager.resync_meter_state().await;
+        assert!(
+            manager.inner.resync_pending.load(Ordering::Relaxed),
+            "the failed schedule read did not leave the resync unresolved"
+        );
+        {
+            let handle = manager
+                .inner
+                .handle(&thread_id)
+                .await
+                .expect("thread handle");
+            let record = handle.lock().await;
+            assert!(
+                !record.parks_active_turn(),
+                "precondition: the unresolved record names no schedule"
+            );
+            assert!(
+                record.parks_persisted_prompt(),
+                "the restored prompt is not the durable parked one"
+            );
+        }
+        manager.shutdown().await;
+        drop(manager);
+
+        // A working ledger now delivers the schedule. It must fire the prompt
+        // the person sent, not the policy's resume prompt.
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal after shutdown"),
+        );
+        let (harness, sends) = FakeHarness::new().with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host, journal).await;
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter after shutdown"),
+        );
+        manager.set_meter(Arc::clone(&meter));
+        manager.resync_meter_state().await;
+        let mut events = manager.subscribe();
+        let meta = manager.thread_meta(&thread_id).await.expect("thread meta");
+        assert_eq!(
+            meta.parked.as_ref().map(|parked| parked.turn_id.clone()),
+            Some(second.turn_id.clone()),
+            "the shutdown erased the parked prompt"
+        );
+        manager
+            .resume_now(&thread_id)
+            .await
+            .expect("the surviving schedule fires");
+
+        let mut echoed = String::new();
+        let (turn, status) = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                match wire.event {
+                    Event::MessageDelta { text, .. } => echoed.push_str(&text),
+                    Event::TurnCompleted {
+                        turn_id, status, ..
+                    } => return (turn_id, status),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the surviving schedule delivered no turn");
+        assert_eq!(
+            turn, second.turn_id,
+            "the resume started a new turn instead of the parked one"
+        );
+        assert_eq!(status, TurnStatus::Completed);
+        assert!(
+            echoed.contains("echo: second"),
+            "the policy's prompt ran instead of the parked one: {echoed:?}"
+        );
+        assert_eq!(sends.get(), 1);
+    }
+
+    /// A resync retry never restores a schedule armed after its ledger read.
+    ///
+    /// The retry reads the ledger, and a newer limit can arm schedule B before
+    /// the retry reaches the record. Writing the older snapshot A into the
+    /// record would move the thread back to A's earlier reset and leave the
+    /// parked prompt waiting for a schedule the record no longer names.
+    #[tokio::test]
+    async fn a_resync_retry_does_not_replace_a_newer_schedule() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal_path = workspace.path().join("journal.sqlite");
+        let meter_path = workspace.path().join("meter.sqlite");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(20);
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal"),
+        );
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter"),
+        );
+        let parked = park_requeued_turn_on(Some(reset_at), journal, meter, None).await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            thread_id,
+            second,
+            ..
+        } = parked;
+        drop(manager);
+
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal after restart"),
+        );
+        let (harness, sends) = FakeHarness::new().with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host, journal).await;
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter after restart"),
+        );
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let first = meter.schedules().await.expect("read schedules");
+        assert_eq!(first.len(), 1, "the paused schedule survived the restart");
+        let first_id = first[0].schedule_id.clone();
+
+        // Hold the resync between its ledger read and the record lock.
+        let pause = Arc::new(ResyncPause::default());
+        *manager
+            .inner
+            .resync_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&pause));
+        let resyncing = {
+            let manager = manager.clone();
+            tokio::spawn(async move { manager.resync_meter_state().await })
+        };
+        tokio::time::timeout(Duration::from_secs(10), pause.read.notified())
+            .await
+            .expect("the resync never read the ledger");
+
+        // While it is held, a newer limit arms schedule B on the record.
+        let newer_reset = chrono::Utc::now() + chrono::Duration::minutes(40);
+        let handle = manager
+            .inner
+            .handle(&thread_id)
+            .await
+            .expect("thread handle");
+        let newer_id = {
+            let mut record = handle.lock().await;
+            let mut domain = Vec::new();
+            let mut wire = Vec::new();
+            manager
+                .inner
+                .note_limit_hit(
+                    &mut record,
+                    LimitObservation {
+                        generation: Some(99),
+                        reset_at: Some(newer_reset),
+                        auto_resume: true,
+                    },
+                    manager.now(),
+                    &mut domain,
+                    &mut wire,
+                )
+                .await;
+            let id = record
+                .scheduled_limit
+                .as_ref()
+                .and_then(|scheduled| scheduled.schedule_id.clone())
+                .expect("the newer limit armed a schedule");
+            assert_ne!(id, first_id, "the newer limit replaced the schedule");
+            id
+        };
+        pause.resume.notify_one();
+        resyncing.await.expect("the resync task");
+
+        {
+            let record = handle.lock().await;
+            let scheduled = record
+                .scheduled_limit
+                .as_ref()
+                .expect("the retry dropped every pause");
+            assert_eq!(
+                scheduled.schedule_id.as_deref(),
+                Some(newer_id.as_str()),
+                "the retry restored the older schedule over the newer one"
+            );
+            assert_eq!(
+                scheduled.reset_at,
+                Some(newer_reset),
+                "the retry moved the pause back to the older reset"
+            );
+            assert_eq!(
+                scheduled.parked_turn.as_ref(),
+                Some(&second.turn_id),
+                "the newer pause lost the prompt it was holding"
+            );
+        }
+
+        // The newer schedule fires and delivers the parked prompt.
+        manager
+            .resume_now(&thread_id)
+            .await
+            .expect("the newer schedule fires");
+        let mut echoed = String::new();
+        let (turn, status) = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                match wire.event {
+                    Event::MessageDelta { text, .. } => echoed.push_str(&text),
+                    Event::TurnCompleted {
+                        turn_id, status, ..
+                    } => return (turn_id, status),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the newer schedule delivered no turn");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+        assert!(
+            echoed.contains("echo: second"),
+            "the parked prompt was not delivered: {echoed:?}"
+        );
+        assert_eq!(sends.get(), 1);
+    }
+
+    /// A resync retry never binds a schedule the person cancelled after its
+    /// ledger read.
+    ///
+    /// The startup read fails, so the restored prompt has no pause that will
+    /// deliver it. The retry then snapshots schedule A while it is still armed,
+    /// the person cancels A before the retry reaches the record, and binding
+    /// that stale snapshot would leave the prompt waiting for a fire that can
+    /// never happen. The retry re-reads A under the lock instead and releases
+    /// the prompt, so it runs now.
+    #[tokio::test]
+    async fn a_resync_retry_releases_a_prompt_cancelled_after_its_read() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal_path = workspace.path().join("journal.sqlite");
+        let meter_path = workspace.path().join("meter.sqlite");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(20);
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal"),
+        );
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter"),
+        );
+        let parked = park_requeued_turn_on(Some(reset_at), journal, meter, None).await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            thread_id,
+            second,
+            ..
+        } = parked;
+        drop(manager);
+
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal after restart"),
+        );
+        let (harness, sends) = FakeHarness::new().with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host, journal).await;
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter after restart"),
+        );
+        meter.store().fail_next_schedule_reads_for_tests(1);
+        manager.set_meter(Arc::clone(&meter));
+
+        // The first read fails: the restored prompt is still unresolved.
+        manager.resync_meter_state().await;
+        assert!(
+            manager.inner.resync_pending.load(Ordering::Relaxed),
+            "the failed schedule read left no retry pending"
+        );
+
+        // Hold the retry between its ledger read and the record lock.
+        let pause = Arc::new(ResyncPause::default());
+        *manager
+            .inner
+            .resync_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&pause));
+        let mut events = manager.subscribe();
+        let resyncing = {
+            let manager = manager.clone();
+            tokio::spawn(async move { manager.resync_meter_state().await })
+        };
+        tokio::time::timeout(Duration::from_secs(10), pause.read.notified())
+            .await
+            .expect("the retry never read the ledger");
+
+        // The person cancels A while the retry holds its snapshot.
+        let cancelled = manager
+            .cancel_resume(&thread_id)
+            .await
+            .expect("cancel the armed resume");
+        assert!(
+            cancelled.is_some(),
+            "the parked prompt had no schedule to cancel"
+        );
+        let schedules = meter.schedules().await.expect("read schedules");
+        assert_eq!(
+            schedules[0].state,
+            ResumeState::Cancelled,
+            "the test did not cancel the armed schedule"
+        );
+
+        pause.resume.notify_one();
+        resyncing.await.expect("the resync task");
+
+        {
+            let handle = manager
+                .inner
+                .handle(&thread_id)
+                .await
+                .expect("thread handle");
+            let record = handle.lock().await;
+            assert!(
+                record.scheduled_limit.is_none(),
+                "the retry bound a schedule that was already cancelled"
+            );
+            assert!(
+                record.meta.parked.is_none(),
+                "the cancelled schedule kept the prompt parked"
+            );
+        }
+
+        // The release delivers the person's prompt instead of leaving it
+        // waiting for the cancelled schedule.
+        let mut echoed = String::new();
+        let (turn, status) = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                match wire.event {
+                    Event::MessageDelta { text, .. } => echoed.push_str(&text),
+                    Event::TurnCompleted {
+                        turn_id, status, ..
+                    } => return (turn_id, status),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the released prompt never ran");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+        assert!(
+            echoed.contains("echo: second"),
+            "the parked prompt was not delivered: {echoed:?}"
+        );
+        assert_eq!(sends.get(), 1, "the released prompt was not written once");
+    }
+
+    /// A retry does not release a prompt the cancel already released.
+    ///
+    /// The first resync bound the pause to the restored prompt, so the person's
+    /// cancellation releases it and records one release. A later retry then
+    /// snapshots the now-cancelled row, and its re-check must not release the
+    /// same prompt a second time.
+    #[tokio::test]
+    async fn a_retry_does_not_release_a_prompt_the_cancel_already_released() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal_path = workspace.path().join("journal.sqlite");
+        let meter_path = workspace.path().join("meter.sqlite");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(20);
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal"),
+        );
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter"),
+        );
+        let parked = park_requeued_turn_on(Some(reset_at), journal, meter, None).await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            thread_id,
+            second,
+            ..
+        } = parked;
+        drop(manager);
+
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal after restart"),
+        );
+        let (harness, sends) = FakeHarness::new().with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host, journal).await;
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter after restart"),
+        );
+        manager.set_meter(Arc::clone(&meter));
+
+        // The first resync binds the restored pause to its prompt.
+        manager.resync_meter_state().await;
+        {
+            let handle = manager
+                .inner
+                .handle(&thread_id)
+                .await
+                .expect("thread handle");
+            let record = handle.lock().await;
+            assert!(
+                record.parks_active_turn(),
+                "precondition: the pause holds the restored prompt"
+            );
+        }
+
+        // Hold a later retry between its ledger read and the record lock.
+        let pause = Arc::new(ResyncPause::default());
+        *manager
+            .inner
+            .resync_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&pause));
+        let mut events = manager.subscribe();
+        let resyncing = {
+            let manager = manager.clone();
+            tokio::spawn(async move { manager.resync_meter_state().await })
+        };
+        tokio::time::timeout(Duration::from_secs(10), pause.read.notified())
+            .await
+            .expect("the retry never read the ledger");
+
+        // The cancel releases the prompt and records that release while the
+        // retry still holds its snapshot.
+        let cancelled = manager
+            .cancel_resume(&thread_id)
+            .await
+            .expect("cancel the armed resume");
+        assert!(cancelled.is_some(), "the parked prompt lost its schedule");
+        let domain = manager
+            .inner
+            .journal
+            .read_domain(&thread_id)
+            .await
+            .expect("read the domain log");
+        assert_eq!(
+            domain
+                .iter()
+                .filter(|event| matches!(event, ThreadEvent::LimitResumeReleased { .. }))
+                .count(),
+            1,
+            "precondition: the cancel released the parked prompt once"
+        );
+
+        pause.resume.notify_one();
+        resyncing.await.expect("the resync task");
+
+        // The retry saw a cancelled row, but the prompt it held is already
+        // released: no second release and no phase change for it.
+        let domain = manager
+            .inner
+            .journal
+            .read_domain(&thread_id)
+            .await
+            .expect("read the domain log");
+        assert_eq!(
+            domain
+                .iter()
+                .filter(|event| matches!(event, ThreadEvent::LimitResumeReleased { .. }))
+                .count(),
+            1,
+            "the retry released a prompt the cancel already released"
+        );
+        {
+            let handle = manager
+                .inner
+                .handle(&thread_id)
+                .await
+                .expect("thread handle");
+            let record = handle.lock().await;
+            assert!(record.scheduled_limit.is_none());
+            assert!(record.meta.parked.is_none());
+        }
+
+        // The one release delivers the person's prompt exactly once.
+        let mut echoed = String::new();
+        let (turn, status) = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                match wire.event {
+                    Event::MessageDelta { text, .. } => echoed.push_str(&text),
+                    Event::TurnCompleted {
+                        turn_id, status, ..
+                    } => return (turn_id, status),
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("the cancelled schedule's prompt never ran");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+        assert!(
+            echoed.contains("echo: second"),
+            "the parked prompt was not delivered: {echoed:?}"
+        );
+        assert_eq!(sends.get(), 1, "the released prompt was not written once");
+    }
+
+    /// A cancelled idle schedule snapshot releases no prompt.
+    ///
+    /// The thread has no pending turn: an exit report's limit armed its
+    /// schedule between turns, and nothing is parked behind it. If the person
+    /// cancels that schedule after a retry snapshotted it, the retry must drop
+    /// the stale pause instead of emitting a release that would flip the idle
+    /// thread to Thinking.
+    #[tokio::test]
+    async fn a_cancelled_idle_schedule_snapshot_releases_no_prompt() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal_path = workspace.path().join("journal.sqlite");
+        let meter_path = workspace.path().join("meter.sqlite");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(15);
+        let journal: Arc<dyn Journal> = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal"),
+        );
+        let (harness, harness_events) = FakeHarness::new().with_event_injector();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host.clone(), journal).await;
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter"),
+        );
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        // Between turns, the exit's limit arms a schedule while the thread is
+        // idle: no pending turn and no parked prompt.
+        harness_events.emit(HarnessEvent::TransportClosed {
+            message: "the ACP agent stdout closed".into(),
+            retryable: true,
+            kind: TransportCloseKind::Eof,
+            reset_at: None,
+        });
+        harness_events.emit(HarnessEvent::LimitHit {
+            reset_at: Some(reset_at),
+            auto_resume: true,
+        });
+        let row = tokio::time::timeout(Duration::from_secs(3), next_error(&mut events))
+            .await
+            .expect("the fallback publishes the idle row");
+        assert_eq!(row, "the ACP agent stdout closed");
+        {
+            let handle = manager
+                .inner
+                .handle(&created.thread_id)
+                .await
+                .expect("thread handle");
+            let record = handle.lock().await;
+            assert!(
+                record.scheduled_limit.is_some(),
+                "the idle limit armed no pause"
+            );
+            assert!(!record.pending_turn(), "precondition: the thread is idle");
+            assert!(
+                !record.parks_persisted_prompt(),
+                "precondition: an idle pause parks no prompt"
+            );
+            assert_eq!(record.state.phase, h4rn_core::Phase::RateLimited);
+        }
+        manager.shutdown().await;
+        drop(manager);
+
+        // The next boot cannot read the schedule list, so the first resync is
+        // unresolved and the retry is the pass that snapshots the row.
+        let journal: Arc<dyn Journal> = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal after restart"),
+        );
+        let harness = FakeHarness::new();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host, journal).await;
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter after restart"),
+        );
+        meter.store().fail_next_schedule_reads_for_tests(1);
+        manager.set_meter(Arc::clone(&meter));
+        manager.resync_meter_state().await;
+        assert!(
+            manager.inner.resync_pending.load(Ordering::Relaxed),
+            "the failed schedule read left no retry pending"
+        );
+
+        // Hold the retry between its ledger read and the record lock.
+        let pause = Arc::new(ResyncPause::default());
+        *manager
+            .inner
+            .resync_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&pause));
+        let resyncing = {
+            let manager = manager.clone();
+            tokio::spawn(async move { manager.resync_meter_state().await })
+        };
+        tokio::time::timeout(Duration::from_secs(10), pause.read.notified())
+            .await
+            .expect("the retry never read the ledger");
+
+        // The person cancels the schedule while the retry holds its snapshot.
+        let cancelled = manager
+            .cancel_resume(&created.thread_id)
+            .await
+            .expect("cancel the armed resume");
+        assert!(
+            cancelled.is_some(),
+            "the idle thread had no schedule to cancel"
+        );
+
+        pause.resume.notify_one();
+        resyncing.await.expect("the resync task");
+
+        // Nothing was parked, so the cancelled snapshot must not release
+        // anything or move the thread out of its paused phase.
+        let domain = manager
+            .inner
+            .journal
+            .read_domain(&created.thread_id)
+            .await
+            .expect("read the domain log");
+        assert!(
+            !domain
+                .iter()
+                .any(|event| matches!(event, ThreadEvent::LimitResumeReleased { .. })),
+            "the idle thread's cancelled snapshot released a prompt it never parked"
+        );
+        {
+            let handle = manager
+                .inner
+                .handle(&created.thread_id)
+                .await
+                .expect("thread handle");
+            let record = handle.lock().await;
+            assert_eq!(
+                record.state.phase,
+                h4rn_core::Phase::RateLimited,
+                "the cancelled idle snapshot moved the thread out of its pause"
+            );
+            assert!(record.active.is_none());
+            assert!(record.meta.parked.is_none());
+            assert!(record.scheduled_limit.is_none());
+        }
+        let summary = manager
+            .thread_summary(&created.thread_id)
+            .await
+            .expect("summary");
+        assert_eq!(
+            summary.agent_state,
+            AgentState::RateLimited,
+            "the cancelled idle snapshot made the thread look like it is thinking"
+        );
+    }
+
+    /// The resync retry deadline is monotonic.
+    ///
+    /// A wall clock that jumps backwards (NTP, a manual change) must not stretch
+    /// the wait: the manager's monotonic reading alone decides when the retry
+    /// runs.
+    #[tokio::test]
+    async fn a_backward_wall_clock_jump_does_not_stretch_the_resync_retry() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal_path = workspace.path().join("journal.sqlite");
+        let meter_path = workspace.path().join("meter.sqlite");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(20);
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal"),
+        );
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter"),
+        );
+        let parked = park_requeued_turn_on(Some(reset_at), journal, meter, None).await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            ..
+        } = parked;
+        drop(manager);
+
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal after restart"),
+        );
+        let (harness, _) = FakeHarness::new().with_send_count();
+        let host = HostId::new("host_test");
+        let clock = Arc::new(ManualClock::new());
+        let manager = open_test_manager_with_clock(
+            harness,
+            host,
+            journal,
+            Some(Arc::clone(&clock) as Arc<dyn Clock>),
+        )
+        .await;
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter after restart"),
+        );
+        meter.store().fail_next_limit_reads_for_tests(1);
+        manager.set_meter(Arc::clone(&meter));
+
+        manager.resync_meter_state().await;
+        assert_eq!(
+            meter.store().limit_reads_for_tests(),
+            1,
+            "the first resync did not try the limit history"
+        );
+        assert!(
+            manager.inner.resync_pending.load(Ordering::Relaxed),
+            "the failed read left no retry pending"
+        );
+
+        // The wall clock jumps an hour back. A deadline read from the wall
+        // clock would now be an hour away.
+        clock.shift_wall(chrono::Duration::hours(-1));
+        manager.inner.tick().await;
+        assert_eq!(
+            meter.store().limit_reads_for_tests(),
+            1,
+            "the backward wall-clock jump moved the retry deadline"
+        );
+
+        // Only the monotonic wait decides when the retry runs.
+        clock.advance_monotonic(Duration::from_secs(1));
+        manager.inner.tick().await;
+        assert_eq!(
+            meter.store().limit_reads_for_tests(),
+            2,
+            "the retry missed its monotonic deadline"
+        );
+        assert!(
+            !manager.inner.resync_pending.load(Ordering::Relaxed),
+            "the successful retry left a retry pending"
+        );
+    }
+
+    /// A failed resync waits its backoff, and each wait doubles to a minute.
+    ///
+    /// The wait is what keeps an unreadable ledger from rewriting every summary
+    /// on every tick, so it needs its own deterministic test: a tick that does
+    /// not advance the clock must not read the ledger again, the first wait is
+    /// one second, and each later wait doubles up to the 60 s cap.
+    #[tokio::test]
+    async fn a_failed_resync_waits_its_backoff_before_retrying() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal_path = workspace.path().join("journal.sqlite");
+        let meter_path = workspace.path().join("meter.sqlite");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(20);
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal"),
+        );
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter"),
+        );
+        let parked = park_requeued_turn_on(Some(reset_at), journal, meter, None).await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            ..
+        } = parked;
+        drop(manager);
+
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal after restart"),
+        );
+        let (harness, _) = FakeHarness::new().with_send_count();
+        let host = HostId::new("host_test");
+        let clock = Arc::new(ManualClock::new());
+        let manager = open_test_manager_with_clock(
+            harness,
+            host,
+            journal,
+            Some(Arc::clone(&clock) as Arc<dyn Clock>),
+        )
+        .await;
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter after restart"),
+        );
+        // Every attempt keeps failing, so only the wait decides a retry.
+        meter.store().fail_next_limit_reads_for_tests(100);
+        manager.set_meter(Arc::clone(&meter));
+
+        manager.resync_meter_state().await;
+        let reads = || meter.store().limit_reads_for_tests();
+        assert_eq!(reads(), 1, "the first resync did not try the limit history");
+
+        // A tick without advancing the clock does not retry.
+        manager.inner.tick().await;
+        assert_eq!(reads(), 1, "a tick retried before the backoff elapsed");
+
+        // The first wait is one second.
+        clock.advance_monotonic(Duration::from_secs(1));
+        manager.inner.tick().await;
+        assert_eq!(reads(), 2, "the retry did not run at the first backoff");
+
+        // Each later wait doubles, capped at a minute.
+        for wait in [2u64, 4, 8, 16, 32, 60, 60] {
+            let before = reads();
+            clock.advance_monotonic(Duration::from_secs(wait - 1));
+            manager.inner.tick().await;
+            assert_eq!(
+                reads(),
+                before,
+                "a tick retried before the {wait}s wait elapsed"
+            );
+            clock.advance_monotonic(Duration::from_secs(1));
+            manager.inner.tick().await;
+            assert_eq!(reads(), before + 1, "the retry missed the {wait}s wait");
+        }
+        assert!(
+            manager.inner.resync_pending.load(Ordering::Relaxed),
+            "the test's ledger unexpectedly recovered"
+        );
+    }
+
+    /// A failing ledger read does not rewrite every summary on every tick.
+    ///
+    /// Each retry used to clear every thread's cached signature, so a ledger
+    /// that stayed unreadable re-appended and broadcast the whole inbox once a
+    /// tick. Only a record whose restored state changed may be re-published,
+    /// and the retry itself backs off.
+    #[tokio::test]
+    async fn a_failing_ledger_read_does_not_rebroadcast_every_summary() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal_path = workspace.path().join("journal.sqlite");
+        let meter_path = workspace.path().join("meter.sqlite");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(20);
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal"),
+        );
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter"),
+        );
+        let parked = park_requeued_turn_on(Some(reset_at), journal, meter, None).await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            thread_id,
+            ..
+        } = parked;
+        drop(manager);
+
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal after restart"),
+        );
+        let (harness, _) = FakeHarness::new().with_send_count();
+        let host = HostId::new("host_test");
+        let clock = Arc::new(ManualClock::new());
+        let manager = open_test_manager_with_clock(
+            harness,
+            host,
+            journal,
+            Some(Arc::clone(&clock) as Arc<dyn Clock>),
+        )
+        .await;
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter after restart"),
+        );
+        meter.store().fail_next_limit_reads_for_tests(16);
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+
+        // The startup read fails its limit history but still binds the
+        // schedule, so this one change is published.
+        manager.resync_meter_state().await;
+        assert!(
+            manager.inner.resync_pending.load(Ordering::Relaxed),
+            "the failed read did not leave a retry pending"
+        );
+        {
+            let handle = manager
+                .inner
+                .handle(&thread_id)
+                .await
+                .expect("thread handle");
+            let record = handle.lock().await;
+            assert!(
+                record.scheduled_limit.is_some(),
+                "the failed limit read blocked the schedule-id restore"
+            );
+        }
+
+        // Each tick retries after the backoff has passed and reads the same
+        // ledger. Only the first tick publishes the one summary that changed.
+        let mut upserts = 0;
+        for wait in [1, 2, 4, 8] {
+            clock.advance(chrono::Duration::seconds(wait));
+            manager.inner.tick().await;
+            while let Ok(wire) = events.try_recv() {
+                if matches!(wire.event, Event::ThreadUpserted(_)) {
+                    upserts += 1;
+                }
+            }
+        }
+        assert_eq!(
+            upserts, 1,
+            "a failing ledger read republished the inbox on every tick"
+        );
+        assert!(
+            manager.inner.resync_pending.load(Ordering::Relaxed),
+            "the test's ledger unexpectedly recovered"
+        );
+    }
+
     /// A fire only claims an attempt the thread's record names.
     ///
     /// A restarted daemon restores the parked prompt from the journal before
@@ -12848,7 +14335,9 @@ mod tests {
         );
 
         // The next tick retries the resync (which now succeeds) and fires the
-        // due attempt for the restored prompt.
+        // due attempt for the restored prompt. The retry wait is time-based;
+        // the test moves it aside rather than waiting.
+        manager.inner.clear_resync_retry();
         *manager
             .inner
             .last_schedule_check
@@ -12860,6 +14349,110 @@ mod tests {
             2,
             "the tick did not retry the failed ledger read"
         );
+        assert!(
+            !manager.inner.resync_pending.load(Ordering::Relaxed),
+            "the successful retry left a retry pending"
+        );
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the due schedule never delivered the restored prompt");
+        assert_eq!(turn, second.turn_id);
+        assert_eq!(status, TurnStatus::Completed);
+        assert_eq!(sends.get(), 1);
+        let schedules = meter.schedules().await.expect("read schedules");
+        assert_eq!(
+            schedules[0].state,
+            ResumeState::Fired,
+            "the retried resync left the due schedule unfired"
+        );
+    }
+
+    /// A resync that cannot re-read one schedule row is retried.
+    ///
+    /// The startup pass reads the schedule list and the limit history, then
+    /// fails on the per-row re-check that confirms the restored schedule before
+    /// binding it. That failure leaves the restored prompt unnamed, so the
+    /// ticker must treat the resync as unresolved and run the whole pass again
+    /// instead of leaving the prompt waiting forever.
+    #[tokio::test]
+    async fn a_failed_per_schedule_reread_is_retried_and_the_due_schedule_fires() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let journal_path = workspace.path().join("journal.sqlite");
+        let meter_path = workspace.path().join("meter.sqlite");
+        // Already due: the schedule fires as soon as a tick sees it.
+        let reset_at = chrono::Utc::now() - chrono::Duration::minutes(1);
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal"),
+        );
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter"),
+        );
+        let parked = park_requeued_turn_on(Some(reset_at), journal, meter, None).await;
+        let ParkedRequeue {
+            _workspace,
+            manager,
+            thread_id,
+            second,
+            ..
+        } = parked;
+        drop(manager);
+
+        let journal = Arc::new(
+            SqliteJournal::connect(&journal_path)
+                .await
+                .expect("journal after restart"),
+        );
+        let (harness, sends) = FakeHarness::new().with_send_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager_with_journal(harness, host, journal).await;
+        let meter = Arc::new(
+            h4rn_meter::MeterHub::open(&meter_path)
+                .await
+                .expect("meter after restart"),
+        );
+        // The list and the limit history read fine; only the per-row re-check
+        // that confirms the restored schedule fails.
+        meter.store().fail_next_schedule_queries_for_tests(1);
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+
+        manager.resync_meter_state().await;
+        {
+            let handle = manager
+                .inner
+                .handle(&thread_id)
+                .await
+                .expect("thread handle");
+            let record = handle.lock().await;
+            assert!(
+                record.scheduled_limit.is_none(),
+                "the failed re-check still bound the restored schedule"
+            );
+            assert!(
+                record.parks_persisted_prompt(),
+                "the restored prompt is not the durable parked one"
+            );
+        }
+        assert!(
+            manager.inner.resync_pending.load(Ordering::Relaxed),
+            "the failed per-schedule re-check left no retry pending"
+        );
+
+        // The next tick retries the resync (which now succeeds) and fires the
+        // due attempt for the restored prompt. The retry wait is time-based;
+        // the test moves it aside rather than waiting.
+        manager.inner.clear_resync_retry();
+        *manager
+            .inner
+            .last_schedule_check
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        manager.inner.tick().await;
         assert!(
             !manager.inner.resync_pending.load(Ordering::Relaxed),
             "the successful retry left a retry pending"
@@ -13187,7 +14780,6 @@ mod tests {
         }
     }
 
-    /// A replacement schedule keeps the prompt the pause was holding.
     /// A replacement schedule keeps the prompt the pause was holding.
     ///
     /// A newer limit replaces the pause a failed write armed while its prompt
