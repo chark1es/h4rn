@@ -1597,6 +1597,51 @@ async fn azure_encodes_project_names_as_path_segments() {
 }
 
 #[tokio::test]
+async fn azure_accepts_a_literal_percent_in_a_repository_name() {
+    // Azure returns decoded names, so a repository literally called
+    // `release%20notes` arrives with a `%` in it. That is a name, not an
+    // escape: validation must accept it and the request path and browser URL
+    // must encode the `%` itself.
+    let server = MockServer::start().await;
+    let mut pr = fixture(AZ_PR);
+    pr.as_object_mut().unwrap().remove("_links");
+    pr["repository"].as_object_mut().unwrap().remove("webUrl");
+    Mock::given(method("GET"))
+        .and(path(
+            "/acme/platform/_apis/git/repositories/release%2520notes/pullrequests/7",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(pr))
+        .mount(&server)
+        .await;
+    let client = AzureDevOpsClient::new(&format!("{}/acme", server.uri()), "pat", 120).unwrap();
+    let repo = ForgeRepoRef {
+        forge: ForgeKind::AzureDevOps,
+        base_url: format!("{}/acme", server.uri()),
+        owner: "platform".into(),
+        repo: "release%20notes".into(),
+    };
+    let pr = client.get_pr(&repo, 7).await.unwrap();
+    assert_eq!(pr.summary.number, 7);
+    assert_eq!(
+        pr.summary.web_url,
+        format!(
+            "{}/acme/platform/_git/release%2520notes/pullrequest/7",
+            server.uri()
+        ),
+        "the browser must read %20 as part of the name, not as a space"
+    );
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| !request.url.path().contains("release%20notes/")),
+        "no request may leave a bare %20 in the path"
+    );
+}
+
+#[tokio::test]
 async fn azure_sends_a_basic_pat_with_an_empty_username() {
     let server = MockServer::start().await;
     let expected = base64::engine::general_purpose::STANDARD.encode(":pat-token");

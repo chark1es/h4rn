@@ -244,6 +244,102 @@ describe("PR detail tabs", () => {
     expect(requestsOfType("forge_list_checks")).toBe(1);
   });
 
+  it("keeps a live checks update when the older request then fails", async () => {
+    // The checks request is in flight when the daemon pushes a live update.
+    // Its late failure describes an older snapshot, so it must not replace the
+    // fresher one with an error.
+    let failChecks: ((cause: Error) => void) | null = null;
+    mock.client.request.mockImplementation(async (request) => {
+      if (request.type === "forge_list_checks") {
+        return new Promise<ResponseBody>((_, reject) => {
+          failChecks = reject;
+        });
+      }
+      return mock.defaultRequest(request);
+    });
+
+    await openPr();
+    fireEvent.click(screen.getByRole("tab", { name: /Checks/ }));
+    expect((await screen.findAllByText("Loading checks…")).length).toBeGreaterThan(0);
+
+    const live = mock.checksPayload(repo);
+    live.checks = [
+      {
+        name: "deploy",
+        status: "success",
+        details_url: null,
+        description: null,
+        started_at: null,
+        completed_at: null,
+        duration_ms: null,
+        required: true,
+      },
+    ];
+    act(() => {
+      for (const listener of mock.state.listeners) {
+        listener({
+          event: { type: "forge_checks_updated", repo, number: 7, checks: live },
+        });
+      }
+    });
+    expect(screen.getAllByText("deploy").length).toBeGreaterThan(0);
+
+    await act(async () => {
+      failChecks?.(new Error("GitHub returned HTTP 500: the checks request lost the race"));
+    });
+
+    expect(screen.queryByText("Checks did not load")).toBeNull();
+    expect(screen.getAllByText("deploy").length).toBeGreaterThan(0);
+    expect(screen.queryByText("build")).toBeNull();
+  });
+
+  it("keeps a live checks update when the older request then succeeds", async () => {
+    // Same race, but the stale request resolves. It carries the snapshot from
+    // before the push, so the live one stays on screen.
+    let resolveChecks: ((body: ResponseBody) => void) | null = null;
+    mock.client.request.mockImplementation(async (request) => {
+      if (request.type === "forge_list_checks") {
+        return new Promise<ResponseBody>((resolve) => {
+          resolveChecks = resolve;
+        });
+      }
+      return mock.defaultRequest(request);
+    });
+
+    await openPr();
+    fireEvent.click(screen.getByRole("tab", { name: /Checks/ }));
+    expect((await screen.findAllByText("Loading checks…")).length).toBeGreaterThan(0);
+
+    const live = mock.checksPayload(repo);
+    live.checks = [
+      {
+        name: "deploy",
+        status: "success",
+        details_url: null,
+        description: null,
+        started_at: null,
+        completed_at: null,
+        duration_ms: null,
+        required: true,
+      },
+    ];
+    act(() => {
+      for (const listener of mock.state.listeners) {
+        listener({
+          event: { type: "forge_checks_updated", repo, number: 7, checks: live },
+        });
+      }
+    });
+    expect(screen.getAllByText("deploy").length).toBeGreaterThan(0);
+
+    await act(async () => {
+      resolveChecks?.({ type: "forge_checks", checks: mock.checksPayload(repo) });
+    });
+
+    expect(screen.getAllByText("deploy").length).toBeGreaterThan(0);
+    expect(screen.queryByText("build")).toBeNull();
+  });
+
   it("re-runs only the tab's own request on Retry and keeps the header", async () => {
     const counts = new Map<string, number>();
     let release: ((body: ResponseBody) => void) | null = null;

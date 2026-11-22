@@ -114,8 +114,14 @@ All notable changes to h4rn are recorded here. The format follows
   Nested JSON error details are redacted as decoded strings before they are
   serialized into the message, so a credential containing a quote cannot
   survive as a JSON-escaped value, and the escaped spelling is matched as a
-  second layer. The configured secret is removed before the pattern-based
-  token pass, which stays as a second layer.
+  second layer. Object keys are redacted as well as values (a credential used
+  as a key cannot slip through a serialized `error` object), and a JSON body
+  with no `message`, `error`, `detail` or `errors` key is serialized from the
+  redacted decoded value instead of echoing the raw body, so no `\/` or
+  `\u00xx` spelling survives. Matching normalizes the text once and reads every
+  match offset from that normalised copy, so a body that echoes a credential
+  thousands of times is redacted in one linear pass. The configured secret is
+  removed before the pattern-based token pass, which stays as a second layer.
 - **Azure DevOps reply ids are parsed before they are used.** A reply's thread
   id goes into the request URL and its comment id into the JSON body; both must
   be positive 32-bit integers, and an invalid one returns `InvalidRequest`
@@ -137,8 +143,10 @@ All notable changes to h4rn are recorded here. The format follows
   and Retry: a quiet “Loading…” fills the tab while its request is in flight
   instead of a “did not load” or empty state, Retry re-runs only that tab's
   request while the PR header, checks and the rest of the detail stay on
-  screen, and a live checks update clears a failed Checks load. An error still
-  stays inside its own tab.
+  screen, and a live checks update clears a failed Checks load. A live update
+  also wins over a checks request that was already in flight: its late answer,
+  success or failure, describes an older snapshot and no longer replaces what
+  the daemon pushed. An error still stays inside its own tab.
 - **Azure DevOps missing collections are errors, not empty answers.** A 200
   without `threads` or `changeEntries` is a parse error, while an explicit
   empty list stays empty; a missing `changeEntries` leaves
@@ -148,6 +156,11 @@ All notable changes to h4rn are recorded here. The format follows
   repository segments (a repository named `release%20notes` no longer links to
   `release notes`), and a file's totals count added or removed lines whose
   content starts `+++` or `---` instead of mistaking them for file headers.
+- **A literal `%` in an Azure DevOps project or repository name works.** Azure
+  returns decoded names, so `release%20notes` is a name, not an escaped space.
+  Shared validation accepts it and every segment is percent-encoded before it
+  enters a request or browser URL (`%` becomes `%25`), while the checks that
+  keep a segment a single safe path step still reject separators and `.`/`..`.
 - **Large Azure DevOps pull requests load within the page deadline.** Azure needs file contents to
   build a diff, so a 30-file page could not finish inside the UI's ten-second budget once the
   account's local request allowance ran out. A diff page now holds at most eight files (eighteen

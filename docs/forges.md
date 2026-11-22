@@ -94,7 +94,9 @@ Azure DevOps Services uses REST 7.1. `ForgeRepoRef.base_url` carries the
 organization (`https://dev.azure.com/acme`) and `owner` carries the project.
 Remote path segments are percent-decoded when detected (so `My%20Project`
 becomes the project name) and encoded again as path segments in requests;
-decoded separators and `..` are rejected. The legacy SSH host
+decoded separators and `..` are rejected, and a name that itself contains a
+`%` (a repository literally called `release%20notes`) keeps it as part of the
+name and is encoded as `%25`. The legacy SSH host
 `vs-ssh.visualstudio.com` derives `https://<org>.visualstudio.com` from its
 `v3/<org>/...` path. Pull requests map `active`/`completed`/`abandoned` onto
 open/merged/closed, but listing only asks for active PRs
@@ -197,7 +199,8 @@ Local paths and file remotes are rejected. Azure DevOps remotes keep the
 organization in `base_url` and the project in `owner`; the browser URL inserts
 the `_git` segment. Azure DevOps path segments are percent-decoded
 (`My%20Project`) and validated (a decoded separator, `..` or an empty segment
-is rejected) because they are encoded again in requests. Every other forge
+is rejected) because they are encoded again in requests; a literal `%` is part
+of the name (`release%20notes` becomes `release%2520notes`). Every other forge
 keeps its long-standing lenient path handling: a double slash such as
 `https://gitlab.com/team//repo.git` resolves like `team/repo`.
 
@@ -424,9 +427,13 @@ is local and append-only.
 
 The daemon polls PRs it is watching for checks changes. The base interval is
 `H4RN_FORGE_POLL_SECS` (default 30, minimum 5); failures back off up to 300
-seconds. A state change broadcasts a transient `forges_checks_updated` event
+seconds. A state change broadcasts a transient `forge_checks_updated` event
 carrying the PR, aggregated state, counts and the connection's current durable
 `last_seq`. The event is not journaled, so a client that reconnects re-fetches.
+The PR page treats a pushed event as the freshest snapshot: it bumps a
+generation counter, and a checks request that was already in flight keeps an
+older generation, so its late answer (or failure) does not replace the pushed
+one.
 
 Each account gets a client with a local request budget,
 `H4RN_FORGE_RPM` (default 120 requests/minute). Every response is also checked
@@ -445,12 +452,18 @@ and in every form an error body or URL can echo it: quoted inside a JSON
 message, percent-encoded (the `%xx` escapes match whichever hex case the server
 used), or Base64 inside a Basic header. Every copy in a body is replaced, so a
 message that carries the plain value plus an uppercase- and a lowercase-escaped
-copy loses all three. A JSON body is redacted as decoded strings before a
-nested value is serialized into the message, so a credential containing a quote
-cannot come back as a JSON-escaped `\"` value; the escaped spelling is also
-matched as a second layer. A pattern-based pass removes anything that still
-looks like a GitHub, GitLab or Atlassian token. The redacted message is what
-reaches a log or a protocol error; the raw response body never does.
+copy loses all three. A JSON body is redacted as decoded strings and object
+keys before a nested value is serialized into the message, so a credential
+containing a quote cannot come back as a JSON-escaped `\"` value and a
+credential used as a key cannot come back as a property name; the escaped
+spelling is also matched as a second layer. A JSON body with no known message
+key is serialized from the redacted decoded value, never from the raw body, so
+a `\/` or `\u00xx` spelling does not survive. Matching normalizes the text once
+and replaces every match offset in a single pass, so a body that echoes the
+credential thousands of times stays linear. A pattern-based pass removes
+anything that still looks like a GitHub, GitLab or Atlassian token. The
+redacted message is what reaches a log or a protocol error; the raw response
+body never does.
 
 ## Testing
 

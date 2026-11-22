@@ -345,11 +345,14 @@ impl ForgeHttp {
 
     /// The message a failed body carries, already redacted.
     ///
-    /// A JSON body is walked as decoded strings and every string is sanitized
-    /// before any nested value is serialized back into the message: a
-    /// credential containing a quote would otherwise reach the message as a
-    /// JSON-escaped `\"` value that the configured-secret match cannot see.
-    /// Non-JSON bodies are sanitized as text.
+    /// A JSON body is walked as decoded strings and keys, and every one is
+    /// sanitized before any nested value is serialized back into the message:
+    /// a credential containing a quote would otherwise reach the message as a
+    /// JSON-escaped `\"` value that the configured-secret match cannot see, and
+    /// a credential used as a key would never be looked at at all. When no
+    /// known message key exists, the redacted decoded value is serialized, so
+    /// the raw body (with its `\/` and `\u00xx` spellings) is never sanitized
+    /// a second time and never echoed. Non-JSON bodies are sanitized as text.
     fn response_message(&self, body: &str) -> String {
         let trimmed = body.trim();
         if trimmed.is_empty() {
@@ -365,6 +368,7 @@ impl ForgeHttp {
                     return message.to_string();
                 }
             }
+            return value.to_string();
         }
         self.sanitize(trimmed)
     }
@@ -480,7 +484,12 @@ fn header_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
         .and_then(|value| value.trim().parse::<u64>().ok())
 }
 
-/// Sanitizes every string inside a decoded JSON value in place.
+/// Sanitizes every string and object key inside a decoded JSON value in place.
+///
+/// Keys are decoded JSON too: a credential can be an object key, and its raw
+/// spelling (`\/`, `\u00xx`) is already gone by the time the value is read.
+/// A key that sanitizes to the same text as another key collapses into it,
+/// which is harmless for an error message.
 fn redact_json_strings(value: &mut Value, sanitize: &dyn Fn(&str) -> String) {
     match value {
         Value::String(text) => *text = sanitize(text),
@@ -490,8 +499,10 @@ fn redact_json_strings(value: &mut Value, sanitize: &dyn Fn(&str) -> String) {
             }
         }
         Value::Object(map) => {
-            for item in map.values_mut() {
-                redact_json_strings(item, sanitize);
+            let entries = std::mem::take(map);
+            for (key, mut item) in entries {
+                redact_json_strings(&mut item, sanitize);
+                map.insert(sanitize(&key), item);
             }
         }
         _ => {}
@@ -552,18 +563,24 @@ fn token_run_len(value: &str) -> usize {
 /// matching span in the text is replaced. Normalising once up front means a
 /// body that carries the plain value and an uppercase- and a lowercase-escaped
 /// copy has all three removed; uppercasing changes no byte lengths or offsets,
-/// so the match index in the normalised copy is the index to replace in the
-/// original. Base64's own case stays exact.
+/// so a match index in the normalised copy is the index to replace in the
+/// original. Scanning the normalised haystack once for every match offset
+/// (instead of re-normalising the remaining text per replacement) keeps a body
+/// that echoes the secret thousands of times linear rather than quadratic.
 fn redact_secret(value: &str, secret: &str) -> String {
     let needle = normalize_escapes(secret);
-    let mut output = String::with_capacity(value.len());
-    let mut rest = value;
-    while let Some(index) = normalize_escapes(rest).find(&needle) {
-        output.push_str(&rest[..index]);
-        output.push_str("[redacted]");
-        rest = &rest[index + secret.len()..];
+    if needle.is_empty() {
+        return value.to_owned();
     }
-    output.push_str(rest);
+    let haystack = normalize_escapes(value);
+    let mut output = String::with_capacity(value.len());
+    let mut copied = 0;
+    for (index, matched) in haystack.match_indices(&needle) {
+        output.push_str(&value[copied..index]);
+        output.push_str("[redacted]");
+        copied = index + matched.len();
+    }
+    output.push_str(&value[copied..]);
     output
 }
 
@@ -1074,6 +1091,73 @@ mod tests {
         assert!(!message.contains(&head), "{message}");
         assert!(!message.contains(&token), "{message}");
         assert!(message.contains("[redacted]"), "{message}");
+    }
+
+    #[test]
+    fn a_credential_used_as_an_object_key_is_redacted_too() {
+        // Keys are decoded JSON strings as much as values are. A proxy that
+        // names the rejected token in a nested key used to leak it through the
+        // serialized `error` object.
+        let pat = fake_pat("");
+        let client = client_with_pat(&pat);
+        let mut nested = serde_json::Map::new();
+        nested.insert("code".into(), Value::String("Unauthorized".into()));
+        nested.insert(pat.clone(), Value::String("echoed back as a key".into()));
+        let body = serde_json::json!({ "error": Value::Object(nested) }).to_string();
+        let message = error_for(&client, body);
+        assert!(
+            !message.contains(&pat),
+            "the credential survived as an object key: {message}"
+        );
+        assert!(message.contains("[redacted]"), "{message}");
+        assert!(message.contains("Unauthorized"), "{message}");
+    }
+
+    #[test]
+    fn a_body_without_a_known_key_is_serialized_from_the_redacted_value() {
+        // A body with no `message`/`error`/`detail`/`errors` key is the whole
+        // message. Its raw spelling is never echoed: the decoded value is
+        // redacted, then serialized. The secret contains `/`, and the body
+        // spells it `\/`, which a raw-text match would miss.
+        let pat = fake_pat("/");
+        let client = client_with_pat(&pat);
+        let escaped = pat.replace('/', r"\/");
+        let body = format!(r#"{{"cause":"rejected {escaped}","retry":false}}"#);
+        let message = error_for(&client, body);
+        assert!(
+            !message.contains("7Kq"),
+            "the slash-escaped credential survived: {message}"
+        );
+        assert!(
+            !message.contains(r"\/"),
+            "the raw JSON spelling was echoed back: {message}"
+        );
+        assert!(message.contains("[redacted]"), "{message}");
+        assert!(message.contains("cause"), "{message}");
+        assert!(message.contains(r#""retry":false"#), "{message}");
+    }
+
+    #[test]
+    fn a_body_that_echoes_the_secret_many_times_is_redacted_in_one_pass() {
+        // A proxy that repeats the rejected credential in every line. The
+        // earlier implementation re-normalised the whole remaining body for
+        // each copy, so this body was quadratic; normalising once and reading
+        // every match offset is linear.
+        let pat = fake_pat("");
+        let client = client_with_pat(&pat);
+        let body = serde_json::json!({
+            "message": format!("{pat}\n").repeat(20_000),
+        })
+        .to_string();
+        let started = Instant::now();
+        let message = error_for(&client, body);
+        let elapsed = started.elapsed();
+        assert!(!message.contains(&pat), "echoed copies survived");
+        assert!(message.contains("[redacted]"), "{message}");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "redacting 20k echoes took {elapsed:?}"
+        );
     }
 
     #[test]

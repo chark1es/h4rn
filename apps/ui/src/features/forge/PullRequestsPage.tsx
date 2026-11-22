@@ -11,7 +11,7 @@ import {
   MessageSquareTextIcon,
   RotateCwIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { AgentGlyph } from "@/components/agent/AgentGlyph";
 import { EntityAvatar } from "@/components/agent/EntityAvatar";
@@ -811,6 +811,10 @@ function PrDetail({
   const [commitsError, setCommitsError] = useState<string | null>(null);
   const [checksLoading, setChecksLoading] = useState(true);
   const [checksError, setChecksError] = useState<string | null>(null);
+  // Bumped by every live checks update. A request that started before the
+  // update carries an older generation, so its late answer (or failure) must
+  // not overwrite the fresher snapshot the daemon pushed.
+  const checksGeneration = useRef(0);
   const [tab, setTab] = useState<"conversation" | "commits" | "checks" | "files">("conversation");
   // One nonce per request. A tab's Retry bumps only its own, so the PR header
   // and the checks stay on screen while that tab loads again.
@@ -888,17 +892,18 @@ function PrDetail({
   useEffect(() => {
     void checksNonce;
     let cancelled = false;
+    const generation = checksGeneration.current;
     setChecksLoading(true);
     setChecksError(null);
     api()
       .checks(repo, number)
       .then((result) => {
-        if (cancelled) return;
+        if (cancelled || generation !== checksGeneration.current) return;
         setChecks(result);
         setChecksLoading(false);
       })
       .catch((cause: unknown) => {
-        if (cancelled) return;
+        if (cancelled || generation !== checksGeneration.current) return;
         setChecksError(errorMessage(cause));
         setChecksLoading(false);
       });
@@ -963,6 +968,7 @@ function PrDetail({
         event.repo.repo === repo.repo &&
         event.number === number
       ) {
+        checksGeneration.current += 1;
         setChecks(event.checks);
         setChecksError(null);
         setChecksLoading(false);
@@ -981,10 +987,14 @@ function PrDetail({
   const rerunFailed = async () => {
     if (rerunBusy) return;
     setRerunBusy(true);
+    const generation = checksGeneration.current;
     try {
-      setChecks(await api().rerunChecks(repo, number));
+      const result = await api().rerunChecks(repo, number);
+      if (generation !== checksGeneration.current) return;
+      setChecks(result);
       pushToast({ title: "Re-running the failed checks.", variant: "success" });
     } catch (cause) {
+      if (generation !== checksGeneration.current) return;
       pushToast({
         title: "Could not re-run the checks.",
         description: cause instanceof Error ? cause.message : String(cause),
