@@ -350,7 +350,25 @@ export class H4rnClient {
 
   private transport: Transport | null = null;
   private frameId = 0;
+  /**
+   * Highest sequence actually delivered to listeners.
+   *
+   * Deduplication uses this, not the audited boundary: a frame can arrive
+   * after the subscribe reply yet still be one the daemon queued for this
+   * socket, and it must not be dropped just because the reply named a head
+   * that covers it.
+   */
   private lastSeq = 0;
+  /**
+   * Highest journal position the daemon has acknowledged serving (or skipping)
+   * for this client.
+   *
+   * A first connect asks from the live edge, so the answer's head is history
+   * this client deliberately did not want; remembering it separately keeps a
+   * later reconnect from replaying that range, without using it to discard
+   * frames that arrive live after the reply.
+   */
+  private ackSeq = 0;
   /** Events between socket open and the subscribe reply, sorted on flush. */
   private replaying = false;
   private replayBuffer: EventEnvelope[] = [];
@@ -670,8 +688,9 @@ export class H4rnClient {
     const handlers: TransportHandlers = {
       onOpen: () => {
         this.socketOpen = true;
-        // Keep `lastSeq` across reconnects so the subscribe replay resumes
-        // exactly where the previous socket stopped.
+        // Keep the delivered and acknowledged cursors across reconnects so
+        // the subscribe replay resumes exactly where the previous socket
+        // stopped.
         this.replaying = true;
         this.replayBuffer = [];
         void this.performHello();
@@ -744,16 +763,17 @@ export class H4rnClient {
       this.startPing();
 
       try {
-        // On the first connection `lastSeq` is 0, so start at the live edge;
-        // after a reconnect ask for the gap and let the daemon replay it
+        // On the first connection nothing was delivered, so start at the live
+        // edge; after a reconnect ask for the gap and let the daemon replay it
         // before going live (ADR-003). The answer names the journal head it
         // served, which is the only honest replay boundary: a live event can
         // arrive before this answer and must not be mistaken for history.
+        const resumeFrom = Math.max(this.lastSeq, this.ackSeq);
         await this.request(
           {
             type: "subscribe",
             topics: ["all"],
-            since_seq: this.lastSeq > 0 ? this.lastSeq : null,
+            since_seq: resumeFrom > 0 ? resumeFrom : null,
           },
           { timeoutMs: 6_000 },
         );
@@ -773,6 +793,9 @@ export class H4rnClient {
         localHostId: hello.local_host,
         serverVersion: hello.server_version,
         deviceId: hello.device_id,
+        // A daemon older than this field answers without it, and a signed-out
+        // daemon has no machine to name.
+        daemonMachineId: hello.daemon_machine_id ?? null,
       };
       for (const listener of this.readyListeners) listener(ready);
     } catch (error) {
@@ -922,21 +945,26 @@ export class H4rnClient {
    * arrived live after the daemon went live and must be treated as news. When
    * the subscribe failed there is no boundary, so everything held is history.
    *
-   * `liveEdge` says the subscribe asked from the live edge (`since_seq: null`)
-   * and an older daemon answered without a boundary. Nothing was replayed in
-   * that case, so the held frames can be delivered untagged.
+   * `firstConnect` says the subscribe asked from the live edge
+   * (`since_seq: null`). Nothing was replayed in that case, whatever boundary
+   * the answer names: the daemon sends no history for a live-edge subscribe,
+   * so every held frame reached this socket after it opened and is news. A
+   * frame that arrived between `hello` and `subscribe` belongs here too, even
+   * though the daemon's journal head (and therefore `replayThrough`) already
+   * covers its sequence.
    */
-  private flushReplay(replayThrough: number | null, liveEdge = false): void {
+  private flushReplay(replayThrough: number | null, firstConnect = false): void {
     if (!this.replaying) return;
     this.replaying = false;
     const pending = this.replayBuffer.splice(0).sort((left, right) => left.seq - right.seq);
     for (const envelope of pending) {
       if (envelope.seq <= this.lastSeq) continue;
       this.lastSeq = envelope.seq;
-      // These frames were sent while the subscribe replay was still open, so
-      // they are history from before this client caught up. Tagging them is
-      // what lets the notifier tell a burst of old approvals from a live one.
-      const isReplay = replayThrough !== null ? envelope.seq <= replayThrough : !liveEdge;
+      // Held frames on a resumed subscribe are history from before this client
+      // caught up. Tagging them is what lets the notifier tell a burst of old
+      // approvals from a live one. A first connect has no history to tell.
+      const isReplay =
+        !firstConnect && (replayThrough !== null ? envelope.seq <= replayThrough : true);
       const replayed: EventEnvelope = {
         ...envelope,
         ...(isReplay ? { replayed: true } : {}),
@@ -945,21 +973,25 @@ export class H4rnClient {
         listener(replayed);
       }
     }
-    // Even with no events to apply, the cursor now covers the replay the
-    // daemon served, so a later reconnect asks from the right place.
+    // The acknowledged boundary covers the replay (or the live edge) the
+    // daemon served, so a later reconnect asks from the right place. It is
+    // kept apart from `lastSeq`: the reply may name a head that covers frames
+    // still queued for this socket, and those are delivered, not dropped.
     if (replayThrough !== null) {
-      this.lastSeq = Math.max(this.lastSeq, replayThrough);
+      this.ackSeq = Math.max(this.ackSeq, replayThrough);
     }
   }
 
   /** Closes the replay window with the subscribe answer's boundary. */
   private finishSubscribe(replayThrough: number | null, accepted: boolean): void {
-    // An older daemon can accept a live-edge subscribe without naming a
-    // boundary; nothing was replayed then, so the held frames are live. A
-    // refused subscribe gets no such benefit of the doubt.
-    const liveEdge = accepted && replayThrough === null && this.subscribeSince === null;
+    // A subscribe from the live edge replayed nothing, however its answer
+    // names the boundary: the daemon sends no history for `since_seq: null`, so
+    // every held frame is live. A resumed subscribe's held frames are history
+    // unless the boundary says otherwise. A refused subscribe gets no such
+    // benefit of the doubt.
+    const firstConnect = accepted && this.subscribeSince === null;
     this.subscribeSince = null;
-    this.flushReplay(replayThrough, liveEdge);
+    this.flushReplay(replayThrough, firstConnect);
   }
 
   private handleClose(code: number, reason: string): void {
@@ -968,8 +1000,9 @@ export class H4rnClient {
     this.stopPing();
     this.handshaken = false;
     // Frames held for this socket's subscribe die with it: the next socket
-    // asks from `lastSeq` again, so the daemon replays the same range with a
-    // boundary instead of this client guessing at their provenance.
+    // asks from the delivered/acknowledged cursor again, so the daemon replays
+    // the same range with a boundary instead of this client guessing at their
+    // provenance.
     this.replayBuffer = [];
     this.subscribeId = null;
     this.subscribeSince = null;
