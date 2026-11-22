@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ForgePrSummary, ForgeRepoRef, ThreadPullRequest } from "@/gen";
@@ -40,6 +40,7 @@ const pulls: ThreadPullRequest[] = [
     summary: summary("open", 7, "Add PR watch"),
     error: null,
     watching: true,
+    watch_notice: null,
     linked_at: "2026-01-01T00:00:00Z",
   },
   {
@@ -49,11 +50,15 @@ const pulls: ThreadPullRequest[] = [
     summary: summary("closed", 9, "Old experiment"),
     error: null,
     watching: false,
+    watch_notice: null,
     linked_at: "2026-01-02T00:00:00Z",
   },
 ];
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 function openBadge(): void {
   const trigger = screen.getByRole("button", { name: "Linked pull requests" });
@@ -78,6 +83,7 @@ describe("linked pull request badge and panel", () => {
   });
 
   it("lists every link with open, watch and unlink actions", () => {
+    const open = vi.spyOn(window, "open").mockReturnValue(null);
     const onUnwatch = vi.fn();
     const onWatch = vi.fn();
     const onUnlink = vi.fn();
@@ -97,19 +103,51 @@ describe("linked pull request badge and panel", () => {
     expect(screen.getByText("Old experiment")).toBeTruthy();
     expect(screen.getByText("Closed")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: /Stop watching/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: /Add PR watch/ }));
+    expect(open).toHaveBeenCalledWith(
+      "https://github.com/h4rn/api/pull/7",
+      "_blank",
+      "noopener,noreferrer",
+    );
+
+    openBadge();
+    fireEvent.click(screen.getByRole("menuitem", { name: /Stop watching/ }));
     expect(onUnwatch).toHaveBeenCalledWith(pulls[0]);
 
-    fireEvent.click(screen.getByRole("button", { name: /Watch/ }));
+    openBadge();
+    fireEvent.click(screen.getByRole("menuitem", { name: /Watch for changes/ }));
     expect(onWatch).toHaveBeenCalledWith(pulls[1]);
 
-    const unlink = screen.getAllByRole("button", { name: /Unlink/ })[0];
-    expect(unlink).toBeTruthy();
-    if (unlink) fireEvent.click(unlink);
+    openBadge();
+    fireEvent.click(screen.getAllByRole("menuitem", { name: /Unlink/ })[0] as HTMLElement);
     expect(onUnlink).toHaveBeenCalledWith(pulls[0]);
   });
 
-  it("points an open row at the forge page", () => {
+  it("opens the panel and runs an action with the keyboard", async () => {
+    const onUnwatch = vi.fn();
+    render(
+      <LinkedPullRequestsMenu
+        pulls={pulls}
+        onUnlink={() => undefined}
+        onWatch={() => undefined}
+        onUnwatch={onUnwatch}
+      />,
+    );
+
+    const trigger = screen.getByRole("button", { name: "Linked pull requests" });
+    trigger.focus();
+    fireEvent.keyDown(trigger, { key: "Enter" });
+
+    const openRow = await screen.findByRole("menuitem", { name: /Add PR watch/ });
+    fireEvent.keyDown(openRow, { key: "ArrowDown" });
+    const stop = screen.getByRole("menuitem", { name: /Stop watching/ });
+    await waitFor(() => expect(document.activeElement).toBe(stop));
+
+    fireEvent.keyDown(stop, { key: "Enter" });
+    expect(onUnwatch).toHaveBeenCalledWith(pulls[0]);
+  });
+
+  it("shows an eye only on the row that ends a watch", () => {
     render(
       <LinkedPullRequestsMenu
         pulls={pulls}
@@ -119,7 +157,27 @@ describe("linked pull request badge and panel", () => {
       />,
     );
     openBadge();
-    const link = screen.getByRole("link", { name: /Add PR watch/ });
-    expect(link.getAttribute("href")).toBe("https://github.com/h4rn/api/pull/7");
+
+    const stop = screen.getByRole("menuitem", { name: /Stop watching/ });
+    const watch = screen.getByRole("menuitem", { name: /Watch for changes/ });
+    expect(stop.querySelector("svg")).not.toBeNull();
+    expect(watch.querySelector("svg")).toBeNull();
+  });
+
+  it("says what a watch cannot cover when the forge has no login", () => {
+    const notice =
+      "Comments and reviews are not watched: this account has no login on the forge, so the daemon cannot tell your own words from someone else's.";
+    const [primary, other] = pulls;
+    if (!primary || !other) throw new Error("the badge fixtures are missing");
+    render(
+      <LinkedPullRequestsMenu
+        pulls={[{ ...primary, watch_notice: notice }, other]}
+        onUnlink={() => undefined}
+        onWatch={() => undefined}
+        onUnwatch={() => undefined}
+      />,
+    );
+    openBadge();
+    expect(screen.getByText(notice)).toBeTruthy();
   });
 });

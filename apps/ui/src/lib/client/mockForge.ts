@@ -16,9 +16,11 @@ import type {
   ForgeReview,
   ForgeReviewComment,
   ForgeReviewThread,
+  PrLinkedThread,
   ProtoError,
   ResponseBody,
   ThreadId,
+  ThreadPullRequest,
 } from "@/gen";
 
 type MockHooks = {
@@ -26,6 +28,8 @@ type MockHooks = {
   err: (code: ProtoError["code"], message: string, hint: string | null) => void;
   later: (ms: number, fn: () => void) => void;
   transient: (event: import("@/gen").Event) => void;
+  /** The dev harness's thread title, for the PR page's reverse lookup. */
+  threadTitle?: (threadId: string) => string | null;
 };
 
 const REPO: ForgeRepoRef = {
@@ -441,6 +445,33 @@ export class MockForge {
   private accountsSeq = 1;
   private commentSeq = 100;
   private openedSeq = 500;
+  /** Thread → linked PRs, the same in-memory dev data the PR pages use. */
+  private links = new Map<string, MockLink[]>([
+    [
+      "thr_a",
+      [
+        {
+          repo: REPO,
+          number: 482,
+          account_id: "acct_mock_github",
+          linked_at: now(-12 * 60_000),
+        },
+      ],
+    ],
+    [
+      "thr_b",
+      [
+        {
+          repo: REPO,
+          number: 479,
+          account_id: "acct_mock_github",
+          linked_at: now(-40 * 60_000),
+        },
+      ],
+    ],
+  ]);
+  /** `threadId|linkKey` for every watched link. */
+  private watching = new Set<string>([`thr_a|${linkKey(REPO, 482)}`]);
   private comments = new Map<number, ForgeComment[]>(
     Object.entries(GENERAL_COMMENTS).map(([number, list]) => [Number(number), [...list]]),
   );
@@ -763,6 +794,15 @@ export class MockForge {
           reviewers: [],
           merge_commit_sha: null,
         };
+        // Like the daemon, opening a PR from a thread links it.
+        const links = this.links.get(request.thread_id) ?? [];
+        links.push({
+          repo,
+          number: pr.summary.number,
+          account_id: this.accounts[0]?.account_id ?? "acct_mock_github",
+          linked_at: now(),
+        });
+        this.links.set(request.thread_id, links);
         hooks.ok({ type: "forge_pr_opened", pr });
         return true;
       }
@@ -780,10 +820,131 @@ export class MockForge {
         hooks.ok({ type: "forge_handoff", handoff });
         return true;
       }
+      case "list_thread_pull_requests": {
+        const request = body as Extract<ClientRequest, { type: "list_thread_pull_requests" }>;
+        hooks.ok({
+          type: "thread_pull_requests",
+          thread_id: request.thread_id,
+          pulls: this.pullsFor(request.thread_id),
+        });
+        return true;
+      }
+      case "link_pull_request": {
+        const request = body as Extract<ClientRequest, { type: "link_pull_request" }>;
+        const summary = SUMMARIES.find((item) => item.number === request.number);
+        if (!summary) {
+          hooks.err(
+            "not_found",
+            `PR #${request.number} is not in the dev data.`,
+            "Pick one of the repository's pull requests.",
+          );
+          return true;
+        }
+        const account =
+          this.accounts.find((item) => item.forge === request.repo.forge) ??
+          (this.accounts[0] as ForgeAccount);
+        const links = this.links.get(request.thread_id) ?? [];
+        if (!links.some((link) => sameLink(link.repo, request.repo, link.number, request.number))) {
+          links.push({
+            repo: request.repo,
+            number: request.number,
+            account_id: request.account_id ?? account.account_id,
+            linked_at: now(),
+          });
+          this.links.set(request.thread_id, links);
+        }
+        const pull = this.pullsFor(request.thread_id).find(
+          (item) => item.number === request.number,
+        );
+        if (pull) {
+          hooks.ok({ type: "thread_pull_request", pull });
+        }
+        return true;
+      }
+      case "unlink_pull_request": {
+        const request = body as Extract<ClientRequest, { type: "unlink_pull_request" }>;
+        const links = (this.links.get(request.thread_id) ?? []).filter(
+          (link) => !sameLink(link.repo, request.repo, link.number, request.number),
+        );
+        this.links.set(request.thread_id, links);
+        this.watching.delete(`${request.thread_id}|${linkKey(request.repo, request.number)}`);
+        hooks.ok({ type: "ack" });
+        return true;
+      }
+      case "watch_pull_request": {
+        const request = body as Extract<ClientRequest, { type: "watch_pull_request" }>;
+        this.watching.add(`${request.thread_id}|${linkKey(request.repo, request.number)}`);
+        hooks.ok({ type: "ack" });
+        return true;
+      }
+      case "unwatch_pull_request": {
+        const request = body as Extract<ClientRequest, { type: "unwatch_pull_request" }>;
+        this.watching.delete(`${request.thread_id}|${linkKey(request.repo, request.number)}`);
+        hooks.ok({ type: "ack" });
+        return true;
+      }
+      case "list_pr_threads": {
+        const request = body as Extract<ClientRequest, { type: "list_pr_threads" }>;
+        const threads: PrLinkedThread[] = [];
+        for (const [threadId, links] of this.links) {
+          for (const link of links) {
+            if (!sameLink(link.repo, request.repo, link.number, request.number)) continue;
+            threads.push({
+              thread_id: threadId as ThreadId,
+              title: hooks.threadTitle?.(threadId) ?? threadId,
+              watching: this.watching.has(`${threadId}|${linkKey(link.repo, link.number)}`),
+            });
+          }
+        }
+        hooks.ok({ type: "pr_threads", repo: request.repo, number: request.number, threads });
+        return true;
+      }
       default:
         return false;
     }
   }
+
+  private pullsFor(threadId: string): ThreadPullRequest[] {
+    return (this.links.get(threadId) ?? []).map((link) => {
+      const summary = SUMMARIES.find((item) => item.number === link.number);
+      return {
+        repo: link.repo,
+        number: link.number,
+        account_id: link.account_id,
+        summary: summary ? { ...summary, repo: link.repo } : null,
+        error: summary ? null : "This pull request is not in the dev data.",
+        watching: this.watching.has(`${threadId}|${linkKey(link.repo, link.number)}`),
+        watch_notice: null,
+        linked_at: link.linked_at,
+      };
+    });
+  }
+}
+
+type MockLink = {
+  repo: ForgeRepoRef;
+  number: number;
+  account_id: string;
+  linked_at: string;
+};
+
+function linkKey(repo: ForgeRepoRef, number: number): string {
+  return `${repo.forge}|${repo.base_url}|${repo.owner}|${repo.repo}|${number}`;
+}
+
+function sameLink(
+  left: ForgeRepoRef,
+  right: ForgeRepoRef,
+  leftNumber: number,
+  rightNumber: number,
+): boolean {
+  return (
+    leftNumber === rightNumber &&
+    left.forge === right.forge &&
+    left.base_url === right.base_url &&
+    left.owner === right.owner &&
+    left.repo === right.repo
+  );
 }
 
 function cloneThreads(threads: ForgeReviewThread[]): ForgeReviewThread[] {

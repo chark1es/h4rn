@@ -583,6 +583,7 @@ describe("pull request links", () => {
         summary,
         error: null,
         watching: true,
+        watch_notice: null,
         linked_at: "2026-01-01T00:00:00Z",
       }),
     ).toBe("#12 Open");

@@ -351,11 +351,14 @@ read the flags instead of assuming all forges behave alike.
 | Re-run failed checks | yes (check suites) | yes (pipeline retry) | no | no | no | no |
 | Conditional PR poll | yes | no | no | no | no | no |
 
-The conditional PR poll is what the thread watch uses on GitHub: a
-`GET /pulls/{n}` with `If-None-Match` answers `304` when the detail did not
-change, so only checks and comments are read on that tick. The other forges
-read the PR every time, which spends more of their request budget for the same
-two-minute interval.
+The conditional PR poll is what the thread watch uses on GitHub: every read of
+`GET /pulls/{n}` revalidates with `If-None-Match`, so an unchanged detail comes
+back as a `304` and costs no second API request. A `304` is answered from the
+body the account client's cache holds, which may be newer than an individual
+watch's snapshot because the checks poll, the badge and the PR page share the
+same client; the watch therefore takes its snapshot from that body and never
+from its own earlier read. The other forges read the PR every time, which
+spends more of their request budget for the same two-minute interval.
 
 Diff pagination on Gitea/Forgejo, Bitbucket Cloud and Azure DevOps is applied
 locally: the provider's diff (or changed-file list) is read and sliced by
@@ -448,7 +451,7 @@ no summary rather than as stale state.
   linked PR.
 
 Watches live in daemon memory (links do not). While the thread is not settled,
-the daemon polls every two minutes and shares one poll between every thread
+the daemon polls every two minutes and shares one read between every thread
 watching the same PR. It wakes the agent by appending a user-visible message
 that starts a turn, naming what changed and linking to the PR or comment:
 
@@ -463,11 +466,27 @@ that starts a turn, naming what changed and linking to the PR or comment:
 - the PR merges or closes, which also ends that watch.
 
 Each event is reported once per watch, and re-watching starts a fresh baseline
-so old news is not repeated. A watch ends after ten wakes in a row that brought
-only comments or reviews, after eight failed reads in a row, or when the thread
-is settled or archived. A rate limit only pauses the watch until the forge's
-`retry-after` (or two minutes when it does not say); it is not a failed read.
-Comments and reviews from the linked account itself never wake the agent.
+so old news is not repeated. Every watcher keeps its own snapshot and
+seen-failure state: a second thread watching the same PR, or a thread watching
+again, never replaces another watcher's baseline, so it can neither hide a
+change that watcher has not heard nor repeat one it has. A new watch starts
+from the current snapshot, and it never clears a rate-limit pause the poller
+recorded for that PR. A failure wake fires only for a failing check that was
+not already failing in that watcher's previous snapshot, so a re-run that
+passed and left other checks failing is not reported as a new failure. A watch
+ends after ten wakes in a row that brought only comments or reviews, after
+eight failed reads in a row, or when the thread is settled or archived. A rate
+limit only pauses the watch until the forge's `retry-after` (or two minutes
+when it does not say); it is not a failed read.
+
+Comments and reviews from the linked account itself never wake the agent. That
+needs the account's login, which some credentials do not report (a Bitbucket
+workspace or repository access token has no user identity). When the login is
+unknown, the watch skips comment and review triggers for as long as it runs
+instead of treating every author as someone else, and
+`ThreadPullRequest.watch_notice` says so beside the watch state in the
+linked-items panel. The other triggers (checks, conflicts, merge and close)
+still apply.
 
 Because the thread list is a client concern, a client that reconnects re-reads
 `ListThreadPullRequests`; watch changes do not add a journaled event.

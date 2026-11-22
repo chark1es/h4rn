@@ -251,20 +251,32 @@ async fn github_etag_revalidation_serves_the_cached_body() {
 }
 
 #[tokio::test]
-async fn github_pr_changed_answers_from_the_etag_cache() {
+async fn github_pr_read_reports_a_merge_refreshed_by_another_reader() {
     let server = MockServer::start().await;
 
-    // The conditional mock is registered first: wiremock keeps registration
-    // order when two mocks have the same priority, and both match the path.
+    // Conditional mocks are registered first: wiremock keeps registration
+    // order when two mocks have the same priority, and all of them match the
+    // path. Order: another reader's refresh (v1 -> merged, v2), then the
+    // watch's next poll (v2 -> 304), then the unconditional first read.
+    let mut merged = github_pr_detail();
+    merged["merged_at"] = json!("2024-05-02T00:00:00Z");
+    merged["merged"] = json!(true);
+    merged["state"] = json!("closed");
     Mock::given(method("GET"))
         .and(path("/api/v3/repos/acme/widget/pulls/42"))
-        .and(header("if-none-match", "\"pr-42\""))
+        .and(header("if-none-match", "\"v1\""))
+        .respond_with(json_body(merged).insert_header("etag", "\"v2\""))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v3/repos/acme/widget/pulls/42"))
+        .and(header("if-none-match", "\"v2\""))
         .respond_with(ResponseTemplate::new(304))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
         .and(path("/api/v3/repos/acme/widget/pulls/42"))
-        .respond_with(json_body(github_pr_detail()).insert_header("etag", "\"pr-42\""))
+        .respond_with(json_body(github_pr_detail()).insert_header("etag", "\"v1\""))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
@@ -273,22 +285,24 @@ async fn github_pr_changed_answers_from_the_etag_cache() {
         .mount(&server)
         .await;
 
-    let mut other = github_pr_detail();
-    other["number"] = json!(43);
-    Mock::given(method("GET"))
-        .and(path("/api/v3/repos/acme/widget/pulls/43"))
-        .respond_with(json_body(other).insert_header("etag", "\"pr-43\""))
-        .mount(&server)
-        .await;
-
     let client = GitHubClient::new(&server.uri(), "ghp_test", 120).unwrap();
     let repo = repo(ForgeKind::GitHub, &server.uri());
 
-    client.get_pr(&repo, 42).await.unwrap();
-    assert_eq!(client.pr_changed(&repo, 42).await.unwrap(), Some(false));
-    // A PR this client has never read has no cached validator; it must be
-    // read rather than reported unchanged.
-    assert_eq!(client.pr_changed(&repo, 43).await.unwrap(), Some(true));
+    // The watch's first read takes the open snapshot and caches its ETag.
+    let first = client.get_pr(&repo, 42).await.unwrap();
+    assert_eq!(first.summary.state, ForgePrState::Open);
+
+    // Another reader (the checks poll, the badge, the PR page) reads after the
+    // merge and refreshes the shared account cache to the merged body.
+    let refreshed = client.get_pr(&repo, 42).await.unwrap();
+    assert_eq!(refreshed.summary.state, ForgePrState::Merged);
+
+    // The watch's next read gets a 304 for v2. Its snapshot must be built
+    // from the cached body the server just validated (merged), not from the
+    // watch's own earlier snapshot (open).
+    let polled = client.get_pr(&repo, 42).await.unwrap();
+    assert_eq!(polled.summary.state, ForgePrState::Merged);
+    server.verify().await;
 }
 
 #[tokio::test]

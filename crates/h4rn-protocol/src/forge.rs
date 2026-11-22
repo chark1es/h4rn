@@ -157,8 +157,9 @@ pub struct ForgeCapabilities {
     /// pipelines). Gitea, Forgejo, Bitbucket Cloud and Azure DevOps expose no
     /// equivalent for the PR surface.
     pub rerun_checks: bool,
-    /// PR detail can be probed with a conditional GET (`ETag`/`304`) before
-    /// reading the whole PR. The watch uses it to stay inside the rate limit.
+    /// PR detail is revalidated with a conditional GET (`ETag`/`304`) on every
+    /// read, so an unchanged PR costs no extra request. The watch relies on it
+    /// to stay inside the rate limit.
     #[serde(default)]
     pub conditional_poll: bool,
 }
@@ -764,6 +765,15 @@ pub struct ThreadPullRequest {
     pub error: Option<String>,
     /// The thread is watching this PR for changes.
     pub watching: bool,
+    /// Something the watch cannot do, said plainly so the UI can show it
+    /// beside the watch state. `None` when the watch covers every trigger.
+    ///
+    /// Today this is set when the account's login is unknown: comment and
+    /// review triggers need it to tell the person's own words from someone
+    /// else's, and pretending every author is someone else would wake the
+    /// agent for its own comments.
+    #[serde(default)]
+    pub watch_notice: Option<String>,
     /// When the link was created.
     pub linked_at: DateTime<Utc>,
 }

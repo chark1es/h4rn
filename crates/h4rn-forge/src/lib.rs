@@ -112,19 +112,6 @@ pub trait Forge: Send + Sync {
     /// Fetches one PR's detail.
     async fn get_pr(&self, repo: &ForgeRepoRef, number: u32) -> Result<ForgePullRequest>;
 
-    /// Whether the PR detail changed since this client last read it.
-    ///
-    /// `Some(false)` means a conditional request got a `304 Not Modified` and
-    /// the caller can reuse the last read. `Some(true)` means the forge
-    /// returned a body (it changed, or this is the first read) and the caller
-    /// must read the PR. `None` means the forge cannot answer cheaply. Only
-    /// forges whose [`ForgeCapabilities::conditional_poll`] is true override
-    /// this.
-    async fn pr_changed(&self, repo: &ForgeRepoRef, number: u32) -> Result<Option<bool>> {
-        let _ = (repo, number);
-        Ok(None)
-    }
-
     /// Fetches one page of the PR diff.
     async fn get_diff(
         &self,

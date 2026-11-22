@@ -682,7 +682,11 @@ fn pr_link_from_row(row: sqlx::sqlite::SqliteRow) -> Result<PrLinkRecord, Journa
         })?,
         linked_at: DateTime::parse_from_rfc3339(&linked_at)
             .map(|value| value.with_timezone(&Utc))
-            .unwrap_or_else(|_| Utc::now()),
+            .map_err(|error| {
+                JournalError::Database(sqlx::Error::Protocol(format!(
+                    "unparsable linked_at {linked_at:?} in daemon_pr_links: {error}"
+                )))
+            })?,
     })
 }
 
@@ -977,6 +981,47 @@ mod tests {
         assert!(
             journal.list_threads().await.unwrap().is_empty(),
             "a failed append must not leave the thread row behind"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unparsable_pr_link_timestamp_is_a_journal_error() {
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        let thread_id = ThreadId::new("th_one");
+        journal
+            .upsert_pr_link(&PrLinkRecord {
+                thread_id: thread_id.clone(),
+                account_id: "acct_1".into(),
+                repo: ForgeRepoRef {
+                    forge: ForgeKind::GitHub,
+                    base_url: "https://github.com".into(),
+                    owner: "h4rn".into(),
+                    repo: "api".into(),
+                },
+                number: 7,
+                linked_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        // A row written by a damaged file or an older schema: the timestamp is
+        // not RFC 3339. The row is rejected, never silently stamped "now".
+        sqlx::query("UPDATE daemon_pr_links SET linked_at = 'not-a-time'")
+            .execute(&journal.pool)
+            .await
+            .unwrap();
+
+        let error = journal
+            .pr_links_for_thread(&thread_id)
+            .await
+            .expect_err("an unparsable linked_at must not be replaced with now");
+        assert!(
+            matches!(
+                error,
+                JournalError::Database(sqlx::Error::Protocol(ref message))
+                    if message.contains("linked_at")
+            ),
+            "{error:?}"
         );
     }
 }

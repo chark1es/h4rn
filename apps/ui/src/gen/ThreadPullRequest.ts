@@ -35,6 +35,16 @@ error: string | null,
  */
 watching: boolean, 
 /**
+ * Something the watch cannot do, said plainly so the UI can show it
+ * beside the watch state. `None` when the watch covers every trigger.
+ *
+ * Today this is set when the account's login is unknown: comment and
+ * review triggers need it to tell the person's own words from someone
+ * else's, and pretending every author is someone else would wake the
+ * agent for its own comments.
+ */
+watch_notice: string | null, 
+/**
  * When the link was created.
  */
 linked_at: string, };

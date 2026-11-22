@@ -297,6 +297,23 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A PR watch hears every change since it started, exactly once.** The GitHub
+  change probe is gone: the watch reads the PR detail conditionally, so a `304`
+  is built from the body the account's shared cache returns rather than from the
+  watch's own earlier snapshot, and a merge, close or conflict another reader
+  already saw is no longer reported late or missed. Each thread keeps its own
+  baseline and seen-failure state, so a second watch or a re-watch neither hides
+  a change another watcher has not seen nor repeats one it has, a new watch
+  starts from the current state, and it never clears a rate-limit pause the
+  poller recorded. A failure wake now fires only for a failing check that was not
+  already failing, so a re-run that passed is not reported as a new failure. When
+  the forge does not report the account's login, the watch skips comment and
+  review triggers rather than treating every author as someone else, and the
+  linked-items panel says so. A damaged `linked_at` in the link journal is an
+  error instead of being replaced with the current time. The badge popover is
+  keyboard reachable, and its rows say what they do instead of showing an icon
+  for the opposite action.
+
 - **Composer drafts survive recall, two tabs and a full quota.** Sending a recalled prompt puts the
   draft that recall preserved back in the box instead of clearing it. Two tabs editing the same
   thread inside one 300 ms window no longer lose the later edit, and a tab whose queued write was

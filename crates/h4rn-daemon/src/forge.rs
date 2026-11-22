@@ -659,18 +659,6 @@ impl ForgeService {
         Ok(pr)
     }
 
-    /// Whether a PR changed since the account last read it, where the forge
-    /// can answer with a conditional request.
-    pub async fn pr_changed(
-        &self,
-        account_id: Option<&str>,
-        repo: &ForgeRepoRef,
-        number: u32,
-    ) -> Result<Option<bool>, ForgeServiceError> {
-        let (_account, client) = self.resolve_client(account_id, repo)?;
-        Ok(client.pr_changed(repo, number).await?)
-    }
-
     /// The account id a repository resolves to, for callers that store it.
     pub fn resolve_account_id(
         &self,

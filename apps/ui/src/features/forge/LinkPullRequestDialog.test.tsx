@@ -84,6 +84,7 @@ function client(): { api: () => ForgeApi; request: ReturnType<typeof vi.fn> } {
             summary,
             error: null,
             watching: false,
+            watch_notice: null,
             linked_at: "2026-01-01T00:00:00Z",
           },
         };

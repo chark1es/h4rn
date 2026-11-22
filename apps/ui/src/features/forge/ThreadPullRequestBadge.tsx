@@ -1,9 +1,10 @@
-import { ExternalLinkIcon, EyeIcon, EyeOffIcon, GitPullRequestIcon, XIcon } from "lucide-react";
+import { ExternalLinkIcon, EyeIcon, GitPullRequestIcon, XIcon } from "lucide-react";
 import { useState } from "react";
 
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
@@ -16,6 +17,11 @@ import { ForgeApi, linkedPullLabel, linkedPullTone, prWebUrl, stateLabel } from 
 import { notifyThreadLinks, useThreadPullRequests } from "./threadLinks";
 
 const resolveApi = () => new ForgeApi((request) => getClient().request(request));
+
+/** Opens a pull request in the browser from a menu row. */
+function openPull(url: string): void {
+  window.open(url, "_blank", "noopener,noreferrer");
+}
 
 /** The quiet header badge and its linked-items popover. */
 export function ThreadPullRequestBadge({ threadId }: { threadId: string }) {
@@ -95,65 +101,56 @@ export function LinkedPullRequestsMenu({
           {extra > 0 ? <span className="q-pr-more">+{extra}</span> : null}
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-80">
+      <DropdownMenuContent align="end" className="w-80 max-h-80 overflow-y-auto">
         <DropdownMenuLabel>Linked pull requests</DropdownMenuLabel>
         <DropdownMenuSeparator />
-        <div className="q-pr-links">
-          {pulls.map((pull) => {
-            const url = pull.summary?.web_url || prWebUrl(pull.repo, pull.number);
-            const state = pull.summary ? stateLabel(pull.summary.state).label : "State unavailable";
-            return (
-              <div className="q-pr-link" key={`${pull.repo.base_url}:${pull.number}`}>
-                <div className="q-pr-link-main">
-                  <a
-                    className="q-pr-link-title"
-                    href={url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    title={pull.summary?.title ?? `Open ${url}`}
-                  >
-                    <span className="q-num">#{pull.number}</span>
-                    <span className="q-pr-link-name">{pull.summary?.title ?? "Pull request"}</span>
-                    <ExternalLinkIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
-                  </a>
-                  <div className="q-pr-link-meta">
-                    <span className={cn(pull.summary?.state === "closed" && "q-danger")}>
-                      {state}
-                    </span>
-                    {pull.error ? <span className="q-faint">{pull.error}</span> : null}
-                    <span className="grow" />
-                    <button
-                      type="button"
-                      className="q-link"
-                      disabled={busy !== null}
-                      onClick={() => (pull.watching ? onUnwatch(pull) : onWatch(pull))}
-                    >
-                      {pull.watching ? (
-                        <>
-                          <EyeIcon className="q-icon s12" strokeWidth={1.5} aria-hidden /> Stop
-                          watching
-                        </>
-                      ) : (
-                        <>
-                          <EyeOffIcon className="q-icon s12" strokeWidth={1.5} aria-hidden /> Watch
-                        </>
-                      )}
-                    </button>
-                    <button
-                      type="button"
-                      className="q-link q-faint"
-                      disabled={busy !== null}
-                      onClick={() => onUnlink(pull)}
-                      title="Unlink this pull request"
-                    >
-                      <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden /> Unlink
-                    </button>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
+        {pulls.map((pull, index) => {
+          const url = pull.summary?.web_url || prWebUrl(pull.repo, pull.number);
+          const state = pull.summary ? stateLabel(pull.summary.state) : null;
+          return (
+            <div className="q-pr-links" key={`${pull.repo.base_url}:${pull.number}`}>
+              {index > 0 ? <DropdownMenuSeparator /> : null}
+              <DropdownMenuItem
+                className="q-pr-row"
+                disabled={busy !== null}
+                onSelect={() => openPull(url)}
+              >
+                <GitPullRequestIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                <span className="q-num">#{pull.number}</span>
+                <span className="q-pr-link-name">
+                  {pull.summary?.title ?? "Pull request unavailable"}
+                </span>
+                <span
+                  className={cn(
+                    "q-pr-row-state",
+                    state?.tone === "danger" && "q-danger",
+                    state?.tone === "ok" && "q-ok",
+                  )}
+                >
+                  {state?.label ?? "State unavailable"}
+                </span>
+                <ExternalLinkIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+              </DropdownMenuItem>
+              {pull.error ? <p className="q-pr-note q-danger">{pull.error}</p> : null}
+              <DropdownMenuItem
+                disabled={busy !== null}
+                onSelect={() => (pull.watching ? onUnwatch(pull) : onWatch(pull))}
+              >
+                {/* The eye marks the current state; the action row that ends a
+                    watch is the only place it appears. */}
+                {pull.watching ? (
+                  <EyeIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                ) : null}
+                {pull.watching ? "Stop watching" : "Watch for changes"}
+              </DropdownMenuItem>
+              {pull.watch_notice ? <p className="q-pr-note">{pull.watch_notice}</p> : null}
+              <DropdownMenuItem disabled={busy !== null} onSelect={() => onUnlink(pull)}>
+                <XIcon className="q-icon s12" strokeWidth={1.5} aria-hidden />
+                Unlink
+              </DropdownMenuItem>
+            </div>
+          );
+        })}
       </DropdownMenuContent>
     </DropdownMenu>
   );

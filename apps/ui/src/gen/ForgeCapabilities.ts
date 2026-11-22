@@ -50,7 +50,8 @@ graphql: boolean,
  */
 rerun_checks: boolean, 
 /**
- * PR detail can be probed with a conditional GET (`ETag`/`304`) before
- * reading the whole PR. The watch uses it to stay inside the rate limit.
+ * PR detail is revalidated with a conditional GET (`ETag`/`304`) on every
+ * read, so an unchanged PR costs no extra request. The watch relies on it
+ * to stay inside the rate limit.
  */
 conditional_poll: boolean, };
