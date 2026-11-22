@@ -1773,7 +1773,7 @@ fn task_runs_installation(installed: &InstalledService, current: &Path) -> bool 
 /// written before any rename, so a crash mid-update leaves a task that can still
 /// start, even when the binary at the install path is an older image that does
 /// not understand `--recover-only`.
-pub fn prepare_replace(current: &Path, data_dir: &Path) -> Result<()> {
+pub fn prepare_replace(current: &Path) -> Result<()> {
     if ServicePlatform::current() != ServicePlatform::Windows {
         return Ok(());
     }
@@ -1788,17 +1788,27 @@ pub fn prepare_replace(current: &Path, data_dir: &Path) -> Result<()> {
     if !output.status.success() {
         return Ok(());
     }
-    let installed = windows_installed_binary(&String::from_utf8_lossy(&output.stdout));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let installed = windows_installed_binary(&stdout);
     if !task_runs_installation(&installed, current) {
         return Ok(());
     }
+    // Keep the data directory the service already uses. The updater's own
+    // data directory can differ (a service installed with `--data-dir`), and
+    // repointing the task would restart the daemon on an empty one.
+    let data_dir = windows_task_action(&stdout)
+        .and_then(|action| task_data_dir(&action.arguments))
+        .with_context(|| {
+            "can't read the data directory from the scheduled task; \
+             reinstall it with `h4rnd service install --data-dir <dir>` and update again"
+        })?;
     ensure_available("powershell")?;
     let task = windows_task_name();
     let script = PrivateScript::create("install-scheduled-task.ps1", WINDOWS_INSTALL_SCRIPT)?;
     run_checked(&windows_prepare_command(
         script.path(),
         current,
-        data_dir,
+        &data_dir,
         &task,
     ))?;
     drop(script);
@@ -2058,7 +2068,29 @@ pub fn windows_task_executable_command(task: &str) -> CommandSpec {
 /// The command starts with `$b = '<install path>'; ...`; single quotes inside
 /// the path are doubled by PowerShell.
 pub fn inline_task_binary(arguments: &str) -> Option<PathBuf> {
-    let marker = "$b = '";
+    inline_task_value(arguments, "$b = '")
+}
+
+/// The data directory a task's action passes to the daemon.
+///
+/// The recovery launcher names it as `$d = '<dir>'`; a task registered by an
+/// older install runs `h4rnd.exe --data-dir <dir> serve`, with the directory
+/// quoted when it contains spaces.
+pub fn task_data_dir(arguments: &str) -> Option<PathBuf> {
+    if let Some(dir) = inline_task_value(arguments, "$d = '") {
+        return Some(dir);
+    }
+    let rest = arguments.split_once("--data-dir")?.1;
+    let rest = rest.strip_prefix('=').unwrap_or(rest).trim_start();
+    if let Some(quoted) = rest.strip_prefix('"') {
+        let end = quoted.find('"')?;
+        return Some(PathBuf::from(&quoted[..end]));
+    }
+    rest.split_whitespace().next().map(PathBuf::from)
+}
+
+/// A single-quoted PowerShell value that follows `marker` in a task action.
+fn inline_task_value(arguments: &str, marker: &str) -> Option<PathBuf> {
     let start = arguments.find(marker)? + marker.len();
     let mut value = String::new();
     let mut chars = arguments[start..].chars().peekable();
@@ -3358,6 +3390,42 @@ mod tests {
             &InstalledService::Unknown,
             &current
         ));
+    }
+
+    #[test]
+    fn the_prepare_step_keeps_the_data_directory_the_task_already_uses() {
+        let launcher = "$b = 'C:\\Program Files\\h4rn\\h4rnd.exe'; $p = 'x'; $o = 'y'; \
+                        $x = 'z'; $d = 'D:\\h4rn data\\o''brien'; $l = 'l'; $f = 'f'; serve";
+        assert_eq!(
+            task_data_dir(launcher),
+            Some(PathBuf::from("D:\\h4rn data\\o'brien"))
+        );
+        assert_eq!(
+            task_data_dir("--data-dir \"D:\\h4rn data\" serve"),
+            Some(PathBuf::from("D:\\h4rn data"))
+        );
+        assert_eq!(
+            task_data_dir("--data-dir D:\\h4rn serve"),
+            Some(PathBuf::from("D:\\h4rn"))
+        );
+        assert_eq!(
+            task_data_dir("--data-dir=D:\\h4rn serve"),
+            Some(PathBuf::from("D:\\h4rn"))
+        );
+        assert_eq!(task_data_dir("serve"), None);
+        // The action parsed from the task's output is what the prepare step
+        // rewrites the task with, never the updater's own data directory.
+        let output = format!("powershell.exe\t-Command {launcher}\n");
+        let action = windows_task_action(&output).expect("an action");
+        let kept = task_data_dir(&action.arguments).expect("a data directory");
+        let script = Path::new(r"C:\Temp\install.ps1");
+        let binary = Path::new(r"C:\Program Files\h4rn\h4rnd.exe");
+        let prepare = windows_prepare_command(script, binary, &kept, "h4rn-alice");
+        assert!(
+            prepare.args.iter().any(|arg| arg.contains("o'brien")),
+            "the prepare step must keep the task's data directory: {:?}",
+            prepare.args
+        );
     }
 
     #[test]

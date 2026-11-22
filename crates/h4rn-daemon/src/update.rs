@@ -1660,7 +1660,6 @@ pub async fn run(config: &Config, options: UpdateOptions) -> Result<()> {
     } else {
         UpdateTarget::resolve(config)
     };
-    let data_dir = config.data_dir.clone();
     let prepare_current = current.clone();
     run_with(
         options,
@@ -1671,9 +1670,7 @@ pub async fn run(config: &Config, options: UpdateOptions) -> Result<()> {
             public_key: configured_public_key().map(str::to_owned),
             restart: Box::new(crate::service::restart_after_update),
             service_active: Box::new(crate::service::is_active),
-            prepare_replace: Box::new(move || {
-                crate::service::prepare_replace(&prepare_current, &data_dir)
-            }),
+            prepare_replace: Box::new(move || crate::service::prepare_replace(&prepare_current)),
         },
     )
     .await
