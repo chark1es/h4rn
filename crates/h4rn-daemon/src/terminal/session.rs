@@ -1672,23 +1672,41 @@ mod tests {
         // lock would never be released here, because only this path kills the
         // shell, so a watchdog ends it shortly after the deadline and the
         // wall-clock assertion below fails instead of hanging the test.
+        //
+        // The watchdog waits on a completion signal rather than sleeping a
+        // fixed time, and it only signals a pid while the session still says
+        // the shell is alive: once the close reaps the child, its pid may be
+        // reused, and killing it then would hit an unrelated process.
         let bound = HANGUP_GRACE + TERM_GRACE + Duration::from_millis(500);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
         let watchdog = {
             let session = Arc::clone(&session);
             std::thread::spawn(move || {
-                std::thread::sleep(bound + Duration::from_millis(500));
+                if done_rx
+                    .recv_timeout(bound + Duration::from_millis(500))
+                    .is_ok()
+                {
+                    return false;
+                }
+                if !session.is_alive() {
+                    return false;
+                }
                 if let Some(pid) = session.shell_pid {
-                    // SAFETY: signalling the shell this test spawned; ESRCH
-                    // after a clean exit is ignored.
+                    // SAFETY: the session still reports the shell as alive, so
+                    // the pid cannot have been reaped and reused; ESRCH after
+                    // an exit that races this check is ignored.
                     unsafe { libc::kill(pid, libc::SIGKILL) };
                 }
+                true
             })
         };
 
         let started = Instant::now();
         session.kill_with_grace().await;
         let elapsed = started.elapsed();
-        watchdog.join().expect("watchdog joins");
+        let _ = done_tx.send(());
+        let fired = watchdog.join().expect("watchdog joins");
+        assert!(!fired, "the close path must finish without the watchdog");
         assert!(
             elapsed < bound,
             "close must not wait for the child lock the reader thread holds (took {elapsed:?})"
