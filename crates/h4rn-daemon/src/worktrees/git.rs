@@ -1653,12 +1653,23 @@ const FULL_MODES: [&str; 4] = ["-c", "core.fileMode=true", "-c", "core.symlinks=
 /// own filesystem git's probe is right and is kept: forcing it on a filesystem
 /// without executable bits would mark every file changed and no clear could
 /// ever pass.
+#[cfg(unix)]
 pub fn mode_config(checkout: &Path) -> &'static [&'static str] {
     if foreign_filesystem(checkout) {
         &FULL_MODES
     } else {
         &[]
     }
+}
+
+/// Non-Unix: there is no stable volume id to compare, so the filesystems
+/// cannot be told apart and the symlink comparison is always forced (it can
+/// only over-report, for repositories that track symlinks). `core.fileMode`
+/// keeps git's probe: Windows filesystems have no executable bits, and forcing
+/// it would mark every file changed.
+#[cfg(not(unix))]
+pub fn mode_config(_checkout: &Path) -> &'static [&'static str] {
+    &["-c", "core.symlinks=true"]
 }
 
 #[cfg(unix)]
@@ -1677,12 +1688,6 @@ fn foreign_filesystem(checkout: &Path) -> bool {
         (Ok(checkout), Ok(admin)) => checkout.dev() != admin.dev(),
         _ => true,
     }
-}
-
-#[cfg(not(unix))]
-fn foreign_filesystem(_checkout: &Path) -> bool {
-    // No portable device id; git's own probe stands.
-    false
 }
 
 #[cfg(test)]

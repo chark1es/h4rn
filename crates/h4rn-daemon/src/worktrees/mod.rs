@@ -2109,8 +2109,12 @@ fn nested_checkout(root: &Path, common: &Path, limit: Duration) -> Result<Option
             let file_type = entry
                 .file_type()
                 .map_err(|_| NESTED_SCAN_UNKNOWN.to_owned())?;
-            if entry.file_name() == ".git" {
-                if dir == root {
+            // Case-insensitively: on a case-insensitive volume a `.GIT`
+            // directory is a working git dir; on a case-sensitive one this can
+            // only over-report, which keeps the checkout.
+            if entry.file_name().eq_ignore_ascii_case(".git") {
+                // Only the exact `.git` at the root is the checkout's own.
+                if dir == root && entry.file_name() == ".git" {
                     continue;
                 }
                 if file_type.is_file() {

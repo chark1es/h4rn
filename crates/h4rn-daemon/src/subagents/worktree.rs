@@ -65,25 +65,24 @@ pub fn create(repo: &Path, dest: &Path, branch: &str) -> Result<(), String> {
 /// Best-effort: cleanup failures are logged by the caller rather than turning a
 /// finished delegation into a failure the user cannot act on.
 pub fn remove(repo: &Path, dest: &Path, branch: Option<&str>) {
-    let _ = git_command()
-        .arg("-C")
-        .arg(repo)
-        .args(["worktree", "remove", "--force"])
-        .arg(dest)
-        .output();
+    use crate::worktrees::git::run_with_timeout;
+    // Each call has the tracker's per-command deadline, so a wedged checkout
+    // cannot leave finalize (and the subagent) stuck.
+    let _ = run_with_timeout(
+        repo,
+        [
+            std::ffi::OsStr::new("worktree"),
+            std::ffi::OsStr::new("remove"),
+            std::ffi::OsStr::new("--force"),
+            dest.as_os_str(),
+        ],
+        GIT_TIMEOUT,
+    );
     // A worktree directory that was already removed still leaves git metadata;
     // prune keeps the parent repository's `git worktree list` honest.
-    let _ = git_command()
-        .arg("-C")
-        .arg(repo)
-        .args(["worktree", "prune"])
-        .output();
+    let _ = run_with_timeout(repo, ["worktree", "prune"], GIT_TIMEOUT);
     if let Some(branch) = branch {
-        let _ = git_command()
-            .arg("-C")
-            .arg(repo)
-            .args(["branch", "-D", branch])
-            .output();
+        let _ = run_with_timeout(repo, ["branch", "-D", branch], GIT_TIMEOUT);
     }
     if dest.exists() {
         let _ = std::fs::remove_dir_all(dest);
@@ -95,43 +94,51 @@ pub fn remove(repo: &Path, dest: &Path, branch: Option<&str>) {
 /// Call this **before** [`remove`]; it is what the parent's result card shows.
 pub fn changes(worktree: &Path) -> Vec<SubagentFileChange> {
     use crate::worktrees::git;
-    // The same overrides as the clearing checks, so the result card does not
-    // under-report under `status.showUntrackedFiles=no` or a filesystem
-    // monitor, and the same per-command deadline, so a wedged checkout cannot
-    // stall finalize. `normal` collapses an untracked directory to one row, so
-    // a child's `dist/` cannot flood the result card. Bytes are kept as git
-    // wrote them: a porcelain line starts with a meaningful space.
-    let args = git::SAFETY_CONFIG.into_iter().chain([
-        "status",
-        "--porcelain",
-        "--untracked-files=normal",
-        "--ignore-submodules=none",
-    ]);
-    let Ok(stdout) = git::run_bytes_with_timeout(worktree, args, CHANGES_TIMEOUT) else {
+    // The same overrides as the clearing checks (including the mode checks for
+    // a checkout on another filesystem), so the result card does not
+    // under-report, and the same per-command deadline, so a wedged checkout
+    // cannot stall finalize. `normal` collapses an untracked directory to one
+    // row, so a child's `dist/` cannot flood the result card. `-z` keeps paths
+    // exactly as stored: no quoting, no ambiguous ` -> ` in a rename.
+    let args = git::SAFETY_CONFIG
+        .into_iter()
+        .chain(git::mode_config(worktree).iter().copied())
+        .chain([
+            "status",
+            "--porcelain",
+            "-z",
+            "--untracked-files=normal",
+            "--ignore-submodules=none",
+        ]);
+    let Ok(stdout) = git::run_bytes_with_timeout(worktree, args, GIT_TIMEOUT) else {
         return Vec::new();
     };
-    String::from_utf8_lossy(&stdout)
-        .lines()
-        .filter_map(parse_porcelain_line)
-        .collect()
+    parse_porcelain_z(&stdout)
 }
 
-/// How long the result card's `git status` may take.
-const CHANGES_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// How long each git call here may take.
+const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-fn parse_porcelain_line(line: &str) -> Option<SubagentFileChange> {
-    if line.len() < 4 {
-        return None;
+/// Parses `git status --porcelain -z`: NUL-terminated `XY path` records, where
+/// a rename or copy is followed by one more field holding the original path.
+fn parse_porcelain_z(output: &[u8]) -> Vec<SubagentFileChange> {
+    let mut changes = Vec::new();
+    let mut fields = output.split(|byte| *byte == 0);
+    while let Some(field) = fields.next() {
+        if field.len() < 4 {
+            continue;
+        }
+        let status = String::from_utf8_lossy(&field[..2]).trim().to_owned();
+        let path = String::from_utf8_lossy(&field[3..]).into_owned();
+        if status.starts_with('R') || status.starts_with('C') {
+            // The original path; the parent cares about the new one.
+            fields.next();
+        }
+        if !path.is_empty() {
+            changes.push(SubagentFileChange { path, status });
+        }
     }
-    let status = line.get(..2)?.trim().to_owned();
-    let mut path = line[3..].trim().to_owned();
-    // Renames are `old -> new`; the new path is what the parent cares about.
-    if let Some((_, new)) = path.rsplit_once(" -> ") {
-        path = new.trim_matches('"').to_owned();
-    } else {
-        path = path.trim_matches('"').to_owned();
-    }
-    (!path.is_empty()).then_some(SubagentFileChange { path, status })
+    changes
 }
 
 /// The worktree path for one subagent under the daemon data directory.
@@ -147,29 +154,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn porcelain_lines_map_to_paths_and_statuses() {
+    fn porcelain_records_map_to_paths_and_statuses() {
+        let output = b" M src/lib.rs\0?? notes.md\0R  new.rs\0old.rs\0?? spa ce -> x.txt\0";
         assert_eq!(
-            parse_porcelain_line(" M src/lib.rs"),
-            Some(SubagentFileChange {
-                path: "src/lib.rs".into(),
-                status: "M".into(),
-            })
+            parse_porcelain_z(output),
+            vec![
+                SubagentFileChange {
+                    path: "src/lib.rs".into(),
+                    status: "M".into(),
+                },
+                SubagentFileChange {
+                    path: "notes.md".into(),
+                    status: "??".into(),
+                },
+                SubagentFileChange {
+                    path: "new.rs".into(),
+                    status: "R".into(),
+                },
+                SubagentFileChange {
+                    path: "spa ce -> x.txt".into(),
+                    status: "??".into(),
+                },
+            ]
         );
-        assert_eq!(
-            parse_porcelain_line("?? notes.md"),
-            Some(SubagentFileChange {
-                path: "notes.md".into(),
-                status: "??".into(),
-            })
-        );
-        assert_eq!(
-            parse_porcelain_line("R  old.rs -> new.rs"),
-            Some(SubagentFileChange {
-                path: "new.rs".into(),
-                status: "R".into(),
-            })
-        );
-        assert_eq!(parse_porcelain_line(""), None);
+        assert!(parse_porcelain_z(b"").is_empty());
     }
 
     #[test]

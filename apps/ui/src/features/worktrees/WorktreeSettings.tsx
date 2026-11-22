@@ -37,7 +37,12 @@ function worktreeTitle(row: TrackedWorktree): string {
 /** A path that keeps its last two folders when the row is narrow. */
 function MiddlePath({ path }: { path: string }) {
   const shown = tildePath(path);
-  const cut = shown.split("/").length > 2 ? shown.lastIndexOf("/", shown.lastIndexOf("/") - 1) : -1;
+  // Separator positions, `/` or `\` (Windows paths), so the tail keeps the
+  // last two folders on either platform.
+  const separators = [...shown].flatMap((char, index) =>
+    char === "/" || char === "\\" ? [index] : [],
+  );
+  const cut = separators.length >= 2 ? (separators.at(-2) ?? -1) : -1;
   const head = cut > 0 ? shown.slice(0, cut) : shown;
   const tail = cut > 0 ? shown.slice(cut) : "";
   return (

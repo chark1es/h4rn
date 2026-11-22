@@ -5817,3 +5817,27 @@ fn on_the_repositorys_own_filesystem_gits_mode_probe_is_kept() {
         Ok(ClearOne::Removed)
     ));
 }
+
+#[test]
+fn a_nested_clone_whose_git_dir_is_upper_case_is_never_removed() {
+    // On a case-insensitive volume `.GIT` is a working git dir; the scan must
+    // recognise it whatever the case (on a case-sensitive one it can only
+    // over-report, which keeps the checkout).
+    let fixture = Fixture::new();
+    ignore(&fixture, "vendor/");
+    let host = fixture.add_worktree("wt-upper-git-host", "upper-git-branch");
+    let clone = host.join("vendor/other");
+    init_repo(&clone);
+    std::fs::rename(clone.join(".git"), clone.join(".GIT")).expect("rename to .GIT");
+    let target = entry(&host, &fixture.repo, Some("upper-git-branch"), false);
+    for force in [false, true] {
+        assert_eq!(
+            clear_one(&target, force, &fixture.data_dir())
+                .err()
+                .as_deref(),
+            Some(format!("contains another git checkout at {}", clone.display()).as_str()),
+            "force={force}"
+        );
+        assert!(clone.join(".GIT").is_dir());
+    }
+}

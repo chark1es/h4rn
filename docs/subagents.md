@@ -519,7 +519,12 @@ selection does no filesystem work at all.
   on, and every linked worktree shares them; a checkout elsewhere could then
   hide a `chmod +x` or a symlink replaced by a plain file. On the repository's
   own filesystem git's probe is kept: forcing it on a filesystem without
-  executable bits would mark every file changed and no clear could pass.
+  executable bits would mark every file changed and no clear could pass. The
+  admin dir is the comparison point because git runs that probe inside the git
+  directory (also with `--separate-git-dir`). On Windows there is no stable
+  volume id, so `core.symlinks=true` is always forced (it can only over-report,
+  for repositories that track symlinks) and `core.fileMode` keeps git's probe
+  (Windows filesystems have no executable bits).
 - Every git call runs with `GIT_NO_REPLACE_OBJECTS=1` (and without
   `GIT_REPLACE_REF_BASE`) and with `GIT_GRAFT_FILE` pointed at an empty file: a
   replacement ref (`refs/replace/*`) or a graft (`<common>/info/grafts`, or an
@@ -530,9 +535,12 @@ selection does no filesystem work at all.
   dropped too, so git reads the user's normal configuration: a redirected global
   config could otherwise set keys that are not forced (`core.excludesFile`
   hiding every untracked file). The subagent result card's `git status` uses the
-  same overrides with `--untracked-files=normal --ignore-submodules=none` (an
-  untracked directory is one row, so a child's build output cannot flood the
-  card), bounded at 30 seconds and off the async runtime.
+  same overrides, including the mode checks above, with `-z
+  --untracked-files=normal --ignore-submodules=none` (paths exactly as stored;
+  an untracked directory is one row, so a child's build output cannot flood the
+  card), bounded at 30 seconds and off the async runtime. The subagent
+  worktree's own cleanup (`worktree remove`, `prune`, `branch -D`) has the same
+  per-command deadline.
 - Without `force`, an existing checkout must still be on the branch the listing
   gave it. If the current branch differs, the entry is skipped as
   `checkout is no longer on <branch>`; force removes the replacement checkout
@@ -629,8 +637,9 @@ selection does no filesystem work at all.
   tree to protect, and removing that registration must leave the nested
   registration alone.
 - Before an existing checkout is removed (force or not), its tree is scanned,
-  without following symlinks, for a nested `.git` file or directory other than
-  the checkout's own top-level one, so an ignored clone of any repository (not
+  without following symlinks, for a nested `.git` file or directory (matched
+  case-insensitively, since `.GIT` is a working git dir on a case-insensitive
+  volume) other than the checkout's own top-level one, so an ignored clone of any repository (not
   only a registered worktree) is found. One is skipped as
   `contains another git checkout at <path>` (never forceable). Only a real
   submodule checkout of this repository is exempt, and only when both hold: its
