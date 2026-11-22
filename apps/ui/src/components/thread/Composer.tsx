@@ -21,7 +21,12 @@ import {
 import type { ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { caretOnFirstLine, sentPrompts, stepPromptHistory } from "@/lib/composerHistory";
-import { clearThreadDraft, readThreadDraft, writeThreadDraft } from "@/lib/drafts";
+import {
+  clearThreadDraft,
+  readThreadDraft,
+  subscribeDraftChanges,
+  writeThreadDraft,
+} from "@/lib/drafts";
 import { harnessLabel } from "@/lib/entities";
 import { getState, sendMessage, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
@@ -74,6 +79,18 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     if (focusNonce > 0) ref.current?.focus();
   }, [focusNonce]);
 
+  // Another tab may edit this thread's draft. Adopt its text only while this
+  // composer has no unsaved edit of its own.
+  useEffect(() => {
+    return subscribeDraftChanges((change) => {
+      if (change.scope !== "thread") return;
+      if (change.host !== summary.host || change.target !== summary.thread_id) return;
+      historyIndex.current = -1;
+      historyDraft.current = "";
+      setText(change.text);
+    });
+  }, [summary.host, summary.thread_id]);
+
   const newThreadOpen = useApp((state) => state.ui.newThreadOpen);
   useAttachShortcut(attachments.openPicker, !newThreadOpen);
 
@@ -103,11 +120,14 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     if (!step) return false;
     historyIndex.current = step.index;
     historyDraft.current = step.draft;
+    // Recall never touches the stored draft: the user's in-progress text
+    // stays there until they edit the recalled prompt or send something.
+    // The caret starts at the top so another ArrowUp keeps walking back
+    // through a multi-line prompt instead of moving inside it.
     setText(step.text);
-    writeThreadDraft(summary.host, summary.thread_id, step.text);
     requestAnimationFrame(() => {
       element.focus();
-      element.setSelectionRange(step.text.length, step.text.length);
+      element.setSelectionRange(0, 0);
       autosize();
     });
     return true;
@@ -194,7 +214,11 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
         }
         const element = event.currentTarget;
         if (event.key === "ArrowUp") {
+          // The first-line rule decides whether recall starts; once history
+          // mode is open the caret sits at the top of the recalled text and
+          // further ArrowUps keep walking back even through several lines.
           if (
+            historyIndex.current < 0 &&
             !caretOnFirstLine(element.value, element.selectionStart ?? 0, element.selectionEnd ?? 0)
           ) {
             return;

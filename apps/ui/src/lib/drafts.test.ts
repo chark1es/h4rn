@@ -2,8 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   createDraftStore,
-  DRAFTS_STORAGE_KEY,
+  DRAFT_KEY_PREFIX,
   type DraftStorage,
+  draftStorageKey,
+  installDraftFlushHandlers,
+  LEGACY_DRAFTS_STORAGE_KEY,
   MAX_STORED_DRAFTS,
 } from "./drafts";
 
@@ -11,22 +14,31 @@ type MemoryStorage = DraftStorage & {
   data: Map<string, string>;
 };
 
-function memoryStorage(initial?: string): MemoryStorage {
-  const data = new Map<string, string>();
-  if (initial !== undefined) data.set(DRAFTS_STORAGE_KEY, initial);
+function memoryStorage(initial?: Record<string, string>): MemoryStorage {
+  const data = new Map<string, string>(Object.entries(initial ?? {}));
   return {
     data,
     getItem: (key) => data.get(key) ?? null,
     setItem: vi.fn((key: string, value: string) => {
       data.set(key, value);
     }),
+    removeItem: vi.fn((key: string) => {
+      data.delete(key);
+    }),
+    key: (index: number) => [...data.keys()][index] ?? null,
+    get length() {
+      return data.size;
+    },
   };
 }
 
-function payload(storage: DraftStorage): { version: number; drafts: unknown[] } {
-  const raw = storage.getItem(DRAFTS_STORAGE_KEY);
-  if (!raw) return { version: 0, drafts: [] };
-  return JSON.parse(raw) as { version: number; drafts: unknown[] };
+function threadKey(host: string, threadId: string): string {
+  return draftStorageKey("thread", host, threadId);
+}
+
+function storedText(storage: MemoryStorage, key: string): string | null {
+  const raw = storage.getItem(key);
+  return raw === null ? null : (JSON.parse(raw) as { text: string }).text;
 }
 
 describe("draft store", () => {
@@ -38,20 +50,19 @@ describe("draft store", () => {
     vi.useRealTimers();
   });
 
-  it("persists a draft after the debounce, keyed by host and thread", () => {
+  it("persists a draft after the debounce, under its own key", () => {
     const storage = memoryStorage();
     const store = createDraftStore(storage, { now: () => 1 });
 
     store.writeThreadDraft("host_a", "thread_1", "hello");
-    expect(storage.getItem(DRAFTS_STORAGE_KEY)).toBeNull();
+    expect(storage.data.size).toBe(0);
 
     vi.advanceTimersByTime(299);
-    expect(storage.getItem(DRAFTS_STORAGE_KEY)).toBeNull();
+    expect(storage.data.size).toBe(0);
     vi.advanceTimersByTime(1);
 
-    expect(payload(storage).drafts).toEqual([
-      { scope: "thread", host: "host_a", target: "thread_1", text: "hello", updatedAt: 1 },
-    ]);
+    expect(storedText(storage, threadKey("host_a", "thread_1"))).toBe("hello");
+    expect(storage.getItem(LEGACY_DRAFTS_STORAGE_KEY)).toBeNull();
   });
 
   it("debounces a burst of edits into one write", () => {
@@ -68,7 +79,7 @@ describe("draft store", () => {
     vi.advanceTimersByTime(1);
 
     expect(storage.setItem).toHaveBeenCalledTimes(1);
-    expect(storage.getItem(DRAFTS_STORAGE_KEY)).toContain("hello");
+    expect(storedText(storage, threadKey("host_a", "thread_1"))).toBe("hello");
   });
 
   it("flushes immediately and cancels the pending timer", () => {
@@ -77,7 +88,7 @@ describe("draft store", () => {
 
     store.writeThreadDraft("host_a", "thread_1", "hello");
     store.flush();
-    expect(storage.getItem(DRAFTS_STORAGE_KEY)).toContain("hello");
+    expect(storedText(storage, threadKey("host_a", "thread_1"))).toBe("hello");
 
     vi.advanceTimersByTime(300);
     expect(storage.setItem).toHaveBeenCalledTimes(1);
@@ -100,32 +111,64 @@ describe("draft store", () => {
     const store = createDraftStore(storage);
 
     store.writeThreadDraft("host_a", "thread_1", "send me");
+    store.flush();
+    store.writeThreadDraft("host_a", "thread_1", "newer but unsent");
     store.clearThreadDraft("host_a", "thread_1");
     vi.advanceTimersByTime(300);
 
     expect(store.readThreadDraft("host_a", "thread_1")).toBe("");
-    expect(payload(storage).drafts).toEqual([]);
+    expect(storage.data.size).toBe(0);
   });
 
-  it("drops drafts for threads that no longer exist and keeps new-thread drafts", () => {
+  it("drops drafts for gone threads, and leaves other hosts and new-thread drafts alone", () => {
     const storage = memoryStorage();
     const store = createDraftStore(storage);
 
     store.writeThreadDraft("host_a", "thread_1", "live");
     store.writeThreadDraft("host_a", "thread_2", "deleted");
-    store.writeThreadDraft("host_b", "thread_2", "also deleted");
+    store.writeThreadDraft("host_b", "thread_2", "another machine");
     store.writeNewThreadDraft("host_a", "~/code", "new thread text");
     store.flush();
 
-    store.pruneThreadDrafts([{ host: "host_a", threadId: "thread_1" }]);
+    store.pruneThreadDrafts([{ host: "host_a", threadId: "thread_1" }], ["host_a"]);
 
     expect(store.readThreadDraft("host_a", "thread_1")).toBe("live");
     expect(store.readThreadDraft("host_a", "thread_2")).toBe("");
-    expect(store.readThreadDraft("host_b", "thread_2")).toBe("");
+    expect(store.readThreadDraft("host_b", "thread_2")).toBe("another machine");
+    expect(storedText(storage, threadKey("host_b", "thread_2"))).toBe("another machine");
     expect(store.readNewThreadDraft("host_a", "~/code")).toBe("new thread text");
   });
 
-  it("caps the store at the oldest-first limit", () => {
+  it("keeps a child thread's draft when the inventory includes it", () => {
+    const storage = memoryStorage();
+    const store = createDraftStore(storage);
+    store.writeThreadDraft("host_a", "parent", "parent draft");
+    store.writeThreadDraft("host_a", "child", "child draft");
+    store.flush();
+
+    store.pruneThreadDrafts(
+      [
+        { host: "host_a", threadId: "parent" },
+        { host: "host_a", threadId: "child" },
+      ],
+      ["host_a"],
+    );
+
+    expect(store.readThreadDraft("host_a", "child")).toBe("child draft");
+  });
+
+  it("does not prune anything when the daemon reported no hosts", () => {
+    const storage = memoryStorage();
+    const store = createDraftStore(storage);
+    store.writeThreadDraft("host_a", "thread_1", "keep me");
+    store.flush();
+
+    store.pruneThreadDrafts([], []);
+
+    expect(store.readThreadDraft("host_a", "thread_1")).toBe("keep me");
+  });
+
+  it("caps the store by removing the oldest draft keys", () => {
     const storage = memoryStorage();
     let time = 0;
     const store = createDraftStore(storage, { maxDrafts: 3, now: () => ++time });
@@ -136,7 +179,8 @@ describe("draft store", () => {
     store.writeThreadDraft("host_a", "t4", "four");
     store.flush();
 
-    expect(payload(storage).drafts).toHaveLength(3);
+    const keys = [...storage.data.keys()].filter((key) => key.startsWith(DRAFT_KEY_PREFIX));
+    expect(keys).toHaveLength(3);
     expect(store.readThreadDraft("host_a", "t1")).toBe("");
     expect(store.readThreadDraft("host_a", "t2")).toBe("two");
     expect(store.readThreadDraft("host_a", "t3")).toBe("three");
@@ -144,18 +188,20 @@ describe("draft store", () => {
   });
 
   it("trims an over-cap store when it loads", () => {
-    const drafts = Array.from({ length: MAX_STORED_DRAFTS + 5 }, (_, index) => ({
-      scope: "thread",
-      host: "host_a",
-      target: `t${index}`,
-      text: `draft ${index}`,
-      updatedAt: index,
-    }));
-    const storage = memoryStorage(JSON.stringify({ version: 1, drafts }));
+    const initial: Record<string, string> = {};
+    for (let index = 0; index < MAX_STORED_DRAFTS + 5; index += 1) {
+      initial[threadKey("host_a", `t${index}`)] = JSON.stringify({
+        text: `draft ${index}`,
+        updatedAt: index,
+      });
+    }
+    const storage = memoryStorage(initial);
     const store = createDraftStore(storage);
 
     expect(store.readThreadDraft("host_a", "t0")).toBe("");
-    expect(payload(storage).drafts).toHaveLength(MAX_STORED_DRAFTS);
+    expect([...storage.data.keys()].filter((key) => key.startsWith(DRAFT_KEY_PREFIX))).toHaveLength(
+      MAX_STORED_DRAFTS,
+    );
   });
 
   it("keeps working when storage throws", () => {
@@ -166,16 +212,26 @@ describe("draft store", () => {
       setItem: () => {
         throw new Error("blocked");
       },
+      removeItem: () => {
+        throw new Error("blocked");
+      },
+      key: () => {
+        throw new Error("blocked");
+      },
+      get length(): number {
+        throw new Error("blocked");
+      },
     };
     const store = createDraftStore(storage);
 
     expect(() => store.writeThreadDraft("host_a", "thread_1", "still here")).not.toThrow();
     expect(store.readThreadDraft("host_a", "thread_1")).toBe("still here");
     expect(() => store.flush()).not.toThrow();
+    expect(store.readThreadDraft("host_a", "thread_1")).toBe("still here");
   });
 
-  it("ignores corrupt storage and starts empty", () => {
-    const storage = memoryStorage("not json");
+  it("ignores corrupt values and starts empty", () => {
+    const storage = memoryStorage({ [threadKey("host_a", "thread_1")]: "not json" });
     const store = createDraftStore(storage);
 
     expect(store.readThreadDraft("host_a", "thread_1")).toBe("");
@@ -202,6 +258,183 @@ describe("draft store", () => {
     store.flush();
 
     expect(store.readThreadDraft("host_a", "thread_1")).toBe("");
-    expect(payload(storage).drafts).toEqual([]);
+    expect(storage.data.size).toBe(0);
+  });
+
+  it("migrates the old single-blob key, then deletes it", () => {
+    const legacy = JSON.stringify({
+      version: 1,
+      drafts: [
+        {
+          scope: "thread",
+          host: "host_a",
+          target: "thread_1",
+          text: "old draft",
+          updatedAt: 5,
+        },
+        {
+          scope: "new-thread",
+          host: "host_a",
+          target: "~/code",
+          text: "old prompt",
+          updatedAt: 6,
+        },
+      ],
+    });
+    const storage = memoryStorage({ [LEGACY_DRAFTS_STORAGE_KEY]: legacy });
+    const store = createDraftStore(storage);
+
+    expect(store.readThreadDraft("host_a", "thread_1")).toBe("old draft");
+    expect(store.readNewThreadDraft("host_a", "~/code")).toBe("old prompt");
+    expect(storage.getItem(LEGACY_DRAFTS_STORAGE_KEY)).toBeNull();
+    expect(storedText(storage, threadKey("host_a", "thread_1"))).toBe("old draft");
+  });
+
+  it("does not overwrite a newer per-key draft during migration", () => {
+    const key = threadKey("host_a", "thread_1");
+    const storage = memoryStorage({
+      [LEGACY_DRAFTS_STORAGE_KEY]: JSON.stringify({
+        version: 1,
+        drafts: [
+          { scope: "thread", host: "host_a", target: "thread_1", text: "older", updatedAt: 1 },
+        ],
+      }),
+      [key]: JSON.stringify({ text: "newer", updatedAt: 9 }),
+    });
+    const store = createDraftStore(storage);
+
+    expect(store.readThreadDraft("host_a", "thread_1")).toBe("newer");
+  });
+
+  it("lets two tabs write their own drafts without erasing each other", () => {
+    const storage = memoryStorage();
+    const tabA = createDraftStore(storage, { now: () => 1 });
+    const tabB = createDraftStore(storage, { now: () => 2 });
+
+    tabA.writeThreadDraft("host_a", "thread_1", "tab A");
+    tabA.flush();
+    tabB.writeThreadDraft("host_a", "thread_2", "tab B");
+    tabB.flush();
+
+    expect(storedText(storage, threadKey("host_a", "thread_1"))).toBe("tab A");
+    expect(storedText(storage, threadKey("host_a", "thread_2"))).toBe("tab B");
+    // Each tab reads through to storage, so both see both drafts.
+    expect(tabB.readThreadDraft("host_a", "thread_1")).toBe("tab A");
+    expect(tabA.readThreadDraft("host_a", "thread_2")).toBe("tab B");
+  });
+
+  it("flushes only the keys this tab changed", () => {
+    const storage = memoryStorage();
+    const tabA = createDraftStore(storage);
+    tabA.writeThreadDraft("host_a", "thread_1", "tab A");
+    tabA.flush();
+    vi.mocked(storage.setItem).mockClear();
+
+    const tabB = createDraftStore(storage);
+    tabB.writeThreadDraft("host_a", "thread_2", "tab B");
+    tabB.flush();
+
+    expect(storage.setItem).toHaveBeenCalledTimes(1);
+    expect(storage.setItem).toHaveBeenCalledWith(
+      threadKey("host_a", "thread_2"),
+      expect.stringContaining("tab B"),
+    );
+  });
+
+  it("adopts another tab's change unless this tab has an unsaved edit", () => {
+    const storage = memoryStorage();
+    const store = createDraftStore(storage);
+    const key = threadKey("host_a", "thread_1");
+
+    store.writeThreadDraft("host_a", "thread_1", "local saved");
+    store.flush();
+
+    const remote = JSON.stringify({ text: "from the other tab", updatedAt: 4 });
+    storage.data.set(key, remote);
+
+    expect(store.applyStorageEvent(key, remote)?.text).toBe("from the other tab");
+    expect(store.readThreadDraft("host_a", "thread_1")).toBe("from the other tab");
+
+    store.writeThreadDraft("host_a", "thread_1", "local, being typed");
+    expect(store.applyStorageEvent(key, JSON.stringify({ text: "remote", updatedAt: 5 }))).toBe(
+      null,
+    );
+    expect(store.readThreadDraft("host_a", "thread_1")).toBe("local, being typed");
+  });
+
+  it("clears the open composer when another tab removes the draft", () => {
+    const storage = memoryStorage();
+    const store = createDraftStore(storage);
+    store.writeThreadDraft("host_a", "thread_1", "saved");
+    store.flush();
+
+    storage.data.delete(threadKey("host_a", "thread_1"));
+    const change = store.applyStorageEvent(threadKey("host_a", "thread_1"), null);
+
+    expect(change?.text).toBe("");
+    expect(store.readThreadDraft("host_a", "thread_1")).toBe("");
+  });
+
+  it("remembers the last folder per host", () => {
+    const storage = memoryStorage();
+    const store = createDraftStore(storage);
+
+    store.writeLastWorkspace("host_a", "  ~/code/api  ");
+    store.writeLastWorkspace("host_b", "~/work");
+
+    expect(store.readLastWorkspace("host_a")).toBe("~/code/api");
+    expect(store.readLastWorkspace("host_b")).toBe("~/work");
+    expect(store.readLastWorkspace("host_c")).toBe("");
+  });
+});
+
+describe("draft flush wiring", () => {
+  function fakeTarget() {
+    const listeners = new Map<string, Set<() => void>>();
+    return {
+      addEventListener: vi.fn((type: string, listener: () => void) => {
+        const set = listeners.get(type) ?? new Set();
+        set.add(listener);
+        listeners.set(type, set);
+      }),
+      removeEventListener: vi.fn((type: string, listener: () => void) => {
+        listeners.get(type)?.delete(listener);
+      }),
+      fire(type: string) {
+        for (const listener of [...(listeners.get(type) ?? [])]) listener();
+      },
+      count(type: string) {
+        return listeners.get(type)?.size ?? 0;
+      },
+    };
+  }
+
+  it("flushes on pagehide and on visibilitychange only when hidden", () => {
+    const target = fakeTarget();
+    const flush = vi.fn();
+    let hidden = false;
+    installDraftFlushHandlers(target, () => hidden, flush);
+
+    target.fire("visibilitychange");
+    expect(flush).not.toHaveBeenCalled();
+
+    hidden = true;
+    target.fire("visibilitychange");
+    expect(flush).toHaveBeenCalledTimes(1);
+
+    target.fire("pagehide");
+    expect(flush).toHaveBeenCalledTimes(2);
+  });
+
+  it("removes both listeners when torn down", () => {
+    const target = fakeTarget();
+    const stop = installDraftFlushHandlers(target, () => true, vi.fn());
+    expect(target.count("pagehide")).toBe(1);
+    expect(target.count("visibilitychange")).toBe(1);
+
+    stop();
+
+    expect(target.count("pagehide")).toBe(0);
+    expect(target.count("visibilitychange")).toBe(0);
   });
 });

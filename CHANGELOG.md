@@ -7,17 +7,28 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
-- **Unsent composer text survives a reload, an app restart or Android killing the webview.** Drafts
-  are stored per host and thread (and the new-thread box has one per host and folder), written after
-  a short debounce and flushed when the page hides. A sent message clears its draft; a failed send
-  keeps it. Thread drafts for deleted threads are dropped when the list loads, and the store keeps
-  at most 200 drafts, dropping the oldest. Attachment bytes are never persisted: a restored draft
-  is its text, and files must be attached again.
+- **Unsent composer text survives a reload, an app restart or Android killing the webview.** Every
+  draft is stored under its own key for a host and thread, written after a short debounce and
+  flushed when the page hides, so two open tabs or windows never erase each other's work. Drafts
+  from the previous single-blob store are migrated on first launch. A sent message clears its
+  draft; a failed send keeps it. When the thread list loads, only drafts for threads this daemon no
+  longer knows are dropped — subagent threads count as known, and drafts for other machines or a
+  signed-out account are left untouched. The store keeps at most 200 drafts, dropping the oldest.
+  Attachment bytes are never persisted: a restored draft is its text, and files must be attached
+  again. A draft changed in another tab appears in the open composer only when that composer has no
+  unsaved edit of its own.
+- **The new-thread box follows the host and folder you see.** Its prompt is saved per host and
+  folder, the last folder used on a host is remembered for the next time the dialog opens, and
+  switching folders leaves the old folder's text saved where it was. Text typed before a host is
+  known is kept and attached to that host's draft slot once it appears, without overwriting a
+  draft that was already there.
 - **The composer recalls earlier prompts.** With the caret on the first line and nothing selected,
   `↑` walks back through the prompts already sent in this thread and `↓` walks forward, finally
-  restoring the text that was in progress. The history is read from the thread's own user messages,
-  so it needs no separate copy and works on any device that can see the thread. Typing leaves
-  history mode, and an open menu or IME composition leaves the arrow keys alone.
+  restoring the text that was in progress. Recalling a prompt does not touch the stored draft, so a
+  reload still brings back what you were typing; editing the recalled text replaces it. Multi-line
+  prompts keep stepping with the caret at their first line. The history is read from the thread's
+  own user messages, so it needs no separate copy and works on any device that can see the thread.
+  Typing leaves history mode, and an open menu or IME composition leaves the arrow keys alone.
 
 ### Fixed
 
