@@ -153,4 +153,40 @@ describe("signed request path", () => {
 
     expect(signed).toEqual([{ method: "GET", path: "/v1/machines" }]);
   });
+
+  it("accepts a linked list only when the relay says it filtered", async () => {
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL): Promise<Response> =>
+        new Response(JSON.stringify([{ id: "machine-1" }]), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            "x-h4rn-machine-filter": "linked",
+          },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ConnectClient(credentials());
+    const answer = await client.linkedMachines();
+
+    expect(answer).toEqual({ supported: true, machines: [{ id: "machine-1" }] });
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe("https://relay.test/v1/machines?linked=true");
+  });
+
+  it("treats a missing filter marker as an older relay", async () => {
+    const fetchMock = vi.fn(
+      async (_input: RequestInfo | URL): Promise<Response> =>
+        new Response(JSON.stringify([{ id: "machine-1" }]), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ConnectClient(credentials());
+    // The older relay ignored the query and returned the whole account; the
+    // caller must not mistake that for this device's links.
+    await expect(client.linkedMachines()).resolves.toEqual({ supported: false, machines: [] });
+  });
 });
