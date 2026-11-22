@@ -32,8 +32,9 @@ Only two things:
 1. the text of the thread's **first prompt**, and
 2. the **name of the workspace folder** (the last path component).
 
-The prompt is capped at 4,000 characters. No files, diffs, paths, environment variables or thread
-history are sent.
+The prompt is capped at 4,000 characters. h4rn sends no files, diffs, paths, environment variables
+or thread history. The Claude Code CLI adds its own short environment note to each request (its
+working directory, which is the empty temp directory, plus platform, shell and OS version).
 
 The trusted instruction ("write one short title…") is kept apart from that text. Claude Code gets
 it as its system prompt (`--system-prompt`). The prompt itself is wrapped once in
@@ -52,10 +53,12 @@ the cleanup. A run that overruns is killed, and the first-line title stays.
 The flags are exactly:
 
 - `-p --output-format text` — one shot, plain text on stdout.
+- `--no-session-persistence` — no session file is written, so the prompt does not outlive the run.
 - `--tools ""` — no tools, so there is no shell and no file access.
 - `--strict-mcp-config` with no `--mcp-config` — no MCP servers are loaded.
 - `--setting-sources ""` — no user, project or local settings source, so hooks and plugins from the
-  host's own configuration never load.
+  host's own configuration never load. Managed (enterprise policy) settings still apply; the run
+  has no tools, so the model cannot trigger anything through them.
 - `--disable-slash-commands` — no slash commands.
 - `--permission-mode dontAsk` — it cannot ask a question and wait.
 - `--model haiku` — the cheap model alias.

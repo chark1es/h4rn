@@ -844,10 +844,12 @@ impl TextGenerationService {
             HarnessKind::ClaudeCode => {
                 // No tools, no slash commands, no MCP servers, and no user,
                 // project or local settings source, so hooks and plugins from
-                // the host's own configuration never load. The title
-                // instruction is the system prompt; stdin is only data.
+                // the host's own configuration never load. No session is
+                // written to disk, so the prompt never outlives the run. The
+                // title instruction is the system prompt; stdin is only data.
                 command.args([
                     "-p",
+                    "--no-session-persistence",
                     "--output-format",
                     "text",
                     "--model",
@@ -907,8 +909,12 @@ impl TextGenerationService {
         })?;
         if !status.success() {
             // A CLI's stderr usually opens with a banner and ends with the
-            // error. Quote the tail, not the banner that hid the reason.
-            let detail = excerpt_tail(String::from_utf8_lossy(&err).trim());
+            // error. Quote the tail, not the banner that hid the reason. Claude
+            // Code prints API failures on stdout and leaves stderr empty.
+            let mut detail = excerpt_tail(String::from_utf8_lossy(&err).trim());
+            if detail.is_empty() {
+                detail = excerpt_tail(String::from_utf8_lossy(&out).trim());
+            }
             return Err(TextGenerationError::Provider(if detail.is_empty() {
                 format!("{} exited with {status}", harness_label(harness))
             } else {
@@ -2498,6 +2504,7 @@ mod tests {
             "no user, project or local settings source loads hooks or plugins: {argv:?}"
         );
         assert!(argv.contains(&"--strict-mcp-config"), "{argv:?}");
+        assert!(argv.contains(&"--no-session-persistence"), "{argv:?}");
         assert!(!argv.contains(&"--mcp-config"), "{argv:?}");
         assert_eq!(
             argv.windows(2).find(|pair| pair[0] == "--system-prompt"),
