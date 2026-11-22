@@ -5,7 +5,9 @@
 //! ignored by default and gated on environment variables; `scripts/test-forges.sh`
 //! runs them against Docker when the user asks.
 
-use h4rn_forge::{Forge, ForgeError, GitHubClient, GitLabClient, GiteaClient};
+use h4rn_forge::{
+    Forge, ForgeError, GitHubClient, GitLabClient, GiteaClient, pr_context_for_agent,
+};
 use h4rn_protocol::{ForgeDiffSide, ForgeKind, ForgePrFilter, ForgePrState, ForgeRepoRef};
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path, path_regex, query_param};
@@ -394,6 +396,10 @@ async fn gitlab_reads_merge_requests_discussions_and_jobs() {
     assert_eq!(pr.additions, 2);
     assert_eq!(pr.deletions, 1);
     assert_eq!(pr.changed_files, 1);
+    assert!(
+        pr.line_counts_known,
+        "get_pr sums the changes, so the totals are real"
+    );
     assert_eq!(pr.reviewers[0].author, "bob");
 
     let diff = client.get_diff(&repo, 7, 1, 30).await.unwrap();
@@ -409,6 +415,172 @@ async fn gitlab_reads_merge_requests_discussions_and_jobs() {
     assert_eq!(checks.head_sha, "abc123");
     assert_eq!(checks.failed, 1);
     assert_eq!(checks.total, 1);
+
+    let context = pr_context_for_agent(&pr, &[], &checks);
+    assert!(
+        context.contains("Diff: +2 −1 across 1 file"),
+        "the agent handoff carries the summed totals:\n{context}"
+    );
+}
+
+#[tokio::test]
+async fn gitlab_truncated_changes_leave_line_totals_unknown() {
+    // `overflow: true` means GitLab cut the changes list off. A partial sum
+    // would be a wrong number, so the handoff says the totals are unknown.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/v4/projects/[^/]+/merge_requests/7$"))
+        .respond_with(json_body(gitlab_mr_detail()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(
+            r"^/api/v4/projects/[^/]+/merge_requests/7/changes$",
+        ))
+        .respond_with(json_body(json!({
+            "overflow": true,
+            "changes": [{
+                "old_path": "src/lib.rs",
+                "new_path": "src/lib.rs",
+                "new_file": false,
+                "renamed_file": false,
+                "deleted_file": false,
+                "diff": "@@ -1 +1 @@\n-old\n+new"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = GitLabClient::new(&server.uri(), "glpat-test", 120).unwrap();
+    let repo = repo(ForgeKind::GitLab, &server.uri());
+    let pr = client.get_pr(&repo, 7).await.unwrap();
+    assert!(
+        !pr.line_counts_known,
+        "a truncated changes list cannot report line totals"
+    );
+    let context = pr_context_for_agent(&pr, &[], &client.list_checks(&repo, 7).await.unwrap());
+    assert!(
+        context.contains("additions and deletions unknown"),
+        "{context}"
+    );
+}
+
+#[tokio::test]
+async fn gitlab_counts_content_lines_that_begin_with_diff_markers() {
+    // `---old` is the removal of a line whose text is `--old`, and `+++new` is
+    // the addition of `+new`; only the file header before the first hunk is a
+    // marker, so both are counted.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/v4/projects/[^/]+/merge_requests/7$"))
+        .respond_with(json_body(gitlab_mr_detail()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(
+            r"^/api/v4/projects/[^/]+/merge_requests/7/changes$",
+        ))
+        .respond_with(json_body(json!({
+            "overflow": false,
+            "changes": [{
+                "old_path": "src/lib.rs",
+                "new_path": "src/lib.rs",
+                "new_file": false,
+                "renamed_file": false,
+                "deleted_file": false,
+                "diff": "@@ -1,2 +1,2 @@\n---old\n+++new"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/v4/projects/[^/]+/pipelines$"))
+        .respond_with(json_body(json!([])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/api/v4/projects/[^/]+/pipelines/900/jobs$"))
+        .respond_with(json_body(json!([{
+            "id": 1,
+            "name": "test",
+            "stage": "test",
+            "status": "success",
+            "web_url": "https://gitlab.com/acme/widget/-/jobs/1"
+        }])))
+        .mount(&server)
+        .await;
+
+    let client = GitLabClient::new(&server.uri(), "glpat-test", 120).unwrap();
+    let repo = repo(ForgeKind::GitLab, &server.uri());
+    let pr = client.get_pr(&repo, 7).await.unwrap();
+    assert_eq!(
+        pr.additions, 1,
+        "a content line starting with +++ is an add"
+    );
+    assert_eq!(
+        pr.deletions, 1,
+        "a content line starting with --- is a removal"
+    );
+    assert!(pr.line_counts_known);
+    let context = pr_context_for_agent(&pr, &[], &client.list_checks(&repo, 7).await.unwrap());
+    assert!(
+        context.contains("Diff: +1 −1 across 1 file"),
+        "the handoff carries the real totals:\n{context}"
+    );
+}
+
+#[tokio::test]
+async fn gitlab_collapsed_or_too_large_changes_leave_line_totals_unknown() {
+    // A `collapsed` or `too_large` change carries a partial or absent patch.
+    // Summing the rest would report a wrong number, so the totals stay
+    // unknown, exactly like an `overflow` answer.
+    for flag in ["collapsed", "too_large"] {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/api/v4/projects/[^/]+/merge_requests/7$"))
+            .respond_with(json_body(gitlab_mr_detail()))
+            .mount(&server)
+            .await;
+        let mut change = json!({
+            "old_path": "src/lib.rs",
+            "new_path": "src/lib.rs",
+            "new_file": false,
+            "renamed_file": false,
+            "deleted_file": false,
+            "diff": "@@ -1 +1 @@\n-old\n+new"
+        });
+        change[flag] = json!(true);
+        Mock::given(method("GET"))
+            .and(path_regex(
+                r"^/api/v4/projects/[^/]+/merge_requests/7/changes$",
+            ))
+            .respond_with(json_body(json!({"overflow": false, "changes": [change]})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/api/v4/projects/[^/]+/pipelines$"))
+            .respond_with(json_body(json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex(r"^/api/v4/projects/[^/]+/pipelines/900/jobs$"))
+            .respond_with(json_body(json!([])))
+            .mount(&server)
+            .await;
+
+        let client = GitLabClient::new(&server.uri(), "glpat-test", 120).unwrap();
+        let repo = repo(ForgeKind::GitLab, &server.uri());
+        let pr = client.get_pr(&repo, 7).await.unwrap();
+        assert!(
+            !pr.line_counts_known,
+            "a {flag} change cannot report line totals"
+        );
+        let context = pr_context_for_agent(&pr, &[], &client.list_checks(&repo, 7).await.unwrap());
+        assert!(
+            context.contains("additions and deletions unknown"),
+            "{flag}: {context}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

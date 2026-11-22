@@ -316,14 +316,21 @@ pub fn validate_base_url_for(kind: ForgeKind, value: &str) -> Result<String> {
 pub fn base_urls_match(kind: ForgeKind, a: &str, b: &str) -> bool {
     fn normalize(kind: ForgeKind, value: &str) -> String {
         let value = value.trim().trim_end_matches('/');
+        // The alias is matched case-insensitively: a remote may spell the
+        // segment `/defaultcollection` or `/DefaultCollection`.
+        const ALIAS: &str = "/defaultcollection";
         if kind == ForgeKind::AzureDevOps
-            && let Some(base) = value.strip_suffix("/DefaultCollection")
-            && Url::parse(base)
+            && let Some(suffix) = value.get(value.len().saturating_sub(ALIAS.len())..)
+            && suffix.eq_ignore_ascii_case(ALIAS)
+        {
+            let base = &value[..value.len() - ALIAS.len()];
+            if Url::parse(base)
                 .ok()
                 .and_then(|url| url.host_str().map(str::to_owned))
                 .is_some_and(|host| host.to_ascii_lowercase().ends_with(".visualstudio.com"))
-        {
-            return base.to_owned();
+            {
+                return base.to_owned();
+            }
         }
         value.to_owned()
     }
@@ -972,6 +979,17 @@ mod tests {
             ForgeKind::AzureDevOps,
             "https://acme.visualstudio.com/DefaultCollection/",
             "https://acme.visualstudio.com"
+        ));
+        // The alias segment is matched case-insensitively too.
+        assert!(base_urls_match(
+            ForgeKind::AzureDevOps,
+            "https://acme.visualstudio.com/defaultcollection",
+            "https://acme.visualstudio.com"
+        ));
+        assert!(base_urls_match(
+            ForgeKind::AzureDevOps,
+            "https://acme.visualstudio.com",
+            "https://ACME.VisualStudio.com/dEfAuLtCoLlEcTiOn/"
         ));
         assert!(base_urls_match(
             ForgeKind::AzureDevOps,
