@@ -14,11 +14,14 @@ type MemoryStorage = DraftStorage & {
   data: Map<string, string>;
 };
 
-function memoryStorage(initial?: Record<string, string>): MemoryStorage {
+function memoryStorage(initial?: Record<string, string>, unreadable?: Set<string>): MemoryStorage {
   const data = new Map<string, string>(Object.entries(initial ?? {}));
   return {
     data,
-    getItem: (key) => data.get(key) ?? null,
+    getItem: (key) => {
+      if (unreadable?.has(key)) throw new Error("blocked");
+      return data.get(key) ?? null;
+    },
     setItem: vi.fn((key: string, value: string) => {
       data.set(key, value);
     }),
@@ -179,6 +182,92 @@ describe("draft store", () => {
     expect(store.readThreadDraft("host_a", "thread_1")).toBe("");
   });
 
+  it("reads the text and its revision together", () => {
+    const storage = memoryStorage();
+    const store = createDraftStore(storage, { now: () => 42, nonce: "tab-a" });
+    store.writeThreadDraft("host_a", "thread_1", "loaded");
+    store.flush();
+
+    const fresh = createDraftStore(storage, { now: () => 42 });
+    expect(fresh.readThreadDraftEntry("host_a", "thread_1")).toEqual({
+      text: "loaded",
+      revision: { updatedAt: 42, nonce: "tab-a" },
+    });
+  });
+
+  it("gives every write its own revision, even across tabs in one millisecond", () => {
+    const storage = memoryStorage();
+    const tabA = createDraftStore(storage, { now: () => 5, nonce: "tab-a" });
+    const tabB = createDraftStore(storage, { now: () => 5, nonce: "tab-b" });
+
+    const first = tabA.writeThreadDraft("host_a", "thread_1", "first");
+    tabA.flush();
+    const second = tabB.writeThreadDraft("host_a", "thread_1", "second");
+    tabB.flush();
+
+    expect(first?.nonce).toBe("tab-a");
+    expect(second?.nonce).toBe("tab-b");
+    expect(second?.updatedAt).toBeGreaterThan(first?.updatedAt ?? 0);
+    expect(tabA.readThreadDraftRevision("host_a", "thread_1")).toEqual(second);
+    expect(tabA.readThreadDraft("host_a", "thread_1")).toBe("second");
+  });
+
+  it("advances the revision within the same millisecond", () => {
+    const store = createDraftStore(memoryStorage(), { now: () => 7, nonce: "tab-a" });
+    const first = store.writeThreadDraft("host_a", "thread_1", "one");
+    const second = store.writeThreadDraft("host_a", "thread_1", "one more");
+
+    expect(second?.updatedAt).toBeGreaterThan(first?.updatedAt ?? 0);
+    expect(second?.nonce).toBe("tab-a");
+  });
+
+  it("compares both halves of a revision before clearing", () => {
+    const store = createDraftStore(memoryStorage(), { now: () => 10, nonce: "tab-a" });
+    store.writeThreadDraft("host_a", "thread_1", "one");
+    store.flush();
+
+    expect(
+      store.clearThreadDraftIfRevision("host_a", "thread_1", { updatedAt: 10, nonce: "tab-b" }),
+    ).toBe(false);
+    expect(store.readThreadDraft("host_a", "thread_1")).toBe("one");
+  });
+
+  it("retries a failed removal only while the stored revision still matches", () => {
+    const key = threadKey("host_a", "thread_1");
+    const data = new Map<string, string>();
+    let failRemove = false;
+    const storage: DraftStorage = {
+      getItem: (current) => data.get(current) ?? null,
+      setItem: (current, value) => {
+        data.set(current, value);
+      },
+      removeItem: (current) => {
+        if (failRemove) throw new Error("blocked");
+        data.delete(current);
+      },
+      key: (index) => [...data.keys()][index] ?? null,
+      get length() {
+        return data.size;
+      },
+    };
+    const store = createDraftStore(storage, { nonce: "tab-a" });
+    store.writeThreadDraft("host_a", "thread_1", "sent");
+    store.flush();
+    const revision = store.readThreadDraftRevision("host_a", "thread_1");
+
+    failRemove = true;
+    expect(store.clearThreadDraftIfRevision("host_a", "thread_1", revision)).toBe(true);
+    expect(data.has(key)).toBe(true);
+
+    // Another tab saves newer text before the removal can be retried.
+    data.set(key, JSON.stringify({ text: "newer", updatedAt: 9_999_999_999, nonce: "tab-b" }));
+    failRemove = false;
+    store.flush();
+
+    expect(data.has(key)).toBe(true);
+    expect(store.readThreadDraft("host_a", "thread_1")).toBe("newer");
+  });
+
   it("clears only the submitted folder's new-thread draft", () => {
     const storage = memoryStorage();
     let time = 100;
@@ -259,14 +348,39 @@ describe("draft store", () => {
     expect(store.readThreadDraft("host_a", "thread_1")).toBe("still here");
   });
 
-  it("ignores corrupt values and starts empty", () => {
-    const storage = memoryStorage({ [threadKey("host_a", "thread_1")]: "not json" });
+  it("ignores corrupt values, and drops them from storage", () => {
+    const key = threadKey("host_a", "thread_1");
+    const storage = memoryStorage({ [key]: "not json" });
     const store = createDraftStore(storage);
 
     expect(store.readThreadDraft("host_a", "thread_1")).toBe("");
+    expect(storage.data.has(key)).toBe(false);
     store.writeThreadDraft("host_a", "thread_1", "fresh");
     store.flush();
     expect(store.readThreadDraft("host_a", "thread_1")).toBe("fresh");
+  });
+
+  it("does not evict a draft whose age it could not read", () => {
+    const base = 1_000;
+    const unreadable = threadKey("host_a", "unreadable");
+    const storage = memoryStorage(
+      {
+        [unreadable]: JSON.stringify({ text: "keep", updatedAt: base }),
+        [threadKey("host_a", "old")]: JSON.stringify({ text: "old", updatedAt: base + 1 }),
+        [threadKey("host_a", "new")]: JSON.stringify({ text: "new", updatedAt: base + 2 }),
+      },
+      new Set([unreadable]),
+    );
+    createDraftStore(storage, { maxDrafts: 2, now: () => base + 100 }).readThreadDraft(
+      "host_a",
+      "new",
+    );
+
+    // Unknown age means it is not treated as the oldest; the oldest readable
+    // draft goes instead.
+    expect(storage.data.has(unreadable)).toBe(true);
+    expect(storage.data.has(threadKey("host_a", "old"))).toBe(false);
+    expect(storage.data.has(threadKey("host_a", "new"))).toBe(true);
   });
 
   it("works without storage, keeping drafts in memory", () => {
@@ -285,6 +399,20 @@ describe("draft store", () => {
     store.flush();
     store.writeThreadDraft("host_a", "thread_1", "");
     store.flush();
+
+    expect(store.readThreadDraft("host_a", "thread_1")).toBe("");
+    expect(storage.data.size).toBe(0);
+  });
+
+  it("does not resurrect an older stored draft when the box is emptied", () => {
+    const storage = memoryStorage();
+    const store = createDraftStore(storage);
+
+    store.writeThreadDraft("host_a", "thread_1", "first");
+    store.flush();
+    store.writeThreadDraft("host_a", "thread_1", "first and more");
+    store.writeThreadDraft("host_a", "thread_1", "");
+    vi.advanceTimersByTime(300);
 
     expect(store.readThreadDraft("host_a", "thread_1")).toBe("");
     expect(storage.data.size).toBe(0);

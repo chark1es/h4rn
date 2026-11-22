@@ -28,7 +28,7 @@ import {
 } from "@/features/proxy/proxyStore";
 import type { HarnessKind, HostId, RuntimeMode } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
-import { DEFAULT_NEW_THREAD_WORKSPACE, drafts, flushDrafts } from "@/lib/drafts";
+import { DEFAULT_NEW_THREAD_WORKSPACE, drafts } from "@/lib/drafts";
 import { HARNESS_LABELS, HARNESS_SLUGS } from "@/lib/entities";
 import { detectedHarnesses, HARNESS_MODELS } from "@/lib/models";
 import { NewThreadDraftSession, type NewThreadDraftSnapshot } from "@/lib/newThreadDraft";
@@ -98,6 +98,8 @@ export function NewThreadDialog() {
   const hostResolved = useRef(false);
   /** The user picked the host; the dialog must not rebind it underneath them. */
   const hostChosen = useRef(false);
+  /** Start is being pressed: its blur must not swap the text before it submits. */
+  const startPressed = useRef(false);
   const preset = useApp((state) => state.ui.newThreadPreset);
 
   const draftSession = useCallback((): NewThreadDraftSession => {
@@ -213,23 +215,19 @@ export function NewThreadDialog() {
 
   const submit = async () => {
     if (starting || attachments.blockedReason) return;
-    // The folder field commits on blur or Enter; a Start press can also carry
-    // the text that is visible right now.
+    // Cmd+Enter with no host yet: nothing has been committed or saved.
     const session = draftSession();
-    const committed = session.commitWorkspace(workspace);
-    setWorkspace(committed.workspace);
-    setPrompt(committed.text);
-    // Capture the revision storage will hold, so newer text written while
-    // Start waits is not mistaken for the draft that was sent.
-    flushDrafts();
-    const draft = session.submission();
-    if (!draft.host) return;
+    const draft = session.submission(workspace);
+    if (!draft) return;
     if (!draft.text.trim() && attachments.attachments.length === 0) return;
+    // The folder on screen is the one the request runs in, but the visible
+    // text stays where it is: Start never swaps the box for another slot.
+    setWorkspace(draft.workspace);
     setStarting(true);
     const ok = await createThread({
       host: draft.host,
       harness,
-      workspacePath: draft.workspace || DEFAULT_NEW_THREAD_WORKSPACE,
+      workspacePath: draft.workspace,
       model,
       prompt: draft.text.trim(),
       attachments: attachments.attachments,
@@ -237,9 +235,11 @@ export function NewThreadDialog() {
     });
     setStarting(false);
     if (ok) {
-      // Only the slot and revision that were sent: a folder switch or another
-      // tab's newer text while Start waited must survive.
+      // Only the text's own slot, and only while it still holds the revision
+      // that was sent: newer text from another tab survives.
       session.clearSubmitted(draft);
+      // The folder on screen was used, even if the field was never committed.
+      drafts.writeLastWorkspace(draft.host, draft.workspace);
       closeNewThread();
       setPrompt("");
       attachments.clear();
@@ -370,7 +370,13 @@ export function NewThreadDialog() {
               id="new-thread-workspace"
               value={workspace}
               onChange={(event) => setWorkspace(event.target.value)}
-              onBlur={commitWorkspace}
+              onBlur={() => {
+                // Pressing Start blurs this field on the way to the button.
+                // Start sends what is on screen to the folder as typed; it
+                // must not swap the box to that folder's draft first.
+                if (startPressed.current) return;
+                commitWorkspace();
+              }}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
                   event.preventDefault();
@@ -431,6 +437,7 @@ export function NewThreadDialog() {
           <Textarea
             id="new-thread-task"
             autoFocus
+            disabled={!host}
             value={prompt}
             onChange={(event) => {
               const value = event.target.value;
@@ -453,7 +460,11 @@ export function NewThreadDialog() {
                 void submit();
               }
             }}
-            placeholder="Describe the task. Use @ for files and hosts, / for commands. Paste or drop images too."
+            placeholder={
+              host
+                ? "Describe the task. Use @ for files and hosts, / for commands. Paste or drop images too."
+                : "Connecting…"
+            }
             className="min-h-32"
           />
         </div>
@@ -489,6 +500,12 @@ export function NewThreadDialog() {
                 Boolean(attachments.blockedReason) ||
                 (!prompt.trim() && attachments.attachments.length === 0)
               }
+              onPointerDown={() => {
+                startPressed.current = true;
+              }}
+              onPointerUp={() => {
+                startPressed.current = false;
+              }}
               onClick={() => void submit()}
               title={
                 attachments.blockedReason ??

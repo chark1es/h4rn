@@ -243,6 +243,53 @@ describe("Composer drafts and history", () => {
     expect(readThreadDraft(HOST, THREAD)).toBe("");
   });
 
+  it("clears the draft it loaded, before any typing", async () => {
+    writeThreadDraft(HOST, THREAD, "loaded draft");
+    flushDrafts();
+    mock.sendMessage.mockResolvedValue(true);
+    renderComposer();
+    const input = textarea();
+    expect(input.value).toBe("loaded draft");
+
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+
+    await waitFor(() => expect(input.value).toBe(""));
+    expect(readThreadDraft(HOST, THREAD)).toBe("");
+  });
+
+  it("clears against the revision it showed, not a newer one in storage", async () => {
+    let finish: (ok: boolean) => void = () => undefined;
+    mock.sendMessage.mockReturnValue(
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    renderComposer();
+    const input = textarea();
+
+    fireEvent.change(input, { target: { value: "being sent" } });
+    flushDrafts();
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await waitFor(() => expect(mock.sendMessage).toHaveBeenCalled());
+
+    // Another tab saves newer text without this tab hearing about it.
+    const key = draftStorageKey("thread", HOST, THREAD);
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({
+        text: "newer from elsewhere",
+        updatedAt: Date.now() + 1000,
+        nonce: "other",
+      }),
+    );
+
+    await act(async () => {
+      finish(true);
+    });
+
+    expect(readThreadDraft(HOST, THREAD)).toBe("newer from elsewhere");
+  });
+
   it("keeps the draft when the send fails", async () => {
     mock.sendMessage.mockResolvedValue(false);
     renderComposer();

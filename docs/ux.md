@@ -562,7 +562,7 @@ flowchart TD
 - Attachments: paste, drop, or `⌘U`; images get thumbnails, text over 32 KiB becomes a text-file attachment, and every attachment shows a size. A failed upload keeps the draft and shows a retry per file.
 - The Start button states the consequence: “Runs Claude Code on atlas”. If the host is offline, Start is disabled with “atlas is offline — [Reconnect]”, not a generic error.
 - Starting is idempotent per draft: double-Enter does not create two threads.
-- The Task box keeps an unsent draft per host and folder on this device, so cancelling and reopening the dialog does not lose what you typed; the draft switches when you commit the folder (leave the field or press Enter), switching folders leaves the old folder's text saved there, and the last folder used on a host is remembered. Attachments are not persisted.
+- The Task box keeps an unsent draft per host and folder on this device, so cancelling and reopening the dialog does not lose what you typed; the draft switches when you commit the folder (leave the field or press Enter), switching folders leaves the old folder's text saved there, and the last folder used on a host is remembered. Attachments are not persisted. The box stays disabled with a quiet “Connecting…” until a host is known, so text is never typed into a slot that does not exist yet. Start sends exactly what is on screen to the folder on screen, and clears only the draft the text came from.
 
 **Failure paths**
 

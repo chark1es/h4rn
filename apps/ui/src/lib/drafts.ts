@@ -34,12 +34,23 @@ export type DraftStoreOptions = {
   maxDrafts?: number;
   maxAgeMs?: number;
   now?: () => number;
+  /** Identifies this tab inside a revision; generated once per store by default. */
+  nonce?: string;
 };
 
-/** A value as stored: the text and when it was last touched. */
-export type StoredDraft = {
-  text: string;
+/**
+ * Identifies one saved draft: when it was written, and which tab wrote it.
+ * Two tabs can write in the same millisecond, so the timestamp alone is not
+ * unique; both halves are compared.
+ */
+export type DraftRevision = {
   updatedAt: number;
+  nonce: string;
+};
+
+/** A value as stored: the text, its revision and when it was last touched. */
+export type StoredDraft = DraftRevision & {
+  text: string;
 };
 
 export type DraftTarget = {
@@ -48,9 +59,18 @@ export type DraftTarget = {
   target: string;
 };
 
-export type DraftChange = DraftTarget & { text: string };
+/** One saved draft as this tab sees it. */
+export type DraftEntry = {
+  text: string;
+  revision: DraftRevision | null;
+};
 
-type LegacyDraft = DraftTarget & StoredDraft;
+export type DraftChange = DraftTarget & DraftEntry;
+
+type LegacyDraft = DraftTarget & {
+  text: string;
+  updatedAt: number;
+};
 
 export type DraftStore = ReturnType<typeof createDraftStore>;
 
@@ -89,7 +109,9 @@ export function parseDraftValue(raw: string | null): StoredDraft | null {
     const record = parsed as Record<string, unknown>;
     if (typeof record.text !== "string" || record.text.length === 0) return null;
     if (typeof record.updatedAt !== "number" || !Number.isFinite(record.updatedAt)) return null;
-    return { text: record.text, updatedAt: record.updatedAt };
+    // Values written before revisions carried a nonce are still drafts.
+    const nonce = typeof record.nonce === "string" ? record.nonce : "";
+    return { text: record.text, updatedAt: record.updatedAt, nonce };
   } catch {
     return null;
   }
@@ -124,6 +146,26 @@ function parseLegacyDrafts(raw: string | null): LegacyDraft[] {
   }
 }
 
+export function revisionOf(value: StoredDraft): DraftRevision {
+  return { updatedAt: value.updatedAt, nonce: value.nonce };
+}
+
+export function sameRevision(a: DraftRevision | null, b: DraftRevision | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.updatedAt === b.updatedAt && a.nonce === b.nonce;
+}
+
+function randomNonce(): string {
+  try {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+  } catch {
+    // Fall through to a non-cryptographic id; it only has to be unique.
+  }
+  return `${Math.random().toString(36).slice(2, 10)}${Math.random().toString(36).slice(2, 10)}`;
+}
+
 function readBrowserStorage(): DraftStorage | null {
   try {
     if (typeof window === "undefined") return null;
@@ -133,17 +175,23 @@ function readBrowserStorage(): DraftStorage | null {
   }
 }
 
-/**
- * The storage interface cannot report a failed read, so `undefined` means
- * "storage threw" and `null` means "no value". Reads fall back to the values
- * this tab already knows when storage throws.
- */
-function readStoredDraft(storage: DraftStorage, key: string): StoredDraft | null | undefined {
+/** What a key currently holds, with the read failures storage cannot report. */
+type StoredRead =
+  | { state: "ok"; value: StoredDraft }
+  | { state: "missing" }
+  | { state: "corrupt" }
+  | { state: "unreadable" };
+
+function readStored(storage: DraftStorage, key: string): StoredRead {
+  let raw: string | null;
   try {
-    return parseDraftValue(storage.getItem(key));
+    raw = storage.getItem(key);
   } catch {
-    return undefined;
+    return { state: "unreadable" };
   }
+  if (raw === null) return { state: "missing" };
+  const value = parseDraftValue(raw);
+  return value ? { state: "ok", value } : { state: "corrupt" };
 }
 
 function storageDraftKeys(storage: DraftStorage): string[] {
@@ -192,40 +240,67 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
   const maxDrafts = options.maxDrafts ?? MAX_STORED_DRAFTS;
   const maxAgeMs = options.maxAgeMs ?? DRAFT_MAX_AGE_MS;
   const now = options.now ?? Date.now;
+  const nonce = options.nonce ?? randomNonce();
 
   /** Last value this tab knows per key; the fallback when storage is unreadable. */
   const memory = new Map<string, StoredDraft>();
   /** Keys changed by this tab and not yet written to storage. */
   const pendingWrites = new Map<string, StoredDraft>();
-  const pendingRemoves = new Set<string>();
+  /** Keys this tab removed, with the revision it meant to remove. */
+  const pendingRemoves = new Map<string, DraftRevision>();
   let loaded = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
 
+  /** A key that does not parse is not a draft; drop it from storage too. */
+  function forgetCorrupt(key: string): void {
+    memory.delete(key);
+    pendingWrites.delete(key);
+    try {
+      storage?.removeItem(key);
+    } catch {
+      // The next load tries again; nothing usable is lost either way.
+    }
+  }
+
   function dropBehindCap(): void {
-    const keys = storage ? storageDraftKeys(storage) : [];
-    if (storage) {
-      // Writes still pending will add keys of their own; reserve room for them
-      // rather than deleting a draft the user just typed.
-      const storedKeys = keys.filter((key) => !pendingWrites.has(key));
-      const allowed = Math.max(0, maxDrafts - pendingWrites.size);
-      if (storedKeys.length <= allowed) return;
-      const entries = storedKeys
-        .map((key) => ({ key, updatedAt: readStoredDraft(storage, key)?.updatedAt ?? 0 }))
-        .sort((a, b) => a.updatedAt - b.updatedAt);
-      for (const entry of entries.slice(0, entries.length - allowed)) {
-        try {
-          storage.removeItem(entry.key);
-        } catch {
-          // Leave it; the next flush tries again.
-        }
-        memory.delete(entry.key);
-        pendingRemoves.delete(entry.key);
-      }
+    if (!storage) {
+      if (memory.size <= maxDrafts) return;
+      const oldest = [...memory.entries()].sort((a, b) => a[1].updatedAt - b[1].updatedAt);
+      for (const [key] of oldest.slice(0, memory.size - maxDrafts)) memory.delete(key);
       return;
     }
-    if (memory.size <= maxDrafts) return;
-    const oldest = [...memory.entries()].sort((a, b) => a[1].updatedAt - b[1].updatedAt);
-    for (const [key] of oldest.slice(0, memory.size - maxDrafts)) memory.delete(key);
+    const entries: { key: string; updatedAt: number }[] = [];
+    let unreadable = 0;
+    for (const key of storageDraftKeys(storage)) {
+      // Writes still pending will add keys of their own; reserve room for
+      // them rather than deleting a draft the user just typed.
+      if (pendingWrites.has(key)) continue;
+      const read = readStored(storage, key);
+      if (read.state === "unreadable") {
+        // Its age is unknown, so it is never treated as the oldest. It still
+        // counts against the cap, so the store cannot grow without bound.
+        unreadable += 1;
+        continue;
+      }
+      if (read.state === "corrupt") {
+        forgetCorrupt(key);
+        continue;
+      }
+      if (read.state === "missing") continue;
+      entries.push({ key, updatedAt: read.value.updatedAt });
+    }
+    const allowed = Math.max(0, maxDrafts - pendingWrites.size - unreadable);
+    if (entries.length <= allowed) return;
+    entries.sort((a, b) => a.updatedAt - b.updatedAt);
+    for (const entry of entries.slice(0, entries.length - allowed)) {
+      try {
+        storage.removeItem(entry.key);
+      } catch {
+        // Leave it; the next flush tries again.
+      }
+      memory.delete(entry.key);
+      pendingRemoves.delete(entry.key);
+    }
   }
 
   /**
@@ -239,16 +314,21 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
     const keys = new Set<string>(memory.keys());
     if (storage) for (const key of storageDraftKeys(storage)) keys.add(key);
     for (const key of keys) {
-      let updatedAt: number | null | undefined = memory.get(key)?.updatedAt;
+      if (pendingWrites.has(key)) continue;
+      let updatedAt = memory.get(key)?.updatedAt;
       if (storage) {
-        const stored = readStoredDraft(storage, key);
+        const read = readStored(storage, key);
         // A storage throw means we cannot tell; leave the draft alone.
-        if (stored === undefined) continue;
-        if (stored === null) {
+        if (read.state === "unreadable") continue;
+        if (read.state === "corrupt") {
+          forgetCorrupt(key);
+          continue;
+        }
+        if (read.state === "missing") {
           memory.delete(key);
           continue;
         }
-        updatedAt = stored.updatedAt;
+        updatedAt = read.value.updatedAt;
       }
       if (updatedAt === undefined || updatedAt === null) continue;
       if (updatedAt >= cutoff) continue;
@@ -277,9 +357,10 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
     if (!raw) return;
     for (const draft of parseLegacyDrafts(raw)) {
       const key = draftStorageKey(draft.scope, draft.host, draft.target);
-      const existing = readStoredDraft(storage, key);
-      if (existing && existing.updatedAt >= draft.updatedAt) continue;
-      const value: StoredDraft = { text: draft.text, updatedAt: draft.updatedAt };
+      const read = readStored(storage, key);
+      if (read.state === "unreadable") return;
+      if (read.state === "ok" && read.value.updatedAt >= draft.updatedAt) continue;
+      const value: StoredDraft = { text: draft.text, updatedAt: draft.updatedAt, nonce: "" };
       try {
         storage.setItem(key, JSON.stringify(value));
         memory.set(key, value);
@@ -319,13 +400,27 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
         // Keep the draft pending and retry on the next write or flush.
       }
     }
-    for (const key of [...pendingRemoves]) {
+    for (const [key, expected] of [...pendingRemoves]) {
+      const read = readStored(storage, key);
+      // Cannot tell what is there; keep the removal pending.
+      if (read.state === "unreadable") continue;
+      if (read.state === "corrupt") {
+        forgetCorrupt(key);
+        pendingRemoves.delete(key);
+        continue;
+      }
+      if (read.state === "ok" && !sameRevision(revisionOf(read.value), expected)) {
+        // Another tab saved newer text after this removal was queued. That
+        // text is not what was sent, so the removal is dropped.
+        pendingRemoves.delete(key);
+        continue;
+      }
       try {
         storage.removeItem(key);
         memory.delete(key);
         pendingRemoves.delete(key);
       } catch {
-        // Keep it pending so a retry cannot resurrect the removed text.
+        // Keep it pending; the next flush retries while the revision matches.
       }
     }
     dropBehindCap();
@@ -347,75 +442,74 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
     }, delayMs);
   }
 
-  function read(scope: DraftScope, host: string, target: string): string {
+  /** The text and revision for a slot, reading through to storage when it can. */
+  function entry(scope: DraftScope, host: string, target: string): DraftEntry {
     load();
     const key = draftStorageKey(scope, host, target);
-    if (pendingRemoves.has(key)) return "";
+    if (pendingRemoves.has(key)) return { text: "", revision: null };
     const pending = pendingWrites.get(key);
-    if (pending) return pending.text;
-    if (!storage) return memory.get(key)?.text ?? "";
-    const stored = readStoredDraft(storage, key);
-    if (stored === undefined) return memory.get(key)?.text ?? "";
-    if (stored === null) {
-      memory.delete(key);
-      return "";
+    if (pending) return { text: pending.text, revision: revisionOf(pending) };
+    if (!storage) {
+      const known = memory.get(key);
+      return { text: known?.text ?? "", revision: known ? revisionOf(known) : null };
     }
-    memory.set(key, stored);
-    return stored.text;
+    const read = readStored(storage, key);
+    if (read.state === "unreadable") {
+      const known = memory.get(key);
+      return { text: known?.text ?? "", revision: known ? revisionOf(known) : null };
+    }
+    if (read.state === "corrupt") {
+      forgetCorrupt(key);
+      return { text: "", revision: null };
+    }
+    if (read.state === "missing") {
+      memory.delete(key);
+      return { text: "", revision: null };
+    }
+    memory.set(key, read.value);
+    return { text: read.value.text, revision: revisionOf(read.value) };
   }
 
-  function write(scope: DraftScope, host: string, target: string, text: string): void {
+  /** The newest revision seen so far for a key, from this tab or storage. */
+  function storedUpdatedAt(key: string): number {
+    if (!storage) return 0;
+    const read = readStored(storage, key);
+    if (read.state === "ok") return read.value.updatedAt;
+    if (read.state === "corrupt") forgetCorrupt(key);
+    return 0;
+  }
+
+  function write(
+    scope: DraftScope,
+    host: string,
+    target: string,
+    text: string,
+  ): DraftRevision | null {
     load();
     const key = draftStorageKey(scope, host, target);
     if (text.length === 0) {
-      memory.delete(key);
-      pendingWrites.delete(key);
-      pendingRemoves.add(key);
-    } else {
-      // A revision must change with every write, even two in the same
-      // millisecond, so a finish cannot clear a draft saved just after Start.
-      const previous = memory.get(key)?.updatedAt ?? pendingWrites.get(key)?.updatedAt ?? 0;
-      const value = { text, updatedAt: Math.max(now(), previous + 1) };
-      memory.set(key, value);
-      pendingWrites.set(key, value);
-      pendingRemoves.delete(key);
-    }
-    schedule();
-  }
-
-  function hasStoredDraft(scope: DraftScope, host: string, target: string): boolean {
-    const key = draftStorageKey(scope, host, target);
-    if (memory.has(key) || pendingWrites.has(key)) return true;
-    if (!storage) return false;
-    return readStoredDraft(storage, key) !== null;
-  }
-
-  function remove(scope: DraftScope, host: string, target: string): void {
-    load();
-    if (!hasStoredDraft(scope, host, target)) return;
-    const key = draftStorageKey(scope, host, target);
-    memory.delete(key);
-    pendingWrites.delete(key);
-    pendingRemoves.add(key);
-    // Cancel a pending write so a debounced older value cannot bring it back.
-    flush();
-  }
-
-  function revision(scope: DraftScope, host: string, target: string): number | null {
-    load();
-    const key = draftStorageKey(scope, host, target);
-    if (pendingRemoves.has(key)) return null;
-    const pending = pendingWrites.get(key);
-    if (pending) return pending.updatedAt;
-    if (!storage) return memory.get(key)?.updatedAt ?? null;
-    const stored = readStoredDraft(storage, key);
-    if (stored === undefined) return memory.get(key)?.updatedAt ?? null;
-    if (stored === null) {
-      memory.delete(key);
+      // Emptied: remove the slot. This persists any pending text first, so
+      // the removal is guarded against the revision storage really holds.
+      remove(scope, host, target);
       return null;
     }
-    memory.set(key, stored);
-    return stored.updatedAt;
+    // A revision must change with every write, even two in the same
+    // millisecond or two tabs writing at once, so a finish cannot clear a
+    // draft saved just after Start. The nonce keeps two tabs apart.
+    const previous = Math.max(
+      memory.get(key)?.updatedAt ?? 0,
+      pendingWrites.get(key)?.updatedAt ?? 0,
+    );
+    const value: StoredDraft = {
+      text,
+      updatedAt: Math.max(now(), storedUpdatedAt(key) + 1, previous + 1),
+      nonce,
+    };
+    memory.set(key, value);
+    pendingWrites.set(key, value);
+    pendingRemoves.delete(key);
+    schedule();
+    return revisionOf(value);
   }
 
   /**
@@ -423,63 +517,85 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
    * message takes a moment to send, and another tab (or a folder switch while
    * Start waits) can save newer text in the meantime; that text must survive.
    */
-  function clearIfRevision(
+  function removeIfRevision(
     scope: DraftScope,
     host: string,
     target: string,
-    expected: number | null,
+    expected: DraftRevision | null,
   ): boolean {
-    if (revision(scope, host, target) !== expected) return false;
-    remove(scope, host, target);
+    const key = draftStorageKey(scope, host, target);
+    // Write any pending text first: it is the revision this clear is about,
+    // and the guard compares what storage holds. A pending write would leave
+    // the older stored revision in place and make the guard fail.
+    flush();
+    const current = entry(scope, host, target).revision;
+    if (!sameRevision(current, expected)) return false;
+    if (current === null) return true;
+    memory.delete(key);
+    pendingWrites.delete(key);
+    pendingRemoves.set(key, current);
+    flush();
     return true;
   }
 
-  function readThread(host: HostId, threadId: ThreadId): string {
-    return read("thread", host, threadId);
+  function remove(scope: DraftScope, host: string, target: string): void {
+    removeIfRevision(scope, host, target, entry(scope, host, target).revision);
   }
 
-  function writeThread(host: HostId, threadId: ThreadId, text: string): void {
-    write("thread", host, threadId, text);
+  function readThreadEntry(host: HostId, threadId: ThreadId): DraftEntry {
+    return entry("thread", host, threadId);
+  }
+
+  function readThread(host: HostId, threadId: ThreadId): string {
+    return readThreadEntry(host, threadId).text;
+  }
+
+  function writeThread(host: HostId, threadId: ThreadId, text: string): DraftRevision | null {
+    return write("thread", host, threadId, text);
   }
 
   function clearThread(host: HostId, threadId: ThreadId): void {
     remove("thread", host, threadId);
   }
 
-  function threadRevision(host: HostId, threadId: ThreadId): number | null {
-    return revision("thread", host, threadId);
+  function threadRevision(host: HostId, threadId: ThreadId): DraftRevision | null {
+    return readThreadEntry(host, threadId).revision;
   }
 
   function clearThreadIfRevision(
     host: HostId,
     threadId: ThreadId,
-    expected: number | null,
+    expected: DraftRevision | null,
   ): boolean {
-    return clearIfRevision("thread", host, threadId, expected);
+    return removeIfRevision("thread", host, threadId, expected);
+  }
+
+  function readNewThreadEntry(host: HostId, workspace: string): DraftEntry {
+    return entry("new-thread", host, normalizeWorkspace(workspace));
   }
 
   function readNewThread(host: HostId, workspace: string): string {
-    return read("new-thread", host, normalizeWorkspace(workspace));
+    return readNewThreadEntry(host, workspace).text;
   }
 
-  function writeNewThread(host: HostId, workspace: string, text: string): void {
-    write("new-thread", host, normalizeWorkspace(workspace), text);
+  function writeNewThread(host: HostId, workspace: string, text: string): DraftRevision | null {
+    return write("new-thread", host, normalizeWorkspace(workspace), text);
   }
 
   function clearNewThread(host: HostId, workspace: string): void {
     remove("new-thread", host, normalizeWorkspace(workspace));
   }
 
-  function newThreadRevision(host: HostId, workspace: string): number | null {
-    return revision("new-thread", host, normalizeWorkspace(workspace));
+  function newThreadRevision(host: HostId, workspace: string): DraftRevision | null {
+    return readNewThreadEntry(host, workspace).revision;
   }
 
   function clearNewThreadIfRevision(
     host: HostId,
     workspace: string,
-    expected: number | null,
+    expected: DraftRevision | null,
   ): boolean {
-    return clearIfRevision("new-thread", host, normalizeWorkspace(workspace), expected);
+    return removeIfRevision("new-thread", host, normalizeWorkspace(workspace), expected);
   }
 
   function readLastWorkspace(host: HostId): string {
@@ -515,16 +631,18 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
     const value = parseDraftValue(newValue);
     if (value) memory.set(key, value);
     else memory.delete(key);
-    return { ...target, text: value?.text ?? "" };
+    return { ...target, text: value?.text ?? "", revision: value ? revisionOf(value) : null };
   }
 
   return {
     readThreadDraft: readThread,
+    readThreadDraftEntry: readThreadEntry,
     writeThreadDraft: writeThread,
     clearThreadDraft: clearThread,
     readThreadDraftRevision: threadRevision,
     clearThreadDraftIfRevision: clearThreadIfRevision,
     readNewThreadDraft: readNewThread,
+    readNewThreadDraftEntry: readNewThreadEntry,
     writeNewThreadDraft: writeNewThread,
     clearNewThreadDraft: clearNewThread,
     readNewThreadDraftRevision: newThreadRevision,
@@ -539,10 +657,12 @@ export function createDraftStore(storage: DraftStorage | null, options: DraftSto
 export const drafts = createDraftStore(readBrowserStorage());
 
 export const readThreadDraft = drafts.readThreadDraft;
+export const readThreadDraftEntry = drafts.readThreadDraftEntry;
 export const writeThreadDraft = drafts.writeThreadDraft;
 export const readThreadDraftRevision = drafts.readThreadDraftRevision;
 export const clearThreadDraftIfRevision = drafts.clearThreadDraftIfRevision;
 export const readNewThreadDraft = drafts.readNewThreadDraft;
+export const readNewThreadDraftEntry = drafts.readNewThreadDraftEntry;
 export const writeNewThreadDraft = drafts.writeNewThreadDraft;
 export const flushDrafts = drafts.flush;
 

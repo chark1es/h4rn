@@ -12,20 +12,24 @@ All notable changes to h4rn are recorded here. The format follows
   flushed when the page hides, so two open tabs or windows never erase each other's work. Drafts
   from the previous single-blob store are migrated on first launch. A sent message clears only the
   text that was sent: a newer draft written in another tab while the message was in flight stays,
-  and a failed send keeps the text so it can be retried. Drafts nobody has touched in 30 days are
-  dropped when the app loads, and the store keeps at most 200, dropping the oldest. Attachment
-  bytes are never persisted: a restored draft is its text, and files must be attached again. A
-  draft changed in another tab appears in the open composer only when that composer has no unsaved
-  edit of its own.
+  and a failed send keeps the text so it can be retried. Every write carries its own revision (a
+  timestamp plus a per-tab id), so two tabs writing in the same moment cannot be confused, and a
+  send clears only the revision the composer was showing rather than whatever storage holds when
+  the reply finishes; a removal that failed is retried only while storage still holds that
+  revision. Drafts nobody has touched in 30 days are dropped when the app loads, and the store
+  keeps at most 200, dropping the oldest; a draft whose age cannot be read is never treated as the
+  oldest, and a corrupt value is dropped from storage. Attachment bytes are never persisted: a
+  restored draft is its text, and files must be attached again. A draft changed in another tab
+  appears in the open composer only when that composer has no unsaved edit of its own.
 - **The new-thread box follows the host and folder you see.** Its prompt is saved per host and
-  folder, the last folder used on a host is remembered for the next time the dialog opens, and the
-  folder's draft switches only when you commit the folder (leave the field, press Enter, or pick a
-  project), not on every keystroke; an empty folder means the default one it will use. Switching
-  folders leaves the old folder's text saved where it was. Text typed before a host is known is
-  kept and attached to that host's draft slot once it appears, without overwriting a draft that was
-  already there. If the daemon's own host changes before you pick one, the dialog rebinds to it so
-  Start does not target a host the daemon would reject, and a thread that starts while the folder
-  changes clears only the submitted folder's draft.
+  folder, and the last folder used on a host is remembered for the next time the dialog opens. The
+  box stays disabled with a quiet “Connecting…” until a host is known, so no text is typed before
+  there is a slot to keep it in. The folder's draft switches only when you commit the folder (leave
+  the field, press Enter, or pick a project), not on every keystroke; an empty folder means the
+  default one it will use. Switching folders, or the daemon's own host changing before you pick
+  one, shows that slot's text and moves nothing. Start sends exactly the text on screen to the
+  folder on screen, even when you typed the folder but did not commit it, and clears only the slot
+  that text came from — only while it still holds what was sent.
 - **The composer recalls earlier prompts.** With the caret on the first line and nothing selected,
   `↑` walks back through the prompts already sent in this thread and `↓` walks forward, finally
   restoring the text that was in progress. Recalling a prompt does not touch the stored draft, so a

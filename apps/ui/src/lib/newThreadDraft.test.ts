@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { createDraftStore, DEFAULT_NEW_THREAD_WORKSPACE, type DraftStorage } from "./drafts";
-import { NewThreadDraftSession } from "./newThreadDraft";
+import { NewThreadDraftSession, type NewThreadDraftSubmission } from "./newThreadDraft";
 
 function memoryStorage(): DraftStorage & { data: Map<string, string> } {
   const data = new Map<string, string>();
@@ -25,6 +25,12 @@ function makeStore(storage: DraftStorage) {
   return createDraftStore(storage);
 }
 
+function submit(session: NewThreadDraftSession, folder: string): NewThreadDraftSubmission {
+  const submission = session.submission(folder);
+  if (!submission) throw new Error("expected a submission once a host is bound");
+  return submission;
+}
+
 describe("NewThreadDraftSession", () => {
   it("loads the draft for the host once it resolves", () => {
     const store = makeStore(memoryStorage());
@@ -37,6 +43,19 @@ describe("NewThreadDraftSession", () => {
       workspace: DEFAULT_NEW_THREAD_WORKSPACE,
       text: "saved prompt",
     });
+  });
+
+  it("writes nothing and submits nothing until it has a host", () => {
+    const storage = memoryStorage();
+    const store = makeStore(storage);
+    const session = new NewThreadDraftSession(store);
+
+    session.setText("waiting");
+    store.flush();
+
+    expect(storage.data.size).toBe(0);
+    expect(session.snapshot().text).toBe("waiting");
+    expect(session.submission(DEFAULT_NEW_THREAD_WORKSPACE)).toBeNull();
   });
 
   it("commits a folder change: the box switches only when the folder is committed", () => {
@@ -129,46 +148,6 @@ describe("NewThreadDraftSession", () => {
     expect(otherHost.adoptHost("host_b").workspace).toBe(DEFAULT_NEW_THREAD_WORKSPACE);
   });
 
-  it("binds text typed before a host resolved into an empty slot", () => {
-    const store = makeStore(memoryStorage());
-    const session = new NewThreadDraftSession(store);
-    session.setText("typed before hello");
-
-    const snapshot = session.adoptHost("host_a");
-
-    expect(snapshot.text).toBe("typed before hello");
-    expect(store.readNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE)).toBe(
-      "typed before hello",
-    );
-  });
-
-  it("keeps pre-host text without overwriting a draft already in the slot", () => {
-    const store = makeStore(memoryStorage());
-    store.writeNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE, "stored earlier");
-    store.flush();
-    const session = new NewThreadDraftSession(store);
-    session.setText("typed before hello");
-
-    const snapshot = session.adoptHost("host_a");
-
-    expect(snapshot.text).toBe("typed before hello");
-    expect(store.readNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE)).toBe("stored earlier");
-  });
-
-  it("never writes pre-host text over an occupied slot when the folder changes", () => {
-    const store = makeStore(memoryStorage());
-    store.writeNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE, "stored earlier");
-    store.flush();
-    const session = new NewThreadDraftSession(store);
-    session.setText("typed before hello");
-    session.adoptHost("host_a");
-
-    const snapshot = session.commitWorkspace("~/code/api");
-
-    expect(snapshot.text).toBe("typed before hello");
-    expect(store.readNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE)).toBe("stored earlier");
-  });
-
   it("loads the other host's draft when the user switches host", () => {
     const store = makeStore(memoryStorage());
     store.writeNewThreadDraft("host_b", DEFAULT_NEW_THREAD_WORKSPACE, "for b");
@@ -184,27 +163,9 @@ describe("NewThreadDraftSession", () => {
     expect(store.readNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE)).toBe("for a");
   });
 
-  it("rebinds an auto-chosen host and takes the typed text along", () => {
+  it("shows the new host's slot when an auto-chosen host is rebound", () => {
     const store = makeStore(memoryStorage());
-    const session = new NewThreadDraftSession(store);
-    session.adoptHost("host_remote");
-    session.setText("typed for the wrong host");
-
-    const snapshot = session.rebindHost("host_local");
-
-    expect(snapshot).toEqual({
-      host: "host_local",
-      workspace: DEFAULT_NEW_THREAD_WORKSPACE,
-      text: "typed for the wrong host",
-    });
-    expect(store.readNewThreadDraft("host_local", DEFAULT_NEW_THREAD_WORKSPACE)).toBe(
-      "typed for the wrong host",
-    );
-    expect(store.readNewThreadDraft("host_remote", DEFAULT_NEW_THREAD_WORKSPACE)).toBe("");
-  });
-
-  it("leaves a saved draft on its host when the host is rebound", () => {
-    const store = makeStore(memoryStorage());
+    store.writeNewThreadDraft("host_local", DEFAULT_NEW_THREAD_WORKSPACE, "local draft");
     store.writeNewThreadDraft("host_remote", DEFAULT_NEW_THREAD_WORKSPACE, "remote saved");
     store.flush();
     const session = new NewThreadDraftSession(store);
@@ -212,7 +173,12 @@ describe("NewThreadDraftSession", () => {
 
     const snapshot = session.rebindHost("host_local");
 
-    expect(snapshot.text).toBe("");
+    expect(snapshot).toEqual({
+      host: "host_local",
+      workspace: DEFAULT_NEW_THREAD_WORKSPACE,
+      text: "local draft",
+    });
+    // Nothing is moved or cleared between the two hosts' slots.
     expect(store.readNewThreadDraft("host_remote", DEFAULT_NEW_THREAD_WORKSPACE)).toBe(
       "remote saved",
     );
@@ -240,19 +206,43 @@ describe("NewThreadDraftSession", () => {
     session.setText("start me");
     store.flush();
 
-    session.clearSubmitted(session.submission());
+    session.clearSubmitted(submit(session, DEFAULT_NEW_THREAD_WORKSPACE));
 
     expect(session.snapshot().text).toBe("");
     expect(store.readNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE)).toBe("");
   });
 
-  it("leaves newer text in the submitted folder alone", () => {
+  it("sends the visible text to the folder on screen without moving it", () => {
+    const store = makeStore(memoryStorage());
+    store.writeNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE, "default work");
+    store.flush();
+    const session = new NewThreadDraftSession(store);
+    session.adoptHost("host_a");
+
+    const submission = submit(session, "~/code/api");
+
+    expect(submission).toMatchObject({
+      host: "host_a",
+      workspace: "~/code/api",
+      text: "default work",
+      slotWorkspace: DEFAULT_NEW_THREAD_WORKSPACE,
+    });
+    // Start does not swap the box to the other folder's draft.
+    expect(session.snapshot().text).toBe("default work");
+
+    session.clearSubmitted(submission);
+
+    expect(store.readNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE)).toBe("");
+    expect(store.readNewThreadDraft("host_a", "~/code/api")).toBe("");
+  });
+
+  it("leaves newer text in the submitted slot alone", () => {
     const store = makeStore(memoryStorage());
     const session = new NewThreadDraftSession(store);
     session.adoptHost("host_a");
     session.setText("start me");
     store.flush();
-    const submission = session.submission();
+    const submission = submit(session, DEFAULT_NEW_THREAD_WORKSPACE);
     store.writeNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE, "newer from another tab");
     store.flush();
 
@@ -263,14 +253,14 @@ describe("NewThreadDraftSession", () => {
     );
   });
 
-  it("clears only the submitted folder when the folder changed while Start waited", () => {
+  it("clears only the submitted slot when the folder changed while Start waited", () => {
     const store = makeStore(memoryStorage());
     const session = new NewThreadDraftSession(store);
     session.adoptHost("host_a");
     session.commitWorkspace("~/code/api");
     session.setText("api work");
     store.flush();
-    const submission = session.submission();
+    const submission = submit(session, "~/code/api");
 
     session.commitWorkspace("~/code/web");
     session.setText("web work");
@@ -282,28 +272,16 @@ describe("NewThreadDraftSession", () => {
     expect(session.snapshot().text).toBe("web work");
   });
 
-  it("does not clear a draft the pre-host text never took the slot of", () => {
-    const store = makeStore(memoryStorage());
-    store.writeNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE, "stored earlier");
-    store.flush();
-    const session = new NewThreadDraftSession(store);
-    session.setText("typed before hello");
-    session.adoptHost("host_a");
-
-    session.clearSubmitted(session.submission());
-
-    expect(store.readNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE)).toBe("stored earlier");
-  });
-
-  it("writes nothing until it has a host", () => {
+  it("captures the revision from the write, so a reload sees the same draft", () => {
     const storage = memoryStorage();
     const store = makeStore(storage);
     const session = new NewThreadDraftSession(store);
-
-    session.setText("waiting");
+    session.adoptHost("host_a");
+    session.setText("start me");
     store.flush();
 
-    expect(storage.data.size).toBe(0);
-    expect(session.snapshot().text).toBe("waiting");
+    const reopened = new NewThreadDraftSession(makeStore(storage));
+    reopened.adoptHost("host_a");
+    expect(reopened.snapshot().text).toBe("start me");
   });
 });

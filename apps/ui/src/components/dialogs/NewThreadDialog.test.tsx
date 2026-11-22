@@ -72,6 +72,7 @@ vi.mock("@/features/attachments/use-attachments", () => ({
 
 import {
   DEFAULT_NEW_THREAD_WORKSPACE,
+  drafts,
   flushDrafts,
   readNewThreadDraft,
   writeNewThreadDraft,
@@ -120,6 +121,26 @@ describe("NewThreadDialog drafts", () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  it("keeps the task box and Start disabled until a host is bound", async () => {
+    mock.state.hosts = {};
+    mock.state.localHostId = null;
+
+    const view = render(<NewThreadDialog />);
+
+    expect(textarea().disabled).toBe(true);
+    expect(textarea().placeholder).toBe("Connecting…");
+    expect((screen.getByRole("button", { name: "Start" }) as HTMLButtonElement).disabled).toBe(
+      true,
+    );
+
+    mock.state.hosts = { host_a: host("host_a", "atlas") };
+    mock.state.localHostId = "host_a";
+    view.rerender(<NewThreadDialog />);
+
+    await waitFor(() => expect(textarea().disabled).toBe(false));
+    expect(textarea().placeholder).not.toBe("Connecting…");
   });
 
   it("adopts the default host and its saved draft when the host resolves", async () => {
@@ -230,6 +251,63 @@ describe("NewThreadDialog drafts", () => {
       prompt: "build it",
     });
     await waitFor(() => expect(mock.closeNewThread).toHaveBeenCalled());
+    expect(readNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE)).toBe("");
+  });
+
+  it("starts with the folder on screen without swapping the visible text", async () => {
+    writeNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE, "default work");
+    flushDrafts();
+    mock.createThread.mockResolvedValue(true);
+    mock.state.hosts = { host_a: host("host_a", "atlas") };
+    mock.state.localHostId = "host_a";
+
+    render(<NewThreadDialog />);
+    await waitFor(() => expect(textarea().value).toBe("default work"));
+
+    // The folder is typed but not committed: Start still sends the text that
+    // is on screen, to the folder on screen.
+    fireEvent.change(folderField(), { target: { value: "~/code/api" } });
+    expect(textarea().value).toBe("default work");
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+
+    await waitFor(() => expect(mock.createThread).toHaveBeenCalledTimes(1));
+    expect(mock.createThread.mock.calls[0]?.[0]).toMatchObject({
+      host: "host_a",
+      workspacePath: "~/code/api",
+      prompt: "default work",
+    });
+    await waitFor(() => expect(mock.closeNewThread).toHaveBeenCalled());
+    // Only the slot the text came from is cleared.
+    expect(readNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE)).toBe("");
+    expect(readNewThreadDraft("host_a", "~/code/api")).toBe("");
+    // The folder that was used is the one the next open starts in.
+    expect(drafts.readLastWorkspace("host_a")).toBe("~/code/api");
+  });
+
+  it("starts with the folder on screen even when pressing Start blurs the field", async () => {
+    writeNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE, "default work");
+    flushDrafts();
+    mock.createThread.mockResolvedValue(true);
+    mock.state.hosts = { host_a: host("host_a", "atlas") };
+    mock.state.localHostId = "host_a";
+
+    render(<NewThreadDialog />);
+    await waitFor(() => expect(textarea().value).toBe("default work"));
+
+    fireEvent.change(folderField(), { target: { value: "~/code/api" } });
+    const start = screen.getByRole("button", { name: "Start" });
+    // A real press focuses the button, blurring the folder field first.
+    fireEvent.pointerDown(start, { button: 0, pointerType: "mouse" });
+    fireEvent.blur(folderField());
+    fireEvent.pointerUp(start, { button: 0, pointerType: "mouse" });
+    expect(textarea().value).toBe("default work");
+    fireEvent.click(start);
+
+    await waitFor(() => expect(mock.createThread).toHaveBeenCalledTimes(1));
+    expect(mock.createThread.mock.calls[0]?.[0]).toMatchObject({
+      workspacePath: "~/code/api",
+      prompt: "default work",
+    });
     expect(readNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE)).toBe("");
   });
 

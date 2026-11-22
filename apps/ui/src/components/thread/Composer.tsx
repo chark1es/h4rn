@@ -23,9 +23,10 @@ import { useIsPhone } from "@/hooks/use-media-query";
 import { caretOnFirstLine, sentPrompts, stepPromptHistory } from "@/lib/composerHistory";
 import {
   clearThreadDraftIfRevision,
+  type DraftRevision,
   flushDrafts,
   readThreadDraft,
-  readThreadDraftRevision,
+  readThreadDraftEntry,
   subscribeDraftChanges,
   writeThreadDraft,
 } from "@/lib/drafts";
@@ -43,6 +44,11 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   const [dragging, setDragging] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const ref = useRef<HTMLTextAreaElement | null>(null);
+  /**
+   * The revision of the text this composer is showing: set when the draft is
+   * loaded, when it is written, and when another tab's change is adopted.
+   */
+  const revision = useRef<DraftRevision | null>(null);
   /** -1 while the in-progress text is showing; otherwise an index into sent prompts. */
   const historyIndex = useRef(-1);
   /** The in-progress text captured before the first ArrowUp. */
@@ -66,7 +72,9 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   });
 
   useEffect(() => {
-    setText(readThreadDraft(summary.host, summary.thread_id));
+    const entry = readThreadDraftEntry(summary.host, summary.thread_id);
+    setText(entry.text);
+    revision.current = entry.revision;
     historyIndex.current = -1;
     historyDraft.current = "";
     requestAnimationFrame(() => {
@@ -89,6 +97,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
       if (change.host !== summary.host || change.target !== summary.thread_id) return;
       historyIndex.current = -1;
       historyDraft.current = "";
+      revision.current = change.revision;
       setText(change.text);
     });
   }, [summary.host, summary.thread_id]);
@@ -107,7 +116,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     historyIndex.current = -1;
     historyDraft.current = "";
     setText(value);
-    writeThreadDraft(summary.host, summary.thread_id, value);
+    revision.current = writeThreadDraft(summary.host, summary.thread_id, value);
   };
 
   const recall = (direction: "backward" | "forward"): boolean => {
@@ -151,21 +160,27 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   const submit = async () => {
     if (!writable || sending || attachments.blockedReason) return;
     if (!text.trim() && attachments.attachments.length === 0) return;
+    // Send exactly what is on screen, and remember the revision it was loaded
+    // or written under. A newer draft written elsewhere while this send waits
+    // must not be cleared.
     const value = text;
-    setSending(true);
-    // Write the text now so the revision captured below is the one storage
-    // holds; a send takes a moment and another tab may write in between.
+    const submitted = revision.current;
+    // Store the draft before the send waits so a second tab's edit during the
+    // request is not hidden behind this tab's pending write.
     flushDrafts();
-    const revision = readThreadDraftRevision(summary.host, summary.thread_id);
+    setSending(true);
     const ok = await sendMessage(summary.thread_id, value, attachments.attachments);
     setSending(false);
     if (ok) {
       // Clear only the draft that was sent. If this tab typed again, or another
       // tab saved newer text, that text stays in the box and in storage.
-      const cleared = clearThreadDraftIfRevision(summary.host, summary.thread_id, revision);
+      const cleared = clearThreadDraftIfRevision(summary.host, summary.thread_id, submitted);
       historyIndex.current = -1;
       historyDraft.current = "";
-      if (cleared) setText("");
+      if (cleared) {
+        revision.current = null;
+        setText("");
+      }
       attachments.clear();
       requestAnimationFrame(autosize);
     }
