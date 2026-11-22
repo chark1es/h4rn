@@ -70,6 +70,7 @@ const mock = vi.hoisted(() => {
 vi.mock("@/lib/store/appStore", () => ({
   useApp: (selector: (state: unknown) => unknown) => selector(mock.state),
   getState: () => mock.state,
+  PREVIEW_EVENT: "h4rn:preview",
   ensureThread: mock.ensureThread,
   interruptThread: mock.interruptThread,
   navigate: mock.navigate,
