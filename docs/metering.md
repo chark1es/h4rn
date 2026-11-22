@@ -113,6 +113,7 @@ own completion arm the pause the person already cancelled. When a newer
 generation confirms the same reset, the pause keeps its attempt and jitter and
 transfers to that generation, so an older generation's delayed report cannot
 replace it later.
+
 A death between turns publishes one diagnostic row; it does not raise a failure,
 so a thread whose auto-resume just armed stays Scheduled (and a thread with no
 limit is not turned into an Error asking for attention by the agent's exit
@@ -148,12 +149,20 @@ dispatch it parks, so a pause armed by an old agent's exit report does not hold 
 replacement prompt that a Send has just started. The parked prompt is stored on
 the thread row, so a restart restores it and the schedule delivers the person's
 message rather than the policy's prompt; a graceful shutdown leaves that parked
-turn and its saved prompt untouched for the same reason. A schedule that did not
-survive the restart releases the prompt instead, recording the release and
-dropping the limit exactly as a cancellation does. The restart restores the
+turn and its saved prompt untouched for the same reason, and keeps it while the
+startup resync is unresolved too — a ledger read that failed does not turn the
+prompt into a settled turn that the next boot would replace with the policy's
+prompt. A schedule that did not survive the restart releases the prompt
+instead, recording the release and dropping the limit exactly as a cancellation
+does. The restart restores the
 schedule ids from the ledger independently of the limit history: a failed limit
 read only leaves the reset time unknown for now, and the ticker retries the
-resync until both reads succeed, so a restored pause never stays unnamed.
+resync until both reads succeed, so a restored pause never stays unnamed. The
+retry waits start at a second and double up to a minute, so a ledger that stays
+unreadable does not rewrite every thread's summary on every tick. A retry never
+overwrites what changed after it read the ledger: a newer limit that armed
+another schedule in that window keeps its own reset and parked prompt, and only
+a record whose pause is still unresolved takes the restored identity.
 
 When a schedule fires, the daemon starts a new turn with the policy prompt and
 marks the schedule `Fired`. The fire first checks that the thread's record names
@@ -179,8 +188,9 @@ advance uses, so a pause armed by another session generation does not hold a
 prompt it does not own. An unknown reset on that requeued-write path waits the
 backoff above rather than retrying immediately. A release whose journal append
 fails is still projected on the next tick instead of being hidden by a cached
-summary. With
-`failover = true` and an active proxy profile, it asks the proxy for another
+summary.
+
+With `failover = true` and an active proxy profile, it asks the proxy for another
 model/account that is not cooling down, records
 that choice on the schedule (and emits it in `ScheduleChanged`), and uses the
 model for the resumed session. A failed resume moves to `Waiting` with
