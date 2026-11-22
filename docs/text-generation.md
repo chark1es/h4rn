@@ -6,12 +6,14 @@ later, h4rn can replace that title with a shorter one written by a model.
 
 Picked in **Settings → Threads → Title model**:
 
-- **Off** keeps the first-line title. Nothing leaves the machine.
+- **Off** keeps the first-line title. Nothing leaves the machine, and no title job starts: there
+  is nothing to attempt and nothing to log per thread.
 - **Coding agent** runs an installed CLI once, non-interactively: Claude Code (`claude -p`) or
-  Codex (`codex exec`). With no explicit agent picked, h4rn uses **the thread's own harness** when
-  that harness has a one-shot mode; a thread on any other harness keeps its first-line title. A
-  prompt is never handed to a different provider without being asked. The picker lists only
-  installed agents that have this one-shot mode.
+  Codex (`codex exec`). The picker's first choice, **Follow the thread's agent**, is the default:
+  each thread uses **its own harness** when that harness has a one-shot mode, and a thread on any
+  other harness keeps its first-line title. A prompt is never handed to a different provider
+  without being asked. Picking a specific agent instead hands every thread's title to it; the
+  other choices are installed agents that have this one-shot mode.
 - **Text generator** calls a model API that only writes text, configured under
   **Settings → Providers → Text generators**. Two shapes are supported:
   - **OpenAI-compatible** chat completions: OpenAI, OpenRouter, or any server that copies the
@@ -35,7 +37,9 @@ history are sent.
 The trusted instruction ("write one short title…") is kept apart from that text. Claude Code gets
 it as its system prompt (`--system-prompt`); Codex, which has no such flag, gets it once above the
 untrusted text. The prompt itself is wrapped once in `<untrusted_request>` tags and is never
-repeated, so a prompt that looks like an instruction is still only data.
+repeated, so a prompt that looks like an instruction is still only data. Any spelling of
+`</untrusted_request` in the prompt or the folder name is escaped to `&lt;` before the wrap, so the
+block can only end where h4rn ends it; text after a forged closing tag stays inside the block.
 
 ## How the coding agents are isolated
 
@@ -47,9 +51,17 @@ overruns is killed, and the first-line title stays.
   (`--strict-mcp-config` with no config file) and no user, project or local settings source
   (`--setting-sources ""`), so hooks and plugins from the host's own configuration never load. It
   cannot ask a question (`--permission-mode dontAsk`) and uses the `haiku` alias.
-- **Codex** runs `exec` with `--ephemeral` and a read-only sandbox, MCP servers switched off
-  (`-c mcp_servers={}`), web search and the patch tool off, and no repo check. It uses its
-  configured default model.
+- **Codex** runs `exec` with `--strict-config --ignore-user-config`, `--ephemeral`, a read-only
+  sandbox and no repo check. `--ignore-user-config` leaves the user's `config.toml` unread (its
+  MCP servers, hooks, plugins and apps never load) and `--disable shell_tool --disable apps
+  --disable plugins --disable hooks --disable browser_use --disable computer_use` turns the
+  built-in tools off. `-c mcp_servers={}` is not used: it merges into the user's configuration
+  instead of replacing it, and `include_apply_patch_tool` is not a key this CLI knows. The run
+  asks for `gpt-6-luna`, the fast model the installed CLI accepted in a real one-shot run.
+
+  Before each Codex run h4rn probes the installed binary with the same flags plus `--help`. A
+  Codex that does not accept them is never run unisolated: the attempt fails, the first-line title
+  stays and one line is logged.
 
 The output of either CLI is read up to 64 KiB; anything larger is treated as a model that ignored
 the prompt, not a title. A provider HTTP body is capped the same way.
@@ -116,6 +128,11 @@ data directory. Every read-modify-write holds one lock through the save, the fil
 unique temporary file, fsynced and renamed, and a new configuration is published in memory only
 after that write has landed. A crash therefore leaves the old file or the new one, never half of
 either, and concurrent saves lose nothing.
+
+Whether a key exists is cached when the service opens and updated by every write, so listing
+generators never calls the keychain. A keychain read or write that a save or a title job needs runs
+on the blocking pool while the lock is held, so a slow keychain can delay that one request but
+never stalls the daemon's async workers.
 
 ## Testing a generator
 

@@ -129,6 +129,8 @@ async fn boot_inner_with_text_generation(
     };
 
     let mut builder = DaemonBuilder::new(config)
+        // Titles never spawn the machine's own claude or codex.
+        .without_title_agents()
         .with_harness_registry(Arc::new(OfflineRegistry))
         // No test may run a package manager against the machine's real CLIs.
         .with_update_runner(Arc::new(RefusingRunner))
@@ -1155,6 +1157,8 @@ async fn restored_threads_replay_after_a_daemon_restart() {
     };
 
     let daemon = DaemonBuilder::new(config.clone())
+        // Titles never spawn the machine's own claude or codex.
+        .without_title_agents()
         .with_harness(Arc::new(FakeHarness::new()))
         .with_lifecycle(options.clone())
         .build()
@@ -1189,6 +1193,8 @@ async fn restored_threads_replay_after_a_daemon_restart() {
 
     // Reboot against the same data directory.
     let rebooted = DaemonBuilder::new(config)
+        // Titles never spawn the machine's own claude or codex.
+        .without_title_agents()
         .with_harness(Arc::new(FakeHarness::new()))
         .with_lifecycle(options)
         .build()
@@ -1920,6 +1926,8 @@ async fn a_restart_rehydrates_the_summary_resume_target() {
         network_port: 0,
     };
     let rebooted = DaemonBuilder::new(config)
+        // Titles never spawn the machine's own claude or codex.
+        .without_title_agents()
         .with_harness(Arc::new(FakeHarness::new()))
         .with_lifecycle(resume_options())
         .build()
@@ -2893,6 +2901,71 @@ async fn a_fixture_coding_agent_writes_the_generated_thread_title() {
     // Read the row back through the protocol as the authoritative check.
     let renamed = thread_summary(&mut client, &summary.thread_id).await;
     assert_eq!(renamed.title, "Fixture title");
+    daemon.stop().await;
+}
+
+/// A test daemon may never start the host's own `claude` or `codex`.
+///
+/// A fake `claude` is put first on `PATH`; an ordinary thread must create,
+/// keep its first-line title and never run it.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_ordinary_thread_never_starts_the_hosts_coding_agent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fake_bin = tempfile::tempdir().expect("fake bin");
+    let marker = fake_bin.path().join("invoked");
+    let script = fake_bin.path().join("claude");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nprintf 'a title from the host\\n'\n",
+            marker.display()
+        ),
+    )
+    .expect("write the fake claude");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    // PATH is process-global, so this test runs alone while it is changed and
+    // a guard puts the old value back even if an assertion panics. An async
+    // mutex because the test awaits the daemon while it holds the lock.
+    static PATH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _path_lock = PATH_LOCK.lock().await;
+    struct RestorePath(Option<std::ffi::OsString>);
+    impl Drop for RestorePath {
+        fn drop(&mut self) {
+            if let Some(path) = self.0.take() {
+                // SAFETY: the lock above serializes PATH changes in this test
+                // binary, and the value is the one this test replaced.
+                unsafe { std::env::set_var("PATH", path) };
+            }
+        }
+    }
+    let original = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![fake_bin.path().to_path_buf()];
+    paths.extend(std::env::split_paths(&original));
+    let joined = std::env::join_paths(paths).expect("join PATH");
+    let _restore = RestorePath(Some(original));
+    // SAFETY: see the guard above.
+    unsafe { std::env::set_var("PATH", &joined) };
+
+    let daemon = boot_isolated().await;
+    let host = host_id_for(&daemon).await;
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    let summary = create_with_host(
+        &mut client,
+        host,
+        "Keep this title",
+        HarnessKind::ClaudeCode,
+    )
+    .await;
+    // A title job that wrongly fell back to the host's claude would start it
+    // immediately; this is ample time for the marker to appear.
+    tokio::time::sleep(Duration::from_millis(750)).await;
+    assert!(!marker.exists(), "a test daemon started the host's claude");
+    let read_back = thread_summary(&mut client, &summary.thread_id).await;
+    assert_eq!(read_back.title, "Keep this title");
     daemon.stop().await;
 }
 

@@ -103,6 +103,8 @@ async fn a_settled_subagent_worktree_is_listed_and_cleared_over_the_wire() {
         network_port: 0,
     };
     let daemon = DaemonBuilder::new(config)
+        // Titles never spawn the machine's own claude or codex.
+        .without_title_agents()
         .with_catalog(Arc::new(catalog))
         .build()
         .await
@@ -264,6 +266,8 @@ async fn clearing_a_worktree_while_its_child_still_works_skips_it() {
         network_port: 0,
     };
     let daemon = DaemonBuilder::new(config)
+        // Titles never spawn the machine's own claude or codex.
+        .without_title_agents()
         .with_catalog(Arc::new(catalog))
         .build()
         .await
@@ -436,6 +440,8 @@ async fn a_thread_in_a_linked_checkout_of_a_bare_repository_is_tracked_and_its_s
         network_port: 0,
     };
     let daemon = DaemonBuilder::new(config)
+        // Titles never spawn the machine's own claude or codex.
+        .without_title_agents()
         .with_catalog(Arc::new(catalog))
         .build()
         .await

@@ -118,6 +118,11 @@ export function useTextGenerationData(options: { settings?: boolean } = {}): voi
   }, [connection, options.settings]);
 }
 
+/** Drops a save error, for example when the add form is closed or reset. */
+export function clearGeneratorSaveError(): void {
+  patch({ saveError: null });
+}
+
 export async function addTextGenerator(draft: TextGeneratorDraft): Promise<TextGenerator | null> {
   const invalid = validateGeneratorDraft(draft);
   if (invalid) return null;
@@ -164,8 +169,8 @@ export async function removeTextGenerator(generatorId: TextGeneratorId): Promise
   try {
     await getClient().request({ type: "remove_text_generator", generator_id: generatorId });
     patch({ generators: state.generators.filter((generator) => generator.id !== generatorId) });
-    // The daemon falls back to the coding-agent mode when the removed
-    // generator was the title model; read that back instead of guessing.
+    // Removing the selected generator turns titles Off on the daemon; read
+    // that back instead of guessing.
     void loadTitleModel();
     return true;
   } catch (error) {
@@ -276,7 +281,7 @@ export function titleModelSummary(settings: TextGenerationSettings | null): stri
   if (title.mode === "coding_agent") {
     return title.harness
       ? `Titles are written once by ${HARNESS_LABELS[title.harness]}.`
-      : "Titles are written once by the first installed coding agent.";
+      : "Titles are written once by each thread's own coding agent; other agents keep the first line.";
   }
   return title.model
     ? `Titles are written by a text generator with ${title.model}.`

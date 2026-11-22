@@ -84,6 +84,12 @@ describe("the title-model picker", () => {
         title: { mode: "coding_agent", harness: "codex", generator_id: null, model: null },
       }),
     ).toContain("Codex");
+    // No pick means each thread follows its own agent, not the first installed.
+    expect(
+      titleModelSummary({
+        title: { mode: "coding_agent", harness: null, generator_id: null, model: null },
+      }),
+    ).toContain("thread's own");
     expect(
       titleModelSummary({
         title: {

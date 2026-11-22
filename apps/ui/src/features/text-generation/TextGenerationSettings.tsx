@@ -17,6 +17,7 @@ import { useApp } from "@/lib/store/appStore";
 
 import {
   addTextGenerator,
+  clearGeneratorSaveError,
   installedTitleAgents,
   loadTextGenerators,
   loadTitleModel,
@@ -33,6 +34,13 @@ const MODES: Array<{ value: TitleModelMode; label: string }> = [
   { value: "coding_agent", label: "Coding agent" },
   { value: "text_generator", label: "Text generator" },
 ];
+
+/**
+ * The coding-agent picker has one value the protocol does not: `thread`
+ * follows each thread's own agent (a `null` harness).
+ */
+type AgentChoice = HarnessKind | "thread";
+const FOLLOW_THREAD = "thread" as const;
 
 const KINDS: Array<{ value: TextGeneratorKind; label: string; hint: string }> = [
   {
@@ -139,7 +147,8 @@ function GeneratorRow({ id }: { id: TextGeneratorId }) {
   );
 }
 
-function AddGenerator() {
+/** The add form, exported so its reset behaviour can be tested. */
+export function AddGenerator() {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [kind, setKind] = useState<TextGeneratorKind>("open_ai_compatible");
@@ -150,6 +159,19 @@ function AddGenerator() {
   const [saving, setSaving] = useState(false);
   const saveError = useTextGeneration((state) => state.saveError);
   const host = useHostName();
+
+  // Closing the form always forgets the key and everything typed beside it,
+  // so a cancelled attempt leaves no secret on screen or in the next draft.
+  const reset = () => {
+    setName("");
+    setKind("open_ai_compatible");
+    setBaseUrl("");
+    setModel("");
+    setApiKey("");
+    setErrors(null);
+    setSaving(false);
+    clearGeneratorSaveError();
+  };
 
   if (!open) {
     return (
@@ -275,7 +297,14 @@ function AddGenerator() {
         </div>
       </div>
       <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
-        <button type="button" className="q-btn ghost" onClick={() => setOpen(false)}>
+        <button
+          type="button"
+          className="q-btn ghost"
+          onClick={() => {
+            reset();
+            setOpen(false);
+          }}
+        >
           Cancel
         </button>
         <button
@@ -290,11 +319,8 @@ function AddGenerator() {
             void addTextGenerator(draft).then((generator) => {
               setSaving(false);
               if (!generator) return;
+              reset();
               setOpen(false);
-              setName("");
-              setBaseUrl("");
-              setModel("");
-              setApiKey("");
             });
           }}
         >
@@ -378,7 +404,7 @@ export function TextGeneratorsSettings() {
  * Arrow keys move the choice and the focus together, Home and End jump to the
  * ends, and on a phone each target is thumb-sized.
  */
-function ModePicker({
+export function ModePicker({
   value,
   onChange,
 }: {
@@ -451,7 +477,8 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
 
   const chooseMode = (mode: TitleModelMode) => {
     if (mode === "coding_agent") {
-      patchSetting({ mode, harness: draft.harness ?? agents[0]?.harness ?? null });
+      // No pick means "follow the thread's agent", which is the default.
+      patchSetting({ mode, harness: draft.harness ?? null });
       return;
     }
     if (mode === "text_generator") {
@@ -497,25 +524,35 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
           <div className="lab">
             <div className="t">Coding agent</div>
             <div className="s">
-              {agents.length > 0
-                ? "Runs once in an empty folder with no tools, then exits."
-                : "No coding agent with a one-shot mode is installed on this host."}
+              Each thread's own agent runs once in an empty folder with no tools, then exits. Pick
+              one agent only to hand every thread's title to it.
             </div>
           </div>
           <div className="ctl">
-            <ChipSelect<HarnessKind>
+            <ChipSelect<AgentChoice>
               label="Coding agent for titles"
-              value={draft.harness ?? agents[0]?.harness ?? ""}
-              width={170}
-              disabled={agents.length === 0}
-              options={agents.map((agent) => ({
-                value: agent.harness,
-                label: HARNESS_LABELS[agent.harness],
-                hint: agent.installed,
-              }))}
-              onChange={(harness) => patchSetting({ harness })}
+              value={draft.harness ?? FOLLOW_THREAD}
+              width={220}
+              options={[
+                {
+                  value: FOLLOW_THREAD,
+                  label: "Follow the thread's agent",
+                  hint: "Claude Code and Codex threads use their own",
+                },
+                ...agents.map((agent) => ({
+                  value: agent.harness,
+                  label: HARNESS_LABELS[agent.harness],
+                  hint: agent.installed,
+                })),
+              ]}
+              onChange={(choice) =>
+                patchSetting({ harness: choice === FOLLOW_THREAD ? null : choice })
+              }
             />
           </div>
+          {agents.length === 0 ? (
+            <div className="s q-faint">No Claude Code or Codex is installed on this host yet.</div>
+          ) : null}
         </div>
       ) : null}
 
@@ -602,10 +639,7 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
             void saveTitleModel({
               title: {
                 mode: draft.mode,
-                harness:
-                  draft.mode === "coding_agent"
-                    ? (draft.harness ?? agents[0]?.harness ?? null)
-                    : null,
+                harness: draft.mode === "coding_agent" ? (draft.harness ?? null) : null,
                 generator_id: draft.mode === "text_generator" ? draft.generator_id : null,
                 model:
                   draft.mode === "text_generator" && draft.model?.trim()

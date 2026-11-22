@@ -472,6 +472,8 @@ async fn boot_with_host(
         clock: None,
     };
     let mut builder = DaemonBuilder::new(config)
+        // Titles never spawn the machine's own claude or codex.
+        .without_title_agents()
         .with_harness(Arc::new(FakeHarness::new()))
         .with_lifecycle(options)
         .with_secure(Arc::clone(&service));

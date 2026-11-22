@@ -120,18 +120,20 @@ pub(super) async fn handle(
     }
 }
 
-/// Runs one provider Test for a live connection.
-async fn test(
-    conn: &Connection,
+/// Runs one provider Test and audits it, whichever loop called it.
+async fn run_test(
+    state: &AppState,
+    origin: &SessionOrigin,
     generator_id: h4rn_protocol::TextGeneratorId,
     model: Option<String>,
 ) -> Result<ResponseBody, ProtoError> {
-    let report = conn
-        .state
+    let report = state
         .text_generation
         .test_generator(&generator_id, model.as_deref())
         .await?;
-    conn.audit(
+    crate::server::record_audit(
+        state,
+        origin,
         "text_generator.tested",
         Some("text_generator"),
         Some(generator_id.as_str()),
@@ -141,6 +143,15 @@ async fn test(
         }),
     );
     Ok(ResponseBody::TextGeneratorTested { report })
+}
+
+/// Runs one provider Test for a live connection.
+async fn test(
+    conn: &Connection,
+    generator_id: h4rn_protocol::TextGeneratorId,
+    model: Option<String>,
+) -> Result<ResponseBody, ProtoError> {
+    run_test(&conn.state, &conn.origin, generator_id, model).await
 }
 
 /// Runs a Test without holding the connection's request loop.
@@ -159,22 +170,7 @@ pub(crate) async fn test_off_loop(
     else {
         return Err(crate::server::not_implemented(&request));
     };
-    let report = state
-        .text_generation
-        .test_generator(&generator_id, model.as_deref())
-        .await?;
-    crate::server::record_audit(
-        state,
-        origin,
-        "text_generator.tested",
-        Some("text_generator"),
-        Some(generator_id.as_str()),
-        serde_json::json!({
-            "ok": report.ok,
-            "latency_ms": report.latency_ms,
-        }),
-    );
-    Ok(ResponseBody::TextGeneratorTested { report })
+    run_test(state, origin, generator_id, model).await
 }
 
 /// Settings live in files and renames arrive as normal thread upserts, so the

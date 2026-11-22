@@ -23,19 +23,29 @@ All notable changes to h4rn are recorded here. The format follows
   provider unasked. See [docs/text-generation.md](docs/text-generation.md).
 - **Title generation keeps keys and prompts where they belong.** No redirect is followed, so a
   `3xx` from a generator cannot forward the key or the prompt to another host. The coding-agent
-  CLIs run with no tools, no MCP configuration and no user settings, project settings, hooks or
-  plugins, in an empty folder under one 30-second deadline that also covers version discovery and
-  cleanup; Claude Code receives the title instruction as its system prompt and Codex once above a
-  single delimited block, so the untrusted prompt is never repeated or mistaken for instructions.
+  CLIs run with no tools and no user configuration in an empty folder under one 30-second deadline
+  that also covers version discovery and cleanup. Claude Code gets no tools, slash commands, MCP
+  config or settings source, and receives the title instruction as its system prompt. Codex runs
+  `exec --strict-config --ignore-user-config` with `shell_tool`, apps, plugins, hooks, browser use
+  and computer use disabled, so the host's MCP servers and extensions never load; `-c
+  mcp_servers={}` is gone because it merges into the user's config instead of replacing it. Before
+  each Codex run h4rn probes the binary for those flags and never runs a Codex that rejects them,
+  so an old CLI keeps the first-line title instead of starting unisolated. Any spelling of
+  `</untrusted_request` in the prompt or folder name is escaped, so untrusted text cannot close the
+  delimited block early, and the untrusted prompt is never repeated or mistaken for instructions.
   A stored key is scrubbed from provider text, Test results, logs and errors before truncation, and
   a reply that echoes the key is discarded. A generator's endpoint, kind and key are read as one
   snapshot so a title job can never pair an old key with a new URL, and a new configuration is
-  published only after it is on disk. Both files are written atomically under one lock, so
-  concurrent saves lose nothing. Removing the selected generator turns titles Off rather than
-  borrowing a coding agent, a generated title that beats the create reply is kept, the rename
-  dialog keeps your draft, a Test no longer blocks other requests on the same connection, and
-  OpenAI-compatible requests send no `max_tokens` (OpenAI's own API gets
-  `max_completion_tokens`).
+  published only after it is on disk. Key presence is cached, so listing generators never calls the
+  keychain, and keychain reads and writes needed by a save or a job run off the async worker. Both
+  files are written atomically under one lock, so concurrent saves lose nothing. The Coding-agent
+  picker defaults to **Follow the thread's agent** (no agent picked); choosing one agent hands
+  every thread's title to it. Turning titles Off starts no job and logs nothing per thread. Removing
+  the selected generator turns titles Off rather than borrowing a coding agent, a generated title
+  that beats the create reply is kept, the rename dialog keeps your draft, the add-generator form
+  forgets the key and its fields on Cancel and after saving, a Test no longer blocks other requests
+  on the same connection, and OpenAI-compatible requests send no `max_tokens` (OpenAI's own API
+  gets `max_completion_tokens`).
 - **Bitbucket Cloud and Azure DevOps pull requests.** The forge layer now understands two more
   providers. Bitbucket Cloud takes an Atlassian API token (account email plus token, HTTP Basic) or
   a workspace, project or repository access token (Bearer); app passwords were retired in July 2026

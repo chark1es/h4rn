@@ -12,7 +12,8 @@ export type TitleModelSetting = {
  */
 mode: TitleModelMode, 
 /**
- * Coding agent to run. `None` picks the first installed one.
+ * Coding agent to run. `None` follows the thread's own harness, which is
+ * the default; picking one hands every thread's title to that agent.
  */
 harness: HarnessKind | null, 
 /**

@@ -159,7 +159,8 @@ pub enum TitleModelMode {
 pub struct TitleModelSetting {
     /// Which backend writes titles.
     pub mode: TitleModelMode,
-    /// Coding agent to run. `None` picks the first installed one.
+    /// Coding agent to run. `None` follows the thread's own harness, which is
+    /// the default; picking one hands every thread's title to that agent.
     #[serde(default)]
     pub harness: Option<HarnessKind>,
     /// Text generator to call in [`TitleModelMode::TextGenerator`].

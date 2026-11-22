@@ -42,7 +42,7 @@ use tokio::task::JoinHandle;
 
 use crate::blobs::{AttachmentResolver, BlobError};
 use crate::journal::{Journal, ParkedAttachment, ParkedPrompt, ThreadMeta, TitleSource, WireEvent};
-use crate::text_generation::TextGeneration;
+use crate::text_generation::{TextGeneration, TextGenerationError};
 
 /// Capacity of the live event broadcast. A subscriber that falls further behind
 /// than this is dropped with a resume hint rather than slowing other clients.
@@ -2005,12 +2005,14 @@ impl ThreadManager {
             .insert(thread_id.as_str().to_owned(), handle.clone());
 
         if title_eligible {
-            self.inner.spawn_title_job(
-                thread_id.clone(),
-                title_prompt,
-                title_workspace,
-                title_harness,
-            );
+            self.inner
+                .spawn_title_job(
+                    thread_id.clone(),
+                    title_prompt,
+                    title_workspace,
+                    title_harness,
+                )
+                .await;
         }
 
         self.inner.spawn_session(handle);
@@ -3028,7 +3030,10 @@ impl Inner {
     /// it only while the row still says the title came from the prompt, so a
     /// rename that lands first wins and a rename that lands later overwrites
     /// the generated title.
-    fn spawn_title_job(
+    ///
+    /// Off returns before a job exists: nothing is attempted and nothing is
+    /// logged per thread.
+    async fn spawn_title_job(
         self: &Arc<Self>,
         thread_id: ThreadId,
         prompt: String,
@@ -3038,6 +3043,9 @@ impl Inner {
         let Some(service) = self.text_generation.get().cloned() else {
             return;
         };
+        if !service.titles_enabled().await {
+            return;
+        }
         if !self
             .title_jobs
             .lock()
@@ -3051,6 +3059,9 @@ impl Inner {
             let result = service.thread_title(&prompt, &workspace, harness).await;
             match result {
                 Ok(title) => inner.apply_generated_title(&thread_id, title).await,
+                // Titles were turned off after the job started: still nothing
+                // to report, and nothing to attempt.
+                Err(TextGenerationError::Disabled) => {}
                 Err(error) => {
                     // One line per failed attempt; the fallback title stays.
                     tracing::info!(
@@ -9993,6 +10004,8 @@ mod tests {
         result: Result<String, TextGenerationError>,
         started: Option<Arc<tokio::sync::Notify>>,
         release: Option<Arc<tokio::sync::Notify>>,
+        enabled: bool,
+        calls: Option<Arc<std::sync::atomic::AtomicUsize>>,
     }
 
     impl TestTitles {
@@ -10001,6 +10014,8 @@ mod tests {
                 result: Ok(title.to_owned()),
                 started: None,
                 release: None,
+                enabled: true,
+                calls: None,
             }
         }
 
@@ -10009,7 +10024,24 @@ mod tests {
                 result: Err(error),
                 started: None,
                 release: None,
+                enabled: true,
+                calls: None,
             }
+        }
+
+        /// A backend whose mode is Off, counting any call it should never get.
+        fn off() -> (Self, Arc<std::sync::atomic::AtomicUsize>) {
+            let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            (
+                Self {
+                    result: Err(TextGenerationError::Disabled),
+                    started: None,
+                    release: None,
+                    enabled: false,
+                    calls: Some(Arc::clone(&calls)),
+                },
+                calls,
+            )
         }
 
         fn gated(title: &str) -> (Self, Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
@@ -10020,6 +10052,8 @@ mod tests {
                     result: Ok(title.to_owned()),
                     started: Some(Arc::clone(&started)),
                     release: Some(Arc::clone(&release)),
+                    enabled: true,
+                    calls: None,
                 },
                 started,
                 release,
@@ -10029,12 +10063,19 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TextGeneration for TestTitles {
+        async fn titles_enabled(&self) -> bool {
+            self.enabled
+        }
+
         async fn thread_title(
             &self,
             _first_prompt: &str,
             _workspace: &str,
             _harness: HarnessKind,
         ) -> Result<String, TextGenerationError> {
+            if let Some(calls) = &self.calls {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             if let Some(started) = &self.started {
                 started.notify_one();
             }
@@ -10043,6 +10084,43 @@ mod tests {
             }
             self.result.clone()
         }
+    }
+
+    #[tokio::test]
+    async fn off_starts_no_title_job_and_never_calls_the_backend() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let manager = open_test_manager(FakeHarness::new(), HostId::new("host_title")).await;
+        let (backend, calls) = TestTitles::off();
+        manager.set_text_generation(Arc::new(backend));
+        let created = manager
+            .create_thread(new_thread(
+                HostId::new("host_title"),
+                workspace.path(),
+                "Keep the first line",
+            ))
+            .await
+            .expect("create");
+        manager.inner.wait_for_titles().await;
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "Off must not even attempt a title"
+        );
+        assert!(
+            manager
+                .inner
+                .title_jobs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty(),
+            "Off registers no job"
+        );
+        let meta = manager
+            .thread_meta(&created.thread_id)
+            .await
+            .expect("thread");
+        assert_eq!(meta.title, "Keep the first line");
+        assert_eq!(meta.title_source, TitleSource::Prompt);
     }
 
     #[tokio::test]

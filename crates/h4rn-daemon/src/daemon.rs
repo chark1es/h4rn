@@ -51,6 +51,8 @@ pub struct DaemonBuilder {
     harness_registry: Option<Arc<dyn h4rn_harness::RegistryClient>>,
     update_runner: Option<Arc<dyn h4rn_harness::UpdateRunner>>,
     text_generation: Option<Arc<crate::text_generation::TextGenerationService>>,
+    /// Whether a title job may look for the host's own `claude` or `codex`.
+    detect_title_agents: bool,
 }
 
 impl DaemonBuilder {
@@ -72,6 +74,7 @@ impl DaemonBuilder {
             harness_registry: None,
             update_runner: None,
             text_generation: None,
+            detect_title_agents: true,
         }
     }
 
@@ -141,6 +144,16 @@ impl DaemonBuilder {
         service: Arc<crate::text_generation::TextGenerationService>,
     ) -> Self {
         self.text_generation = Some(service);
+        self
+    }
+
+    /// Keeps title jobs away from the host's own harness CLIs.
+    ///
+    /// Tests and embedders use this: a generated title may never spawn the
+    /// machine's `claude` or `codex`. The service still runs, so it fails
+    /// honestly with "not installed" instead of silently doing nothing.
+    pub fn without_title_agents(mut self) -> Self {
+        self.detect_title_agents = false;
         self
     }
 
@@ -268,10 +281,19 @@ impl DaemonBuilder {
         // generator; the service decides per thread from its saved settings.
         let text_generation = match self.text_generation {
             Some(service) => service,
-            None => Arc::new(
-                crate::text_generation::TextGenerationService::open(&self.config.data_dir)
-                    .map_err(|error| anyhow::anyhow!("open text generation: {error}"))?,
-            ),
+            None => {
+                let service =
+                    crate::text_generation::TextGenerationService::open(&self.config.data_dir)
+                        .map_err(|error| anyhow::anyhow!("open text generation: {error}"))?;
+                // A unit-test build must never spawn the host's own CLIs
+                // either, even when the builder was left at its defaults.
+                let service = if self.detect_title_agents && !cfg!(test) {
+                    service
+                } else {
+                    service.without_detected_agents()
+                };
+                Arc::new(service)
+            }
         };
         manager.set_text_generation(
             Arc::clone(&text_generation) as Arc<dyn crate::text_generation::TextGeneration>
