@@ -1652,7 +1652,7 @@ fn response_frame(id: u64, body: ResponseBody) -> String {
         ProtoError::new(
             ProtoErrorCode::InvalidRequest,
             "this response is larger than one transport frame",
-            "Narrow the request: open a smaller file or a single diff hunk",
+            "Narrow the request: list a smaller folder, open a smaller file, or ask for one diff",
         ),
     )
 }
