@@ -29,8 +29,8 @@ pub const PREVIEW_SCHEME: &str = "h4rn-preview";
 /// `DOCUMENT_START_SCRIPT` make Wry inject the shell's initialization scripts
 /// into this HTML and prepend their hashes to `script-src`, and a CSP with
 /// hashes ignores `'unsafe-inline'`. A hash in that header cannot come from
-/// here, so the UI treats a frame that never runs its bridge as unsupported
-/// and turns the preview off (see `docs/ux.md`).
+/// here, so `preview_capabilities` reports the WebView's support before a
+/// frame is created (see `docs/ux.md`).
 const PREVIEW_CSP: &str = "default-src 'none'; img-src data: https:; media-src data: https:; object-src data:; style-src 'unsafe-inline' https:; script-src 'unsafe-inline' https:; font-src data: https:; connect-src https:";
 
 /// Largest prepared document the shell stores, in bytes. The UI caps the
@@ -55,9 +55,10 @@ pub struct PreviewStore(Mutex<Documents>);
 #[derive(Debug, Serialize)]
 pub struct PreparedPreview {
     /// The URL to put in the iframe's `src`.
+    ///
+    /// The document already carries the bridge's own token; the shell does not
+    /// mint a second one for the frame.
     pub url: String,
-    /// The token the frame's bridge reports with.
-    pub token: String,
 }
 
 impl PreviewStore {
@@ -83,7 +84,6 @@ impl PreviewStore {
         documents.order.push_back(token.clone());
         Ok(PreparedPreview {
             url: preview_url(&token),
-            token,
         })
     }
 
@@ -130,6 +130,85 @@ fn new_token() -> Result<String, String> {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).map_err(|error| format!("no random source: {error}"))?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// What the preview's WebView can do, for the panel's honest notices.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewCapabilities {
+    /// The shell platform: `android`, `ios` or `desktop` (a host test build).
+    pub platform: &'static str,
+    /// Whether the WebView runs the shell's scripts at document start.
+    ///
+    /// `None` (JSON `null`) is "unknown": the shell could not read the WebView
+    /// version. The panel treats that as unsupported rather than assuming the
+    /// page's scripts will run.
+    pub document_start_scripts: Option<bool>,
+}
+
+#[cfg(target_os = "android")]
+const PLATFORM: &str = "android";
+#[cfg(target_os = "ios")]
+const PLATFORM: &str = "ios";
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+const PLATFORM: &str = "desktop";
+
+/// Reports the preview's WebView capabilities before a page is framed.
+///
+/// `async` keeps the command off the main thread: on Android it asks the
+/// platform for the WebView version, which must never block the event loop
+/// while the panel waits for an answer.
+#[tauri::command(async)]
+pub fn preview_capabilities() -> PreviewCapabilities {
+    PreviewCapabilities {
+        platform: PLATFORM,
+        document_start_scripts: document_start_scripts_supported(),
+    }
+}
+
+/// The WebView major version that first ships `DOCUMENT_START_SCRIPT`.
+///
+/// Source: androidx.webkit maps `WebViewFeature.DOCUMENT_START_SCRIPT` to
+/// WebView APK version 84 in `WebViewFeatureInternal`'s feature table, and
+/// Wry 0.57 calls `WebViewFeature.isFeatureSupported(...)` for it in
+/// `src/android/kotlin/RustWebView.kt` before registering a document-start
+/// script. Comparing the reported version avoids a JNI round trip to the
+/// feature check itself.
+///
+/// Only Android reads a version; the host tests exercise the parser too.
+#[cfg(any(test, target_os = "android"))]
+const DOCUMENT_START_WEBVIEW_MAJOR: u32 = 84;
+
+/// Whether a WebView version string supports document-start scripts.
+///
+/// `None` is "unknown" — no version at all, or one that does not start with a
+/// number. It is deliberately not a default of supported: Wry's fallback would
+/// add CSP hashes, every page script would silently stop, and the panel would
+/// have shown a broken page instead of a notice.
+#[cfg(any(test, target_os = "android"))]
+fn document_start_scripts_for_version(version: Option<&str>) -> Option<bool> {
+    let major = version?.trim().split('.').next()?.parse::<u32>().ok()?;
+    Some(major >= DOCUMENT_START_WEBVIEW_MAJOR)
+}
+
+/// Whether this WebView supports document-start scripts.
+///
+/// Wry checks `WebViewFeature.DOCUMENT_START_SCRIPT` on Android and, when it
+/// is missing, injects the shell's initialization scripts into the HTML and
+/// adds their hashes to `script-src`; a policy with hashes ignores
+/// `'unsafe-inline'`, so the page's own scripts never run. The shell can answer
+/// before a frame is created, so the panel never has to infer an Android
+/// limitation from a missing bridge message on every platform.
+#[cfg(target_os = "android")]
+fn document_start_scripts_supported() -> Option<bool> {
+    document_start_scripts_for_version(tauri::webview_version().ok().as_deref())
+}
+
+/// iOS WebViews (and a host test build of this crate) inject scripts at
+/// document start.
+#[cfg(not(target_os = "android"))]
+fn document_start_scripts_supported() -> Option<bool> {
+    Some(true)
 }
 
 /// Stores one prepared document; answers with the URL to frame it.
@@ -179,6 +258,12 @@ fn not_found() -> Response<Vec<u8>> {
 mod tests {
     use super::*;
 
+    fn token_of(prepared: &PreparedPreview) -> String {
+        token_from_url(&prepared.url)
+            .expect("a prepared URL carries its token")
+            .to_owned()
+    }
+
     fn request(path: &str) -> tauri::http::Request<Vec<u8>> {
         tauri::http::Request::builder()
             .uri(format!("{PREVIEW_SCHEME}://localhost{path}"))
@@ -186,11 +271,53 @@ mod tests {
             .expect("request")
     }
 
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[test]
+    fn a_host_build_reports_desktop_webview_capabilities() {
+        let capabilities = preview_capabilities();
+        assert_eq!(capabilities.platform, "desktop");
+        assert_eq!(capabilities.document_start_scripts, Some(true));
+        // The UI reads camelCase; a snake_case field would silently default.
+        let json = serde_json::to_value(capabilities).expect("capabilities json");
+        assert_eq!(json["documentStartScripts"], true);
+    }
+
+    #[test]
+    fn a_webview_version_below_the_baseline_is_unsupported() {
+        assert_eq!(
+            document_start_scripts_for_version(Some("83.0.4103.106")),
+            Some(false)
+        );
+        assert_eq!(
+            document_start_scripts_for_version(Some("84.0.0.0")),
+            Some(true)
+        );
+        assert_eq!(
+            document_start_scripts_for_version(Some(" 141.0.7390.70 ")),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn an_unreadable_webview_version_is_unknown_not_supported() {
+        assert_eq!(document_start_scripts_for_version(None), None);
+        assert_eq!(document_start_scripts_for_version(Some("")), None);
+        assert_eq!(document_start_scripts_for_version(Some("unknown")), None);
+        assert_eq!(document_start_scripts_for_version(Some(".84")), None);
+        // The report is explicit: null, never a default of supported.
+        let json = serde_json::to_value(PreviewCapabilities {
+            platform: "android",
+            document_start_scripts: None,
+        })
+        .expect("capabilities json");
+        assert!(json["documentStartScripts"].is_null());
+    }
+
     #[test]
     fn a_prepared_document_is_served_with_its_own_policy() {
         let store = PreviewStore::default();
         let prepared = store.insert("<p>hi</p>".into()).expect("store");
-        let response = respond(&store, &request(&format!("/{}", prepared.token)));
+        let response = respond(&store, &request(&format!("/{}", token_of(&prepared))));
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers().get(header::CONTENT_SECURITY_POLICY),
@@ -209,9 +336,9 @@ mod tests {
         let prepared = store.insert("<p>hi</p>".into()).expect("store");
         assert!(token_from_url(&prepared.url).is_some());
 
-        store.remove(&prepared.token);
+        store.remove(&token_of(&prepared));
         assert_eq!(
-            respond(&store, &request(&format!("/{}", prepared.token))).status(),
+            respond(&store, &request(&format!("/{}", token_of(&prepared)))).status(),
             StatusCode::NOT_FOUND
         );
         assert_eq!(
@@ -226,10 +353,11 @@ mod tests {
         // rewrites `script-src` with hashes, which makes browsers ignore
         // `'unsafe-inline'`. This server must never do that itself: the policy
         // it serves is the documented one, and the only place hashes can come
-        // from is that external fallback (which the UI detects at runtime).
+        // from is that external fallback (which `preview_capabilities`
+        // reports).
         let store = PreviewStore::default();
         let prepared = store.insert("<p>hi</p>".into()).expect("store");
-        let response = respond(&store, &request(&format!("/{}", prepared.token)));
+        let response = respond(&store, &request(&format!("/{}", token_of(&prepared))));
         let csp = response
             .headers()
             .get(header::CONTENT_SECURITY_POLICY)
@@ -253,7 +381,7 @@ mod tests {
         for index in 0..MAX_DOCUMENTS {
             store.insert(format!("doc {index}")).expect("store");
         }
-        assert!(store.get(&first.token).is_none());
+        assert!(store.get(&token_of(&first)).is_none());
         assert!(store.get(&new_token().expect("random source")).is_none());
     }
 

@@ -82,6 +82,7 @@ pub fn run() {
             commands::daemon_endpoints,
             commands::auth_loopback,
             commands::open_external,
+            preview::preview_capabilities,
             preview::preview_prepare,
             preview::preview_release,
             commands::keychain_get,
