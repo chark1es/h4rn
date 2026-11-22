@@ -35,6 +35,7 @@ import {
   resetWorktreeStoreForTests,
   settledWorktrees,
   shouldReloadWorktrees,
+  splitMiddlePath,
   worktreeClientCurrent,
   worktreeOutcomeForClient,
   worktreePage,
@@ -560,5 +561,23 @@ describe("shouldReloadWorktrees", () => {
   it("refetches when the stored rows belong to a replaced client", () => {
     expect(shouldReloadWorktrees(true, true, false)).toBe(true);
     expect(shouldReloadWorktrees(false, true, false)).toBe(false);
+  });
+});
+
+describe("splitMiddlePath", () => {
+  it("keeps the last two folders on Unix and Windows paths", () => {
+    expect(splitMiddlePath("~/code/repo/wt")).toEqual(["~/code", "/repo/wt"]);
+    expect(splitMiddlePath("C:\\Users\\me\\wt")).toEqual(["C:\\Users", "\\me\\wt"]);
+  });
+
+  it("never splits a character outside the BMP", () => {
+    const [head, tail] = splitMiddlePath("/home/me/😀/repos/wt");
+    expect(head).toBe("/home/me/😀");
+    expect(tail).toBe("/repos/wt");
+  });
+
+  it("does not cut into a UNC prefix or a short path", () => {
+    expect(splitMiddlePath("\\\\server\\share")).toEqual(["\\\\server\\share", ""]);
+    expect(splitMiddlePath("wt")).toEqual(["wt", ""]);
   });
 });

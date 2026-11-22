@@ -427,3 +427,21 @@ export function resetWorktreeStoreForTests(): void {
   state = initialState;
   for (const listener of listeners) listener();
 }
+
+/**
+ * Splits a path for middle truncation: the head may be cut with an ellipsis,
+ * the tail keeps the last two folders. Indices are UTF-16 offsets (what
+ * `slice` uses), so a character outside the BMP is never split; `/` and `\`
+ * both count, and a UNC `\\server\share` prefix is never cut into.
+ */
+export function splitMiddlePath(shown: string): [string, string] {
+  const separators: number[] = [];
+  for (let index = 0; index < shown.length; index += 1) {
+    if (shown[index] === "/" || shown[index] === "\\") separators.push(index);
+  }
+  // A UNC path's two leading separators belong to its prefix.
+  const floor = shown.startsWith("\\\\") ? 2 : 1;
+  const cut = separators.length >= 2 ? (separators.at(-2) ?? -1) : -1;
+  if (cut < floor) return [shown, ""];
+  return [shown.slice(0, cut), shown.slice(cut)];
+}

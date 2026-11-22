@@ -2014,6 +2014,26 @@ fn worktree_remove(repo: &Path, path: &Path, force: bool) -> Result<(), String> 
     git::run_with_timeout(repo, args, CLEAR_GIT_TIMEOUT).map(|_| ())
 }
 
+/// Whether two paths name the same directory entry (without following a final
+/// symlink).
+fn same_entry(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        match (a.symlink_metadata(), b.symlink_metadata()) {
+            (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(a), Ok(b)) if a == b
+        )
+    }
+}
+
 /// The reason a nested-checkout scan could not finish (not forceable: the scan
 /// must finish even for a forced clear).
 const NESTED_SCAN_UNKNOWN: &str = "could not check for nested checkouts";
@@ -2113,8 +2133,14 @@ fn nested_checkout(root: &Path, common: &Path, limit: Duration) -> Result<Option
             // directory is a working git dir; on a case-sensitive one this can
             // only over-report, which keeps the checkout.
             if entry.file_name().eq_ignore_ascii_case(".git") {
-                // Only the exact `.git` at the root is the checkout's own.
-                if dir == root && entry.file_name() == ".git" {
+                // At the root only the checkout's own `.git` is exempt: the
+                // exact name, or a case variant that is the very same entry
+                // (a case-insensitive volume). A separate `.GIT` beside it on
+                // a case-sensitive volume is another checkout.
+                if dir == root
+                    && (entry.file_name() == ".git"
+                        || same_entry(&entry.path(), &root.join(".git")))
+                {
                     continue;
                 }
                 if file_type.is_file() {

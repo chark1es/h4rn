@@ -513,18 +513,20 @@ selection does no filesystem work at all.
   checks (a same-size edit that kept its indexed mtime) would otherwise let git
   trust its index and miss an edit or a new file.
 - The dirty check and git's removal backstop also force
-  `-c core.fileMode=true -c core.symlinks=true` when the checkout is on a
-  different filesystem from its admin dir (or that cannot be determined). Git
-  probes those two settings once, for the filesystem the repository was created
-  on, and every linked worktree shares them; a checkout elsewhere could then
-  hide a `chmod +x` or a symlink replaced by a plain file. On the repository's
-  own filesystem git's probe is kept: forcing it on a filesystem without
-  executable bits would mark every file changed and no clear could pass. The
-  admin dir is the comparison point because git runs that probe inside the git
-  directory (also with `--separate-git-dir`). On Windows there is no stable
-  volume id, so `core.symlinks=true` is always forced (it can only over-report,
-  for repositories that track symlinks) and `core.fileMode` keeps git's probe
-  (Windows filesystems have no executable bits).
+  `-c core.fileMode=true` and `-c core.symlinks=true` wherever the checkout's
+  filesystem actually supports executable bits and symlinks. Git probes those
+  settings once, for the filesystem the repository was created on, every linked
+  worktree shares them, and they can be set by hand; a `false` on a filesystem
+  that supports the feature would hide a `chmod +x` or a symlink replaced by a
+  plain file. A checkout on a different filesystem from its admin dir gets both
+  forced; otherwise h4rn probes like `git init` does — a scratch file and a
+  scratch symlink in the admin dir (git's own directory on the same
+  filesystem, never the working tree), cached per admin dir — and forces each
+  setting the filesystem supports. A probe that cannot run forces both (over-
+  reporting skips). A filesystem that genuinely lacks the feature keeps git's
+  `false`, so ordinary clears still work there. On Windows there is no stable
+  volume id, so `core.symlinks=true` is always forced and `core.fileMode` keeps
+  git's probe (Windows filesystems have no executable bits).
 - Every git call runs with `GIT_NO_REPLACE_OBJECTS=1` (and without
   `GIT_REPLACE_REF_BASE`) and with `GIT_GRAFT_FILE` pointed at an empty file: a
   replacement ref (`refs/replace/*`) or a graft (`<common>/info/grafts`, or an
@@ -536,7 +538,8 @@ selection does no filesystem work at all.
   config could otherwise set keys that are not forced (`core.excludesFile`
   hiding every untracked file). The subagent result card's `git status` uses the
   same overrides, including the mode checks above, with `-z
-  --untracked-files=normal --ignore-submodules=none` (paths exactly as stored;
+  --untracked-files=normal --ignore-submodules=none` (paths exactly as stored,
+  a non-UTF-8 name shown with `\xNN` escapes;
   an untracked directory is one row, so a child's build output cannot flood the
   card), bounded at 30 seconds and off the async runtime. The subagent
   worktree's own cleanup (`worktree remove`, `prune`, `branch -D`) has the same
@@ -639,7 +642,8 @@ selection does no filesystem work at all.
 - Before an existing checkout is removed (force or not), its tree is scanned,
   without following symlinks, for a nested `.git` file or directory (matched
   case-insensitively, since `.GIT` is a working git dir on a case-insensitive
-  volume) other than the checkout's own top-level one, so an ignored clone of any repository (not
+  volume) other than the checkout's own top-level one (the exact `.git`, or a
+  case variant that is the very same entry), so an ignored clone of any repository (not
   only a registered worktree) is found. One is skipped as
   `contains another git checkout at <path>` (never forceable). Only a real
   submodule checkout of this repository is exempt, and only when both hold: its

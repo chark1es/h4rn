@@ -5803,19 +5803,38 @@ fn a_symlink_replaced_by_a_file_on_a_foreign_filesystem_is_kept() {
 
 #[cfg(unix)]
 #[test]
-fn on_the_repositorys_own_filesystem_gits_mode_probe_is_kept() {
-    // Same filesystem: `core.fileMode=false` stands (forcing it would mark
-    // every file changed on a filesystem without executable bits).
+fn an_executable_bit_change_is_kept_where_the_filesystem_supports_it() {
+    // Same filesystem as the repository, but `core.fileMode=false` set by
+    // hand: the probe finds executable bits supported, so the change counts.
     let fixture = Fixture::new();
     let linked = fixture.add_worktree("wt-own-fs", "own-fs-branch");
-    assert!(git::mode_config(&linked).is_empty(), "same filesystem");
     run(&linked, &["config", "core.fileMode", "false"]);
     chmod_x(&linked.join("README.md"));
     let target = entry(&linked, &fixture.repo, Some("own-fs-branch"), false);
-    assert!(matches!(
-        clear_one(&target, false, &fixture.data_dir()),
-        Ok(ClearOne::Removed)
-    ));
+    assert_eq!(
+        clear_one(&target, false, &fixture.data_dir())
+            .err()
+            .as_deref(),
+        Some("has uncommitted changes")
+    );
+    assert!(linked.join("README.md").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_filesystem_without_executable_bits_keeps_gits_file_mode() {
+    // On a filesystem that genuinely lacks executable bits (simulated), git's
+    // `core.fileMode=false` stands, so ordinary clears still work there.
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-no-exec-fs", "no-exec-branch");
+    run(&linked, &["config", "core.fileMode", "false"]);
+    chmod_x(&linked.join("README.md"));
+    let target = entry(&linked, &fixture.repo, Some("no-exec-branch"), false);
+    git::FORCE_NO_MODE_SUPPORT.with(|forced| forced.set(true));
+    assert!(git::mode_config(&linked).is_empty());
+    let outcome = clear_one(&target, false, &fixture.data_dir());
+    git::FORCE_NO_MODE_SUPPORT.with(|forced| forced.set(false));
+    assert!(matches!(outcome, Ok(ClearOne::Removed)), "{outcome:?}");
 }
 
 #[test]
@@ -5840,4 +5859,28 @@ fn a_nested_clone_whose_git_dir_is_upper_case_is_never_removed() {
         );
         assert!(clone.join(".GIT").is_dir());
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_separate_upper_case_git_dir_at_the_root_is_another_checkout() {
+    let fixture = Fixture::new();
+    let host = fixture.add_worktree("wt-root-upper-git", "root-upper-git-branch");
+    // Only possible on a case-sensitive volume: the checkout's own `.git`
+    // file and a different `.GIT` directory side by side.
+    if host.join(".GIT").exists() {
+        return;
+    }
+    std::fs::create_dir(host.join(".GIT")).expect(".GIT dir");
+    std::fs::write(host.join(".gitignore"), ".GIT/\n").expect("ignore it");
+    run(&host, &["add", ".gitignore"]);
+    run(&host, &["commit", "-q", "-m", "ignore .GIT"]);
+    let target = entry(&host, &fixture.repo, Some("root-upper-git-branch"), false);
+    assert_eq!(
+        clear_one(&target, false, &fixture.data_dir())
+            .err()
+            .as_deref(),
+        Some(format!("contains another git checkout at {}", host.display()).as_str())
+    );
+    assert!(host.join(".GIT").is_dir());
 }

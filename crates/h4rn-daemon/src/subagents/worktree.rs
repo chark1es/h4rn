@@ -129,7 +129,12 @@ fn parse_porcelain_z(output: &[u8]) -> Vec<SubagentFileChange> {
             continue;
         }
         let status = String::from_utf8_lossy(&field[..2]).trim().to_owned();
-        let path = String::from_utf8_lossy(&field[3..]).into_owned();
+        // Valid UTF-8 verbatim; anything else escaped (`\xNN`) rather than
+        // replaced, so two distinct non-UTF-8 names stay distinct.
+        let path = match std::str::from_utf8(&field[3..]) {
+            Ok(path) => path.to_owned(),
+            Err(_) => field[3..].escape_ascii().to_string(),
+        };
         if status.starts_with('R') || status.starts_with('C') {
             // The original path; the parent cares about the new one.
             fields.next();
@@ -178,6 +183,10 @@ mod tests {
             ]
         );
         assert!(parse_porcelain_z(b"").is_empty());
+        let distinct = parse_porcelain_z(b"?? note-\xff\0?? note-\xfe\0");
+        assert_eq!(distinct.len(), 2);
+        assert_ne!(distinct[0].path, distinct[1].path);
+        assert_eq!(distinct[0].path, "note-\\xff");
     }
 
     #[test]

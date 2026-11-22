@@ -187,6 +187,10 @@ thread_local! {
     /// admin dir on this thread.
     pub static FORCE_FOREIGN_FILESYSTEM: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    /// Test-only: probe every filesystem as lacking executable bits and
+    /// symlinks on this thread.
+    pub static FORCE_NO_MODE_SUPPORT: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 #[cfg(test)]
@@ -1640,54 +1644,118 @@ pub fn status(worktree: &Path, limit: Duration) -> Result<String, String> {
 
 /// Forces git to compare executable bits and symlinks.
 const FULL_MODES: [&str; 4] = ["-c", "core.fileMode=true", "-c", "core.symlinks=true"];
+#[cfg(unix)]
+const FILE_MODE_ONLY: [&str; 2] = ["-c", "core.fileMode=true"];
+const SYMLINKS_ONLY: [&str; 2] = ["-c", "core.symlinks=true"];
 
 /// Extra config for the checks on `checkout` (the dirty check and git's
 /// removal backstop).
 ///
-/// `core.fileMode` and `core.symlinks` are probed by git for the filesystem the
-/// repository was created on and shared by every linked worktree. A checkout
-/// on another filesystem that supports executable bits and symlinks would then
-/// hide a `chmod +x` or a symlink replaced by a plain file, so the full
-/// comparison is forced there — and whenever the filesystems cannot be told
-/// apart, since forcing can only over-report, which skips. On the repository's
-/// own filesystem git's probe is right and is kept: forcing it on a filesystem
-/// without executable bits would mark every file changed and no clear could
-/// ever pass.
+/// `core.fileMode` and `core.symlinks` are probed by git once, for the
+/// filesystem the repository was created on, shared by every linked worktree,
+/// and can also be set by hand. A checkout whose filesystem supports executable
+/// bits or symlinks while the setting says it does not would hide a `chmod +x`
+/// or a symlink replaced by a plain file. So each comparison is forced wherever
+/// the checkout's filesystem actually supports it: always for a checkout on a
+/// different filesystem from its admin dir, and otherwise as a fresh probe in
+/// the admin dir (same filesystem) finds. A probe that cannot run forces both,
+/// which can only over-report and skip. A filesystem that genuinely lacks the
+/// feature keeps git's `false`, so ordinary clears still work there.
 #[cfg(unix)]
 pub fn mode_config(checkout: &Path) -> &'static [&'static str] {
-    if foreign_filesystem(checkout) {
-        &FULL_MODES
-    } else {
-        &[]
+    let admin = gitfile_target(&checkout.join(".git")).unwrap_or_else(|| checkout.join(".git"));
+    if foreign_filesystem(checkout, &admin) {
+        return &FULL_MODES;
+    }
+    match mode_support(&admin) {
+        (true, true) => &FULL_MODES,
+        (true, false) => &FILE_MODE_ONLY,
+        (false, true) => &SYMLINKS_ONLY,
+        (false, false) => &[],
     }
 }
 
-/// Non-Unix: there is no stable volume id to compare, so the filesystems
-/// cannot be told apart and the symlink comparison is always forced (it can
-/// only over-report, for repositories that track symlinks). `core.fileMode`
-/// keeps git's probe: Windows filesystems have no executable bits, and forcing
-/// it would mark every file changed.
+/// Non-Unix: there is no stable volume id to compare, so the symlink comparison
+/// is always forced (it can only over-report, for repositories that track
+/// symlinks). `core.fileMode` keeps git's probe: Windows filesystems have no
+/// executable bits, and forcing it would mark every file changed.
 #[cfg(not(unix))]
 pub fn mode_config(_checkout: &Path) -> &'static [&'static str] {
-    &["-c", "core.symlinks=true"]
+    &SYMLINKS_ONLY
 }
 
 #[cfg(unix)]
-fn foreign_filesystem(checkout: &Path) -> bool {
+fn foreign_filesystem(checkout: &Path, admin: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     #[cfg(test)]
     if FORCE_FOREIGN_FILESYSTEM.with(std::cell::Cell::get) {
         return true;
     }
-    let Some(admin) = gitfile_target(&checkout.join(".git")) else {
-        // The main worktree (a `.git` directory) shares the repository's
-        // filesystem; anything else unreadable is treated as foreign.
-        return !checkout.join(".git").is_dir();
-    };
     match (checkout.metadata(), admin.metadata()) {
         (Ok(checkout), Ok(admin)) => checkout.dev() != admin.dev(),
         _ => true,
     }
+}
+
+/// Whether the filesystem holding `admin` keeps executable bits and symlinks,
+/// probed like `git init` does (a scratch file and a scratch symlink in the git
+/// directory, never in the working tree) and cached per admin dir. A probe that
+/// cannot run answers "supported", so the comparison is forced.
+#[cfg(unix)]
+fn mode_support(admin: &Path) -> (bool, bool) {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    #[cfg(test)]
+    if FORCE_NO_MODE_SUPPORT.with(std::cell::Cell::get) {
+        return (false, false);
+    }
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, (bool, bool)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(found) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(admin)
+    {
+        return *found;
+    }
+    let found = probe_mode_support(admin);
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(admin.to_path_buf(), found);
+    found
+}
+
+#[cfg(unix)]
+fn probe_mode_support(admin: &Path) -> (bool, bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let stamp = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default()
+    );
+    let file = admin.join(format!("h4rn-mode-probe-{stamp}"));
+    let exec = (|| -> std::io::Result<bool> {
+        std::fs::write(&file, b"")?;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644))?;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))?;
+        let mode = std::fs::metadata(&file)?.permissions().mode();
+        Ok(mode & 0o111 != 0)
+    })()
+    .unwrap_or(true);
+    let _ = std::fs::remove_file(&file);
+    let link = admin.join(format!("h4rn-link-probe-{stamp}"));
+    let symlinks = std::os::unix::fs::symlink("h4rn-probe-target", &link).is_ok()
+        && link
+            .symlink_metadata()
+            .is_ok_and(|meta| meta.file_type().is_symlink());
+    // A probe that could not even create its file proves nothing either way.
+    let symlinks = symlinks || !admin.is_dir();
+    let _ = std::fs::remove_file(&link);
+    (exec, symlinks)
 }
 
 #[cfg(test)]
