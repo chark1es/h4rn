@@ -191,6 +191,13 @@ thread_local! {
     /// symlinks on this thread.
     pub static FORCE_NO_MODE_SUPPORT: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
+    /// Test-only: the mode probe sees a filesystem that ignores chmod and
+    /// reports `0777` (WSL drvfs, FAT) on this thread.
+    pub static FORCE_SYNTHESIZED_MODE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    /// Test-only: the symlink probe fails with this errno on this thread.
+    pub static FORCE_SYMLINK_ERRNO: std::cell::Cell<Option<i32>> =
+        const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -1735,41 +1742,79 @@ fn mode_support(admin: &Path) -> (bool, bool) {
 
 /// Probes executable bits and symlinks in `admin`. `None` means the probe
 /// could not establish the answer.
+///
+/// Like `git init`, the executable bit must actually toggle: a filesystem that
+/// ignores `chmod` and reports a synthesised `0777` (WSL drvfs without
+/// `metadata`, FAT) lacks executable bits even though every file looks
+/// executable. A symlink failure means "unsupported" only for the errors a
+/// filesystem without symlinks returns, after a plain file could be written in
+/// the same place; anything else is inconclusive.
 #[cfg(unix)]
 fn probe_mode_support(admin: &Path) -> (Option<bool>, Option<bool>) {
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     let stamp = format!(
         "{}-{}",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_nanos())
-            .unwrap_or_default()
+        NEXT.fetch_add(1, Ordering::Relaxed)
     );
     let file = admin.join(format!("h4rn-mode-probe-{stamp}"));
     let wrote_file = std::fs::write(&file, b"").is_ok();
     let exec = wrote_file
         .then(|| -> std::io::Result<bool> {
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644))?;
+            let off = probe_mode(&file)? & 0o111 == 0;
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))?;
-            let mode = std::fs::metadata(&file)?.permissions().mode();
-            Ok(mode & 0o111 != 0)
+            let on = probe_mode(&file)? & 0o111 != 0;
+            Ok(off && on)
         })
         .and_then(Result::ok);
     let _ = std::fs::remove_file(&file);
     let link = admin.join(format!("h4rn-link-probe-{stamp}"));
-    let symlinks = match std::os::unix::fs::symlink("h4rn-probe-target", &link) {
-        Ok(()) => Some(
-            link.symlink_metadata()
-                .is_ok_and(|meta| meta.file_type().is_symlink()),
-        ),
-        // The filesystem demonstrably takes files here but not symlinks.
-        Err(_) if wrote_file => Some(false),
-        // Could not even write a file: proves nothing about symlinks.
+    let symlinks = match probe_symlink(&link) {
+        Ok(()) => match link.symlink_metadata() {
+            Ok(meta) if meta.file_type().is_symlink() => Some(true),
+            _ => None,
+        },
+        // The filesystem demonstrably takes files here but refuses symlinks.
+        Err(error) if wrote_file && symlinks_unsupported(&error) => Some(false),
+        // A full disk, a quota, a permission problem: proves nothing.
         Err(_) => None,
     };
     let _ = std::fs::remove_file(&link);
     (exec, symlinks)
+}
+
+/// The errors a filesystem without symlink support returns from `symlink(2)`.
+#[cfg(unix)]
+fn symlinks_unsupported(error: &std::io::Error) -> bool {
+    const EPERM: i32 = 1;
+    const ENOSYS: i32 = 38;
+    const EOPNOTSUPP: i32 = 95;
+    matches!(error.raw_os_error(), Some(EPERM | ENOSYS | EOPNOTSUPP))
+        || error.kind() == std::io::ErrorKind::Unsupported
+}
+
+/// The probe file's mode (a test can simulate a filesystem that ignores chmod).
+#[cfg(unix)]
+fn probe_mode(file: &Path) -> std::io::Result<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    #[cfg(test)]
+    if FORCE_SYNTHESIZED_MODE.with(std::cell::Cell::get) {
+        return Ok(0o100777);
+    }
+    Ok(std::fs::metadata(file)?.permissions().mode())
+}
+
+/// Creates the probe symlink (a test can inject the error it fails with).
+#[cfg(unix)]
+fn probe_symlink(link: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    if let Some(errno) = FORCE_SYMLINK_ERRNO.with(std::cell::Cell::get) {
+        return Err(std::io::Error::from_raw_os_error(errno));
+    }
+    std::os::unix::fs::symlink("h4rn-probe-target", link)
 }
 
 #[cfg(test)]

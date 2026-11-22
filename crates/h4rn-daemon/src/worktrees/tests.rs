@@ -5939,3 +5939,43 @@ fn an_inconclusive_mode_probe_forces_both_comparisons_and_is_not_cached() {
         ["-c", "core.fileMode=true", "-c", "core.symlinks=true"]
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_filesystem_that_ignores_chmod_keeps_gits_file_mode() {
+    // WSL drvfs without `metadata` or FAT: chmod succeeds but changes nothing
+    // and every file reports 0777. Executable bits are not supported there,
+    // so `core.fileMode` must not be forced (ordinary clears keep working).
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-synth-mode", "synth-mode-branch");
+    git::FORCE_SYNTHESIZED_MODE.with(|forced| forced.set(true));
+    let config = git::mode_config(&linked).to_vec();
+    git::FORCE_SYNTHESIZED_MODE.with(|forced| forced.set(false));
+    assert!(
+        !config.contains(&"core.fileMode=true"),
+        "a synthesised 0777 is not executable-bit support: {config:?}"
+    );
+    assert!(config.contains(&"core.symlinks=true"), "{config:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn only_a_definite_symlink_refusal_counts_as_unsupported_and_is_cached() {
+    const ENOSPC: i32 = 28;
+    const EPERM: i32 = 1;
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-symlink-errno", "symlink-errno-branch");
+    // A transient error after the scratch file was written: inconclusive, so
+    // the comparison is forced and nothing is cached.
+    git::FORCE_SYMLINK_ERRNO.with(|errno| errno.set(Some(ENOSPC)));
+    let transient = git::mode_config(&linked).to_vec();
+    // The definite refusal a filesystem without symlinks gives: unsupported.
+    // That it takes effect now proves the transient answer was not cached.
+    git::FORCE_SYMLINK_ERRNO.with(|errno| errno.set(Some(EPERM)));
+    let refused = git::mode_config(&linked).to_vec();
+    git::FORCE_SYMLINK_ERRNO.with(|errno| errno.set(None));
+    assert!(transient.contains(&"core.symlinks=true"), "{transient:?}");
+    assert!(!refused.contains(&"core.symlinks=true"), "{refused:?}");
+    // The conclusive answer is cached for this admin dir.
+    assert_eq!(git::mode_config(&linked), refused.as_slice());
+}

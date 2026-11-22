@@ -522,11 +522,15 @@ selection does no filesystem work at all.
   forced; otherwise h4rn probes like `git init` does — a scratch file and a
   scratch symlink in the admin dir (git's own directory on the same
   filesystem, never the working tree), cached per admin dir — and forces each
-  setting the filesystem supports. Symlinks count as unsupported only when the
-  scratch file could be written but the symlink could not; anything
-  inconclusive (a read-only admin dir, a full disk) forces the comparison and
-  is not cached, so a transient failure never becomes a lasting
-  "unsupported" (over-reporting skips). A filesystem that genuinely lacks the feature keeps git's
+  setting the filesystem supports. As with git's own probe, the executable bit
+  must actually toggle (off at `0644`, on at `0755`): a filesystem that ignores
+  `chmod` and reports a synthesised `0777` (WSL drvfs without `metadata`, FAT)
+  lacks executable bits. Symlinks count as unsupported only when the scratch
+  file could be written and `symlink(2)` then failed with `EPERM`, `ENOSYS` or
+  `EOPNOTSUPP`; anything inconclusive (a read-only admin dir, a full disk, a
+  quota, a failed metadata read) forces the comparison and is not cached, so a
+  transient failure never becomes a lasting "unsupported" (over-reporting
+  skips). A filesystem that genuinely lacks the feature keeps git's
   `false`, so ordinary clears still work there. On Windows there is no stable
   volume id, so `core.symlinks=true` is always forced and `core.fileMode` keeps
   git's probe (Windows filesystems have no executable bits).

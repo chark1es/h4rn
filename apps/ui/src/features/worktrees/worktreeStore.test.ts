@@ -576,6 +576,19 @@ describe("splitMiddlePath", () => {
     expect(tail).toBe("/repos/wt");
   });
 
+  it("does not cut into a verbatim UNC or drive prefix", () => {
+    expect(splitMiddlePath("\\\\?\\UNC\\server\\share\\worktree")).toEqual([
+      "\\\\?\\UNC\\server\\share\\worktree",
+      "",
+    ]);
+    expect(splitMiddlePath("\\\\?\\UNC\\server\\share\\a\\b")).toEqual([
+      "\\\\?\\UNC\\server\\share",
+      "\\a\\b",
+    ]);
+    expect(splitMiddlePath("\\\\?\\C:\\wt")).toEqual(["\\\\?\\C:\\wt", ""]);
+    expect(splitMiddlePath("\\\\?\\C:\\repo\\a\\b")).toEqual(["\\\\?\\C:\\repo", "\\a\\b"]);
+  });
+
   it("does not cut into a UNC prefix or a short path", () => {
     expect(splitMiddlePath("\\\\server\\share")).toEqual(["\\\\server\\share", ""]);
     expect(splitMiddlePath("\\\\server\\share\\worktree")).toEqual([
