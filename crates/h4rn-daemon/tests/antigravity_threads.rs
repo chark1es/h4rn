@@ -160,6 +160,7 @@ fn new_thread(host: &HostId, workspace: &std::path::Path, prompt: &str) -> NewTh
         subagent_id: None,
         host: host.clone(),
         harness: HarnessKind::Antigravity,
+        agent_id: None,
         workspace_path: workspace.display().to_string(),
         model: "fixture-model".into(),
         prompt: prompt.into(),

@@ -154,11 +154,21 @@ fn request(
 }
 
 async fn send(state: &AppState, request: Request<Body>) -> (StatusCode, serde_json::Value) {
+    let (status, _, value) = send_with_headers(state, request).await;
+    (status, value)
+}
+
+/// Like [`send`], but also hands back the response headers.
+async fn send_with_headers(
+    state: &AppState,
+    request: Request<Body>,
+) -> (StatusCode, axum::http::HeaderMap, serde_json::Value) {
     let response = router(state.clone())
         .oneshot(request)
         .await
         .expect("oneshot");
     let status = response.status();
+    let headers = response.headers().clone();
     let bytes = response
         .into_body()
         .collect()
@@ -172,7 +182,7 @@ async fn send(state: &AppState, request: Request<Body>) -> (StatusCode, serde_js
             serde_json::Value::String(String::from_utf8_lossy(&bytes).to_string())
         })
     };
-    (status, value)
+    (status, headers, value)
 }
 
 #[tokio::test]
@@ -1020,21 +1030,31 @@ async fn machine_list_can_be_limited_to_this_devices_links() {
     let two = actor_with_subject(&state, ConnectDeviceKind::Daemon, Some("two"), &subject).await;
     let desktop = actor_with_subject(&state, ConnectDeviceKind::Desktop, None, &subject).await;
 
-    let (status, all) = send(
+    let (status, headers, all) = send_with_headers(
         &state,
         request(Method::GET, "/v1/machines", Some(&one), None),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{all}");
     assert_eq!(all.as_array().unwrap().len(), 2);
+    // An unfiltered answer must not claim the linked scope.
+    assert!(headers.get("x-h4rn-machine-filter").is_none());
 
     // Each daemon runs exactly one of the user's machines.
-    let (status, linked) = send(
+    let (status, headers, linked) = send_with_headers(
         &state,
         request(Method::GET, "/v1/machines?linked=true", Some(&one), None),
     )
     .await;
     assert_eq!(status, StatusCode::OK, "{linked}");
+    // The marker is how a client tells a filtered answer from an older
+    // relay that ignored the query and returned the whole account.
+    assert_eq!(
+        headers
+            .get("x-h4rn-machine-filter")
+            .and_then(|value| value.to_str().ok()),
+        Some("linked")
+    );
     let linked = linked.as_array().unwrap();
     assert_eq!(linked.len(), 1);
     assert_eq!(linked[0]["id"], one.device.machine_id.unwrap().to_string());

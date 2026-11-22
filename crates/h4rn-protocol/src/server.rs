@@ -108,6 +108,14 @@ pub enum ResponseBody {
         server_version: String,
         /// Device id the daemon resolved for this connection.
         device_id: DeviceId,
+        /// Connect machine id this daemon owns, when it is signed in.
+        ///
+        /// It comes from the daemon's own stored connect session, never from
+        /// the connecting device's claim, so a client can treat it as the
+        /// machine a direct socket actually reached. Absent for a signed-out
+        /// daemon and for an older daemon that does not report it.
+        #[serde(default)]
+        daemon_machine_id: Option<String>,
         /// Host id of the machine this daemon runs on.
         ///
         /// Every daemon-scoped request that names a host (skills, the
@@ -516,6 +524,29 @@ pub enum ResponseBody {
         /// One row per harness, in stable order.
         harnesses: Vec<crate::HarnessVersionInfo>,
     },
+    /// Local ACP agents configured on this daemon.
+    AcpAgents {
+        /// Configured agents, in creation order.
+        agents: Vec<crate::AcpAgent>,
+    },
+    /// One configured ACP agent after an add or update.
+    AcpAgent {
+        /// The stored agent with its installation facts.
+        agent: crate::AcpAgent,
+    },
+    /// One configured ACP agent's writable configuration.
+    ///
+    /// Only the admin-scoped get request returns this shape, because `env`
+    /// carries real values.
+    AcpAgentSpec {
+        /// Configuration exactly as stored.
+        agent: crate::AcpAgentSpec,
+    },
+    /// What one configured ACP agent advertises.
+    AcpAgentProbe {
+        /// The probe result.
+        probe: crate::AcpAgentProbe,
+    },
     /// Tracked git worktrees.
     Worktrees {
         /// Active first, then orphaned, then settled; newest first within each.
@@ -687,6 +718,15 @@ pub enum Event {
         turn_id: TurnId,
         /// Current tool-call state.
         tool_call: ToolCall,
+    },
+    /// The agent published a plan, replacing any earlier one.
+    Plan {
+        /// Thread.
+        thread_id: ThreadId,
+        /// Turn the plan belongs to.
+        turn_id: TurnId,
+        /// Every step, in the agent's order.
+        entries: Vec<crate::PlanStep>,
     },
     /// The harness is waiting for a decision.
     ApprovalRequested {
@@ -998,6 +1038,36 @@ mod tests {
         .unwrap();
         assert_eq!(value["result"]["Ok"]["type"], "terminal_attached");
         assert_eq!(value["result"]["Ok"]["start_seq"], 3);
+    }
+
+    #[test]
+    fn hello_carries_the_daemons_machine_and_tolerates_an_older_daemon() {
+        let value = serde_json::json!({
+            "type": "hello",
+            "protocol_version": 1,
+            "server_version": "1.0.1",
+            "device_id": "dev_1",
+            "daemon_machine_id": "m_atlas",
+            "local_host": "host_atlas",
+            "hosts": [],
+        });
+        match serde_json::from_value::<ResponseBody>(value.clone()).unwrap() {
+            ResponseBody::Hello {
+                daemon_machine_id, ..
+            } => assert_eq!(daemon_machine_id.as_deref(), Some("m_atlas")),
+            other => panic!("unexpected body: {other:?}"),
+        }
+
+        // A daemon older than this field answers without it. Its absence must
+        // not fail the handshake; the client falls back to the local host name.
+        let mut older = value;
+        older.as_object_mut().unwrap().remove("daemon_machine_id");
+        match serde_json::from_value::<ResponseBody>(older).unwrap() {
+            ResponseBody::Hello {
+                daemon_machine_id, ..
+            } => assert_eq!(daemon_machine_id, None),
+            other => panic!("unexpected body: {other:?}"),
+        }
     }
 
     #[test]

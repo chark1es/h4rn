@@ -102,6 +102,18 @@ pub fn for_harness(kind: HarnessKind, target: &ProxyTarget<'_>) -> HarnessOverri
         HarnessKind::Codex => codex_recipe(target, &provider, model),
         HarnessKind::Opencode => opencode_recipe(target, &provider, model),
         HarnessKind::Antigravity => antigravity_recipe(target, model),
+        // A local ACP command owns its provider configuration. h4rn offers no
+        // generated recipe for it, so the override is empty and the model is
+        // passed through unchanged.
+        HarnessKind::Acp => HarnessOverride {
+            env: BTreeMap::new(),
+            model: target.model.to_string(),
+            verified: false,
+            note: Some(
+                "A local ACP command manages its own provider settings; h4rn does not rewrite them"
+                    .into(),
+            ),
+        },
     }
 }
 
@@ -197,6 +209,7 @@ pub fn config_path(kind: HarnessKind) -> &'static str {
         HarnessKind::Codex => "~/.codex/config.toml",
         HarnessKind::Opencode => "~/.config/opencode/opencode.jsonc",
         HarnessKind::Antigravity => "~/.gemini/settings.json",
+        HarnessKind::Acp => "the agent's own configuration",
     }
 }
 

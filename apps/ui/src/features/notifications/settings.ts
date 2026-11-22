@@ -96,3 +96,39 @@ export function displayedNotificationSetting(
   if (permission === "default" || permission === "denied") return false;
   return stored;
 }
+
+/** What the Host offline row can say about this device's relay presence. */
+export type HostOfflineVisibility =
+  | { kind: "hidden" }
+  | { kind: "available" }
+  | { kind: "no-links" }
+  | { kind: "relay-too-old" };
+
+/**
+ * Whether the Host offline row belongs on Settings.
+ *
+ * Nothing is known before the account's first answer, so the row and its
+ * explanation both stay away: a flash of "no linked host" would claim the
+ * device has no links when the fetch simply has not finished. `linkedSupported`
+ * is tri-state for that reason: `null` means no successful linked answer has
+ * arrived yet (a failed fetch keeps it `null`), so this cannot mistake a
+ * missing answer for an older relay. A relay that ignores `?linked=true` and
+ * answers successfully without the marker is `false` and gets its own note
+ * instead of pretending the whole account belongs here.
+ */
+export function hostOfflineVisibility(remote: {
+  phase: string;
+  signedIn: boolean;
+  linkedSupported: boolean | null;
+  linkedMachineCount: number;
+}): HostOfflineVisibility {
+  if (remote.phase === "loading") return { kind: "hidden" };
+  // A cached sign-in is `signed_in` before `refresh()` answers. The row must
+  // wait for the relay's first successful answer rather than call it old.
+  if (remote.linkedSupported === null) return { kind: "hidden" };
+  if (remote.signedIn && remote.linkedSupported && remote.linkedMachineCount > 0) {
+    return { kind: "available" };
+  }
+  if (remote.signedIn && !remote.linkedSupported) return { kind: "relay-too-old" };
+  return { kind: "no-links" };
+}

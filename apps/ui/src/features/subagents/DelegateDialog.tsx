@@ -1,5 +1,5 @@
 import { LoaderIcon } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ChipSelect } from "@/components/common/ChipSelect";
 import {
   Dialog,
@@ -13,12 +13,28 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import type { HarnessKind, HostId, SubagentIsolation, ThreadSummary } from "@/gen";
 import { HARNESS_LABELS, HARNESS_SLUGS } from "@/lib/entities";
+import { HARNESS_MODELS } from "@/lib/models";
 import { useApp } from "@/lib/store/appStore";
 import { localOnlyHostOptions } from "@/lib/thread-hosts";
 
 import { closeDelegate, spawnSubagent, useSubagentStore } from "./subagentStore";
 
 const HARNESSES: HarnessKind[] = ["claude_code", "codex", "opencode", "antigravity"];
+
+/**
+ * The model a delegated child starts with.
+ *
+ * A child inherits its parent's model only while it keeps the parent's
+ * harness: an ACP thread's model (`default`, or an id only that configured
+ * agent knows) means nothing to Claude Code, so a fallback starts on that
+ * harness's own default.
+ */
+export function delegateModel(
+  parent: { harness: HarnessKind; model: string },
+  harness: HarnessKind,
+): string {
+  return parent.harness === harness ? parent.model : HARNESS_MODELS[harness].default;
+}
 
 function parseCount(value: string): number | null {
   const trimmed = value.trim();
@@ -41,9 +57,13 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
   const spawning = useSubagentStore((state) => state.spawning);
   const hosts = useApp((state) => state.hosts);
   const [task, setTask] = useState("");
-  const [harness, setHarness] = useState<HarnessKind>(thread.harness);
+  const [harness, setHarness] = useState<HarnessKind>(
+    thread.harness === "acp" ? "claude_code" : thread.harness,
+  );
   const [host, setHost] = useState<HostId>(thread.host);
-  const [model, setModel] = useState(thread.model);
+  const [model, setModel] = useState(() =>
+    delegateModel(thread, thread.harness === "acp" ? "claude_code" : thread.harness),
+  );
   const [isolation, setIsolation] = useState<SubagentIsolation>("worktree");
   const [maxTurns, setMaxTurns] = useState("");
   const [maxMinutes, setMaxMinutes] = useState("");
@@ -58,18 +78,40 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
     [hosts],
   );
 
+  /**
+   * Stable facts about the parent, for the seed.
+   *
+   * A parent summary is refreshed on every event (title, agent state, usage,
+   * last activity), so the raw `thread` object changes constantly while the
+   * dialog is open. Seeding from these scalars means only a new open, or a
+   * different parent identity, resets the draft: an erased task, summary or
+   * budget would otherwise vanish mid-typing because the daemon sent a tick.
+   */
+  const parentThreadId = thread.thread_id;
+  const parentHarness = thread.harness;
+  const parentHost = thread.host;
+  const parentModel = thread.model;
+  const seeded = useRef<string | null>(null);
+
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      seeded.current = null;
+      return;
+    }
+    const seed = [parentThreadId, parentHarness, parentHost, parentModel].join("\u0000");
+    if (seeded.current === seed) return;
+    seeded.current = seed;
+    const nextHarness: HarnessKind = parentHarness === "acp" ? "claude_code" : parentHarness;
     setTask("");
-    setHarness(thread.harness);
-    setHost(thread.host);
-    setModel(thread.model);
+    setHarness(nextHarness);
+    setHost(parentHost);
+    setModel(delegateModel({ harness: parentHarness, model: parentModel }, nextHarness));
     setIsolation("worktree");
     setMaxTurns("");
     setMaxMinutes("");
     setMaxTokens("");
     setSummary("");
-  }, [open, thread.harness, thread.host, thread.model]);
+  }, [open, parentThreadId, parentHarness, parentHost, parentModel]);
 
   const submit = async () => {
     if (!task.trim() || spawning) return;
@@ -89,7 +131,11 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
     if (ok) closeDelegate();
   };
 
-  const harnessChoices = hosts[host]?.harnesses.length ? hosts[host].harnesses : HARNESSES;
+  const harnessChoices = (hosts[host]?.harnesses.length ? hosts[host].harnesses : HARNESSES).filter(
+    // A child has no configured agent instance, so the bare ACP kind is not
+    // startable here.
+    (kind) => kind !== "acp",
+  );
 
   return (
     <Dialog open={open} onOpenChange={(value) => (value ? undefined : closeDelegate())}>
@@ -134,9 +180,14 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
               )}
               onChange={(next) => {
                 setHost(next);
-                const options = hosts[next]?.harnesses;
-                if (options?.length && !options.includes(harness))
-                  setHarness(options[0] ?? harness);
+                const options = hosts[next]?.harnesses.filter(
+                  (kind): kind is Exclude<HarnessKind, "acp"> => kind !== "acp",
+                );
+                const fallback = options?.[0];
+                if (fallback && !options?.includes(harness as Exclude<HarnessKind, "acp">)) {
+                  setHarness(fallback);
+                  setModel(delegateModel(thread, fallback));
+                }
               }}
             />
           </div>
@@ -153,7 +204,13 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
                 value: option,
                 label: HARNESS_LABELS[option],
               }))}
-              onChange={setHarness}
+              onChange={(next) => {
+                setHarness(next);
+                // A model belongs to one harness; switching starts from the
+                // new harness's own default rather than sending its CLI an id
+                // it never issued.
+                setModel(HARNESS_MODELS[next].default);
+              }}
             />
           </div>
           <div className="flex flex-col gap-1">

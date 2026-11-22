@@ -51,6 +51,32 @@ describe("foldEvent", () => {
     });
   });
 
+  it("keeps one plan item per turn, updated in place", () => {
+    let log = createThreadLog();
+    log = foldEvent(log, {
+      type: "plan",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      entries: [
+        { content: "Inspect", status: "completed", priority: "high" },
+        { content: "Implement", status: "in_progress", priority: "medium" },
+      ],
+    });
+    log = foldEvent(log, {
+      type: "plan",
+      thread_id: "t1",
+      turn_id: "turn_1",
+      entries: [{ content: "Inspect", status: "completed", priority: "high" }],
+    });
+
+    const items = log.turns[0]?.items ?? [];
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      kind: "plan",
+      entries: [{ content: "Inspect", status: "completed" }],
+    });
+  });
+
   it("ignores a duplicate turn_started and keeps one row", () => {
     const start = {
       type: "turn_started" as const,

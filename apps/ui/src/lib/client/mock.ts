@@ -10,6 +10,8 @@ import {
 import { BinaryKind, decodeFrame, encodeFrame } from "@/features/attachments/frames";
 import { createMockFs } from "@/features/ide/mockFs";
 import type {
+  AcpAgent,
+  AcpAgentSpec,
   AgentState,
   Attachment,
   AutoResumePolicy,
@@ -1661,6 +1663,7 @@ const MOCK_HARNESS_PATHS: Record<HarnessKind, string> = {
   codex: "~/.codex/config.toml",
   opencode: "~/.config/opencode/opencode.jsonc",
   antigravity: "~/.gemini/settings.json",
+  acp: "the agent's own configuration",
 };
 
 /** The redacted settings the daemon would report for one harness. */
@@ -1932,6 +1935,9 @@ class MockDaemon {
   private limitHistory: LimitStatus[] = [];
   private proxyProfiles: ProxyProfile[] = [];
   private harnessVersions: HarnessVersionInfo[] = mockHarnessVersions();
+  private acpAgents: AcpAgent[] = [];
+  /** Full configurations; only the admin get request returns these. */
+  private acpSpecs = new Map<string, AcpAgentSpec>();
   private harnessUpdating = new Set<HarnessKind>();
   private worktrees: TrackedWorktree[] = mockWorktrees();
   private proxyCatalogs = new Map<string, ProxyModelCatalog>();
@@ -2213,6 +2219,7 @@ class MockDaemon {
           protocol_version: 1,
           server_version: "1.0.1-mock",
           device_id: "mock-device",
+          daemon_machine_id: null,
           local_host: "atlas",
           hosts: this.hosts,
         });
@@ -2290,6 +2297,7 @@ class MockDaemon {
           parent_thread_id: null,
           host: body.host,
           harness: body.harness,
+          ...(body.agent_id ? { agent_id: body.agent_id } : {}),
           title: body.prompt.split("\n")[0]?.slice(0, 56) || "New thread",
           workspace_path: body.workspace_path,
           model: body.model,
@@ -2919,6 +2927,69 @@ class MockDaemon {
       case "update_harness":
         this.updateHarness(frame.id, body.harness);
         return;
+      case "list_acp_agents":
+        this.ok(frame.id, { type: "acp_agents", agents: this.acpAgents });
+        return;
+      case "get_acp_agent": {
+        const agent = this.acpSpecs.get(body.id);
+        if (!agent) {
+          this.err(frame.id, "not_found", `no ACP agent \`${body.id}\``, "Reload the list.");
+          return;
+        }
+        this.ok(frame.id, { type: "acp_agent_spec", agent });
+        return;
+      }
+      case "add_acp_agent": {
+        if (this.acpAgents.some((agent) => agent.id === body.agent.id)) {
+          this.err(
+            frame.id,
+            "invalid_request",
+            `an ACP agent with id \`${body.agent.id}\` already exists`,
+            "Choose another instance id.",
+          );
+          return;
+        }
+        const agent = mockAcpAgent(body.agent);
+        this.acpAgents = [...this.acpAgents, agent];
+        this.acpSpecs.set(agent.id, body.agent);
+        this.ok(frame.id, { type: "acp_agent", agent });
+        return;
+      }
+      case "update_acp_agent": {
+        const index = this.acpAgents.findIndex((agent) => agent.id === body.id);
+        if (index < 0) {
+          this.err(frame.id, "not_found", `no ACP agent \`${body.id}\``, "Reload the list.");
+          return;
+        }
+        const agent = mockAcpAgent(body.agent);
+        this.acpAgents = this.acpAgents.map((entry, at) => (at === index ? agent : entry));
+        this.acpSpecs.set(agent.id, body.agent);
+        this.ok(frame.id, { type: "acp_agent", agent });
+        return;
+      }
+      case "remove_acp_agent":
+        this.acpAgents = this.acpAgents.filter((agent) => agent.id !== body.id);
+        this.acpSpecs.delete(body.id);
+        this.ok(frame.id, { type: "ack" });
+        return;
+      case "probe_acp_agent": {
+        const agent = this.acpAgents.find((entry) => entry.id === body.id);
+        if (!agent) {
+          this.err(frame.id, "not_found", `no ACP agent \`${body.id}\``, "Reload the list.");
+          return;
+        }
+        this.ok(frame.id, {
+          type: "acp_agent_probe",
+          probe: {
+            id: agent.id,
+            installed: false,
+            models: [],
+            modes: [],
+            error: "The browser preview cannot start a local process.",
+          },
+        });
+        return;
+      }
       case "list_worktrees":
         this.ok(frame.id, { type: "worktrees", worktrees: this.worktrees });
         return;
@@ -4704,12 +4775,28 @@ function mockWorktrees(): TrackedWorktree[] {
   ];
 }
 
+function mockAcpAgent(spec: AcpAgentSpec): AcpAgent {
+  return {
+    id: spec.id,
+    name: spec.name,
+    command: spec.command,
+    // The view-scoped shape masks environment values and omits the literal
+    // argument list; the edit form asks for the admin-scoped configuration.
+    env: Object.fromEntries(Object.keys(spec.env).map((key) => [key, "•••"])),
+    working_dir: spec.working_dir,
+    installed: false,
+    models: [],
+    modes: [],
+  };
+}
+
 function harnessName(harness: HarnessKind): string {
   return {
     claude_code: "Claude Code",
     codex: "Codex",
     opencode: "OpenCode",
     antigravity: "Antigravity",
+    acp: "ACP agent",
   }[harness];
 }
 
