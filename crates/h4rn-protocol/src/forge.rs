@@ -87,7 +87,7 @@ impl ForgeKind {
     ///
     /// GitHub does. GitLab, Gitea, Forgejo, Bitbucket Cloud and Azure DevOps
     /// do not expose a device grant for this use case, so they use a personal
-    /// access token (or an app password) the user creates.
+    /// A personal access token or OAuth access token the user creates.
     pub fn supports_device_flow(self) -> bool {
         matches!(self, Self::GitHub)
     }
@@ -105,10 +105,11 @@ pub enum ForgeCredentialSource {
     GhCli,
     /// Imported from `glab auth status --show-token` after the user asked.
     GlabCli,
-    /// A Bitbucket Cloud app password or API token, sent with the account
-    /// username as HTTP Basic.
-    #[serde(rename = "bitbucket_app_password")]
-    BitbucketAppPassword,
+    /// A Bitbucket Cloud API token, sent as HTTP Basic with the Atlassian
+    /// account email as the username. (App passwords were retired in July
+    /// 2026 and are no longer offered.)
+    #[serde(rename = "bitbucket_api_token")]
+    BitbucketApiToken,
     /// A Bitbucket Cloud OAuth or workspace access token, sent as Bearer.
     #[serde(rename = "bitbucket_access_token")]
     BitbucketAccessToken,
@@ -122,7 +123,7 @@ impl ForgeCredentialSource {
             Self::OAuthDevice => "OAuth device flow",
             Self::GhCli => "gh CLI",
             Self::GlabCli => "glab CLI",
-            Self::BitbucketAppPassword => "Bitbucket API token or app password",
+            Self::BitbucketApiToken => "Bitbucket API token (email + token)",
             Self::BitbucketAccessToken => "Bitbucket access token",
         }
     }

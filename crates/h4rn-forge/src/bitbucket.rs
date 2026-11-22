@@ -1,9 +1,10 @@
 //! Bitbucket Cloud client (`bitbucket.org`, API v2).
 //!
-//! Authentication is either an app password (or API token) basic-auth pair
-//! with the account username, or a workspace/OAuth access token sent as a
-//! bearer token. The daemon stores both halves the same way it stores every
-//! other forge token.
+//! Authentication is either an Atlassian API token sent as HTTP Basic with the
+//! account email, or a workspace, project, repository or OAuth access token
+//! sent as a bearer token. Atlassian retired app passwords in July 2026, so
+//! this client no longer offers them. The daemon stores the token the same way
+//! it stores every other forge credential.
 //!
 //! Review threads are rebuilt from the comment `parent` chain. Bitbucket's
 //! newer API adds a `resolution` object to a comment; when it is present the
@@ -48,8 +49,9 @@ pub struct BitbucketClient {
 impl BitbucketClient {
     /// Builds a client for one account.
     ///
-    /// `username` selects basic auth (app password / API token). Without it
-    /// the token is sent as a bearer token (OAuth or workspace access token).
+    /// `username` (the Atlassian account email) selects basic auth with an API
+    /// token. Without it the token is sent as a bearer token (OAuth or
+    /// workspace, project or repository access token).
     pub fn new(
         base_url: &str,
         token: &str,
@@ -123,16 +125,36 @@ impl BitbucketClient {
         self.http.get_json(&self.pr_url(repo, number)).await
     }
 
+    /// The PR's diffstat, or `None` when it cannot be read in full.
+    ///
+    /// The totals are only reported when every page was read: a partial sum
+    /// and a partial file count would be a wrong number, not an estimate.
     async fn diffstat(&self, repo: &ForgeRepoRef, number: u32) -> Option<(u32, u32, u32)> {
-        let url = format!("{}/diffstat?pagelen=100", self.pr_url(repo, number));
-        let values = self.get_pages(&url, 5).await.ok()?;
+        let mut next = Some(format!(
+            "{}/diffstat?pagelen=100",
+            self.pr_url(repo, number)
+        ));
         let mut additions = 0u32;
         let mut deletions = 0u32;
-        for value in &values {
-            additions += value["lines_added"].as_u64().unwrap_or(0) as u32;
-            deletions += value["lines_removed"].as_u64().unwrap_or(0) as u32;
+        let mut files = 0u32;
+        let mut pages = 0;
+        while let Some(current) = next {
+            if pages == 5 {
+                // A sixth page exists; stop and say the size is unknown.
+                return None;
+            }
+            pages += 1;
+            let value = self.http.get_json(&current).await.ok()?;
+            let values = value["values"].as_array()?;
+            for value in values {
+                additions += value["lines_added"].as_u64().unwrap_or(0) as u32;
+                deletions += value["lines_removed"].as_u64().unwrap_or(0) as u32;
+                files += 1;
+            }
+            next = optional_text(&value, "next")
+                .filter(|next| crate::http::same_origin(next, &self.api));
         }
-        Some((additions, deletions, values.len() as u32))
+        Some((additions, deletions, files))
     }
 
     async fn commit_count(&self, repo: &ForgeRepoRef, number: u32) -> Option<u32> {
@@ -145,26 +167,12 @@ impl BitbucketClient {
     }
 
     /// `GET /user`, which needs the account scope.
+    ///
+    /// Bitbucket does not report a credential's scopes on this (or any)
+    /// response, so the account row leaves them unknown instead of inventing
+    /// a list from an `x-oauth-scopes` header, which is a GitHub header.
     async fn user_viewer(&self) -> Result<ForgeViewer> {
-        let url = format!("{}/user", self.api);
-        let response = self
-            .http
-            .request(reqwest::Method::GET, &url, None, false)
-            .await?;
-        let scopes = response
-            .headers
-            .get("x-oauth-scopes")
-            .and_then(|value| value.to_str().ok())
-            .map(|value| {
-                value
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|scope| !scope.is_empty())
-                    .map(ToOwned::to_owned)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let value = self.http.json(response)?;
+        let value = self.http.get_json(&format!("{}/user", self.api)).await?;
         let login = optional_text(&value, "nickname")
             .or_else(|| optional_text(&value, "username"))
             .or_else(|| optional_text(&value, "display_name"))
@@ -175,7 +183,7 @@ impl BitbucketClient {
         Ok(ForgeViewer {
             login,
             display_name: optional_text(&value, "display_name"),
-            scopes,
+            scopes: Vec::new(),
         })
     }
 
@@ -203,7 +211,7 @@ impl BitbucketClient {
             .ok_or_else(|| ForgeError::Unauthorized {
                 forge: ForgeKind::Bitbucket,
                 message:
-                    "the token cannot read an account; add the account scope or use an app password"
+                    "the token cannot read an account; add a repository in the form so it can be validated against that repository"
                         .into(),
             })?;
         let login = optional_text(workspace, "slug")
@@ -274,77 +282,52 @@ impl Forge for BitbucketClient {
     ) -> Result<PrPage> {
         validate_repo(repo)?;
         let page = page.max(1);
-        let base = self.repo_url(repo);
-        if matches!(filter, ForgePrFilter::Open) {
-            let url =
-                format!("{base}/pullrequests?state=OPEN&pagelen=50&page={page}&sort=-updated_on");
-            let value = self.http.get_json(&url).await?;
-            let items = value["values"]
-                .as_array()
-                .ok_or_else(|| ForgeError::Parse("Bitbucket returned no PR list".into()))?;
-            let prs = items
-                .iter()
-                .filter_map(|item| map_pr_summary(repo, item))
-                .collect::<Vec<_>>();
-            return Ok(PrPage {
-                has_more: optional_text(&value, "next").is_some(),
-                prs,
-                page,
-            });
+        let mut query: Vec<(&str, String)> = vec![
+            ("state", "OPEN".to_owned()),
+            ("pagelen", "50".to_owned()),
+            ("page", page.to_string()),
+            ("sort", "-updated_on".to_owned()),
+        ];
+        // Author, reviewer and source-branch filters all have a documented
+        // `q` form, so the server does the filtering and a page maps one to
+        // one onto a server page. Nothing is filtered locally, which is what
+        // used to repeat rows when a later page re-read earlier results.
+        match filter {
+            ForgePrFilter::Open => {}
+            ForgePrFilter::Mine => {
+                let viewer = self.viewer_for(Some(repo)).await?;
+                query.push(("q", format!("author.nickname = {}", quote(&viewer.login))));
+            }
+            ForgePrFilter::ReviewRequested => {
+                let viewer = self.viewer_for(Some(repo)).await?;
+                query.push((
+                    "q",
+                    format!("reviewers.nickname = {}", quote(&viewer.login)),
+                ));
+                // The PR collection omits `reviewers` by default; ask for the
+                // documented partial-response addition so the row can show
+                // who was asked even if the server's filter is lenient.
+                query.push(("fields", "+values.reviewers".to_owned()));
+            }
+            ForgePrFilter::ByBranch { branch } => {
+                query.push(("q", format!("source.branch.name = {}", quote(branch))));
+            }
         }
-
-        // Bitbucket's list endpoint has no reviewer/author filter that maps
-        // exactly onto the UI's filters, so open pages are filtered locally.
-        let viewer = match filter {
-            ForgePrFilter::Mine | ForgePrFilter::ReviewRequested => {
-                Some(self.viewer_for(Some(repo)).await?)
-            }
-            _ => None,
-        };
-        let mut matches = Vec::new();
-        let mut current_page = page;
-        let mut has_more = false;
-        for _ in 0..4 {
-            let url = format!(
-                "{base}/pullrequests?state=OPEN&pagelen=50&page={current_page}&sort=-updated_on"
-            );
-            let value = self.http.get_json(&url).await?;
-            let Some(items) = value["values"].as_array() else {
-                break;
-            };
-            has_more = optional_text(&value, "next").is_some();
-            for item in items {
-                let Some(pr) = map_pr_summary(repo, item) else {
-                    continue;
-                };
-                let keep = match filter {
-                    ForgePrFilter::Mine => viewer
-                        .as_ref()
-                        .is_some_and(|viewer| same_user(&item["author"], &viewer.login)),
-                    ForgePrFilter::ReviewRequested => viewer.as_ref().is_some_and(|viewer| {
-                        item["reviewers"].as_array().is_some_and(|reviewers| {
-                            reviewers
-                                .iter()
-                                .any(|reviewer| same_user(reviewer, &viewer.login))
-                        })
-                    }),
-                    ForgePrFilter::ByBranch { branch } => pr.head_branch == *branch,
-                    ForgePrFilter::Open => true,
-                };
-                if keep {
-                    matches.push(pr);
-                    if matches.len() >= 50 {
-                        break;
-                    }
-                }
-            }
-            if matches.len() >= 50 || !has_more {
-                break;
-            }
-            current_page += 1;
-        }
+        let url = with_query(&format!("{}/pullrequests", self.repo_url(repo)), &query);
+        let value = self.http.get_json(&url).await?;
+        let items = value["values"]
+            .as_array()
+            .ok_or_else(|| ForgeError::Parse("Bitbucket returned no PR list".into()))?;
+        let prs = items
+            .iter()
+            .filter_map(|item| map_pr_summary(repo, item))
+            .collect::<Vec<_>>();
+        // A `next` link on another origin is never followed; treat it as the
+        // end of the list rather than promising another page.
+        let has_more = optional_text(&value, "next")
+            .is_some_and(|next| crate::http::same_origin(&next, &self.api));
         Ok(PrPage {
-            prs: matches,
+            prs,
             page,
             has_more,
         })
@@ -525,17 +508,26 @@ fn urlencode(value: &str) -> String {
     crate::http::encode_path_segment(value)
 }
 
+fn with_query(url: &str, query: &[(&str, String)]) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in query {
+        serializer.append_pair(key, value);
+    }
+    let separator = if url.contains('?') { '&' } else { '?' };
+    format!("{url}{separator}{}", serializer.finish())
+}
+
+/// Quotes one value for Bitbucket's documented `q` filter language.
+fn quote(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
 fn user_login(value: &Value) -> String {
     optional_text(value, "nickname")
         .or_else(|| optional_text(value, "username"))
         .or_else(|| optional_text(value, "display_name"))
         .unwrap_or_default()
-}
-
-fn same_user(value: &Value, login: &str) -> bool {
-    user_login(value) == login
-        || optional_text(value, "uuid") == Some(login.to_owned())
-        || optional_text(value, "account_id") == Some(login.to_owned())
 }
 
 fn pr_state(value: &Value) -> ForgePrState {

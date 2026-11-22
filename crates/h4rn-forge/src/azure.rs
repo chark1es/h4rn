@@ -13,16 +13,24 @@
 //! client reads the latest iteration's changes, pages them, downloads the old
 //! and new content of the files on the requested page (at most six requests at
 //! once, from the iteration's `commonRefCommit` and `sourceRefCommit`), and
-//! builds a unified diff locally with [`crate::diff::unified_diff`]. The PR
-//! detail only counts changed files from the same metadata; it never downloads
-//! file contents.
+//! builds a unified diff locally with [`crate::diff::unified_diff`]. A page is
+//! capped at eight files: the worst case is two content requests per file plus
+//! the iteration and change-entry reads, 18 requests, which fits the UI's ten
+//! second deadline inside the default 120-requests-per-minute account budget.
+//! Files whose change carries no content difference (a pure rename, branch or
+//! merge) download nothing. The PR detail only counts changed files from the
+//! same metadata; it never downloads file contents.
 //!
 //! Checks combine the PR's commit statuses with its policy evaluations
-//! (`api-version=7.1-preview.1`; blocking policies are `required`, and a
-//! policy outcome wins over a status with the same name). The project id comes
-//! from the PR's `repository.project.id`. Re-running builds needs the Builds
-//! API and a broader token; this client reports it as unsupported with the
-//! reason.
+//! (`api-version=7.1-preview.1`). Statuses carry an optional `iterationId`; the
+//! client keeps PR-level statuses and those belonging to the current iteration
+//! only, so a failure from an earlier push cannot outlive the code it tested.
+//! Each policy evaluation is its own row (keyed by its evaluation and
+//! configuration ids, so two policies that share a display name stay
+//! distinct), blocking policies are `required`, and a policy outcome wins only
+//! over a *status* with the same name. The project id comes from the PR's
+//! `repository.project.id`. Re-running builds needs the Builds API and a
+//! broader token; this client reports it as unsupported with the reason.
 
 use std::collections::HashMap;
 
@@ -53,13 +61,19 @@ const API_VERSION: &str = "7.1";
 const POLICY_API_VERSION: &str = "7.1-preview.1";
 /// File contents fetched at once for one diff page.
 const CONTENT_CONCURRENCY: usize = 6;
+/// Files in one diff page. Eight files need at most 18 requests per page, which
+/// fits the UI's 10 s deadline at the default 120 requests/minute budget.
+const DIFF_PAGE_FILES: u32 = 8;
 /// Commits requested per page.
 const COMMIT_PAGE_SIZE: u32 = 100;
 
-/// One file content response.
+/// One file content response. `exists` is false for a 404, which is how a
+/// path that is absent on one side of the change is reported; an existing
+/// empty file is present with empty text.
 struct ItemContent {
     text: Option<String>,
     binary: bool,
+    exists: bool,
 }
 
 /// One changed file, before its contents are fetched.
@@ -67,18 +81,36 @@ struct ChangedFile {
     path: String,
     original: String,
     status: ForgeFileStatus,
+    /// Whether the change can alter the file's bytes. A pure rename, branch or
+    /// merge keeps them, so its contents are never downloaded.
+    content_changed: bool,
 }
 
 impl ItemContent {
-    fn empty() -> Self {
+    fn missing() -> Self {
         Self {
             text: None,
             binary: false,
+            exists: false,
+        }
+    }
+
+    fn present(text: Option<String>, binary: bool) -> Self {
+        Self {
+            text,
+            binary,
+            exists: true,
         }
     }
 
     fn text(&self) -> &str {
         self.text.as_deref().unwrap_or_default()
+    }
+
+    /// The text as a diff side: `None` when the path does not exist there, an
+    /// empty string when it exists and is empty.
+    fn side(&self) -> Option<&str> {
+        self.exists.then(|| self.text())
     }
 }
 
@@ -216,15 +248,15 @@ impl AzureDevOpsClient {
             urlencode(commit)
         );
         match self.http.get_json(&url).await {
-            Ok(value) => Ok(ItemContent {
-                text: optional_text(&value, "content"),
-                binary: value["contentMetadata"]["isBinary"]
+            Ok(value) => Ok(ItemContent::present(
+                optional_text(&value, "content"),
+                value["contentMetadata"]["isBinary"]
                     .as_bool()
                     .or_else(|| value["isBinary"].as_bool())
                     .unwrap_or(false),
-            }),
+            )),
             Err(ForgeError::NotFound(_)) | Err(ForgeError::Http { status: 404, .. }) => {
-                Ok(ItemContent::empty())
+                Ok(ItemContent::missing())
             }
             Err(error) => Err(error),
         }
@@ -232,7 +264,8 @@ impl AzureDevOpsClient {
 
     /// Fetches the old and new contents for one page of files, at most
     /// [`CONTENT_CONCURRENCY`] requests at a time. A cache keyed by path and
-    /// commit keeps a rename from downloading the same blob twice.
+    /// commit keeps a rename from downloading the same blob twice, and a file
+    /// whose change keeps its bytes (a pure rename) downloads nothing.
     async fn page_file_diffs(
         &self,
         repo: &ForgeRepoRef,
@@ -242,6 +275,9 @@ impl AzureDevOpsClient {
     ) -> Result<Vec<ForgeFileDiff>> {
         let mut requests: Vec<(String, String)> = Vec::new();
         for file in files {
+            if !file.content_changed {
+                continue;
+            }
             if file.status != ForgeFileStatus::Added {
                 requests.push((file.original.clone(), old_ref.to_owned()));
             }
@@ -267,27 +303,27 @@ impl AzureDevOpsClient {
         }
 
         let mut diffs = Vec::with_capacity(files.len());
-        let empty = ItemContent::empty();
+        let missing = ItemContent::missing();
         for file in files {
-            let old = if file.status == ForgeFileStatus::Added {
-                &empty
+            let old = if file.status == ForgeFileStatus::Added || !file.content_changed {
+                &missing
             } else {
                 cache
                     .get(&(file.original.clone(), old_ref.to_owned()))
-                    .unwrap_or(&empty)
+                    .unwrap_or(&missing)
             };
-            let new = if file.status == ForgeFileStatus::Deleted {
-                &empty
+            let new = if file.status == ForgeFileStatus::Deleted || !file.content_changed {
+                &missing
             } else {
                 cache
                     .get(&(file.path.clone(), new_ref.to_owned()))
-                    .unwrap_or(&empty)
+                    .unwrap_or(&missing)
             };
             let binary = old.binary || new.binary;
-            let patch = if binary {
+            let patch = if binary || !file.content_changed {
                 None
             } else {
-                crate::diff::unified_diff(&file.original, &file.path, old.text(), new.text())
+                crate::diff::unified_diff(&file.original, &file.path, old.side(), new.side())
             };
             let (additions, deletions) = patch.as_deref().map(count_patch).unwrap_or((0, 0));
             diffs.push(ForgeFileDiff {
@@ -467,7 +503,10 @@ impl Forge for AzureDevOpsClient {
         per_page: u32,
     ) -> Result<ForgeDiffPage> {
         validate_repo(repo)?;
-        let per_page = per_page.clamp(1, 100);
+        // Azure needs one content request per side of every changed file, so a
+        // large page blows the request budget and the UI's deadline. Eight
+        // files keep the worst case within both.
+        let per_page = per_page.clamp(1, DIFF_PAGE_FILES);
         let page = page.max(1);
         let iteration = self.latest_iteration(repo, number).await?;
         let old_ref = iteration["commonRefCommit"]["commitId"]
@@ -592,6 +631,13 @@ impl Forge for AzureDevOpsClient {
             .as_str()
             .map(ToOwned::to_owned)
             .ok_or_else(|| ForgeError::Parse("the pull request has no source commit".into()))?;
+        // The current iteration scopes the iteration-level statuses; the
+        // PR-level statuses (no `iterationId`) always stay.
+        let current_iteration = self
+            .latest_iteration(repo, number)
+            .await
+            .ok()
+            .and_then(|iteration| iteration["id"].as_u64());
         let mut checks = Vec::new();
         if let Ok(value) = self
             .http
@@ -602,12 +648,17 @@ impl Forge for AzureDevOpsClient {
             .await
         {
             for status in value["value"].as_array().into_iter().flatten() {
-                checks.push(map_status(status));
+                if status_is_current(status, current_iteration) {
+                    checks.push(map_status(status));
+                }
             }
         }
-        // Blocking policies are what the branch gates on. Statuses often carry
-        // the same context; when a status and a policy share a name, the policy
-        // outcome wins because it is the branch gate.
+        // A policy row is never merged with another policy row: two
+        // configurations can share a display name (an approved optional policy
+        // and a rejected blocking one), and collapsing them would hide the
+        // failure. A policy only reconciles with a *status* of the same name,
+        // because the policy is the branch gate.
+        let status_count = checks.len();
         if let Some(project_id) = optional_text(&pr["repository"]["project"], "id") {
             let artifact = urlencode(&format!(
                 "vstfs:///CodeReview/CodeReviewId/{project_id}/{number}"
@@ -618,8 +669,20 @@ impl Forge for AzureDevOpsClient {
                 urlencode(&repo.owner)
             );
             if let Ok(value) = self.http.get_json(&url).await {
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                // A status is reconciled with at most one policy; a second
+                // same-named policy stays its own row.
+                let mut reconciled: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
                 for evaluation in value["value"].as_array().into_iter().flatten() {
                     let policy = &evaluation["configuration"];
+                    let evaluation_id = optional_text(evaluation, "evaluationId")
+                        .or_else(|| optional_text(policy, "id"))
+                        .or_else(|| policy["id"].as_u64().map(|id| id.to_string()))
+                        .unwrap_or_default();
+                    if !evaluation_id.is_empty() && !seen.insert(evaluation_id) {
+                        continue;
+                    }
                     let type_name = optional_text(&policy["type"], "displayName");
                     let name = optional_text(&policy["settings"], "displayName")
                         .or_else(|| type_name.clone())
@@ -627,12 +690,17 @@ impl Forge for AzureDevOpsClient {
                     let required = policy["isBlocking"].as_bool();
                     let status =
                         azure_policy_status(evaluation["status"].as_str().unwrap_or_default());
-                    if let Some(existing) = checks.iter_mut().find(|check| check.name == name) {
+                    if !reconciled.contains(&name)
+                        && let Some(existing) = checks[..status_count]
+                            .iter_mut()
+                            .find(|check| check.name == name)
+                    {
                         existing.required = required;
                         existing.status = status;
                         if existing.description.is_none() {
                             existing.description = type_name;
                         }
+                        reconciled.insert(name);
                         continue;
                     }
                     checks.push(ForgeCheck {
@@ -1004,7 +1072,8 @@ fn changed_files(entries: &[Value]) -> Vec<ChangedFile> {
         {
             continue;
         }
-        let status = change_status(entry["changeType"].as_str().unwrap_or_default());
+        let change_type = entry["changeType"].as_str().unwrap_or_default();
+        let status = change_status(change_type);
         let source = optional_text(entry, "originalPath")
             .or_else(|| optional_text(entry, "sourceServerItem"));
         // A deleted entry may have no `item.path`; the source fields name it.
@@ -1023,22 +1092,57 @@ fn changed_files(entries: &[Value]) -> Vec<ChangedFile> {
             path,
             original,
             status,
+            content_changed: change_has_content_difference(change_type),
         });
     }
     files
 }
 
+/// The change-type tokens, lowercased. `changeType` is a comma-separated list
+/// of `VersionControlChangeType` values ("rename, edit"), so tokens are matched
+/// exactly: `undelete` is not a deletion, it restores a file.
+fn change_tokens(change_type: &str) -> Vec<String> {
+    change_type
+        .split(',')
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
 fn change_status(change_type: &str) -> ForgeFileStatus {
-    if change_type.contains("add") {
+    let tokens = change_tokens(change_type);
+    let has = |token: &str| tokens.iter().any(|value| value == token);
+    if has("add") || has("undelete") {
         ForgeFileStatus::Added
-    } else if change_type.contains("delete") {
+    } else if has("delete") {
         ForgeFileStatus::Deleted
-    } else if change_type.contains("rename") {
+    } else if has("rename") || has("sourcerename") || has("targetrename") {
         ForgeFileStatus::Renamed
-    } else if change_type.contains("edit") {
+    } else if has("edit") || has("encoding") || has("lock") || has("property") || has("rollback") {
         ForgeFileStatus::Modified
     } else {
         ForgeFileStatus::Unknown
+    }
+}
+
+/// Whether a change can alter the file's bytes. A pure rename, branch, merge
+/// or lock keeps them, so the diff needs no content request for it.
+fn change_has_content_difference(change_type: &str) -> bool {
+    change_tokens(change_type).iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "add" | "delete" | "edit" | "encoding" | "undelete" | "rollback" | "property"
+        )
+    })
+}
+
+/// A status belongs to the current checks when it is PR-level (no
+/// `iterationId`) or was recorded for the current iteration.
+fn status_is_current(status: &Value, current_iteration: Option<u64>) -> bool {
+    match status["iterationId"].as_u64() {
+        None => true,
+        Some(iteration) => Some(iteration) == current_iteration,
     }
 }
 
@@ -1149,6 +1253,35 @@ mod tests {
         assert_eq!(change_status("rename, edit"), ForgeFileStatus::Renamed);
         assert_eq!(change_status("edit"), ForgeFileStatus::Modified);
         assert_eq!(change_status("something"), ForgeFileStatus::Unknown);
+        // `undelete` restores a file; matching the substring "delete" would
+        // report it as a removal.
+        assert_eq!(change_status("undelete"), ForgeFileStatus::Added);
+        assert_eq!(change_status("sourceRename"), ForgeFileStatus::Renamed);
+        assert_eq!(change_status("targetRename"), ForgeFileStatus::Renamed);
+        assert_eq!(change_status("rollback, delete"), ForgeFileStatus::Deleted);
+    }
+
+    #[test]
+    fn only_content_changes_need_a_content_fetch() {
+        assert!(change_has_content_difference("add"));
+        assert!(change_has_content_difference("edit"));
+        assert!(change_has_content_difference("rename, edit"));
+        assert!(change_has_content_difference("delete"));
+        assert!(change_has_content_difference("undelete"));
+        assert!(!change_has_content_difference("rename"));
+        assert!(!change_has_content_difference("branch"));
+        assert!(!change_has_content_difference("merge"));
+    }
+
+    #[test]
+    fn statuses_from_older_iterations_are_dropped() {
+        let current = Some(2);
+        assert!(status_is_current(&json!({"state": "succeeded"}), current));
+        assert!(status_is_current(&json!({"iterationId": 2}), current));
+        assert!(!status_is_current(&json!({"iterationId": 1}), current));
+        // With no current iteration only PR-level statuses survive.
+        assert!(status_is_current(&json!({"state": "failed"}), None));
+        assert!(!status_is_current(&json!({"iterationId": 1}), None));
     }
 
     #[test]

@@ -6,7 +6,9 @@
 
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
-use h4rn_forge::{AzureDevOpsClient, BitbucketClient, Forge, ForgeError};
+use h4rn_forge::{
+    AzureDevOpsClient, BitbucketClient, DEFAULT_REQUESTS_PER_MINUTE, Forge, ForgeError,
+};
 use h4rn_protocol::{
     ForgeChecksState, ForgeDiffSide, ForgeFileStatus, ForgeKind, ForgeMergeable, ForgePrFilter,
     ForgePrState, ForgeRepoRef, ForgeReviewState,
@@ -32,6 +34,8 @@ const AZ_STATUSES: &str = include_str!("fixtures/azure_statuses.json");
 const AZ_POLICIES: &str = include_str!("fixtures/azure_policies.json");
 const AZ_COMMITS: &str = include_str!("fixtures/azure_commits.json");
 const AZ_CONNECTION: &str = include_str!("fixtures/azure_connection.json");
+const AZ_STATUSES_ITERATIONS: &str = include_str!("fixtures/azure_statuses_iterations.json");
+const AZ_POLICIES_SAME_NAME: &str = include_str!("fixtures/azure_policies_same_name.json");
 
 const AZ_BASE: &str = "bbbb1111cccc2222dddd3333eeee4444ffff5555";
 const AZ_HEAD: &str = "aaaa1111bbbb2222cccc3333dddd4444eeee5555";
@@ -73,9 +77,12 @@ async fn bitbucket_server() -> MockServer {
     let api = "/2.0/repositories/acme/widget";
     Mock::given(method("GET"))
         .and(path("/2.0/user"))
-        .respond_with(ok(
-            r#"{"type":"user","display_name":"Alice Example","nickname":"alice","uuid":"{alice-uuid}","account_id":"557058:alice"}"#,
-        ))
+        // Bitbucket does not report scopes; this GitHub-style header must not
+        // be read as one.
+        .respond_with(
+            ok(r#"{"type":"user","display_name":"Alice Example","nickname":"alice","uuid":"{alice-uuid}","account_id":"557058:alice"}"#)
+                .insert_header("x-oauth-scopes", "account, repository"),
+        )
         .mount(&server)
         .await;
     Mock::given(method("GET"))
@@ -146,6 +153,10 @@ async fn bitbucket_reads_pull_requests_threads_and_checks() {
     let viewer = client.viewer().await.unwrap();
     assert_eq!(viewer.login, "alice");
     assert_eq!(viewer.display_name.as_deref(), Some("Alice Example"));
+    assert!(
+        viewer.scopes.is_empty(),
+        "Bitbucket reports no scopes; an x-oauth-scopes header is not one"
+    );
 
     let page = client
         .list_prs(&repo, &ForgePrFilter::Open, 1)
@@ -372,6 +383,358 @@ async fn bitbucket_follows_same_origin_next_but_not_a_cross_origin_one() {
         other.received_requests().await.unwrap().is_empty(),
         "a cross-origin next link must not receive the token"
     );
+}
+
+fn bitbucket_pr(id: u32, author: &str) -> Value {
+    json!({
+        "type": "pullrequest",
+        "id": id,
+        "title": format!("Fix {id}"),
+        "state": "OPEN",
+        "draft": false,
+        "author": {"type": "user", "display_name": "Alice Example", "nickname": author, "uuid": "{alice-uuid}"},
+        "source": {"branch": {"name": "alice/fix"}, "commit": {"hash": "aaaa1111"}},
+        "destination": {"branch": {"name": "main"}, "commit": {"hash": "bbbb1111"}},
+        "created_on": "2024-05-01T09:00:00+00:00",
+        "updated_on": "2024-05-01T12:00:00+00:00",
+        "links": {"html": {"href": format!("https://bitbucket.org/acme/widget/pull-requests/{id}")}}
+    })
+}
+
+#[tokio::test]
+async fn bitbucket_filtered_lists_use_the_documented_q_filter() {
+    let server = MockServer::start().await;
+    let api = "/2.0/repositories/acme/widget/pullrequests";
+    Mock::given(method("GET"))
+        .and(path("/2.0/user"))
+        .respond_with(ok(
+            r#"{"type":"user","display_name":"Alice Example","nickname":"alice","uuid":"{alice-uuid}"}"#,
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(api))
+        .respond_with(ok(r#"{"pagelen":2,"values":[],"page":1}"#))
+        .mount(&server)
+        .await;
+    let client = BitbucketClient::new(&server.uri(), "ATBB-token", None, 120).unwrap();
+    let repo = bitbucket_repo(&server.uri());
+
+    for (filter, expected) in [
+        (
+            ForgePrFilter::Mine,
+            "author.nickname = \"alice\"".to_owned(),
+        ),
+        (
+            ForgePrFilter::ReviewRequested,
+            "reviewers.nickname = \"alice\"".to_owned(),
+        ),
+        (
+            ForgePrFilter::ByBranch {
+                branch: "alice/fix".into(),
+            },
+            "source.branch.name = \"alice/fix\"".to_owned(),
+        ),
+    ] {
+        let _ = client.list_prs(&repo, &filter, 3).await.unwrap();
+        let requests = server.received_requests().await.unwrap();
+        let last = requests
+            .iter()
+            .rev()
+            .find(|request| request.url.path() == api)
+            .expect("a PR list request");
+        let query: std::collections::HashMap<_, _> = last
+            .url
+            .query_pairs()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        assert_eq!(query.get("q").map(String::as_str), Some(expected.as_str()));
+        assert_eq!(query.get("page").map(String::as_str), Some("3"));
+        if matches!(filter, ForgePrFilter::ReviewRequested) {
+            assert_eq!(
+                query.get("fields").map(String::as_str),
+                Some("+values.reviewers"),
+                "reviewer rows ask for the documented partial-response addition"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn bitbucket_server_pages_do_not_repeat_pull_requests() {
+    // Server-side filtering means page two resumes where page one ended; no
+    // row is returned twice across the UI's "load more".
+    let server = MockServer::start().await;
+    let api = "/2.0/repositories/acme/widget/pullrequests";
+    Mock::given(method("GET"))
+        .and(path("/2.0/user"))
+        .respond_with(ok(
+            r#"{"type":"user","display_name":"Alice Example","nickname":"alice","uuid":"{alice-uuid}"}"#,
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(api))
+        .and(query_param("page", "1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "pagelen": 2,
+            "page": 1,
+            "values": [bitbucket_pr(1, "alice"), bitbucket_pr(2, "alice")],
+            "next": format!("{}{api}?page=2", server.uri())
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(api))
+        .and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "pagelen": 2,
+            "page": 2,
+            "values": [bitbucket_pr(3, "alice")]
+        })))
+        .mount(&server)
+        .await;
+
+    let client = BitbucketClient::new(&server.uri(), "ATBB-token", None, 120).unwrap();
+    let repo = bitbucket_repo(&server.uri());
+    let first = client
+        .list_prs(&repo, &ForgePrFilter::Mine, 1)
+        .await
+        .unwrap();
+    let second = client
+        .list_prs(&repo, &ForgePrFilter::Mine, 2)
+        .await
+        .unwrap();
+    assert!(first.has_more);
+    assert!(!second.has_more);
+    let ids: Vec<u32> = first
+        .prs
+        .iter()
+        .chain(second.prs.iter())
+        .map(|pr| pr.number)
+        .collect();
+    let unique: std::collections::HashSet<u32> = ids.iter().copied().collect();
+    assert_eq!(unique.len(), ids.len(), "pages repeated a row: {ids:?}");
+    assert_eq!(ids, [1, 2, 3]);
+}
+
+#[tokio::test]
+async fn bitbucket_reports_unknown_size_when_diffstat_paging_hits_its_cap() {
+    let server = MockServer::start().await;
+    let api = "/2.0/repositories/acme/widget/pullrequests/42/diffstat";
+    Mock::given(method("GET"))
+        .and(path("/2.0/repositories/acme/widget/pullrequests/42"))
+        .respond_with(ok(BB_PR))
+        .mount(&server)
+        .await;
+    for page in 1..=5 {
+        let given = Mock::given(method("GET")).and(path(api));
+        let given = if page == 1 {
+            given.and(query_param_is_missing("page"))
+        } else {
+            given.and(query_param("page", page.to_string()))
+        };
+        given
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "pagelen": 100,
+                "values": [{
+                    "type": "diffstat",
+                    "status": "modified",
+                    "lines_added": 3,
+                    "lines_removed": 1,
+                    "old": {"path": format!("src/{page}.rs")},
+                    "new": {"path": format!("src/{page}.rs")}
+                }],
+                // Even the fifth page has a successor, so the totals would be
+                // partial and must be reported as unknown instead.
+                "next": format!("{}{api}?page={}", server.uri(), page + 1)
+            })))
+            .mount(&server)
+            .await;
+    }
+    let client = BitbucketClient::new(&server.uri(), "ATBB-token", None, 120).unwrap();
+    let repo = bitbucket_repo(&server.uri());
+    let pr = client.get_pr(&repo, 42).await.unwrap();
+    assert_eq!(pr.additions, 0);
+    assert_eq!(pr.deletions, 0);
+    assert_eq!(pr.changed_files, 0);
+}
+
+/// An Azure server with only the checks sources mounted, so a test can pick
+/// the statuses and policy evaluations it needs.
+async fn azure_checks_server(statuses: Value, policies: Value) -> MockServer {
+    let server = MockServer::start().await;
+    let repo = "/acme/platform/_apis/git/repositories/widget";
+    let pr = format!("{repo}/pullrequests/7");
+    Mock::given(method("GET"))
+        .and(path(&pr))
+        .respond_with(ok(AZ_PR))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{pr}/iterations")))
+        .respond_with(ok(AZ_ITERATIONS))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{pr}/statuses")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(statuses))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/acme/platform/_apis/policy/evaluations"))
+        .and(query_param("api-version", "7.1-preview.1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(policies))
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn azure_same_name_policies_stay_distinct_and_a_rejection_fails_the_pr() {
+    let server = azure_checks_server(
+        json!({"count": 0, "value": []}),
+        fixture(AZ_POLICIES_SAME_NAME),
+    )
+    .await;
+    let client = AzureDevOpsClient::new(&format!("{}/acme", server.uri()), "pat", 120).unwrap();
+    let repo = azure_repo(&server.uri());
+
+    let checks = client.list_checks(&repo, 7).await.unwrap();
+    let rows: Vec<_> = checks
+        .checks
+        .iter()
+        .filter(|check| check.name == "Build validation")
+        .collect();
+    assert_eq!(
+        rows.len(),
+        2,
+        "two configurations that share a display name are two rows"
+    );
+    assert!(
+        rows.iter().any(|row| row.required == Some(true)
+            && row.status == h4rn_protocol::ForgeCheckStatus::Failure),
+        "the blocking rejection keeps its own row"
+    );
+    assert!(
+        rows.iter().any(|row| row.required == Some(false)
+            && row.status == h4rn_protocol::ForgeCheckStatus::Success),
+        "the approved optional policy keeps its own row"
+    );
+    assert_eq!(checks.failed, 1);
+    assert_eq!(checks.state, ForgeChecksState::Failing);
+}
+
+#[tokio::test]
+async fn azure_drops_statuses_from_older_iterations() {
+    let server = azure_checks_server(
+        fixture(AZ_STATUSES_ITERATIONS),
+        json!({"count": 0, "value": []}),
+    )
+    .await;
+    let client = AzureDevOpsClient::new(&format!("{}/acme", server.uri()), "pat", 120).unwrap();
+    let repo = azure_repo(&server.uri());
+
+    let checks = client.list_checks(&repo, 7).await.unwrap();
+    let build: Vec<_> = checks
+        .checks
+        .iter()
+        .filter(|check| check.name == "ci/build")
+        .collect();
+    assert_eq!(build.len(), 1, "only the current iteration's status stays");
+    assert_eq!(build[0].status, h4rn_protocol::ForgeCheckStatus::Success);
+    assert_eq!(
+        checks
+            .checks
+            .iter()
+            .filter(|check| check.name == "license/cla")
+            .count(),
+        1,
+        "a PR-level status has no iteration and always stays"
+    );
+    assert_eq!(checks.failed, 0);
+    assert_eq!(checks.state, ForgeChecksState::Passing);
+}
+
+#[tokio::test]
+async fn azure_hundred_file_pr_pages_within_the_deadline() {
+    // A 100-file PR at the UI's default page request (30) through the real
+    // 120 requests/minute limiter: every page must finish inside the UI's 10 s
+    // deadline, and Azure's smaller page size must keep the request count
+    // bounded. The files are added, so each needs exactly one content request.
+    let server = MockServer::start().await;
+    let repo_path = "/acme/platform/_apis/git/repositories/widget";
+    let pr = format!("{repo_path}/pullrequests/7");
+    Mock::given(method("GET"))
+        .and(path(&pr))
+        .respond_with(ok(AZ_PR))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{pr}/iterations")))
+        .respond_with(ok(AZ_ITERATIONS))
+        .mount(&server)
+        .await;
+    let changes: Vec<Value> = (1..=100)
+        .map(|index| {
+            json!({
+                "changeTrackingId": index,
+                "changeId": index,
+                "changeType": "add",
+                "item": {
+                    "objectId": format!("{index:040}"),
+                    "gitObjectType": "blob",
+                    "path": format!("/src/gen/file{index:03}.txt")
+                }
+            })
+        })
+        .collect();
+    Mock::given(method("GET"))
+        .and(path(format!("{pr}/iterations/2/changes")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"changeEntries": changes})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{repo_path}/items")))
+        .and(query_param("includeContentMetadata", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "gitObjectType": "blob",
+            "content": "line\n",
+            "contentMetadata": {"isBinary": false, "encoding": 65001, "contentType": "text/plain"}
+        })))
+        .mount(&server)
+        .await;
+
+    let client = AzureDevOpsClient::new(
+        &format!("{}/acme", server.uri()),
+        "pat",
+        DEFAULT_REQUESTS_PER_MINUTE,
+    )
+    .unwrap();
+    let repo = azure_repo(&server.uri());
+
+    let mut seen = 0;
+    for page in 1..=13 {
+        let started = std::time::Instant::now();
+        let diff = client.get_diff(&repo, 7, page, 30).await.unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "page {page} took {elapsed:?}, over the UI's 10 s deadline"
+        );
+        assert_eq!(diff.per_page, 8, "Azure clamps the page size");
+        let expected = if page < 13 { 8 } else { 4 };
+        assert_eq!(diff.files.len(), expected, "page {page}");
+        assert_eq!(diff.has_more, page < 13, "page {page}");
+        let total = server.received_requests().await.unwrap().len();
+        let page_requests = total - seen;
+        seen = total;
+        assert!(
+            page_requests <= 20,
+            "page {page} made {page_requests} requests; the default budget allows 20 in 10 s"
+        );
+    }
+    assert_eq!(seen, 100 + 13 * 2, "100 contents plus metadata per page");
 }
 
 async fn azure_server() -> MockServer {
@@ -646,6 +1009,16 @@ async fn azure_reads_pull_requests_diff_threads_and_checks() {
         .unwrap();
     assert_eq!(renamed.status, ForgeFileStatus::Renamed);
     assert_eq!(renamed.previous_path.as_deref(), Some("src/old_name.rs"));
+    assert!(
+        renamed.patch.is_none(),
+        "a pure rename keeps its bytes, so there is nothing to show"
+    );
+    assert!(
+        !item_paths(&server.received_requests().await.unwrap())
+            .iter()
+            .any(|path| path == "/src/old_name.rs"),
+        "a pure rename downloads neither side"
+    );
     let binary = diff
         .files
         .iter()
@@ -753,15 +1126,8 @@ async fn azure_diff_page_fetches_only_its_files() {
     requested.sort();
     assert_eq!(
         requested,
-        [
-            "/src/lib.rs",
-            "/src/lib.rs",
-            "/src/new.rs",
-            "/src/new_name.rs",
-            "/src/old.rs",
-            "/src/old_name.rs"
-        ],
-        "the second page fetches only the two files it shows"
+        ["/src/lib.rs", "/src/lib.rs", "/src/new.rs", "/src/old.rs"],
+        "the second page fetches only the files whose content can differ"
     );
 }
 
@@ -997,8 +1363,8 @@ fn bitbucket_account(
 
 #[tokio::test]
 async fn a_stored_bitbucket_account_keeps_its_auth_scheme() {
-    // An app password always uses Basic, even after the daemon restarts and
-    // the account row carries a login.
+    // An API token always uses Basic, even after the daemon restarts and the
+    // account row carries a login.
     let basic = MockServer::start().await;
     let expected = base64::engine::general_purpose::STANDARD.encode("alice:s3cret");
     Mock::given(method("GET"))
@@ -1012,7 +1378,7 @@ async fn a_stored_bitbucket_account_keeps_its_auth_scheme() {
     let account = bitbucket_account(
         &basic,
         Some("alice"),
-        h4rn_protocol::ForgeCredentialSource::BitbucketAppPassword,
+        h4rn_protocol::ForgeCredentialSource::BitbucketApiToken,
     );
     let client = h4rn_forge::client_for(&account, "s3cret").unwrap();
     assert_eq!(client.viewer().await.unwrap().login, "alice");

@@ -584,8 +584,8 @@ pub fn auth_header(name: &'static str, value: &str) -> Option<(HeaderName, Strin
 
 /// An HTTP Basic credential header, base64-encoded as the RFC requires.
 ///
-/// Bitbucket Cloud app passwords use `username:app-password`; Azure DevOps
-/// personal access tokens use an empty username (`:pat`).
+/// Bitbucket Cloud API tokens use `email:api-token`; Azure DevOps personal
+/// access tokens use an empty username (`:pat`).
 pub fn basic_auth_header(username: &str, secret: &str) -> Option<(HeaderName, String)> {
     use base64::Engine as _;
     let credentials = format!("{username}:{secret}");

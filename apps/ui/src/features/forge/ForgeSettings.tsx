@@ -1,12 +1,19 @@
 import { KeyRoundIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { ConfirmDialog } from "@/components/common/ConfirmDialog";
 import { type ForgeAccounts, ForgeApi, forgeLabel } from "@/features/forge/store";
-import type { ForgeAccount, ForgeCredentialSource, ForgeDeviceFlow, ForgeKind } from "@/gen";
+import type {
+  ForgeAccount,
+  ForgeCredentialSource,
+  ForgeDeviceFlow,
+  ForgeKind,
+  ForgeRemote,
+  ForgeRepoRef,
+} from "@/gen";
 import { relativeAge } from "@/lib/format";
-import { getClient, pushToast } from "@/lib/store/appStore";
+import { getClient, pushToast, useApp } from "@/lib/store/appStore";
 
 const api = () => new ForgeApi((request) => getClient().request(request));
 
@@ -28,7 +35,7 @@ const SCOPES: Record<ForgeKind, string> = {
   gitea: "a token with repo scope on the repositories you want to see",
   forgejo: "a token with repo scope on the repositories you want to see",
   bitbucket:
-    "an Atlassian API token (Account: read, Repositories: read, Pull requests: write) with your Atlassian account email, or a legacy app password with your Bitbucket username",
+    "an Atlassian API token (Account: read, Repositories: read, Pull requests: write) with your Atlassian account email, or a workspace, project or repository access token (app passwords were retired in July 2026)",
   azure_devops: "a personal access token with Code: read & write",
 };
 
@@ -50,10 +57,10 @@ function sourceLabel(source: ForgeCredentialSource): string {
       return "Imported from gh";
     case "glab_cli":
       return "Imported from glab";
-    case "bitbucket_app_password":
-      return "API token or app password";
+    case "bitbucket_api_token":
+      return "API token (email + token)";
     case "bitbucket_access_token":
-      return "Access token";
+      return "Workspace, project or repository access token";
   }
 }
 
@@ -145,7 +152,13 @@ function AccountsTable({
   );
 }
 
-function AddAccountForm({ onAdded }: { onAdded: () => void }) {
+function AddAccountForm({
+  onAdded,
+  repositories,
+}: {
+  onAdded: () => void;
+  repositories: ForgeRemote[];
+}) {
   const [forge, setForge] = useState<ForgeKind>("github");
   const [baseUrl, setBaseUrl] = useState(DEFAULT_BASE.github);
   const [username, setUsername] = useState("");
@@ -163,18 +176,43 @@ function AddAccountForm({ onAdded }: { onAdded: () => void }) {
   const missingOrganization =
     forge === "azure_devops" && baseUrl.trim().replace(/\/$/, "") === "https://dev.azure.com";
 
+  // The detected workspace remote for this host. Bitbucket access tokens need
+  // it because they cannot read `/user` or `/user/workspaces`.
+  const normalizedBase = baseUrl.trim().replace(/\/$/, "");
+  const detectedRepo: ForgeRepoRef | null =
+    forge === "bitbucket"
+      ? (repositories.find(
+          (remote) =>
+            remote.repo.forge === "bitbucket" &&
+            remote.repo.base_url.replace(/\/$/, "") === normalizedBase,
+        )?.repo ?? null)
+      : null;
+  const accessTokenWithoutRepository =
+    forge === "bitbucket" && username.trim() === "" && detectedRepo === null;
+
   const submit = async () => {
-    if (token.trim() === "" || baseUrl.trim() === "" || busy || missingOrganization) return;
+    if (
+      token.trim() === "" ||
+      baseUrl.trim() === "" ||
+      busy ||
+      missingOrganization ||
+      accessTokenWithoutRepository
+    ) {
+      return;
+    }
     setBusy(true);
     try {
       const account = await api().addAccount(
         forge,
-        baseUrl.trim().replace(/\/$/, ""),
+        normalizedBase,
         token.trim(),
         forge === "bitbucket" ? username.trim() || null : null,
+        detectedRepo,
       );
-      // The token is written once and never read back.
+      // The token is written once and never read back, and the email is
+      // cleared so the next account starts from an empty form.
       setToken("");
+      setUsername("");
       pushToast({
         title: `Added ${forgeLabel(forge)}${account.username ? ` as @${account.username}` : ""}.`,
         variant: "success",
@@ -211,8 +249,8 @@ function AddAccountForm({ onAdded }: { onAdded: () => void }) {
           </span>
           {forge === "bitbucket" ? (
             <span className="q-faint" style={{ fontSize: 12, display: "block" }}>
-              Reading the account needs Account: read. A workspace, project or repository access
-              token that cannot read it is validated against the repository instead.
+              App passwords no longer work. Paste an API token with your Atlassian account email, or
+              a workspace, project or repository access token with the email left empty.
             </span>
           ) : null}
         </div>
@@ -244,8 +282,8 @@ function AddAccountForm({ onAdded }: { onAdded: () => void }) {
           <div className="lab">
             <div className="t">Atlassian account email</div>
             <div className="s">
-              Needed for an API token (email + token) or a legacy app password (username +
-              password); leave empty for a workspace, project or repository access token
+              Needed for an API token (email + token). Leave empty for a workspace, project or
+              repository access token.
             </div>
           </div>
           <div className="ctl">
@@ -253,11 +291,18 @@ function AddAccountForm({ onAdded }: { onAdded: () => void }) {
               className="q-input q-mono"
               style={{ maxWidth: 300, fontSize: 12 }}
               autoComplete="username"
-              aria-label="Bitbucket account email or username"
+              aria-label="Atlassian account email"
               value={username}
               onChange={(event) => setUsername(event.target.value)}
-              placeholder="you@example.com or username"
+              placeholder="you@example.com"
             />
+            {accessTokenWithoutRepository ? (
+              <span className="q-warn" style={{ fontSize: 12, display: "block" }}>
+                An access token cannot read your account, so it is validated against a repository.
+                Open the Pull requests page from a checkout of a Bitbucket repository first, then
+                this form can detect it.
+              </span>
+            ) : null}
           </div>
         </div>
       ) : null}
@@ -280,7 +325,13 @@ function AddAccountForm({ onAdded }: { onAdded: () => void }) {
           <button
             type="button"
             className="q-btn primary"
-            disabled={busy || token.trim() === "" || baseUrl.trim() === "" || missingOrganization}
+            disabled={
+              busy ||
+              token.trim() === "" ||
+              baseUrl.trim() === "" ||
+              missingOrganization ||
+              accessTokenWithoutRepository
+            }
             onClick={() => void submit()}
           >
             <PlusIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
@@ -440,6 +491,8 @@ function DeviceFlow({ baseUrl, onComplete }: { baseUrl: string; onComplete: () =
 }
 
 export function ForgeSettings() {
+  const threads = useApp((state) => state.threads);
+  const [repositories, setRepositories] = useState<ForgeRemote[]>([]);
   const [data, setData] = useState<ForgeAccounts>({ accounts: [], capabilities: [] });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -449,6 +502,52 @@ export function ForgeSettings() {
   const [importing, setImporting] = useState(false);
 
   const load = useCallback(() => setReload((value) => value + 1), []);
+
+  const workspaceKey = useMemo(
+    () =>
+      [
+        ...new Set(
+          Object.values(threads)
+            .map((thread) => thread.workspace_path)
+            .filter(Boolean),
+        ),
+      ]
+        .sort()
+        .join("\n"),
+    [threads],
+  );
+
+  // The detected workspace remotes let a Bitbucket access token be validated
+  // against its repository even though it cannot read the account.
+  useEffect(() => {
+    if (!workspaceKey) {
+      setRepositories([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const found: ForgeRemote[] = [];
+      for (const workspace of workspaceKey.split("\n")) {
+        try {
+          found.push(...(await api().detectRepo(workspace)));
+        } catch {
+          // A workspace without a forge remote is not an error.
+        }
+      }
+      if (cancelled) return;
+      setRepositories([
+        ...new Map(
+          found.map((remote) => [
+            `${remote.repo.forge}:${remote.repo.base_url}:${remote.repo.owner}/${remote.repo.repo}`,
+            remote,
+          ]),
+        ).values(),
+      ]);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceKey]);
 
   useEffect(() => {
     void reload;
@@ -549,7 +648,7 @@ export function ForgeSettings() {
         )}
       </div>
 
-      <AddAccountForm onAdded={load} />
+      <AddAccountForm onAdded={load} repositories={repositories} />
 
       <div className="q-group">
         <h2>Import from a CLI</h2>

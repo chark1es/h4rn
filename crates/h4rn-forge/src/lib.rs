@@ -207,7 +207,7 @@ pub fn client_for_with_budget(
             // The source remembers which scheme validated at add time, so a
             // workspace access token stays Bearer after a daemon restart even
             // though the account row also carries the viewer login.
-            let basic = matches!(account.source, ForgeCredentialSource::BitbucketAppPassword)
+            let basic = matches!(account.source, ForgeCredentialSource::BitbucketApiToken)
                 || (matches!(account.source, ForgeCredentialSource::Pat)
                     && account.username.is_some());
             Arc::new(BitbucketClient::new(

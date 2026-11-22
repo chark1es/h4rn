@@ -206,6 +206,7 @@ export class ForgeApi {
     baseUrl: string,
     token: string,
     username: string | null = null,
+    repository: ForgeRepoRef | null = null,
   ): Promise<ForgeAccount> {
     const response = await this.call(
       {
@@ -215,6 +216,9 @@ export class ForgeApi {
         token,
         username,
         source: "pat",
+        // A repository-scoped Bitbucket access token cannot read `/user`; the
+        // daemon validates it against this detected repository instead.
+        repository,
       },
       "forge_account",
     );

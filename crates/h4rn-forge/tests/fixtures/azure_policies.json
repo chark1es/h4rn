@@ -2,7 +2,7 @@
   "count": 2,
   "value": [
     {
-      "evaluationId": "eval-1",
+      "evaluationId": "3f1c8a52-9d47-4b60-8e2a-5c7d0b1f9e63",
       "artifactId": "vstfs:///CodeReview/CodeReviewId/project-guid/7",
       "status": "rejected",
       "startedDate": "2024-05-01T10:00:00.000Z",
@@ -26,7 +26,7 @@
       }
     },
     {
-      "evaluationId": "eval-2",
+      "evaluationId": "c84e2d17-0a5b-4f39-91d6-7b2e4a8c5f10",
       "artifactId": "vstfs:///CodeReview/CodeReviewId/project-guid/7",
       "status": "approved",
       "startedDate": "2024-05-01T10:00:00.000Z",

@@ -368,6 +368,43 @@ describe("ForgeApi commits and re-run", () => {
     expect(result.state).toBe("pending");
   });
 
+  test("adds an account with the detected repository hint", async () => {
+    const bitbucketRepo: ForgeRepoRef = {
+      forge: "bitbucket",
+      base_url: "https://bitbucket.org",
+      owner: "acme",
+      repo: "widget",
+    };
+    const saved: ForgeAccount = {
+      ...account,
+      account_id: "a2",
+      forge: "bitbucket",
+      base_url: "https://bitbucket.org",
+      username: null,
+      display_name: null,
+      scopes: [],
+      source: "bitbucket_access_token",
+    };
+    const request = vi.fn().mockResolvedValue({ type: "forge_account", account: saved });
+    const result = await new ForgeApi(request).addAccount(
+      "bitbucket",
+      "https://bitbucket.org",
+      "ATBB-token",
+      null,
+      bitbucketRepo,
+    );
+    expect(request).toHaveBeenCalledWith({
+      type: "forge_add_account",
+      forge: "bitbucket",
+      base_url: "https://bitbucket.org",
+      token: "ATBB-token",
+      username: null,
+      source: "pat",
+      repository: bitbucketRepo,
+    });
+    expect(result.account_id).toBe("a2");
+  });
+
   test("rejects an unexpected response instead of guessing", async () => {
     const request = vi.fn().mockResolvedValue({ type: "ack" });
     await expect(new ForgeApi(request).commits(repo, 7)).rejects.toThrow("expected forge_commits");

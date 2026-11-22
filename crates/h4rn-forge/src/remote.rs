@@ -60,6 +60,12 @@ impl Default for ForgeHosts {
             ForgeKind::Bitbucket,
             "https://bitbucket.org",
         );
+        // The SSH host serves the same web/API account as bitbucket.org.
+        hosts.insert(
+            "ssh.bitbucket.org",
+            ForgeKind::Bitbucket,
+            "https://bitbucket.org",
+        );
         hosts.insert(
             "dev.azure.com",
             ForgeKind::AzureDevOps,
@@ -231,23 +237,24 @@ pub fn validate_base_url_for(kind: ForgeKind, value: &str) -> Result<String> {
         return validate_base_url(value);
     }
     let trimmed = value.trim().trim_end_matches('/');
-    let parsed = Url::parse(trimmed).map_err(|error| {
-        ForgeError::InvalidRequest(format!("invalid base URL {value:?}: {error}"))
+    // The input may carry a secret in its path; Azure errors never echo it.
+    let parsed = Url::parse(trimmed).map_err(|_| {
+        ForgeError::InvalidRequest("the Azure DevOps base URL is not a valid URL".into())
     })?;
     if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(ForgeError::InvalidRequest(format!(
-            "base URL {value:?} must use http or https"
-        )));
+        return Err(ForgeError::InvalidRequest(
+            "the Azure DevOps base URL must use http or https".into(),
+        ));
     }
     if parsed.host_str().is_none() {
-        return Err(ForgeError::InvalidRequest(format!(
-            "base URL {value:?} has no host"
-        )));
+        return Err(ForgeError::InvalidRequest(
+            "the Azure DevOps base URL has no host".into(),
+        ));
     }
     if parsed.query().is_some() || parsed.fragment().is_some() {
-        return Err(ForgeError::InvalidRequest(format!(
-            "base URL {value:?} must not include a query or fragment"
-        )));
+        return Err(ForgeError::InvalidRequest(
+            "the Azure DevOps base URL must not include a query or fragment".into(),
+        ));
     }
     let segments: Vec<&str> = parsed
         .path()
@@ -255,9 +262,10 @@ pub fn validate_base_url_for(kind: ForgeKind, value: &str) -> Result<String> {
         .filter(|part| !part.is_empty())
         .collect();
     if segments.len() > 1 || segments.iter().any(|part| *part == "." || *part == "..") {
-        return Err(ForgeError::InvalidRequest(format!(
-            "Azure DevOps base URL {value:?} must be the host and at most one organization or collection segment"
-        )));
+        return Err(ForgeError::InvalidRequest(
+            "the Azure DevOps base URL must be the host and at most one organization or collection segment"
+                .into(),
+        ));
     }
     Ok(trimmed.to_owned())
 }
@@ -324,6 +332,11 @@ pub fn detect_remote(remote: &str, url: &str, hosts: &ForgeHosts) -> Option<Forg
     if host.kind == ForgeKind::AzureDevOps {
         return detect_azure_remote(remote, url, &parsed, &host);
     }
+    // Other forges keep the lenient path handling they have always had: empty
+    // segments collapse (GitLab's `team//repo` resolves like `team/repo`) and
+    // no percent-decoding or traversal check happens here. The strict rules
+    // belong to Azure DevOps, whose project and repository names are decoded
+    // and encoded again.
     let segments: Vec<&str> = parsed
         .path
         .split('/')
@@ -367,12 +380,13 @@ fn detect_azure_remote(
     parsed: &ParsedRemote,
     host: &ForgeHost,
 ) -> Option<ForgeRemote> {
-    let segments: Vec<&str> = parsed
-        .path
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .collect();
-    if segments.iter().any(|part| *part == "." || *part == "..") {
+    // Azure project and repository names may be percent-encoded (`My%20Project`).
+    // Decode every segment, reject a decoded separator or a traversal segment,
+    // and reject an empty segment: an Azure path names one project and one
+    // repository, so a double slash is malformed rather than an empty name.
+    let decoded = azure_path_segments(&parsed.path)?;
+    let segments: Vec<&str> = decoded.iter().map(String::as_str).collect();
+    if segments.is_empty() {
         return None;
     }
     // The legacy SSH host has no web root of its own: only its `v3` path
@@ -526,7 +540,7 @@ pub fn parse_remote(value: &str) -> Option<ParsedRemote> {
             return None;
         }
         let host = url.host_str()?.to_ascii_lowercase();
-        let path = normalise_path(url.path())?;
+        let path = trim_remote_path(url.path())?;
         return Some(ParsedRemote { host, path });
     }
 
@@ -544,24 +558,33 @@ pub fn parse_remote(value: &str) -> Option<ParsedRemote> {
     if host.is_empty() {
         return None;
     }
-    let path = normalise_path(path)?;
+    let path = trim_remote_path(path)?;
     Some(ParsedRemote { host, path })
 }
 
-fn normalise_path(path: &str) -> Option<String> {
+/// Trims a remote path and drops the `.git` suffix, keeping any empty
+/// segments exactly as they were written.
+fn trim_remote_path(path: &str) -> Option<String> {
     let path = path.trim_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
     let path = path.trim_matches('/');
-    if path.is_empty() {
-        return None;
-    }
-    // Path segments arrive percent-encoded from an https/ssh URL. Decode each
-    // one so `My%20Project` becomes the project name, and reject anything that
-    // decodes into a separator or a traversal segment so a crafted remote
-    // cannot address a different path once the client encodes it again.
+    (!path.is_empty()).then(|| path.to_owned())
+}
+
+/// Decodes an Azure DevOps path into project and repository segments.
+///
+/// Decoded separators and traversal segments are rejected so a crafted remote
+/// cannot address a different path once the client encodes it again. Empty
+/// segments are malformed in an Azure path and rejected here, which is why
+/// this stricter form is only used for Azure; other forges keep their
+/// long-standing lenient handling.
+fn azure_path_segments(path: &str) -> Option<Vec<String>> {
     let mut segments = Vec::new();
-    for segment in path.split('/') {
-        let segment = percent_decode(segment)?;
+    for raw in path.split('/') {
+        if raw.is_empty() {
+            return None;
+        }
+        let segment = percent_decode(raw)?;
         if segment.is_empty()
             || segment == "."
             || segment == ".."
@@ -574,7 +597,7 @@ fn normalise_path(path: &str) -> Option<String> {
         }
         segments.push(segment);
     }
-    Some(segments.join("/"))
+    Some(segments)
 }
 
 /// Decodes `%XX` escapes in one path segment.
@@ -681,6 +704,9 @@ mod tests {
             "git@bitbucket.org:acme/widget.git",
             "https://acme@bitbucket.org/acme/widget.git",
             "ssh://git@bitbucket.org/acme/widget.git",
+            // The SSH host is part of Bitbucket Cloud and shares its account.
+            "git@ssh.bitbucket.org:acme/widget.git",
+            "ssh://git@ssh.bitbucket.org/acme/widget.git",
         ] {
             let detected = detect(url).unwrap();
             assert_eq!(detected.repo.forge, ForgeKind::Bitbucket, "{url}");
@@ -690,6 +716,20 @@ mod tests {
         }
         let with_credentials = detect("https://user:secret@bitbucket.org/acme/widget.git").unwrap();
         assert!(!with_credentials.url.contains("secret"));
+    }
+
+    #[test]
+    fn other_forges_keep_their_lenient_path_handling() {
+        // A double slash collapses the way it always has; the strict segment
+        // rules apply to Azure DevOps only.
+        let gitlab = detect("https://gitlab.com/team//repo.git").unwrap();
+        assert_eq!(gitlab.repo.forge, ForgeKind::GitLab);
+        assert_eq!(gitlab.repo.owner, "team");
+        assert_eq!(gitlab.repo.repo, "repo");
+
+        let github = detect("https://github.com/owner//repo.git").unwrap();
+        assert_eq!(github.repo.owner, "owner");
+        assert_eq!(github.repo.repo, "repo");
     }
 
     #[test]
@@ -875,5 +915,30 @@ mod tests {
             .is_err()
         );
         assert!(validate_base_url_for(ForgeKind::GitHub, "https://ghe.example.com/acme").is_err());
+    }
+
+    #[test]
+    fn cloud_validation_errors_never_echo_the_input() {
+        // A path, query or fragment can carry a secret; the Azure error must
+        // describe the rule without repeating it.
+        for value in [
+            "https://dev.azure.com/acme/placeholder-secret",
+            "https://dev.azure.com/acme?placeholder-secret=1",
+            "https://dev.azure.com/acme#placeholder-secret",
+            "not a url placeholder-secret",
+        ] {
+            let error = validate_base_url_for(ForgeKind::AzureDevOps, value)
+                .unwrap_err()
+                .to_string();
+            assert!(!error.contains("placeholder-secret"), "{error}");
+            assert!(!error.contains(value), "{error}");
+        }
+        let error = validate_cloud_base_url(
+            ForgeKind::AzureDevOps,
+            "https://placeholder-secret.example.com",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!error.contains("placeholder-secret"), "{error}");
     }
 }
