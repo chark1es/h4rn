@@ -7,11 +7,18 @@ import {
   classifyFrame,
   decodeBinaryFrame,
   encodeBinaryFrame,
+  ptyInputReplySeq,
 } from "./binary";
 
 const payload = new TextEncoder().encode("hello\r\n");
 
 describe("binary frames", () => {
+  it("pins the reply flag word to a literal golden vector", () => {
+    // The Rust constant `pty_input_reply_seq(1, 1)` must produce the same
+    // number: position 1 is shifted one bit and ordinal 1 starts at bit 33.
+    expect(ptyInputReplySeq(1, 1)).toBe(2 ** 33 + 3);
+  });
+
   it("round-trips a frame through the shared header", () => {
     const bytes = encodeBinaryFrame({
       kind: BinaryKind.PtyOutput,

@@ -71,6 +71,19 @@ All notable changes to h4rn are recorded here. The format follows
   explanation. Both startup rows are hidden in the browser and on mobile.
 - The mobile build does not send notifications yet, and Settings says so instead of offering
   switches that do nothing.
+- **The composer picks files with `@` and runs commands with `/`.** Typing `@` at a word boundary,
+  or pressing the `@` button, opens a caret-anchored list of the thread's workspace files; typing
+  filters it with a path-aware fuzzy match (`src/comp` finds `apps/ui/src/components/…`). The index
+  walks the daemon's existing directory listings, skips dependency and build folders, and reuses
+  one cached walk per host and workspace. `↑`/`↓` move, `↵` or `Tab` inserts, `Esc` closes and
+  leaves the typed text, and a click inserts too. The `@query` token becomes the workspace-relative
+  path plus a space, quoted when the path contains spaces (`@"src/with space.ts"`). Typing `/` as
+  the first character opens the actions h4rn already has for the thread — stop the turn, changes,
+  subagents, the terminal, the IDE and a new thread — and choosing one runs it and clears the
+  slash text. While a menu is open its arrows and accept keys do not fire prompt history or send;
+  IME composition never opens or drives it. On a phone the same list is a sheet above the keyboard.
+  Harness-native slash commands and skills are not listed: no harness publishes commands through
+  h4rn and h4rn defines no skill invocation of its own.
 - **Unsent composer text survives a reload, an app restart or Android killing the webview.** Every
   draft is stored under its own key for a host and thread, so one tab never erases another
   thread's draft; for the same thread the most recent edit wins. Writes happen after a short
@@ -135,6 +148,49 @@ All notable changes to h4rn are recorded here. The format follows
   nothing was parked. Now only a prompt that is really parked (a pending turn whose prompt is saved
   on the thread row) is released; a stale pause is dropped without a release or a phase change, and
   a cancel that already released the prompt is not released twice.
+- **The composer's phone sheet stays inside the keyboard, and the panel sheet takes focus.** The
+  `@` sheet now ends at whichever comes first, the composer or the visible viewport's bottom, so no
+  row hides under an open keyboard when the composer itself sits below it. When less than the header
+  plus one row fits above, it covers the composer inside the visible viewport instead of collapsing
+  to nothing. Opening Changes or Subagents with `/` moves focus into the panel sheet, so typing no
+  longer edits the draft behind it. `@` no longer opens after a Unicode letter (`café@src`), and a
+  workspace with exactly 3,000 files is a complete index, not a truncated one.
+- **The composer's menus trust the caret and the query in front of them.** `↵` and `Tab` accept
+  only rows ranked for the text on screen, so pressing Enter inside the old 120 ms debounce cannot
+  insert the row for the previous query. The `@` button separates a new mention from the words on
+  both sides of the caret (`Review this part` → `Review @README.md this part`) and completion never
+  glues a path to the following word. A quoted mention no longer pairs its opening quote with one
+  on another line, so a finished `@"…"` on the next line stays inert. The popover anchors to the
+  actual selection (not the end of the token) and copies the textarea's computed styles under CSS
+  property names, so its mirror measures the caret correctly in Chromium. The file walk spends its
+  250-listing budget on failed folders too, limits each batch to what remains, and stops adding
+  files the moment the 3,000 cap is hit; the partial-index note sits beside the footer instead of
+  scrolling away with the list. On a phone the sheet is sized to the visible space above the
+  composer (visual viewport and keyboard included), keeping its header and Done on screen with an
+  expanded composer, and a `/` command that opens a dialog or sheet keeps focus there instead of
+  pulling it back into the textarea.
+- **The composer's `@` picker and `/` menu hold up on a phone and at the edges.** The phone file
+  sheet no longer inherits the shared bottom-sheet placement and covers the composer: it sits above
+  the input it belongs to. On a phone, `/` → Changes and Subagents open the phone panel sheet on the
+  matching segment instead of calling the desktop panel action, like the header button does. `@`
+  now opens after any non-identifier character (`(`, `[`, `{`, a quote, a comma), not only after
+  whitespace, and the `@` button inserts a separating space on either side of the caret, so the
+  menu no longer dies on the next keystroke. The caret popover measures itself and
+  clamps to the viewport, moving left and opening below the caret when there is no room above.
+  The file index now reports the caps it hit — a truncated listing, 3,000 files, 250 folders or
+  8 levels — and the menu says “Showing the first 3,000 files.” instead of a bare “No files match”.
+  Every option has an id, `↑`/`↓` scroll the highlighted row into view and the textarea names it
+  with `aria-activedescendant`.
+- **The composer's file list tells the truth when the workspace cannot be fully read.** A folder
+  that fails to list makes the index partial, so the quiet “Showing the first … files.” note beside
+  the footer appears instead of claiming no other file exists; if the workspace root itself fails,
+  the picker shows that error rather than “No files in …”. The phone `/` menu no longer offers
+  “Open the IDE” (the phone shell has no IDE view to open), the phone sheet's Done button dismisses
+  it exactly like `Esc`, and `⇧↵` inserts a newline even while the `@` list is open. A quoted
+  mention (`@"path with space"`) is scanned as one token on one line: the picker keeps filtering
+  while its closing quote is missing, does nothing inside a finished mention, and completes it
+  without doubling or dropping the quotes. The caret popover also follows the caret line when the
+  textarea has scrolled.
 - **Large Azure DevOps pull requests load within the page deadline.** Azure needs file contents to
   build a diff, so a 30-file page could not finish inside the UI's ten-second budget once the
   account's local request allowance ran out. A diff page now holds at most eight files (eighteen
@@ -247,12 +303,49 @@ All notable changes to h4rn are recorded here. The format follows
   the grace period after SIGTERM so cleanup handlers can run, and only then sends SIGKILL to the
   shell's process group after `child.kill()`. The hangup uses the spawned child's pid, not the
   foreground group cached from `tcgetpgrp`, which a job started during shell startup can own. A
-  `nohup` job and one that moved itself into another session with `setsid` are left alone.
+  `nohup` job and one that moved itself into another session with `setsid` are left alone. The wait
+  after the hangup ends as soon as the shell exits (bounded at two seconds), so a loaded machine no
+  longer needs a fixed pause long enough for the shell to forward it; the two-second wait now runs
+  only when a hangup was actually delivered, so closing a terminal on Windows does not pause. If the
+  close wait reaped the shell, it captures the status under the child lock and the reader thread
+  reads it under the same lock order, so the exit report keeps that status instead of reporting
+  `-1` from a second failed wait. Closing no longer waits on the child handle: the hangup wait only
+  tries its lock, so a shell that hit PTY EOF first (and is being reaped by the reader thread) can
+  no longer hold the close past its two-second bound; TERM and KILL still go out on schedule, with
+  KILL addressed to the shell's pid when the handle is busy.
 - **Only one attached viewer answers terminal queries.** Two xterm instances each answered device,
   cursor and colour queries, so a shell with a desktop and a phone attached received duplicate
-  replies. The UI now marks xterm's own answers to just-asked queries, and the daemon writes the
-  reply owner's answer only; every other answer is dropped, while keystrokes and paste go through
-  from every viewer. The first viewer to answer owns the role until it detaches.
+  replies. The UI now marks xterm's own answers to just-asked queries with the output position that
+  carried the query and the answer's ordinal within that chunk (one chunk can ask several questions
+  and xterm answers each separately), and the daemon writes each distinct answer once from any
+  viewer. Only exact duplicates and positions at or below the evicted high-water mark are dropped;
+  a reply for an older position that has not been answered yet is accepted, because it can only
+  rescue a pending query. A reply naming output the daemon never sent to that viewer is ignored, so
+  a bogus position cannot suppress a real answer, and acceptance and the PTY write happen under one
+  lock so accepted replies cannot reach the shell out of order. An answer's ordinal is counted per
+  chunk, so a viewer that attached mid-query numbers answers differently; the daemon records the
+  first output chunk each viewer was sent after its snapshot and drops a reply for a chunk whose
+  predecessor that viewer never parsed, leaving the answer to an earlier-attached viewer. That rule
+  exists only to keep two parsers from numbering one chunk differently, so it is relaxed when no
+  other attached viewer could answer the position: a sole viewer that attached at a snapshot, or
+  resynced after falling behind, still answers its first raw chunk. A viewer that is still taking
+  its attach snapshot, or whose output credit never reached the chunk, has not received the query
+  and does not count as another answerer. The client no longer drops a
+  reply below its own floor; it always sends and the daemon decides. A query
+  spanning more than two 64 KiB chunks is out of scope. The sent bound advances only when a frame
+  is really handed to the outbound channel, so a blocked send cannot let a reply name unseen output,
+  and an ack past that bound is clamped, so a stale or bogus acknowledgement cannot mark later
+  chunks free. Clients declare reply-position support when they attach; while any attached viewer
+  does not, every reply keeps the legacy single-owner rule, whichever client's reply arrives first.
+  The owner role and the answered-position record are only committed once the reply's bytes reach
+  the shell, so a failed write leaves neither behind, the answer can still be written by another
+  viewer, and a bogus positioned claim cannot suppress the old client's next valid answer.
+  Another legacy viewer attaching or detaching no longer resets the owner while a query is in
+  flight. A stalled or
+  backgrounded viewer no longer holds an owner role that blocks the others. The per-answer record
+  keeps 64 recent chunks with 1024 answers each by design, and older chunks collapse to a high-water
+  mark, so memory stays constant; a late reply for a chunk older than the whole window is the entry
+  that ages out, so it cannot push a newer chunk out.
 - **A batched colour query marks every answer it earns.** The query tracker kept at most 32 pending
   answers, so an `OSC 4` palette query with more entries left its tail looking like typed input. It
   now tracks the whole batch.

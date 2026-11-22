@@ -14146,6 +14146,7 @@ mod tests {
         );
     }
 
+    /// A fire only claims an attempt the thread's record names.
     ///
     /// A restarted daemon restores the parked prompt from the journal before
     /// the ledger is attached. A due schedule in that window must not be
