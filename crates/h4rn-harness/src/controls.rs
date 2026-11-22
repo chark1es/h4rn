@@ -151,6 +151,12 @@ pub struct SessionControls {
     pub modes: Vec<RuntimeMode>,
     /// Model ids the session advertised, when it named a catalogue.
     pub models: Option<Vec<String>>,
+    /// Model ids that mean "the agent's own default" to this adapter.
+    ///
+    /// A request for one of these is valid even when the advertised catalogue
+    /// does not list it: the alias names the agent's own choice, not a model.
+    /// Empty for an adapter without such an alias.
+    pub default_models: Vec<String>,
     /// Reasoning-effort values the session advertised; empty when it has no
     /// real effort control.
     pub efforts: Vec<String>,
@@ -173,6 +179,7 @@ impl Default for SessionControls {
         Self {
             modes: Vec::new(),
             models: None,
+            default_models: Vec::new(),
             efforts: Vec::new(),
             fast: false,
             switch_mode: false,

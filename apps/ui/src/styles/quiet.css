@@ -1877,11 +1877,11 @@ fieldset.q-seg-fs {
   gap: 2px;
 }
 .q-tctrl-head {
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-  color: var(--fg-3);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--fg-2);
   margin-top: 10px;
   margin-bottom: 4px;
 }

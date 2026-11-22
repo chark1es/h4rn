@@ -160,6 +160,15 @@ pub struct FakeHarness {
     session_count: Option<SessionCount>,
     /// The settings each session started with, and every live switch applied.
     session_settings: Option<SessionSettings>,
+    /// Model ids the fake session advertises, when a test asks for a catalogue.
+    advertised_models: Option<Vec<String>>,
+    /// Model ids that mean the agent's own default to the fake session.
+    default_models: Vec<String>,
+    /// Effects each model offers, so a model switch changes the catalogue.
+    model_efforts: Option<BTreeMap<String, Vec<String>>>,
+    /// A configured ACP agent id this fake harness accepts, when a test creates
+    /// an ACP thread.
+    instance: Option<String>,
     /// Whether a live session accepts in-place setting changes.
     switchable: bool,
     /// A test-only count of sessions this harness shut down.
@@ -493,6 +502,10 @@ impl Default for FakeHarness {
             start_attempts: None,
             session_models: None,
             session_settings: None,
+            advertised_models: None,
+            default_models: Vec::new(),
+            model_efforts: None,
+            instance: None,
             switchable: true,
             completion_gate: None,
             completion_gate_first_send: true,
@@ -680,6 +693,46 @@ impl FakeHarness {
         self
     }
 
+    /// Advertises a model catalogue from every fake session.
+    ///
+    /// A test uses this to prove the daemon validates a model change against
+    /// what the live session actually offers.
+    pub fn with_advertised_models(mut self, models: impl IntoIterator<Item = String>) -> Self {
+        self.advertised_models = Some(models.into_iter().collect());
+        self
+    }
+
+    /// Treats `alias` as the agent's own default model.
+    ///
+    /// A test uses this to prove a non-model change on a thread created on the
+    /// alias is not refused as an unknown model.
+    pub fn with_default_model(mut self, alias: impl Into<String>) -> Self {
+        self.default_models.push(alias.into());
+        self
+    }
+
+    /// Gives each model its own reasoning-effort catalogue.
+    ///
+    /// The fake advertises these model ids, and a live model switch changes the
+    /// efforts the session reports, so a test can prove the summary
+    /// re-advertises them.
+    pub fn with_model_efforts(
+        mut self,
+        efforts: impl IntoIterator<Item = (String, Vec<String>)>,
+    ) -> Self {
+        self.model_efforts = Some(efforts.into_iter().collect());
+        self
+    }
+
+    /// Accepts `id` as a configured ACP agent.
+    ///
+    /// The daemon refuses an ACP thread that names no configured instance, so a
+    /// test that creates one against this fake asks for this id.
+    pub fn with_instance(mut self, id: impl Into<String>) -> Self {
+        self.instance = Some(id.into());
+        self
+    }
+
     /// Ends the session's event stream once the returned gate is released.
     ///
     /// A test uses this to order "the agent exits after this turn" against
@@ -864,6 +917,10 @@ impl Harness for FakeHarness {
         self.install.clone()
     }
 
+    fn has_instance(&self, instance: &str) -> bool {
+        self.instance.as_deref() == Some(instance)
+    }
+
     async fn start_session(
         &self,
         spec: SessionSpec,
@@ -966,6 +1023,10 @@ impl Harness for FakeHarness {
             script: self.script.clone(),
             session_scripts,
             settings: self.session_settings.clone(),
+            advertised_models: self.advertised_models.clone(),
+            default_models: self.default_models.clone(),
+            model_efforts: self.model_efforts.clone(),
+            current_model: spec.model.clone(),
             switchable: self.switchable,
             primed,
             delay,
@@ -1007,6 +1068,14 @@ pub struct FakeSession {
     session_scripts: Option<Arc<SessionScripts>>,
     /// Where setting changes are recorded, when a test asked for them.
     settings: Option<SessionSettings>,
+    /// Model ids this session advertises, when a test asked for a catalogue.
+    advertised_models: Option<Vec<String>>,
+    /// Model ids that mean the agent's own default to this session.
+    default_models: Vec<String>,
+    /// Efforts each model offers, when a test asked for per-model catalogues.
+    model_efforts: Option<BTreeMap<String, Vec<String>>>,
+    /// The model this session runs, so its effort catalogue can follow it.
+    current_model: String,
     /// Whether this session accepts in-place setting changes.
     switchable: bool,
     /// The daemon's first `send` is the input that started the scripted turn.
@@ -1073,10 +1142,21 @@ impl HarnessSession for FakeSession {
         // for the same modes, efforts and fast tier the real adapter offers.
         // It switches all of them in place unless the test asked otherwise.
         let base = crate::thread_controls(self.kind);
+        let models = self.advertised_models.clone().or_else(|| {
+            self.model_efforts
+                .as_ref()
+                .map(|efforts| efforts.keys().cloned().collect())
+        });
+        let efforts = self
+            .model_efforts
+            .as_ref()
+            .and_then(|efforts| efforts.get(&self.current_model).cloned())
+            .unwrap_or(base.efforts);
         Some(crate::SessionControls {
             modes: base.modes,
-            models: None,
-            efforts: base.efforts,
+            models,
+            default_models: self.default_models.clone(),
+            efforts,
             fast: base.fast,
             switch_mode: self.switchable,
             switch_model: self.switchable,
@@ -1459,6 +1539,7 @@ impl HarnessSession for FakeSession {
                 feature: "switching the model on a live session".into(),
             });
         }
+        self.current_model = model.to_string();
         if let Some(settings) = &self.settings {
             settings.note(SettingChange::Model(model.to_string()));
         }

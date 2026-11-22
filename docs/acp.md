@@ -104,10 +104,14 @@ saved selection and sends the prompt rather than rejecting it against an empty l
 replays the old conversation as session updates; h4rn consumes that history before the new turn, so
 it is neither shown twice nor able to fill the event queue and stall a long conversation.
 
-The new-thread mode picker only offers a choice h4rn can map onto an advertised mode id (Approval
-required → `default`, Auto-accept edits → `accept-edits`, Full access → `auto`). An agent that names
-its own modes (for example `ask` and `code`) shows **Mode is managed by the agent** instead, and h4rn
-leaves the agent's current mode alone.
+The new-thread and composer mode pickers only offer a choice h4rn can map onto an advertised mode id.
+The mapping is the daemon's: Approval required → `default`, `ask`, `manual` or `supervised`;
+Auto-accept edits → `accept-edits`, `acceptEdits` or `accept_edits`; Plan → `plan`, `read-only` or
+`readonly`; Full access → `auto`, `full-access`, `bypass` or `bypassPermissions`. An agent whose
+ids map to none of those shows **Mode is managed by the agent** in the dialog and no permission rows
+in the thread. A mode the agent does not advertise is refused with the advertised list rather than
+silently started in another mode. Plan is offered at creation and mid-thread wherever the agent
+advertises it.
 
 When an agent has a fixed working directory, **New thread** shows that directory before Start and
 the thread's workspace (Files and Changes) is that directory, not the thread workspace a built-in

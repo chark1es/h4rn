@@ -296,6 +296,12 @@ All notable changes to h4rn are recorded here. The format follows
   is shown only when the agent reports one during `initialize`; h4rn does not install or update it.
   See [docs/acp.md](docs/acp.md).
 
+### Changed
+
+- **The `thread.acknowledge` shortcut moved off `Mod+Shift+A`.** It is now
+  `Mod+Alt+A` (`⌘⌥A` / `Ctrl+Alt+A`); `Mod+Shift+A` opens the new permission
+  picker. Shortcuts help and the command palette show the new binding.
+
 ### Fixed
 
 - **Preview follow-ups from the HTML preview review.** A descriptorless `srcset` candidate followed

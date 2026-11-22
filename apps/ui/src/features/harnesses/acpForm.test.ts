@@ -5,6 +5,7 @@ import {
   acpAgentSpecFromForm,
   acpModelChoices,
   acpPickerOptions,
+  acpRuntimeModeChoices,
   EMPTY_ACP_FORM,
   formFromAcpAgent,
   isPlatformAbsolutePath,
@@ -187,5 +188,19 @@ describe("ACP picker options", () => {
     ]);
     expect(options.at(-2)?.label).toBe("DeepSeek Harness");
     expect(options.at(-1)?.label).toBe("Missing agent · not installed");
+  });
+
+  it("maps an agent's own mode ids onto the modes the daemon accepts", () => {
+    expect(acpRuntimeModeChoices(["acceptEdits", "bypassPermissions"])).toEqual([
+      { value: "auto_accept_edits", label: "Auto-accept edits" },
+      { value: "full_access", label: "Full access" },
+    ]);
+    // A plan mode is offered when the agent advertises one, with the daemon's
+    // other spellings accepted too.
+    expect(acpRuntimeModeChoices(["read-only", "accept-edits"])).toEqual([
+      { value: "auto_accept_edits", label: "Auto-accept edits" },
+      { value: "plan", label: "Plan" },
+    ]);
+    expect(acpRuntimeModeChoices(["code", "architect"])).toEqual([]);
   });
 });

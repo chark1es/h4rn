@@ -90,6 +90,7 @@ vi.mock("@/features/attachments/use-attachments", () => ({
   useAttachShortcut: () => undefined,
 }));
 
+import { setDefaultPermissionMode } from "@/features/threads/settings";
 import {
   DEFAULT_NEW_THREAD_WORKSPACE,
   drafts,
@@ -143,6 +144,7 @@ describe("NewThreadDialog drafts", () => {
     mock.harness.loaded = false;
     mock.createThread.mockReset();
     mock.closeNewThread.mockReset();
+    setDefaultPermissionMode("approval_required");
   });
 
   afterEach(() => {
@@ -439,7 +441,7 @@ describe("NewThreadDialog drafts", () => {
         path: "/usr/bin/demo-agent",
       },
     ];
-    // An agent with its own mode ids: h4rn can select none of them.
+    // An agent with its own mode ids: h4rn maps none of them.
     mock.harness.probes = {
       demo: {
         id: "demo",
@@ -447,8 +449,8 @@ describe("NewThreadDialog drafts", () => {
         version: null,
         models: [{ id: "demo-model", name: "Demo" }],
         modes: [
-          { id: "ask", name: "Ask", description: null },
           { id: "code", name: "Code", description: null },
+          { id: "architect", name: "Architect", description: null },
         ],
         error: null,
       },
@@ -467,7 +469,71 @@ describe("NewThreadDialog drafts", () => {
 
     await waitFor(() => expect(screen.getByText("Mode is managed by the agent.")).toBeTruthy());
     expect(screen.queryByRole("button", { name: "Mode: Approval required" })).toBeNull();
-    expect(screen.queryByText("Fixed for the life of the thread.")).toBeNull();
+    expect(screen.queryByText("Can be changed later from the composer.")).toBeNull();
+  });
+
+  it("offers Plan at creation and keeps a Plan default", async () => {
+    mock.state.hosts = { host_a: host("host_a", "atlas") };
+    mock.state.localHostId = "host_a";
+    setDefaultPermissionMode("plan");
+
+    render(<NewThreadDialog />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Harness: Claude Code" })).toBeTruthy(),
+    );
+    // Claude Code has a real plan mode, so the dialog offers it and does not
+    // coerce the device's Plan default to the first row.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Mode: Plan" })).toBeTruthy());
+    expect(screen.getByText("Can be changed later from the composer.")).toBeTruthy();
+  });
+
+  it("offers the agent's own mode ids at creation", async () => {
+    mock.state.hosts = { host_a: host("host_a", "atlas") };
+    mock.state.localHostId = "host_a";
+    mock.harness.agents = [
+      {
+        id: "demo",
+        name: "Demo agent",
+        command: "demo-agent",
+        env: {},
+        working_dir: { kind: "thread_workspace" },
+        installed: true,
+        models: [],
+        modes: [],
+        version: null,
+        path: "/usr/bin/demo-agent",
+      },
+    ];
+    mock.harness.probes = {
+      demo: {
+        id: "demo",
+        installed: true,
+        version: null,
+        models: [{ id: "demo-model", name: "Demo" }],
+        modes: [
+          { id: "acceptEdits", name: "Accept edits", description: null },
+          { id: "bypassPermissions", name: "Bypass", description: null },
+        ],
+        error: null,
+      },
+    };
+
+    render(<NewThreadDialog />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Harness: Claude Code" })).toBeTruthy(),
+    );
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Harness: Claude Code" }), {
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    fireEvent.click(await screen.findByRole("menuitem", { name: /Demo agent/ }));
+
+    // The daemon maps these ids to auto-accept-edits and full-access, so the
+    // dialog offers them instead of deciding the agent manages its own mode.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Mode: Auto-accept edits" })).toBeTruthy(),
+    );
   });
 
   it("shows a fixed working directory and starts the thread there", async () => {

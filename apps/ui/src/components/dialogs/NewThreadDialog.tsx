@@ -17,13 +17,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts, useAttachShortcut } from "@/features/attachments/use-attachments";
-import {
-  acpModeChoices,
-  acpModelChoices,
-  acpPickerOptions,
-  acpRuntimeModeChoices,
-  THREAD_RUNTIME_MODES,
-} from "@/features/harnesses/acpForm";
+import { acpModeChoices, acpModelChoices, acpPickerOptions } from "@/features/harnesses/acpForm";
 import {
   probeAcpAgent,
   useAcpAgents,
@@ -46,7 +40,12 @@ import { detectedHarnesses, HARNESS_MODELS } from "@/lib/models";
 import { NewThreadDraftSession, type NewThreadDraftSnapshot } from "@/lib/newThreadDraft";
 import { closeNewThread, createThread, useApp } from "@/lib/store/appStore";
 import { defaultThreadHostId, localOnlyHostOptions } from "@/lib/thread-hosts";
-import { effortLabel, fastSupported, threadEffortChoices } from "@/lib/threadControls";
+import {
+  effortLabel,
+  fastSupported,
+  threadEffortChoices,
+  threadModeChoices,
+} from "@/lib/threadControls";
 import { cn } from "@/lib/utils";
 
 const DEFAULT_MODELS = Object.fromEntries(
@@ -272,10 +271,13 @@ export function NewThreadDialog() {
   const agentModels = acpModelChoices(probe, probeFailed, selectedAgent?.models);
   // Only a mode h4rn can actually select is offered. An agent that names its
   // own modes is left alone: the dialog says so instead of promising an
-  // "Approval required" mode the agent never advertised.
+  // "Approval required" mode the agent never advertised. The same mapping the
+  // composer uses reads the agent's ids, so `acceptEdits` and
+  // `bypassPermissions` are the modes they name, and a plan mode is offered
+  // wherever the harness or agent really has one.
   const agentModes = acpModeChoices(probe, probeFailed, selectedAgent?.modes);
   const runtimeModeChoices =
-    harness === "acp" ? acpRuntimeModeChoices(agentModes) : THREAD_RUNTIME_MODES;
+    harness === "acp" ? threadModeChoices("acp", agentModes) : threadModeChoices(harness);
   const modeManagedByAgent = harness === "acp" && runtimeModeChoices.length === 0;
   // Open on this device's default for new threads; a harness that cannot honour
   // it falls back to the first mode it offers below.
@@ -560,7 +562,9 @@ export function NewThreadDialog() {
                   options={runtimeModeChoices}
                   onChange={setRuntimeMode}
                 />
-                <span className="text-small text-fg-3">Fixed for the life of the thread.</span>
+                <span className="text-small text-fg-3">
+                  Can be changed later from the composer.
+                </span>
               </>
             )}
           </div>

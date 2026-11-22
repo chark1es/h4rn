@@ -1,4 +1,5 @@
 import type { AcpAgentSpec, AcpWorkingDir, RuntimeMode } from "@/gen";
+import { MODE_CHOICES, runtimeModeForModeId } from "@/lib/threadControls";
 
 /** The editable shape of the "Add / edit ACP agent" form. */
 export type AcpAgentForm = {
@@ -170,17 +171,11 @@ export function acpPickerOptions(
  * The thread modes h4rn maps onto ACP mode ids.
  *
  * A generic agent names its own modes; h4rn only changes the mode when the
- * agent advertised the id this row selects with. The label is a promise, so a
- * mode the agent does not offer is never shown.
+ * agent advertised an id the daemon maps to it. The labels and the mappable
+ * modes come from the same table the composer uses, so the dialog and the
+ * thread picker cannot disagree.
  */
-const RUNTIME_MODE_ROWS: { value: RuntimeMode; label: string; modeId: string }[] = [
-  { value: "approval_required", label: "Approval required", modeId: "default" },
-  { value: "auto_accept_edits", label: "Auto-accept edits", modeId: "accept-edits" },
-  { value: "full_access", label: "Full access", modeId: "auto" },
-];
-
-/** Every thread mode, for harnesses that map them the way they always have. */
-export const THREAD_RUNTIME_MODES: { value: RuntimeMode; label: string }[] = RUNTIME_MODE_ROWS.map(
+export const THREAD_RUNTIME_MODES: { value: RuntimeMode; label: string }[] = MODE_CHOICES.map(
   ({ value, label }) => ({ value, label }),
 );
 
@@ -188,8 +183,10 @@ export const THREAD_RUNTIME_MODES: { value: RuntimeMode; label: string }[] = RUN
 export function acpRuntimeModeChoices(
   advertised: string[],
 ): { value: RuntimeMode; label: string }[] {
-  const ids = new Set(advertised);
-  return RUNTIME_MODE_ROWS.filter((row) => ids.has(row.modeId)).map(({ value, label }) => ({
+  const mapped = new Set(
+    advertised.map(runtimeModeForModeId).filter((mode): mode is RuntimeMode => mode !== undefined),
+  );
+  return MODE_CHOICES.filter((choice) => mapped.has(choice.value)).map(({ value, label }) => ({
     value,
     label,
   }));

@@ -317,6 +317,13 @@ struct Inner {
     /// race the restart's detach must re-check under its own lock.
     #[cfg(test)]
     restart_pause: std::sync::Mutex<Option<Arc<RestartPause>>>,
+    /// Pauses a settings change between its first record read and its final
+    /// record lock.
+    ///
+    /// Test-only: a Send can start a turn in that window, and the detach
+    /// decision must re-read the record instead of trusting the first snapshot.
+    #[cfg(test)]
+    settings_pause: std::sync::Mutex<Option<Arc<SettingsPause>>>,
     /// Pauses a due-schedule fire between claiming its attempt and acting on
     /// the record.
     ///
@@ -349,6 +356,14 @@ struct RestartPause {
     resume: tokio::sync::Notify,
 }
 
+/// A test's hold on a settings change's read-to-decide window.
+#[cfg(test)]
+#[derive(Default)]
+struct SettingsPause {
+    read: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
+
 /// A test's hold on the resync's read-to-bind window.
 #[cfg(test)]
 #[derive(Default)]
@@ -378,12 +393,24 @@ impl Default for ResyncRetry {
 }
 
 /// A thread's settings as one request reads them.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ThreadSettings {
     runtime_mode: RuntimeMode,
     model: String,
     reasoning_effort: Option<String>,
     fast: bool,
+}
+
+impl ThreadSettings {
+    /// The settings a thread's record currently holds.
+    fn of(meta: &ThreadMeta) -> Self {
+        Self {
+            runtime_mode: meta.runtime_mode,
+            model: meta.model.clone(),
+            reasoning_effort: meta.reasoning_effort.clone(),
+            fast: meta.fast,
+        }
+    }
 }
 
 /// One thread-setting change a request asks for.
@@ -470,6 +497,13 @@ struct ThreadRecord {
     limit: Option<LimitBrief>,
     /// Effort values the live session advertised.
     advertised_efforts: Vec<String>,
+    /// The thread settings the live session was started with, or was last
+    /// switched to in place.
+    ///
+    /// A change a live session could not take only reaches the summary until
+    /// the next session starts; comparing this with the record's settings is
+    /// what makes the next turn start a session that really uses them.
+    session_settings: Option<ThreadSettings>,
     /// Time to first token of the most recent metered turn (ADR-024).
     ttft_ms: Option<u64>,
     /// Context window of the model the session is running (ADR-015/024).
@@ -1196,6 +1230,7 @@ impl ThreadRecord {
             }
         }
         self.advertised_efforts.clear();
+        self.session_settings = None;
         match std::mem::replace(&mut self.session, SessionSlot::None) {
             SessionSlot::Live { session, .. } => Some(session),
             SessionSlot::None | SessionSlot::Starting(_) => None,
@@ -1242,6 +1277,7 @@ impl ThreadRecord {
         );
         self.pump = None;
         self.advertised_efforts.clear();
+        self.session_settings = None;
         #[cfg(test)]
         self.dying_notify.notify_one();
     }
@@ -1260,6 +1296,27 @@ impl ThreadRecord {
     /// and the next session start picks up the new proxy routing.
     fn detach_restart_session(&mut self, generation: u64) -> Option<SharedSession> {
         if self.active.is_some() {
+            return None;
+        }
+        self.detach_session(generation)
+    }
+
+    /// Detaches the live session when it was started with settings the thread
+    /// no longer has.
+    ///
+    /// A change a running session could not take is already journaled and
+    /// shown; without this the next turns would keep writing to a session that
+    /// still runs the old mode, model or effort, so the summary would promise a
+    /// setting the agent never uses. The caller holds the record lock and shuts
+    /// the returned session down outside it. It must not be the pump itself
+    /// (a turn start, not a turn end), because detaching stops the pump.
+    fn detach_stale_session(&mut self) -> Option<SharedSession> {
+        let generation = match &self.session {
+            SessionSlot::Live { generation, .. } => *generation,
+            SessionSlot::None | SessionSlot::Starting(_) => return None,
+        };
+        let started = self.session_settings.as_ref()?;
+        if started == &ThreadSettings::of(&self.meta) {
             return None;
         }
         self.detach_session(generation)
@@ -1605,6 +1662,8 @@ impl ThreadManager {
                 clock,
                 #[cfg(test)]
                 restart_pause: std::sync::Mutex::new(None),
+                #[cfg(test)]
+                settings_pause: std::sync::Mutex::new(None),
                 #[cfg(test)]
                 fire_pause: std::sync::Mutex::new(None),
                 #[cfg(test)]
@@ -2001,6 +2060,7 @@ impl ThreadManager {
             resume_at: None,
             limit: None,
             advertised_efforts: Vec::new(),
+            session_settings: None,
             ttft_ms: None,
             context_window: None,
             branch: None,
@@ -2190,8 +2250,17 @@ impl ThreadManager {
         ];
         let (_, seq) = self.inner.emit(&mut record, domain, wire).await?;
 
+        // A setting this session could not switch in place (an effort or model
+        // it only applies when starting) makes this the turn that must start a
+        // session that really uses it.
+        let stale = record.detach_stale_session();
         let live = record.live_session().cloned();
         drop(record);
+        if let Some(stale) = stale {
+            tokio::spawn(async move {
+                let _ = stale.lock().await.shutdown().await;
+            });
+        }
         match live {
             Some(session) => {
                 // The message and its turn are already recorded; let the
@@ -2248,6 +2317,22 @@ impl ThreadManager {
             }
         }
         active
+    }
+
+    /// Waits at the settings change's read-to-decide window, when a test
+    /// installed one.
+    #[cfg(test)]
+    async fn pause_settings(&self) {
+        let pause = self
+            .inner
+            .settings_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let Some(pause) = pause {
+            pause.read.notify_one();
+            pause.resume.notified().await;
+        }
     }
 
     /// Drops the live harness session of every thread on one of `harnesses`,
@@ -2626,21 +2711,20 @@ impl ThreadManager {
         change: ThreadSettingsChange,
     ) -> Result<ThreadSummary, ManagerError> {
         let handle = self.inner.handle(thread_id).await?;
-        let (harness, mut settings, session, generation, idle) = {
+        let (harness, mut settings, session) = {
             let record = handle.lock().await;
             (
                 record.meta.harness,
-                ThreadSettings {
-                    runtime_mode: record.meta.runtime_mode,
-                    model: record.meta.model.clone(),
-                    reasoning_effort: record.meta.reasoning_effort.clone(),
-                    fast: record.meta.fast,
-                },
+                ThreadSettings::of(&record.meta),
                 record.session.live().cloned(),
-                record.session.generation(),
-                record.active.is_none(),
             )
         };
+
+        // Test-only interleaving point: a Send can start a turn between reading
+        // the record above and taking the record lock again below. The final
+        // decision must look at the record it finds, never at this snapshot.
+        #[cfg(test)]
+        self.pause_settings().await;
 
         match &change {
             ThreadSettingsChange::Mode(mode) => settings.runtime_mode = *mode,
@@ -2667,7 +2751,14 @@ impl ThreadManager {
         )?;
 
         let mut switched = false;
+        // The live session an in-place switch actually changed, and its
+        // catalogue after the switch, so the summary re-advertises what the new
+        // model or mode really offers. The session is compared with the slot
+        // under the final lock: a Send may have replaced it meanwhile.
+        let mut switched_session: Option<SharedSession> = None;
+        let mut switched_controls: Option<h4rn_harness::SessionControls> = None;
         if let Some(session) = session {
+            let switched_handle = Arc::clone(&session);
             let mut session = session.lock().await;
             let advertised = session.controls();
             let static_controls = h4rn_harness::thread_controls(harness);
@@ -2681,8 +2772,17 @@ impl ThreadManager {
                         runtime_mode_label(settings.runtime_mode)
                     )));
                 }
-                if let Some(models) = &controls.models
+                // Only a model change is checked against the catalogue: a mode,
+                // effort or fast change leaves the model alone, and a thread
+                // created on the adapter's default alias must not be refused
+                // because that alias is not a catalogue entry.
+                if matches!(change, ThreadSettingsChange::Model(_))
+                    && let Some(models) = &controls.models
                     && !models.iter().any(|model| model == &settings.model)
+                    && !controls
+                        .default_models
+                        .iter()
+                        .any(|alias| alias.eq_ignore_ascii_case(&settings.model))
                 {
                     return Err(ManagerError::Unsupported(format!(
                         "this agent does not offer model `{}`",
@@ -2730,7 +2830,11 @@ impl ThreadManager {
                     ThreadSettingsChange::Fast(fast) => session.set_fast(*fast).await,
                 };
                 match result {
-                    Ok(()) => switched = true,
+                    Ok(()) => {
+                        switched = true;
+                        switched_controls = session.controls();
+                        switched_session = Some(switched_handle);
+                    }
                     // The adapter said the value itself is unsupported (an
                     // agent's pinned mode, an unknown effort): refuse it rather
                     // than pretend the next start will differ. Clearing an
@@ -2750,20 +2854,43 @@ impl ThreadManager {
         let (summary, parked) = {
             let mut record = handle.lock().await;
             record.meta.runtime_mode = settings.runtime_mode;
-            record.meta.model = settings.model;
-            record.meta.reasoning_effort = settings.reasoning_effort;
+            record.meta.model = settings.model.clone();
+            record.meta.reasoning_effort = settings.reasoning_effort.clone();
             record.meta.fast = settings.fast;
             // A different model can have a different context window; the
             // proxy catalog fills it again on the next session start.
             if matches!(change, ThreadSettingsChange::Model(_)) {
                 record.context_window = None;
             }
+            if switched
+                && switched_session
+                    .as_ref()
+                    .is_some_and(|session| record.session.is_live(session))
+            {
+                // The live session really took the values now, so the record
+                // that started them is up to date.
+                record.session_settings = Some(settings.clone());
+                // A new model can advertise a different effort list; the
+                // summary must show the one the session now has, not the old
+                // model's.
+                record.advertised_efforts = switched_controls
+                    .map(|controls| controls.efforts)
+                    .unwrap_or_default();
+            } else {
+                // The switch happened on a session a Send has since replaced,
+                // or the adapter could not take it in place: the record still
+                // needs a session that really uses these values.
+                switched = false;
+            }
             // A setting the live session could not take is picked up by the
-            // next start. Detaching an idle session makes that start the next
-            // turn; a running turn keeps its session until it ends.
-            let parked = match (switched, idle, generation) {
-                (false, true, Some(generation)) => record.detach_session(generation),
-                _ => None,
+            // next start. The decision is made on the record as it is now, not
+            // on the idle snapshot read before the live switch: if a Send began
+            // a turn in between, that session belongs to the running turn and
+            // stays; the change is applied when that turn's successor starts.
+            let parked = if !switched && record.active.is_none() {
+                record.detach_stale_session()
+            } else {
+                None
             };
             let (summary, _) = self.inner.emit(&mut record, Vec::new(), Vec::new()).await?;
             (summary, parked)
@@ -3721,6 +3848,7 @@ impl Inner {
                 resume_at: None,
                 limit: None,
                 advertised_efforts: Vec::new(),
+                session_settings: None,
                 ttft_ms: None,
                 context_window: None,
                 branch,
@@ -3949,7 +4077,7 @@ impl Inner {
         // an agent for nobody would leave a session no turn asked for, and a
         // failure would be blamed on whichever turn arrived next. The slot stays
         // `None`, so a Send that arrives now starts its own session.
-        let (harness, snapshot, mut spec, generation, turn) = {
+        let (harness, snapshot, mut spec, generation, turn, started_settings) = {
             let mut record = handle.lock().await;
             if record.closed || self.closed.load(Ordering::Relaxed) {
                 return;
@@ -4015,6 +4143,7 @@ impl Inner {
                 record.meta.resume_id = resume_id;
             }
             let resume_id = record.meta.resume_id.clone();
+            let started_settings = ThreadSettings::of(&record.meta);
             let spec = SessionSpec {
                 workspace,
                 model: record.meta.model.clone(),
@@ -4029,7 +4158,7 @@ impl Inner {
             };
             let generation = record.next_session_gen();
             record.session = SessionSlot::Starting(generation);
-            (harness, snapshot, spec, generation, turn)
+            (harness, snapshot, spec, generation, turn, started_settings)
         };
 
         // CLIProxyAPI routing is applied only when the harness's toggle is on.
@@ -4094,6 +4223,10 @@ impl Inner {
             record.advertised_efforts = controls
                 .map(|controls| controls.efforts)
                 .unwrap_or_default();
+            // The session was started from this snapshot of the thread's
+            // settings; a later change it cannot switch in place is what
+            // `detach_stale_session` notices.
+            record.session_settings = Some(started_settings);
             // This session was started for the captured turn: the pump can
             // tell its death from the end of a previous turn's agent.
             turn.note_started_generation(generation);
@@ -5942,8 +6075,8 @@ impl Inner {
     /// starting delivers it when it is ready, and this returns without starting
     /// a second one.
     async fn advance_queue(self: &Arc<Self>, handle: ThreadHandle) {
-        let needs_session = {
-            let record = handle.lock().await;
+        let (needs_session, stale) = {
+            let mut record = handle.lock().await;
             if record.closed || record.active.is_none() {
                 return;
             }
@@ -5959,8 +6092,17 @@ impl Inner {
                 // this one (a Send's own replacement turn still starts).
                 return;
             }
-            matches!(record.session, SessionSlot::None)
+            // A live session started with settings the thread no longer has
+            // would run this turn on the old mode, model or effort. Drop it so
+            // the turn starts a session that uses the recorded values.
+            let stale = record.detach_stale_session();
+            (matches!(record.session, SessionSlot::None), stale)
         };
+        if let Some(stale) = stale {
+            tokio::spawn(async move {
+                let _ = stale.lock().await.shutdown().await;
+            });
+        }
         if needs_session {
             self.spawn_session(handle);
         } else {
@@ -6379,6 +6521,7 @@ impl Inner {
             // re-checked, but the delivery below is not conditional on it.
             tracing::error!(%error, "could not record the auto-resume turn");
         }
+        let stale = record.detach_stale_session();
         let needs_session = matches!(record.session, SessionSlot::None);
         drop(record);
 
@@ -6397,6 +6540,9 @@ impl Inner {
             if let Err(error) = session.shutdown().await {
                 tracing::warn!(%thread_id, %error, "harness shutdown before failover failed");
             }
+        }
+        if let Some(stale) = stale {
+            let _ = stale.lock().await.shutdown().await;
         }
         if needs_session {
             self.spawn_session(handle);
@@ -15632,6 +15778,241 @@ mod tests {
         assert_eq!(summary.model, "fake-model");
         assert_eq!(summary.reasoning_effort, None);
         assert!(!summary.fast);
+    }
+
+    #[tokio::test]
+    async fn a_change_made_during_a_turn_applies_to_the_next_session() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, completion) = FakeHarness::new().with_later_completion_gate();
+        let (harness, settings) = harness.with_unswitchable_settings().with_session_settings();
+        let (harness, sessions) = harness.with_session_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+        assert_eq!(sessions.get(), 1);
+
+        // A turn is running on the first session; its completion is held.
+        manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        assert!(
+            wait_until(|| settings
+                .get()
+                .iter()
+                .any(|change| { matches!(change, h4rn_harness::SettingChange::Started { .. }) }))
+            .await
+        );
+
+        // Claude Code cannot switch effort in place, so this is journaled for
+        // the next session start while the turn keeps running.
+        let summary = manager
+            .set_thread_reasoning_effort(&created.thread_id, Some("high".into()))
+            .await
+            .expect("record the effort");
+        assert_eq!(summary.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(
+            sessions.get(),
+            1,
+            "the running turn kept its session instead of being restarted mid-turn"
+        );
+
+        completion.release();
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+
+        // The next turn must not reuse the session that still runs without the
+        // new effort: it starts one that really has it.
+        manager
+            .send_message(&created.thread_id, "third".into(), Vec::new())
+            .await
+            .expect("send");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert!(
+            wait_until(|| sessions.get() >= 2).await,
+            "the next turn started a fresh session"
+        );
+        let started = settings
+            .get()
+            .iter()
+            .rev()
+            .find_map(|change| match change {
+                h4rn_harness::SettingChange::Started {
+                    reasoning_effort, ..
+                } => Some(reasoning_effort.clone()),
+                _ => None,
+            })
+            .expect("a started session");
+        assert_eq!(
+            started.as_deref(),
+            Some("high"),
+            "the new session was started with the recorded effort"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_settings_change_does_not_detach_a_session_a_send_just_claimed() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, completion) = FakeHarness::new().with_later_completion_gate();
+        let (harness, settings) = harness.with_unswitchable_settings().with_session_settings();
+        let (harness, sessions) = harness.with_session_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        // Hold the settings request after its first record read, so the Send
+        // below starts its turn in the window the stale idle snapshot came
+        // from.
+        let pause = Arc::new(SettingsPause::default());
+        *manager
+            .inner
+            .settings_pause
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(pause.clone());
+        let this = manager.clone();
+        let thread_id = created.thread_id.clone();
+        let changing =
+            tokio::spawn(
+                async move { this.set_thread_model(&thread_id, "next-model".into()).await },
+            );
+        pause.read.notified().await;
+
+        manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("send");
+        assert_eq!(sessions.get(), 1);
+
+        pause.resume.notify_one();
+        let summary = changing
+            .await
+            .expect("the settings task")
+            .expect("record the model");
+        assert_eq!(summary.model, "next-model");
+
+        // The turn the Send started still owns its session and completes
+        // normally. A detach here would abort the pump that carries its end.
+        completion.release();
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(
+            sessions.get(),
+            1,
+            "the running turn was not moved onto a fresh session"
+        );
+
+        // The change is still applied by the turn after it.
+        manager
+            .send_message(&created.thread_id, "third".into(), Vec::new())
+            .await
+            .expect("send");
+        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert!(wait_until(|| sessions.get() >= 2).await);
+        let started = settings
+            .get()
+            .iter()
+            .rev()
+            .find_map(|change| match change {
+                h4rn_harness::SettingChange::Started { model, .. } => Some(model.clone()),
+                _ => None,
+            })
+            .expect("a started session");
+        assert_eq!(started, "next-model");
+    }
+
+    #[tokio::test]
+    async fn a_mode_change_on_a_thread_created_on_the_default_model_is_not_refused() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, settings) = FakeHarness::new()
+            .with_kind(HarnessKind::Acp)
+            .with_instance("demo")
+            .with_advertised_models(["m-1".to_string(), "m-2".to_string()])
+            .with_default_model("default")
+            .with_session_settings();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Acp;
+        request.agent_id = Some("demo".into());
+        request.model = "default".into();
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        let summary = manager
+            .set_thread_runtime_mode(&created.thread_id, RuntimeMode::FullAccess)
+            .await
+            .expect("a mode change is not a model change");
+        assert_eq!(summary.runtime_mode, RuntimeMode::FullAccess);
+        assert_eq!(summary.model, "default");
+
+        // A model change still goes through the catalogue, and the default
+        // alias stays valid.
+        manager
+            .set_thread_model(&created.thread_id, "m-2".into())
+            .await
+            .expect("an advertised model");
+        let error = manager
+            .set_thread_model(&created.thread_id, "nope".into())
+            .await
+            .expect_err("an unknown model is refused");
+        assert!(matches!(error, ManagerError::Unsupported(_)), "{error:?}");
+        manager
+            .set_thread_model(&created.thread_id, "default".into())
+            .await
+            .expect("the adapter's default alias is valid");
+        assert!(settings.get().iter().any(|change| matches!(
+            change,
+            h4rn_harness::SettingChange::Model(model) if model == "m-2"
+        )));
+    }
+
+    #[tokio::test]
+    async fn an_in_place_model_switch_readvertises_efforts() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (harness, _settings) = FakeHarness::new()
+            .with_kind(HarnessKind::Codex)
+            .with_model_efforts([
+                ("gpt-a".to_string(), vec!["low".to_string()]),
+                (
+                    "gpt-b".to_string(),
+                    vec!["low".to_string(), "high".to_string()],
+                ),
+            ])
+            .with_session_settings();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let mut request = new_thread(host, workspace.path(), "first");
+        request.harness = HarnessKind::Codex;
+        request.model = "gpt-a".into();
+        let created = manager.create_thread(request).await.expect("create");
+        wait_for_idle(&manager, &created.thread_id).await;
+
+        let summary = manager
+            .get_thread(&created.thread_id, 0)
+            .await
+            .expect("summary")
+            .summary;
+        assert_eq!(summary.reasoning_efforts, vec!["low"]);
+
+        let summary = manager
+            .set_thread_model(&created.thread_id, "gpt-b".into())
+            .await
+            .expect("switch the model in place");
+        assert_eq!(
+            summary.reasoning_efforts,
+            vec!["low", "high"],
+            "the summary shows the new model's effort list"
+        );
     }
 
     #[tokio::test]

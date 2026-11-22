@@ -139,6 +139,60 @@ pub fn tool_summary(name: &str, input: Option<&Value>) -> String {
     }
 }
 
+/// One `control_response` the CLI sends for a control request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ControlReply {
+    /// The `request_id` the reply answers.
+    pub request_id: String,
+    /// `None` when the CLI applied the request, else its own refusal message.
+    pub error: Option<String>,
+}
+
+/// Parses one stdout line as a `control_response`, when it is one.
+///
+/// The CLI answers every `control_request` with
+/// `{"type":"control_response","response":{"subtype":"success"|"error", ...}}`.
+/// A success names the request it applied; an error also carries the CLI's
+/// message, which is the only honest account of why a switch did not happen.
+pub fn parse_control_response(line: &str) -> Option<ControlReply> {
+    let value: Value = serde_json::from_str(line.trim()).ok()?;
+    if value.get("type").and_then(Value::as_str) != Some("control_response") {
+        return None;
+    }
+    let response = value.get("response")?;
+    let request_id = response.get("request_id").and_then(Value::as_str)?;
+    let request_id = request_id.trim();
+    if request_id.is_empty() {
+        return None;
+    }
+    let subtype = response
+        .get("subtype")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let error = if subtype.eq_ignore_ascii_case("error") {
+        let message = response
+            .get("error")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                response
+                    .get("error_code")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "the CLI refused the request".to_string());
+        Some(message)
+    } else {
+        None
+    };
+    Some(ControlReply {
+        request_id: request_id.to_string(),
+        error,
+    })
+}
+
 /// The stream-json parser.
 ///
 /// One parser belongs to one long-lived `claude` process. Feed it each stdout

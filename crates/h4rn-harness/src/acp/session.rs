@@ -281,15 +281,25 @@ impl AcpSession {
         }
 
         let wanted_mode = (policy.mode_for)(spec);
-        if let Some(mode) = session.modes.iter().find(|mode| mode.id == wanted_mode) {
-            if session.current_mode_id.as_deref() != Some(mode.id.as_str()) {
+        // The same mapping the in-place switch uses: an agent may name its mode
+        // `acceptEdits` or `bypassPermissions`, which is still h4rn's
+        // auto-accept-edits / full-access mode. An explicit environment override
+        // names an exact id first, so it keeps winning.
+        let resolved_mode = session
+            .modes
+            .iter()
+            .find(|mode| mode.id == wanted_mode)
+            .map(|mode| mode.id.clone())
+            .or_else(|| advertised_mode_for(spec.runtime_mode, &session.modes));
+        if let Some(mode_id) = resolved_mode {
+            if session.current_mode_id.as_deref() != Some(mode_id.as_str()) {
                 match session.mode_config_id.as_deref() {
                     Some(config_id) => client
-                        .set_config_option(&session.session_id, config_id, &mode.id)
+                        .set_config_option(&session.session_id, config_id, &mode_id)
                         .await
                         .map_err(|error| map_acp_error(error, policy.harness))?,
                     None => client
-                        .set_mode(&session.session_id, &mode.id)
+                        .set_mode(&session.session_id, &mode_id)
                         .await
                         .map_err(|error| map_acp_error(error, policy.harness))?,
                 }
@@ -302,7 +312,13 @@ impl AcpSession {
                 harness = ?policy.harness,
                 "the resumed session advertised no modes; keeping its current mode"
             );
-        } else if spec.runtime_mode == RuntimeMode::Plan || (policy.missing_mode_is_error)(spec) {
+        } else if !session.modes.is_empty()
+            || spec.runtime_mode == RuntimeMode::Plan
+            || (policy.missing_mode_is_error)(spec)
+        {
+            // The agent named modes and none of them is this one: say so
+            // instead of warning and starting in a mode the thread did not ask
+            // for. A mode nobody offers must reach the person as a refusal.
             return Err(HarnessError::Unsupported {
                 harness: policy.harness,
                 feature: format!(
@@ -535,6 +551,12 @@ impl HarnessSession for AcpSession {
                     .map(|model| model.model_id.clone())
                     .collect()
             }),
+            default_models: self
+                .policy
+                .default_models
+                .iter()
+                .map(|alias| (*alias).to_string())
+                .collect(),
             efforts: self.info.efforts.clone(),
             fast: false,
             switch_mode: true,
@@ -587,6 +609,21 @@ impl HarnessSession for AcpSession {
             return Err(HarnessError::Transport {
                 harness: self.policy.harness,
                 message: "session is shut down".into(),
+            });
+        }
+        let model = model.trim();
+        // ACP has no "reset to default" method and the catalogue does not name
+        // which entry is the default, so a live session cannot honour the
+        // alias. Refusing is the honest answer; silently keeping the current
+        // model while the summary says `default` would not be.
+        if self.policy.is_default_model(model) {
+            return Err(HarnessError::Unsupported {
+                harness: self.policy.harness,
+                feature: format!(
+                    "switching back to the agent's default model in a live session; \
+                     choose a model id ({})",
+                    available_models(&self.info)
+                ),
             });
         }
         let Some(model_id) = self.info.resolve_model(model) else {
@@ -2312,6 +2349,212 @@ mod tests {
             .await
             .expect("start session")
             .into_session();
+        agent.await.expect("agent");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn adapter_mode_ids_are_mapped_at_start_and_in_place() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            let initialize = next_frame(&mut reader).await;
+            send_frame(
+                &mut writer,
+                json!({"jsonrpc": "2.0", "id": initialize["id"], "result": {"protocolVersion": 1}}),
+            )
+            .await;
+            let new_session = next_frame(&mut reader).await;
+            assert_eq!(new_session["method"], "session/new");
+            // The agent names its own ids, not h4rn's `accept-edits`/`auto`.
+            send_frame(
+                &mut writer,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": new_session["id"],
+                    "result": {
+                        "sessionId": "s-1",
+                        "modes": {
+                            "currentModeId": "architect",
+                            "availableModes": [
+                                {"id": "architect", "name": "Architect"},
+                                {"id": "acceptEdits", "name": "Accept edits"},
+                                {"id": "bypassPermissions", "name": "Bypass"}
+                            ]
+                        }
+                    }
+                }),
+            )
+            .await;
+
+            let start = next_frame(&mut reader).await;
+            assert_eq!(
+                start["method"], "session/set_mode",
+                "a session created in full access asks for the agent's own id"
+            );
+            assert_eq!(start["params"]["sessionId"], "s-1");
+            assert_eq!(start["params"]["modeId"], "bypassPermissions");
+            send_frame(
+                &mut writer,
+                json!({"jsonrpc": "2.0", "id": start["id"], "result": {}}),
+            )
+            .await;
+
+            let switch = next_frame(&mut reader).await;
+            assert_eq!(switch["method"], "session/set_mode");
+            assert_eq!(switch["params"]["sessionId"], "s-1");
+            assert_eq!(switch["params"]["modeId"], "acceptEdits");
+            send_frame(
+                &mut writer,
+                json!({"jsonrpc": "2.0", "id": switch["id"], "result": {}}),
+            )
+            .await;
+        });
+
+        let mut spec = acp_spec(workspace.path());
+        spec.runtime_mode = RuntimeMode::FullAccess;
+        let mut session = AcpSession::start(&client, &spec, policy(), workspace.path())
+            .await
+            .expect("start session")
+            .into_session();
+
+        let modes = session
+            .controls()
+            .expect("the agent advertised its modes")
+            .modes;
+        assert!(
+            modes.contains(&RuntimeMode::AutoAcceptEdits)
+                && modes.contains(&RuntimeMode::FullAccess),
+            "adapter ids map onto h4rn's modes: {modes:?}"
+        );
+        session
+            .set_runtime_mode(RuntimeMode::AutoAcceptEdits)
+            .await
+            .expect("switch in place through the mapped id");
+        agent.await.expect("agent");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_advertised_mode_that_maps_to_none_is_refused_at_start() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            let initialize = next_frame(&mut reader).await;
+            send_frame(
+                &mut writer,
+                json!({"jsonrpc": "2.0", "id": initialize["id"], "result": {"protocolVersion": 1}}),
+            )
+            .await;
+            let new_session = next_frame(&mut reader).await;
+            send_frame(
+                &mut writer,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": new_session["id"],
+                    "result": {
+                        "sessionId": "s-1",
+                        "modes": {
+                            "currentModeId": "code",
+                            "availableModes": [
+                                {"id": "code", "name": "Code"},
+                                {"id": "architect", "name": "Architect"}
+                            ]
+                        }
+                    }
+                }),
+            )
+            .await;
+        });
+
+        let spec = acp_spec(workspace.path());
+        let error = AcpSession::start(&client, &spec, policy(), workspace.path())
+            .await
+            .err()
+            .expect("no advertised mode is h4rn's approval mode");
+        agent.await.expect("agent");
+        match error {
+            HarnessError::Unsupported { feature, .. } => {
+                assert!(
+                    feature.contains("code"),
+                    "the refusal names the catalogue: {feature}"
+                );
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_effort_config_option_is_sent_at_start_and_in_place() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            let initialize = next_frame(&mut reader).await;
+            send_frame(
+                &mut writer,
+                json!({"jsonrpc": "2.0", "id": initialize["id"], "result": {"protocolVersion": 1}}),
+            )
+            .await;
+            let new_session = next_frame(&mut reader).await;
+            assert_eq!(new_session["method"], "session/new");
+            send_frame(
+                &mut writer,
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": new_session["id"],
+                    "result": {
+                        "sessionId": "s-1",
+                        "configOptions": [{
+                            "id": "reasoning_effort",
+                            "name": "Reasoning effort",
+                            "category": "thought_level",
+                            "type": "select",
+                            "currentValue": "low",
+                            "options": [
+                                {"value": "low", "name": "Low"},
+                                {"value": "high", "name": "High"}
+                            ]
+                        }]
+                    }
+                }),
+            )
+            .await;
+
+            let start = next_frame(&mut reader).await;
+            assert_eq!(start["method"], "session/set_config_option");
+            assert_eq!(start["params"]["sessionId"], "s-1");
+            assert_eq!(start["params"]["configId"], "reasoning_effort");
+            assert_eq!(start["params"]["value"], "high");
+            send_frame(
+                &mut writer,
+                json!({"jsonrpc": "2.0", "id": start["id"], "result": {}}),
+            )
+            .await;
+
+            let switch = next_frame(&mut reader).await;
+            assert_eq!(switch["method"], "session/set_config_option");
+            assert_eq!(switch["params"]["configId"], "reasoning_effort");
+            assert_eq!(switch["params"]["value"], "low");
+            send_frame(
+                &mut writer,
+                json!({"jsonrpc": "2.0", "id": switch["id"], "result": {}}),
+            )
+            .await;
+        });
+
+        let mut spec = acp_spec(workspace.path());
+        spec.reasoning_effort = Some("high".into());
+        let mut session = AcpSession::start(&client, &spec, policy(), workspace.path())
+            .await
+            .expect("start session")
+            .into_session();
+        session
+            .set_reasoning_effort(Some("low"))
+            .await
+            .expect("switch effort in place");
         agent.await.expect("agent");
         session.shutdown().await.expect("shutdown");
     }

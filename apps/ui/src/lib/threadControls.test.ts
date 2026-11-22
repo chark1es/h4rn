@@ -6,6 +6,7 @@ import {
   fastSupported,
   modeLabel,
   nonDefaultSettings,
+  runtimeModeForModeId,
   threadEffortChoices,
   threadModeChoices,
   threadModelChoices,
@@ -62,6 +63,19 @@ describe("thread controls", () => {
   it("offers an ACP agent only the modes it advertised", () => {
     const offered = threadModeChoices("acp", ["default", "auto"]).map((choice) => choice.value);
     expect(offered).toEqual(["approval_required", "full_access"]);
+  });
+
+  it("accepts the agent's own spellings of the modes the daemon maps", () => {
+    const offered = threadModeChoices("acp", ["acceptEdits", "bypassPermissions"]).map(
+      (choice) => choice.value,
+    );
+    expect(offered).toEqual(["auto_accept_edits", "full_access"]);
+    expect(threadModeChoices("acp", ["accept_edits", "read-only"]).map((c) => c.value)).toEqual([
+      "auto_accept_edits",
+      "plan",
+    ]);
+    expect(runtimeModeForModeId("BypassPermissions")).toBe("full_access");
+    expect(runtimeModeForModeId("code")).toBeUndefined();
   });
 
   it("shows an effort picker only for harnesses with a real effort control", () => {

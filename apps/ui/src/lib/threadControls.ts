@@ -27,6 +27,29 @@ export const MODE_CHOICES: ModeChoice[] = [
   { value: "full_access", label: "Full access", modeId: "auto" },
 ];
 
+/**
+ * The ACP mode ids h4rn reads as each permission mode.
+ *
+ * This mirrors the daemon's `runtime_mode_for_id`. An agent names its modes
+ * itself (`acceptEdits`, `bypassPermissions`, `read-only`), and the picker must
+ * map those onto the same h4rn mode the daemon does: offering a second table
+ * here would offer labels the daemon refuses, or hide modes it accepts.
+ */
+const MODE_IDS: Record<RuntimeMode, readonly string[]> = {
+  approval_required: ["default", "ask", "manual", "supervised"],
+  auto_accept_edits: ["accept-edits", "acceptedits", "accept_edits"],
+  plan: ["plan", "read-only", "readonly"],
+  full_access: ["auto", "full-access", "full_access", "bypass", "bypasspermissions"],
+};
+
+/** The h4rn mode an advertised ACP mode id maps to, when it maps to one. */
+export function runtimeModeForModeId(id: string): RuntimeMode | undefined {
+  const normalized = id.trim().toLowerCase();
+  return (Object.keys(MODE_IDS) as RuntimeMode[]).find((mode) =>
+    MODE_IDS[mode].includes(normalized),
+  );
+}
+
 /** The modes each built-in harness can honour. */
 const HARNESS_MODES: Record<HarnessKind, RuntimeMode[]> = {
   claude_code: ["approval_required", "auto_accept_edits", "plan", "full_access"],
@@ -53,9 +76,16 @@ export function threadModeChoices(
     return MODE_CHOICES.filter((choice) => offered.includes(choice.value));
   }
   // The cached agent catalogue is authoritative when it is known: never offer
-  // a label the agent did not name.
-  const ids = new Set(advertisedAgentModes);
-  return MODE_CHOICES.filter((choice) => offered.includes(choice.value) && ids.has(choice.modeId));
+  // a label the agent did not name, and use the daemon's id mapping so an
+  // agent's `acceptEdits`/`bypassPermissions` counts as the mode it names.
+  const mapped = new Set(
+    advertisedAgentModes
+      .map(runtimeModeForModeId)
+      .filter((mode): mode is RuntimeMode => mode !== undefined),
+  );
+  return MODE_CHOICES.filter(
+    (choice) => offered.includes(choice.value) && mapped.has(choice.value),
+  );
 }
 
 /** The reasoning efforts a harness exposes, or an empty list. */

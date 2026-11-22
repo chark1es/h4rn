@@ -406,7 +406,7 @@ impl HarnessSession for OpenCodeSession {
         let Some((provider, model)) = parse_model(model) else {
             return Err(HarnessError::Unsupported {
                 harness: self.kind,
-                feature: format!("model `{model}`; OpenCode models are `provider/model`"),
+                feature: unsupported_model(model),
             });
         };
         let session_id = self
@@ -607,7 +607,10 @@ impl Drop for OpenCodeSession {
 
 /// Parses a `provider/model` selection.
 ///
-/// Empty values and the sentinels `default`/`auto` mean "let the server pick".
+/// Empty values and the sentinels `default`/`auto` mean "no explicit
+/// selection": a session start lets the server pick, which is why they are not
+/// a `(provider, model)` pair. A live session cannot switch back to that choice
+/// (`[`unsupported_model`]` says so), only to a named model.
 pub fn parse_model(model: &str) -> Option<(String, String)> {
     let model = model.trim();
     if model.is_empty()
@@ -621,6 +624,19 @@ pub fn parse_model(model: &str) -> Option<(String, String)> {
         return None;
     }
     Some((provider.to_string(), id.to_string()))
+}
+
+/// Why [`parse_model`] returned nothing, in the person's terms.
+fn unsupported_model(model: &str) -> String {
+    let model = model.trim();
+    if model.is_empty()
+        || model.eq_ignore_ascii_case("default")
+        || model.eq_ignore_ascii_case("auto")
+    {
+        "the server's default model; a session start lets OpenCode pick it, while a live session can only switch to a `provider/model`".to_string()
+    } else {
+        format!("model `{model}`; OpenCode models are `provider/model`")
+    }
 }
 
 /// Builds the generated `OPENCODE_CONFIG_CONTENT` document for a session.
@@ -1436,6 +1452,20 @@ mod tests {
         assert_eq!(parse_model("default"), None);
         assert_eq!(parse_model("deepseek-v4.1-flash"), None);
         assert_eq!(parse_model(""), None);
+    }
+
+    #[test]
+    fn a_default_model_is_refused_in_words_that_match_the_parser() {
+        let message = unsupported_model("default");
+        assert!(
+            message.contains("server's default") && message.contains("session start"),
+            "the reason explains what the sentinel means: {message}"
+        );
+        assert!(
+            !message.contains("OpenCode models are"),
+            "the sentinel is not a malformed provider/model: {message}"
+        );
+        assert!(unsupported_model("no-slash").contains("provider/model"));
     }
 
     #[test]

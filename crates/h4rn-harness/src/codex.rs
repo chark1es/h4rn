@@ -293,6 +293,8 @@ pub struct CodexSession {
 /// The per-model options Codex's `model/list` advertised.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CodexCatalog {
+    /// Every model id the catalogue offers, in its own order.
+    models: Vec<String>,
     /// Reasoning efforts this model accepts.
     efforts: Vec<String>,
     /// The effort the model runs at unless the thread overrides it.
@@ -497,9 +499,10 @@ impl CodexSession {
 
     /// Reads `model/list` and records what the current model supports.
     ///
-    /// Best effort: an older Codex without the method, or a provider whose
-    /// catalogue is unavailable, leaves `catalog` as it was (usually `None`),
-    /// so no valid setting is rejected on a guess.
+    /// A failed fetch clears the catalogue: the previous model's efforts and
+    /// fast tier do not describe the new one, and keeping them would let the
+    /// daemon validate a switch against a stale entry. With no catalogue no
+    /// value is rejected on a guess.
     async fn refresh_catalog(&mut self) {
         let requested = {
             let named = model_argument(&self.settings.model).map(str::to_string);
@@ -512,9 +515,12 @@ impl CodexSession {
             }
         };
         let Ok(result) = self.request("model/list", json!({})).await else {
+            // A failed fetch clears the catalogue: the previous model's efforts
+            // and fast tier do not describe the new one.
+            refreshed_catalog(&mut self.catalog, None, requested.as_deref());
             return;
         };
-        self.catalog = catalog_from_model_list(&result, requested.as_deref());
+        refreshed_catalog(&mut self.catalog, Some(result), requested.as_deref());
     }
 
     async fn request(&mut self, method: &str, params: Value) -> Result<Value, HarnessError> {
@@ -588,6 +594,19 @@ impl HarnessSession for CodexSession {
             return Err(HarnessError::Unsupported {
                 harness: self.kind,
                 feature: "an empty model".into(),
+            });
+        }
+        // The catalogue the session already fetched lists every model Codex
+        // offers. Check the requested id against it before switching so a typo
+        // is refused here instead of failing the next turn. `default` is the
+        // thread's "let Codex pick" alias, not a catalogue entry.
+        if self.catalog.is_none() {
+            self.refresh_catalog().await;
+        }
+        if let Some(feature) = unknown_codex_model(self.catalog.as_ref(), model) {
+            return Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature,
             });
         }
         let previous = self.settings.model.clone();
@@ -669,9 +688,10 @@ impl HarnessSession for CodexSession {
         let base = crate::thread_controls(self.kind);
         Some(crate::SessionControls {
             modes: base.modes,
-            // The catalogue lists selectable models, but a provider can run a
-            // custom slug too; the model itself is left unconstrained.
-            models: None,
+            models: (!catalog.models.is_empty()).then(|| catalog.models.clone()),
+            // `default` is Codex's own "let the CLI pick" alias; a turn omits
+            // the model field for it.
+            default_models: vec!["default".to_string()],
             efforts: catalog.efforts.clone(),
             fast: catalog.fast,
             switch_mode: true,
@@ -1120,13 +1140,51 @@ fn sandbox_mode(runtime_mode: RuntimeMode) -> &'static str {
     }
 }
 
+/// Records a `model/list` result, or clears the catalogue when the fetch
+/// failed.
+///
+/// Kept separate from the request so a test can prove the two outcomes: a
+/// failure must not leave the previous model's efforts behind, because the
+/// daemon would then validate the new model against a stale entry.
+fn refreshed_catalog(
+    catalog: &mut Option<CodexCatalog>,
+    result: Option<Value>,
+    requested: Option<&str>,
+) {
+    *catalog = result.and_then(|result| catalog_from_model_list(&result, requested));
+}
+
+/// Why `model` is not in the catalogue, when the catalogue is known.
+///
+/// `None` means the switch may proceed: the id is offered, it is the CLI's own
+/// default alias, the catalogue is unknown, or it named no models at all.
+fn unknown_codex_model(catalog: Option<&CodexCatalog>, model: &str) -> Option<String> {
+    let catalog = catalog?;
+    if catalog.models.is_empty()
+        || model == "default"
+        || catalog.models.iter().any(|id| id == model)
+    {
+        return None;
+    }
+    Some(format!(
+        "model `{model}`; codex offers: {}",
+        catalog.models.join(", ")
+    ))
+}
+
 /// The catalogue entry for one thread's model, from a `model/list` reply.
 ///
 /// `requested` is the model the thread named; without one the catalogue's
 /// default entry is the thread's model. An unknown id leaves the catalogue
-/// unknown rather than guessing from another model.
+/// unknown rather than guessing from another model. The full id list is kept
+/// even then, so the daemon can refuse a model Codex does not offer.
 fn catalog_from_model_list(result: &Value, requested: Option<&str>) -> Option<CodexCatalog> {
     let entries = result["data"].as_array()?;
+    let models = entries
+        .iter()
+        .filter_map(|entry| entry["id"].as_str())
+        .map(str::to_string)
+        .collect();
     let entry = match requested {
         Some(id) => entries
             .iter()
@@ -1151,6 +1209,7 @@ fn catalog_from_model_list(result: &Value, requested: Option<&str>) -> Option<Co
             .is_some_and(|tiers| tiers.iter().any(|tier| tier == "fast"));
     let default_effort = entry["defaultReasoningEffort"].as_str().map(str::to_string);
     Some(CodexCatalog {
+        models,
         efforts,
         default_effort,
         fast,
@@ -1656,10 +1715,56 @@ mod tests {
         assert_eq!(catalog.efforts, vec!["low", "high"]);
         assert_eq!(catalog.default_effort.as_deref(), Some("low"));
         assert!(catalog.fast);
+        assert_eq!(
+            catalog.models,
+            vec!["gpt-6.2-sol".to_string(), "gpt-plain".to_string()],
+            "the catalogue exposes every id it offers for model validation"
+        );
         let plain = catalog_from_model_list(&result, Some("gpt-plain")).expect("catalogue");
         assert!(plain.efforts.is_empty());
         assert!(!plain.fast);
         // An unknown id does not borrow another model's options.
         assert_eq!(catalog_from_model_list(&result, Some("missing")), None);
+    }
+
+    #[test]
+    fn a_failed_catalogue_refresh_clears_the_previous_models_entry() {
+        let first = json!({
+            "data": [
+                {"id": "gpt-a", "isDefault": true, "supportedReasoningEfforts": [{"reasoningEffort": "low"}]},
+                {"id": "gpt-b", "isDefault": false, "supportedReasoningEfforts": []}
+            ]
+        });
+        let mut catalog = None;
+        refreshed_catalog(&mut catalog, Some(first), Some("gpt-a"));
+        assert_eq!(catalog.as_ref().expect("catalogue").efforts, vec!["low"]);
+
+        // The next fetch failed: keeping gpt-a's entry would validate the new
+        // model against efforts it may not offer.
+        refreshed_catalog(&mut catalog, None, Some("gpt-b"));
+        assert!(catalog.is_none(), "a failed refresh cleared the catalogue");
+    }
+
+    #[test]
+    fn a_model_the_catalogue_does_not_list_is_refused() {
+        let result = json!({
+            "data": [
+                {"id": "gpt-a", "isDefault": true},
+                {"id": "gpt-b", "isDefault": false}
+            ]
+        });
+        let catalog = catalog_from_model_list(&result, Some("gpt-a")).expect("catalogue");
+        let refusal = unknown_codex_model(Some(&catalog), "gpt-typo").expect("refused");
+        assert!(
+            refusal.contains("gpt-typo") && refusal.contains("gpt-a") && refusal.contains("gpt-b"),
+            "the refusal names the id and the catalogue: {refusal}"
+        );
+        assert!(unknown_codex_model(Some(&catalog), "gpt-b").is_none());
+        assert!(
+            unknown_codex_model(Some(&catalog), "default").is_none(),
+            "the CLI's default alias is not a catalogue entry"
+        );
+        // Without a catalogue nothing is refused on a guess.
+        assert!(unknown_codex_model(None, "anything").is_none());
     }
 }

@@ -46,7 +46,7 @@
 //! child is spawned into its own process group so `Bash` tools die with it
 //! (ADR-021).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -71,7 +71,10 @@ mod protocol;
 
 pub use limit::{LimitSignal, detect_limit, parse_reset_time};
 pub use process::StderrRing;
-pub use protocol::{ClaudeStreamParser, TurnReport, state_for_tool, tool_paths, tool_summary};
+pub use protocol::{
+    ClaudeStreamParser, ControlReply, TurnReport, parse_control_response, state_for_tool,
+    tool_paths, tool_summary,
+};
 
 use process::{GroupSignal, signal_group};
 
@@ -103,6 +106,12 @@ const EVENT_CHANNEL_CAPACITY: usize = 512;
 const STDIN_CHANNEL_CAPACITY: usize = 64;
 const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long a control request may take before the CLI is treated as mute.
+///
+/// A refused switch is reported by the CLI in a `control_response`; waiting
+/// forever would hang the request that asked for it, and assuming success
+/// would report a setting the session never took.
+const CONTROL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Environment variables a nested Claude Code must not inherit.
 ///
@@ -332,6 +341,11 @@ struct SharedState {
     state: AgentState,
     last_turn: Option<TurnReport>,
     touched_paths: Vec<String>,
+    /// Control requests waiting for the CLI's `control_response`.
+    ///
+    /// The stdout task resolves one on the parsed frame; a request that is
+    /// never answered times out in [`ClaudeCodeSession::send_control_request`].
+    pending_controls: HashMap<String, tokio::sync::oneshot::Sender<ControlReply>>,
 }
 
 impl SharedState {
@@ -343,6 +357,7 @@ impl SharedState {
             state: AgentState::Idle,
             last_turn: None,
             touched_paths: Vec::new(),
+            pending_controls: HashMap::new(),
         }
     }
 }
@@ -415,11 +430,15 @@ impl ClaudeCodeSession {
         format!("h4rn-{}", self.control_seq)
     }
 
-    /// Sends one `control_request` on the stream-json channel.
+    /// Sends one `control_request` and waits for the CLI's answer.
     ///
-    /// Claude Code answers with a `control_response`; the daemon does not wait
-    /// for it because the switch applies to the next turn, and a refusal is
-    /// visible in the harness's next output.
+    /// Claude Code replies with a `control_response` carrying the same
+    /// `request_id`: a `success` means the CLI applied the switch, an `error`
+    /// carries its own refusal message (for example a model the provider does
+    /// not know). Reporting a setting the CLI refused would put a value in the
+    /// thread summary the next turn never uses, so the refusal is returned as
+    /// [`HarnessError::Unsupported`] and a CLI that does not answer in
+    /// [`CONTROL_TIMEOUT`] is a transport failure.
     async fn send_control_request(
         &mut self,
         request: serde_json::Value,
@@ -431,13 +450,53 @@ impl ClaudeCodeSession {
             });
         }
         let request_id = self.next_request_id();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        lock(&self.shared)
+            .pending_controls
+            .insert(request_id.clone(), reply_tx);
         let frame = json!({
             "type": "control_request",
             "request_id": request_id,
             "request": request,
         });
-        let bytes = encode_frame(&frame)?;
-        self.write_frame(bytes).await
+        let bytes = match encode_frame(&frame) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                lock(&self.shared).pending_controls.remove(&request_id);
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.write_frame(bytes).await {
+            lock(&self.shared).pending_controls.remove(&request_id);
+            return Err(error);
+        }
+
+        let reply = match tokio::time::timeout(CONTROL_TIMEOUT, reply_rx).await {
+            Ok(Ok(reply)) => reply,
+            Ok(Err(_)) => {
+                return Err(HarnessError::Transport {
+                    harness: self.kind,
+                    message: "claude closed before answering a control request".into(),
+                });
+            }
+            Err(_) => {
+                lock(&self.shared).pending_controls.remove(&request_id);
+                return Err(HarnessError::Transport {
+                    harness: self.kind,
+                    message: format!(
+                        "claude did not answer a control request within {}s",
+                        CONTROL_TIMEOUT.as_secs()
+                    ),
+                });
+            }
+        };
+        match reply.error {
+            None => Ok(()),
+            Some(message) => Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature: message,
+            }),
+        }
     }
 }
 
@@ -561,9 +620,16 @@ impl HarnessSession for ClaudeCodeSession {
 
     async fn set_model(&mut self, model: &str) -> Result<(), HarnessError> {
         let model = model.trim();
-        if model.is_empty() || model == "default" {
-            return Ok(());
+        if model.is_empty() {
+            return Err(HarnessError::Unsupported {
+                harness: self.kind,
+                feature: "an empty model".into(),
+            });
         }
+        // `default` is the CLI's own alias and really switches back to the
+        // model the CLI would pick (verified against 2.1.329: the reply names
+        // the resulting model). Skipping the request would leave the live
+        // session on the old model while the summary claimed the default.
         self.send_control_request(json!({
             "subtype": "set_model",
             "model": model,
@@ -647,6 +713,13 @@ fn spawn_stdout_reader(
             };
 
             let mut events = parser.push_line(&line);
+            // A control reply is not a turn event; it answers the request that
+            // is waiting in `send_control_request`.
+            if let Some(reply) = parse_control_response(&line)
+                && let Some(sender) = lock(&shared).pending_controls.remove(&reply.request_id)
+            {
+                let _ = sender.send(reply);
+            }
             {
                 let mut state = lock(&shared);
                 state.session_id = parser.session_id().map(str::to_string);
@@ -1226,5 +1299,106 @@ mod tests {
         let args = session_args(&spec, None);
         assert!(!args.iter().any(|arg| arg == "--model"));
         assert!(!args.iter().any(|arg| arg == "--effort"));
+    }
+
+    /// A fake CLI that logs every frame it receives and answers a control
+    /// request with `reply`.
+    #[cfg(unix)]
+    fn fake_cli(directory: &Path, reply: &str) -> (HarnessInstall, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let log = directory.join("control.log");
+        let path = directory.join("claude");
+        let script = format!(
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$H4RN_TEST_CONTROL_LOG"
+  case "$line" in
+    *'"type":"control_request"'*)
+      rid=$(printf '%s' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')
+{r}
+      ;;
+  esac
+done
+"#,
+            r = reply
+        );
+        std::fs::write(&path, script).expect("write the fake cli");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        (
+            HarnessInstall {
+                path,
+                version: "2.1.329".into(),
+            },
+            log,
+        )
+    }
+
+    #[cfg(unix)]
+    fn control_log(log: &Path) -> Vec<serde_json::Value> {
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        text.lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .filter(|value: &serde_json::Value| value["type"] == "control_request")
+            .collect()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_refused_model_switch_is_an_error_with_the_cli_message() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (install, log) = fake_cli(
+            workspace.path(),
+            "      printf '{\"type\":\"control_response\",\"response\":{\"subtype\":\"error\",\"request_id\":\"%s\",\"error\":\"API error: 400 unknown provider for model nope \\u00b7 model not changed\",\"error_code\":\"check_rejected\"}}\\n' \"$rid\"",
+        );
+        let harness = ClaudeCodeHarness::with_install(install);
+        let mut spec = spec(workspace.path());
+        spec.env_overrides
+            .insert("H4RN_TEST_CONTROL_LOG".into(), log.display().to_string());
+        let mut session = harness.start_session(spec).await.expect("start session");
+
+        let error = session
+            .set_model("nope")
+            .await
+            .expect_err("a refused switch is not success");
+        match error {
+            HarnessError::Unsupported { feature, .. } => {
+                assert!(
+                    feature.contains("model not changed"),
+                    "the CLI's own message is reported: {feature}"
+                );
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+        let requests = control_log(&log);
+        assert_eq!(requests.len(), 1, "the switch was really sent");
+        assert_eq!(requests[0]["request"]["subtype"], "set_model");
+        assert_eq!(requests[0]["request"]["model"], "nope");
+        session.shutdown().await.expect("shutdown");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_default_model_switch_is_really_sent_to_the_cli() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (install, log) = fake_cli(
+            workspace.path(),
+            "      printf '{\"type\":\"control_response\",\"response\":{\"subtype\":\"success\",\"request_id\":\"%s\",\"response\":{\"model\":\"claude-opus-5-5\"}}}\\n' \"$rid\"",
+        );
+        let harness = ClaudeCodeHarness::with_install(install);
+        let mut spec = spec(workspace.path());
+        spec.env_overrides
+            .insert("H4RN_TEST_CONTROL_LOG".into(), log.display().to_string());
+        let mut session = harness.start_session(spec).await.expect("start session");
+
+        session
+            .set_model("default")
+            .await
+            .expect("the CLI's default is a real switch");
+        let requests = control_log(&log);
+        assert_eq!(requests.len(), 1, "default was not treated as a no-op");
+        assert_eq!(requests[0]["request"]["subtype"], "set_model");
+        assert_eq!(requests[0]["request"]["model"], "default");
+        session.shutdown().await.expect("shutdown");
     }
 }
