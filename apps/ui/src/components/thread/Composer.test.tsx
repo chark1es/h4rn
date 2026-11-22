@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MessageRole, ThreadSummary } from "@/gen";
 import type { StreamTurn, ThreadLog, TurnItem } from "@/lib/store/projection";
@@ -10,17 +10,32 @@ const mock = vi.hoisted(() => {
     connection: { status: string };
     hosts: Record<string, { online: boolean; name: string }>;
     logs: Record<string, unknown>;
-    ui: { focusComposerNonce: number; newThreadOpen: boolean };
+    ui: {
+      focusComposerNonce: number;
+      newThreadOpen: boolean;
+      phone: boolean;
+      layout: { terminalOpen: boolean; view: "thread" | "ide" };
+    };
   } = {
     connection: { status: "online" },
     hosts: { host_ui: { online: true, name: "atlas" } },
     logs: {},
-    ui: { focusComposerNonce: 0, newThreadOpen: false },
+    ui: {
+      focusComposerNonce: 0,
+      newThreadOpen: false,
+      phone: false,
+      layout: { terminalOpen: false, view: "thread" },
+    },
   };
   return {
     state,
     sendMessage:
       vi.fn<(threadId: string, text: string, attachments: unknown[]) => Promise<boolean>>(),
+    interruptThread: vi.fn(),
+    toggleTerminal: vi.fn(),
+    toggleView: vi.fn(),
+    setPanelTab: vi.fn(),
+    openNewThread: vi.fn(),
     attachments: () => ({
       attachments: [] as unknown[],
       tasks: [] as unknown[],
@@ -43,6 +58,14 @@ vi.mock("@/lib/store/appStore", () => ({
   useApp: (selector: (state: unknown) => unknown) => selector(mock.state),
   getState: () => mock.state,
   sendMessage: mock.sendMessage,
+  interruptThread: mock.interruptThread,
+  toggleTerminal: mock.toggleTerminal,
+  toggleView: mock.toggleView,
+  setPanelTab: mock.setPanelTab,
+  openNewThread: mock.openNewThread,
+  getClient: () => {
+    throw new Error("Tests inject a workspace file lister.");
+  },
 }));
 
 vi.mock("@/features/attachments/use-attachments", () => ({
@@ -58,9 +81,14 @@ vi.mock("@/features/proxy/proxyStore", () => ({
 }));
 
 vi.mock("@/hooks/use-media-query", () => ({
-  useIsPhone: () => false,
+  useIsPhone: () => mock.state.ui.phone,
 }));
 
+import {
+  clearWorkspaceFilesCache,
+  setWorkspaceFileListerForTests,
+} from "@/features/composer/workspaceFiles";
+import type { FileEntry, FsListing } from "@/gen";
 import { draftStorageKey, flushDrafts, readThreadDraft, writeThreadDraft } from "@/lib/drafts";
 import { Composer } from "./Composer";
 
@@ -139,25 +167,79 @@ function textarea(): HTMLTextAreaElement {
   return screen.getByRole("textbox") as HTMLTextAreaElement;
 }
 
+const WORKSPACE_FILES = [
+  "README.md",
+  "apps/ui/src/components/Composer.tsx",
+  "apps/ui/src/lib/composerMenu.ts",
+  "docs/ux.md",
+  "src/with space.ts",
+];
+
+function fileEntry(path: string): FileEntry {
+  return {
+    name: path.split("/").pop() ?? path,
+    path,
+    kind: "file",
+    size_bytes: 10,
+    modified_at: null,
+    git_status: null,
+  };
+}
+
+function workspaceListing(path: string, files: string[]): FsListing {
+  return {
+    workspace: "/work/repo",
+    path,
+    entries: path === "" ? files.map(fileEntry) : [],
+    truncated: false,
+  };
+}
+
+function stubWorkspaceFiles(files: string[] = WORKSPACE_FILES): void {
+  setWorkspaceFileListerForTests(async ({ path }) => workspaceListing(path, files));
+}
+
+/** Type, then put the caret at the end the way a browser would. */
+function typeInto(input: HTMLTextAreaElement, value: string, caret = value.length): void {
+  fireEvent.change(input, { target: { value } });
+  input.setSelectionRange(caret, caret);
+  fireEvent.select(input);
+}
+
+function option(pattern: RegExp): HTMLElement | null {
+  return screen.queryByRole("option", { name: pattern });
+}
+
+beforeEach(() => {
+  flushDrafts();
+  window.localStorage.clear();
+  rafQueue = [];
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+    rafQueue.push(callback);
+    return rafQueue.length;
+  });
+  mock.state.logs = {};
+  mock.state.connection.status = "online";
+  mock.state.ui.phone = false;
+  mock.state.ui.layout = { terminalOpen: false, view: "thread" };
+  mock.sendMessage.mockReset();
+  mock.interruptThread.mockReset();
+  mock.toggleTerminal.mockReset();
+  mock.toggleView.mockReset();
+  mock.setPanelTab.mockReset();
+  mock.openNewThread.mockReset();
+  clearWorkspaceFilesCache();
+  stubWorkspaceFiles();
+});
+
+afterEach(() => {
+  cleanup();
+  setWorkspaceFileListerForTests(null);
+  clearWorkspaceFilesCache();
+  vi.unstubAllGlobals();
+});
+
 describe("Composer drafts and history", () => {
-  beforeEach(() => {
-    flushDrafts();
-    window.localStorage.clear();
-    rafQueue = [];
-    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
-      rafQueue.push(callback);
-      return rafQueue.length;
-    });
-    mock.state.logs = {};
-    mock.state.connection.status = "online";
-    mock.sendMessage.mockReset();
-  });
-
-  afterEach(() => {
-    cleanup();
-    vi.unstubAllGlobals();
-  });
-
   it("leaves the stored draft alone while browsing history", () => {
     mock.state.logs[THREAD] = log(["earlier prompt"]);
     const view = renderComposer();
@@ -405,5 +487,225 @@ describe("Composer drafts and history", () => {
       }),
     );
     expect(input.value).toBe("my unsaved edit");
+  });
+});
+
+describe("Composer @ file picker", () => {
+  it("opens at a word boundary and lists workspace files", async () => {
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "ask @");
+
+    expect(await screen.findByRole("listbox", { name: "Files" })).toBeTruthy();
+    await waitFor(() => expect(option(/README\.md/)).not.toBeNull());
+    expect(option(/with space/)).not.toBeNull();
+    expect(input.value).toBe("ask @");
+  });
+
+  it("does not open inside a word", async () => {
+    renderComposer();
+    typeInto(textarea(), "me@example.com");
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
+  it("filters with path-aware matching after a debounce", async () => {
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "@components/comp");
+
+    await waitFor(() => expect(option(/components\/Composer\.tsx/)).not.toBeNull(), {
+      timeout: 1_000,
+    });
+    await waitFor(() => expect(option(/README\.md/)).toBeNull(), { timeout: 1_000 });
+  });
+
+  it("inserts the highlighted file with Enter, quotes spaces and moves the caret", async () => {
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "open @with");
+    await waitFor(() => expect(option(/src\/with space\.ts/)).not.toBeNull(), {
+      timeout: 1_000,
+    });
+    await waitFor(() => expect(option(/README\.md/)).toBeNull(), { timeout: 1_000 });
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    runAnimationFrames();
+
+    expect(input.value).toBe('open @"src/with space.ts" ');
+    expect(input.selectionStart).toBe(input.value.length);
+    expect(input.selectionEnd).toBe(input.value.length);
+    expect(mock.sendMessage).not.toHaveBeenCalled();
+    expect(readThreadDraft(HOST, THREAD)).toBe('open @"src/with space.ts" ');
+  });
+
+  it("inserts with Tab and also inserts on click", async () => {
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "@read");
+    await waitFor(() => expect(option(/README\.md/)).not.toBeNull(), { timeout: 1_000 });
+    fireEvent.keyDown(input, { key: "Tab" });
+    runAnimationFrames();
+    expect(input.value).toBe("@README.md ");
+
+    typeInto(input, "@menu");
+    await waitFor(() => expect(option(/composerMenu\.ts/)).not.toBeNull(), {
+      timeout: 1_000,
+    });
+    fireEvent.click(option(/composerMenu\.ts/) as HTMLElement);
+    runAnimationFrames();
+    expect(input.value).toBe("@apps/ui/src/lib/composerMenu.ts ");
+  });
+
+  it("moves with arrows without recalling history, and Enter never sends while open", async () => {
+    mock.state.logs[THREAD] = log(["earlier prompt"]);
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "@");
+    await waitFor(() => expect(option(/README\.md/)).not.toBeNull());
+
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    runAnimationFrames();
+    expect(input.value).toBe("@");
+    expect(input.value).not.toBe("earlier prompt");
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    runAnimationFrames();
+    expect(mock.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("closes on Escape, leaves the typed text, then normal keys work again", async () => {
+    mock.sendMessage.mockResolvedValue(true);
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "@comp");
+    await waitFor(() => expect(option(/Composer\.tsx/)).not.toBeNull(), { timeout: 1_000 });
+
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(input.value).toBe("@comp");
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(mock.sendMessage).toHaveBeenCalledWith(THREAD, "@comp", []));
+  });
+
+  it("opens from the @ button", async () => {
+    renderComposer();
+    fireEvent.click(screen.getByRole("button", { name: "Mention a file" }));
+
+    expect(await screen.findByRole("listbox", { name: "Files" })).toBeTruthy();
+    expect(textarea().value).toBe("@");
+  });
+
+  it("does not open or move during IME composition", async () => {
+    renderComposer();
+    const input = textarea();
+    fireEvent.compositionStart(input);
+    fireEvent.change(input, { target: { value: "@に" } });
+    input.setSelectionRange(2, 2);
+    fireEvent.select(input);
+
+    expect(screen.queryByRole("listbox")).toBeNull();
+    fireEvent.keyDown(input, { key: "ArrowDown", isComposing: true });
+    expect(screen.queryByRole("listbox")).toBeNull();
+
+    fireEvent.compositionEnd(input);
+  });
+
+  it("shows an empty workspace and an empty filter state", async () => {
+    stubWorkspaceFiles([]);
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "@");
+    expect(await screen.findByText("No files in code.")).toBeTruthy();
+
+    typeInto(input, "@zzz");
+    expect(await screen.findByText("No files match “zzz”.")).toBeTruthy();
+  });
+});
+
+describe("Composer / command menu", () => {
+  it("opens only when / is the first character", async () => {
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "say /stop");
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole("listbox")).toBeNull();
+
+    typeInto(input, "/");
+    expect(await screen.findByRole("listbox", { name: "Commands" })).toBeTruthy();
+    expect(option(/Stop the turn/)).not.toBeNull();
+    expect(option(/Open the terminal/)).not.toBeNull();
+    expect(option(/New thread/)).not.toBeNull();
+  });
+
+  it("runs the highlighted h4rn action and clears the slash text", async () => {
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "/term");
+    await waitFor(() => expect(option(/Open the terminal/)).not.toBeNull());
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    runAnimationFrames();
+
+    expect(mock.toggleTerminal).toHaveBeenCalledTimes(1);
+    expect(input.value).toBe("");
+    expect(readThreadDraft(HOST, THREAD)).toBe("");
+    expect(mock.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("offers Stop the turn only while the thread is working", async () => {
+    const view = renderComposer();
+    const input = textarea();
+    typeInto(input, "/stop");
+    expect(await screen.findByRole("option", { name: /Stop the turn/ })).toBeTruthy();
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(mock.interruptThread).toHaveBeenCalledWith(THREAD);
+    mock.interruptThread.mockReset();
+
+    view.rerender(<Composer summary={{ ...summary, tab: "done" }} />);
+    const second = textarea();
+    typeInto(second, "/stop");
+    expect(await screen.findByRole("listbox", { name: "Commands" })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: /Stop the turn/ })).toBeNull();
+  });
+
+  it("starts a new thread in this workspace", async () => {
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "/new");
+    await waitFor(() => expect(option(/New thread/)).not.toBeNull());
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(mock.openNewThread).toHaveBeenCalledWith({ host: HOST, workspace: "~/code" });
+    expect(input.value).toBe("");
+  });
+
+  it("shows an empty command state and keeps Enter from sending", async () => {
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "/zzz");
+    expect(await screen.findByText("No commands match “zzz”.")).toBeTruthy();
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(mock.sendMessage).not.toHaveBeenCalled();
+    expect(input.value).toBe("/zzz");
+  });
+
+  it("renders the same list as a bottom sheet on a phone", async () => {
+    mock.state.ui.phone = true;
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "@read");
+
+    const sheet = await screen.findByRole("dialog", { name: "Files" });
+    expect(within(sheet).getByText("Files in code")).toBeTruthy();
+    fireEvent.click(await within(sheet).findByRole("option", { name: /README\.md/ }));
+    runAnimationFrames();
+    expect(input.value).toBe("@README.md ");
+    expect(screen.queryByRole("dialog", { name: "Files" })).toBeNull();
   });
 });

@@ -1,5 +1,5 @@
 import { ArrowUpIcon, AtSignIcon, ChevronDownIcon, PaperclipIcon, PlusIcon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import {
   DropdownMenu,
@@ -12,6 +12,8 @@ import {
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts, useAttachShortcut } from "@/features/attachments/use-attachments";
+import { useDebouncedValue } from "@/features/composer/useDebouncedValue";
+import { useWorkspaceFiles } from "@/features/composer/workspaceFiles";
 import {
   proxyModelsFor,
   proxyOverrideFor,
@@ -20,7 +22,18 @@ import {
 } from "@/features/proxy/proxyStore";
 import type { ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
+import { composerCommands } from "@/lib/composerCommands";
 import { caretOnFirstLine, sentPrompts, stepPromptHistory } from "@/lib/composerHistory";
+import {
+  applyCompletion,
+  type ComposerTrigger,
+  detectComposerTrigger,
+  fileReference,
+  rankCommands,
+  rankFilePaths,
+  stepSelection,
+  triggerKey,
+} from "@/lib/composerMenu";
 import {
   clearThreadDraftIfRevision,
   type DraftRevision,
@@ -33,6 +46,66 @@ import {
 import { harnessLabel } from "@/lib/entities";
 import { getState, sendMessage, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
+import { ComposerMenu, type ComposerMenuRow } from "./ComposerMenu";
+
+type OpenMenu = { trigger: ComposerTrigger; activeIndex: number };
+
+/** Where the desktop popover sits, relative to the input wrapper. */
+function caretAnchor(
+  element: HTMLTextAreaElement,
+  position: number,
+): { left: number; bottom: number } {
+  const wrapper = element.parentElement;
+  if (!wrapper) return { left: 0, bottom: 0 };
+  const width = wrapper.clientWidth || element.clientWidth;
+  if (typeof window === "undefined" || !window.getComputedStyle) {
+    return { left: 0, bottom: 0 };
+  }
+  const computed = window.getComputedStyle(element);
+  const mirror = document.createElement("div");
+  for (const property of [
+    "fontFamily",
+    "fontSize",
+    "fontStyle",
+    "fontWeight",
+    "letterSpacing",
+    "lineHeight",
+    "paddingTop",
+    "paddingRight",
+    "paddingBottom",
+    "paddingLeft",
+    "borderTopWidth",
+    "borderRightWidth",
+    "borderBottomWidth",
+    "borderLeftWidth",
+    "borderStyle",
+    "boxSizing",
+  ]) {
+    mirror.style.setProperty(property, computed.getPropertyValue(property));
+  }
+  mirror.style.position = "absolute";
+  mirror.style.visibility = "hidden";
+  mirror.style.top = "0";
+  mirror.style.left = "0";
+  mirror.style.width = `${element.clientWidth || width}px`;
+  mirror.style.whiteSpace = "pre-wrap";
+  mirror.style.overflowWrap = "break-word";
+  mirror.textContent = element.value.slice(0, position);
+  const marker = document.createElement("span");
+  marker.textContent = element.value.slice(position) || ".";
+  mirror.append(marker);
+  document.body.append(mirror);
+  const markerLeft = marker.offsetLeft;
+  const markerTop = marker.offsetTop;
+  mirror.remove();
+
+  const lineHeight = Number.parseFloat(computed.lineHeight) || 21;
+  const above = wrapper.clientHeight - (element.offsetTop + markerTop);
+  return {
+    left: Math.max(0, Math.min(markerLeft + element.offsetLeft, Math.max(0, width - 240))),
+    bottom: Math.max(lineHeight, above + 6),
+  };
+}
 
 export function Composer({ summary }: { summary: ThreadSummary }) {
   const focusNonce = useApp((state) => state.ui.focusComposerNonce);
@@ -43,7 +116,14 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   const [sending, setSending] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [menu, setMenu] = useState<OpenMenu | null>(null);
+  const [anchor, setAnchor] = useState({ left: 0, bottom: 0 });
   const ref = useRef<HTMLTextAreaElement | null>(null);
+  /** True from compositionstart to compositionend; IME never drives the menu. */
+  const composing = useRef(false);
+  /** The trigger Escape dismissed; typing the same token does not reopen it. */
+  const dismissed = useRef<string | null>(null);
+  const isPhone = useIsPhone();
   /**
    * The revision of the text this composer is showing: set when the draft is
    * loaded, when it is written, and when another tab's change is adopted.
@@ -60,6 +140,43 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   useProxy((state) => state.profiles);
   const proxyActive = proxyOverrideFor(summary.harness);
   const proxyModels = proxyModelsFor(summary.harness);
+
+  const terminalOpen = useApp((state) => state.ui.layout.terminalOpen);
+  const view = useApp((state) => state.ui.layout.view);
+  const commands = useMemo(
+    () => composerCommands(summary, { terminalOpen, view }),
+    [summary, terminalOpen, view],
+  );
+  const workspaceTarget = useMemo(
+    () => ({ host: summary.host, workspace: summary.workspace_path }),
+    [summary.host, summary.workspace_path],
+  );
+  const fileIndex = useWorkspaceFiles(workspaceTarget, menu?.trigger.kind === "file");
+  const menuQuery = menu?.trigger.query ?? "";
+  const settledQuery = useDebouncedValue(menuQuery, 120);
+  const commandQuery = menu?.trigger.kind === "command" ? menu.trigger.query : "";
+  const fileResults = useMemo(
+    () => rankFilePaths(fileIndex.files, settledQuery, 50),
+    [fileIndex.files, settledQuery],
+  );
+  const commandResults = useMemo(
+    () => rankCommands(commands, commandQuery),
+    [commands, commandQuery],
+  );
+  const rows: ComposerMenuRow[] = useMemo(() => {
+    if (menu?.trigger.kind === "command") {
+      return commandResults.map((command) => ({
+        kind: "command" as const,
+        id: command.id,
+        label: command.label,
+        ...(command.hint ? { hint: command.hint } : {}),
+        icon: command.icon,
+      }));
+    }
+    return fileResults.map((path) => ({ kind: "file" as const, id: path, path }));
+  }, [menu?.trigger.kind, commandResults, fileResults]);
+  const activeIndex = menu && rows.length > 0 ? Math.min(menu.activeIndex, rows.length - 1) : 0;
+  const workspaceName = summary.workspace_path.split("/").filter(Boolean).pop() ?? summary.host;
 
   const online = connection === "online";
   const writable = online && hostOnline;
@@ -80,6 +197,8 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     revision.current = entry.revision;
     historyIndex.current = -1;
     historyDraft.current = "";
+    setMenu(null);
+    dismissed.current = null;
     requestAnimationFrame(() => {
       const element = ref.current;
       if (!element) return;
@@ -87,6 +206,14 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
       element.style.height = `${Math.min(element.scrollHeight, 132)}px`;
     });
   }, [summary.host, summary.thread_id]);
+
+  // The popover points at the caret line. Its position follows edits, not the
+  // highlighted row, so moving with arrows never makes it jump.
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!menu || !element || isPhone) return;
+    setAnchor(caretAnchor(element, menu.trigger.end));
+  }, [menu, isPhone]);
 
   useEffect(() => {
     if (focusNonce > 0) ref.current?.focus();
@@ -102,6 +229,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
       historyDraft.current = "";
       revision.current = change.revision;
       setText(change.text);
+      setMenu(null);
     });
   }, [summary.host, summary.thread_id]);
 
@@ -147,22 +275,11 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     return true;
   };
 
-  const insertMention = () => {
-    const element = ref.current;
-    if (!element || !writable) return;
-    const start = element.selectionStart ?? text.length;
-    const next = `${text.slice(0, start)}@${text.slice(start)}`;
-    update(next);
-    requestAnimationFrame(() => {
-      element.focus();
-      element.setSelectionRange(start + 1, start + 1);
-      autosize();
-    });
-  };
-
   const submit = async () => {
     if (!writable || sending || attachments.blockedReason) return;
     if (!text.trim() && attachments.attachments.length === 0) return;
+    setMenu(null);
+    dismissed.current = null;
     // Send exactly what is on screen, and remember the revision it was loaded
     // or written under. A newer draft written elsewhere while this send waits
     // must not be cleared.
@@ -202,10 +319,92 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     !attachments.blockedReason &&
     (text.trim().length > 0 || attachments.attachments.length > 0);
 
-  const isPhone = useIsPhone();
   const replyTo = isPhone
     ? `Reply to ${harnessLabel(summary.harness)}`
     : `Reply to ${harnessLabel(summary.harness)} on ${summary.host}`;
+
+  const syncMenu = (value: string, caret: number | null) => {
+    if (!writable) {
+      setMenu(null);
+      return;
+    }
+    const trigger = detectComposerTrigger(value, caret ?? value.length);
+    if (!trigger) {
+      setMenu(null);
+      dismissed.current = null;
+      return;
+    }
+    const key = triggerKey(trigger);
+    if (dismissed.current === key) {
+      setMenu(null);
+      return;
+    }
+    if (dismissed.current && dismissed.current !== key) dismissed.current = null;
+    setMenu((current) => {
+      if (
+        current &&
+        current.trigger.kind === trigger.kind &&
+        current.trigger.start === trigger.start &&
+        current.trigger.query === trigger.query &&
+        current.trigger.end === trigger.end
+      ) {
+        return { ...current, trigger };
+      }
+      return { trigger, activeIndex: 0 };
+    });
+  };
+
+  const focusCaret = (caret: number) => {
+    const element = ref.current;
+    if (!element) return;
+    requestAnimationFrame(() => {
+      if (!ref.current) return;
+      element.focus();
+      element.setSelectionRange(caret, caret);
+      autosize();
+    });
+  };
+
+  const closeMenu = (dismiss: boolean) => {
+    if (dismiss && menu) dismissed.current = triggerKey(menu.trigger);
+    setMenu(null);
+  };
+
+  const choose = (index: number) => {
+    const row = rows[index];
+    if (!menu || !row) return;
+    if (row.kind === "file") {
+      const applied = applyCompletion(text, menu.trigger, fileReference(row.path));
+      update(applied.value);
+      dismissed.current = null;
+      setMenu(null);
+      focusCaret(applied.caret);
+      return;
+    }
+    const command = commandResults.find((entry) => entry.id === row.id);
+    const applied = applyCompletion(text, menu.trigger, "");
+    update(applied.value);
+    dismissed.current = null;
+    setMenu(null);
+    command?.run();
+    focusCaret(applied.caret);
+  };
+
+  const insertMention = () => {
+    const element = ref.current;
+    if (!element || !writable) return;
+    const start = element.selectionStart ?? text.length;
+    const end = element.selectionEnd ?? start;
+    const next = `${text.slice(0, start)}@${text.slice(end)}`;
+    update(next);
+    dismissed.current = null;
+    setMenu({ trigger: { kind: "file", query: "", start, end: start + 1 }, activeIndex: 0 });
+    requestAnimationFrame(() => {
+      element.focus();
+      element.setSelectionRange(start + 1, start + 1);
+      autosize();
+    });
+  };
 
   const input = (
     <textarea
@@ -213,9 +412,28 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
       value={text}
       rows={1}
       aria-label={replyTo}
+      aria-autocomplete="list"
+      aria-controls={menu ? `composer-menu-${summary.thread_id}` : undefined}
       placeholder={disabledReason ?? replyTo}
       disabled={!writable}
-      onChange={(event) => update(event.target.value)}
+      onChange={(event) => {
+        const next = event.target.value;
+        update(next);
+        if (!composing.current) syncMenu(next, event.target.selectionStart);
+      }}
+      onSelect={(event) => {
+        if (!composing.current) {
+          syncMenu(event.currentTarget.value, event.currentTarget.selectionStart);
+        }
+      }}
+      onCompositionStart={() => {
+        composing.current = true;
+        setMenu(null);
+      }}
+      onCompositionEnd={(event) => {
+        composing.current = false;
+        syncMenu(event.currentTarget.value, event.currentTarget.selectionStart);
+      }}
       onInput={autosize}
       onPaste={(event) => {
         if (!writable) return;
@@ -229,6 +447,35 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
         if (attachments.addPastedText(pasted)) event.preventDefault();
       }}
       onKeyDown={(event) => {
+        if (event.nativeEvent.isComposing) return;
+        // While the picker is open its arrows and accept keys belong to it,
+        // not to history recall or send.
+        if (menu) {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            if (rows.length === 0) return;
+            const delta = event.key === "ArrowDown" ? 1 : -1;
+            setMenu((current) =>
+              current
+                ? {
+                    ...current,
+                    activeIndex: stepSelection(current.activeIndex, rows.length, delta),
+                  }
+                : current,
+            );
+            return;
+          }
+          if (event.key === "Enter" || event.key === "Tab") {
+            event.preventDefault();
+            if (rows.length > 0) choose(activeIndex);
+            return;
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            closeMenu(true);
+            return;
+          }
+        }
         if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
           event.preventDefault();
           void submit();
@@ -262,6 +509,31 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
         if (historyIndex.current >= 0 && recall("forward")) event.preventDefault();
       }}
     />
+  );
+
+  const inputBlock = (
+    <div className="q-comp-in">
+      {input}
+      {!isPhone && menu ? (
+        <ComposerMenu
+          kind={menu.trigger.kind}
+          rows={rows}
+          activeIndex={activeIndex}
+          anchor={anchor}
+          loading={fileIndex.loading}
+          error={fileIndex.error}
+          workspaceName={workspaceName}
+          query={menu.trigger.kind === "file" ? settledQuery : menu.trigger.query}
+          isPhone={false}
+          listId={`composer-menu-${summary.thread_id}`}
+          onSelect={choose}
+          onHighlight={(index) =>
+            setMenu((current) => (current ? { ...current, activeIndex: index } : current))
+          }
+          onClose={() => closeMenu(false)}
+        />
+      ) : null}
+    </div>
   );
 
   const hiddenInput = (
@@ -303,7 +575,11 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
       <fieldset
         aria-label="Message composer"
         className="q-ph-composer"
-        style={{ margin: 0, minWidth: 0 }}
+        style={{ margin: 0, minWidth: 0, position: "relative" }}
+        onBlur={(event) => {
+          if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+          setMenu(null);
+        }}
       >
         <AttachmentTray
           tasks={attachments.tasks}
@@ -323,10 +599,29 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
             <PlusIcon className="q-icon s22" strokeWidth={1.5} aria-hidden />
           </button>
           <div className="in">
-            {input}
+            {inputBlock}
             {canSend ? sendButton : null}
           </div>
         </div>
+        {menu ? (
+          <ComposerMenu
+            kind={menu.trigger.kind}
+            rows={rows}
+            activeIndex={activeIndex}
+            anchor={anchor}
+            loading={fileIndex.loading}
+            error={fileIndex.error}
+            workspaceName={workspaceName}
+            query={menu.trigger.kind === "file" ? settledQuery : menu.trigger.query}
+            isPhone
+            listId={`composer-menu-${summary.thread_id}`}
+            onSelect={choose}
+            onHighlight={(index) =>
+              setMenu((current) => (current ? { ...current, activeIndex: index } : current))
+            }
+            onClose={() => closeMenu(false)}
+          />
+        ) : null}
         {hiddenInput}
       </fieldset>
     );
@@ -338,6 +633,10 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
         aria-label="Message composer"
         className="q-composer"
         style={{ margin: 0, minWidth: 0, position: "relative" }}
+        onBlur={(event) => {
+          if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+          setMenu(null);
+        }}
         onDragEnter={(event) => {
           if (!writable || !event.dataTransfer.types.includes("Files")) return;
           event.preventDefault();
@@ -366,7 +665,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
           onRetry={attachments.retry}
         />
 
-        {input}
+        {inputBlock}
 
         {dragging ? (
           <div

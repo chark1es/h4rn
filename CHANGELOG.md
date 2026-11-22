@@ -7,6 +7,19 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **The composer picks files with `@` and runs commands with `/`.** Typing `@` at a word boundary,
+  or pressing the `@` button, opens a caret-anchored list of the thread's workspace files; typing
+  filters it with a path-aware fuzzy match (`src/comp` finds `apps/ui/src/components/…`). The index
+  walks the daemon's existing directory listings, skips dependency and build folders, and reuses
+  one cached walk per host and workspace. `↑`/`↓` move, `↵` or `Tab` inserts, `Esc` closes and
+  leaves the typed text, and a click inserts too. The `@query` token becomes the workspace-relative
+  path plus a space, quoted when the path contains spaces (`@"src/with space.ts"`). Typing `/` as
+  the first character opens the actions h4rn already has for the thread — stop the turn, changes,
+  subagents, the terminal, the IDE and a new thread — and choosing one runs it and clears the
+  slash text. While a menu is open its arrows and accept keys do not fire prompt history or send;
+  IME composition never opens or drives it. On a phone the same list is a sheet above the keyboard.
+  Harness-native slash commands and skills are not listed: no harness publishes commands through
+  h4rn and h4rn defines no skill invocation of its own.
 - **Unsent composer text survives a reload, an app restart or Android killing the webview.** Every
   draft is stored under its own key for a host and thread, so one tab never erases another
   thread's draft; for the same thread the most recent edit wins. Writes happen after a short
