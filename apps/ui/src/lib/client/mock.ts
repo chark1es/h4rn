@@ -2213,6 +2213,7 @@ class MockDaemon {
           protocol_version: 1,
           server_version: "1.0.1-mock",
           device_id: "mock-device",
+          daemon_machine_id: null,
           local_host: "atlas",
           hosts: this.hosts,
         });

@@ -81,6 +81,7 @@ function fakeClient(claimedDaemonKeyByte = 0xbb) {
       devices: [{ id: "phone" }],
     })),
     machines: vi.fn(async () => [MACHINE]),
+    linkedMachines: vi.fn(async () => ({ supported: true, machines: [MACHINE] })),
     listPairings: vi.fn(async () => [PAIRING]),
   };
   return client;
@@ -93,6 +94,9 @@ function signedIn() {
     connectUrl: "http://relay.test",
     user: { id: "user-1", email: null, display_name: "Dev", avatar_url: null },
     machines: [MACHINE],
+    linkedMachines: [],
+    linkedSupported: null,
+    lastSyncAt: null,
     active: null,
     activeMachineId: null,
     sasConfirm: null,
@@ -206,9 +210,8 @@ describe("typed-code pairing", () => {
 describe("account refresh", () => {
   it("keeps the account when linked presence cannot be fetched", async () => {
     const client = fakeClient();
-    client.machines = vi.fn(async (options?: { linked?: boolean }) => {
-      if (options?.linked) throw new Error("the relay rejected the proof");
-      return [MACHINE];
+    client.linkedMachines = vi.fn(async () => {
+      throw new Error("the relay rejected the proof");
     });
     setConnectClient(client as never);
 
@@ -218,7 +221,43 @@ describe("account refresh", () => {
     expect(state.phase).toBe("signed_in");
     expect(state.machines).toEqual([MACHINE]);
     expect(state.linkedMachines).toEqual([]);
+    // A failed fetch says nothing about the relay: it must not read as an
+    // older relay that ignored `?linked=true`.
+    expect(state.linkedSupported).toBeNull();
     expect(state.error).toBeNull();
+  });
+
+  it("stays unknown while the first linked fetch is still pending", async () => {
+    const client = fakeClient();
+    client.linkedMachines = vi.fn(
+      () => new Promise<never>(() => undefined),
+    ) as unknown as typeof client.linkedMachines;
+    setConnectClient(client as never);
+
+    // The cached sign-in already says signed_in; the relay has not answered
+    // about linked machines yet, so this must not read as an older relay.
+    void refresh();
+    await vi.advanceTimersByTimeAsync(0);
+
+    const state = getRemoteState();
+    expect(state.phase).toBe("signed_in");
+    expect(state.linkedSupported).toBeNull();
+  });
+
+  it("does not treat an older relay's unfiltered list as this device's links", async () => {
+    const client = fakeClient();
+    // An older relay ignores `?linked=true`; the client sees no filter marker
+    // and must not turn the whole account into presence rows.
+    client.linkedMachines = vi.fn(async () => ({ supported: false, machines: [] }));
+    setConnectClient(client as never);
+
+    await refresh();
+
+    const state = getRemoteState();
+    expect(state.phase).toBe("signed_in");
+    expect(state.machines).toEqual([MACHINE]);
+    expect(state.linkedMachines).toEqual([]);
+    expect(state.linkedSupported).toBe(false);
   });
 
   it("stores the linked machines the relay answered with", async () => {
@@ -228,5 +267,6 @@ describe("account refresh", () => {
     await refresh();
 
     expect(getRemoteState().linkedMachines).toEqual([MACHINE]);
+    expect(getRemoteState().linkedSupported).toBe(true);
   });
 });
