@@ -176,6 +176,9 @@ pub fn read_native(
                 &mut scan,
             )?;
         }
+        // A user-configured ACP command has no standard configuration file
+        // h4rn can read; its servers come from the agent itself.
+        HarnessKind::Acp => {}
     }
     Ok(scan)
 }
@@ -457,6 +460,8 @@ pub fn candidate_paths(
         HarnessKind::Antigravity => {
             vec![home.join(".gemini").join("config").join("mcp_config.json")]
         }
+        // A user-configured ACP command keeps its own configuration.
+        HarnessKind::Acp => Vec::new(),
     }
 }
 

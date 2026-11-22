@@ -28,6 +28,7 @@
 
 #![deny(missing_docs)]
 
+mod acp_agent;
 mod binary;
 mod blob;
 mod client;
@@ -48,6 +49,9 @@ mod transport;
 mod usage;
 mod worktrees;
 
+pub use acp_agent::{
+    AcpAgent, AcpAgentMode, AcpAgentModel, AcpAgentProbe, AcpAgentSpec, AcpWorkingDir,
+};
 pub use binary::{
     BINARY_HEADER_LEN, BINARY_MAGIC, BINARY_VERSION, BinaryFrame, BinaryFrameError, BinaryKind,
     PTY_INPUT_ORDINAL_BITS, PTY_INPUT_ORDINAL_MAX, PTY_INPUT_ORDINAL_SHIFT,
@@ -58,8 +62,8 @@ pub use blob::{Attachment, BlobDownload, BlobInfo, BlobRange, UploadState, Uploa
 pub use client::{ClientFrame, ClientRequest};
 pub use common::{
     AgentState, ApprovalDecision, ApprovalKind, ApprovalOption, DeviceInfo, HarnessKind,
-    HostSummary, Item, MatchUnit, MessageRole, RuntimeMode, ThreadFilter, ThreadSummary, ThreadTab,
-    ToolCall, ToolCallStatus, ToolStats, Topic, TurnStatus, Usage, WorktreeRequest,
+    HostSummary, Item, MatchUnit, MessageRole, PlanStep, RuntimeMode, ThreadFilter, ThreadSummary,
+    ThreadTab, ToolCall, ToolCallStatus, ToolStats, Topic, TurnStatus, Usage, WorktreeRequest,
 };
 pub use connect::*;
 pub use forge::*;

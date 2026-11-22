@@ -2,7 +2,6 @@ import { ArrowRightIcon, GitBranchIcon, PaperclipIcon, PlusIcon } from "lucide-r
 import type * as React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChipSelect } from "@/components/common/ChipSelect";
-
 import { ENTER, Kbd, MOD } from "@/components/common/Kbd";
 import { Button } from "@/components/ui/button";
 import {
@@ -18,7 +17,19 @@ import { Textarea } from "@/components/ui/textarea";
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts, useAttachShortcut } from "@/features/attachments/use-attachments";
-import { useHarnesses, useHarnessVersions } from "@/features/harnesses/harnessStore";
+import {
+  acpModeChoices,
+  acpModelChoices,
+  acpPickerOptions,
+  acpRuntimeModeChoices,
+  THREAD_RUNTIME_MODES,
+} from "@/features/harnesses/acpForm";
+import {
+  probeAcpAgent,
+  useAcpAgents,
+  useHarnesses,
+  useHarnessVersions,
+} from "@/features/harnesses/harnessStore";
 import {
   proxyDefaultModel,
   proxyModelsFor,
@@ -29,7 +40,7 @@ import {
 import type { HarnessKind, HostId, RuntimeMode } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { DEFAULT_NEW_THREAD_WORKSPACE, drafts } from "@/lib/drafts";
-import { HARNESS_LABELS, HARNESS_SLUGS } from "@/lib/entities";
+import { HARNESS_LABELS, HARNESS_SLUGS, threadHarnessLabel } from "@/lib/entities";
 import { detectedHarnesses, HARNESS_MODELS } from "@/lib/models";
 import { NewThreadDraftSession, type NewThreadDraftSnapshot } from "@/lib/newThreadDraft";
 import { closeNewThread, createThread, useApp } from "@/lib/store/appStore";
@@ -67,6 +78,11 @@ export function NewThreadDialog() {
   const isPhone = useIsPhone();
   useProxyCatalog();
   useHarnessVersions();
+  useAcpAgents();
+  const agents = useHarnesses((value) => value.agents);
+  const probes = useHarnesses((value) => value.probes);
+  const probeErrors = useHarnesses((value) => value.probeErrors);
+  const probingAgents = useHarnesses((value) => value.probing);
   const harnessRows = useHarnesses((value) => (value.loaded ? value.rows : null));
   const installed = useMemo(
     () => harnessRows?.filter((row) => row.installed !== null).map((row) => row.harness) ?? null,
@@ -87,6 +103,7 @@ export function NewThreadDialog() {
   /** The host the draft session is bound to; empty until one resolves. */
   const [boundHost, setBoundHost] = useState<HostId | "">("");
   const [harness, setHarness] = useState<HarnessKind>("claude_code");
+  const [agentId, setAgentId] = useState<string | null>(null);
   const [model, setModel] = useState(DEFAULT_MODELS.claude_code);
   const [workspace, setWorkspace] = useState(DEFAULT_NEW_THREAD_WORKSPACE);
   const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>("approval_required");
@@ -159,6 +176,7 @@ export function NewThreadDialog() {
         const nextHarness =
           detectedHarnesses(HARNESSES, installed, first.harnesses)[0] ?? "claude_code";
         setHarness(nextHarness);
+        setAgentId(null);
         setModel(proxyDefaultModel(nextHarness) ?? DEFAULT_MODELS[nextHarness]);
       } else if (
         // A host the user picked stays only while it is still a valid choice;
@@ -206,20 +224,80 @@ export function NewThreadDialog() {
 
   const selectedHost = boundHost ? hosts[boundHost] : undefined;
   const harnessChoices = detectedHarnesses(HARNESSES, installed, selectedHost?.harnesses);
+  const selectedAgent = agentId ? agents.find((agent) => agent.id === agentId) : undefined;
+  const probe = agentId ? probes[agentId] : undefined;
+  const probeError = agentId ? probeErrors[agentId] : undefined;
+  const probing = agentId ? probingAgents[agentId] === true : false;
   const modelInfo = HARNESS_MODELS[harness];
+  // Built-in harnesses and configured agents share one picker. A value is a
+  // harness kind, or `acp:<instance>` for a local command.
+  const harnessValue = harness === "acp" && agentId ? `acp:${agentId}` : harness;
 
   // If detection settles and the chosen harness is not among those found,
   // move to one that is rather than leave an undetected harness selected.
   const firstChoice = harnessChoices[0];
-  const harnessMissing = harnessChoices.length > 0 && !harnessChoices.includes(harness);
+  const agentGone = harness === "acp" && !selectedAgent;
+  const harnessMissing =
+    harness !== "acp" && harnessChoices.length > 0 && !harnessChoices.includes(harness);
   useEffect(() => {
-    if (!open || !harnessMissing || !firstChoice) return;
+    if (!open) return;
+    if (!harnessMissing && !agentGone) return;
+    if (!firstChoice) return;
     setHarness(firstChoice);
+    setAgentId(null);
     setModel(proxyDefaultModel(firstChoice) ?? DEFAULT_MODELS[firstChoice]);
-  }, [open, harnessMissing, firstChoice]);
+  }, [open, harnessMissing, agentGone, firstChoice]);
+
+  // The model list comes from the agent's own handshake. Probe once when the
+  // picker selects it; the daemon starts the command once and stops it. A
+  // device without admin cannot probe, and the failure is remembered so the
+  // picker does not retry on every render or selection. One probe at a time:
+  // while a handshake is in flight a second start would only race it.
+  useEffect(() => {
+    if (!open || !agentId || probes[agentId] || probeErrors[agentId]) return;
+    if (probingAgents[agentId] === true) return;
+    void probeAcpAgent(agentId);
+  }, [open, agentId, probes, probeErrors, probingAgents]);
+
+  // The probe fills from an admin device; every device still sees the last
+  // successful result the daemon stored in the list. A failed probe (a rejected
+  // request, or an answer that carries an error) falls back to that stored
+  // result instead of emptying the picker.
+  const probeFailed = Boolean(probeError) || Boolean(probe?.error);
+  const agentModels = acpModelChoices(probe, probeFailed, selectedAgent?.models);
+  // Only a mode h4rn can actually select is offered. An agent that names its
+  // own modes is left alone: the dialog says so instead of promising an
+  // "Approval required" mode the agent never advertised.
+  const agentModes = acpModeChoices(probe, probeFailed, selectedAgent?.modes);
+  const runtimeModeChoices =
+    harness === "acp" ? acpRuntimeModeChoices(agentModes) : THREAD_RUNTIME_MODES;
+  const modeManagedByAgent = harness === "acp" && runtimeModeChoices.length === 0;
+  useEffect(() => {
+    if (!open) return;
+    // An agent that manages its own mode gets no choice from this dialog, so
+    // don't carry over one picked for another harness.
+    if (modeManagedByAgent) {
+      if (runtimeMode !== "approval_required") setRuntimeMode("approval_required");
+      return;
+    }
+    if (runtimeModeChoices.length === 0) return;
+    if (runtimeModeChoices.some((choice) => choice.value === runtimeMode)) return;
+    const first = runtimeModeChoices[0];
+    if (first) setRuntimeMode(first.value);
+  }, [open, modeManagedByAgent, runtimeMode, runtimeModeChoices]);
+  // A fixed working directory is where the agent runs, whatever path the
+  // thread workspace would otherwise be: show it before Start and use it.
+  const fixedWorkspace =
+    harness === "acp" && selectedAgent?.working_dir.kind === "fixed_path"
+      ? selectedAgent.working_dir.path
+      : null;
+  const effectiveWorkspace = fixedWorkspace ?? workspace;
   const offline = connection !== "online";
   const modelChoices = [
-    ...new Set([...modelInfo.models, ...proxyModels.map((candidate) => candidate.id)]),
+    ...new Set([
+      ...(harness === "acp" ? agentModels : modelInfo.models),
+      ...(harness === "acp" ? [] : proxyModels.map((candidate) => candidate.id)),
+    ]),
   ];
   const attachments = useAttachmentDrafts("new-thread", {
     enabled: !offline && Boolean(boundHost),
@@ -255,7 +333,10 @@ export function NewThreadDialog() {
     const ok = await createThread({
       host: draft.host,
       harness,
-      workspacePath: draft.workspace,
+      agentId: harness === "acp" ? agentId : null,
+      // A fixed directory replaces the thread workspace: the thread row and
+      // Files/Changes must name where the agent really runs.
+      workspacePath: fixedWorkspace ?? draft.workspace,
       model,
       prompt: draft.text.trim(),
       attachments: attachments.attachments,
@@ -312,8 +393,9 @@ export function NewThreadDialog() {
                 hostChosen.current = true;
                 showDraft(draftSession().selectHost(value));
                 const nextHarness = detectedHarnesses(HARNESSES, installed, nextHost?.harnesses)[0];
-                if (nextHarness) {
+                if (nextHarness && harness !== "acp") {
                   setHarness(nextHarness);
+                  setAgentId(null);
                   setModel(DEFAULT_MODELS[nextHarness]);
                 }
               }}
@@ -327,14 +409,28 @@ export function NewThreadDialog() {
               block
               label="Harness"
               placeholder="No harness detected"
-              value={harnessChoices.includes(harness) ? harness : ""}
-              options={harnessChoices.map((option) => ({
-                value: option,
-                label: HARNESS_LABELS[option],
-              }))}
+              value={
+                harnessValue === harness && !harnessChoices.includes(harness) ? "" : harnessValue
+              }
+              options={acpPickerOptions(
+                harnessChoices.map((option) => ({
+                  value: option as string,
+                  label: HARNESS_LABELS[option],
+                })),
+                agents,
+              )}
               onChange={(next) => {
-                setHarness(next);
-                setModel(proxyDefaultModel(next) ?? DEFAULT_MODELS[next]);
+                if (next.startsWith("acp:")) {
+                  const id = next.slice(4);
+                  setHarness("acp");
+                  setAgentId(id);
+                  setModel("default");
+                  return;
+                }
+                const kind = next as HarnessKind;
+                setHarness(kind);
+                setAgentId(null);
+                setModel(proxyDefaultModel(kind) ?? DEFAULT_MODELS[kind]);
               }}
             />
           </div>
@@ -353,7 +449,21 @@ export function NewThreadDialog() {
                 <option key={option} value={option} />
               ))}
             </datalist>
-            {modelInfo.thinking ? (
+            {harness === "acp" ? (
+              <span className="text-small text-fg-3">
+                {probing
+                  ? "Reading the agent's models…"
+                  : probe?.error
+                    ? probe.error
+                    : probeError
+                      ? `${probeError} Type a model or leave \`default\`.`
+                      : agentModels.length > 0
+                        ? `${agentModels.length} models from ${selectedAgent?.name ?? "the agent"}.`
+                        : selectedAgent && !selectedAgent.installed
+                          ? "This command is not installed on the host yet. Type a model or leave `default`."
+                          : "No models read yet. Type one or leave `default`."}
+              </span>
+            ) : modelInfo.thinking ? (
               <span className="text-small text-fg-3">
                 {modelInfo.thinking.kind}: {modelInfo.thinking.levels.join(", ")}
               </span>
@@ -372,28 +482,41 @@ export function NewThreadDialog() {
         <div className="grid gap-3 sm:grid-cols-[1fr_1.2fr]">
           <div className="flex flex-col gap-1">
             <FieldLabel htmlFor="new-thread-mode">Mode</FieldLabel>
-            <ChipSelect
-              id="new-thread-mode"
-              block
-              label="Mode"
-              value={runtimeMode}
-              options={[
-                { value: "approval_required", label: "Approval required" },
-                { value: "auto_accept_edits", label: "Auto-accept edits" },
-                { value: "full_access", label: "Full access" },
-              ]}
-              onChange={setRuntimeMode}
-            />
-            <span className="text-small text-fg-3">Fixed for the life of the thread.</span>
+            {modeManagedByAgent ? (
+              <>
+                <span id="new-thread-mode" className="py-1.5 text-small text-fg-2">
+                  Mode is managed by the agent.
+                </span>
+                <span className="text-small text-fg-3">
+                  {probing ? "Reading the agent's modes…" : "The agent decides its own approvals."}
+                </span>
+              </>
+            ) : (
+              <>
+                <ChipSelect
+                  id="new-thread-mode"
+                  block
+                  label="Mode"
+                  value={runtimeMode}
+                  options={runtimeModeChoices}
+                  onChange={setRuntimeMode}
+                />
+                <span className="text-small text-fg-3">Fixed for the life of the thread.</span>
+              </>
+            )}
           </div>
 
           <div className="flex flex-col gap-1">
-            <FieldLabel htmlFor="new-thread-workspace" hint="on the host">
+            <FieldLabel
+              htmlFor="new-thread-workspace"
+              hint={fixedWorkspace ? "fixed by the agent" : "on the host"}
+            >
               Where
             </FieldLabel>
             <Input
               id="new-thread-workspace"
-              value={workspace}
+              value={effectiveWorkspace}
+              disabled={fixedWorkspace !== null}
               onChange={(event) => setWorkspace(event.target.value)}
               onBlur={() => {
                 // Pressing Start blurs this field on the way to the button.
@@ -413,8 +536,9 @@ export function NewThreadDialog() {
             />
             <span className="flex items-center gap-1 text-small text-fg-3">
               <GitBranchIcon className="size-3" aria-hidden />
-              The agent works in this directory. h4rn does not create a worktree for new threads
-              yet.
+              {fixedWorkspace
+                ? "This agent always runs in its configured directory."
+                : "The agent works in this directory. h4rn does not create a worktree for new threads yet."}
             </span>
           </div>
         </div>
@@ -497,9 +621,18 @@ export function NewThreadDialog() {
         <p className="rounded-sm border border-line bg-bg-side px-2.5 py-1.5 text-small text-fg-2">
           {selectedHost ? (
             <>
-              Starts <span className="font-mono">{HARNESS_SLUGS[harness]}</span> on{" "}
+              Starts{" "}
+              <span className="font-mono">
+                {harness === "acp"
+                  ? (selectedAgent?.command ?? HARNESS_SLUGS.acp)
+                  : HARNESS_SLUGS[harness]}
+              </span>{" "}
+              {harness === "acp" ? `(${threadHarnessLabel(harness, agentId)})` : null} on{" "}
               <span className="font-medium text-fg">{selectedHost.name}</span> in{" "}
-              <span className="font-mono">{workspace || DEFAULT_NEW_THREAD_WORKSPACE}</span>.
+              <span className="font-mono">
+                {effectiveWorkspace || DEFAULT_NEW_THREAD_WORKSPACE}
+              </span>
+              .
             </>
           ) : (
             "Pair an online host before starting a thread."

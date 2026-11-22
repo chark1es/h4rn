@@ -163,6 +163,7 @@ async fn real_claude_daemon_round_trip_and_resume() {
             subagent_id: None,
             host,
             harness: HarnessKind::ClaudeCode,
+            agent_id: None,
             workspace_path: repo.path().display().to_string(),
             model: "default".into(),
             prompt: PROMPT.into(),

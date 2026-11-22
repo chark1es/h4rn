@@ -361,6 +361,7 @@ async fn create_thread_over_secure() -> ThreadSummary {
         .request(ClientRequest::CreateThread {
             host,
             harness: HarnessKind::ClaudeCode,
+            agent_id: None,
             workspace_path: "/tmp/h4rn-secure-workspace".into(),
             model: "fake-model".into(),
             prompt: "created over noise".into(),
@@ -648,6 +649,7 @@ fn create_thread_in(host: h4rn_protocol::HostId, workspace: &str) -> ClientReque
     ClientRequest::CreateThread {
         host,
         harness: HarnessKind::ClaudeCode,
+        agent_id: None,
         workspace_path: workspace.into(),
         model: "fake-model".into(),
         prompt: "scope test".into(),

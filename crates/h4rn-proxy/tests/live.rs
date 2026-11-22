@@ -113,6 +113,7 @@ async fn live_cliproxyapi_detects_lists_and_runs_claude_code() {
         mcp_endpoint: None,
         env_overrides: applied.env.clone(),
         attachments: Vec::new(),
+        agent_id: None,
     };
     // The Claude adapter scrubs inherited Anthropic variables and applies the
     // same map the daemon would; using the recipe directly keeps this test

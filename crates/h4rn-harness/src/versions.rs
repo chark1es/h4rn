@@ -54,7 +54,7 @@ pub fn npm_package(kind: HarnessKind) -> Option<&'static str> {
         HarnessKind::ClaudeCode => Some("@anthropic-ai/claude-code"),
         HarnessKind::Codex => Some("@openai/codex"),
         HarnessKind::Opencode => Some("opencode-ai"),
-        HarnessKind::Antigravity => None,
+        HarnessKind::Antigravity | HarnessKind::Acp => None,
     }
 }
 
@@ -63,7 +63,7 @@ pub fn self_update_args(kind: HarnessKind) -> Option<&'static [&'static str]> {
     match kind {
         HarnessKind::ClaudeCode => Some(&["update"]),
         HarnessKind::Opencode => Some(&["upgrade"]),
-        HarnessKind::Codex | HarnessKind::Antigravity => None,
+        HarnessKind::Codex | HarnessKind::Antigravity | HarnessKind::Acp => None,
     }
 }
 

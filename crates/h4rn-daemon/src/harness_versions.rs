@@ -313,6 +313,7 @@ fn display_name(kind: HarnessKind) -> &'static str {
         HarnessKind::Codex => "Codex",
         HarnessKind::Opencode => "OpenCode",
         HarnessKind::Antigravity => "Antigravity",
+        HarnessKind::Acp => "ACP agents",
     }
 }
 

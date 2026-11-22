@@ -599,6 +599,12 @@ impl AcpClient {
     }
 
     /// Loads an existing session (`session/load`).
+    ///
+    /// The agent replays the conversation as `session/update` notifications
+    /// before it answers. That history belongs to turns the thread already
+    /// shows, so it is consumed here instead of queued for the new session:
+    /// the event channel is bounded, and a long conversation would fill it and
+    /// leave the reader unable to deliver the reply at all.
     pub async fn load_session(
         &self,
         session_id: &str,
@@ -610,8 +616,79 @@ impl AcpClient {
             "cwd": cwd.display().to_string(),
             "mcpServers": mcp_servers.iter().map(|server| server.to_json()).collect::<Vec<_>>(),
         });
+        let result = self.call_consuming_replay("session/load", params).await?;
+        Ok(AcpSessionInfo::from_value(&result, session_id))
+    }
+
+    /// Runs one session call while discarding the history it replays.
+    ///
+    /// `session/load` streams the old conversation between the request and the
+    /// reply. Nothing consumes the event stream yet at startup, so this drains
+    /// it alongside the call. Only `session/update` frames are dropped: a death
+    /// report, a permission hand or an error that arrives meanwhile is handed
+    /// back to the stream once the call settles.
+    async fn call_consuming_replay(
+        &self,
+        method: &'static str,
+        params: Value,
+    ) -> Result<Value, AcpError> {
+        let mut receiver = lock(&self.shared.events_rx).take();
+        let mut kept = Vec::new();
+        let result = match receiver.as_mut() {
+            None => self.call(method, params, Some(SESSION_TIMEOUT)).await,
+            Some(receiver) => {
+                let mut call = std::pin::pin!(self.call(method, params, Some(SESSION_TIMEOUT)));
+                loop {
+                    tokio::select! {
+                        result = &mut call => break result,
+                        event = receiver.recv() => match event {
+                            Some(AcpEvent::SessionUpdate { .. }) => {}
+                            Some(event) => kept.push(event),
+                            // The transport is gone; the call reports that.
+                            None => break call.await,
+                        },
+                    }
+                }
+            }
+        };
+        if let Some(mut receiver) = receiver {
+            // The reader queues the last replayed frames before it resolves
+            // the reply, so some history can still sit in the channel once the
+            // call settles. Drain it now, or it would surface as output of the
+            // next turn.
+            while let Ok(event) = receiver.try_recv() {
+                if !matches!(event, AcpEvent::SessionUpdate { .. }) {
+                    kept.push(event);
+                }
+            }
+            // Hand back what arrived during the load before anything newer can
+            // be read, so a permission request or an error keeps its order.
+            for event in kept {
+                let _ = self.shared.events_tx.send(event).await;
+            }
+            *lock(&self.shared.events_rx) = Some(receiver);
+        }
+        result
+    }
+
+    /// Continues a stored session without replaying it (`session/resume`).
+    ///
+    /// `session/resume` is its own capability: an agent that advertises only
+    /// `resume` has no `session/load`, so callers must check
+    /// [`AgentCapabilities::supports_resume`] before choosing this method.
+    pub async fn resume_session(
+        &self,
+        session_id: &str,
+        cwd: &Path,
+        mcp_servers: &[super::protocol::AcpMcpServer],
+    ) -> Result<AcpSessionInfo, AcpError> {
+        let params = json!({
+            "sessionId": session_id,
+            "cwd": cwd.display().to_string(),
+            "mcpServers": mcp_servers.iter().map(|server| server.to_json()).collect::<Vec<_>>(),
+        });
         let result = self
-            .call("session/load", params, Some(SESSION_TIMEOUT))
+            .call("session/resume", params, Some(SESSION_TIMEOUT))
             .await?;
         Ok(AcpSessionInfo::from_value(&result, session_id))
     }
@@ -665,6 +742,26 @@ impl AcpClient {
         self.call(
             "session/set_mode",
             json!({"sessionId": session_id, "modeId": mode_id}),
+            Some(SESSION_TIMEOUT),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Selects one ACP v1 session config option (`session/set_config_option`).
+    ///
+    /// Agents that advertise models or modes through `configOptions` expect
+    /// this method instead of the legacy `session/set_model` and
+    /// `session/set_mode`.
+    pub async fn set_config_option(
+        &self,
+        session_id: &str,
+        config_id: &str,
+        value: &str,
+    ) -> Result<(), AcpError> {
+        self.call(
+            "session/set_config_option",
+            json!({"sessionId": session_id, "configId": config_id, "value": value}),
             Some(SESSION_TIMEOUT),
         )
         .await
