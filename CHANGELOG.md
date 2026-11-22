@@ -225,37 +225,36 @@ All notable changes to h4rn are recorded here. The format follows
   reads it under the same lock order, so the exit report keeps that status instead of reporting
   `-1` from a second failed wait. Closing no longer waits on the child handle: the hangup wait only
   tries its lock, so a shell that hit PTY EOF first (and is being reaped by the reader thread) can
-  no longer hold the close past its two-second bound; TERM and KILL still go out on schedule, with
-  KILL addressed to the shell's pid when the handle is busy.
+  no longer hold the close past its two-second bound; TERM and KILL still go out on schedule, and
+  the session keeps a cloned child handle that terminates the shell even while the reader thread
+  holds the child in `wait()`, which is the only way a Windows console ends when its handle is
+  busy.
 - **Only one attached viewer answers terminal queries.** Two xterm instances each answered device,
   cursor and colour queries, so a shell with a desktop and a phone attached received duplicate
-  replies. The UI now marks xterm's own answers to just-asked queries with the output position that
-  carried the query and the answer's ordinal within that chunk (one chunk can ask several questions
-  and xterm answers each separately), and the daemon writes each distinct answer once from any
-  viewer. Only exact duplicates and positions at or below the evicted high-water mark are dropped;
-  a reply for an older position that has not been answered yet is accepted, because it can only
-  rescue a pending query. A reply naming output the daemon never sent to that viewer is ignored, so
-  a bogus position cannot suppress a real answer, and acceptance and the PTY write happen under one
-  lock so accepted replies cannot reach the shell out of order. An answer's ordinal is counted per
-  chunk, so a viewer that attached mid-query numbers answers differently; the daemon records the
-  first output chunk each viewer was sent after its snapshot and drops a reply for a chunk whose
-  predecessor that viewer never parsed, leaving the answer to an earlier-attached viewer. That rule
-  exists only to keep two parsers from numbering one chunk differently, so it is relaxed when no
-  other attached viewer could answer the position: a sole viewer that attached at a snapshot, or
-  resynced after falling behind, still answers its first raw chunk. A viewer that is still taking
-  its attach snapshot, or whose output credit never reached the chunk, has not received the query
-  and does not count as another answerer. The client no longer drops a
-  reply below its own floor; it always sends and the daemon decides. A query
-  spanning more than two 64 KiB chunks is out of scope. The sent bound advances only when a frame
-  is really handed to the outbound channel, so a blocked send cannot let a reply name unseen output,
-  and an ack past that bound is clamped, so a stale or bogus acknowledgement cannot mark later
-  chunks free. Clients declare reply-position support when they attach; while any attached viewer
-  does not, every reply keeps the legacy single-owner rule, whichever client's reply arrives first.
-  The owner role and the answered-position record are only committed once the reply's bytes reach
-  the shell, so a failed write leaves neither behind, the answer can still be written by another
-  viewer, and a bogus positioned claim cannot suppress the old client's next valid answer.
-  Another legacy viewer attaching or detaching no longer resets the owner while a query is in
-  flight. A stalled or
+  replies. The UI now marks xterm's own answers to just-asked queries with the output chunk that
+  carried the query's first byte and the query's index among the queries that start in that chunk
+  (one chunk can ask several questions and xterm answers each separately), and the daemon writes
+  each distinct answer once from any viewer. Numbering by the starting chunk makes the identity a
+  property of the output stream: two viewers name the same answer the same way even when their
+  chunks arrive in a different order, and a viewer whose attach snapshot already contained the
+  query's first byte simply never saw the query. A viewer that stalled before a chunk and caught up
+  later therefore cannot write a second answer for a query another viewer answered in the meantime.
+  Only exact duplicates and positions at or below the evicted high-water mark are dropped; a reply
+  for an older position that has not been answered yet is accepted, because it can only rescue a
+  pending query. A reply naming output the daemon never sent to that viewer is ignored, so a bogus
+  position cannot suppress a real answer, and acceptance and the PTY write happen under one lock so
+  accepted replies cannot reach the shell out of order. The old per-viewer attach floor is gone,
+  because there is no chunk-local numbering left for it to protect: a sole or resynced viewer
+  answers its first raw chunk, and so does a positioned viewer in mixed-version mode after a
+  resync. The sent bound advances only when a frame is really handed to the outbound channel, so a
+  blocked send cannot let a reply name unseen output, and an ack past that bound is clamped, so a
+  stale or bogus acknowledgement cannot mark later chunks free. Clients declare reply-position
+  support when they attach; while any attached viewer does not, every reply keeps the legacy
+  single-owner rule, whichever client's reply arrives first. The owner role and the
+  answered-position record are only committed once the reply's bytes reach the shell, so a failed
+  write leaves neither behind, the answer can still be written by another viewer, and a bogus
+  positioned claim cannot suppress the old client's next valid answer. Another legacy viewer
+  attaching or detaching no longer resets the owner while a query is in flight. A stalled or
   backgrounded viewer no longer holds an owner role that blocks the others. The per-answer record
   keeps 64 recent chunks with 1024 answers each by design, and older chunks collapse to a high-water
   mark, so memory stays constant; a late reply for a chunk older than the whole window is the entry
