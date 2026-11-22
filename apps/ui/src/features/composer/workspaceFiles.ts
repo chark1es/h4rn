@@ -67,13 +67,20 @@ async function list(input: WorkspaceTarget & { path: string }): Promise<FsListin
 }
 
 /** Walk one workspace, pruned and capped. A failed directory is skipped. */
+export type WorkspaceIndex = {
+  files: string[];
+  /** True when a listing, the depth cap, the directory cap or the file cap cut the walk short. */
+  truncated: boolean;
+};
+
 export async function walkWorkspace(
   target: WorkspaceTarget,
   lister: Lister = list,
-): Promise<string[]> {
+): Promise<WorkspaceIndex> {
   const files: string[] = [];
   const queue: Array<{ path: string; depth: number }> = [{ path: "", depth: 0 }];
   let directories = 0;
+  let truncated = false;
 
   while (queue.length > 0 && directories < MAX_DIRECTORIES && files.length < MAX_INDEXED_FILES) {
     const batch = queue.splice(0, CONCURRENCY);
@@ -86,9 +93,13 @@ export async function walkWorkspace(
       if (result?.status !== "fulfilled") continue;
       directories += 1;
       const depth = batch[index]?.depth ?? 0;
+      if (result.value.truncated) truncated = true;
       for (const entry of result.value.entries) {
         if (entry.kind === "directory") {
-          if (depth + 1 > MAX_DEPTH) continue;
+          if (depth + 1 > MAX_DEPTH) {
+            truncated = true;
+            continue;
+          }
           if (IGNORED_DIRECTORIES.has(entry.name)) continue;
           queue.push({ path: entry.path, depth: depth + 1 });
           continue;
@@ -97,18 +108,24 @@ export async function walkWorkspace(
         // loop, and the daemon reports them without resolving the target.
         if (entry.kind !== "file") continue;
         files.push(entry.path);
-        if (files.length >= MAX_INDEXED_FILES) break;
+        if (files.length >= MAX_INDEXED_FILES) {
+          truncated = true;
+          break;
+        }
       }
     }
   }
 
-  return files;
+  // Leftover directories mean a cap stopped the walk: the list is a prefix.
+  if (queue.length > 0) truncated = true;
+
+  return { files, truncated };
 }
 
 type CacheEntry = {
-  files: string[];
+  index: WorkspaceIndex;
   at: number;
-  pending: Promise<string[]> | null;
+  pending: Promise<WorkspaceIndex> | null;
 };
 
 const cache = new Map<string, CacheEntry>();
@@ -118,25 +135,30 @@ function cacheKey(target: WorkspaceTarget): string {
 }
 
 /** Files already indexed for this workspace, for a flash-free first render. */
-export function readWorkspaceFilesCache(target: WorkspaceTarget): string[] | null {
+export function readWorkspaceFilesCache(target: WorkspaceTarget): WorkspaceIndex | null {
   const hit = cache.get(cacheKey(target));
-  if (!hit || hit.pending) return hit?.files.length ? hit.files : null;
-  return hit.files;
+  if (!hit) return null;
+  if (hit.pending) return hit.index.files.length ? hit.index : null;
+  return hit.index;
 }
 
 /** Index one workspace, reusing a fresh cache or an in-flight walk. */
-export async function loadWorkspaceFiles(target: WorkspaceTarget): Promise<string[]> {
+export async function loadWorkspaceFiles(target: WorkspaceTarget): Promise<WorkspaceIndex> {
   const key = cacheKey(target);
   const hit = cache.get(key);
   if (hit?.pending) return hit.pending;
-  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.files;
+  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.index;
 
   const pending = walkWorkspace(target);
-  cache.set(key, { files: hit?.files ?? [], at: hit?.at ?? 0, pending });
+  cache.set(key, {
+    index: hit?.index ?? { files: [], truncated: false },
+    at: hit?.at ?? 0,
+    pending,
+  });
   try {
-    const files = await pending;
-    cache.set(key, { files, at: Date.now(), pending: null });
-    return files;
+    const index = await pending;
+    cache.set(key, { index, at: Date.now(), pending: null });
+    return index;
   } catch (error) {
     cache.delete(key);
     throw error;
@@ -150,11 +172,13 @@ export function clearWorkspaceFilesCache(): void {
 
 export type WorkspaceFilesState = {
   files: string[];
+  /** The index hit a cap, so a sparse result may just be outside it. */
+  truncated: boolean;
   loading: boolean;
   error: string | null;
 };
 
-const EMPTY: WorkspaceFilesState = { files: [], loading: false, error: null };
+const EMPTY: WorkspaceFilesState = { files: [], truncated: false, loading: false, error: null };
 
 /**
  * The index for the open picker. It loads only while the menu asks for it and
@@ -167,16 +191,27 @@ export function useWorkspaceFiles(target: WorkspaceTarget, enabled: boolean): Wo
     if (!enabled) return;
     let cancelled = false;
     const cached = readWorkspaceFilesCache(target);
-    setState({ files: cached ?? [], loading: true, error: null });
+    setState({
+      files: cached?.files ?? [],
+      truncated: cached?.truncated ?? false,
+      loading: true,
+      error: null,
+    });
     loadWorkspaceFiles(target)
-      .then((files) => {
+      .then((index) => {
         if (cancelled) return;
-        setState({ files, loading: false, error: null });
+        setState({
+          files: index.files,
+          truncated: index.truncated,
+          loading: false,
+          error: null,
+        });
       })
       .catch((error: unknown) => {
         if (cancelled) return;
         setState({
           files: [],
+          truncated: false,
           loading: false,
           error: error instanceof Error ? error.message : "The workspace could not be read.",
         });

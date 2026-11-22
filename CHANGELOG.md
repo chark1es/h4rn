@@ -100,6 +100,18 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **The composer's `@` picker and `/` menu hold up on a phone and at the edges.** The phone file
+  sheet no longer inherits the shared bottom-sheet placement and covers the composer: it sits above
+  the input it belongs to. On a phone, `/` → Changes and Subagents open the phone panel sheet on the
+  matching segment instead of calling the desktop panel action, like the header button does. `@`
+  now opens after any non-identifier character (`(`, `[`, `{`, a quote, a comma), not only after
+  whitespace, and the `@` button inserts a separating space before it when the caret follows a
+  word, so the menu no longer dies on the next keystroke. The caret popover measures itself and
+  clamps to the viewport, moving left and opening below the caret when there is no room above.
+  The file index now reports the caps it hit — a truncated listing, 3,000 files, 250 folders or
+  8 levels — and the menu says “Showing the first 3,000 files.” instead of a bare “No files match”.
+  Every option has an id, `↑`/`↓` scroll the highlighted row into view and the textarea names it
+  with `aria-activedescendant`.
 - **A second launch hands its deep link to the running app.** Launching h4rn while it is already
   running (including from a hidden tray) used to focus the window and drop the `h4rn://` link that
   started the second process. The single-instance plugin now has its `deep-link` feature, so it

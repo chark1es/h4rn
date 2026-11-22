@@ -7,9 +7,10 @@ import {
   TerminalIcon,
   WorkflowIcon,
 } from "lucide-react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import type { ComposerCommandIcon } from "@/lib/composerCommands";
-import { splitPath } from "@/lib/composerMenu";
+import { type PopoverPlacement, placePopover, splitPath } from "@/lib/composerMenu";
 
 export type ComposerMenuRow =
   | { kind: "file"; id: string; path: string }
@@ -29,6 +30,18 @@ const COMMAND_ICONS = {
   subagents: WorkflowIcon,
   terminal: TerminalIcon,
 } as const;
+
+/** A quiet count for the index footer: `3,000`, not `3000`. */
+function countLabel(count: number): string {
+  return new Intl.NumberFormat("en-US").format(count);
+}
+
+function cappedNote(indexed: number, truncated: boolean): string | null {
+  if (!truncated) return null;
+  return indexed > 0
+    ? `Showing the first ${countLabel(indexed)} files.`
+    : "Showing only the files the index could reach.";
+}
 
 function emptyText(
   kind: "file" | "command",
@@ -51,11 +64,13 @@ function emptyText(
 
 function MenuRow({
   row,
+  id,
   active,
   onSelect,
   onHighlight,
 }: {
   row: ComposerMenuRow;
+  id: string;
   active: boolean;
   onSelect: () => void;
   onHighlight: () => void;
@@ -66,6 +81,7 @@ function MenuRow({
       <button
         type="button"
         role="option"
+        id={id}
         aria-selected={active}
         className="q-comp-menu-item"
         onMouseEnter={onHighlight}
@@ -85,6 +101,7 @@ function MenuRow({
     <button
       type="button"
       role="option"
+      id={id}
       aria-selected={active}
       className="q-comp-menu-item q-comp-menu-cmd"
       onMouseEnter={onHighlight}
@@ -108,6 +125,8 @@ export function ComposerMenu({
   workspaceName,
   query,
   isPhone,
+  indexedCount,
+  truncated,
   listId,
   onSelect,
   onHighlight,
@@ -122,6 +141,10 @@ export function ComposerMenu({
   workspaceName: string;
   query: string;
   isPhone: boolean;
+  /** How many files the index holds, for the cap footer. */
+  indexedCount: number;
+  /** The index stopped at a cap, so a thin result may just be outside it. */
+  truncated: boolean;
   listId: string;
   onSelect: (index: number) => void;
   onHighlight: (index: number) => void;
@@ -129,9 +152,15 @@ export function ComposerMenu({
 }) {
   const label = kind === "file" ? "Files" : "Commands";
   const empty = emptyText(kind, query, loading, error, workspaceName);
+  const note = kind === "file" ? cappedNote(indexedCount, truncated) : null;
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const measured = useRef<PopoverPlacement | null>(null);
+  const [placement, setPlacement] = useState<PopoverPlacement | null>(null);
   const rowsView = rows.map((row, index) => (
     <MenuRow
       key={row.id}
+      id={`${listId}-option-${index}`}
       row={row}
       active={index === activeIndex}
       onSelect={() => onSelect(index)}
@@ -139,9 +168,59 @@ export function ComposerMenu({
     />
   ));
 
+  // Follow the highlight with the keyboard: a long list must show the row it
+  // is about to insert.
+  useEffect(() => {
+    const active = listRef.current?.querySelector<HTMLElement>(
+      `[id="${listId}-option-${activeIndex}"]`,
+    );
+    active?.scrollIntoView?.({ block: "nearest" });
+  }, [activeIndex, listId]);
+
+  // Measure the popover before placing it: long paths make it wider than the
+  // viewport guess, and a tall list near the top has to flip below the caret.
+  // Runs after every render because the list (and so the height) follows the
+  // query; the comparison keeps a re-measure from looping.
+  useLayoutEffect(() => {
+    if (isPhone) return;
+    const element = menuRef.current;
+    if (!element) return;
+    const parent = element.offsetParent;
+    if (!(parent instanceof HTMLElement)) return;
+    const parentRect = parent.getBoundingClientRect();
+    const next = placePopover({
+      anchor,
+      size: { width: element.offsetWidth, height: element.offsetHeight },
+      parent: {
+        left: parentRect.left,
+        top: parentRect.top,
+        width: parentRect.width,
+        height: parentRect.height,
+      },
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+    });
+    const previous = measured.current;
+    if (
+      previous &&
+      previous.left === next.left &&
+      previous.bottom === next.bottom &&
+      previous.top === next.top
+    ) {
+      return;
+    }
+    measured.current = next;
+    setPlacement(next);
+  });
+
   if (isPhone) {
     return (
-      <div className="q-ph-sheet q-comp-sheet" role="dialog" aria-label={label}>
+      <div
+        className="q-ph-sheet q-comp-sheet"
+        role="dialog"
+        aria-label={label}
+        data-placement="above"
+      >
+        <div className="q-grab" />
         <div className="q-comp-sheet-head">
           <span>{kind === "file" ? `Files in ${workspaceName}` : "Commands"}</span>
           <span className="grow" />
@@ -149,21 +228,39 @@ export function ComposerMenu({
             Done
           </button>
         </div>
-        <div className="q-comp-sheet-list" role="listbox" aria-label={label} id={listId}>
+        <div
+          className="q-comp-sheet-list"
+          role="listbox"
+          aria-label={label}
+          id={listId}
+          ref={listRef}
+        >
           {rows.length > 0 ? rowsView : <p className="q-comp-menu-empty">{empty}</p>}
+          {note ? <p className="q-comp-menu-note">{note}</p> : null}
         </div>
       </div>
     );
   }
 
+  // Until the first measurement the anchor is the best guess; after it the
+  // measured placement keeps the popover inside the viewport.
+  const style = placement
+    ? placement.top !== null
+      ? { left: placement.left, top: placement.top }
+      : { left: placement.left, bottom: placement.bottom ?? anchor.bottom }
+    : { left: anchor.left, bottom: anchor.bottom };
+
   return (
     <div
+      ref={menuRef}
       className="q-comp-menu"
-      style={{ left: anchor.left, bottom: anchor.bottom }}
+      style={style}
       data-kind={kind}
+      {...(placement?.top != null ? { "data-flipped": "below" } : {})}
     >
-      <div className="q-comp-menu-list" role="listbox" aria-label={label} id={listId}>
+      <div className="q-comp-menu-list" role="listbox" aria-label={label} id={listId} ref={listRef}>
         {rows.length > 0 ? rowsView : <p className="q-comp-menu-empty">{empty}</p>}
+        {note ? <p className="q-comp-menu-note">{note}</p> : null}
       </div>
       <div className="q-comp-menu-foot" aria-hidden>
         <span>↑↓ move</span>

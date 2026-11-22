@@ -12,16 +12,19 @@ export type ComposerTrigger =
   | { kind: "command"; query: string; start: number; end: number };
 
 const WHITESPACE = /\s/;
+/** Characters that keep a mention inside a word (`me@example.com`, `foo@bar`). */
+const IDENTIFIER = /[A-Za-z0-9_]/;
 
 function isWhitespace(char: string | undefined): boolean {
   return char !== undefined && WHITESPACE.test(char);
 }
 
-/** Start of the non-whitespace token that contains `caret`. */
-function tokenStart(value: string, caret: number): number {
-  let index = caret - 1;
-  while (index >= 0 && !isWhitespace(value[index])) index -= 1;
-  return index + 1;
+/** True when `@` at `index` starts a token rather than sitting inside a word. */
+function isWordBoundary(value: string, index: number): boolean {
+  if (index <= 0) return true;
+  const before = value[index - 1];
+  if (before === undefined) return true;
+  return isWhitespace(before) || !IDENTIFIER.test(before);
 }
 
 /** End of the non-whitespace token that contains `caret`. */
@@ -34,25 +37,84 @@ function tokenEnd(value: string, caret: number): number {
 /**
  * The trigger the caret is inside, or `null`.
  *
- * `@` only opens at a word boundary, so `me@example.com` is left alone. `/`
- * only opens as the first character of the composer; a slash later in the
- * prompt is path text, not a command.
+ * `@` opens after any non-identifier character — start of input, whitespace,
+ * `(`, `[`, `"`, `,`, and so on — but not inside a word, so `me@example.com`
+ * is left alone. The query runs from the `@` to the caret, so path text may
+ * contain `-` and `/`. `/` only opens as the first character of the composer;
+ * a slash later in the prompt is path text, not a command.
  */
 export function detectComposerTrigger(value: string, caretInput: number): ComposerTrigger | null {
   const caret = Math.max(0, Math.min(caretInput, value.length));
-  const start = tokenStart(value, caret);
   const end = tokenEnd(value, caret);
-  const token = value.slice(start, end);
 
-  if (token.startsWith("@")) {
-    return { kind: "file", query: token.slice(1, caret - start), start, end };
+  // The nearest `@` in the current token, provided nothing but the token
+  // itself sits in front of it.
+  let at = caret - 1;
+  while (at >= 0 && !isWhitespace(value[at]) && value[at] !== "@") at -= 1;
+  if (at >= 0 && value[at] === "@" && isWordBoundary(value, at)) {
+    return { kind: "file", query: value.slice(at + 1, caret), start: at, end };
   }
 
-  if (start === 0 && token.startsWith("/")) {
-    return { kind: "command", query: token.slice(1, caret - start), start, end };
+  if (value.startsWith("/") && caret > 0) {
+    // Only the first token is a command: once whitespace ends it, the slash
+    // text is part of the prompt.
+    const firstTokenEnd = tokenEnd(value, 0);
+    if (caret <= firstTokenEnd) {
+      return { kind: "command", query: value.slice(1, caret), start: 0, end: firstTokenEnd };
+    }
   }
 
   return null;
+}
+
+/**
+ * Where the caret-anchored popover should sit, relative to its positioned
+ * parent. The caller measures the popover first: a width-agnostic guess
+ * overflows the viewport for long paths.
+ */
+export type PopoverPlacement = {
+  /** Distance from the parent's left edge. */
+  left: number;
+  /** Set when the popover sits above the caret line, measured from the parent's bottom. */
+  bottom: number | null;
+  /** Set when there is no room above and the popover flips below the caret line. */
+  top: number | null;
+  /** True when the popover had to move up or sideways to stay on screen. */
+  flipped: boolean;
+};
+
+export function placePopover({
+  anchor,
+  size,
+  parent,
+  viewport,
+  margin = 8,
+  lineHeight = 21,
+}: {
+  anchor: { left: number; bottom: number };
+  size: { width: number; height: number };
+  parent: { left: number; top: number; width: number; height: number };
+  viewport: { width: number; height: number };
+  margin?: number;
+  lineHeight?: number;
+}): PopoverPlacement {
+  const minLeft = margin - parent.left;
+  const maxLeft = viewport.width - margin - size.width - parent.left;
+  // A popover wider than the screen keeps its left edge on screen.
+  const left = maxLeft < minLeft ? minLeft : Math.max(minLeft, Math.min(anchor.left, maxLeft));
+
+  const caretTop = parent.top + parent.height - anchor.bottom + 6;
+  const aboveTop = caretTop - size.height;
+  if (aboveTop >= margin) {
+    return { left, bottom: anchor.bottom, top: null, flipped: left !== anchor.left };
+  }
+
+  // No room above the caret (a tall menu near the top of the screen): open
+  // downwards and pull it back up if even that would leave the viewport.
+  const desiredTop = caretTop + lineHeight + 4 - parent.top;
+  const maxTop = viewport.height - margin - size.height - parent.top;
+  const top = Math.max(margin - parent.top, Math.min(desiredTop, maxTop));
+  return { left, bottom: null, top, flipped: true };
 }
 
 /** Stable identity for one trigger, used to keep Escape dismissed. */

@@ -187,17 +187,17 @@ function fileEntry(path: string): FileEntry {
   };
 }
 
-function workspaceListing(path: string, files: string[]): FsListing {
+function workspaceListing(path: string, files: string[], truncated = false): FsListing {
   return {
     workspace: "/work/repo",
     path,
     entries: path === "" ? files.map(fileEntry) : [],
-    truncated: false,
+    truncated,
   };
 }
 
-function stubWorkspaceFiles(files: string[] = WORKSPACE_FILES): void {
-  setWorkspaceFileListerForTests(async ({ path }) => workspaceListing(path, files));
+function stubWorkspaceFiles(files: string[] = WORKSPACE_FILES, truncated = false): void {
+  setWorkspaceFileListerForTests(async ({ path }) => workspaceListing(path, files, truncated));
 }
 
 /** Type, then put the caret at the end the way a browser would. */
@@ -238,6 +238,7 @@ afterEach(() => {
   setWorkspaceFileListerForTests(null);
   clearWorkspaceFilesCache();
   vi.unstubAllGlobals();
+  delete (Element.prototype as unknown as Record<string, unknown>).scrollIntoView;
 });
 
 describe("Composer drafts and history", () => {
@@ -512,6 +513,19 @@ describe("Composer @ file picker", () => {
     expect(screen.queryByRole("listbox")).toBeNull();
   });
 
+  it("opens after punctuation and keeps filtering as more is typed", async () => {
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "look (@");
+    expect(await screen.findByRole("listbox", { name: "Files" })).toBeTruthy();
+
+    typeInto(input, "look (@read");
+    expect(await screen.findByRole("option", { name: /README\.md/ })).toBeTruthy();
+    fireEvent.keyDown(input, { key: "Enter" });
+    runAnimationFrames();
+    expect(input.value).toBe("look (@README.md ");
+  });
+
   it("filters with path-aware matching after a debounce", async () => {
     renderComposer();
     const input = textarea();
@@ -599,6 +613,53 @@ describe("Composer @ file picker", () => {
 
     expect(await screen.findByRole("listbox", { name: "Files" })).toBeTruthy();
     expect(textarea().value).toBe("@");
+  });
+
+  it("separates the @ button from a word and keeps the menu usable", async () => {
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "ask");
+
+    fireEvent.click(screen.getByRole("button", { name: "Mention a file" }));
+    runAnimationFrames();
+    expect(input.value).toBe("ask @");
+    expect(await screen.findByRole("listbox", { name: "Files" })).toBeTruthy();
+
+    // The next keystroke filters instead of closing the menu.
+    typeInto(input, "ask @read");
+    expect(await screen.findByRole("option", { name: /README\.md/ })).toBeTruthy();
+  });
+
+  it("offers a quiet footer when the index hit a cap", async () => {
+    stubWorkspaceFiles(WORKSPACE_FILES, true);
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "@");
+    await waitFor(() => expect(screen.getByText("Showing the first 5 files.")).toBeTruthy());
+
+    typeInto(input, "@nothing-matches");
+    expect(await screen.findByText("No files match “nothing-matches”.")).toBeTruthy();
+    expect(screen.getByText("Showing the first 5 files.")).toBeTruthy();
+  });
+
+  it("gives every option an id, announces the highlight and scrolls it into view", async () => {
+    const scrollIntoView = vi.fn();
+    (Element.prototype as unknown as { scrollIntoView: unknown }).scrollIntoView = scrollIntoView;
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "@");
+    await waitFor(() => expect(option(/README\.md/)).not.toBeNull());
+
+    const first = screen.getByRole("option", { name: /README\.md/ });
+    expect(first.id).toBe(`composer-menu-${THREAD}-option-0`);
+    expect(input.getAttribute("aria-activedescendant")).toBe(`composer-menu-${THREAD}-option-0`);
+    expect(within(screen.getByRole("listbox")).getAllByRole("option")[1]?.id).toBe(
+      `composer-menu-${THREAD}-option-1`,
+    );
+
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    expect(input.getAttribute("aria-activedescendant")).toBe(`composer-menu-${THREAD}-option-1`);
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
   });
 
   it("does not open or move during IME composition", async () => {
@@ -696,6 +757,40 @@ describe("Composer / command menu", () => {
     expect(input.value).toBe("/zzz");
   });
 
+  it("opens the phone panel sheet for Changes and Subagents on a phone", async () => {
+    mock.state.ui.phone = true;
+    const seen: string[] = [];
+    const listener = (event: Event) => {
+      seen.push((event as CustomEvent<string>).detail);
+    };
+    window.addEventListener("h4rn:phone-panel", listener);
+    try {
+      renderComposer();
+      const input = textarea();
+      typeInto(input, "/chan");
+      await waitFor(() => expect(option(/Open changes/)).not.toBeNull());
+      fireEvent.keyDown(input, { key: "Enter" });
+
+      typeInto(input, "/sub");
+      await waitFor(() => expect(option(/Open subagents/)).not.toBeNull());
+      fireEvent.keyDown(input, { key: "Enter" });
+
+      expect(seen).toEqual(["changes", "subagents"]);
+      expect(mock.setPanelTab).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener("h4rn:phone-panel", listener);
+    }
+  });
+
+  it("still opens the desktop panel tab from the / menu", async () => {
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "/chan");
+    await waitFor(() => expect(option(/Open changes/)).not.toBeNull());
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(mock.setPanelTab).toHaveBeenCalledWith("changes");
+  });
+
   it("renders the same list as a bottom sheet on a phone", async () => {
     mock.state.ui.phone = true;
     renderComposer();
@@ -703,6 +798,11 @@ describe("Composer / command menu", () => {
     typeInto(input, "@read");
 
     const sheet = await screen.findByRole("dialog", { name: "Files" });
+    // The shared bottom-sheet styles must not pull it over the composer: the
+    // composer placement class puts it above the input it belongs to.
+    expect(sheet.className).toContain("q-ph-sheet");
+    expect(sheet.className).toContain("q-comp-sheet");
+    expect(sheet.getAttribute("data-placement")).toBe("above");
     expect(within(sheet).getByText("Files in code")).toBeTruthy();
     fireEvent.click(await within(sheet).findByRole("option", { name: /README\.md/ }));
     runAnimationFrames();

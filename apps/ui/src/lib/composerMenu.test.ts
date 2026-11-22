@@ -5,6 +5,7 @@ import {
   detectComposerTrigger,
   fileReference,
   fuzzyScore,
+  placePopover,
   rankCommands,
   rankFilePaths,
   splitPath,
@@ -37,6 +38,24 @@ describe("@ file trigger", () => {
 
   it("does not open inside a word after another @", () => {
     expect(detectComposerTrigger("foo@bar", 7)).toBeNull();
+  });
+
+  it("treats any non-identifier character as a boundary", () => {
+    for (const before of ["(", "[", "{", '"', "'", ",", "=", ":", "-", "@"]) {
+      const value = `see ${before}@src`;
+      const trigger = detectComposerTrigger(value, value.length);
+      expect(trigger, `after ${before}`).toEqual({
+        kind: "file",
+        query: "src",
+        start: 5,
+        end: value.length,
+      });
+    }
+  });
+
+  it("keeps path characters in the query", () => {
+    const value = "(see @apps/ui/src/comp-menu.ts";
+    expect(detectComposerTrigger(value, value.length)?.query).toBe("apps/ui/src/comp-menu.ts");
   });
 
   it("replaces the whole token when the caret sits before its end", () => {
@@ -185,6 +204,54 @@ describe("insertion", () => {
   it("keeps text that follows the command token", () => {
     const applied = applyCompletion("/term and more", { start: 0, end: 5 }, "");
     expect(applied.value).toBe(" and more");
+  });
+});
+
+describe("popover placement", () => {
+  const viewport = { width: 1_200, height: 800 };
+  const parent = { left: 16, top: 600, width: 500, height: 96 };
+
+  it("sits above the caret when the measured height fits", () => {
+    const placement = placePopover({
+      anchor: { left: 40, bottom: 80 },
+      size: { width: 420, height: 320 },
+      parent,
+      viewport,
+    });
+    expect(placement).toEqual({ left: 40, bottom: 80, top: null, flipped: false });
+  });
+
+  it("clamps a measured width to the right edge", () => {
+    const placement = placePopover({
+      anchor: { left: 900, bottom: 80 },
+      size: { width: 420, height: 320 },
+      parent,
+      viewport,
+    });
+    expect(placement.left).toBe(756);
+    expect(parent.left + placement.left + 420).toBe(viewport.width - 8);
+  });
+
+  it("never leaves the left edge off screen", () => {
+    const placement = placePopover({
+      anchor: { left: -100, bottom: 80 },
+      size: { width: 420, height: 320 },
+      parent: { ...parent, left: 0 },
+      viewport,
+    });
+    expect(placement.left).toBe(8);
+  });
+
+  it("flips below the caret when there is no room above", () => {
+    const placement = placePopover({
+      anchor: { left: 20, bottom: 80 },
+      size: { width: 300, height: 320 },
+      parent: { left: 16, top: 0, width: 500, height: 96 },
+      viewport,
+    });
+    expect(placement.bottom).toBeNull();
+    expect(placement.top).toBeGreaterThan(0);
+    expect(placement.flipped).toBe(true);
   });
 });
 

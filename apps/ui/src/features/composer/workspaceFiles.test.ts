@@ -64,9 +64,10 @@ describe("workspace file walk", () => {
     };
     const lister = vi.fn(async ({ path }: { path: string }) => listing(path, tree[path] ?? []));
 
-    const files = await walkWorkspace(target, lister);
+    const index = await walkWorkspace(target, lister);
 
-    expect(files).toEqual(["README.md", "src/main.ts", "src/nested/deep.ts"]);
+    expect(index.files).toEqual(["README.md", "src/main.ts", "src/nested/deep.ts"]);
+    expect(index.truncated).toBe(false);
     expect(lister).not.toHaveBeenCalledWith(expect.objectContaining({ path: "node_modules" }));
   });
 
@@ -77,7 +78,10 @@ describe("workspace file walk", () => {
       return listing(path, [file(`${path}/file.ts`)]);
     };
 
-    await expect(walkWorkspace(target, lister)).resolves.toEqual(["src/file.ts"]);
+    await expect(walkWorkspace(target, lister)).resolves.toEqual({
+      files: ["src/file.ts"],
+      truncated: false,
+    });
   });
 
   it("stops at the file cap", async () => {
@@ -87,7 +91,9 @@ describe("workspace file walk", () => {
     const lister = async ({ path }: { path: string }) =>
       listing(path, path === "" ? [directory("src")] : many);
 
-    await expect(walkWorkspace(target, lister)).resolves.toHaveLength(MAX_INDEXED_FILES);
+    const index = await walkWorkspace(target, lister);
+    expect(index.files).toHaveLength(MAX_INDEXED_FILES);
+    expect(index.truncated).toBe(true);
   });
 
   it("does not descend past the depth cap", async () => {
@@ -99,9 +105,30 @@ describe("workspace file walk", () => {
       ]);
     };
 
-    const files = await walkWorkspace(target, lister);
-    expect(files).toContain("next/next/next/next/next/next/next/next/file.ts");
-    expect(files.some((path) => path.split("/").length > 10)).toBe(false);
+    const index = await walkWorkspace(target, lister);
+    expect(index.files).toContain("next/next/next/next/next/next/next/next/file.ts");
+    expect(index.files.some((path) => path.split("/").length > 10)).toBe(false);
+    // Directories below the depth cap are left out, so the list is incomplete.
+    expect(index.truncated).toBe(true);
+  });
+
+  it("reports a listing the daemon itself truncated", async () => {
+    const lister = async ({ path }: { path: string }) => ({
+      ...listing(path, path === "" ? [file("a.ts")] : []),
+      truncated: true,
+    });
+    await expect(walkWorkspace(target, lister)).resolves.toEqual({
+      files: ["a.ts"],
+      truncated: true,
+    });
+  });
+
+  it("reports the directory cap", async () => {
+    const directories = Array.from({ length: 300 }, (_, index) => directory(`dir-${index}`));
+    const lister = async ({ path }: { path: string }) =>
+      listing(path, path === "" ? directories : []);
+    const index = await walkWorkspace(target, lister);
+    expect(index.truncated).toBe(true);
   });
 });
 
@@ -115,8 +142,8 @@ describe("workspace file cache", () => {
       loadWorkspaceFiles(target),
       loadWorkspaceFiles(target),
     ]);
-    expect(first).toEqual(["a.ts", "b.ts"]);
-    expect(second).toEqual(["a.ts", "b.ts"]);
+    expect(first).toEqual({ files: ["a.ts", "b.ts"], truncated: false });
+    expect(second).toEqual({ files: ["a.ts", "b.ts"], truncated: false });
     expect(lister).toHaveBeenCalledTimes(1);
   });
 
@@ -128,6 +155,9 @@ describe("workspace file cache", () => {
     await loadWorkspaceFiles(target);
     await loadWorkspaceFiles(target);
     expect(lister).toHaveBeenCalledTimes(1);
-    expect(readWorkspaceFilesCache(target)).toEqual(["a.ts"]);
+    expect(readWorkspaceFilesCache(target)).toEqual({
+      files: ["a.ts"],
+      truncated: false,
+    });
   });
 });

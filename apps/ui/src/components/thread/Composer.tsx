@@ -44,6 +44,7 @@ import {
   writeThreadDraft,
 } from "@/lib/drafts";
 import { harnessLabel } from "@/lib/entities";
+import { openPhonePanel } from "@/lib/phonePanels";
 import { getState, sendMessage, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 import { ComposerMenu, type ComposerMenuRow } from "./ComposerMenu";
@@ -102,7 +103,7 @@ function caretAnchor(
   const lineHeight = Number.parseFloat(computed.lineHeight) || 21;
   const above = wrapper.clientHeight - (element.offsetTop + markerTop);
   return {
-    left: Math.max(0, Math.min(markerLeft + element.offsetLeft, Math.max(0, width - 240))),
+    left: Math.max(0, markerLeft + element.offsetLeft),
     bottom: Math.max(lineHeight, above + 6),
   };
 }
@@ -144,8 +145,14 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   const terminalOpen = useApp((state) => state.ui.layout.terminalOpen);
   const view = useApp((state) => state.ui.layout.view);
   const commands = useMemo(
-    () => composerCommands(summary, { terminalOpen, view }),
-    [summary, terminalOpen, view],
+    () =>
+      composerCommands(summary, {
+        terminalOpen,
+        view,
+        phone: isPhone,
+        openPhonePanel,
+      }),
+    [summary, terminalOpen, view, isPhone],
   );
   const workspaceTarget = useMemo(
     () => ({ host: summary.host, workspace: summary.workspace_path }),
@@ -177,6 +184,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   }, [menu?.trigger.kind, commandResults, fileResults]);
   const activeIndex = menu && rows.length > 0 ? Math.min(menu.activeIndex, rows.length - 1) : 0;
   const workspaceName = summary.workspace_path.split("/").filter(Boolean).pop() ?? summary.host;
+  const menuListId = `composer-menu-${summary.thread_id}`;
 
   const online = connection === "online";
   const writable = online && hostOnline;
@@ -395,15 +403,17 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     if (!element || !writable) return;
     const start = element.selectionStart ?? text.length;
     const end = element.selectionEnd ?? start;
-    const next = `${text.slice(0, start)}@${text.slice(end)}`;
+    const before = text.slice(0, start);
+    // Never glue the @ to the word before it: `(`/`"` and friends are
+    // boundaries anyway, but a letter is not, so separate with a space first.
+    const prefix = before.length > 0 && !/\s$/.test(before) ? " @" : "@";
+    const next = `${before}${prefix}${text.slice(end)}`;
     update(next);
     dismissed.current = null;
-    setMenu({ trigger: { kind: "file", query: "", start, end: start + 1 }, activeIndex: 0 });
-    requestAnimationFrame(() => {
-      element.focus();
-      element.setSelectionRange(start + 1, start + 1);
-      autosize();
-    });
+    // Run the same trigger detection the keyboard uses, so the menu opens for
+    // exactly the token the next keystroke will keep filtering.
+    syncMenu(next, before.length + prefix.length);
+    focusCaret(before.length + prefix.length);
   };
 
   const input = (
@@ -413,7 +423,10 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
       rows={1}
       aria-label={replyTo}
       aria-autocomplete="list"
-      aria-controls={menu ? `composer-menu-${summary.thread_id}` : undefined}
+      aria-controls={menu ? menuListId : undefined}
+      aria-activedescendant={
+        menu && rows.length > 0 ? `${menuListId}-option-${activeIndex}` : undefined
+      }
       placeholder={disabledReason ?? replyTo}
       disabled={!writable}
       onChange={(event) => {
@@ -525,7 +538,9 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
           workspaceName={workspaceName}
           query={menu.trigger.kind === "file" ? settledQuery : menu.trigger.query}
           isPhone={false}
-          listId={`composer-menu-${summary.thread_id}`}
+          indexedCount={fileIndex.files.length}
+          truncated={fileIndex.truncated}
+          listId={menuListId}
           onSelect={choose}
           onHighlight={(index) =>
             setMenu((current) => (current ? { ...current, activeIndex: index } : current))
@@ -614,7 +629,9 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
             workspaceName={workspaceName}
             query={menu.trigger.kind === "file" ? settledQuery : menu.trigger.query}
             isPhone
-            listId={`composer-menu-${summary.thread_id}`}
+            indexedCount={fileIndex.files.length}
+            truncated={fileIndex.truncated}
+            listId={menuListId}
             onSelect={choose}
             onHighlight={(index) =>
               setMenu((current) => (current ? { ...current, activeIndex: index } : current))
