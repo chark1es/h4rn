@@ -10,12 +10,16 @@ All notable changes to h4rn are recorded here. The format follows
 - **Preview HTML files in the right panel.** A report, chart or mockup the agent wrote can be
   opened from the Files tab's new action on `.html`/`.htm` rows, or from a relative HTML link in
   an agent message. The Preview tab reads the file through the daemon, inlines its relative CSS,
-  JS, images and fonts from inside the workspace (up to 10 MB), and renders it in a
-  `sandbox="allow-scripts"` iframe with `srcdoc` and a `default-src 'none'` CSP, so page scripts
-  run without gaining access to h4rn, its cookies or its storage. It reloads when the file changes
-  on disk, expands to full width in the main area, and opens in the phone panel sheet. Files
-  outside the workspace, over the size limit, or not UTF-8 show a plain message instead. MCP Apps,
-  a headless browser and dev-server proxying are not part of this change.
+  JS, images and fonts from inside the workspace, and renders it in a `sandbox="allow-scripts"`
+  iframe with a `default-src 'none'` CSP, so page scripts run without gaining access to h4rn, its
+  cookies or its storage. The desktop and mobile shells serve the prepared page from their own
+  `h4rn-preview` origin (a `srcdoc` frame would inherit the window's `script-src 'self'`); the
+  browser build keeps `srcdoc`. Limits are the daemon's 2 MiB HTML read, 360 KiB per binary asset
+  and 10 MB for all embedded copies. Links in the page ask in an inline bar before opening in the
+  system browser. It reloads when the file or an asset changes on disk (the workspace watch is
+  shared with the IDE), expands to full width in the main area, and opens in the phone panel
+  sheet. Files outside the workspace, over a size limit, or not UTF-8 show a plain message
+  instead. MCP Apps, a headless browser and dev-server proxying are not part of this change.
 
 ### Fixed
 

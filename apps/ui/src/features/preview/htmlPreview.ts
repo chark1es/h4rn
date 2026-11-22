@@ -3,13 +3,16 @@
  *
  * The preview never loads a page from the daemon as a URL. The HTML is read as
  * text, everything it needs from the workspace is inlined, and the result is
- * rendered in a sandboxed iframe through `srcdoc`. That means:
+ * rendered in a sandboxed iframe. In a packaged shell the prepared document is
+ * served from the shell's own `h4rn-preview` origin (so the page's scripts are
+ * not blocked by the window's `script-src 'self'`); in the browser build it is
+ * rendered through `srcdoc`. Either way:
  *
  * - the page has an opaque origin, so it cannot read the app, its cookies or
  *   its storage;
  * - relative references are resolved here, against the document's own folder,
  *   and only paths inside the workspace root are fetched;
- * - a strict CSP (injected below) blocks anything that was not inlined except
+ * - a strict CSP (prepended below) blocks anything that was not inlined except
  *   images, styles, scripts and fonts from `https:` CDNs.
  *
  * The functions in this file are deliberately free of DOM APIs so they can be
@@ -23,8 +26,23 @@ export const PREVIEW_SANDBOX = "allow-scripts";
 export const PREVIEW_CSP =
   "default-src 'none'; img-src data: https:; style-src 'unsafe-inline' https:; script-src 'unsafe-inline' https:; font-src data: https:; connect-src https:";
 
+/** The CSP `<meta>` the document starts with. */
+export const PREVIEW_CSP_META = `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">`;
+
 /** Total workspace bytes the preview will inline, including the HTML itself. */
 export const PREVIEW_MAX_TOTAL_BYTES = 10 * 1024 * 1024;
+
+/** The daemon's own text read limit: a larger HTML file cannot be previewed. */
+export const PREVIEW_MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;
+
+/**
+ * The largest asset the daemon embeds as base64 in one response (360 KiB).
+ *
+ * Keep in step with `MAX_INLINE_BYTES` in
+ * `crates/h4rn-daemon/src/fs/paths.rs`. Base64 makes that 480 KiB, which still
+ * fits the secure transport's 512 KiB frame once the JSON envelope is added.
+ */
+export const PREVIEW_MAX_ASSET_BYTES = 360 * 1024;
 
 /** What one workspace reference needs from the daemon. */
 export type PreviewAssetKind = "text" | "bytes";
@@ -37,6 +55,8 @@ export type PreviewReference = {
   path: string;
   /** Text assets (CSS, JS) are inlined as text; everything else as bytes. */
   kind: PreviewAssetKind;
+  /** How many times this document embeds the asset. */
+  count: number;
 };
 
 /** The result of scanning a document for workspace references. */
@@ -130,13 +150,61 @@ export function isExternalPreviewUrl(raw: string): boolean {
   return /^https?:/i.test(url) || url.startsWith("//");
 }
 
+/**
+ * Validates a link the page asked to open and names its host.
+ *
+ * The page can send anything — including a forged token, which the panel
+ * checks separately — so the URL is re-validated here and only `http:` and
+ * `https:` ever reach the system browser.
+ */
+export function previewOpenRequest(raw: unknown): { url: string; host: string } | null {
+  if (typeof raw !== "string") return null;
+  const url = raw.trim();
+  if (!/^https?:\/\//i.test(url)) return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+  if (!parsed.hostname) return null;
+  return { url: parsed.href, host: parsed.host };
+}
+
+/**
+ * True when a click on a markdown `.html` link should open the preview.
+ *
+ * Modifier-clicks keep the browser's own behaviour (a new tab, a download),
+ * so a ⌘-click never hijacks the link.
+ */
+export function previewLinkOpens(event: {
+  metaKey?: boolean;
+  ctrlKey?: boolean;
+  shiftKey?: boolean;
+  altKey?: boolean;
+  button?: number;
+}): boolean {
+  if (event.button !== undefined && event.button !== 0) return false;
+  return !(event.metaKey || event.ctrlKey || event.shiftKey || event.altKey);
+}
+
+/** How many bytes one asset adds to the serialized document. */
+export function previewEmbeddedBytes(asset: PreviewAsset): number {
+  const text = asset.kind === "text" ? asset.text : asset.base64;
+  return new TextEncoder().encode(text).length;
+}
+
+/** One reference before occurrence counting: what the document asked for. */
+type PreviewTarget = Omit<PreviewReference, "count">;
+
 /** Classifies one reference and resolves the workspace ones. */
 function classify(
   docPath: string,
   raw: string,
   kind: PreviewAssetKind,
   scan: PreviewScan,
-): PreviewReference | null {
+): PreviewTarget | null {
   const url = raw.trim();
   if (!url || url.startsWith("#") || /^data:/i.test(url) || /^blob:/i.test(url)) return null;
   if (isExternalPreviewUrl(url)) {
@@ -148,8 +216,7 @@ function classify(
     if (!url.startsWith("#")) scan.rejected.push(url);
     return null;
   }
-  const ref = { url, path, kind } satisfies PreviewReference;
-  return ref;
+  return { url, path, kind };
 }
 
 type Attr = { name: string; value: string | null };
@@ -331,13 +398,18 @@ function walk(
  */
 export function scanPreviewReferences(html: string, docPath: string): PreviewScan {
   const scan: PreviewScan = { refs: [], external: [], rejected: [] };
-  const seen = new Set<string>();
-  const add = (ref: PreviewReference | null) => {
+  const seen = new Map<string, PreviewReference>();
+  const add = (ref: PreviewTarget | null) => {
     if (!ref) return;
     const key = `${ref.kind}:${ref.path}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    scan.refs.push(ref);
+    const existing = seen.get(key);
+    if (existing) {
+      existing.count += 1;
+      return;
+    }
+    const entry = { ...ref, count: 1 };
+    seen.set(key, entry);
+    scan.refs.push(entry);
   };
 
   walk(
@@ -382,15 +454,19 @@ export function scanPreviewReferences(html: string, docPath: string): PreviewSca
 /** Finds `url(...)` assets in a stylesheet, resolved from the sheet's folder. */
 export function scanCssReferences(css: string, cssPath: string): PreviewScan {
   const scan: PreviewScan = { refs: [], external: [], rejected: [] };
-  const seen = new Set<string>();
+  const seen = new Map<string, PreviewReference>();
   for (const match of css.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)'"\s]+))\s*\)/gi)) {
     const url = match[1] ?? match[2] ?? match[3] ?? "";
     const ref = classify(cssPath, url, "bytes", scan);
     if (!ref) continue;
-    const key = ref.path;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    scan.refs.push(ref);
+    const existing = seen.get(ref.path);
+    if (existing) {
+      existing.count += 1;
+      continue;
+    }
+    const entry = { ...ref, count: 1 };
+    seen.set(entry.path, entry);
+    scan.refs.push(entry);
   }
   return scan;
 }
@@ -436,45 +512,52 @@ function inlineCss(
       if (isExternalPreviewUrl(raw) || /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw)) return whole;
       const path = resolvePreviewAsset(cssPath, raw);
       if (!path) {
+        // A local reference that escapes the workspace is not left as a
+        // relative URL: the preview origin would see the request.
         missing?.add(raw);
-        return whole;
+        return "none";
       }
       const asset = assets[path];
       if (!asset) {
         missing?.add(path);
-        return whole;
+        return "none";
       }
       const replacement = dataUrl(asset, path);
-      return replacement ? `url("${replacement}")` : whole;
+      if (!replacement) {
+        missing?.add(path);
+        return "none";
+      }
+      return `url("${replacement}")`;
     },
   );
   // A stylesheet cannot close its own element.
   return rewritten.replace(/<\/style/gi, "<\\/style");
 }
 
-/** Injects the policy into the document head. */
+/**
+ * Injects the policy as the document's first bytes.
+ *
+ * There is no `<head>` matching: untrusted markup cannot make the policy land
+ * anywhere but the implicit head. The one exception is a doctype at byte 0 —
+ * a meta before it would switch the page into quirks mode — so the policy goes
+ * directly after it.
+ */
 export function injectCsp(html: string): string {
-  const meta = `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">`;
-  if (/<head\b[^>]*>/i.test(html)) {
-    return html.replace(/<head\b[^>]*>/i, (head) => `${head}${meta}`);
-  }
-  if (/<html\b[^>]*>/i.test(html)) {
-    return html.replace(/<html\b[^>]*>/i, (root) => `${root}<head>${meta}</head>`);
-  }
-  const doctype = /<!doctype\b[^>]*>/i.exec(html);
+  const doctype = /^<!doctype\b[^>]*>/i.exec(html);
   if (doctype) {
-    const end = doctype.index + doctype[0].length;
-    return `${html.slice(0, end)}<head>${meta}</head>${html.slice(end)}`;
+    return `${doctype[0]}${PREVIEW_CSP_META}${html.slice(doctype[0].length)}`;
   }
-  return `<head>${meta}</head>${html}`;
+  return `${PREVIEW_CSP_META}${html}`;
 }
 
 /**
  * Makes links inert in the frame and reports them to the app.
  *
  * The sandbox has no `allow-popups`, so `target="_blank"` alone does nothing;
- * the bridge script intercepts the click and posts the URL to the parent,
- * which opens it with the shell's opener. Same-page `#` links stay in-page.
+ * the bridge script intercepts the click and posts the URL to the parent.
+ * The panel validates it and asks the user before opening it, because the
+ * page controls everything inside the frame, including this token.
+ * Same-page `#` links stay in-page.
  */
 export function previewBridge(token: string): string {
   const safe = token.replace(/[^a-zA-Z0-9-]/g, "");
@@ -492,10 +575,11 @@ function rewriteAnchor(tag: Tag): string {
 }
 
 /**
- * Builds the `srcdoc` for one preview.
+ * Builds the document for one preview.
  *
- * Inlines the assets in `assets`, rewrites anchors for the bridge script,
- * injects the CSP and returns which references could not be inlined.
+ * Inlines the assets in `assets`, removes every local reference it could not
+ * inline (so the preview origin never receives a relative request), rewrites
+ * anchors for the bridge script, prepends the CSP and appends the bridge.
  */
 export function buildPreviewDocument(options: {
   html: string;
@@ -506,22 +590,38 @@ export function buildPreviewDocument(options: {
   const { html, docPath, assets, token } = options;
   const inlined = new Set<string>();
   const missing = new Set<string>();
-  const noteRef = (raw: string) => {
-    if (!raw.trim() || raw.trim().startsWith("#") || /^data:/i.test(raw)) return null;
-    if (isExternalPreviewUrl(raw)) return null;
-    const path = resolvePreviewAsset(docPath, raw);
-    if (!path) {
-      if (!/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(raw.trim())) missing.add(raw.trim());
-      return null;
+
+  // `leave` keeps the reference as written (external, `data:`, a fragment);
+  // `local` means the document was asking the workspace for the file.
+  const classifyLocal = (
+    raw: string,
+  ): { state: "leave" } | { state: "external" } | { state: "local"; path: string | null } => {
+    const value = raw.trim();
+    if (!value || value.startsWith("#") || /^(data|blob|javascript|mailto|tel):/i.test(value)) {
+      return { state: "leave" };
     }
-    const asset = assets[path];
-    if (!asset) {
-      missing.add(path);
-      return null;
-    }
-    inlined.add(path);
-    return { path, asset };
+    if (isExternalPreviewUrl(value)) return { state: "external" };
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value)) return { state: "leave" };
+    return { state: "local", path: resolvePreviewAsset(docPath, value) };
   };
+
+  const take = (raw: string): { path: string; asset: PreviewAsset } | null => {
+    const target = classifyLocal(raw);
+    if (target.state !== "local") return null;
+    if (!target.path) {
+      missing.add(raw.trim());
+      return null;
+    }
+    const asset = assets[target.path];
+    if (!asset) {
+      missing.add(target.path);
+      return null;
+    }
+    inlined.add(target.path);
+    return { path: target.path, asset };
+  };
+
+  const isLocal = (raw: string): boolean => classifyLocal(raw).state === "local";
 
   const body = walk(
     html,
@@ -541,11 +641,23 @@ export function buildPreviewDocument(options: {
       const name = tag.name.toLowerCase();
 
       if (name === "link") {
-        const rel = attr(tag, "rel")?.toLowerCase() ?? "";
         const href = attr(tag, "href");
-        if (!href || !rel.split(/\s+/).includes("stylesheet")) return null;
-        const found = noteRef(href);
-        if (found?.asset.kind !== "text") return { replacement: null };
+        if (!href) return null;
+        const rel = attr(tag, "rel")?.toLowerCase() ?? "";
+        if (!rel.split(/\s+/).includes("stylesheet")) {
+          // Icons, preloads and manifests are not inlined; a local one must
+          // not turn into a request against the preview origin.
+          return isLocal(href) ? { replacement: "" } : null;
+        }
+        const found = take(href);
+        if (!found) {
+          // External stylesheets stay; a local one that could not be read is
+          // dropped rather than left as a relative URL.
+          return isLocal(href) ? { replacement: "" } : null;
+        }
+        if (found.asset.kind !== "text") {
+          return { replacement: "" };
+        }
         return {
           replacement: `<style>${inlineCss(found.asset.text, found.path, assets, missing)}</style>`,
         };
@@ -554,10 +666,16 @@ export function buildPreviewDocument(options: {
       if (name === "script") {
         const src = attr(tag, "src");
         if (!src) return null;
-        const found = noteRef(src);
-        if (found?.asset.kind !== "text") return { replacement: null };
+        const found = take(src);
+        if (!found) {
+          return isLocal(src) ? { replacement: "", skipBody: true } : null;
+        }
+        if (found.asset.kind !== "text") {
+          return { replacement: "", skipBody: true };
+        }
+        // JSON-LD, import maps, templates and modules all keep their type.
         const type = attr(tag, "type");
-        const typeAttr = type && /^module$/i.test(type.trim()) ? ' type="module"' : "";
+        const typeAttr = type ? ` type="${escapeAttr(type)}"` : "";
         return {
           replacement: `<script${typeAttr}>${found.asset.text.replace(/<\/script/gi, "<\\/script")}</script>`,
           skipBody: true,
@@ -567,10 +685,15 @@ export function buildPreviewDocument(options: {
       if (name === "img" || name === "source") {
         const src = attr(tag, "src");
         if (!src) return null;
-        const found = noteRef(src);
-        if (!found) return null;
+        const found = take(src);
+        if (!found) {
+          return isLocal(src) ? { replacement: "" } : null;
+        }
         const replacement = dataUrl(found.asset, found.path);
-        if (!replacement) return null;
+        if (!replacement) {
+          missing.add(found.path);
+          return { replacement: "" };
+        }
         return {
           replacement: formatTag(tag, upsertAttr(tag.attrs, "src", replacement)),
         };
@@ -584,13 +707,9 @@ export function buildPreviewDocument(options: {
     (name, text) => (name === "style" ? inlineCss(text, docPath, assets, missing) : text),
   );
 
-  let document = injectCsp(body);
-  const bridge = previewBridge(token);
-  if (/<\/body\s*>/i.test(document)) {
-    document = document.replace(/<\/body\s*>/i, `${bridge}</body>`);
-  } else {
-    document += bridge;
-  }
+  // The policy is the document's first bytes; the bridge is appended after the
+  // document so no `</body>` inside a script or comment can split it.
+  const document = injectCsp(body) + previewBridge(token);
 
   return {
     srcdoc: document,

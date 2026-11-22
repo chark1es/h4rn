@@ -70,6 +70,7 @@ export type * from "./ForgeReview";
 export type * from "./ForgeReviewComment";
 export type * from "./ForgeReviewState";
 export type * from "./ForgeReviewThread";
+export type * from "./FsBytesOmitted";
 export type * from "./FsChangeKind";
 export type * from "./FsCreateKind";
 export type * from "./FsDeleteResult";

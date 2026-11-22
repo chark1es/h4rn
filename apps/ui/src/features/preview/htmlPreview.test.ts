@@ -5,10 +5,14 @@ import {
   injectCsp,
   isHtmlPath,
   PREVIEW_CSP,
+  PREVIEW_CSP_META,
   PREVIEW_MAX_TOTAL_BYTES,
   PREVIEW_SANDBOX,
   previewAssetFits,
+  previewEmbeddedBytes,
+  previewLinkOpens,
   previewMimeType,
+  previewOpenRequest,
   previewPathFromLink,
   resolvePreviewAsset,
   scanCssReferences,
@@ -87,17 +91,23 @@ describe("HTML preview scanning", () => {
     </body></html>`;
     const scan = scanPreviewReferences(html, "reports/index.html");
     expect(scan.refs).toEqual([
-      { url: "style.css", path: "reports/style.css", kind: "text" },
-      { url: "app.js", path: "reports/app.js", kind: "text" },
-      { url: "hero.png", path: "reports/hero.png", kind: "bytes" },
-      { url: "chart.png", path: "reports/chart.png", kind: "bytes" },
-      { url: "bg.png", path: "reports/bg.png", kind: "bytes" },
+      { url: "style.css", path: "reports/style.css", kind: "text", count: 1 },
+      { url: "app.js", path: "reports/app.js", kind: "text", count: 1 },
+      { url: "hero.png", path: "reports/hero.png", kind: "bytes", count: 1 },
+      { url: "chart.png", path: "reports/chart.png", kind: "bytes", count: 1 },
+      { url: "bg.png", path: "reports/bg.png", kind: "bytes", count: 1 },
     ]);
     expect(scan.external).toEqual([
       "https://cdn.example.com/lib.js",
       "https://cdn.example.com/photo.jpg",
     ]);
     expect(scan.rejected).toEqual(["../../outside.png"]);
+  });
+
+  it("counts every reference to the same asset", () => {
+    const html = `<img src="logo.png"><img src="./logo.png"><div style="background: url(logo.png)">`;
+    const scan = scanPreviewReferences(html, "index.html");
+    expect(scan.refs).toEqual([{ url: "logo.png", path: "logo.png", kind: "bytes", count: 3 }]);
   });
 
   it("does not mistake markup inside script bodies for tags", () => {
@@ -139,9 +149,7 @@ describe("HTML preview document", () => {
       token: "t1",
     });
     expect(PREVIEW_SANDBOX).toBe("allow-scripts");
-    expect(built.srcdoc).toContain(
-      `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">`,
-    );
+    expect(built.srcdoc).toContain(PREVIEW_CSP_META);
     expect(built.srcdoc).toContain("default-src 'none'");
     expect(built.srcdoc).not.toContain("allow-same-origin");
   });
@@ -183,6 +191,92 @@ describe("HTML preview document", () => {
     expect(built.token).toBe("t1");
   });
 
+  it("puts the policy first even when the page fakes a head", () => {
+    const built = buildPreviewDocument({
+      html: `<!-- <head> --><p>Hello</p>`,
+      docPath: "index.html",
+      assets: {},
+      token: "t1",
+    });
+    // The policy is the document's first bytes, before the fake-head comment.
+    expect(built.srcdoc.startsWith(PREVIEW_CSP_META)).toBe(true);
+    expect(built.srcdoc.indexOf(PREVIEW_CSP_META)).toBeLessThan(
+      built.srcdoc.indexOf("<!-- <head> -->"),
+    );
+  });
+
+  it("keeps the bridge out of a script that contains a body tag", () => {
+    const built = buildPreviewDocument({
+      html: `<!doctype html><p>Hi</p><script>const close = "</body>";</script>`,
+      docPath: "index.html",
+      assets: {},
+      token: "t1",
+    });
+    // The bridge is appended, never spliced into the script's string.
+    expect(built.srcdoc).toContain(`const close = "</body>";`);
+    expect(built.srcdoc).toContain(`const close = "</body>";</script>`);
+    expect(built.srcdoc.indexOf("h4rn:preview-open")).toBeGreaterThan(
+      built.srcdoc.indexOf(`const close = "</body>";`),
+    );
+  });
+
+  it("keeps the policy ahead of markup but behind a doctype", () => {
+    const injected = injectCsp("<p>hello</p>");
+    expect(injected.startsWith(PREVIEW_CSP_META)).toBe(true);
+
+    const withDoctype = injectCsp("<!doctype html><p>hello</p>");
+    expect(withDoctype.startsWith("<!doctype html><meta")).toBe(true);
+    expect(withDoctype).toContain(PREVIEW_CSP);
+  });
+
+  it("removes local references it could not inline", () => {
+    const built = buildPreviewDocument({
+      html: `<link rel="icon" href="favicon.png">
+        <link rel="stylesheet" href="gone.css">
+        <script src="gone.js"></script>
+        <img src="gone.png"><img src="../../outside.png">
+        <img src="https://cdn.example.com/ok.png">
+        <style>.x { background: url(gone-bg.png) }</style>`,
+      docPath: "reports/index.html",
+      assets,
+      token: "t1",
+    });
+    for (const relative of ['href="favicon.png"', 'href="gone.css"', 'src="gone.js"']) {
+      expect(built.srcdoc).not.toContain(relative);
+    }
+    expect(built.srcdoc).not.toContain('src="gone.png"');
+    expect(built.srcdoc).not.toContain('src="../../outside.png"');
+    expect(built.srcdoc).not.toContain("gone-bg.png");
+    expect(built.srcdoc).toContain("background: none");
+    // A CDN asset is still the page's own business.
+    expect(built.srcdoc).toContain('src="https://cdn.example.com/ok.png"');
+    expect(built.missing.sort()).toEqual([
+      "../../outside.png",
+      "reports/gone-bg.png",
+      "reports/gone.css",
+      "reports/gone.js",
+      "reports/gone.png",
+    ]);
+  });
+
+  it("preserves the type of an inlined script", () => {
+    const built = buildPreviewDocument({
+      html: `<script type="application/ld+json" src="data.json"></script>
+        <script type="importmap" src="map.json"></script>
+        <script src="plain.js"></script>`,
+      docPath: "index.html",
+      assets: {
+        "data.json": { kind: "text" as const, text: `{"name":"h4rn"}` },
+        "map.json": { kind: "text" as const, text: `{"imports":{}}` },
+        "plain.js": { kind: "text" as const, text: `run()` },
+      },
+      token: "t1",
+    });
+    expect(built.srcdoc).toContain('<script type="application/ld+json">{"name":"h4rn"}</script>');
+    expect(built.srcdoc).toContain('<script type="importmap">{"imports":{}}</script>');
+    expect(built.srcdoc).toContain("<script>run()</script>");
+  });
+
   it("reports references it could not inline", () => {
     const built = buildPreviewDocument({
       html: `<style>.x { background: url(missing-bg.png) }</style>
@@ -198,23 +292,17 @@ describe("HTML preview document", () => {
     ]);
   });
 
-  it("injects the policy when the page has no head", () => {
-    const injected = injectCsp("<p>hello</p>");
-    expect(injected.startsWith("<head>")).toBe(true);
-    expect(injected).toContain(PREVIEW_CSP);
-  });
-
-  it("keeps a doctype ahead of the injected head", () => {
-    const injected = injectCsp("<!doctype html><p>hello</p>");
-    expect(injected.startsWith("<!doctype html><head>")).toBe(true);
-    expect(injected).toContain(PREVIEW_CSP);
-  });
-
-  it("stops adding assets at the total size cap", () => {
+  it("counts every embedded copy against the budget", () => {
+    const asset = { kind: "bytes" as const, base64: "AAAA", mime: "image/png" };
+    const one = previewEmbeddedBytes(asset);
+    expect(one).toBe(4);
     expect(previewAssetFits(0, PREVIEW_MAX_TOTAL_BYTES)).toBe(true);
     expect(previewAssetFits(PREVIEW_MAX_TOTAL_BYTES, 1)).toBe(false);
-    expect(previewAssetFits(9.5 * 1024 * 1024, 0.4 * 1024 * 1024)).toBe(true);
-    expect(previewAssetFits(9.9 * 1024 * 1024, 0.2 * 1024 * 1024)).toBe(false);
+    // Repeating a large asset multiplies its cost, so the page cannot
+    // serialize far past the cap through repetition.
+    const many = previewEmbeddedBytes(asset) * 3;
+    expect(previewAssetFits(PREVIEW_MAX_TOTAL_BYTES - 16, many)).toBe(true);
+    expect(previewAssetFits(PREVIEW_MAX_TOTAL_BYTES - 16, many * 2)).toBe(false);
   });
 
   it("names images and fonts by type, with a safe fallback", () => {
@@ -222,5 +310,31 @@ describe("HTML preview document", () => {
     expect(previewMimeType("a/b.woff2")).toBe("font/woff2");
     expect(previewMimeType("a/b.bin")).toBe("application/octet-stream");
     expect(PREVIEW_MAX_TOTAL_BYTES).toBe(10 * 1024 * 1024);
+  });
+});
+
+describe("HTML preview links", () => {
+  it("accepts only http and https links from the frame", () => {
+    expect(previewOpenRequest("https://example.com/a?b=1")).toEqual({
+      url: "https://example.com/a?b=1",
+      host: "example.com",
+    });
+    expect(previewOpenRequest("http://example.com")?.host).toBe("example.com");
+    expect(previewOpenRequest("javascript:alert(1)")).toBeNull();
+    expect(previewOpenRequest("file:///etc/passwd")).toBeNull();
+    expect(previewOpenRequest("h4rn-preview://localhost/token")).toBeNull();
+    expect(previewOpenRequest("not a url")).toBeNull();
+    expect(previewOpenRequest(42)).toBeNull();
+    expect(previewOpenRequest(null)).toBeNull();
+  });
+
+  it("leaves modifier-clicks to the browser", () => {
+    expect(previewLinkOpens({})).toBe(true);
+    expect(previewLinkOpens({ button: 0 })).toBe(true);
+    expect(previewLinkOpens({ metaKey: true })).toBe(false);
+    expect(previewLinkOpens({ ctrlKey: true })).toBe(false);
+    expect(previewLinkOpens({ shiftKey: true })).toBe(false);
+    expect(previewLinkOpens({ altKey: true })).toBe(false);
+    expect(previewLinkOpens({ button: 1 })).toBe(false);
   });
 });

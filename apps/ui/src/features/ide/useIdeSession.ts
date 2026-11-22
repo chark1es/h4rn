@@ -15,6 +15,7 @@ import type {
   TurnId,
 } from "@/gen";
 import { toProtoError } from "@/lib/client/errors";
+import { retainWorkspaceWatch } from "@/lib/client/fsWatch";
 import { getClient } from "@/lib/store/appStore";
 import { conflictFromWrite, keepMineBaseEtag } from "./conflict";
 import {
@@ -670,19 +671,8 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
       applyState({ ...initialState(), workspaceKey });
       void loadListing("");
     }
-    void getClient()
-      .request({
-        type: "fs_watch",
-        host: workspaceHost,
-        workspace: workspacePath,
-        paths: [],
-      })
-      .catch(() => undefined);
-    return () => {
-      void getClient()
-        .request({ type: "fs_unwatch", workspace: workspacePath })
-        .catch(() => undefined);
-    };
+    const release = retainWorkspaceWatch(workspaceHost, workspacePath);
+    return release;
   }, [workspaceKey, workspacePath, workspaceHost, loadListing]);
 
   useEffect(() => {

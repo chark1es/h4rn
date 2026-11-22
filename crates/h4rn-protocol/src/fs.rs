@@ -133,13 +133,31 @@ pub struct FsFileContent {
     /// Raw bytes as standard base64, when the read asked for them.
     ///
     /// This is how the HTML preview inlines binary assets such as images and
-    /// fonts. It is `None` for ordinary text reads.
+    /// fonts. A `bytes_base64` read returns these bytes **instead of** decoded
+    /// text, so one large asset cannot exceed a transport frame by carrying
+    /// both forms. Ordinary reads send neither.
     #[serde(default)]
     pub bytes_base64: Option<String>,
+    /// Why the requested raw bytes were not returned.
+    ///
+    /// A `bytes_base64` read is capped so one response fits the secure
+    /// transport's frame; a larger file comes back with its metadata and this
+    /// reason, and the preview shows the asset as skipped instead of failing
+    /// the whole page.
+    #[serde(default)]
+    pub bytes_omitted: Option<FsBytesOmitted>,
     /// Last modification time, when available.
     pub modified_at: Option<DateTime<Utc>>,
     /// What to do about a refusal, when there is one.
     pub hint: Option<String>,
+}
+
+/// Why a `bytes_base64` read returned no bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum FsBytesOmitted {
+    /// The file is larger than one response may carry.
+    TooLarge,
 }
 
 /// A save that lost the race against another writer.
@@ -340,6 +358,7 @@ mod tests {
             binary: false,
             truncated: false,
             bytes_base64: None,
+            bytes_omitted: None,
             modified_at: None,
             hint: None,
         };

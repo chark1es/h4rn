@@ -173,21 +173,33 @@ without leaving h4rn.
   an agent message. The tab names the file, has a reload button, and reloads itself when the file
   or one of its assets changes on disk.
 - The file is read through the daemon's fs read request and drawn in an
-  `<iframe sandbox="allow-scripts">` through `srcdoc`, with a CSP of
+  `<iframe sandbox="allow-scripts">` (never `allow-same-origin`) with a CSP of
   `default-src 'none'; img-src data: https:; style-src 'unsafe-inline' https:; script-src
-  'unsafe-inline' https:; font-src data: https:; connect-src https:`. Page scripts run; the page
+  'unsafe-inline' https:; font-src data: https:; connect-src https:`. The policy is the
+  document's first bytes, so no markup can move it out of the head. Page scripts run; the page
   cannot read h4rn, its cookies, its storage or its origin.
+- The desktop and mobile shells serve the prepared document from their own `h4rn-preview` origin
+  with that policy as a response header. A `srcdoc` frame would inherit the window's
+  `script-src 'self'`, so page scripts would never run in a packaged build. The browser build has
+  no such origin (and no CSP that blocks inline scripts), so it keeps `srcdoc`.
 - Relative CSS, JS, images and fonts from the same folder or elsewhere inside the workspace are
-  inlined as `<style>`, `<script>` or `data:` URLs. Anything outside the workspace root, or over
-  10 MB in total, is left out and the tab says how many files were skipped. Absolute `https:`
-  assets load from their CDN.
-- Links in the page open in the system browser (a new tab in the browser app), never inside the
-  frame.
+  inlined as `<style>`, `<script>` or `data:` URLs. The HTML file itself may be up to the daemon's
+  2 MiB read limit; each binary asset may be up to 360 KiB (one secure-transport frame); all
+  embedded copies together may be up to 10 MB. A repeated image counts every time it is embedded.
+  Anything missing, outside the workspace root, or over a size limit is removed from the page (it
+  is never left as a relative URL that would hit the preview origin) and the tab says how many
+  files were skipped. Absolute `https:` assets load from their CDN.
+- A link clicked in the page never opens by itself. The tab shows an inline bar — "Open
+  example.com in your browser?" with **Open** and **Cancel** — and only that click hands an
+  `http:`/`https:` URL to the system browser. The page controls everything inside the frame,
+  including its bridge token, so the app never trusts a message alone.
+- A relative `.html` link in a thread message opens the preview. Modifier-clicks are left alone,
+  and PR bodies and comments keep their normal links.
 - **Expand** opens the preview full-width in the main area; **Back to thread** returns it to the
   panel. On a phone it opens in the existing panel sheet, which gains a Preview segment while a
   file is open.
-- A missing file, a file that is not UTF-8, or one over the size limit gets a plain inline message
-  with Reload; the panel never crashes.
+- A missing file, a file that is not UTF-8, or one over the 2 MiB read limit gets a plain inline
+  message with Reload; the panel never crashes.
 - Not supported yet: MCP Apps rendering, a headless browser, and proxying a page's own development
   server. A page that needs a dev server must use absolute `https:` URLs for its assets.
 

@@ -19,6 +19,13 @@ use thiserror::Error;
 pub const MAX_ENTRIES: usize = 2_000;
 /// Largest file the editor will open, in bytes.
 pub const MAX_READ_BYTES: u64 = 2 * 1024 * 1024;
+/// Largest file the preview embeds as base64 in one response, in bytes.
+///
+/// Base64 inflates by a third, so 360 KiB becomes 480 KiB and the JSON
+/// envelope still fits inside the secure transport's 512 KiB frame. A larger
+/// asset comes back with `FsBytesOmitted::TooLarge` instead of failing the
+/// whole preview.
+pub const MAX_INLINE_BYTES: u64 = 360 * 1024;
 /// Largest content the editor will write, in bytes.
 pub const MAX_WRITE_BYTES: usize = 8 * 1024 * 1024;
 

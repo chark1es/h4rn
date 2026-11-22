@@ -69,7 +69,11 @@ afterEach(() => {
 
 describe("WorkspaceFileRow", () => {
   it("offers Open preview on HTML files", () => {
-    expect(renderRow(file("reports/report.html"))).toContain("Open preview of report.html");
+    const markup = renderRow(file("reports/report.html"));
+    expect(markup).toContain("Open preview of report.html");
+    // The action sits beside the treeitem in a presentational wrapper, so the
+    // tree still owns the row.
+    expect(markup).toContain('role="presentation"');
     expect(renderRow(file("reports/report.htm"))).toContain("Open preview of report.htm");
   });
 
@@ -92,6 +96,8 @@ describe("PreviewPanel", () => {
     const markup = renderToStaticMarkup(<PreviewPanel thread={thread} path={null} />);
     expect(markup).toContain("No preview open");
     expect(markup).toContain("sandboxed");
+    // The panel header can close the preview as well as reload or expand it.
+    expect(markup).toContain("Close preview");
   });
 
   it("renders a plain failure message without crashing", () => {

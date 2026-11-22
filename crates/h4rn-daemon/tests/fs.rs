@@ -129,6 +129,59 @@ fn read_returns_raw_bytes_only_when_asked() {
         .expect("read as bytes");
     assert_eq!(raw.bytes_base64.as_deref(), Some("iVBORwD/"));
     assert!(raw.binary);
+    assert!(raw.bytes_omitted.is_none());
+
+    // A bytes read carries the base64 form *instead of* decoded text, so one
+    // text asset cannot double a response past a transport frame.
+    fixture.write("style.css", ".panel { color: red }");
+    let css = fixture
+        .service
+        .read_with(fixture.workspace(), "style.css", true)
+        .expect("read css as bytes");
+    assert!(css.content.is_none());
+    assert!(!css.binary);
+    assert!(css.bytes_base64.is_some());
+}
+
+#[test]
+fn an_embedded_asset_fits_one_secure_frame() {
+    use h4rn_daemon::fs::MAX_INLINE_BYTES;
+    use h4rn_protocol::{FsBytesOmitted, ResponseBody, ServerFrame};
+
+    let fixture = Fixture::new();
+    // The largest asset the preview embeds must still fit a 512 KiB frame
+    // once base64 and the response envelope are counted.
+    let bytes = vec![0x42_u8; MAX_INLINE_BYTES as usize];
+    fs::write(fixture.workspace.join("big.bin"), &bytes).expect("write asset");
+    let read = fixture
+        .service
+        .read_with(fixture.workspace(), "big.bin", true)
+        .expect("read as bytes");
+    let base64 = read.bytes_base64.as_deref().expect("base64 present");
+    assert_eq!(base64.len(), (MAX_INLINE_BYTES as usize).div_ceil(3) * 4);
+
+    let frame = ServerFrame::Response {
+        id: 1,
+        result: Ok(ResponseBody::FsFile { file: read }),
+    };
+    let encoded = serde_json::to_vec(&frame).expect("serialize frame");
+    assert!(
+        encoded.len() <= h4rn_transport::DEFAULT_MAX_FRAME_BYTES,
+        "{} bytes over the {} byte frame limit",
+        encoded.len(),
+        h4rn_transport::DEFAULT_MAX_FRAME_BYTES
+    );
+
+    // One byte over the cap comes back typed, not as a failed request.
+    let too_big = vec![0x42_u8; MAX_INLINE_BYTES as usize + 1];
+    fs::write(fixture.workspace.join("too-big.bin"), &too_big).expect("write large asset");
+    let skipped = fixture
+        .service
+        .read_with(fixture.workspace(), "too-big.bin", true)
+        .expect("large assets are a result, not an error");
+    assert_eq!(skipped.bytes_omitted, Some(FsBytesOmitted::TooLarge));
+    assert!(skipped.bytes_base64.is_none());
+    assert!(skipped.content.is_none());
 }
 
 #[cfg(unix)]

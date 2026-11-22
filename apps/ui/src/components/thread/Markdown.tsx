@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { previewPathFromLink } from "@/features/preview/htmlPreview";
+import { previewLinkOpens, previewPathFromLink } from "@/features/preview/htmlPreview";
 import { openPreview, resolvedTheme, useApp } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
 
@@ -78,27 +78,41 @@ function CodeBlock({ code, language }: { code: string; language: string | null }
   );
 }
 
-const components: Components = {
-  a: ({ children, href }) => {
-    const preview = href ? previewPathFromLink(href) : null;
-    return (
-      <a
-        href={href}
-        target="_blank"
-        rel="noreferrer noopener"
-        onClick={
-          preview
-            ? (event) => {
-                event.preventDefault();
-                openPreview(preview);
-              }
-            : undefined
-        }
-      >
-        {children}
-      </a>
-    );
-  },
+/**
+ * Markdown components for one message.
+ *
+ * Only thread messages intercept relative `.html` links; PR bodies and comments
+ * keep the behaviour of `origin/main`. A modifier-click (or a non-left button)
+ * is left to the browser, so ⌘-click still opens a new tab.
+ */
+function markdownComponents(interceptHtmlLinks: boolean): Components {
+  return {
+    a: ({ children, href }) => {
+      const preview = interceptHtmlLinks && href ? previewPathFromLink(href) : null;
+      return (
+        <a
+          href={href}
+          target="_blank"
+          rel="noreferrer noopener"
+          onClick={
+            preview
+              ? (event) => {
+                  if (!previewLinkOpens(event)) return;
+                  event.preventDefault();
+                  openPreview(preview);
+                }
+              : undefined
+          }
+        >
+          {children}
+        </a>
+      );
+    },
+    ...baseComponents,
+  };
+}
+
+const baseComponents: Components = {
   code: ({ className, children }) => {
     const text = String(children ?? "").replace(/\n$/, "");
     const language = languageOf(className);
@@ -110,9 +124,19 @@ const components: Components = {
   pre: ({ children }) => <>{children}</>,
 };
 
-/** Markdown for one assistant message. Highlighting loads only when code appears. */
-export function Markdown({ text, className }: { text: string; className?: string }) {
+/** Markdown for one message. Highlighting loads only when code appears. */
+export function Markdown({
+  text,
+  className,
+  interceptHtmlLinks = false,
+}: {
+  text: string;
+  className?: string;
+  /** Thread messages open relative `.html` links in the Preview tab. */
+  interceptHtmlLinks?: boolean;
+}) {
   const memo = useMemo(() => text, [text]);
+  const components = useMemo(() => markdownComponents(interceptHtmlLinks), [interceptHtmlLinks]);
   return (
     <div className={cn("stream-prose", className)}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>

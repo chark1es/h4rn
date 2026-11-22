@@ -109,7 +109,7 @@ export function WorkspaceFileRow({
 
   if (directory || !isHtmlPath(entry.path)) return row;
   return (
-    <div className="q-frow">
+    <div className="q-frow" role="presentation">
       {row}
       <button
         type="button"

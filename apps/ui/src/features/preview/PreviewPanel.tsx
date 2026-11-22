@@ -1,20 +1,47 @@
-import { ArrowLeftIcon, EyeIcon, Maximize2Icon, Minimize2Icon, RefreshCwIcon } from "lucide-react";
-import { useEffect, useRef } from "react";
+import {
+  ArrowLeftIcon,
+  EyeIcon,
+  Maximize2Icon,
+  Minimize2Icon,
+  RefreshCwIcon,
+  XIcon,
+} from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 
 import type { ThreadSummary } from "@/gen";
 import { openExternalUrl } from "@/lib/platform/openExternal";
-import { collapsePreview, expandPreview, setPanelTab } from "@/lib/store/appStore";
+import { closePreview, collapsePreview, expandPreview, setPanelTab } from "@/lib/store/appStore";
 import { cn } from "@/lib/utils";
-import { PREVIEW_SANDBOX } from "./htmlPreview";
+import { PREVIEW_SANDBOX, previewOpenRequest } from "./htmlPreview";
 import { useHtmlPreview } from "./useHtmlPreview";
 
 function fileName(path: string): string {
   return path.split("/").filter(Boolean).at(-1) ?? path;
 }
 
-/** The sandboxed page. Messages from it are tied to this render's token. */
-function PreviewFrame({ srcdoc, token, title }: { srcdoc: string; token: string; title: string }) {
+/**
+ * The sandboxed page and the app's half of the link bridge.
+ *
+ * The page can forge anything inside the frame, including its token, so a
+ * message never opens a link by itself: it only raises the inline bar, and the
+ * user's click is what hands the URL to the system browser.
+ */
+export function PreviewFrame({
+  srcdoc,
+  url,
+  token,
+  title,
+}: {
+  srcdoc: string;
+  url: string | null;
+  token: string;
+  title: string;
+}) {
   const frame = useRef<HTMLIFrameElement | null>(null);
+  const [pending, setPending] = useState<{ url: string; host: string } | null>(null);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a new document must dismiss an old confirmation
+  useEffect(() => setPending(null), [srcdoc, url]);
 
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
@@ -22,22 +49,44 @@ function PreviewFrame({ srcdoc, token, title }: { srcdoc: string; token: string;
       const data = event.data as { type?: unknown; token?: unknown; href?: unknown } | null;
       if (data?.type !== "h4rn:preview-open") return;
       if (data.token !== token) return;
-      if (typeof data.href !== "string") return;
-      void openExternalUrl(data.href);
+      const request = previewOpenRequest(data.href);
+      if (request) setPending(request);
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
   }, [token]);
 
+  const open = () => {
+    if (!pending) return;
+    void openExternalUrl(pending.url);
+    setPending(null);
+  };
+
   return (
-    <iframe
-      ref={frame}
-      className="q-pv-frame"
-      title={title}
-      sandbox={PREVIEW_SANDBOX}
-      srcDoc={srcdoc}
-      referrerPolicy="no-referrer"
-    />
+    <>
+      {pending ? (
+        <div className="q-pv-link" aria-live="polite">
+          <span className="q-pv-link-t">
+            Open <span className="q-mono">{pending.host}</span> in your browser?
+          </span>
+          <span className="grow" />
+          <button type="button" className="q-btn secondary" onClick={() => setPending(null)}>
+            Cancel
+          </button>
+          <button type="button" className="q-btn primary" onClick={open}>
+            Open
+          </button>
+        </div>
+      ) : null}
+      <iframe
+        ref={frame}
+        className="q-pv-frame"
+        title={title}
+        sandbox={PREVIEW_SANDBOX}
+        {...(url ? { src: url } : { srcDoc: srcdoc })}
+        referrerPolicy="no-referrer"
+      />
+    </>
   );
 }
 
@@ -59,6 +108,29 @@ export function PreviewFailure({
         Reload
       </button>
     </div>
+  );
+}
+
+function ReloadButton({
+  disabled,
+  loading,
+  onClick,
+}: {
+  disabled: boolean;
+  loading: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="q-ibtn"
+      aria-label="Reload preview"
+      title="Reload preview"
+      disabled={disabled}
+      onClick={onClick}
+    >
+      <RefreshCwIcon className={cn("q-icon", loading && "q-spin")} strokeWidth={1.5} aria-hidden />
+    </button>
   );
 }
 
@@ -88,20 +160,11 @@ export function PreviewPanel({
             {name ?? "Preview"}
           </span>
           <span className="grow" />
-          <button
-            type="button"
-            className="q-ibtn"
-            aria-label="Reload preview"
-            title="Reload preview"
+          <ReloadButton
             disabled={!path || preview.loading}
+            loading={preview.loading}
             onClick={preview.reload}
-          >
-            <RefreshCwIcon
-              className={cn("q-icon", preview.loading && "q-spin")}
-              strokeWidth={1.5}
-              aria-hidden
-            />
-          </button>
+          />
           <button
             type="button"
             className="q-ibtn"
@@ -111,6 +174,16 @@ export function PreviewPanel({
             onClick={expandPreview}
           >
             <Maximize2Icon className="q-icon" strokeWidth={1.5} aria-hidden />
+          </button>
+          <button
+            type="button"
+            className="q-ibtn"
+            aria-label="Close preview"
+            title="Close preview"
+            disabled={!path}
+            onClick={closePreview}
+          >
+            <XIcon className="q-icon" strokeWidth={1.5} aria-hidden />
           </button>
         </div>
       ) : null}
@@ -122,26 +195,17 @@ export function PreviewPanel({
             {name ?? "Preview"}
           </span>
           <span className="grow" />
-          <button
-            type="button"
-            className="q-ibtn"
-            aria-label="Reload preview"
-            title="Reload preview"
+          <ReloadButton
             disabled={!path || preview.loading}
+            loading={preview.loading}
             onClick={preview.reload}
-          >
-            <RefreshCwIcon
-              className={cn("q-icon", preview.loading && "q-spin")}
-              strokeWidth={1.5}
-              aria-hidden
-            />
-          </button>
+          />
         </div>
       ) : null}
 
       {variant === "full" ? (
         <div className="q-pv-full-bar">
-          <button type="button" className="q-btn secondary sm" onClick={collapsePreview}>
+          <button type="button" className="q-btn secondary" onClick={collapsePreview}>
             <ArrowLeftIcon className="q-icon s14" strokeWidth={1.5} aria-hidden />
             Back to thread
           </button>
@@ -149,20 +213,11 @@ export function PreviewPanel({
             {name ?? "Preview"}
           </span>
           <span className="grow" />
-          <button
-            type="button"
-            className="q-ibtn"
-            aria-label="Reload preview"
-            title="Reload preview"
+          <ReloadButton
             disabled={!path || preview.loading}
+            loading={preview.loading}
             onClick={preview.reload}
-          >
-            <RefreshCwIcon
-              className={cn("q-icon", preview.loading && "q-spin")}
-              strokeWidth={1.5}
-              aria-hidden
-            />
-          </button>
+          />
           <button
             type="button"
             className="q-ibtn"
@@ -211,12 +266,13 @@ export function PreviewPanel({
             {missing > 0 ? (
               <p className="q-pv-note">
                 {missing === 1
-                  ? "1 file wasn’t loaded: it is outside the workspace or over the size limit."
-                  : `${missing} files weren’t loaded: they are outside the workspace or over the size limit.`}
+                  ? "1 file wasn’t loaded: it is missing, outside the workspace, or over the size limit."
+                  : `${missing} files weren’t loaded: they are missing, outside the workspace, or over the size limit.`}
               </p>
             ) : null}
             <PreviewFrame
               srcdoc={preview.document.srcdoc}
+              url={preview.document.frameUrl}
               token={preview.document.token}
               title={`Preview of ${name ?? "HTML file"}`}
             />

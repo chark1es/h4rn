@@ -1,26 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { FsFileContent, ThreadSummary } from "@/gen";
-import { toProtoError } from "@/lib/client/errors";
+import { retainWorkspaceWatch } from "@/lib/client/fsWatch";
 import { getClient } from "@/lib/store/appStore";
-import {
-  buildPreviewDocument,
-  isHtmlPath,
-  PREVIEW_MAX_TOTAL_BYTES,
-  type PreviewAssetMap,
-  type PreviewDocument,
-  previewAssetFits,
-  previewMimeType,
-  previewToken,
-  scanCssReferences,
-  scanPreviewReferences,
-} from "./htmlPreview";
+import { isHtmlPath, type PreviewDocument } from "./htmlPreview";
+import { loadPreview, type PreviewFailure } from "./loadPreview";
+import { preparePreviewFrame, releasePreviewFrame } from "./previewFrame";
 
-export type PreviewFailure = { title: string; detail: string };
+export type { PreviewFailure } from "./loadPreview";
+
+/** A prepared document plus the URL of the shell's preview origin, if any. */
+export type FrameDocument = PreviewDocument & { frameUrl: string | null };
 
 export type HtmlPreview = {
   /** The prepared document, once the first load succeeded. */
-  document: PreviewDocument | null;
+  document: FrameDocument | null;
   loading: boolean;
   failure: PreviewFailure | null;
   reload: () => void;
@@ -32,14 +26,6 @@ const EMPTY: HtmlPreview = {
   failure: null,
   reload: () => undefined,
 };
-
-function tooLarge(size: number): PreviewFailure {
-  const mb = (size / 1_048_576).toFixed(1);
-  return {
-    title: "This file is too large to preview.",
-    detail: `${mb} MB is over the ${PREVIEW_MAX_TOTAL_BYTES / 1_048_576} MB the preview loads from the workspace.`,
-  };
-}
 
 async function readFile(
   host: string,
@@ -62,19 +48,22 @@ async function readFile(
 
 /**
  * Reads one HTML file and everything it needs from the workspace, then
- * prepares the sandboxed `srcdoc` the Preview tab renders.
+ * prepares the sandboxed page the Preview tab renders.
  *
- * The file list is watched through `fs_watch`, so a write by the agent
- * refreshes the preview without a manual reload.
+ * The workspace is watched (shared with the IDE through a reference count), so
+ * a write by the agent refreshes the preview without a manual reload. A
+ * packaged shell gets a URL on its own preview origin; the browser gets
+ * `srcdoc`.
  */
 export function useHtmlPreview(thread: ThreadSummary | null, path: string | null): HtmlPreview {
   const host = thread?.host ?? null;
   const workspace = thread?.workspace_path ?? null;
-  const [document, setDocument] = useState<PreviewDocument | null>(null);
+  const [document, setDocument] = useState<FrameDocument | null>(null);
   const [loading, setLoading] = useState(false);
   const [failure, setFailure] = useState<PreviewFailure | null>(null);
   const [nonce, setNonce] = useState(0);
   const watchedRef = useRef<Set<string>>(new Set());
+  const frameUrlRef = useRef<string | null>(null);
   const enabled = thread !== null;
 
   const reload = useCallback(() => setNonce((value) => value + 1), []);
@@ -90,95 +79,41 @@ export function useHtmlPreview(thread: ThreadSummary | null, path: string | null
       return;
     }
     let cancelled = false;
-    const paths = new Set<string>([path]);
-    watchedRef.current = paths;
+    const dropFrame = () => {
+      const url = frameUrlRef.current;
+      frameUrlRef.current = null;
+      void releasePreviewFrame(url);
+    };
 
     void (async () => {
       setLoading(true);
       setFailure(null);
       try {
-        const file = await readFile(host, workspace, path, false);
-        if (cancelled) return;
-        if (file.truncated || file.size_bytes > PREVIEW_MAX_TOTAL_BYTES) {
-          setDocument(null);
-          setFailure(tooLarge(file.size_bytes));
-          return;
-        }
-        if (file.content === null) {
-          setDocument(null);
-          setFailure({
-            title: "This file isn’t UTF-8 text.",
-            detail: file.binary
-              ? "Only text HTML files can be previewed."
-              : (file.hint ?? "The daemon could not decode it as text."),
-          });
-          return;
-        }
-
-        const html = file.content;
-        const htmlBytes = new TextEncoder().encode(html).length;
-        if (htmlBytes > PREVIEW_MAX_TOTAL_BYTES) {
-          setDocument(null);
-          setFailure(tooLarge(htmlBytes));
-          return;
-        }
-
-        let total = htmlBytes;
-        const assets: PreviewAssetMap = {};
-        const scanned = scanPreviewReferences(html, path);
-        const queue = [...scanned.refs];
-        for (const ref of scanned.refs) paths.add(ref.path);
-        const visited = new Set<string>();
-
-        while (queue.length > 0) {
-          const ref = queue.shift();
-          if (!ref || visited.has(ref.path)) continue;
-          visited.add(ref.path);
-          if (total >= PREVIEW_MAX_TOTAL_BYTES) continue;
-          const asset = await readFile(host, workspace, ref.path, ref.kind === "bytes").catch(
-            () => null,
-          );
-          if (cancelled) return;
-          if (!asset) continue;
-          if (!previewAssetFits(total, asset.size_bytes)) continue;
-          total += asset.size_bytes;
-          if (ref.kind === "text") {
-            if (asset.content === null) continue;
-            assets[ref.path] = { kind: "text", text: asset.content };
-            if (/\.css$/i.test(ref.path)) {
-              const css = scanCssReferences(asset.content, ref.path);
-              for (const nested of css.refs) {
-                paths.add(nested.path);
-                queue.push(nested);
-              }
-            }
-          } else {
-            if (!asset.bytes_base64) continue;
-            assets[ref.path] = {
-              kind: "bytes",
-              base64: asset.bytes_base64,
-              mime: previewMimeType(ref.path),
-            };
-          }
-        }
-
-        if (cancelled) return;
-        const built = buildPreviewDocument({
-          html,
-          docPath: path,
-          assets,
-          token: previewToken(),
+        const loaded = await loadPreview({
+          path,
+          read: (target, bytes) => readFile(host, workspace, target, bytes),
         });
-        setDocument(built);
-        setLoading(false);
+        if (cancelled) return;
+        watchedRef.current = new Set(loaded.watched);
+        if (!loaded.document) {
+          dropFrame();
+          setDocument(null);
+          setFailure(loaded.failure);
+          return;
+        }
+        const frame = await preparePreviewFrame(loaded.document.srcdoc);
+        if (cancelled) return;
+        const released = frameUrlRef.current;
+        frameUrlRef.current = frame?.url ?? null;
+        if (released && released !== frameUrlRef.current) void releasePreviewFrame(released);
+        setDocument({ ...loaded.document, frameUrl: frame?.url ?? null });
       } catch (cause) {
         if (cancelled) return;
-        const error = toProtoError(cause);
-        const missing = error.code === "not_found";
+        dropFrame();
         setDocument(null);
         setFailure({
-          title: missing ? "This file is no longer in the workspace." : "The preview didn’t load.",
-          detail: error.message,
+          title: "The preview didn’t load.",
+          detail: cause instanceof Error ? cause.message : String(cause),
         });
       } finally {
         if (!cancelled) setLoading(false);
@@ -190,15 +125,22 @@ export function useHtmlPreview(thread: ThreadSummary | null, path: string | null
     };
   }, [enabled, host, workspace, path, nonce]);
 
-  // The daemon keeps one watch per workspace per connection, and the IDE uses
-  // the same channel. Asking for the whole workspace is idempotent; leaving the
-  // watch in place when the tab closes keeps the IDE's watch alive, and it ends
-  // with the connection.
+  // A shell keeps the document in memory until the preview closes or is
+  // replaced; the hook is the one that knows when that happens.
+  useEffect(
+    () => () => {
+      const url = frameUrlRef.current;
+      frameUrlRef.current = null;
+      void releasePreviewFrame(url);
+    },
+    [],
+  );
+
+  // The IDE and the preview share one watch per workspace; the refcount means
+  // one view unmounting does not stop the other from seeing changes.
   useEffect(() => {
     if (!host || !workspace || !path) return;
-    void getClient()
-      .request({ type: "fs_watch", host, workspace, paths: [] })
-      .catch(() => undefined);
+    return retainWorkspaceWatch(host, workspace);
   }, [host, workspace, path]);
 
   useEffect(() => {

@@ -38,15 +38,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use h4rn_protocol::{
-    DiffAgainst, FileEntry, FileEntryKind, FsCreateKind, FsDeleteResult, FsDiff, FsFileContent,
-    FsListing, FsSearchBatch, FsTurnChanges, FsWriteConflict, FsWriteResult, ProtoError,
-    ProtoErrorCode, ThreadId, TurnId,
+    DiffAgainst, FileEntry, FileEntryKind, FsBytesOmitted, FsCreateKind, FsDeleteResult, FsDiff,
+    FsFileContent, FsListing, FsSearchBatch, FsTurnChanges, FsWriteConflict, FsWriteResult,
+    ProtoError, ProtoErrorCode, ThreadId, TurnId,
 };
 use tokio::sync::mpsc;
 
 pub use paths::{
-    FsError, MAX_ENTRIES, MAX_READ_BYTES, MAX_WRITE_BYTES, ResolveMode, normalize_relative,
-    relative_of, resolve_for_diff, resolve_inside,
+    FsError, MAX_ENTRIES, MAX_INLINE_BYTES, MAX_READ_BYTES, MAX_WRITE_BYTES, ResolveMode,
+    normalize_relative, relative_of, resolve_for_diff, resolve_inside,
 };
 pub use snapshots::{SnapshotEntry, SnapshotStore};
 pub use watcher::{FsChange, WatcherHub};
@@ -263,6 +263,29 @@ impl FsService {
         let modified_at = metadata.modified().ok().map(to_utc);
         let rel_path = relative_of(&root, &path);
 
+        // A base64 copy must fit one secure-transport frame. Larger assets
+        // still report their metadata so the preview can skip them and keep
+        // rendering the rest of the page.
+        if bytes_base64 && size > MAX_INLINE_BYTES {
+            return Ok(FsFileContent {
+                path: rel_path,
+                content: None,
+                etag: None,
+                encoding: "unknown".into(),
+                size_bytes: size,
+                binary: false,
+                truncated: false,
+                bytes_base64: None,
+                bytes_omitted: Some(FsBytesOmitted::TooLarge),
+                modified_at,
+                hint: Some(format!(
+                    "This asset is {:.1} MiB; the preview embeds files up to {} KiB, so it was skipped.",
+                    size as f64 / 1_048_576.0,
+                    MAX_INLINE_BYTES / 1024
+                )),
+            });
+        }
+
         if size > MAX_READ_BYTES {
             return Ok(FsFileContent {
                 path: rel_path,
@@ -273,6 +296,7 @@ impl FsService {
                 binary: false,
                 truncated: true,
                 bytes_base64: None,
+                bytes_omitted: None,
                 modified_at,
                 hint: Some(format!(
                     "This file is {:.1} MiB; the editor refuses files over {} MiB. Open it in a terminal instead.",
@@ -288,7 +312,31 @@ impl FsService {
             use base64::Engine as _;
             base64::engine::general_purpose::STANDARD.encode(&bytes)
         });
-        match text::decode(&bytes) {
+        let decoded = text::decode(&bytes);
+        let has_text = decoded.is_some();
+        let encoding = match &decoded {
+            Some(text) => text.encoding.to_owned(),
+            None => "binary".to_owned(),
+        };
+        if bytes_base64 {
+            // The preview asked for the raw bytes. It does not also need the
+            // decoded text, and sending both could push a text asset such as
+            // an SVG past one secure-transport frame.
+            return Ok(FsFileContent {
+                path: rel_path,
+                content: None,
+                etag: Some(etag),
+                encoding,
+                size_bytes: size,
+                binary: !has_text,
+                truncated: false,
+                bytes_base64: raw,
+                bytes_omitted: None,
+                modified_at,
+                hint: None,
+            });
+        }
+        match decoded {
             Some(decoded) => Ok(FsFileContent {
                 path: rel_path,
                 content: Some(decoded.text),
@@ -297,7 +345,8 @@ impl FsService {
                 size_bytes: size,
                 binary: false,
                 truncated: false,
-                bytes_base64: raw,
+                bytes_base64: None,
+                bytes_omitted: None,
                 modified_at,
                 hint: None,
             }),
@@ -309,7 +358,8 @@ impl FsService {
                 size_bytes: size,
                 binary: true,
                 truncated: false,
-                bytes_base64: raw,
+                bytes_base64: None,
+                bytes_omitted: None,
                 modified_at,
                 hint: Some(
                     "This looks like a binary file. h4rn does not edit binaries; use a terminal or your IDE."

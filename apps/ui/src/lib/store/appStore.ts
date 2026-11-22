@@ -610,12 +610,6 @@ export function collapsePreview(): void {
   });
 }
 
-/** The panel's expand button: full-width in main, then back. */
-export function togglePreviewExpanded(): void {
-  if (getState().ui.previewExpanded) collapsePreview();
-  else expandPreview();
-}
-
 export function setPanelWidth(width: number): void {
   setLayout({ panelWidth: Math.max(320, Math.min(640, Math.round(width))) });
 }
