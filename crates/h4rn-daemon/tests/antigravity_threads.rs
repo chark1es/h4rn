@@ -669,8 +669,12 @@ async fn an_idle_limit_exit_keeps_the_thread_scheduled() {
     .await
     .expect("the idle death is published without another Send");
     assert!(
-        row.contains("stdout closed"),
-        "the row is the idle death's diagnostic: {row}"
+        row.starts_with("agy exited ("),
+        "the row is the exit report, not the generic close: {row}"
+    );
+    assert!(
+        row.contains("rate limit reached"),
+        "the row keeps the reset the exit report carried: {row}"
     );
 
     let meter = manager.meter().expect("the test manager has a meter");
@@ -861,6 +865,92 @@ async fn an_agent_that_exits_between_turns_reports_without_another_send() {
     );
 
     // The dead session was detached: the next message runs on a new agent.
+    manager
+        .send_message(&thread_id, "next".into(), Vec::new())
+        .await
+        .expect("send");
+    let next = next_turn(&mut events).await;
+    assert_eq!(next.status, TurnStatus::Completed, "{:?}", next.errors);
+    assert!(
+        next.text.contains("echo: next"),
+        "the next turn ran on a fresh agent: {:?}",
+        next.text
+    );
+    assert_eq!(
+        session_starts(workspace.path()),
+        2,
+        "the next message started a fresh agent process"
+    );
+
+    manager.shutdown().await;
+}
+
+/// An idle death that only the process exit can report (a keeper holds stdout
+/// open, so there is no EOF) still detaches the dead session and publishes its
+/// one row, so the next message starts a fresh agent instead of failing on the
+/// dead one.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_idle_death_only_the_exit_reports_detaches_before_the_next_send() {
+    let workspace = tempfile::tempdir().expect("tempdir");
+    let Some(manager) = manager().await else {
+        return skip_without_fixture();
+    };
+    let mut events = manager.subscribe();
+    let host = HostId::new("host_test");
+
+    let created = manager
+        .create_thread(new_thread(&host, workspace.path(), "first"))
+        .await
+        .expect("create");
+    let first = next_turn(&mut events).await;
+    assert_eq!(first.status, TurnStatus::Completed, "{:?}", first.errors);
+    assert_eq!(session_starts(workspace.path()), 1);
+
+    // Answer this turn while the transport is healthy; the death follows the
+    // test's gate, between turns.
+    let thread_id: ThreadId = created.thread_id.clone();
+    manager
+        .send_message(
+            &thread_id,
+            "please H4RN_FIXTURE_IDLE_EXIT_ONLY".into(),
+            Vec::new(),
+        )
+        .await
+        .expect("send");
+    let answered = next_turn(&mut events).await;
+    assert_eq!(
+        answered.status,
+        TurnStatus::Completed,
+        "{:?}",
+        answered.errors
+    );
+    std::fs::write(workspace.path().join(".agy-fixture-idle-exit-gate"), b"")
+        .expect("let the idle agent exit");
+
+    let row = tokio::time::timeout(TURN_TIMEOUT, async {
+        loop {
+            let Ok(wire) = events.recv().await else {
+                panic!("the event stream closed before the idle death was reported");
+            };
+            if let Event::Error { message, .. } = wire.event {
+                return message;
+            }
+        }
+    })
+    .await
+    .expect("the exit report alone publishes the idle death");
+    assert!(
+        row.starts_with("agy exited ("),
+        "the row is the exit report: {row}"
+    );
+    assert!(
+        row.contains("rate limit reached"),
+        "the row keeps the reset the exit report carried: {row}"
+    );
+
+    // The dead session was detached before the row was published, so this Send
+    // must start a fresh agent instead of writing into the dead one.
     manager
         .send_message(&thread_id, "next".into(), Vec::new())
         .await

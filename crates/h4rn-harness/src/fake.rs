@@ -19,7 +19,7 @@ use h4rn_protocol::{ApprovalDecision, HarnessKind, ToolCall, ToolCallStatus, Tur
 
 use crate::{
     Harness, HarnessError, HarnessEvent, HarnessInstall, HarnessSession, LimitSignal, SessionSpec,
-    TransportHealth, UserInput,
+    TransportCloseKind, TransportHealth, UserInput,
 };
 
 /// The event producer for one fake session.
@@ -81,7 +81,7 @@ enum SendFailure {
 /// then the exit status with the stderr it drained) pushes it through this
 /// handle instead of ending the stream.
 #[derive(Clone, Debug, Default)]
-pub struct EventInjector(Arc<Mutex<Option<EventSink>>>);
+pub struct EventInjector(Arc<Mutex<Vec<EventSink>>>);
 
 impl EventInjector {
     /// Queues one event on the most recently started session's stream.
@@ -90,7 +90,25 @@ impl EventInjector {
             .0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
+            .last()
+            .cloned();
+        if let Some(sender) = sender {
+            sender.try_send(event);
+        }
+    }
+
+    /// Queues one event on the stream of the session started at `session`
+    /// (oldest first).
+    ///
+    /// A test uses this to report the exit of a session whose replacement has
+    /// already been started: [`Self::emit`] would target the new one.
+    pub fn emit_to(&self, session: usize, event: HarnessEvent) {
+        let sender = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(session)
+            .cloned();
         if let Some(sender) = sender {
             sender.try_send(event);
         }
@@ -115,6 +133,9 @@ pub struct FakeHarness {
     send_count: Option<SendCount>,
     /// A test-only count of interrupts the session received.
     interrupt_count: Option<InterruptCount>,
+    /// Cancels still due to fail with a transient error (the session stays
+    /// open), so a test can prove a second Stop retries the cancel.
+    interrupt_failures: Option<Arc<AtomicUsize>>,
     /// A test-only latch before a session is returned from `start_session`.
     start_gate: Option<Gate>,
     /// A test-only message: after the start gate, `start_session` fails.
@@ -166,41 +187,129 @@ pub struct FakeHarness {
 /// A shared count of prompts a fake session was asked to write.
 ///
 /// A test reads it to prove the daemon did (or did not) dispatch a prompt to
-/// the harness, without depending on event timing.
+/// the harness, without depending on event timing. It also notifies waiters, so
+/// a test can wait for the arrival itself instead of spinning on the count.
 #[derive(Clone, Debug, Default)]
-pub struct SendCount(Arc<AtomicUsize>);
+pub struct SendCount {
+    count: Arc<AtomicUsize>,
+    notify: Arc<tokio::sync::Notify>,
+}
 
 impl SendCount {
     /// How many prompts have reached the fake session so far.
     pub fn get(&self) -> usize {
-        self.0.load(Ordering::SeqCst)
+        self.count.load(Ordering::SeqCst)
+    }
+
+    /// Waits until at least `count` prompts have been written.
+    pub async fn wait_for(&self, count: usize) {
+        loop {
+            if self.get() >= count {
+                return;
+            }
+            // Register before re-checking: `note` wakes only waiters that are
+            // already registered, so a prompt counted between the load above
+            // and this await would otherwise be lost.
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.get() >= count {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Counts one more prompt and wakes the waiters.
+    fn note(&self) {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        self.notify.notify_waiters();
     }
 }
 
 /// A shared count of sessions a fake harness has started.
 ///
-/// A test reads it to prove a dead session was replaced by a fresh one.
+/// A test reads it to prove a dead session was replaced by a fresh one. It also
+/// notifies waiters, so a test can wait for the start itself instead of spinning
+/// on the count.
 #[derive(Clone, Debug, Default)]
-pub struct SessionCount(Arc<AtomicUsize>);
+pub struct SessionCount {
+    count: Arc<AtomicUsize>,
+    notify: Arc<tokio::sync::Notify>,
+}
 
 impl SessionCount {
     /// How many sessions the fake harness has started so far.
     pub fn get(&self) -> usize {
-        self.0.load(Ordering::SeqCst)
+        self.count.load(Ordering::SeqCst)
+    }
+
+    /// Waits until at least `count` sessions have been started.
+    pub async fn wait_for(&self, count: usize) {
+        loop {
+            if self.get() >= count {
+                return;
+            }
+            // Register before re-checking: `note` wakes only waiters that are
+            // already registered, so a session counted between the load above
+            // and this await would otherwise be lost.
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.get() >= count {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Counts one more session and wakes the waiters.
+    fn note(&self) {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        self.notify.notify_waiters();
     }
 }
 
 /// A shared count of sessions a fake harness shut down.
 ///
 /// A test reads it to prove a startup that lost its slot discarded the session
-/// it made instead of attaching it.
+/// it made instead of attaching it. It also notifies waiters, so a test can wait
+/// for the shutdown itself instead of spinning on the count.
 #[derive(Clone, Debug, Default)]
-pub struct ShutdownCount(Arc<AtomicUsize>);
+pub struct ShutdownCount {
+    count: Arc<AtomicUsize>,
+    notify: Arc<tokio::sync::Notify>,
+}
 
 impl ShutdownCount {
     /// How many sessions the fake harness has shut down so far.
     pub fn get(&self) -> usize {
-        self.0.load(Ordering::SeqCst)
+        self.count.load(Ordering::SeqCst)
+    }
+
+    /// Waits until at least `count` sessions have been shut down.
+    pub async fn wait_for(&self, count: usize) {
+        loop {
+            if self.get() >= count {
+                return;
+            }
+            // Register before re-checking: `note` wakes only waiters that are
+            // already registered, so a shutdown counted between the load above
+            // and this await would otherwise be lost.
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.get() >= count {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Counts one more shutdown and wakes the waiters.
+    fn note(&self) {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        self.notify.notify_waiters();
     }
 }
 
@@ -269,7 +378,12 @@ impl Gate {
             if self.is_released() {
                 return;
             }
+            // Register before re-checking: `release` wakes only waiters that
+            // are already registered, so a release between the load above and
+            // this await would otherwise be lost.
             let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if self.is_released() {
                 return;
             }
@@ -313,6 +427,7 @@ impl Default for FakeHarness {
             write_gate: None,
             send_count: None,
             interrupt_count: None,
+            interrupt_failures: None,
             start_gate: None,
             start_failure: None,
             start_failure_budget: None,
@@ -531,6 +646,16 @@ impl FakeHarness {
         (self, count)
     }
 
+    /// Makes the next cancel fail with a transient error, leaving the session
+    /// open the way a slow or briefly unavailable harness does.
+    ///
+    /// A test uses this to prove a Stop the harness did not take is retried by
+    /// the next Stop instead of being acknowledged as already stopped.
+    pub fn with_interrupt_failure_once(mut self) -> Self {
+        self.interrupt_failures = Some(Arc::new(AtomicUsize::new(1)));
+        self
+    }
+
     /// Lets the first `ok_sends` prompts succeed, then makes every later send
     /// fail as a dead transport whose session reports itself closed.
     ///
@@ -657,7 +782,7 @@ impl Harness for FakeHarness {
             return Err(HarnessError::NotDetected { kind: self.kind });
         }
         if let Some(count) = &self.session_count {
-            count.0.fetch_add(1, Ordering::SeqCst);
+            count.note();
         }
         if let Some(models) = &self.session_models {
             models
@@ -701,10 +826,11 @@ impl Harness for FakeHarness {
             .send(HarnessEvent::SessionStarted { session_id })
             .await;
         if let Some(injector) = &self.event_injector {
-            *injector
+            injector
                 .0
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sender.clone());
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(sender.clone());
         }
 
         let session_scripts = self.session_scripts.clone();
@@ -741,6 +867,7 @@ impl Harness for FakeHarness {
             send_gate: self.send_gate.clone(),
             send_count: self.send_count.clone(),
             interrupt_count: self.interrupt_count.clone(),
+            interrupt_failures: self.interrupt_failures.clone(),
             dead_sends_after: self.dead_sends_after,
             send_failure_after: self.send_failure_after.clone(),
             sends: 0,
@@ -783,6 +910,8 @@ pub struct FakeSession {
     send_count: Option<SendCount>,
     /// A shared count of cancels this session received.
     interrupt_count: Option<InterruptCount>,
+    /// Cancels still due to fail with a transient error.
+    interrupt_failures: Option<Arc<AtomicUsize>>,
     /// Sends after this many fail as a dead transport and close the session.
     dead_sends_after: Option<usize>,
     /// Sends after this many fail with this test-only failure.
@@ -835,7 +964,7 @@ impl HarnessSession for FakeSession {
         }
         self.sends += 1;
         if let Some(count) = &self.send_count {
-            count.0.fetch_add(1, Ordering::SeqCst);
+            count.note();
         }
 
         // The first send starts the thread; a test gates later turns so a
@@ -918,6 +1047,8 @@ impl HarnessSession for FakeSession {
             self.emit(HarnessEvent::TransportClosed {
                 message: "the harness transport closed".into(),
                 retryable: false,
+                kind: TransportCloseKind::Write,
+                reset_at: None,
             });
             if let Some(gate) = self.generic_death_gate.clone() {
                 // The bridge's generic stdout-close notice is already on the
@@ -1095,6 +1226,21 @@ impl HarnessSession for FakeSession {
         if let Some(count) = &self.interrupt_count {
             count.0.fetch_add(1, Ordering::SeqCst);
         }
+        if let Some(remaining) = &self.interrupt_failures {
+            // A `&mut self` session sends one cancel at a time, so the
+            // read-then-store cannot race another attempt.
+            let left = remaining.load(Ordering::SeqCst);
+            if left > 0 {
+                remaining.store(left - 1, Ordering::SeqCst);
+                // A transient cancel failure: the session (and with it the
+                // transport) stays open, so the caller may try the cancel
+                // again.
+                return Err(HarnessError::Transport {
+                    harness: self.kind,
+                    message: "the cancel request timed out".into(),
+                });
+            }
+        }
         self.interrupted.store(true, Ordering::SeqCst);
         self.emit(HarnessEvent::TurnCompleted {
             status: TurnStatus::Interrupted,
@@ -1153,7 +1299,7 @@ impl HarnessSession for FakeSession {
         self.closed = true;
         self.health.close();
         if let Some(count) = &self.shutdown_count {
-            count.0.fetch_add(1, Ordering::SeqCst);
+            count.note();
         }
         // Dropping the sender would end the stream; keep it alive until the
         // session is dropped so an in-flight event is not lost.

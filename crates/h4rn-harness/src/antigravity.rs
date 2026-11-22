@@ -63,8 +63,8 @@ use crate::acp::{
 use crate::attachments::{self, AttachmentClass, AttachmentDelivery};
 use crate::{
     AttachmentRef, ENV_MCP_AUTH_TOKEN, ENV_MCP_BEARER_TOKEN, Harness, HarnessError, HarnessEvent,
-    HarnessInstall, HarnessSession, SessionSpec, TransportHealth, TurnReport, UserInput,
-    detect_limit, merge_transport_detail, most_specific_detail,
+    HarnessInstall, HarnessSession, SessionSpec, TransportCloseKind, TransportHealth, TurnReport,
+    UserInput, detect_limit, merge_transport_detail, most_specific_detail,
 };
 
 mod stream;
@@ -362,7 +362,7 @@ fn map_acp_error(error: AcpError) -> HarnessError {
     let harness = HarnessKind::Antigravity;
     match error {
         AcpError::Spawn { message, .. } => HarnessError::Spawn { harness, message },
-        AcpError::Closed { message } => HarnessError::Transport { harness, message },
+        AcpError::Closed { message, .. } => HarnessError::Transport { harness, message },
         AcpError::Protocol { message } => HarnessError::Protocol { harness, message },
         AcpError::Rpc { code, message, .. } => HarnessError::Protocol {
             harness,
@@ -823,8 +823,25 @@ impl HarnessSession for AcpSession {
                                 error,
                                 AcpError::Protocol { .. } | AcpError::OutsideWorkspace { .. }
                             );
-                        let event = if matches!(error, AcpError::Closed { .. }) {
-                            HarnessEvent::TransportClosed { message, retryable }
+                        let event = if let AcpError::Closed { kind, .. } = &error {
+                            // The kind is the close the client observed: a
+                            // closed stdout is an EOF, a failed writer a write
+                            // failure, a reaped process the exit report. A
+                            // reaped process outranks it, because its report is
+                            // the specific account of the death.
+                            HarnessEvent::TransportClosed {
+                                message,
+                                retryable,
+                                kind: if exit.is_some() {
+                                    TransportCloseKind::Exit
+                                } else {
+                                    *kind
+                                },
+                                // A death whose detail names a reset is in the
+                                // limit branch above, so this report carries
+                                // none.
+                                reset_at: None,
+                            }
                         } else {
                             HarnessEvent::Error { message, retryable }
                         };
@@ -1100,13 +1117,18 @@ fn spawn_event_bridge(
                         })
                         .unwrap_or_default()
                 }
-                AcpEvent::Closed { message } => {
+                AcpEvent::Closed { message, kind } => {
                     if shutting_down.load(Ordering::SeqCst) {
                         Vec::new()
                     } else {
                         vec![HarnessEvent::TransportClosed {
                             message,
                             retryable: true,
+                            // The reader observed whether the stdout ended or a
+                            // read failed; carry that instead of calling every
+                            // close an EOF.
+                            kind,
+                            reset_at: None,
                         }]
                     }
                 }
@@ -1121,23 +1143,50 @@ fn spawn_event_bridge(
                         // already on the stream; a second exit row would
                         // duplicate it.
                         Vec::new()
-                    } else if let Some(signal) = detect_limit(&stderr, Utc::now()) {
-                        vec![HarnessEvent::LimitHit {
-                            reset_at: signal.reset_at,
-                            auto_resume: signal.reset_at.is_some(),
-                        }]
                     } else {
-                        vec![HarnessEvent::TransportClosed {
+                        // The exit report is always the specific account of the
+                        // death, even when its stderr carries a typed limit: the
+                        // limit is applied first, and the report itself still
+                        // tells the pump that the session is dead so it detaches
+                        // it instead of waiting for a stream end the held
+                        // session keeps from happening.
+                        let limit = detect_limit(&stderr, Utc::now());
+                        let reset_at = limit.as_ref().and_then(|signal| signal.reset_at);
+                        let mut events = Vec::new();
+                        if let Some(signal) = limit {
+                            events.push(HarnessEvent::LimitHit {
+                                reset_at: signal.reset_at,
+                                auto_resume: signal.reset_at.is_some(),
+                            });
+                        }
+                        events.push(HarnessEvent::TransportClosed {
                             message: exit_detail(&status, &stderr),
                             retryable: false,
-                        }]
+                            kind: TransportCloseKind::Exit,
+                            // The report carries the reset too, so a consumer
+                            // that only kept the exit report (the daemon's
+                            // closed-completion wait, which may have already
+                            // applied the typed limit ahead of it) still has
+                            // it.
+                            reset_at,
+                        });
+                        events
                     }
                 }
                 AcpEvent::Error { message, retryable } => {
                     vec![HarnessEvent::Error { message, retryable }]
                 }
-                AcpEvent::TransportClosed { message, retryable } => {
-                    vec![HarnessEvent::TransportClosed { message, retryable }]
+                AcpEvent::TransportClosed {
+                    message,
+                    retryable,
+                    kind,
+                } => {
+                    vec![HarnessEvent::TransportClosed {
+                        message,
+                        retryable,
+                        kind,
+                        reset_at: None,
+                    }]
                 }
             };
             for event in mapped {
@@ -1983,6 +2032,82 @@ mod tests {
         bridge.abort();
     }
 
+    /// An exit report whose stderr carries a reset is still a death report: the
+    /// pump needs it to detach the dead session, so the limit and the exit kind
+    /// are published together.
+    #[tokio::test]
+    async fn an_exit_report_with_a_reset_still_reports_the_death() {
+        let (tx, rx) = mpsc::channel(8);
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let bridge = spawn_event_bridge(
+            rx,
+            out_tx,
+            Arc::new(Mutex::new(AcpShared::new())),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        tx.send(AcpEvent::Exited {
+            status: "exited: 7".into(),
+            stderr: "rate limit reached, resets at 2099-12-01T00:00:00Z".into(),
+            deliberate: false,
+        })
+        .await
+        .expect("send");
+
+        assert!(
+            matches!(
+                out_rx.recv().await.expect("limit"),
+                HarnessEvent::LimitHit {
+                    reset_at: Some(_),
+                    auto_resume: true,
+                }
+            ),
+            "the exit report's reset reaches the schedule"
+        );
+        match out_rx.recv().await.expect("exit") {
+            HarnessEvent::TransportClosed { kind, reset_at, .. } => {
+                assert_eq!(kind, TransportCloseKind::Exit);
+                assert!(
+                    reset_at.is_some(),
+                    "the exit report carries the reset, so a consumer that kept it has it"
+                );
+            }
+            other => panic!("the exit report is still the death: {other:?}"),
+        }
+        bridge.abort();
+    }
+
+    /// The generic stdout-close notice keeps the close the reader observed: a
+    /// failed read is not reported as an EOF.
+    #[tokio::test]
+    async fn a_failed_stdout_read_is_not_reported_as_an_eof() {
+        let (tx, rx) = mpsc::channel(8);
+        let (out_tx, mut out_rx) = mpsc::channel(8);
+        let bridge = spawn_event_bridge(
+            rx,
+            out_tx,
+            Arc::new(Mutex::new(AcpShared::new())),
+            Arc::new(AtomicBool::new(false)),
+        );
+
+        tx.send(AcpEvent::Closed {
+            message: "the ACP agent stdout closed".into(),
+            kind: TransportCloseKind::Read,
+        })
+        .await
+        .expect("send");
+
+        match out_rx.recv().await.expect("event") {
+            HarnessEvent::TransportClosed { kind, .. } => assert_eq!(
+                kind,
+                TransportCloseKind::Read,
+                "the bridge keeps the read error the reader observed"
+            ),
+            other => panic!("unexpected event {other:?}"),
+        }
+        bridge.abort();
+    }
+
     async fn handshake(
         reader: &mut BufReader<tokio::io::DuplexStream>,
         writer: &mut tokio::io::DuplexStream,
@@ -2060,6 +2185,59 @@ mod tests {
 
         let _ = stop_tx.send(());
         agent.await.expect("agent");
+    }
+
+    /// A prompt that fails because the agent's stdout closed is an EOF, not a
+    /// writer failure: the close the client observed travels with the error, so
+    /// the daemon never blames the writer for a stdout death.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_prompt_that_fails_on_a_stdout_close_reports_eof() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (client, mut reader, mut writer) = acp_pair(workspace.path());
+
+        let agent = tokio::spawn(async move {
+            handshake(&mut reader, &mut writer).await;
+            let prompt = next_frame(&mut reader).await;
+            assert_eq!(prompt["method"], "session/prompt");
+            // The agent goes away without answering. Closing its stdout is the
+            // EOF the client observes; the client's own writer is fine.
+            drop(writer);
+        });
+
+        let mut session = AcpSession::start_with(&client, &acp_spec(workspace.path()))
+            .await
+            .expect("start session");
+        let mut events = session.events();
+        session
+            .send(UserInput {
+                text: "hello".into(),
+                attachments: Vec::new(),
+            })
+            .await
+            .expect("the prompt frame is flushed before the agent leaves");
+
+        let mut kinds = Vec::new();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(5), events.next())
+                .await
+                .expect("the prompt failure is reported")
+                .expect("the event stream ended before the turn completed");
+            match event {
+                HarnessEvent::TransportClosed { kind, .. } => kinds.push(kind),
+                HarnessEvent::TurnCompleted { .. } => break,
+                _ => {}
+            }
+        }
+        assert!(
+            kinds.len() >= 2,
+            "both the prompt path and the bridge report this death: {kinds:?}"
+        );
+        assert!(
+            kinds.iter().all(|kind| *kind == TransportCloseKind::Eof),
+            "a stdout close is an EOF, never a writer failure: {kinds:?}"
+        );
+        agent.await.expect("agent");
+        let _ = session.shutdown().await;
     }
 
     #[tokio::test(flavor = "current_thread")]

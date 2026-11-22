@@ -22,7 +22,7 @@ use super::protocol::{
     ACP_PROTOCOL_VERSION, AcpPermissionRequest, AcpPromptResult, AcpServerInfo, AcpSessionInfo,
     AcpUpdate, AgentCapabilities, JSONRPC_VERSION, PromptContent, parse_session_update,
 };
-use crate::TransportHealth;
+use crate::{TransportCloseKind, TransportHealth};
 
 const DEFAULT_EVENT_CAPACITY: usize = 1_024;
 const FRAME_CHANNEL_CAPACITY: usize = 256;
@@ -142,6 +142,13 @@ pub enum AcpError {
     Closed {
         /// What closed.
         message: String,
+        /// Which part of the transport the bridge observed closing.
+        ///
+        /// A stdout close is an EOF, a failed write is a write failure and a
+        /// reaped process is the exit report. The prompt path reports this kind
+        /// on its own death so a stdout close is never mistaken for a writer
+        /// failure.
+        kind: TransportCloseKind,
     },
     /// A frame did not match the protocol.
     #[error("ACP protocol error: {message}")]
@@ -215,6 +222,10 @@ pub enum AcpEvent {
     Closed {
         /// Human-readable reason.
         message: String,
+        /// What the reader observed: the stdout ending (an EOF) or a failed
+        /// read. A failed read is not the same death, and the bridge reports
+        /// the kind it is given instead of assuming an EOF.
+        kind: TransportCloseKind,
     },
     /// The agent process exited.
     Exited {
@@ -244,6 +255,8 @@ pub enum AcpEvent {
         message: String,
         /// Whether a retry is safe.
         retryable: bool,
+        /// Which end of the transport failed.
+        kind: TransportCloseKind,
     },
 }
 
@@ -323,6 +336,21 @@ struct Shared {
     writer: Mutex<Option<tokio::task::JoinHandle<()>>>,
     reader: Mutex<Option<tokio::task::JoinHandle<()>>>,
     supervisor: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// A test's hold on a request between its closed check and registration.
+    #[cfg(test)]
+    registration_pause: Mutex<Option<Arc<RegistrationPause>>>,
+}
+
+/// Holds a request between its closed check and its pending registration.
+///
+/// A test uses this to close the transport inside that window: registration
+/// must then reject the request instead of leaving a waiter no reader will ever
+/// resolve.
+#[cfg(test)]
+#[derive(Default)]
+struct RegistrationPause {
+    reached: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
 }
 
 /// A running ACP agent.
@@ -389,11 +417,12 @@ impl AcpClient {
                 // this client ended it on purpose (a write deadline, a
                 // shutdown): that exit is not a second failure to report.
                 let deliberate = shared.shutting_down.swap(true, Ordering::SeqCst);
-                shared.health.close();
+                shared.health.close_with(TransportCloseKind::Exit);
                 fail_pending(
                     &shared,
                     AcpError::Closed {
                         message: "the ACP agent exited".into(),
+                        kind: TransportCloseKind::Exit,
                     },
                 );
                 // The agent's last diagnostic can still be in the pipe when the
@@ -464,6 +493,8 @@ impl AcpClient {
             writer: Mutex::new(None),
             reader: Mutex::new(None),
             supervisor: Mutex::new(None),
+            #[cfg(test)]
+            registration_pause: Mutex::new(None),
         });
 
         let writer = spawn_writer(stdin, stdin_rx, shared.clone());
@@ -728,6 +759,22 @@ impl AcpClient {
         self.shared.health.is_closed()
     }
 
+    /// The error for a request this transport can no longer carry.
+    ///
+    /// It names the close the client observed (a stdout EOF, a read error, a
+    /// writer failure, or the process exit) instead of always blaming a write:
+    /// the daemon's failure row is built from it.
+    fn closed_error(&self, message: &str) -> AcpError {
+        AcpError::Closed {
+            message: message.to_string(),
+            kind: self
+                .shared
+                .health
+                .close_kind()
+                .unwrap_or(TransportCloseKind::Write),
+        }
+    }
+
     /// A lock-free view of the transport's health, for readers that must never
     /// wait on the client's session lock (the daemon's event pump).
     pub fn transport_health(&self) -> TransportHealth {
@@ -787,6 +834,7 @@ impl AcpClient {
             &self.shared,
             AcpError::Closed {
                 message: "the ACP client was shut down".into(),
+                kind: TransportCloseKind::Write,
             },
         );
         Ok(())
@@ -794,9 +842,7 @@ impl AcpClient {
 
     async fn notify(&self, method: &str, params: Value) -> Result<(), AcpError> {
         if self.is_closed() {
-            return Err(AcpError::Closed {
-                message: "the ACP client is shut down".into(),
-            });
+            return Err(self.closed_error("the ACP client is shut down"));
         }
         self.send_frame(
             json!({
@@ -830,14 +876,30 @@ impl AcpClient {
         track_write: bool,
     ) -> Result<StartedCall, AcpError> {
         if self.is_closed() {
-            return Err(AcpError::Closed {
-                message: "the ACP client is shut down".into(),
-            });
+            return Err(self.closed_error("the ACP client is shut down"));
+        }
+        #[cfg(test)]
+        let registration_pause = lock(&self.shared.registration_pause).clone();
+        #[cfg(test)]
+        if let Some(pause) = registration_pause {
+            pause.reached.notify_one();
+            pause.resume.notified().await;
         }
         let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
         let key = id_key(&json!(id));
         let (sender, receiver) = oneshot::channel();
-        lock(&self.shared.pending).insert(key.clone(), sender);
+        {
+            // The reader drains the pending map when stdout closes. Checking
+            // the closed state under that same lock is what makes teardown
+            // either drain this request or reject its registration: a request
+            // inserted after the drain would wait for a reply no reader can
+            // deliver.
+            let mut pending = lock(&self.shared.pending);
+            if self.is_closed() {
+                return Err(self.closed_error("the ACP client is shut down"));
+            }
+            pending.insert(key.clone(), sender);
+        }
 
         let frame = json!({
             "jsonrpc": JSONRPC_VERSION,
@@ -896,7 +958,10 @@ impl AcpClient {
                     let message =
                         format!("the ACP writer failed before the request was written: {detail}");
                     teardown_transport(&self.shared, message.clone());
-                    return Err(AcpError::Closed { message });
+                    return Err(AcpError::Closed {
+                        message,
+                        kind: TransportCloseKind::Write,
+                    });
                 }
                 Ok(Err(_)) => {
                     lock(&self.shared.pending).remove(&key);
@@ -910,6 +975,7 @@ impl AcpClient {
                     );
                     return Err(AcpError::Closed {
                         message: "the ACP writer exited before the request was written".into(),
+                        kind: TransportCloseKind::Write,
                     });
                 }
                 Err(_) => {
@@ -972,12 +1038,14 @@ impl AcpClient {
         let Some(sender) = sender else {
             return Err(AcpError::Closed {
                 message: "the ACP agent stdin is closed".into(),
+                kind: TransportCloseKind::Write,
             });
         };
         match tokio::time::timeout(PROMPT_WRITE_TIMEOUT, sender.send(outgoing)).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(_)) => Err(AcpError::Closed {
                 message: "the ACP writer task has exited".into(),
+                kind: TransportCloseKind::Write,
             }),
             Err(_) => {
                 teardown_transport(&self.shared, "the ACP agent stopped reading frames".into());
@@ -1066,6 +1134,7 @@ where
                     &shared,
                     AcpError::Closed {
                         message: format!("the ACP agent stdin stopped accepting frames: {detail}"),
+                        kind: TransportCloseKind::Write,
                     },
                 );
                 let _ = shared
@@ -1073,6 +1142,7 @@ where
                     .send(AcpEvent::TransportClosed {
                         message: format!("failed to write to the ACP agent: {detail}"),
                         retryable: false,
+                        kind: TransportCloseKind::Write,
                     })
                     .await;
                 // The caller's one failure row is built from this: name the
@@ -1094,6 +1164,7 @@ where
                     &shared,
                     AcpError::Closed {
                         message: format!("the ACP agent stdin stopped accepting frames: {detail}"),
+                        kind: TransportCloseKind::Write,
                     },
                 );
                 let _ = shared
@@ -1101,6 +1172,7 @@ where
                     .send(AcpEvent::TransportClosed {
                         message: format!("failed to flush the ACP agent stdin: {detail}"),
                         retryable: false,
+                        kind: TransportCloseKind::Write,
                     })
                     .await;
                 if let Some(written) = written {
@@ -1122,16 +1194,21 @@ where
 {
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
+        // The close this reader observed: a failed read is not the same as the
+        // stdout ending, and the pending calls it wakes must say which.
+        let mut close_kind = TransportCloseKind::Eof;
         loop {
             let line = match lines.next_line().await {
                 Ok(Some(line)) => line,
                 Ok(None) => break,
                 Err(error) => {
+                    close_kind = TransportCloseKind::Read;
                     let _ = shared
                         .events_tx
                         .send(AcpEvent::TransportClosed {
                             message: format!("failed to read the ACP agent stdout: {error}"),
                             retryable: false,
+                            kind: TransportCloseKind::Read,
                         })
                         .await;
                     break;
@@ -1181,11 +1258,12 @@ where
         // The agent's stdout is gone: no reply can ever come back. Mark the
         // transport dead before failing the pending calls, so a prompt that
         // fails because of this can see why.
-        shared.health.close();
+        shared.health.close_with(close_kind);
         fail_pending(
             &shared,
             AcpError::Closed {
                 message: "the ACP agent stdout closed".into(),
+                kind: close_kind,
             },
         );
         if !shared.shutting_down.load(Ordering::SeqCst) {
@@ -1193,6 +1271,7 @@ where
                 .events_tx
                 .send(AcpEvent::Closed {
                     message: "the ACP agent stdout closed".into(),
+                    kind: close_kind,
                 })
                 .await;
         }
@@ -1300,6 +1379,7 @@ async fn send_from_reader(shared: &Arc<Shared>, frame: Value) -> Result<(), AcpE
     let Some(sender) = sender else {
         return Err(AcpError::Closed {
             message: "the ACP agent stdin is closed".into(),
+            kind: TransportCloseKind::Write,
         });
     };
     match tokio::time::timeout(
@@ -1314,6 +1394,7 @@ async fn send_from_reader(shared: &Arc<Shared>, frame: Value) -> Result<(), AcpE
         Ok(Ok(())) => Ok(()),
         Ok(Err(_)) => Err(AcpError::Closed {
             message: "the ACP writer task has exited".into(),
+            kind: TransportCloseKind::Write,
         }),
         Err(_) => {
             teardown_transport(
@@ -1353,11 +1434,13 @@ fn teardown_transport(shared: &Arc<Shared>, message: String) {
         shared,
         AcpError::Closed {
             message: message.clone(),
+            kind: TransportCloseKind::Write,
         },
     );
     if let Err(error) = shared.events_tx.try_send(AcpEvent::TransportClosed {
         message,
         retryable: false,
+        kind: TransportCloseKind::Write,
     }) {
         // A full event queue already has plenty for the daemon to act on; the
         // closed transport is visible through `is_closed` either way.
@@ -1403,8 +1486,9 @@ fn clone_error(error: &AcpError) -> AcpError {
             program: program.clone(),
             message: message.clone(),
         },
-        AcpError::Closed { message } => AcpError::Closed {
+        AcpError::Closed { message, kind } => AcpError::Closed {
             message: message.clone(),
+            kind: *kind,
         },
         AcpError::Protocol { message } => AcpError::Protocol {
             message: message.clone(),
@@ -2056,6 +2140,22 @@ mod tests {
         }
     }
 
+    /// A reader whose stdout fails instead of ending, like a pipe that broke
+    /// mid-frame.
+    struct BrokenReader;
+    impl AsyncRead for BrokenReader {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "the agent's stdout is gone",
+            )))
+        }
+    }
+
     /// A prompt whose frame its writer drops (the writer exited before it
     /// acknowledged the flush) has no reply coming: the transport is torn down
     /// rather than left open behind the error.
@@ -2111,7 +2211,7 @@ mod tests {
             .expect("the dropped write returns instead of waiting for its deadline")
             .expect("prompt task");
         match outcome {
-            Err(AcpError::Closed { message }) => {
+            Err(AcpError::Closed { message, .. }) => {
                 assert_eq!(
                     message,
                     "the ACP writer exited before the request was written"
@@ -2127,6 +2227,119 @@ mod tests {
             client.cancel("s-1").await.is_err(),
             "later frames are refused instead of queued for a dead writer"
         );
+    }
+
+    /// A request that passed its closed check just before the reader drained
+    /// the pending map must be rejected, not registered after the drain where no
+    /// reply can ever wake it.
+    #[tokio::test]
+    async fn a_request_registered_during_teardown_is_rejected() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (agent_write, client_read) = tokio::io::duplex(64);
+        let client = Arc::new(AcpClient::start_for_test(
+            config(workspace.path()),
+            client_read,
+            tokio::io::sink(),
+        ));
+        let _agent_write = agent_write;
+        let _events = client.take_events().expect("events");
+
+        let pause = Arc::new(RegistrationPause::default());
+        *lock(&client.shared.registration_pause) = Some(Arc::clone(&pause));
+        let calling = {
+            let client = Arc::clone(&client);
+            tokio::spawn(async move { client.call("test/ping", json!({}), None).await })
+        };
+        pause.reached.notified().await;
+
+        // The reader's final drain happens while the request is parked: it
+        // closes the transport and empties the pending map.
+        client.shared.health.close();
+        fail_pending(
+            &client.shared,
+            AcpError::Closed {
+                message: "the ACP agent stdout closed".into(),
+                kind: TransportCloseKind::Eof,
+            },
+        );
+        pause.resume.notify_one();
+
+        let outcome = tokio::time::timeout(Duration::from_secs(2), calling)
+            .await
+            .expect("registration must not wait for a reply no reader can deliver")
+            .expect("call task");
+        match outcome {
+            Err(AcpError::Closed { .. }) => {}
+            other => panic!("expected a closed transport, got {other:?}"),
+        }
+        assert!(
+            lock(&client.shared.pending).is_empty(),
+            "the request was not registered after the drain"
+        );
+        client.shutdown().await.expect("shutdown");
+    }
+
+    /// The close kind a request is rejected with is the one the transport
+    /// observed: the reader's EOF is not a write failure.
+    #[tokio::test]
+    async fn a_request_after_a_reader_eof_reports_the_eof() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let (agent_write, client_read) = tokio::io::duplex(64);
+        let client =
+            AcpClient::start_for_test(config(workspace.path()), client_read, tokio::io::sink());
+        let mut events = client.take_events().expect("events");
+        // The agent's stdout ends; the reader closes the transport for it.
+        drop(agent_write);
+        let kind = loop {
+            let event = events.recv().await.expect("the reader reports its close");
+            if let AcpEvent::Closed { kind, .. } = event {
+                break kind;
+            }
+        };
+        assert_eq!(
+            kind,
+            TransportCloseKind::Eof,
+            "the close event carries the EOF the reader observed"
+        );
+
+        match client.call("test/ping", json!({}), None).await {
+            Err(AcpError::Closed { kind, .. }) => assert_eq!(
+                kind,
+                TransportCloseKind::Eof,
+                "the rejection keeps the close the reader observed"
+            ),
+            other => panic!("expected the observed EOF, got {other:?}"),
+        }
+    }
+
+    /// A failed stdout read is reported as a read, not as the stdout ending: a
+    /// request after it keeps the close the reader observed.
+    #[tokio::test]
+    async fn a_request_after_a_reader_error_reports_the_read() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let client =
+            AcpClient::start_for_test(config(workspace.path()), BrokenReader, tokio::io::sink());
+        let mut events = client.take_events().expect("events");
+        let kind = loop {
+            let event = events.recv().await.expect("the reader reports its close");
+            if let AcpEvent::Closed { kind, .. } = event {
+                break kind;
+            }
+        };
+        assert_eq!(
+            kind,
+            TransportCloseKind::Read,
+            "the close event carries the failed read the reader observed"
+        );
+
+        match client.call("test/ping", json!({}), None).await {
+            Err(AcpError::Closed { kind, .. }) => assert_eq!(
+                kind,
+                TransportCloseKind::Read,
+                "the rejection keeps the close the reader observed"
+            ),
+            other => panic!("expected the observed read error, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -2186,7 +2399,7 @@ mod tests {
             Err(error) => error,
         };
         match error {
-            AcpError::Closed { message } => assert!(
+            AcpError::Closed { message, .. } => assert!(
                 message.contains("the agent's stdin is gone"),
                 "the writer's I/O error is kept: {message}"
             ),
