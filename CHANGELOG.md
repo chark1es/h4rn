@@ -16,9 +16,10 @@ All notable changes to h4rn are recorded here. The format follows
   `target/debug` or a temp directory unless `--force`, and mentions
   `loginctl enable-linger` on Linux when lingering is off. Reinstalling an
   unchanged launch agent that is already running leaves it alone; on Linux a
-  changed unit that is active is restarted after `daemon-reload`, so its new
-  `ExecStart=` and environment take effect immediately, while an unchanged or
-  stopped unit still goes through `enable --now`. On Windows the
+  changed unit that is active is enabled and restarted after `daemon-reload`,
+  so its new `ExecStart=` and environment take effect immediately and it still
+  comes back at login, while an unchanged or stopped unit goes through
+  `enable --now`. On Windows the
   task is named per account (`h4rn-<user>`) and uses an inline launcher that
   waits up to 30 seconds for the updater's installation lock and repairs a
   missing `h4rnd.exe` itself before starting the daemon, so it starts after an
@@ -49,10 +50,11 @@ All notable changes to h4rn are recorded here. The format follows
   goes straight to `h4rnd.previous`: it is copied into a unique temp file beside
   it and its checksum sidecar is staged. The old sidecar is removed before the
   backup is renamed, and the new one is published afterwards as an optional
-  extra check. A crash or failure before the rename leaves the old pair intact;
-  one after it leaves a backup that `--rollback` still accepts after its size
-  and executable checks. The new backup can therefore never sit next to the old
-  backup's checksum, so the last good release stays rollbackable. `--rollback`
+  extra check. A crash or failure before the rename leaves the old backup in
+  place, with its sidecar when that is still present; one after it leaves a
+  backup that `--rollback` still accepts after its size and executable checks.
+  The new backup can therefore never sit next to the old backup's checksum, so
+  the last good release stays rollbackable. `--rollback`
   and startup recovery refuse a backup that is missing, empty, not executable
   on Unix or, when a record is present, does not match it; recovery leaves the
   files in place and says what to do. On Windows `h4rnd update` rewrites the
@@ -68,9 +70,11 @@ All notable changes to h4rn are recorded here. The format follows
   update that started it.
 - **A legacy Windows migration cannot leave the daemon stopped.** Migrating the
   machine-wide `h4rn` task stops it, so the idle guard probes the service once
-  more immediately before the migration. If the binary replace then fails, the
-  update starts the service again, or explains that the task was stopped and
-  that `h4rnd service restart` brings it back.
+  more immediately before the migration. If that migration ran and the binary
+  replace then fails, the update starts the service again, or explains that the
+  task was stopped and that `h4rnd service restart` brings it back. A refusal
+  before the migration, or a task that belongs to another installation, leaves
+  the running daemon alone.
 - **A turn that starts during the final step is not cut off.** The idle check is
   repeated after the new binary is in place and immediately before the restart.
   If a turn started, the binary stays installed, the restart is skipped, and the

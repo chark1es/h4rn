@@ -648,20 +648,20 @@ fn apply_environment_files(
 
 /// The service manager's effective `Environment=` and `EnvironmentFiles=`.
 ///
-/// `systemctl show --value` prints one selected property per line, in the order
-/// asked for: the inline environment first, then the space-separated file list.
-/// Runtime drop-ins appear here even though they are not on disk under the
-/// user's config directory, which is why the manager is the source of truth.
+/// Both values are asked for separately because `systemctl show --value` prints
+/// an `EnvironmentFiles=` entry as `<path> (ignore_errors=yes|no)`, one per
+/// line, and that is not distinguishable from a single property's output when
+/// two properties are asked for at once. Runtime drop-ins appear here even
+/// though they are not on disk under the user's config directory, which is why
+/// the manager is the source of truth.
 pub fn parse_systemd_manager_environment(
-    output: &str,
+    environment: &str,
+    environment_files: &str,
     home: &Path,
     unit_dir: &Path,
 ) -> std::result::Result<Vec<(String, String)>, String> {
-    let mut lines = output.split('\n');
-    let environment_line = lines.next().unwrap_or_default();
-    let files_line = lines.next().unwrap_or_default();
     let mut variables: Vec<(String, String)> = Vec::new();
-    for (key, value) in parse_systemd_assignments(environment_line) {
+    for (key, value) in parse_systemd_assignments(environment) {
         let key = expand_systemd_specifiers(&key, home);
         let value = expand_systemd_specifiers(&value, home);
         match variables.iter_mut().find(|(existing, _)| *existing == key) {
@@ -669,19 +669,33 @@ pub fn parse_systemd_manager_environment(
             None => variables.push((key, value)),
         }
     }
-    let files = parse_systemd_words(files_line)
-        .into_iter()
-        .filter_map(|word| {
-            let (path, optional) = match word.strip_prefix('-') {
-                Some(path) => (path, true),
-                None => (word.as_str(), false),
-            };
-            let path = expand_systemd_specifiers(path, home);
-            (!path.is_empty()).then(|| (PathBuf::from(path), optional))
-        })
+    let files = environment_files
+        .lines()
+        .filter_map(|line| parse_systemd_manager_environment_file(line, home))
         .collect();
     apply_environment_files(&mut variables, files, home, unit_dir)?;
     Ok(variables)
+}
+
+/// One `EnvironmentFiles=` line from `systemctl show --value`.
+///
+/// systemd prints `<path> (ignore_errors=yes|no)` for every file, never the
+/// `-` prefix a unit file may use. `yes` means a missing file is tolerated.
+fn parse_systemd_manager_environment_file(line: &str, home: &Path) -> Option<(PathBuf, bool)> {
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let (path, optional) = match line.rsplit_once(" (ignore_errors=") {
+        Some((path, flag)) => match flag.strip_suffix(')') {
+            Some("yes") => (path, true),
+            Some("no") => (path, false),
+            _ => (line, false),
+        },
+        None => (line, false),
+    };
+    let path = expand_systemd_specifiers(path, home);
+    (!path.is_empty()).then(|| (PathBuf::from(path), optional))
 }
 
 /// `KEY=VALUE` lines of a systemd `EnvironmentFile=`.
@@ -946,10 +960,24 @@ pub(crate) fn systemd_target_from(
     if bind.is_none() {
         // Ask the manager first: its Environment= includes runtime drop-ins,
         // which are not among the files read from the config directories. The
-        // unit files are a fallback only when systemctl cannot answer.
-        match run(&systemd_service_environment_command()) {
-            Ok(output) if output.success => {
-                match parse_systemd_manager_environment(&output.text(), home, unit_dir) {
+        // unit files are a fallback only when systemctl cannot answer both
+        // parts of the environment.
+        let manager_environment = match run(&systemd_service_environment_command()) {
+            Ok(output) if output.success => Some(output),
+            _ => None,
+        };
+        let manager_files = match run(&systemd_service_environment_files_command()) {
+            Ok(output) if output.success => Some(output),
+            _ => None,
+        };
+        match manager_environment.zip(manager_files) {
+            Some((environment, files)) => {
+                match parse_systemd_manager_environment(
+                    &environment.text(),
+                    &files.text(),
+                    home,
+                    unit_dir,
+                ) {
                     Ok(variables) => {
                         bind = variables
                             .into_iter()
@@ -959,7 +987,7 @@ pub(crate) fn systemd_target_from(
                     Err(reason) => return RegisteredTarget::Unverified { reason },
                 }
             }
-            _ => match text.bind(home, unit_dir) {
+            None => match text.bind(home, unit_dir) {
                 Ok(from_unit) => bind = from_unit,
                 Err(reason) => return RegisteredTarget::Unverified { reason },
             },
@@ -1028,18 +1056,27 @@ pub fn systemd_show_environment_command() -> CommandSpec {
     CommandSpec::new("systemctl", ["--user", "show-environment"])
 }
 
-/// The command that prints the unit's effective environment and file list.
+/// The command that prints the unit's effective inline environment.
 ///
 /// The manager applies runtime drop-ins when it answers this, so the busy guard
 /// sees the bind the running daemon actually inherited.
 pub fn systemd_service_environment_command() -> CommandSpec {
     CommandSpec::new(
         "systemctl",
+        ["--user", "show", "-p", "Environment", "--value", UNIT_NAME],
+    )
+}
+
+/// The command that prints the unit's effective `EnvironmentFile=` list.
+///
+/// Asked for separately: each file is printed as `<path> (ignore_errors=no)` or
+/// `(ignore_errors=yes)`.
+pub fn systemd_service_environment_files_command() -> CommandSpec {
+    CommandSpec::new(
+        "systemctl",
         [
             "--user",
             "show",
-            "-p",
-            "Environment",
             "-p",
             "EnvironmentFiles",
             "--value",
@@ -1115,7 +1152,7 @@ fn install_systemd_at(
         run_checked_with(&command, run)?;
     }
     if write && active {
-        println!("Restarted {UNIT_NAME} with the updated unit.");
+        println!("Enabled and restarted {UNIT_NAME} with the updated unit.");
     } else {
         println!("Installed and started {UNIT_NAME}.");
     }
@@ -1125,12 +1162,14 @@ fn install_systemd_at(
 
 /// The commands an install runs after writing (or keeping) the unit.
 ///
-/// A changed unit that is already running is restarted, mirroring launchd, so
-/// the new `ExecStart=` and environment take effect now instead of at the next
-/// login or crash. Otherwise `enable --now` repairs a stopped or disabled unit.
+/// A changed unit that is already running is enabled and then restarted,
+/// mirroring launchd: the restart makes the new `ExecStart=` and environment
+/// take effect now, and the enable keeps an active-but-disabled unit coming
+/// back at login. Otherwise `enable --now` repairs a stopped or disabled unit.
 pub fn systemd_install_steps(write: bool, active: bool) -> Vec<CommandSpec> {
     let mut commands = vec![CommandSpec::new("systemctl", ["--user", "daemon-reload"])];
     if write && active {
+        commands.push(systemd_enable_command());
         commands.push(systemd_restart_command());
     } else {
         commands.push(CommandSpec::new(
@@ -1139,6 +1178,11 @@ pub fn systemd_install_steps(write: bool, active: bool) -> Vec<CommandSpec> {
         ));
     }
     commands
+}
+
+/// Enables the unit without starting it, so it also comes back at login.
+pub fn systemd_enable_command() -> CommandSpec {
+    CommandSpec::new("systemctl", ["--user", "enable", UNIT_NAME])
 }
 
 fn uninstall_systemd() -> Result<()> {
@@ -1899,7 +1943,7 @@ fn task_runs_installation(installed: &InstalledService, current: &Path) -> bool 
 /// written before any rename, so a crash mid-update leaves a task that can still
 /// start, even when the binary at the install path is an older image that does
 /// not understand `--recover-only`.
-pub fn prepare_replace(current: &Path) -> Result<()> {
+pub fn prepare_replace(current: &Path) -> Result<bool> {
     prepare_replace_with(
         ServicePlatform::current(),
         current,
@@ -1927,6 +1971,11 @@ fn prepare_refusal(problem: impl std::fmt::Display) -> anyhow::Error {
 ///
 /// Fails closed: once a task is installed, an action that cannot be read or a
 /// prepare step that cannot run is an error rather than a silent "nothing to do".
+///
+/// Returns whether the `-NoStart` migration actually ran and stopped a legacy
+/// machine-wide task, and with it the daemon that task was running. Only a
+/// `true` here means the service may be down as a result of this step: an early
+/// refusal, a missing task or a task for another installation changes nothing.
 pub(crate) fn prepare_replace_with(
     platform: ServicePlatform,
     current: &Path,
@@ -1934,9 +1983,9 @@ pub(crate) fn prepare_replace_with(
     powershell_available: bool,
     default_data_dir: &Path,
     run: CommandRunner<'_>,
-) -> Result<()> {
+) -> Result<bool> {
     if platform != ServicePlatform::Windows {
-        return Ok(());
+        return Ok(false);
     }
     if !powershell_available {
         return Err(prepare_refusal(
@@ -1947,7 +1996,7 @@ pub(crate) fn prepare_replace_with(
     let legacy_installed =
         task != LEGACY_WINDOWS_TASK && windows_task_installed_with(LEGACY_WINDOWS_TASK, run)?;
     if !current_installed && !legacy_installed {
-        return Ok(());
+        return Ok(false);
     }
     let installed_task = if current_installed {
         task
@@ -1977,7 +2026,7 @@ pub(crate) fn prepare_replace_with(
     };
     let installed = windows_installed_binary(&stdout);
     if !task_runs_installation(&installed, current) {
-        return Ok(());
+        return Ok(false);
     }
     // Keep the data directory the service already uses. The updater's own
     // data directory can differ (a service installed with `--data-dir`), and
@@ -2004,18 +2053,20 @@ pub(crate) fn prepare_replace_with(
     }
     drop(script);
     println!("Updated scheduled task {task} with the recovery launcher.");
-    Ok(())
+    Ok(legacy_installed)
 }
 
 /// Whether the scheduled task exists. An unreadable status fails closed.
 fn windows_task_installed_with(task: &str, run: CommandRunner<'_>) -> Result<bool> {
-    let output = run(&windows_status_command(task))
-        .with_context(|| format!("the status of scheduled task {task} could not be read"))?;
+    let output = run(&windows_status_command(task)).map_err(|error| {
+        prepare_refusal(format!(
+            "the status of scheduled task {task} could not be read: {error}"
+        ))
+    })?;
     if !output.success {
-        bail!(
-            "the status of scheduled task {task} could not be read; pass --force to update \
-             without preparing it"
-        );
+        return Err(prepare_refusal(format!(
+            "the status of scheduled task {task} could not be read"
+        )));
     }
     Ok(parse_windows_task_state(&output.text()).installed)
 }
@@ -2833,12 +2884,33 @@ mod tests {
                     "show",
                     "-p",
                     "Environment",
+                    "--value",
+                    "h4rnd.service"
+                ]
+            )
+        );
+        assert_eq!(
+            systemd_service_environment_files_command(),
+            CommandSpec::new(
+                "systemctl",
+                [
+                    "--user",
+                    "show",
                     "-p",
                     "EnvironmentFiles",
                     "--value",
                     "h4rnd.service"
                 ]
             )
+        );
+        assert_eq!(
+            systemd_install_steps(true, true),
+            vec![
+                CommandSpec::new("systemctl", ["--user", "daemon-reload"]),
+                systemd_enable_command(),
+                systemd_restart_command(),
+            ],
+            "a changed active unit is enabled, then restarted"
         );
         assert_eq!(
             systemd_install_steps(true, true).last(),
@@ -2941,7 +3013,11 @@ mod tests {
         .unwrap();
 
         let calls = calls.borrow();
-        assert_eq!(calls.len(), 3, "status, reload and restart only: {calls:?}");
+        assert_eq!(
+            calls.len(),
+            4,
+            "status, reload, enable and restart only: {calls:?}"
+        );
         assert_eq!(calls[0], systemd_status_command());
         assert_eq!(
             calls[1],
@@ -2949,6 +3025,11 @@ mod tests {
         );
         assert_eq!(
             calls[2],
+            systemd_enable_command(),
+            "an active-but-disabled unit must also come back at login"
+        );
+        assert_eq!(
+            calls[3],
             systemd_restart_command(),
             "the running unit must pick up the new ExecStart now"
         );
@@ -3620,6 +3701,7 @@ mod tests {
         calls: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
         exec_start: std::result::Result<&'static str, &'static str>,
         service_environment: std::result::Result<&'static str, &'static str>,
+        environment_files: std::result::Result<&'static str, &'static str>,
         environment: std::result::Result<&'static str, &'static str>,
     ) -> impl Fn(&CommandSpec) -> Result<CommandOutput> {
         move |spec: &CommandSpec| {
@@ -3631,6 +3713,12 @@ mod tests {
                 };
             }
             if spec.args.iter().any(|arg| arg == "EnvironmentFiles") {
+                return match environment_files {
+                    Ok(stdout) => Ok(ok_output(stdout)),
+                    Err(error) => Err(anyhow::anyhow!("{error}")),
+                };
+            }
+            if spec.args.iter().any(|arg| arg == "Environment") {
                 return match service_environment {
                     Ok(stdout) => Ok(ok_output(stdout)),
                     Err(error) => Err(anyhow::anyhow!("{error}")),
@@ -3661,7 +3749,8 @@ mod tests {
             Ok(
                 "{ path=/opt/h4rnd/h4rnd ; argv[]=/opt/h4rnd/h4rnd serve --bind 127.0.0.1:48001 ; ignore_errors=no }",
             ),
-            Ok("H4RN_BIND=127.0.0.1:48003 PATH=/usr/bin\n\n"),
+            Ok("H4RN_BIND=127.0.0.1:48003 PATH=/usr/bin\n"),
+            Ok(""),
             Ok("H4RN_BIND=127.0.0.1:48003\n"),
         );
 
@@ -3708,6 +3797,7 @@ mod tests {
             calls,
             Err("systemctl not found"),
             Err("systemctl not found"),
+            Err("systemctl not found"),
             Err("no manager"),
         );
 
@@ -3743,6 +3833,7 @@ mod tests {
             calls,
             Err("systemctl not found"),
             Err("systemctl not found"),
+            Err("systemctl not found"),
             Err("no manager"),
         );
         match systemd_target_from(&fragment, Path::new("/home/a"), &run) {
@@ -3773,7 +3864,8 @@ mod tests {
         let run = systemd_runner(
             calls.clone(),
             Ok("{ path=/opt/h4rnd/h4rnd ; argv[]=/opt/h4rnd/h4rnd serve ; ignore_errors=no }"),
-            Ok("H4RN_BIND=127.0.0.1:48032\n\n"),
+            Ok("H4RN_BIND=127.0.0.1:48032\n"),
+            Ok(""),
             Ok("H4RN_BIND=127.0.0.1:48033\n"),
         );
 
@@ -3807,8 +3899,9 @@ mod tests {
         let run = systemd_runner(
             calls,
             Ok("{ path=/opt/h4rnd/h4rnd ; argv[]=/opt/h4rnd/h4rnd serve ; ignore_errors=no }"),
+            Ok(""),
             Ok(Box::leak(
-                format!("\n{}\n", environment.display()).into_boxed_str(),
+                format!("\n{} (ignore_errors=no)\n", environment.display()).into_boxed_str(),
             )),
             Err("not needed"),
         );
@@ -3824,6 +3917,88 @@ mod tests {
     }
 
     #[test]
+    fn an_optional_environment_file_that_is_missing_is_skipped() {
+        let variables = parse_systemd_manager_environment(
+            "H4RN_BIND=127.0.0.1:48041\n",
+            "\n/etc/default/h4rn (ignore_errors=yes)\n",
+            Path::new("/home/a"),
+            Path::new("/home/a/.config/systemd/user"),
+        )
+        .unwrap();
+        assert_eq!(
+            variables
+                .iter()
+                .find(|(key, _)| key == "H4RN_BIND")
+                .map(|(_, value)| value.as_str()),
+            Some("127.0.0.1:48041")
+        );
+    }
+
+    #[test]
+    fn a_required_environment_file_that_is_missing_fails() {
+        let error = parse_systemd_manager_environment(
+            "",
+            "\n/etc/default/h4rn (ignore_errors=no)\n",
+            Path::new("/home/a"),
+            Path::new("/home/a/.config/systemd/user"),
+        )
+        .unwrap_err();
+        assert!(error.contains("/etc/default/h4rn"), "{error}");
+    }
+
+    #[test]
+    fn every_environment_file_line_is_read_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.env");
+        let second = dir.path().join("second.env");
+        std::fs::write(&first, "H4RN_BIND=127.0.0.1:48042\n").unwrap();
+        std::fs::write(&second, "H4RN_BIND=127.0.0.1:48043\n").unwrap();
+        let files = format!(
+            "\n{} (ignore_errors=no)\n{} (ignore_errors=yes)\n",
+            first.display(),
+            second.display()
+        );
+        let variables =
+            parse_systemd_manager_environment("", &files, Path::new("/home/a"), dir.path())
+                .unwrap();
+        assert_eq!(
+            variables
+                .iter()
+                .find(|(key, _)| key == "H4RN_BIND")
+                .map(|(_, value)| value.as_str()),
+            Some("127.0.0.1:48043"),
+            "every file line is read, and the later file wins"
+        );
+    }
+
+    #[test]
+    fn an_inline_environment_and_an_environment_file_are_both_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let environment = dir.path().join("bind.env");
+        std::fs::write(&environment, "H4RN_BIND=127.0.0.1:48044\n").unwrap();
+        let files = format!("\n{} (ignore_errors=no)\n", environment.display());
+        let variables = parse_systemd_manager_environment(
+            "PATH=/usr/bin H4RN_BIND=127.0.0.1:48045\n",
+            &files,
+            Path::new("/home/a"),
+            dir.path(),
+        )
+        .unwrap();
+        let value = |key: &str| {
+            variables
+                .iter()
+                .find(|(existing, _)| existing == key)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(value("PATH"), Some("/usr/bin"));
+        assert_eq!(
+            value("H4RN_BIND"),
+            Some("127.0.0.1:48044"),
+            "an EnvironmentFile overrides Environment=, as systemd does"
+        );
+    }
+
+    #[test]
     fn an_unreadable_user_manager_environment_leaves_the_service_unverified() {
         let dir = tempfile::tempdir().unwrap();
         let fragment = dir.path().join("h4rnd.service");
@@ -3832,6 +4007,7 @@ mod tests {
         let run = systemd_runner(
             calls,
             Ok("{ path=/opt/h4rnd/h4rnd ; argv[]=/opt/h4rnd/h4rnd serve ; ignore_errors=no }"),
+            Err("Failed to connect to bus"),
             Err("Failed to connect to bus"),
             Err("Failed to connect to bus"),
         );
@@ -3987,6 +4163,151 @@ mod tests {
     }
 
     #[test]
+    fn an_unparsable_task_action_refuses_the_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir.path().join("h4rnd.exe");
+        std::fs::write(&current, b"bin").unwrap();
+        let default_data = Path::new(r"C:\Users\a\AppData\Roaming\h4rn");
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = calls.clone();
+
+        let run = move |spec: &CommandSpec| -> Result<CommandOutput> {
+            seen.borrow_mut().push(spec.display());
+            if spec.args.iter().any(|arg| arg.contains("State=")) {
+                let installed = spec.display().contains("'h4rn-alice'");
+                return Ok(ok_output(if installed {
+                    "State=Ready\n"
+                } else {
+                    "State=missing\n"
+                }));
+            }
+            if spec.args.iter().any(|arg| arg.contains("Actions")) {
+                // A successful query with no action line: nothing to parse.
+                return Ok(ok_output("\n"));
+            }
+            Ok(ok_output(""))
+        };
+
+        let error = prepare_replace_with(
+            ServicePlatform::Windows,
+            &current,
+            "h4rn-alice",
+            true,
+            default_data,
+            &run,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("could not be parsed"), "{error}");
+        assert!(
+            error.to_string().contains("h4rnd service install"),
+            "the manual recovery path is printed: {error}"
+        );
+        assert!(
+            calls.borrow().iter().all(|call| !call.contains("-NoStart")),
+            "an unparsable action must refuse before rewriting anything"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_task_status_refuses_the_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir.path().join("h4rnd.exe");
+        std::fs::write(&current, b"bin").unwrap();
+        let default_data = Path::new(r"C:\Users\a\AppData\Roaming\h4rn");
+
+        let run = |spec: &CommandSpec| -> Result<CommandOutput> {
+            if spec.args.iter().any(|arg| arg.contains("State=")) {
+                return Ok(CommandOutput {
+                    success: false,
+                    stdout: Vec::new(),
+                    stderr: b"access denied".to_vec(),
+                });
+            }
+            Ok(ok_output(""))
+        };
+        let error = prepare_replace_with(
+            ServicePlatform::Windows,
+            &current,
+            "h4rn-alice",
+            true,
+            default_data,
+            &run,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("status of scheduled task"),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("h4rnd service install"),
+            "the manual recovery path is printed: {error}"
+        );
+
+        // A status query that cannot even run fails closed the same way.
+        let error = prepare_replace_with(
+            ServicePlatform::Windows,
+            &current,
+            "h4rn-alice",
+            true,
+            default_data,
+            &|_| Err(anyhow::anyhow!("PowerShell is not responding")),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("h4rnd service install"),
+            "the manual recovery path is printed: {error}"
+        );
+    }
+
+    #[test]
+    fn a_task_for_another_installation_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = dir.path().join("h4rnd.exe");
+        let other = dir.path().join("other-h4rnd.exe");
+        std::fs::write(&current, b"bin").unwrap();
+        std::fs::write(&other, b"bin").unwrap();
+        let default_data = Path::new(r"C:\Users\a\AppData\Roaming\h4rn");
+        let action = format!("{}\tserve", other.display());
+        let calls = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = calls.clone();
+
+        let run = move |spec: &CommandSpec| -> Result<CommandOutput> {
+            seen.borrow_mut().push(spec.display());
+            if spec.args.iter().any(|arg| arg.contains("State=")) {
+                let installed = spec.display().contains("'h4rn-alice'");
+                return Ok(ok_output(if installed {
+                    "State=Ready\n"
+                } else {
+                    "State=missing\n"
+                }));
+            }
+            if spec.args.iter().any(|arg| arg.contains("Actions")) {
+                let installed = spec.display().contains("'h4rn-alice'");
+                return Ok(ok_output(if installed { action.as_str() } else { "" }));
+            }
+            Ok(ok_output(""))
+        };
+
+        let stopped_legacy = prepare_replace_with(
+            ServicePlatform::Windows,
+            &current,
+            "h4rn-alice",
+            true,
+            default_data,
+            &run,
+        )
+        .expect("another installation's task is not an error");
+        assert!(
+            !stopped_legacy,
+            "this update neither rewrote nor migrated the task"
+        );
+        assert!(
+            calls.borrow().iter().all(|call| !call.contains("-NoStart")),
+            "another installation's task is never repointed"
+        );
+    }
+
+    #[test]
     fn a_host_without_a_task_needs_no_prepare_step() {
         let dir = tempfile::tempdir().unwrap();
         let current = dir.path().join("h4rnd.exe");
@@ -4004,7 +4325,7 @@ mod tests {
             );
         };
 
-        prepare_replace_with(
+        let stopped_legacy = prepare_replace_with(
             ServicePlatform::Windows,
             &current,
             "h4rn-alice",
@@ -4013,6 +4334,7 @@ mod tests {
             &run,
         )
         .expect("a standalone Windows daemon can update");
+        assert!(!stopped_legacy, "no task was migrated, so none was stopped");
         assert_eq!(
             commands.borrow().len(),
             2,
@@ -4050,7 +4372,7 @@ mod tests {
             Ok(ok_output(""))
         };
 
-        prepare_replace_with(
+        let stopped_legacy = prepare_replace_with(
             ServicePlatform::Windows,
             &current,
             "h4rn-alice",
@@ -4059,6 +4381,10 @@ mod tests {
             &run,
         )
         .expect("an older task that relied on the default directory is migrated");
+        assert!(
+            stopped_legacy,
+            "the -NoStart migration removed the legacy task and stopped its daemon"
+        );
 
         let prepare = prepare.borrow().clone().expect("the prepare step ran");
         let data_arg = prepare

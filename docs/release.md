@@ -205,9 +205,11 @@ assuming there is nothing to prepare; `--force` overrides that and prints the
 manual recovery steps. An older task that passed no `--data-dir` is migrated
 with the daemon's default data directory, which is what it was already using.
 Migrating a legacy task stops it, so the update probes the daemon for active
-turns once more immediately before the migration; if the replace then fails, it
-starts the service again (or tells you to run `h4rnd service restart` after
-printing why). The update releases the installation lock
+turns once more immediately before the migration; only when that migration
+actually ran and the replace then fails does it start the service again (or
+tell you to run `h4rnd service restart` after printing why). A refusal before
+the migration, or a task that belongs to another installation, leaves the
+running daemon alone. The update releases the installation lock
 before it triggers the restart, so the launcher never has to wait for the process
 that started it. Tasks registered by older releases under the machine-wide
 `h4rn` name are removed by the next install or uninstall. Without a service, run
@@ -223,10 +225,11 @@ the next step. On Windows the restart's stop step (`schtasks /End`, or
 running; only the start step must succeed.
 
 `h4rnd service install` follows the launchd rule on Linux: when it wrote a
-changed unit and the unit is active, it runs `systemctl --user restart` after
-`daemon-reload` so the new `ExecStart=` and environment take effect now; when
-the unit was unchanged or is stopped, it runs `enable --now` as before. An
-unchanged active unit is not bounced.
+changed unit and the unit is active, it runs `systemctl --user enable` and then
+`systemctl --user restart` after `daemon-reload`, so the new `ExecStart=` and
+environment take effect now and an active-but-disabled unit still comes back at
+login; when the unit was unchanged or is stopped, it runs `enable --now` as
+before. An unchanged active unit is not bounced.
 
 A running daemon that reports an active turn stops the update with an
 explanation unless `--force` is passed. The guard probes the daemon the

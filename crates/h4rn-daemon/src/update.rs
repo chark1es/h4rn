@@ -1658,9 +1658,12 @@ pub(crate) struct UpdateDeps {
     pub service_active: Box<dyn Fn() -> bool>,
     /// Prepares the installation before the replace (Windows migrates the
     /// scheduled task's launcher so it can recover a missing binary).
-    pub prepare_replace: Box<dyn Fn() -> Result<()>>,
+    ///
+    /// Returns whether the preparation ran the `-NoStart` migration that stops
+    /// a legacy machine-wide task, which also stops the daemon that task runs.
+    pub prepare_replace: Box<dyn Fn() -> Result<bool>>,
     /// Whether [`Self::prepare_replace`] would stop a legacy scheduled task,
-    /// which also stops the daemon that task is running.
+    /// used only to probe for an active turn immediately before it may happen.
     pub prepare_stops_legacy: Box<dyn Fn() -> bool>,
     /// Replaces the installed binary.
     pub replace: Box<ReplaceBinary>,
@@ -1741,15 +1744,12 @@ pub(crate) async fn run_with(options: UpdateOptions, deps: UpdateDeps) -> Result
             check_target_idle(&target, options.force, service_active.as_ref()).await?;
         }
         // A Windows rollback also moves the install path aside, so the task must
-        // be able to recover it first.
-        if let Err(error) = prepare_for_replace(prepare_replace.as_ref(), options.force) {
-            if stops_legacy {
-                restart_after_stopped_legacy(&current, restart.as_ref());
-            }
-            return Err(error);
-        }
+        // be able to recover it first. Only a migration that actually ran can
+        // have stopped the daemon; a refusal or another installation's task
+        // changes nothing.
+        let stopped_legacy = prepare_for_replace(prepare_replace.as_ref(), options.force)?;
         if let Err(error) = rollback_binary(&current) {
-            if stops_legacy {
+            if stopped_legacy {
                 restart_after_stopped_legacy(&current, restart.as_ref());
             }
             return Err(error);
@@ -1838,15 +1838,12 @@ pub(crate) async fn run_with(options: UpdateOptions, deps: UpdateDeps) -> Result
         check_target_idle(&target, options.force, service_active.as_ref()).await?;
     }
     // On Windows the registered task must be able to recover a missing install
-    // path before the running binary is moved aside.
-    if let Err(error) = prepare_for_replace(prepare_replace.as_ref(), options.force) {
-        if stops_legacy {
-            restart_after_stopped_legacy(&current, restart.as_ref());
-        }
-        return Err(error);
-    }
+    // path before the running binary is moved aside. Only a migration that
+    // actually ran can have stopped the daemon; a refusal or another
+    // installation's task bounces nothing.
+    let stopped_legacy = prepare_for_replace(prepare_replace.as_ref(), options.force)?;
     if let Err(error) = replace(&current, &binary) {
-        if stops_legacy {
+        if stopped_legacy {
             restart_after_stopped_legacy(&current, restart.as_ref());
         }
         return Err(error);
@@ -1878,15 +1875,17 @@ pub(crate) async fn run_with(options: UpdateOptions, deps: UpdateDeps) -> Result
 ///
 /// A scheduled task whose action cannot be read is a Windows preparation
 /// failure: continuing without the recovery launcher would make a crash during
-/// the replace unrecoverable, so the update refuses before any rename.
-fn prepare_for_replace(prepare_replace: &dyn Fn() -> Result<()>, force: bool) -> Result<()> {
+/// the replace unrecoverable, so the update refuses before any rename. The
+/// returned flag is true only when the step ran the `-NoStart` migration and so
+/// actually stopped a legacy scheduled task.
+fn prepare_for_replace(prepare_replace: &dyn Fn() -> Result<bool>, force: bool) -> Result<bool> {
     match prepare_replace() {
-        Ok(()) => Ok(()),
+        Ok(stopped_legacy) => Ok(stopped_legacy),
         Err(error) if force => {
             println!("warning: {error}");
             println!("continuing because --force was passed; if the update fails, start the task");
             println!("again with `h4rnd service restart` (or repair the install by hand).");
-            Ok(())
+            Ok(false)
         }
         Err(error) => Err(error),
     }
@@ -2993,7 +2992,7 @@ mod tests {
                 public_key: Some(public_key),
                 restart: counting_restart(restarts.clone()),
                 service_active: Box::new(|| false),
-                prepare_replace: Box::new(|| Ok(())),
+                prepare_replace: Box::new(|| Ok(false)),
                 prepare_stops_legacy: Box::new(|| false),
                 replace: Box::new(replace_binary),
             },
@@ -3037,7 +3036,7 @@ mod tests {
                 public_key: None,
                 restart: counting_restart(restarts.clone()),
                 service_active: Box::new(|| false),
-                prepare_replace: Box::new(|| Ok(())),
+                prepare_replace: Box::new(|| Ok(false)),
                 prepare_stops_legacy: Box::new(|| false),
                 replace: Box::new(replace_binary),
             },
@@ -3076,7 +3075,7 @@ mod tests {
                 public_key: Some(public_key),
                 restart: counting_restart(restarts.clone()),
                 service_active: Box::new(|| false),
-                prepare_replace: Box::new(|| Ok(())),
+                prepare_replace: Box::new(|| Ok(false)),
                 prepare_stops_legacy: Box::new(|| false),
                 replace: Box::new(replace_binary),
             },
@@ -3125,7 +3124,7 @@ mod tests {
                 public_key: None,
                 restart: counting_restart(restarts.clone()),
                 service_active: Box::new(|| false),
-                prepare_replace: Box::new(|| Ok(())),
+                prepare_replace: Box::new(|| Ok(false)),
                 prepare_stops_legacy: Box::new(|| false),
                 replace: Box::new(replace_binary),
             },
@@ -3161,7 +3160,7 @@ mod tests {
                 public_key: None,
                 restart: counting_restart(restarts.clone()),
                 service_active: Box::new(|| false),
-                prepare_replace: Box::new(|| Ok(())),
+                prepare_replace: Box::new(|| Ok(false)),
                 prepare_stops_legacy: Box::new(|| false),
                 replace: Box::new(replace_binary),
             },
@@ -3291,7 +3290,7 @@ mod tests {
                         probe_hits.load(std::sync::atomic::Ordering::SeqCst),
                         std::sync::atomic::Ordering::SeqCst,
                     );
-                    Ok(())
+                    Ok(true)
                 }),
                 prepare_stops_legacy: Box::new(|| true),
                 replace: Box::new(replace_binary),
@@ -3331,7 +3330,7 @@ mod tests {
                 public_key: Some(public_key),
                 restart: counting_restart(restarts.clone()),
                 service_active: Box::new(|| false),
-                prepare_replace: Box::new(|| Ok(())),
+                prepare_replace: Box::new(|| Ok(true)),
                 prepare_stops_legacy: Box::new(|| true),
                 replace: Box::new(|_, _| Err(anyhow::anyhow!("injected replace failure"))),
             },
@@ -3347,6 +3346,93 @@ mod tests {
             restarts.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "a failed replace after the migration stopped the daemon must start it again"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_prepare_refusal_does_not_bounce_the_daemon() {
+        let service = health_stub(vec![0]).await;
+        let (_dir, current) = install_dir();
+        let (_server, client, public_key) =
+            mock_release(b"new binary", "9.9.9", &test_key().0).await;
+        let restarts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let error = run_with(
+            UpdateOptions::default(),
+            UpdateDeps {
+                current: current.clone(),
+                target: target_for(
+                    crate::service::RegisteredTarget::Runs {
+                        binary: current.clone(),
+                        health: service.addr,
+                    },
+                    service.addr,
+                ),
+                client: Some(client),
+                public_key: Some(public_key),
+                restart: counting_restart(restarts.clone()),
+                service_active: Box::new(|| false),
+                prepare_replace: Box::new(|| Err(anyhow::anyhow!("action could not be read"))),
+                // The legacy task exists, so the guard probes once more, but the
+                // prepare step refused before running the migration that would
+                // have stopped it.
+                prepare_stops_legacy: Box::new(|| true),
+                replace: Box::new(|_, _| panic!("the binary must not be replaced")),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("could not be read"), "{error}");
+        assert_eq!(
+            restarts.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an early refusal never stopped the daemon, so it must not be started again"
+        );
+        assert_eq!(std::fs::read(&current).unwrap(), b"old");
+    }
+
+    #[tokio::test]
+    async fn a_task_for_another_installation_does_not_bounce_the_daemon() {
+        let service = health_stub(vec![0]).await;
+        let (_dir, current) = install_dir();
+        let (_server, client, public_key) =
+            mock_release(b"new binary", "9.9.9", &test_key().0).await;
+        let restarts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let error = run_with(
+            UpdateOptions::default(),
+            UpdateDeps {
+                current: current.clone(),
+                target: target_for(
+                    crate::service::RegisteredTarget::Runs {
+                        binary: current.clone(),
+                        health: service.addr,
+                    },
+                    service.addr,
+                ),
+                client: Some(client),
+                public_key: Some(public_key),
+                restart: counting_restart(restarts.clone()),
+                service_active: Box::new(|| false),
+                // Another installation's task is left alone, so no migration
+                // ran even though a legacy task exists.
+                prepare_replace: Box::new(|| Ok(false)),
+                prepare_stops_legacy: Box::new(|| true),
+                replace: Box::new(|_, _| Err(anyhow::anyhow!("injected replace failure"))),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("injected replace failure"),
+            "{error}"
+        );
+        assert_eq!(
+            restarts.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a task for another installation stopped nothing, so nothing restarts"
         );
     }
 
@@ -3535,7 +3621,7 @@ mod tests {
                             .unwrap_or(false),
                         std::sync::atomic::Ordering::SeqCst,
                     );
-                    Ok(())
+                    Ok(false)
                 }),
                 prepare_stops_legacy: Box::new(|| false),
                 replace: Box::new(replace_binary),
@@ -3599,7 +3685,7 @@ mod tests {
                             .unwrap_or(false),
                         std::sync::atomic::Ordering::SeqCst,
                     );
-                    Ok(())
+                    Ok(false)
                 }),
                 prepare_stops_legacy: Box::new(|| false),
                 replace: Box::new(replace_binary),
