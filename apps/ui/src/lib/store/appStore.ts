@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { isPlacementMove, noteManualPlacement } from "@/features/notifications/placement";
 import type {
   ApprovalDecision,
   Attachment,
@@ -1001,6 +1002,11 @@ async function runThreadAction(
   label: string,
   body: Extract<ClientRequest, { type: "set_thread_tab" | "snooze" | "interrupt" }>,
 ): Promise<boolean> {
+  // Moving a thread into Done or Settled is the person's placement, not the
+  // daemon finishing a turn. Tell the notifier before the move so it cannot
+  // pin a remembered live completion on the Done update that follows. A pin
+  // toggle only moves through Working and is not a placement.
+  if (body.type === "set_thread_tab" && isPlacementMove(body.tab)) noteManualPlacement(threadId);
   const state = getState();
   setState({
     ...state,
@@ -1288,6 +1294,7 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
     workspace_path: input.workspacePath,
     model: input.model,
     tab: "working",
+    placed_by_user: false,
     pinned: false,
     snoozed_until: null,
     last_activity: now,

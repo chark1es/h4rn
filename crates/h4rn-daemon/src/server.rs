@@ -876,37 +876,57 @@ impl Connection {
                         .topics
                         .write()
                         .unwrap_or_else(|poisoned| poisoned.into_inner()) = topics;
+                    // Hold the manager's append lock across read + enqueue +
+                    // ready so no event falls between replay and live, and so
+                    // the journal head is the exact replay boundary.
+                    let guard = self.state.manager.lock_append().await;
                     match since_seq {
                         None => {
-                            self.ready.store(true, Ordering::Relaxed);
-                            Ok(ResponseBody::Ack)
+                            let head = self.state.manager.journal_head().await;
+                            match head {
+                                Ok(replay_through) => {
+                                    self.last_seq.store(replay_through, Ordering::Relaxed);
+                                    self.ready.store(true, Ordering::Relaxed);
+                                    drop(guard);
+                                    Ok(ResponseBody::Subscribed { replay_through })
+                                }
+                                Err(error) => {
+                                    drop(guard);
+                                    Err(error.into_proto())
+                                }
+                            }
                         }
                         Some(since) => {
-                            // Hold the manager's append lock across read + enqueue
-                            // + ready so no event falls between replay and live.
-                            let guard = self.state.manager.lock_append().await;
                             let replay = self.state.manager.replay_global_since(since).await;
-                            if let Ok(events) = &replay {
-                                for event in events {
-                                    let frame = ServerFrame::Event {
-                                        seq: event.seq,
-                                        event: event.event.clone(),
-                                    };
-                                    if let Ok(text) = serde_json::to_string(&frame)
-                                        && self.send(Outbound::Text(text)).await.is_err()
-                                    {
-                                        break;
+                            let head = match replay {
+                                Ok(events) => {
+                                    for event in events {
+                                        let frame = ServerFrame::Event {
+                                            seq: event.seq,
+                                            event: event.event.clone(),
+                                        };
+                                        if let Ok(text) = serde_json::to_string(&frame)
+                                            && self.send(Outbound::Text(text)).await.is_err()
+                                        {
+                                            break;
+                                        }
                                     }
+                                    self.state.manager.journal_head().await
                                 }
-                                if let Some(last) = events.last() {
-                                    self.last_seq.store(last.seq, Ordering::Relaxed);
+                                Err(error) => Err(error),
+                            };
+                            match head {
+                                Ok(replay_through) => {
+                                    self.last_seq.store(replay_through, Ordering::Relaxed);
+                                    self.ready.store(true, Ordering::Relaxed);
+                                    drop(guard);
+                                    Ok(ResponseBody::Subscribed { replay_through })
                                 }
-                                self.ready.store(true, Ordering::Relaxed);
+                                Err(error) => {
+                                    drop(guard);
+                                    Err(error.into_proto())
+                                }
                             }
-                            drop(guard);
-                            replay
-                                .map(|_| ResponseBody::Ack)
-                                .map_err(crate::threads::ManagerError::into_proto)
                         }
                     }
                 }

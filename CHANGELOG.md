@@ -7,6 +7,83 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Notifications, Open at login and the tray are real settings.** Settings → Notifications now
+  controls OS notifications on the desktop app (the Tauri notification plugin) and in the browser
+  (the Web Notification API, asked for only when a switch is turned on; there is no separate
+  Allow button). Approvals and waiting questions, finished and failed turns, and a linked machine
+  going offline notify only when the window is not focused or a different thread is open.
+  Replay follows the journal-head boundary named by the subscribe answer, so a live approval that
+  arrives while the handshake is still in flight notifies on a first connect and after a reconnect,
+  while events at or below the boundary stay quiet. A subscribe that outlives its own 6 s request
+  keeps holding the buffer until its answer closes the replay at that boundary (or the socket
+  drops it for the next subscribe to replay); an older daemon that accepts a live-edge subscribe
+  without naming a boundary delivers those frames untagged, because nothing was replayed. Finished
+  and failed turns follow the daemon's
+  thread summary and need a live completion for the current turn: a thread moved to Done by another
+  client, or a replayed completion followed by a live tick, says nothing. A live completion is spent
+  on the one daemon transition it caused: a manual tab move by the person discards it, and a
+  re-seeded baseline clears every remembered completion. The list re-seeds the
+  baseline whenever the client becomes ready, so a gap healed by a list cannot announce history. A
+  turn that hands off to a queued turn says nothing, an interrupted turn that lands in Done reads
+  “Stopped: the turn was interrupted.”, and a token or turn limit reads as “Stopped”, never
+  “Finished”. A burst in one thread
+  waits for a quiet period (1 s of no new event, capped at 3 s) and announces the latest message.
+  Clicking a notification focuses h4rn and opens the thread. Subagent child threads stay quiet (the
+  parent's mirrored approval already covers them); an approval that arrives before the summary
+  names the child is withdrawn when that summary arrives, and an answered approval cancels that
+  thread's queued notification unless a newer approval replaced it. The choices persist per device
+  (`h4rn.notifications`): approvals and finished turns on, host offline off. In the browser a
+  denied OS permission is shown as “Blocked in system settings”, and a still-undecided permission
+  renders the switches off without forgetting the stored choice; the desktop notification plugin
+  cannot detect a blocked permission, so Settings says nothing about it there rather than claiming
+  a state it does not know. Host offline covers only the machines this device is linked to through
+  the relay; the live transport is always online, matched by `hello`'s local host's name even when
+  no machine was picked, and a due alert fetches linked presence once more before delivery and is
+  dropped if the host came back, the fetch failed or the client disconnected. A direct-only session
+  hides the row and says why. On Linux the desktop notification plugin passes `replaces_id = 0`, so
+  a later message for the same key stacks instead of replacing; coalescing still limits it to one
+  message per quiet period.
+- **Open at login** registers the desktop app as a login item through the autostart plugin.
+- **Keep running in tray** adds an Open h4rn / Quit tray icon and makes the window's close button
+  hide h4rn instead of quitting while agents keep working; the shell stores the choice so the
+  close handler knows it before the UI loads. Launching h4rn a second time shows and focuses the
+  hidden window, and a macOS dock click does the same, so a tray icon the Linux desktop never shows
+  cannot trap the app. Hide-on-close is only enabled when the tray icon was actually created: if
+  the shell cannot add one, closing quits as before and Settings disables the switch with an
+  explanation. Both startup rows are hidden in the browser and on mobile.
+- The mobile build does not send notifications yet, and Settings says so instead of offering
+  switches that do nothing.
+- **Unsent composer text survives a reload, an app restart or Android killing the webview.** Every
+  draft is stored under its own key for a host and thread, so one tab never erases another
+  thread's draft; for the same thread the most recent edit wins. Writes happen after a short
+  debounce and are flushed when the page hides. Drafts
+  from the previous single-blob store are migrated on first launch. A sent message clears only the
+  text that was sent: a newer draft written in another tab while the message was in flight stays,
+  and a failed send keeps the text so it can be retried. Every write carries its own revision (a
+  timestamp plus a per-tab id), so two tabs writing in the same moment cannot be confused, and a
+  send clears only the revision the composer was showing rather than whatever storage holds when
+  the reply finishes; a removal that failed is retried only while storage still holds that
+  revision. Drafts nobody has touched in 30 days are dropped when the app loads, and the store
+  keeps at most 200, dropping the oldest; a draft whose age cannot be read is never treated as the
+  oldest, and a corrupt value is dropped from storage. Attachment bytes are never persisted: a
+  restored draft is its text, and files must be attached again. A draft changed in another tab
+  appears in the open composer only when that composer has no unsaved edit of its own.
+- **The new-thread box follows the host and folder you see.** Its prompt is saved per host and
+  folder, and the last folder used on a host is remembered for the next time the dialog opens. The
+  box stays disabled with a quiet “Connecting…” until a host is known, so no text is typed before
+  there is a slot to keep it in. The folder's draft switches only when you commit the folder (leave
+  the field, press Enter, or pick a project), not on every keystroke; an empty folder means the
+  default one it will use. Switching folders, or the daemon's own host changing before you pick
+  one, shows that slot's text and moves nothing. Start sends exactly the text on screen to the
+  folder on screen, even when you typed the folder but did not commit it, and clears only the slot
+  that text came from — only while it still holds what was sent.
+- **The composer recalls earlier prompts.** With the caret on the first line and nothing selected,
+  `↑` walks back through the prompts already sent in this thread and `↓` walks forward, finally
+  restoring the text that was in progress. Recalling a prompt does not touch the stored draft, so a
+  reload still brings back what you were typing; editing the recalled text replaces it. Multi-line
+  prompts keep stepping with the caret at their first line. The history is read from the thread's
+  own user messages, so it needs no separate copy and works on any device that can see the thread.
+  Typing leaves history mode, and an open menu or IME composition leaves the arrow keys alone.
 - **Harnesses: run any ACP agent as a local command.** Settings → Harnesses can now store any
   number of local ACP agents (display name, unique instance id, executable, literal arguments,
   environment overrides and a thread-workspace or fixed working directory). A new `acp` harness
@@ -20,6 +97,39 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A second launch hands its deep link to the running app.** Launching h4rn while it is already
+  running (including from a hidden tray) used to focus the window and drop the `h4rn://` link that
+  started the second process. The single-instance plugin now has its `deep-link` feature, so it
+  passes the second launch's arguments to the deep-link plugin before the focus callback, and the
+  running window opens what the link names.
+- **The "Connected host is online" check matches by name.** The relay mints its own machine and
+  host ids when a machine registers, so its `MachineHost.id` never equals the id `hello` reports
+  for the local host. The notifier compared those ids, decided its own working host was offline,
+  and could announce a host the person was actively using. It now resolves `hello`'s local host to
+  its name through the daemon's host list (the same pairing the sidebar uses) and matches the
+  relay's host by name, ignoring case.
+- **A first-connect subscribe is replay-free whatever its success answer looks like.** An older
+  daemon may answer a live-edge subscribe with the protocol's plain `{type:"ack"}`, or with
+  `subscribed` and no boundary. Both are successful acceptances of `since_seq: null`, so the
+  approvals that arrived while the handshake was open are delivered as live news instead of being
+  tagged as history; a resumed subscribe that gets the same answer still treats its held frames as
+  replay.
+- **Another client's manual move to Done is not reported as "Finished".** The daemon's thread
+  summary now says whether the person placed the thread in its tab (`placed_by_user`). A notifier
+  that still remembers a live completion for the thread stays quiet when the Done summary it sees
+  came from a manual move on another client, and a local pin toggle no longer counts as a
+  placement.
+- **Approvals and finished turns no longer wait for the host-presence request.** A due approval or
+  finished-turn message is delivered as soon as the OS permission allows; the relay request that
+  re-checks a due host-offline alert runs beside it. A queued approval is taken out of the queue
+  only at delivery, so an answer that arrives while the message is waiting cancels it. If the
+  permission query throws, nothing is dropped: the same drafts are re-queued and retried after a
+  short delay instead of a tight timer loop.
+- **The linked-machine presence request is signed over its pathname.** Connect verifies the DPoP
+  proof against `parts.uri.path()`, which excludes the query string, so signing
+  `/v1/machines?linked=true` was rejected with 401 and took the whole account and machine refresh
+  down with it. The client now signs `/v1/machines` and still fetches with `?linked=true`; a
+  presence failure falls back to an empty linked list instead of aborting the refresh.
 - **Local ACP agents: credentials stay off view-scoped devices.** `ListAcpAgents` now masks every
   environment value; the edit form reads the real configuration through a new admin-scoped
   `GetAcpAgent`. The last successful probe's models, modes and version are stored and returned to

@@ -368,6 +368,13 @@ pub struct ThreadSummary {
     pub model: String,
     /// Derived tab placement.
     pub tab: ThreadTab,
+    /// Whether the current tab is where the person just placed the thread.
+    ///
+    /// A manual move is a placement, not a lifecycle transition: the client
+    /// that moved it is not "finishing" a turn, and every other client sees
+    /// the same summary. Notifiers stay quiet for a transition this names.
+    #[serde(default)]
+    pub placed_by_user: bool,
     /// A hand-set Working pin (cleared when the next turn starts).
     pub pinned: bool,
     /// Snooze expiry, when snoozed.
@@ -650,6 +657,7 @@ mod tests {
             branch: Some("h4rn/usage-limit".into()),
             model: "claude-sonnet-5".into(),
             tab: ThreadTab::Working,
+            placed_by_user: false,
             pinned: false,
             snoozed_until: None,
             last_activity: Utc::now(),

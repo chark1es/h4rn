@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-
+import { draftForEnvelope } from "@/features/notifications/logic";
+import { NOTIFICATION_DEFAULTS } from "@/features/notifications/settings";
 import type {
   ClientFrame,
   ClientRequest,
@@ -50,7 +51,7 @@ class FakeTransport implements Transport {
       return;
     }
     if (!this.answerAll) return;
-    if (frame.body.type === "subscribe") reply({ type: "ack" });
+    if (frame.body.type === "subscribe") reply({ type: "subscribed", replay_through: 0 });
     if (frame.body.type === "list_hosts") reply({ type: "hosts", hosts: [] });
     if (frame.body.type === "send_message" || frame.body.type === "create_thread") {
       reply({ type: "ack" });
@@ -150,6 +151,31 @@ const EMPTY_FILTER: ThreadFilter = {
   include_children: false,
 };
 
+function approvalEvent(approvalId: string): Event {
+  return {
+    type: "approval_requested",
+    thread_id: "t1",
+    turn_id: "turn_1",
+    approval_id: approvalId,
+    subagent_id: null,
+    kind: "command",
+    prompt: "npm test",
+    options: [],
+  };
+}
+
+function notificationOptions() {
+  return {
+    threads: {},
+    settings: NOTIFICATION_DEFAULTS,
+    focus: {
+      windowFocused: false,
+      openThreadId: null,
+      connection: "online" as const,
+    },
+  };
+}
+
 function createBody(): Omit<Extract<ClientRequest, { type: "create_thread" }>, "type"> {
   return {
     host: "host_a",
@@ -240,6 +266,344 @@ describe("H4rnClient", () => {
     transport.emit(4, { type: "agent_state_changed", thread_id: "t1", state: "done" });
 
     expect(events.map((envelope) => envelope.seq)).toEqual([3, 4]);
+  });
+
+  it("tags frames held for a slow subscribe as replayed history", async () => {
+    vi.useFakeTimers();
+    try {
+      let answerSubscribe: Reply | null = null;
+      const { client, events, transports } = harness(
+        () =>
+          new FakeTransport((frame, reply) => {
+            if (frame.body.type !== "subscribe") return false;
+            answerSubscribe = reply;
+            return true;
+          }),
+      );
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(client.getSnapshot().status).toBe("online");
+
+      // The person's device was away while this approval happened. The
+      // subscribe has not answered, so the frame belongs to the replay.
+      const approval: Event = {
+        type: "approval_requested",
+        thread_id: "t1",
+        turn_id: "turn_1",
+        approval_id: "ap_1",
+        subagent_id: null,
+        kind: "command",
+        prompt: "npm test",
+        options: [],
+      };
+      const transport = transports[0];
+      if (!transport) throw new Error("transport was not created");
+      transport.emit(7, approval);
+
+      // A slow replay is exactly the case the old wall-clock grace guessed at.
+      await vi.advanceTimersByTimeAsync(3_000);
+      expect(events).toHaveLength(0);
+      (answerSubscribe as Reply | null)?.({
+        type: "subscribed",
+        replay_through: 7,
+      });
+      await settle();
+
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ seq: 7, replayed: true });
+
+      const notificationOptions = {
+        threads: {},
+        settings: NOTIFICATION_DEFAULTS,
+        focus: { windowFocused: false, openThreadId: null, connection: "online" as const },
+      };
+      const replayed = events[0];
+      if (!replayed) throw new Error("replay was not delivered");
+      expect(draftForEnvelope(replayed, notificationOptions)).toBeNull();
+
+      // One second later, the same kind of event is live news.
+      await vi.advanceTimersByTimeAsync(1_000);
+      transport.emit(8, { ...approval, approval_id: "ap_2" } as Event);
+      expect(events).toHaveLength(2);
+      expect(events[1]?.replayed).toBeUndefined();
+      const live = events[1];
+      if (!live) throw new Error("live event was not delivered");
+      expect(draftForEnvelope(live, notificationOptions)).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("treats a live approval that arrived before the first subscribe answer as news", async () => {
+    vi.useFakeTimers();
+    try {
+      let answerSubscribe: Reply | null = null;
+      const { client, events, transports } = harness(
+        () =>
+          new FakeTransport((frame, reply) => {
+            if (frame.body.type !== "subscribe") return false;
+            answerSubscribe = reply;
+            return true;
+          }),
+      );
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      const transport = transports[0];
+      if (!transport) throw new Error("transport was not created");
+
+      // On a first connect the replay is empty (`since_seq: null`), but an
+      // approval already waiting at the served head is still history, and one
+      // that arrives after it is live news.
+      transport.emit(2, approvalEvent("ap_history"));
+      transport.emit(4, approvalEvent("ap_live"));
+      (answerSubscribe as Reply | null)?.({
+        type: "subscribed",
+        replay_through: 3,
+      });
+      await settle();
+
+      expect(events[0]).toMatchObject({ seq: 2, replayed: true });
+      expect(events[1]?.replayed).toBeUndefined();
+      const live = events[1];
+      if (!live) throw new Error("live event was not delivered");
+      expect(draftForEnvelope(live, notificationOptions())).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("treats a live event after the reconnect replay boundary as news", async () => {
+    vi.useFakeTimers();
+    try {
+      let answerReconnect: Reply | null = null;
+      const { client, events, transports } = harness(
+        (context) =>
+          new FakeTransport((frame, reply) => {
+            if (frame.body.type !== "subscribe") return false;
+            if (context.attempt === 0) {
+              reply({ type: "subscribed", replay_through: 0 });
+              return true;
+            }
+            answerReconnect = reply;
+            return true;
+          }),
+      );
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      transports[0]?.emit(2, approvalEvent("ap_seen"));
+      transports[0]?.drop();
+      await vi.advanceTimersByTimeAsync(20);
+      expect(answerReconnect).not.toBeNull();
+
+      // The daemon served the subscribe at head 3, then a fourth event landed
+      // while the answer was in flight. The first is history; the second is
+      // what the person actually missed.
+      transports[1]?.emit(3, approvalEvent("ap_replayed"));
+      transports[1]?.emit(4, approvalEvent("ap_live"));
+      (answerReconnect as Reply | null)?.({
+        type: "subscribed",
+        replay_through: 3,
+      });
+      await settle();
+
+      const replayed = events.find((envelope) => envelope.seq === 3);
+      const live = events.find((envelope) => envelope.seq === 4);
+      expect(replayed?.replayed).toBe(true);
+      expect(live?.replayed).toBeUndefined();
+      if (!live) throw new Error("live event was not delivered");
+      expect(draftForEnvelope(live, notificationOptions())).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps holding frames when the subscribe outlives its own timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      let answerSubscribe: Reply | null = null;
+      const { client, events, transports } = harness(
+        () =>
+          new FakeTransport((frame, reply) => {
+            if (frame.body.type !== "subscribe") return false;
+            answerSubscribe = reply;
+            return true;
+          }),
+      );
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      const transport = transports[0];
+      if (!transport) throw new Error("transport was not created");
+
+      // Held while the subscribe is open, and still held after its request
+      // times out: without the answer's boundary there is no honest tag yet.
+      transport.emit(7, approvalEvent("ap_replay"));
+      await vi.advanceTimersByTimeAsync(6_000);
+      expect(client.getSnapshot().status).toBe("online");
+      expect(events).toHaveLength(0);
+
+      transport.emit(8, approvalEvent("ap_live"));
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(events).toHaveLength(0);
+
+      (answerSubscribe as Reply | null)?.({
+        type: "subscribed",
+        replay_through: 7,
+      });
+      await settle();
+
+      expect(events).toHaveLength(2);
+      expect(events[0]).toMatchObject({ seq: 7, replayed: true });
+      expect(events[1]?.replayed).toBeUndefined();
+      const live = events[1];
+      if (!live) throw new Error("live event was not delivered");
+      expect(draftForEnvelope(live, notificationOptions())).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drops frames held for a socket that closes before the subscribe answer", async () => {
+    vi.useFakeTimers();
+    try {
+      let answerSubscribe: Reply | null = null;
+      const { client, events, transports } = harness(
+        (context) =>
+          new FakeTransport((frame, reply) => {
+            if (frame.body.type !== "subscribe") return false;
+            if (context.attempt === 0) {
+              answerSubscribe = reply;
+              return true;
+            }
+            reply({ type: "subscribed", replay_through: 0 });
+            return true;
+          }),
+      );
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      transports[0]?.emit(7, approvalEvent("ap_held"));
+      transports[0]?.drop();
+      await vi.advanceTimersByTimeAsync(20);
+
+      // The next socket re-subscribes from the same cursor, so the held copy
+      // must not also be delivered live.
+      expect(events).toHaveLength(0);
+      expect(answerSubscribe).not.toBeNull();
+      expect(
+        transports[1]?.sent.find((frame) => frame.body.type === "subscribe")?.body,
+      ).toMatchObject({ type: "subscribe", since_seq: null });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("delivers live-edge frames untagged when an older daemon names no boundary", async () => {
+    vi.useFakeTimers();
+    try {
+      let answerSubscribe: Reply | null = null;
+      const { client, events, transports } = harness(
+        () =>
+          new FakeTransport((frame, reply) => {
+            if (frame.body.type !== "subscribe") return false;
+            answerSubscribe = reply;
+            return true;
+          }),
+      );
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      const transport = transports[0];
+      if (!transport) throw new Error("transport was not created");
+
+      // A first connect asks from the live edge; an older daemon accepts it
+      // without a boundary and sends nothing itself, so the frame is news.
+      transport.emit(3, approvalEvent("ap_live"));
+      (answerSubscribe as Reply | null)?.({ type: "subscribed" } as never);
+      await settle();
+
+      expect(events).toHaveLength(1);
+      expect(events[0]?.replayed).toBeUndefined();
+      const live = events[0];
+      if (!live) throw new Error("live event was not delivered");
+      expect(draftForEnvelope(live, notificationOptions())).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("delivers live-edge frames untagged when an older daemon answers only with an ack", async () => {
+    vi.useFakeTimers();
+    try {
+      let answerSubscribe: Reply | null = null;
+      const { client, events, transports } = harness(
+        () =>
+          new FakeTransport((frame, reply) => {
+            if (frame.body.type !== "subscribe") return false;
+            answerSubscribe = reply;
+            return true;
+          }),
+      );
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      const transport = transports[0];
+      if (!transport) throw new Error("transport was not created");
+
+      // A first connect asks from the live edge and this daemon accepts the
+      // subscription with the protocol's plain `{type:"ack"}` reply. Nothing
+      // was replayed, so the held frame is news.
+      transport.emit(3, approvalEvent("ap_live"));
+      (answerSubscribe as Reply | null)?.({ type: "ack" });
+      await settle();
+
+      expect(events).toHaveLength(1);
+      expect(events[0]?.replayed).toBeUndefined();
+      const live = events[0];
+      if (!live) throw new Error("live event was not delivered");
+      expect(draftForEnvelope(live, notificationOptions())).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a resumed subscribe's held frames tagged when the daemon only acks", async () => {
+    vi.useFakeTimers();
+    try {
+      let answerSubscribe: Reply | null = null;
+      const { client, events, transports } = harness(
+        (context) =>
+          new FakeTransport((frame, reply) => {
+            if (frame.body.type !== "subscribe") return false;
+            if (context.attempt === 0) {
+              reply({ type: "subscribed", replay_through: 0 });
+              return true;
+            }
+            answerSubscribe = reply;
+            return true;
+          }),
+      );
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      transports[0]?.emit(2, approvalEvent("ap_seen"));
+      transports[0]?.drop();
+      await vi.advanceTimersByTimeAsync(20);
+
+      // The reconnect asked for a replay (`since_seq` is no longer null). An
+      // ack names no boundary, so guessing those frames were live would
+      // announce history the client just missed.
+      transports[1]?.emit(3, approvalEvent("ap_replayed"));
+      (answerSubscribe as Reply | null)?.({ type: "ack" });
+      await settle();
+
+      expect(events.find((envelope) => envelope.seq === 3)?.replayed).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("reports degraded while reconnecting and returns online", async () => {

@@ -504,6 +504,7 @@ function summary(input: {
     ...(input.branch ? { branch: input.branch } : {}),
     model: input.model,
     tab: input.tab,
+    placed_by_user: false,
     pinned: input.pinned ?? false,
     snoozed_until: input.snoozedMs ? iso(input.snoozedMs) : null,
     // A small buffer keeps `relativeAge` rounding to the seeded minute even
@@ -2188,6 +2189,15 @@ class MockDaemon {
     this.handlers.onBinary?.(bytes.buffer as ArrayBuffer);
   }
 
+  /** The highest durable sequence any thread's mock journal has emitted. */
+  private wireHead(): number {
+    let head = 0;
+    for (const entry of this.threads.values()) {
+      for (const record of entry.wire) head = Math.max(head, record.seq);
+    }
+    return head;
+  }
+
   private handle(frame: ClientFrame): void {
     const { body } = frame;
     if (
@@ -2275,7 +2285,7 @@ class MockDaemon {
         return;
       }
       case "subscribe":
-        this.ok(frame.id, { type: "ack" });
+        this.ok(frame.id, { type: "subscribed", replay_through: this.wireHead() });
         return;
       case "create_thread": {
         const id = `thr_new_${++this.created}`;
@@ -2291,6 +2301,7 @@ class MockDaemon {
           workspace_path: body.workspace_path,
           model: body.model,
           tab: "working",
+          placed_by_user: false,
           pinned: false,
           snoozed_until: null,
           last_activity: new Date(now).toISOString(),

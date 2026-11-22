@@ -127,6 +127,12 @@ pub trait Journal: Send + Sync {
     /// caller holds the append lock so the result is a gap-free prefix.
     async fn read_wire_since_global(&self, after: u64) -> Result<Vec<WireEvent>, JournalError>;
 
+    /// The highest sequence number the journal has allocated, or 0 when empty.
+    ///
+    /// Read while the append lock is held, this is the boundary between the
+    /// subscribe replay and live events.
+    async fn head(&self) -> Result<u64, JournalError>;
+
     /// The domain log for one thread, used to rebuild lifecycle state.
     async fn read_domain(&self, thread_id: &ThreadId) -> Result<Vec<ThreadEvent>, JournalError>;
 }
@@ -464,6 +470,13 @@ impl Journal for SqliteJournal {
         Ok(events)
     }
 
+    async fn head(&self) -> Result<u64, JournalError> {
+        let head: Option<i64> = sqlx::query_scalar("SELECT MAX(seq) FROM daemon_wire_events")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(head.unwrap_or(0) as u64)
+    }
+
     async fn read_domain(&self, thread_id: &ThreadId) -> Result<Vec<ThreadEvent>, JournalError> {
         Ok(self
             .store
@@ -533,6 +546,7 @@ mod tests {
             branch: Some("h4rn/first-prompt".into()),
             model: "test-model".into(),
             tab: h4rn_protocol::ThreadTab::Working,
+            placed_by_user: false,
             pinned: false,
             snoozed_until: None,
             last_activity: Utc::now(),
@@ -664,6 +678,28 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn head_reports_the_last_allocated_sequence() {
+        let journal = SqliteJournal::in_memory().await.unwrap();
+        assert_eq!(journal.head().await.unwrap(), 0);
+
+        let one = meta("th_one");
+        journal
+            .append(
+                &one,
+                &[ThreadEvent::TurnQueued { at: Utc::now() }],
+                &[Event::ThreadUpserted(summary())],
+            )
+            .await
+            .unwrap();
+        journal
+            .append_wire(&one.thread_id, &[Event::ThreadUpserted(summary())])
+            .await
+            .unwrap();
+
+        assert_eq!(journal.head().await.unwrap(), 2);
     }
 
     #[tokio::test]
