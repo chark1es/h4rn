@@ -6,7 +6,6 @@ import {
   loadWorkspaceFiles,
   MAX_INDEXED_FILES,
   readWorkspaceFilesCache,
-  setWorkspaceFileListerForTests,
   walkWorkspace,
 } from "./workspaceFiles";
 
@@ -51,7 +50,6 @@ const target = { host: "host_1", workspace: "/work/repo" };
 
 beforeEach(() => {
   clearWorkspaceFilesCache();
-  setWorkspaceFileListerForTests(null);
 });
 
 describe("workspace file walk", () => {
@@ -105,6 +103,21 @@ describe("workspace file walk", () => {
     const index = await walkWorkspace(target, lister);
     expect(index.files).toHaveLength(MAX_INDEXED_FILES);
     expect(index.truncated).toBe(true);
+  });
+
+  it("calls exactly the file cap complete when nothing was dropped", async () => {
+    const many = Array.from({ length: MAX_INDEXED_FILES }, (_, index) =>
+      file(`src/file-${index}.ts`),
+    );
+    const lister = async ({ path }: { path: string }) =>
+      listing(path, path === "" ? [directory("src")] : many);
+
+    const index = await walkWorkspace(target, lister);
+
+    expect(index.files).toHaveLength(MAX_INDEXED_FILES);
+    // Every file the walk saw is in the index, so there is nothing to warn
+    // about and no sparse result to explain.
+    expect(index.truncated).toBe(false);
   });
 
   it("does not descend past the depth cap", async () => {
@@ -168,7 +181,8 @@ describe("workspace file walk", () => {
     const index = await walkWorkspace(target, lister);
 
     // Six siblings of 1,000 files fit in one batch; the remaining siblings
-    // must not add one file each after the cap was reached.
+    // add nothing once the cap is reached, and their files are what makes the
+    // index a prefix.
     expect(index.files).toHaveLength(MAX_INDEXED_FILES);
     expect(index.truncated).toBe(true);
   });
@@ -179,10 +193,9 @@ describe("workspace file cache", () => {
     const lister = vi.fn(async ({ path }: { path: string }) =>
       listing(path, path === "" ? [file("a.ts"), file("b.ts")] : []),
     );
-    setWorkspaceFileListerForTests(lister);
     const [first, second] = await Promise.all([
-      loadWorkspaceFiles(target),
-      loadWorkspaceFiles(target),
+      loadWorkspaceFiles(target, lister),
+      loadWorkspaceFiles(target, lister),
     ]);
     expect(first).toEqual({ files: ["a.ts", "b.ts"], truncated: false });
     expect(second).toEqual({ files: ["a.ts", "b.ts"], truncated: false });
@@ -193,9 +206,8 @@ describe("workspace file cache", () => {
     const lister = vi.fn(async ({ path }: { path: string }) =>
       listing(path, path === "" ? [file("a.ts")] : []),
     );
-    setWorkspaceFileListerForTests(lister);
-    await loadWorkspaceFiles(target);
-    await loadWorkspaceFiles(target);
+    await loadWorkspaceFiles(target, lister);
+    await loadWorkspaceFiles(target, lister);
     expect(lister).toHaveBeenCalledTimes(1);
     expect(readWorkspaceFilesCache(target)).toEqual({
       files: ["a.ts"],

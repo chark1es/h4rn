@@ -118,6 +118,13 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **The composer's phone sheet stays inside the keyboard, and the panel sheet takes focus.** The
+  `@` sheet now ends at whichever comes first, the composer or the visible viewport's bottom, so no
+  row hides under an open keyboard when the composer itself sits below it. When less than the header
+  plus one row fits above, it covers the composer inside the visible viewport instead of collapsing
+  to nothing. Opening Changes or Subagents with `/` moves focus into the panel sheet, so typing no
+  longer edits the draft behind it. `@` no longer opens after a Unicode letter (`café@src`), and a
+  workspace with exactly 3,000 files is a complete index, not a truncated one.
 - **The composer's menus trust the caret and the query in front of them.** `↵` and `Tab` accept
   only rows ranked for the text on screen, so pressing Enter inside the old 120 ms debounce cannot
   insert the row for the previous query. The `@` button separates a new mention from the words on

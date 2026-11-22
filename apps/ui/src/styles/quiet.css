@@ -4312,7 +4312,9 @@ fieldset.q-seg-fs {
   margin: 0 auto 10px;
 }
 /* The composer's file picker is a sheet above the composer, not a bottom sheet:
-   `.q-ph-sheet`'s bottom placement would cover the input it belongs to. */
+   `.q-ph-sheet`'s bottom placement would cover the input it belongs to. The
+   component replaces bottom/max-height inline once it has measured the visual
+   viewport, so this is only the first render's guess. */
 .q-ph-sheet.q-comp-sheet {
   top: auto;
   bottom: calc(100% + 8px);
@@ -4837,6 +4839,11 @@ fieldset.q-seg-fs {
   display: flex;
   flex-direction: column;
   padding: 8px 0 0;
+}
+/* The panel sheet takes focus when it opens so typing stays out of the
+   composer behind it; the dialog itself is not a control, so no ring. */
+.q-ph-sheet:focus {
+  outline: none;
 }
 .q-ph-sheet.large .q-ph-body {
   padding-bottom: 34px;

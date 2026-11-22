@@ -190,6 +190,9 @@ describe("ThreadPane phone / commands", () => {
 
     const dialog = await screen.findByRole("dialog", { name: "Changes and subagents" });
     expect(dialog).toBeTruthy();
+    // The sheet is modal: focus moves into it, so typing no longer edits the
+    // draft behind it.
+    await waitFor(() => expect(document.activeElement).toBe(dialog));
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     // The sheet owns the interaction; the composer must not steal focus back.
     expect(focus).not.toHaveBeenCalled();

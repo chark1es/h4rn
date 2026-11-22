@@ -11,8 +11,9 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import type { ComposerCommandIcon } from "@/lib/composerCommands";
 import {
+  type PhoneSheetGeometry,
   type PopoverPlacement,
-  phoneSheetLimit,
+  phoneSheetGeometry,
   placePopover,
   splitPath,
 } from "@/lib/composerMenu";
@@ -162,8 +163,8 @@ export function ComposerMenu({
   const listRef = useRef<HTMLDivElement | null>(null);
   const measured = useRef<PopoverPlacement | null>(null);
   const [placement, setPlacement] = useState<PopoverPlacement | null>(null);
-  /** The measured space above the composer on a phone, or null before layout. */
-  const [sheetLimit, setSheetLimit] = useState<number | null>(null);
+  /** The measured sheet geometry on a phone, or null before layout. */
+  const [sheet, setSheet] = useState<PhoneSheetGeometry | null>(null);
   const rowsView = rows.map((row, index) => (
     <MenuRow
       key={row.id}
@@ -220,9 +221,10 @@ export function ComposerMenu({
   });
 
   // Measure the phone sheet before placing it: it grows upwards from the
-  // composer, so its height must fit the visible space between the top of the
-  // viewport and the composer. Without this an expanded composer (or an open
-  // keyboard) pushes the header and Done off screen.
+  // composer, but it must stay inside the visible viewport on both edges.
+  // Without this an open keyboard (which can leave the composer itself below
+  // the visible viewport) pushes the sheet under it, and an expanded composer
+  // can leave no room for the header and Done at all.
   useLayoutEffect(() => {
     if (!isPhone) return;
     const element = menuRef.current;
@@ -230,14 +232,22 @@ export function ComposerMenu({
     const measure = () => {
       const parent = element.offsetParent;
       if (!(parent instanceof HTMLElement)) return;
-      const composerTop = parent.getBoundingClientRect().top;
+      const rect = parent.getBoundingClientRect();
       const visual = window.visualViewport;
-      const limit = phoneSheetLimit({
-        composerTop,
+      const next = phoneSheetGeometry({
+        composerTop: rect.top,
+        containerBottom: rect.bottom,
         viewportTop: visual?.offsetTop ?? 0,
         viewportHeight: visual?.height ?? window.innerHeight,
       });
-      setSheetLimit((current) => (current === limit ? current : limit));
+      setSheet((current) =>
+        current &&
+        current.bottom === next.bottom &&
+        current.maxHeight === next.maxHeight &&
+        current.coversComposer === next.coversComposer
+          ? current
+          : next,
+      );
     };
     measure();
     // The keyboard changes the visual viewport without changing the layout.
@@ -260,7 +270,8 @@ export function ComposerMenu({
         role="dialog"
         aria-label={label}
         data-placement="above"
-        style={sheetLimit !== null ? { maxHeight: sheetLimit } : undefined}
+        data-covers={sheet?.coversComposer ? "composer" : undefined}
+        style={sheet ? { bottom: sheet.bottom, maxHeight: sheet.maxHeight } : undefined}
       >
         <div className="q-grab" />
         <div className="q-comp-sheet-head">

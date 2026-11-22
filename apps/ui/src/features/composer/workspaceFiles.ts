@@ -8,13 +8,18 @@
  * a full repository scan. Results are cached per host and workspace for a
  * minute, and concurrent opens share one walk.
  */
-import { useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useState } from "react";
 import type { FsListing, HostId } from "@/gen";
 import { getClient } from "@/lib/store/appStore";
 
 export type WorkspaceTarget = { host: HostId; workspace: string };
 
-type Lister = (input: WorkspaceTarget & { path: string }) => Promise<FsListing>;
+export type WorkspaceFileLister = (input: WorkspaceTarget & { path: string }) => Promise<FsListing>;
+
+type Lister = WorkspaceFileLister;
+
+/** Supply the listings the `@` picker reads; the app uses the daemon. */
+export const WorkspaceFilesContext = createContext<WorkspaceFileLister | null>(null);
 
 /** Directories a file picker should never descend into. */
 const IGNORED_DIRECTORIES = new Set([
@@ -45,15 +50,7 @@ const MAX_DEPTH = 8;
 const CONCURRENCY = 6;
 const CACHE_TTL_MS = 60_000;
 
-let testLister: Lister | null = null;
-
-/** Test seam: answer `fs_list` without a socket. */
-export function setWorkspaceFileListerForTests(next: Lister | null): void {
-  testLister = next;
-}
-
-async function list(input: WorkspaceTarget & { path: string }): Promise<FsListing> {
-  if (testLister) return testLister(input);
+async function listFromDaemon(input: WorkspaceTarget & { path: string }): Promise<FsListing> {
   const response = await getClient().request({
     type: "fs_list",
     host: input.host,
@@ -69,13 +66,13 @@ async function list(input: WorkspaceTarget & { path: string }): Promise<FsListin
 /** Walk one workspace, pruned and capped. A failed subdirectory leaves the index incomplete. */
 export type WorkspaceIndex = {
   files: string[];
-  /** True when a listing failed or a cap cut the walk short: the list is a prefix. */
+  /** True when an entry or directory was actually skipped: the list is a prefix. */
   truncated: boolean;
 };
 
 export async function walkWorkspace(
   target: WorkspaceTarget,
-  lister: Lister = list,
+  lister: Lister = listFromDaemon,
 ): Promise<WorkspaceIndex> {
   const files: string[] = [];
   const queue: Array<{ path: string; depth: number }> = [{ path: "", depth: 0 }];
@@ -94,7 +91,6 @@ export async function walkWorkspace(
       batch.map((directory) => lister({ ...target, path: directory.path })),
     );
 
-    let full = false;
     for (let index = 0; index < listings.length; index += 1) {
       const result = listings[index];
       const directory = batch[index];
@@ -127,25 +123,19 @@ export async function walkWorkspace(
         // loop, and the daemon reports them without resolving the target.
         if (entry.kind !== "file") continue;
         if (files.length >= MAX_INDEXED_FILES) {
-          full = true;
-          break;
+          // A file the index cannot hold is exactly what the note is for.
+          // Finishing the batch without it (and without touching the rest)
+          // keeps a workspace of exactly the cap complete.
+          truncated = true;
+          continue;
         }
         files.push(entry.path);
       }
-      // The rest of the batch answered, but its entries no longer fit: stop
-      // adding to the index instead of letting each sibling add one more.
-      if (files.length >= MAX_INDEXED_FILES) {
-        full = true;
-        break;
-      }
-    }
-    if (full) {
-      truncated = true;
-      break;
     }
   }
 
-  // Leftover directories mean a cap stopped the walk: the list is a prefix.
+  // Directories still queued were never read, so the index is a prefix. A walk
+  // that ends with an empty queue and exactly the cap in hand dropped nothing.
   if (queue.length > 0) truncated = true;
 
   return { files, truncated };
@@ -172,13 +162,16 @@ export function readWorkspaceFilesCache(target: WorkspaceTarget): WorkspaceIndex
 }
 
 /** Index one workspace, reusing a fresh cache or an in-flight walk. */
-export async function loadWorkspaceFiles(target: WorkspaceTarget): Promise<WorkspaceIndex> {
+export async function loadWorkspaceFiles(
+  target: WorkspaceTarget,
+  lister: Lister = listFromDaemon,
+): Promise<WorkspaceIndex> {
   const key = cacheKey(target);
   const hit = cache.get(key);
   if (hit?.pending) return hit.pending;
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.index;
 
-  const pending = walkWorkspace(target);
+  const pending = walkWorkspace(target, lister);
   cache.set(key, {
     index: hit?.index ?? { files: [], truncated: false },
     at: hit?.at ?? 0,
@@ -214,6 +207,7 @@ const EMPTY: WorkspaceFilesState = { files: [], truncated: false, loading: false
  * keeps the previous files on screen while a refresh is in flight.
  */
 export function useWorkspaceFiles(target: WorkspaceTarget, enabled: boolean): WorkspaceFilesState {
+  const injected = useContext(WorkspaceFilesContext);
   const [state, setState] = useState<WorkspaceFilesState>(EMPTY);
 
   useEffect(() => {
@@ -226,7 +220,7 @@ export function useWorkspaceFiles(target: WorkspaceTarget, enabled: boolean): Wo
       loading: true,
       error: null,
     });
-    loadWorkspaceFiles(target)
+    loadWorkspaceFiles(target, injected ?? listFromDaemon)
       .then((index) => {
         if (cancelled) return;
         setState({
@@ -248,7 +242,7 @@ export function useWorkspaceFiles(target: WorkspaceTarget, enabled: boolean): Wo
     return () => {
       cancelled = true;
     };
-  }, [target, enabled]);
+  }, [target, enabled, injected]);
 
   return state;
 }

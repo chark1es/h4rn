@@ -12,8 +12,11 @@ export type ComposerTrigger =
   | { kind: "command"; query: string; start: number; end: number };
 
 const WHITESPACE = /\s/;
-/** Characters that keep a mention inside a word (`me@example.com`, `foo@bar`). */
-const IDENTIFIER = /[A-Za-z0-9_]/;
+/**
+ * Characters that keep a mention inside a word (`me@example.com`, `foo@bar`).
+ * Unicode letters and numbers count, so `café@src` is a word too.
+ */
+const IDENTIFIER = /[\p{L}\p{N}_]/u;
 
 function isWhitespace(char: string | undefined): boolean {
   return char !== undefined && WHITESPACE.test(char);
@@ -187,27 +190,63 @@ export function triggerKey(trigger: ComposerTrigger): string {
 }
 
 /**
- * How tall the phone sheet may be so it fits between the top of the visible
- * viewport and the composer it sits above.
+ * Geometry for the phone sheet, in the coordinates its containing block uses.
  *
- * The sheet grows upwards from the composer, so its header and Done button
- * stay on screen as long as its height never exceeds the space above the
- * composer. `visualViewport` is what the person can actually see: when the
- * keyboard is open its height and offset differ from the window's.
+ * The sheet grows upwards from the composer, but only inside what the person
+ * can actually see: when the keyboard is open the composer can itself sit
+ * below the visible viewport, and a sheet pinned to its top would put rows
+ * under the keyboard. So its bottom edge is whichever is higher, the
+ * composer's top or the visible viewport's bottom. When that leaves less room
+ * than the header plus one row, the sheet covers the composer inside the
+ * visible viewport instead of collapsing to nothing; it is a modal with Done.
  */
-export function phoneSheetLimit({
+export type PhoneSheetGeometry = {
+  /** Inline `bottom`, measured from the containing block's bottom edge. */
+  bottom: number;
+  /** Inline `max-height`. */
+  maxHeight: number;
+  /** True when the sheet covers the composer because nothing fits above it. */
+  coversComposer: boolean;
+};
+
+/**
+ * The smallest useful sheet: its header (about 36 px), one 44 px row and the
+ * sheet's 16 px padding. Below this there is no room to open a list, so the
+ * sheet covers the composer instead.
+ */
+export const PHONE_SHEET_MIN_HEIGHT = 96;
+
+export function phoneSheetGeometry({
   composerTop,
+  containerBottom,
   viewportTop = 0,
   viewportHeight,
   gap = 8,
+  minHeight = PHONE_SHEET_MIN_HEIGHT,
 }: {
+  /** Top of the composer, in viewport coordinates. */
   composerTop: number;
+  /** Bottom of the sheet's containing block, in viewport coordinates. */
+  containerBottom: number;
+  /** `visualViewport.offsetTop`. */
   viewportTop?: number;
+  /** `visualViewport.height`. */
   viewportHeight: number;
   gap?: number;
-}): number {
-  const available = composerTop - viewportTop - gap;
-  return Math.max(0, Math.min(available, viewportHeight));
+  minHeight?: number;
+}): PhoneSheetGeometry {
+  const viewportBottom = viewportTop + viewportHeight;
+  // End at the composer, or at the keyboard when the composer is under it.
+  const edge = Math.min(composerTop, viewportBottom) - gap;
+  const available = edge - viewportTop - gap;
+  if (available < minHeight) {
+    return {
+      bottom: containerBottom - viewportBottom,
+      maxHeight: viewportHeight,
+      coversComposer: true,
+    };
+  }
+  return { bottom: containerBottom - edge, maxHeight: available, coversComposer: false };
 }
 
 /**

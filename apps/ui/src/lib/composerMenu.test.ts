@@ -6,7 +6,7 @@ import {
   fileReference,
   fuzzyScore,
   insertMentionToken,
-  phoneSheetLimit,
+  phoneSheetGeometry,
   placePopover,
   rankCommands,
   rankFilePaths,
@@ -36,6 +36,12 @@ describe("@ file trigger", () => {
 
   it("does not open inside an email address", () => {
     expect(detectComposerTrigger("me@example.com", 14)).toBeNull();
+  });
+
+  it("does not open after a Unicode letter", () => {
+    expect(detectComposerTrigger("café@src", 8)).toBeNull();
+    // The same letter followed by a space is still a boundary.
+    expect(detectComposerTrigger("café @src", 9)?.kind).toBe("file");
   });
 
   it("does not open inside a word after another @", () => {
@@ -340,16 +346,33 @@ describe("popover placement", () => {
   });
 });
 
-describe("phone sheet height", () => {
+describe("phone sheet geometry", () => {
   it("fits the visible space above the composer", () => {
     expect(
-      phoneSheetLimit({ composerTop: 140, viewportTop: 20, viewportHeight: 500, gap: 8 }),
-    ).toBe(112);
+      phoneSheetGeometry({
+        composerTop: 140,
+        containerBottom: 380,
+        viewportTop: 20,
+        viewportHeight: 500,
+        gap: 8,
+      }),
+    ).toEqual({ bottom: 248, maxHeight: 104, coversComposer: false });
   });
 
-  it("never asks for more than the viewport or less than nothing", () => {
-    expect(phoneSheetLimit({ composerTop: 900, viewportHeight: 400, gap: 8 })).toBe(400);
-    expect(phoneSheetLimit({ composerTop: 4, viewportHeight: 400, gap: 8 })).toBe(0);
+  it("stops at the visible bottom when the keyboard hides the composer", () => {
+    // The composer is at 700 but the visible viewport ends at 540: the sheet's
+    // bottom edge follows the keyboard, not the composer.
+    expect(
+      phoneSheetGeometry({ composerTop: 700, containerBottom: 796, viewportHeight: 540 }),
+    ).toEqual({ bottom: 264, maxHeight: 524, coversComposer: false });
+  });
+
+  it("covers the composer when the header and a row do not fit above", () => {
+    // 9 px above the composer cannot hold the header and one row, so the sheet
+    // spans the visible viewport instead of collapsing to nothing.
+    expect(
+      phoneSheetGeometry({ composerTop: 9, containerBottom: 105, viewportHeight: 540 }),
+    ).toEqual({ bottom: -435, maxHeight: 540, coversComposer: true });
   });
 });
 

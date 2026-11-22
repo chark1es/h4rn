@@ -1,6 +1,15 @@
 // @vitest-environment jsdom
 
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  createEvent,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MessageRole, ThreadSummary } from "@/gen";
 import type { StreamTurn, ThreadLog, TurnItem } from "@/lib/store/projection";
@@ -86,7 +95,8 @@ vi.mock("@/hooks/use-media-query", () => ({
 
 import {
   clearWorkspaceFilesCache,
-  setWorkspaceFileListerForTests,
+  type WorkspaceFileLister,
+  WorkspaceFilesContext,
 } from "@/features/composer/workspaceFiles";
 import type { FileEntry, FsListing } from "@/gen";
 import { draftStorageKey, flushDrafts, readThreadDraft, writeThreadDraft } from "@/lib/drafts";
@@ -161,7 +171,11 @@ function runAnimationFrames(): void {
 }
 
 function renderComposer() {
-  return render(<Composer summary={summary} />);
+  return render(
+    <WorkspaceFilesContext.Provider value={fileLister}>
+      <Composer summary={summary} />
+    </WorkspaceFilesContext.Provider>,
+  );
 }
 
 function textarea(): HTMLTextAreaElement {
@@ -196,8 +210,28 @@ function workspaceListing(path: string, files: string[], truncated = false): FsL
   };
 }
 
+/** jsdom has no layout: build the box a browser would report. */
+function domRect(left: number, top: number, width: number, height: number): DOMRect {
+  return {
+    left,
+    top,
+    width,
+    height,
+    right: left + width,
+    bottom: top + height,
+    x: left,
+    y: top,
+    toJSON: () => ({}),
+  } as DOMRect;
+}
+
+/** The lister every test composer reads its workspace through. */
+let fileLister: WorkspaceFileLister = async () => {
+  throw new Error("No workspace file lister was stubbed.");
+};
+
 function stubWorkspaceFiles(files: string[] = WORKSPACE_FILES, truncated = false): void {
-  setWorkspaceFileListerForTests(async ({ path }) => workspaceListing(path, files, truncated));
+  fileLister = async ({ path }) => workspaceListing(path, files, truncated);
 }
 
 /** Type, then put the caret at the end the way a browser would. */
@@ -235,7 +269,6 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
-  setWorkspaceFileListerForTests(null);
   clearWorkspaceFilesCache();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -453,7 +486,11 @@ describe("Composer drafts and history", () => {
     await waitFor(() => expect(mock.sendMessage).toHaveBeenCalled());
 
     // The pane switches threads while the send is still in flight.
-    view.rerender(<Composer summary={{ ...summary, thread_id: secondThread }} />);
+    view.rerender(
+      <WorkspaceFilesContext.Provider value={fileLister}>
+        <Composer summary={{ ...summary, thread_id: secondThread }} />
+      </WorkspaceFilesContext.Provider>,
+    );
     await waitFor(() => expect(textarea().value).toBe("second thread draft"));
 
     await act(async () => {
@@ -514,6 +551,15 @@ describe("Composer @ file picker", () => {
     expect(screen.queryByRole("listbox")).toBeNull();
   });
 
+  it("does not open after a Unicode letter", async () => {
+    renderComposer();
+    typeInto(textarea(), "café@src");
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
   it("opens after punctuation and keeps filtering as more is typed", async () => {
     renderComposer();
     const input = textarea();
@@ -527,7 +573,7 @@ describe("Composer @ file picker", () => {
     expect(input.value).toBe("look (@README.md ");
   });
 
-  it("filters with path-aware matching after a debounce", async () => {
+  it("filters with path-aware matching as the query changes", async () => {
     renderComposer();
     const input = textarea();
     typeInto(input, "@components/comp");
@@ -654,8 +700,8 @@ describe("Composer @ file picker", () => {
     typeInto(input, "@");
     await waitFor(() => expect(option(/README\.md/)).not.toBeNull());
 
-    // Change the query and press Enter in the same turn, before any debounce
-    // or index refresh could catch up. The highlighted row must be README's
+    // Change the query and press Enter in the same turn, before the index
+    // refresh could catch up. The highlighted row must be README's
     // replacement, not the row that was highlighted for the old query.
     typeInto(input, "@doc");
     fireEvent.keyDown(input, { key: "Enter" });
@@ -717,9 +763,12 @@ describe("Composer @ file picker", () => {
     typeInto(input, "@read");
     await waitFor(() => expect(option(/README\.md/)).not.toBeNull(), { timeout: 1_000 });
 
-    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    const shiftEnter = createEvent.keyDown(input, { key: "Enter", shiftKey: true });
+    fireEvent(input, shiftEnter);
     runAnimationFrames();
-    // The default newline is the textarea's; no row was accepted.
+    // The textarea's own default newline is untouched: no row was accepted and
+    // the key was not swallowed on the way.
+    expect(shiftEnter.defaultPrevented).toBe(false);
     expect(input.value).toBe("@read");
     expect(screen.queryByRole("listbox", { name: "Files" })).not.toBeNull();
 
@@ -798,9 +847,9 @@ describe("Composer @ file picker", () => {
   });
 
   it("shows the read error instead of claiming an empty workspace", async () => {
-    setWorkspaceFileListerForTests(async () => {
+    fileLister = async () => {
       throw new Error("The workspace could not be read.");
-    });
+    };
     renderComposer();
     typeInto(textarea(), "@");
 
@@ -861,7 +910,11 @@ describe("Composer / command menu", () => {
     expect(mock.interruptThread).toHaveBeenCalledWith(THREAD);
     mock.interruptThread.mockReset();
 
-    view.rerender(<Composer summary={{ ...summary, tab: "done" }} />);
+    view.rerender(
+      <WorkspaceFilesContext.Provider value={fileLister}>
+        <Composer summary={{ ...summary, tab: "done" }} />
+      </WorkspaceFilesContext.Provider>,
+    );
     const second = textarea();
     typeInto(second, "/stop");
     expect(await screen.findByRole("listbox", { name: "Commands" })).toBeTruthy();
@@ -964,19 +1017,45 @@ describe("Composer / command menu", () => {
     expect(mock.toggleView).not.toHaveBeenCalled();
   });
 
-  it("renders the same list as a bottom sheet on a phone", async () => {
+  it("places the phone sheet inside the visible viewport and above the composer", async () => {
     mock.state.ui.phone = true;
+    // The keyboard leaves the composer at 700 px, below a visible viewport
+    // that ends at 600 px. A sheet pinned to the composer's top would run
+    // under the keyboard.
+    vi.stubGlobal("visualViewport", {
+      height: 600,
+      offsetTop: 0,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    });
+    vi.spyOn(HTMLElement.prototype, "offsetParent", "get").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      return this.classList.contains("q-comp-sheet") ? document.body : null;
+    });
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (
+      this: Element,
+    ) {
+      // The composer fieldset: top 700, bottom 796.
+      if (this === document.body) return domRect(0, 700, 390, 96);
+      return domRect(0, 0, 0, 0);
+    });
+
     renderComposer();
     const input = textarea();
     typeInto(input, "@read");
 
     const sheet = await screen.findByRole("dialog", { name: "Files" });
-    // The shared bottom-sheet styles must not pull it over the composer: the
-    // composer placement class puts it above the input it belongs to.
+    await waitFor(() => expect(sheet.style.bottom).toBe("204px"));
+    // Bottom edge 796 - 204 = 592, 8 px above the visible viewport's bottom
+    // (600), not at the composer's top (700). The sheet keeps 584 px on screen.
+    expect(sheet.style.maxHeight).toBe("584px");
     expect(sheet.className).toContain("q-ph-sheet");
     expect(sheet.className).toContain("q-comp-sheet");
     expect(sheet.getAttribute("data-placement")).toBe("above");
+    expect(sheet.getAttribute("data-covers")).toBeNull();
     expect(within(sheet).getByText("Files in code")).toBeTruthy();
+
     fireEvent.click(await within(sheet).findByRole("option", { name: /README\.md/ }));
     runAnimationFrames();
     expect(input.value).toBe("@README.md ");
