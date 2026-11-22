@@ -238,7 +238,6 @@ impl DaemonBuilder {
             .await
             .map_err(|error| anyhow::anyhow!("open thread manager: {error}"))?,
         );
-        manager.start_ticker();
 
         // Profiles and their keys are daemon-global; sessions pick them up
         // through `ThreadManager::set_proxy` at start time (ADR-015).
@@ -263,6 +262,11 @@ impl DaemonBuilder {
         );
         manager.set_meter(Arc::clone(&meter));
         manager.resync_meter_state().await;
+        // The ticker starts only after the resync: a fire checks that the
+        // thread's record names the schedule before claiming it, and a record
+        // that has not learned its ledger schedule would leave that attempt
+        // consumed without a delivery.
+        manager.start_ticker();
 
         let fs = Arc::new(
             FsService::new(&self.config.data_dir)

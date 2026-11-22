@@ -197,6 +197,19 @@ All notable changes to h4rn are recorded here. The format follows
   closed-completion wait now collects those limits and applies one after the wait, preferring the
   exit report's reset, and does not replace a schedule the turn already armed for that reset. The
   attempt counter keeps its first value and the jitter is no longer silently changed.
+- **Auto-resume round 3: a schedule is only fired, held and released by the record that owns it.**
+  A fire now checks that the thread's record names the schedule before it claims the attempt in the
+  ledger, and the daemon resyncs that record before it starts the ticker, so a restarted daemon
+  cannot consume a due attempt it never knew about. A delayed report from an older session
+  generation no longer overwrites a newer turn's applied-reset marker (the marker is only written by
+  the generation that owns the turn), so that turn's own completion cannot re-arm a pause the person
+  cancelled. The failed-write retry decides whether a pause holds it with the same
+  `pause_parks_turn` predicate `advance_queue` uses: a pause armed by another generation does not
+  hold a dispatch it does not name. A newer limit that replaces a parked pause keeps carrying the
+  prompt the pause was holding, so a pump-end advance cannot deliver it into the paused provider.
+  Finally, a parked prompt whose ledger schedule did not survive a restart is released exactly as a
+  cancel releases it — recorded as `LimitResumeReleased` with the limit cleared — instead of running
+  while the thread still claims to be rate limited.
 - **A request refused after an agent death names what actually closed.** The client keeps the close
   it observed (stdout EOF, a failed read, a writer failure or the process exit) and uses it when a
   later request is rejected, so a stdout death no longer looks like a dead writer in the failure row.
