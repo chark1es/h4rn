@@ -38,6 +38,7 @@ const SHORT_HARNESS: Record<HarnessKind, string> = {
   codex: "Codex",
   opencode: "OpenCode",
   antigravity: "Anti",
+  acp: "ACP",
 };
 
 function shortVersion(version: string | null): string {

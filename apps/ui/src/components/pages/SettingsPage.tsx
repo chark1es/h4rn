@@ -7,9 +7,11 @@ import { HarnessSettings } from "@/features/harnesses/HarnessSettings";
 import {
   type NotificationPermissionState,
   notificationChannel,
+  useBrowserNotificationsUnavailable,
 } from "@/features/notifications/channel";
 import {
   displayedNotificationSetting,
+  hostOfflineVisibility,
   type NotificationSettingKey,
   setNotificationSetting,
   useNotificationSettings,
@@ -82,8 +84,73 @@ function describeError(error: unknown): string {
 }
 
 function GeneralForm() {
+  return (
+    <div className="q-form">
+      <h1>General</h1>
+      <p className="lead">How h4rn starts and where it keeps its local state.</p>
+      <StartupSettings />
+      <AboutSettings />
+      <div className="q-group">
+        <h2>Daemon</h2>
+        <div className="q-field">
+          <div className="lab">
+            <div className="t">Data directory</div>
+          </div>
+          <div className="ctl">
+            <span className="q-mono q-muted">~/.h4rn</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * What the OS says about the login item.
+ *
+ * `unsupported` is not an error: a desktop build without the autostart plugin
+ * has no real state to show, so the row is left out instead of offering a
+ * switch that cannot work. Every other read failure is a real problem and is
+ * shown as an error line with the row, rather than hidden as if the plugin
+ * were missing.
+ */
+type AutostartState =
+  | { status: "loading" }
+  | { status: "ready"; enabled: boolean }
+  | { status: "unsupported" }
+  | { status: "error"; error: string };
+
+/**
+ * Whether an autostart read failed because this shell simply has no plugin.
+ *
+ * Only the shell's own "no such plugin/command" answer counts. A permission
+ * error, a refused command or anything else the OS reports is a failure the
+ * person should see, not a reason to pretend the setting does not exist.
+ */
+export function autostartUnsupported(message: string): boolean {
+  // A missing plugin or command is the only shape that means "this build
+  // cannot offer the setting". A permission or capability denial ("not
+  // allowed") comes from a plugin that is present, so the row must stay and
+  // say what failed instead of vanishing.
+  const missing =
+    /(?:plugin[: ][\w-]+|unknown plugin|plugin)\b[^\n]*\b(?:not found|not installed|does not exist|unknown)\b/i;
+  return (
+    missing.test(message) ||
+    /(?:command|plugin) not found/i.test(message) ||
+    /no such (?:command|plugin)/i.test(message)
+  );
+}
+
+/**
+ * Settings → General → Startup: the login item and the tray.
+ *
+ * Both switches read the real OS state. The autostart row appears only after
+ * that state is known, and stays hidden when the plugin is unavailable; a
+ * fake "off" during the read would claim a setting the person never chose.
+ */
+export function StartupSettings() {
   const shell = useMemo(desktopShellBridge, []);
-  const [autostart, setAutostart] = useState<boolean | null>(null);
+  const [autostart, setAutostart] = useState<AutostartState>({ status: "loading" });
   const [shellSettings, setShellSettings] = useState<ShellSettings | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -93,10 +160,22 @@ function GeneralForm() {
     void shell
       .autostartEnabled()
       .then((enabled) => {
-        if (!cancelled) setAutostart(enabled);
+        if (!cancelled) setAutostart({ status: "ready", enabled });
       })
       .catch((cause: unknown) => {
-        if (!cancelled) setError(describeError(cause));
+        if (cancelled) return;
+        const reason = describeError(cause);
+        if (autostartUnsupported(reason)) {
+          // A shell without the plugin is not a failed read; there is simply
+          // no login item to control here.
+          setAutostart({ status: "unsupported" });
+          return;
+        }
+        // Anything else (a blocked permission, a refused command) is a real
+        // failure: keep the row and say what went wrong. The reason lives on
+        // this row's state, so toggling the tray or a later autostart write
+        // does not erase why the read failed.
+        setAutostart({ status: "error", error: reason });
       });
     void shell
       .shellSettings()
@@ -112,11 +191,11 @@ function GeneralForm() {
   }, [shell]);
 
   const changeAutostart = async (next: boolean) => {
-    if (!shell) return;
+    if (!shell || autostart.status !== "ready") return;
     setError(null);
     try {
       await shell.setAutostart(next);
-      setAutostart(await shell.autostartEnabled());
+      setAutostart({ status: "ready", enabled: await shell.autostartEnabled() });
     } catch (cause) {
       setError(describeError(cause));
     }
@@ -132,69 +211,64 @@ function GeneralForm() {
     }
   };
 
+  if (!shell) return null;
+
   const trayAvailable = shellSettings?.tray_available === true;
   const keepInTray = trayAvailable && shellSettings?.keep_in_tray === true;
 
   return (
-    <div className="q-form">
-      <h1>General</h1>
-      <p className="lead">How h4rn starts and where it keeps its local state.</p>
-      {shell ? (
-        <div className="q-group">
-          <h2>Startup</h2>
-          <div className="q-field">
-            <div className="lab">
-              <div className="t">Open at login</div>
+    <div className="q-group">
+      <h2>Startup</h2>
+      {autostart.status !== "unsupported" ? (
+        <div className="q-field">
+          <div className="lab">
+            <div className="t">Open at login</div>
+            {autostart.status === "error" ? (
+              <div className="s" role="alert" style={{ color: "var(--danger)" }}>
+                {autostart.error}
+              </div>
+            ) : (
               <div className="s">Start h4rn when you sign in to this computer</div>
-            </div>
-            <div className="ctl">
+            )}
+          </div>
+          <div className="ctl">
+            {autostart.status === "loading" ? (
+              <span className="q-faint">Checking…</span>
+            ) : autostart.status === "ready" ? (
               <Toggle
-                checked={autostart ?? false}
-                disabled={autostart === null}
+                checked={autostart.enabled}
                 label="Open at login"
                 onChange={(next) => void changeAutostart(next)}
               />
-            </div>
+            ) : null}
           </div>
-          <div className="q-field">
-            <div className="lab">
-              <div className="t">Keep running in tray</div>
-              <div className="s">
-                {shellSettings !== null && !trayAvailable
-                  ? "No tray icon was created, so closing the window quits h4rn"
-                  : keepInTray
-                    ? "Closing the window keeps h4rn in the tray — open h4rn again to show it"
-                    : "Closing the window quits h4rn"}
-              </div>
-            </div>
-            <div className="ctl">
-              <Toggle
-                checked={keepInTray}
-                disabled={shellSettings === null || !trayAvailable}
-                label="Keep running in tray"
-                onChange={(next) => void changeTray(next)}
-              />
-            </div>
-          </div>
-          {error ? (
-            <p className="s" role="alert" style={{ color: "var(--danger)" }}>
-              {error}
-            </p>
-          ) : null}
         </div>
       ) : null}
-      <AboutSettings />
-      <div className="q-group">
-        <h2>Daemon</h2>
-        <div className="q-field">
-          <div className="lab">
-            <div className="t">Data directory</div>
-          </div>
-          <div className="ctl">
-            <span className="q-mono q-muted">~/.h4rn</span>
+      <div className="q-field">
+        <div className="lab">
+          <div className="t">Keep running in tray</div>
+          <div className="s">
+            {shellSettings !== null && !trayAvailable
+              ? "No tray icon was created, so closing the window quits h4rn"
+              : keepInTray
+                ? "Closing the window keeps h4rn in the tray — open h4rn again to show it"
+                : "Closing the window quits h4rn"}
           </div>
         </div>
+        <div className="ctl">
+          <Toggle
+            checked={keepInTray}
+            disabled={shellSettings === null || !trayAvailable}
+            label="Keep running in tray"
+            onChange={(next) => void changeTray(next)}
+          />
+        </div>
       </div>
+      {error ? (
+        <p className="s" role="alert" style={{ color: "var(--danger)" }}>
+          {error}
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -280,12 +354,23 @@ function NotificationsForm() {
   const channel = useMemo(notificationChannel, []);
   const settings = useNotificationSettings();
   const shell = secretShell();
+  const phase = useRemote((state) => state.phase);
   const signedIn = useRemote((state) => state.user !== null);
+  const linkedSupported = useRemote((state) => state.linkedSupported);
   const linkedMachineCount = useRemote((state) => state.linkedMachines.length);
   // Host presence comes from the relay for the machines this device is linked
   // to. A direct-only session has no signal for other hosts, so the row is
-  // hidden rather than shown as a dead switch.
-  const relayPresence = signedIn && linkedMachineCount > 0;
+  // hidden rather than shown as a dead switch. Before the account has loaded
+  // nothing is known yet, so neither the row nor the explanation appears (no
+  // flash of "offline" before the first relay answer).
+  const hostOffline = hostOfflineVisibility({
+    phase,
+    signedIn,
+    linkedSupported,
+    linkedMachineCount,
+  });
+  const relayPresence = hostOffline.kind === "available";
+  const pageUnavailable = useBrowserNotificationsUnavailable();
   const [permission, setPermission] = useState<NotificationPermissionState | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -363,10 +448,16 @@ function NotificationsForm() {
               </div>
             </div>
           ))}
-          {!relayPresence ? (
+          {hostOffline.kind === "no-links" || hostOffline.kind === "relay-too-old" ? (
             <p className="s q-muted">
-              Host offline alerts need a host linked through the relay. This device has none, so
-              there is no other host to watch.
+              {hostOffline.kind === "relay-too-old"
+                ? "This relay does not report which machines this device is linked to. Update the relay to get host offline alerts."
+                : "Host offline alerts need a host linked through the relay. This device has none, so there is no other host to watch."}
+            </p>
+          ) : null}
+          {channel.kind === "browser" && pageUnavailable ? (
+            <p className="s q-muted" role="status">
+              Notifications stopped working on this page. Reload h4rn to try again.
             </p>
           ) : null}
           {error ? (

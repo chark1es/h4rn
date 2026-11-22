@@ -87,6 +87,14 @@ impl RemoteAudit {
         self.devices.device_for_key(key)
     }
 
+    /// The connect machine this daemon owns, when it is signed in.
+    ///
+    /// The id is read from the daemon's own stored session, so it is the
+    /// daemon's identity rather than a value a connecting client supplied.
+    pub fn machine_id(&self) -> Option<String> {
+        self.client.as_ref().and_then(|client| client.machine_id())
+    }
+
     /// Records one remote action.
     pub fn record(
         &self,
@@ -160,6 +168,12 @@ impl RemoteAudit {
 mod tests {
     use super::*;
     use h4rn_transport::keys::KEY_LEN;
+
+    #[test]
+    fn a_trail_without_a_connect_session_names_no_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(RemoteAudit::local(dir.path()).machine_id(), None);
+    }
 
     #[test]
     fn local_sessions_are_not_audited_but_remote_ones_are() {

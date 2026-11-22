@@ -61,7 +61,14 @@ impl HarnessCatalog for StaticHarnessCatalog {
     }
 
     fn available(&self) -> Vec<HarnessKind> {
-        self.harnesses.keys().copied().collect()
+        // A generic ACP agent is not a startable kind by itself: a thread must
+        // name a configured instance (`agent_id`). Host summaries and pickers
+        // list those instances separately, so the bare kind is left out here.
+        self.harnesses
+            .keys()
+            .copied()
+            .filter(|kind| *kind != HarnessKind::Acp)
+            .collect()
     }
 
     fn detect(&self, kind: HarnessKind) -> Option<HarnessInstall> {
@@ -100,5 +107,17 @@ mod tests {
         let catalog = StaticHarnessCatalog::with(Arc::new(FakeHarness::undetected()));
         assert!(catalog.get(HarnessKind::ClaudeCode).is_some());
         assert!(catalog.detect(HarnessKind::ClaudeCode).is_none());
+    }
+
+    #[test]
+    fn acp_is_not_a_startable_kind_on_its_own() {
+        let catalog = StaticHarnessCatalog::with(Arc::new(h4rn_harness::GenericAcpHarness::new(
+            Arc::new(h4rn_harness::StaticAcpAgents::new()),
+        )));
+        assert!(
+            !catalog.available().contains(&HarnessKind::Acp),
+            "a configured instance is what a thread starts, not the bare kind"
+        );
+        assert!(catalog.get(HarnessKind::Acp).is_some());
     }
 }

@@ -510,6 +510,8 @@ function harnessLabel(harness: HarnessKind): string {
       return "OpenCode";
     case "antigravity":
       return "Antigravity";
+    case "acp":
+      return "ACP agent";
   }
 }
 

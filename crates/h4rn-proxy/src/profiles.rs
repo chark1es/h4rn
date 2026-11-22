@@ -557,6 +557,10 @@ pub fn recipe_note(kind: HarnessKind) -> Option<String> {
             "Uses GEMINI_API_KEY + GOOGLE_GEMINI_BASE_URL; the path agy appends is unverified"
                 .into(),
         ),
+        HarnessKind::Acp => Some(
+            "A local ACP command manages its own provider settings; h4rn does not rewrite them"
+                .into(),
+        ),
     }
 }
 

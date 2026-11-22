@@ -22,6 +22,7 @@ export const DELIVERY: Record<HarnessKind, string> = {
   codex: "Session request",
   opencode: "Harness API",
   antigravity: "ACP or stdio bridge",
+  acp: "ACP",
 };
 
 export function transportKind(transport: McpTransportView): string {

@@ -75,7 +75,7 @@ pub fn strategy(harness: HarnessKind, class: AttachmentClass) -> AttachmentDeliv
         HarnessKind::ClaudeCode => AttachmentDelivery::NativeImageBlock,
         HarnessKind::Codex => AttachmentDelivery::LocalImagePath,
         HarnessKind::Opencode => AttachmentDelivery::FileUrl,
-        HarnessKind::Antigravity => AttachmentDelivery::AcpImageBlock,
+        HarnessKind::Antigravity | HarnessKind::Acp => AttachmentDelivery::AcpImageBlock,
     }
 }
 

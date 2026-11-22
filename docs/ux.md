@@ -330,8 +330,14 @@ looking at the thing it names: the window is focused and that thread is open, or
 for a host going offline. A burst in one thread waits for a quiet period (1 s without another
 event, capped at 3 s) and then announces the latest message. Replay is decided by sequence, not by
 arrival time: the subscribe answer names the journal head it served, and only events at or below
-that boundary are history. A live approval that arrives while the subscribe is still in flight is
-therefore news on a first connect and after a reconnect. If a subscribe outlives its own request
+that boundary are history. A first connect asks from the live edge (`since_seq: null`), so the
+daemon sends no history and every frame held during the handshake is news, including one whose
+sequence already falls at or below the served head. After a reconnect the client asks for the gap,
+and events at or below the answer's boundary are history while later ones are news. A live
+approval that arrives while the subscribe is still in flight is therefore news on a first connect
+and after a reconnect. A frame that reaches the socket just after the reply is news too: the head
+the reply names is kept only as an acknowledged cursor for the next reconnect, never as a reason to
+drop a frame this socket has not delivered. If a subscribe outlives its own request
 timeout the client keeps holding the buffer until the answer names the boundary (or the socket
 closes and the next subscribe replays the range); an older daemon that accepts a live-edge
 subscribe with a plain ack, or with no boundary, delivers those frames untagged, since nothing was
@@ -341,16 +347,32 @@ daemon's thread summary but need a live `turn_completed` for the current turn: a
 Done by another client, or a replayed completion followed by a live summary tick, stays quiet. A
 summary names a manual placement (`placed_by_user`), so a `Finished` message is only ever the
 daemon's own lifecycle transition: moving a thread into Done or Settled by hand, locally or from
-another client, is a placement and never notifies, and a pin toggle is not a placement at all. A
-live completion is spent on the one daemon transition it caused; a manual tab move by the person
-discards it, and re-seeding the baseline clears every remembered completion. The
-list is re-seeded into the notifier's baseline whenever the client becomes ready, so a list-healed
-gap after a failed subscribe cannot announce history. A turn that hands off to a queued turn says
+another client, is a placement and never notifies, and a pin toggle is not a placement at all. The
+flag is also set for the hand-set Working pin and a manual move to Working; those are per-thread
+overrides, not a finished turn, so a failure that raises its hand while a thread is pinned still
+notifies. A live completion is spent on the one daemon transition it caused; a manual tab move by
+the person discards it once the daemon accepts the move (a failed move leaves no placement note),
+and a reconnection clears every remembered completion. The notifier keeps the last streamed summary
+per thread separately from list snapshots: a routine refresh only adds threads the stream has not
+named yet, so a list that answers Done before the completion and its upsert cannot swallow the
+finish. Both baselines are re-seeded when the client becomes ready, so a list-healed gap after a
+failed subscribe cannot announce history. A turn that hands off to a queued turn says
 nothing; an interrupted turn reads “Stopped: the turn was interrupted.”, and token and turn limits
 say “Stopped”, never “Finished”. A subagent child thread never notifies on its own; the parent's
 mirrored approval already covers it, and an approval that arrives before the child summary is
 withdrawn once that summary names the child. An answered approval cancels that thread's queued
 approval unless a newer one has already replaced it. Choices are stored per device.
+
+A failure is the turn's own outcome, not a tab's reputation: a live completion that reports a
+failure alerts even when the person already moved the running thread to Done, while a manual move
+with no new failure stays quiet. One failure is announced once per turn, from the outcome or from
+the summary's raised hand, whichever arrives first. A live failure can arrive before any summary
+names its thread; the alert waits for that summary, keeping the failed turn's outcome by turn id so
+a queued turn that starts in the meantime does not erase it, and is cancelled when the summary
+names it a subagent child, whose parent mirrors the moment. A first-connect child failure therefore
+stays quiet. The notifier's baseline is the last streamed summary, never a list snapshot for a
+thread the stream has spoken about, so a list that answers Done before the completion cannot
+swallow the finish.
 
 Approvals and finished turns never wait for the host-presence check: a due thread message is shown
 as soon as the OS permission allows, and the presence request for a host alert runs beside it. A
@@ -359,20 +381,40 @@ message is still waiting withdraws it. If the shell cannot answer the permission
 leaves the queue and the same drafts are retried a few seconds later.
 
 Host offline uses the relay's presence for the machines this device is linked to: the live transport
-decides the host it is connected to (matched by the local host's name, because connect mints its
-own machine ids, even when no machine was picked), so a working connection is never announced as
-offline. Before a due alert is delivered,
-linked presence is fetched once more: the alert is dropped if the host came back, the fetch failed
-or this client disconnected. A direct-only
-session has no independent signal for other hosts, so Settings hides the Host offline row and says
-why instead of showing a switch that cannot fire. In the browser, an OS permission that is still
-unknown (`default`) renders the switches off without forgetting the stored preference; turning one
-on asks for permission, and a granted answer applies the stored choices. A denied permission is
-shown as “Blocked in system settings” rather than a switch that looks on. The desktop notification
-plugin always reports granted, so the desktop app does not claim to know the permission state. On
-Linux the plugin also passes `replaces_id = 0`, so a later message for the same key stacks instead
-of replacing; coalescing still limits a burst to one message per thread. The
-mobile build does not send notifications yet and says so.
+decides the machine it is connected to. That machine comes from the peer, not the account's device
+rows: a relay link names the machine pairing recorded from `machine_devices`, and a direct
+connection uses the connect machine the daemon reports in `hello` from its own signed-in session.
+Only when there is no such id does `hello`'s local host name stand in, and it then matches one
+host; a name shared by two machines matches neither, so those hosts are left out of presence and
+cannot raise an offline alert for the machine in use. That also means adding a second same-named
+machine does not announce the first offline. A verified machine keeps all of its hosts online,
+including WSL siblings, because the transport reached the machine rather than one row of it; a
+name-only match is narrowed to the host it named, so working in a Windows host or one WSL
+distribution does not mark its siblings online. A working connection is never announced as
+offline. Before a due alert
+is delivered, linked presence is fetched once more: the alert is dropped if the host came back,
+the fetch failed or this client disconnected. Whether the relay honours `?linked=true` is
+tri-state: unknown until a successful answer arrives, `false` only when that answer lacks the
+filter marker. A failed fetch leaves it unknown, so a cached sign-in that is `signed_in` before the
+refresh answers does not accuse a current relay; only a relay that answers successfully without the
+marker gets the "update the relay" note. Such an older relay returns
+every machine on the account without the filter marker the relay adds to a filtered answer;
+presence then stands down rather than treating unrelated hosts as this device's links, and
+Settings says the relay is too old for the alert. A direct-only session has no independent signal
+for other hosts, so Settings hides the Host offline row and says why instead of showing a switch
+that cannot fire. The row stays away until the account's first answer arrives, so loading does not
+flash “no linked host”. In the browser, an OS permission that is still unknown (`default`) renders
+the switches off without forgetting the stored preference; turning one on asks for permission, and
+a granted answer applies the stored choices. A denied permission is shown as “Blocked in system
+settings” rather than a switch that looks on. The desktop notification plugin always reports
+granted, so the desktop app does not claim to know the permission state. A browser `Notification`
+constructor that throws (permission revoked, or a context that forbids notifications) is reported
+once to the console and the channel then stays quiet for the page instead of throwing on every
+message. That failure is one page-level fact shared by the notifier and Settings: Settings says
+“Notifications stopped working on this page. Reload h4rn to try again.” while the OS permission is
+still reported as the OS reports it. On Linux the plugin also passes `replaces_id = 0`, so a later
+message for the same key stacks instead of replacing; coalescing still limits a burst to one
+message per thread. The mobile build does not send notifications yet and says so.
 
 ---
 
@@ -1449,8 +1491,8 @@ Covered structurally in flow (d). Additional rules:
 - **Devices** table: device name + platform icon, scopes (View, Approve, Terminal, Files, Admin), last seen, presence, `Revoke`. Revoke is a confirm that names the device and says what stops immediately.
 - **Account & relay:** OrbitID issuer, signed-in identity, relay status, sign out (hosts stay paired), connection diagnostics. The issuer is configuration, never hardcoded; show it verbatim so self-hosters can verify.
 - **Appearance:** theme (System / Light / Dark), density (Comfortable / Compact desktop only), reduced motion (follow OS / force on), terminal theme (dark / light).
-- **Notifications:** approvals and questions, finished and failed turns, and host offline, each with a per-device switch (approvals and finished turns on, host offline off). Notifications stay quiet for the thread that is open in a focused window, coalesce per thread after a 1 s quiet period (at most 3 s), and open the thread when clicked. Replay is decided by the journal-head boundary in the subscribe answer, so a live approval that arrives during the handshake still notifies; a subscribe that outlives its timeout keeps its buffer until that answer arrives. Finished and failed turns need a live completion for the current turn, not just a summary change, and a manual tab move spends that completion. Turning a switch on is the only permission prompt; while the browser permission is still `default` the switches read off without losing the stored choice. In the browser a denied OS permission is shown as “Blocked in system settings”; on the desktop the permission is not detectable and no state is claimed. Host offline covers the machines this device is linked to through the relay and re-fetches their presence once before delivering an alert; a direct-only session hides the row rather than offering a switch that cannot fire. The mobile build does not send notifications yet and says so.
-- **General:** Open at login registers the desktop app as a login item, and Keep running in tray adds an Open h4rn / Quit tray icon and makes the close button hide the window. Launching h4rn again shows and focuses the hidden window (and a macOS dock click does the same), because a Linux AppIndicator can exist without a tray host ever showing it. Keep running in tray is disabled with an explanation when the tray icon could not be created, because hiding the only window would leave no way back. Both rows are desktop-only; the browser and phone hide them.
+- **Notifications:** approvals and questions, finished and failed turns, and host offline, each with a per-device switch (approvals and finished turns on, host offline off). Notifications stay quiet for the thread that is open in a focused window, coalesce per thread after a 1 s quiet period (at most 3 s), and open the thread when clicked. A first connect starts at the live edge, so every frame held during its handshake notifies and replayed history never does; after a reconnect the journal-head boundary in the subscribe answer decides. Finished and failed turns need a live completion for the current turn, not just a summary change, and a manual tab move spends that completion once the daemon accepts it. A Working pin is an override, not a placement, so it never silences a failure; a routine list refresh only adds threads the stream has not named, never replacing the streamed baseline, so a list that answers Done before the completion cannot swallow the finish, while a reconnect re-seeds both. A failed turn alerts from its own outcome even after a manual move to Done, and a failure whose thread is not yet named waits for its summary, cancelled if that summary names a subagent child. Turning a switch on is the only permission prompt; while the browser permission is still `default` the switches read off without losing the stored choice. In the browser a denied OS permission is shown as “Blocked in system settings”; on the desktop the permission is not detectable and no state is claimed. A browser notification constructor that throws is logged once and then left alone; Settings shows that notifications stopped working on this page as its own sentence, separate from the OS permission. Host offline covers the machines this device is linked to through the relay and re-fetches their presence once before delivering an alert; the connected machine is named by the peer the transport reached (the relay link's machine, or the connect machine the daemon reports in `hello` from its own signed-in session on a direct connection), and every host of that machine stays online, including WSL siblings; the local host name is only a fallback when there is no id, matched to one host, and a shared name matches neither so adding a same-named machine does not announce the first offline. A failed linked fetch stays unknown rather than reading as an old relay; a relay that answers successfully without the filter marker is detected as ignoring `?linked=true` and gets no presence rows; the Settings row waits for the first account answer. A direct-only session hides the row rather than offering a switch that cannot fire. The mobile build does not send notifications yet and says so.
+- **General:** Open at login reads the OS login item back, so the switch shows the real state; while that read is in flight no switch is drawn, and a desktop build that answers with a missing autostart plugin or command hides the row rather than offering a switch that cannot work. A capability denial from an installed plugin keeps the row and shows the error, because the setting exists and failed. Keep running in tray adds an Open h4rn / Quit tray icon and makes the close button hide the window. Launching h4rn again shows and focuses the hidden window (and a macOS dock click does the same), because a Linux AppIndicator can exist without a tray host ever showing it. Keep running in tray is disabled with an explanation when the tray icon could not be created, because hiding the only window would leave no way back. Both rows are desktop-only; the browser and phone hide them.
 - **Shortcuts:** the full map, searchable, with reset-to-default and conflict warnings on rebind.
 - **Phone:** Hosts is a bottom-nav destination with a list; host detail is a pushed screen with collapsible sections. Devices live under More → Settings → Devices. Pairing is a prominent row at the top of Hosts.
 

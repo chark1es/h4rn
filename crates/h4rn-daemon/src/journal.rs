@@ -33,6 +33,8 @@ pub struct ThreadMeta {
     pub host: HostId,
     /// Harness adapter.
     pub harness: HarnessKind,
+    /// Configured ACP agent instance, when the harness is generic ACP.
+    pub agent_id: Option<String>,
     /// Human title, derived from the first prompt.
     pub title: String,
     /// Absolute workspace path.
@@ -49,6 +51,11 @@ pub struct ThreadMeta {
     pub usage: Usage,
     /// Harness-native session id for resume.
     pub resume_id: Option<String>,
+    /// Fingerprint of the configured ACP command line `resume_id` belongs to.
+    ///
+    /// A different value means the stored session id describes a command the
+    /// thread no longer runs, so the next start opens a fresh session.
+    pub agent_fingerprint: Option<String>,
     /// A prompt a paused thread still has to deliver.
     ///
     /// A failed write puts its prompt back and the typed limit pauses the
@@ -207,6 +214,8 @@ impl SqliteJournal {
                 worktree_json  TEXT,
                 parent_thread_id TEXT,
                 subagent_id    TEXT,
+                agent_id       TEXT,
+                agent_fingerprint TEXT,
                 parked_json    TEXT
             )",
         )
@@ -226,6 +235,10 @@ impl SqliteJournal {
         self.ensure_column("daemon_threads", "parent_thread_id", "TEXT")
             .await?;
         self.ensure_column("daemon_threads", "subagent_id", "TEXT")
+            .await?;
+        self.ensure_column("daemon_threads", "agent_id", "TEXT")
+            .await?;
+        self.ensure_column("daemon_threads", "agent_fingerprint", "TEXT")
             .await?;
         self.ensure_column("daemon_threads", "parked_json", "TEXT")
             .await?;
@@ -289,8 +302,8 @@ async fn upsert_thread_on(
     let parked_json = serde_json::to_string(&meta.parked)?;
     sqlx::query(
         "INSERT INTO daemon_threads
-            (thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json, parent_thread_id, subagent_id, parked_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(thread_id) DO UPDATE SET
             host = excluded.host,
             harness = excluded.harness,
@@ -303,6 +316,8 @@ async fn upsert_thread_on(
             worktree_json = excluded.worktree_json,
             parent_thread_id = excluded.parent_thread_id,
             subagent_id = excluded.subagent_id,
+            agent_id = excluded.agent_id,
+            agent_fingerprint = excluded.agent_fingerprint,
             parked_json = excluded.parked_json",
     )
     .bind(meta.thread_id.as_str())
@@ -318,6 +333,8 @@ async fn upsert_thread_on(
     .bind(worktree_json)
     .bind(meta.parent_thread_id.as_ref().map(ThreadId::as_str))
     .bind(meta.subagent_id.as_ref().map(SubagentId::as_str))
+    .bind(meta.agent_id.as_deref())
+    .bind(meta.agent_fingerprint.as_deref())
     .bind(parked_json)
     .execute(&mut *conn)
     .await?;
@@ -356,7 +373,7 @@ impl Journal for SqliteJournal {
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json, parent_thread_id, subagent_id, parked_json
+            "SELECT thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint, parked_json
              FROM daemon_threads ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -385,6 +402,7 @@ impl Journal for SqliteJournal {
                 host: HostId::new(host),
                 harness: serde_json::from_str(&format!("\"{harness}\""))
                     .unwrap_or(HarnessKind::ClaudeCode),
+                agent_id: row.try_get("agent_id")?,
                 title: row.try_get("title")?,
                 workspace_path: row.try_get("workspace_path")?,
                 model: row.try_get("model")?,
@@ -396,6 +414,7 @@ impl Journal for SqliteJournal {
                 created_at,
                 usage: serde_json::from_str(&usage_json).unwrap_or_default(),
                 resume_id: row.try_get("resume_id")?,
+                agent_fingerprint: row.try_get("agent_fingerprint")?,
                 parked: row
                     .try_get::<Option<String>, _>("parked_json")?
                     .and_then(|json| serde_json::from_str(&json).ok()),
@@ -515,6 +534,7 @@ pub fn thread_meta_json(meta: &ThreadMeta) -> serde_json::Value {
         "subagent_id": meta.subagent_id,
         "host": meta.host,
         "harness": meta.harness,
+        "agent_id": meta.agent_id,
         "title": meta.title,
         "workspace_path": meta.workspace_path,
         "model": meta.model,
@@ -523,6 +543,7 @@ pub fn thread_meta_json(meta: &ThreadMeta) -> serde_json::Value {
         "worktree": meta.worktree,
         "usage": meta.usage,
         "resume_id": meta.resume_id,
+        "agent_fingerprint": meta.agent_fingerprint,
         "parked": meta.parked,
     })
 }
@@ -539,6 +560,7 @@ mod tests {
             subagent_id: None,
             host: HostId::new("host_test"),
             harness: HarnessKind::ClaudeCode,
+            agent_id: None,
             title: "first prompt".into(),
             workspace_path: "/tmp/work".into(),
             model: "test-model".into(),
@@ -547,6 +569,7 @@ mod tests {
             created_at: Utc::now(),
             usage: Usage::default(),
             resume_id: None,
+            agent_fingerprint: None,
             parked: None,
         }
     }
@@ -557,6 +580,7 @@ mod tests {
             parent_thread_id: None,
             host: HostId::new("host_test"),
             harness: HarnessKind::ClaudeCode,
+            agent_id: None,
             title: "first prompt".into(),
             workspace_path: "/tmp/work".into(),
             branch: Some("h4rn/first-prompt".into()),
@@ -576,6 +600,51 @@ mod tests {
             resume_at: None,
             limit: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a_thread_row_written_before_agent_id_migrates_with_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("old.db");
+        let pool = sqlx::SqlitePool::connect(&format!("sqlite://{}?mode=rwc", path.display()))
+            .await
+            .expect("open old database");
+        sqlx::query(
+            "CREATE TABLE daemon_threads (
+                thread_id      TEXT PRIMARY KEY,
+                host           TEXT NOT NULL,
+                harness        TEXT NOT NULL,
+                title          TEXT NOT NULL,
+                workspace_path TEXT NOT NULL,
+                model          TEXT NOT NULL,
+                created_at     TEXT NOT NULL,
+                usage_json     TEXT NOT NULL,
+                resume_id      TEXT,
+                runtime_mode   TEXT NOT NULL DEFAULT 'approval_required',
+                worktree_json  TEXT,
+                parent_thread_id TEXT,
+                subagent_id    TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("old schema");
+        sqlx::query(
+            "INSERT INTO daemon_threads
+                (thread_id, host, harness, title, workspace_path, model, created_at, usage_json)
+             VALUES ('th_old', 'host_local', 'claude_code', 'old', '/tmp/work', 'm', '2026-01-01T00:00:00Z', '{}')",
+        )
+        .execute(&pool)
+        .await
+        .expect("old row");
+        pool.close().await;
+
+        let journal = SqliteJournal::connect(&path).await.expect("open journal");
+        let threads = journal.list_threads().await.expect("list");
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].thread_id.as_str(), "th_old");
+        assert_eq!(threads[0].agent_id, None);
+        assert_eq!(threads[0].harness, HarnessKind::ClaudeCode);
     }
 
     #[tokio::test]

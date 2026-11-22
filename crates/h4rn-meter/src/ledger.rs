@@ -968,6 +968,7 @@ fn harness_from_slug(slug: &str) -> Option<HarnessKind> {
         "codex" => Some(HarnessKind::Codex),
         "opencode" => Some(HarnessKind::Opencode),
         "antigravity" => Some(HarnessKind::Antigravity),
+        "acp" => Some(HarnessKind::Acp),
         _ => None,
     }
 }

@@ -11,7 +11,7 @@ import type {
 } from "@/gen";
 
 import { H4rnClient } from "./client";
-import type { EventEnvelope, Transport, TransportHandlers } from "./types";
+import type { EventEnvelope, ReadyInfo, Transport, TransportHandlers } from "./types";
 import { isProtocolToken } from "./ws";
 
 type Reply = (body: ResponseBody) => void;
@@ -45,6 +45,7 @@ class FakeTransport implements Transport {
         protocol_version: 1,
         server_version: "test",
         device_id: "dev_test",
+        daemon_machine_id: null,
         local_host: "host_test",
         hosts: [],
       });
@@ -180,6 +181,7 @@ function createBody(): Omit<Extract<ClientRequest, { type: "create_thread" }>, "
   return {
     host: "host_a",
     harness: "claude_code",
+    agent_id: null,
     workspace_path: "/work/repo",
     model: "opus",
     prompt: "hello",
@@ -190,6 +192,38 @@ function createBody(): Omit<Extract<ClientRequest, { type: "create_thread" }>, "
 }
 
 describe("H4rnClient", () => {
+  it("reports the daemon's connect machine from hello", async () => {
+    type HelloBody = Extract<ResponseBody, { type: "hello" }>;
+    const hello = (daemonMachineId: string | null): HelloBody => ({
+      type: "hello",
+      protocol_version: 1,
+      server_version: "test",
+      device_id: "dev_test",
+      daemon_machine_id: daemonMachineId,
+      local_host: "host_test",
+      hosts: [],
+    });
+    const readyWith = async (body: ResponseBody): Promise<ReadyInfo> => {
+      const { client } = harness(
+        () =>
+          new FakeTransport((frame, reply) => {
+            if (frame.body.type !== "hello") return false;
+            reply(body);
+            return true;
+          }),
+      );
+      const ready = new Promise<ReadyInfo>((resolve) => client.onReady(resolve));
+      client.start();
+      return ready;
+    };
+
+    expect((await readyWith(hello("m_atlas"))).daemonMachineId).toBe("m_atlas");
+    // An older daemon omits the field; the client reports no machine rather
+    // than an undefined value reaching the notifier.
+    const { daemon_machine_id: _omitted, ...older } = hello("m_atlas");
+    expect((await readyWith(older as ResponseBody)).daemonMachineId).toBeNull();
+  });
+
   it("correlates responses by frame id regardless of arrival order", async () => {
     const pending: Array<{ reply: Reply }> = [];
     const { client, transports } = harness(
@@ -267,14 +301,18 @@ describe("H4rnClient", () => {
     expect(events.map((envelope) => envelope.seq)).toEqual([3, 4]);
   });
 
-  it("tags frames held for a slow subscribe as replayed history", async () => {
+  it("tags frames held for a slow resumed subscribe as replayed history", async () => {
     vi.useFakeTimers();
     try {
       let answerSubscribe: Reply | null = null;
       const { client, events, transports } = harness(
-        () =>
+        (context) =>
           new FakeTransport((frame, reply) => {
             if (frame.body.type !== "subscribe") return false;
+            if (context.attempt === 0) {
+              reply({ type: "subscribed", replay_through: 0 });
+              return true;
+            }
             answerSubscribe = reply;
             return true;
           }),
@@ -282,10 +320,18 @@ describe("H4rnClient", () => {
 
       client.start();
       await vi.advanceTimersByTimeAsync(1);
+      const transport = transports[0];
+      if (!transport) throw new Error("transport was not created");
+      transport.emit(3, { type: "agent_state_changed", thread_id: "t1", state: "thinking" });
+      await settle();
+      expect(events).toHaveLength(1);
+      transport.drop();
+      await vi.advanceTimersByTimeAsync(20);
       expect(client.getSnapshot().status).toBe("online");
+      expect(answerSubscribe).not.toBeNull();
 
-      // The person's device was away while this approval happened. The
-      // subscribe has not answered, so the frame belongs to the replay.
+      // The person's device was away while this approval happened. The resume
+      // asks from the last seen sequence, so the frame belongs to the replay.
       const approval: Event = {
         type: "approval_requested",
         thread_id: "t1",
@@ -296,37 +342,37 @@ describe("H4rnClient", () => {
         prompt: "npm test",
         options: [],
       };
-      const transport = transports[0];
-      if (!transport) throw new Error("transport was not created");
-      transport.emit(7, approval);
+      const resumed = transports[1];
+      if (!resumed) throw new Error("the reconnect transport was not created");
+      resumed.emit(7, approval);
 
       // A slow replay is exactly the case the old wall-clock grace guessed at.
       await vi.advanceTimersByTimeAsync(3_000);
-      expect(events).toHaveLength(0);
+      expect(events).toHaveLength(1);
       (answerSubscribe as Reply | null)?.({
         type: "subscribed",
         replay_through: 7,
       });
       await settle();
 
-      expect(events).toHaveLength(1);
-      expect(events[0]).toMatchObject({ seq: 7, replayed: true });
+      expect(events).toHaveLength(2);
+      expect(events[1]).toMatchObject({ seq: 7, replayed: true });
 
       const notificationOptions = {
         threads: {},
         settings: NOTIFICATION_DEFAULTS,
         focus: { windowFocused: false, openThreadId: null, connection: "online" as const },
       };
-      const replayed = events[0];
+      const replayed = events[1];
       if (!replayed) throw new Error("replay was not delivered");
       expect(draftForEnvelope(replayed, notificationOptions)).toBeNull();
 
       // One second later, the same kind of event is live news.
       await vi.advanceTimersByTimeAsync(1_000);
-      transport.emit(8, { ...approval, approval_id: "ap_2" } as Event);
-      expect(events).toHaveLength(2);
-      expect(events[1]?.replayed).toBeUndefined();
-      const live = events[1];
+      resumed.emit(8, { ...approval, approval_id: "ap_2" } as Event);
+      expect(events).toHaveLength(3);
+      expect(events[2]?.replayed).toBeUndefined();
+      const live = events[2];
       if (!live) throw new Error("live event was not delivered");
       expect(draftForEnvelope(live, notificationOptions)).not.toBeNull();
     } finally {
@@ -334,7 +380,7 @@ describe("H4rnClient", () => {
     }
   });
 
-  it("treats a live approval that arrived before the first subscribe answer as news", async () => {
+  it("treats every frame held on a first connect as news", async () => {
     vi.useFakeTimers();
     try {
       let answerSubscribe: Reply | null = null;
@@ -352,10 +398,10 @@ describe("H4rnClient", () => {
       const transport = transports[0];
       if (!transport) throw new Error("transport was not created");
 
-      // On a first connect the replay is empty (`since_seq: null`), but an
-      // approval already waiting at the served head is still history, and one
-      // that arrives after it is live news.
-      transport.emit(2, approvalEvent("ap_history"));
+      // `since_seq: null` means the daemon sent no history at all. Both frames
+      // arrived on this socket after it opened, including the one whose
+      // sequence the answer's journal head already covers, so both are news.
+      transport.emit(2, approvalEvent("ap_before_subscribe"));
       transport.emit(4, approvalEvent("ap_live"));
       (answerSubscribe as Reply | null)?.({
         type: "subscribed",
@@ -363,9 +409,53 @@ describe("H4rnClient", () => {
       });
       await settle();
 
-      expect(events[0]).toMatchObject({ seq: 2, replayed: true });
+      expect(events[0]).toMatchObject({ seq: 2 });
+      expect(events[0]?.replayed).toBeUndefined();
       expect(events[1]?.replayed).toBeUndefined();
+      const first = events[0];
+      if (!first) throw new Error("held event was not delivered");
+      expect(draftForEnvelope(first, notificationOptions())).not.toBeNull();
       const live = events[1];
+      if (!live) throw new Error("live event was not delivered");
+      expect(draftForEnvelope(live, notificationOptions())).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("delivers a first-connect frame that arrives after the subscribe reply", async () => {
+    vi.useFakeTimers();
+    try {
+      let answerSubscribe: Reply | null = null;
+      const { client, events, transports } = harness(
+        () =>
+          new FakeTransport((frame, reply) => {
+            if (frame.body.type !== "subscribe") return false;
+            answerSubscribe = reply;
+            return true;
+          }),
+      );
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      const transport = transports[0];
+      if (!transport) throw new Error("transport was not created");
+
+      // The daemon serves the live edge at journal head 7 and queues an
+      // approval behind its answer. The frame reaches this socket after the
+      // reply, with a sequence the reply's head already covers; it is still
+      // news, not history, and must not be deduplicated against that head.
+      (answerSubscribe as Reply | null)?.({
+        type: "subscribed",
+        replay_through: 7,
+      });
+      await settle();
+      transport.emit(7, approvalEvent("ap_after_reply"));
+      await settle();
+
+      expect(events.map((envelope) => envelope.seq)).toEqual([7]);
+      expect(events[0]?.replayed).toBeUndefined();
+      const live = events[0];
       if (!live) throw new Error("live event was not delivered");
       expect(draftForEnvelope(live, notificationOptions())).not.toBeNull();
     } finally {
@@ -438,8 +528,8 @@ describe("H4rnClient", () => {
       if (!transport) throw new Error("transport was not created");
 
       // Held while the subscribe is open, and still held after its request
-      // times out: without the answer's boundary there is no honest tag yet.
-      transport.emit(7, approvalEvent("ap_replay"));
+      // times out: without the answer nothing can be delivered yet.
+      transport.emit(7, approvalEvent("ap_held"));
       await vi.advanceTimersByTimeAsync(6_000);
       expect(client.getSnapshot().status).toBe("online");
       expect(events).toHaveLength(0);
@@ -454,8 +544,11 @@ describe("H4rnClient", () => {
       });
       await settle();
 
+      // A first connect replayed nothing, so the frame at the served head is
+      // as live as the one after it.
       expect(events).toHaveLength(2);
-      expect(events[0]).toMatchObject({ seq: 7, replayed: true });
+      expect(events[0]).toMatchObject({ seq: 7 });
+      expect(events[0]?.replayed).toBeUndefined();
       expect(events[1]?.replayed).toBeUndefined();
       const live = events[1];
       if (!live) throw new Error("live event was not delivered");
@@ -652,6 +745,7 @@ describe("H4rnClient", () => {
       protocol_version: 1,
       server_version: "test",
       device_id: "dev_test",
+      daemon_machine_id: null,
       local_host: "host_test",
       hosts: [],
     });
@@ -719,6 +813,39 @@ describe("H4rnClient", () => {
 
     const subscribe = transports[1]?.sent.find((frame) => frame.body.type === "subscribe");
     expect(subscribe?.body).toMatchObject({ type: "subscribe", since_seq: 5 });
+  });
+
+  it("resumes a first connect from the head its reply acknowledged", async () => {
+    vi.useFakeTimers();
+    try {
+      let answerSubscribe: Reply | null = null;
+      const { client, transports } = harness(
+        () =>
+          new FakeTransport((frame, reply) => {
+            if (frame.body.type !== "subscribe") return false;
+            answerSubscribe = reply;
+            return true;
+          }),
+      );
+
+      client.start();
+      await vi.advanceTimersByTimeAsync(1);
+      // A live-edge subscribe replayed nothing but the daemon named head 9:
+      // a reconnect must not ask to replay that skipped history.
+      (answerSubscribe as Reply | null)?.({
+        type: "subscribed",
+        replay_through: 9,
+      });
+      await settle();
+      transports[0]?.drop();
+      await vi.advanceTimersByTimeAsync(20);
+      await settle();
+
+      const subscribe = transports[1]?.sent.find((frame) => frame.body.type === "subscribe");
+      expect(subscribe?.body).toMatchObject({ type: "subscribe", since_seq: 9 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("keeps retrying at the capped interval instead of giving up", async () => {

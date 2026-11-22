@@ -56,6 +56,21 @@ export function requestTimeoutSignal(ms = CONNECT_REQUEST_TIMEOUT_MS): AbortSign
   return controller.signal;
 }
 
+/**
+ * The response header a relay adds when it served `?linked=true` by filtering.
+ *
+ * Its absence means an older relay answered with the whole account, so the
+ * caller must not treat that list as this device's linked machines.
+ */
+export const MACHINES_FILTER_HEADER = "x-h4rn-machine-filter";
+
+/** A linked-machine answer that says whether the relay honoured the filter. */
+export type LinkedMachines = {
+  /** False for an older relay that ignores `?linked=true`. */
+  supported: boolean;
+  machines: MachineSummary[];
+};
+
 /** Connect's `expires_in` is an i64 on the wire, a number in JSON. */
 export type SessionTokens = {
   access_token: string;
@@ -393,6 +408,25 @@ export class ConnectClient {
   async machines(options: { linked?: boolean } = {}): Promise<MachineSummary[]> {
     const query = options.linked ? "?linked=true" : "";
     return this.authorizedJson<MachineSummary[]>("GET", `/v1/machines${query}`);
+  }
+
+  /**
+   * The machines this device is linked to, and whether the relay filtered.
+   *
+   * An older relay ignores `?linked=true` and answers with every machine on
+   * the account. Its response has no filter marker, so the caller can fall
+   * back instead of treating the whole account as this device's links (which
+   * would announce other people's hosts going offline here).
+   */
+  async linkedMachines(): Promise<LinkedMachines> {
+    const response = await this.authorized("GET", "/v1/machines?linked=true");
+    if (response.headers.get(MACHINES_FILTER_HEADER) !== "linked") {
+      return { supported: false, machines: [] };
+    }
+    return {
+      supported: true,
+      machines: (await response.json()) as MachineSummary[],
+    };
   }
 
   async devices(): Promise<ConnectDevice[]> {
