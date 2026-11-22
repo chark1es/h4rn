@@ -12,8 +12,9 @@ vi.mock("@/lib/client/config", () => ({
   readBootConfig: () => ({}),
 }));
 
+import { onManualPlacement } from "@/features/notifications/placement";
 import { drafts, flushDrafts, readThreadDraft } from "@/lib/drafts";
-import { createThread, getState, loadThreads, store } from "./appStore";
+import { createThread, getState, loadThreads, setThreadTab, store } from "./appStore";
 
 function hostSummary(hostId: string): HostSummary {
   return {
@@ -141,5 +142,30 @@ describe("createThread draft handoff", () => {
 
     expect(readThreadDraft("handoff_host", tempId)).toBe("");
     expect(readThreadDraft("handoff_host", realId)).toBe("typed while starting");
+  });
+});
+
+describe("manual placements", () => {
+  it("notes a placement after the daemon accepts the move", async () => {
+    fake.response.current = { type: "ack" };
+    const seen: string[] = [];
+    const unsubscribe = onManualPlacement((threadId) => seen.push(threadId));
+
+    await setThreadTab("thread_placed", "done");
+    unsubscribe();
+
+    expect(seen).toEqual(["thread_placed"]);
+  });
+
+  it("leaves no placement note when the move fails", async () => {
+    fake.response.current = null;
+    fake.request.mockRejectedValueOnce(new Error("the host is unreachable"));
+    const seen: string[] = [];
+    const unsubscribe = onManualPlacement((threadId) => seen.push(threadId));
+
+    await setThreadTab("thread_failed", "done");
+    unsubscribe();
+
+    expect(seen).toEqual([]);
   });
 });
