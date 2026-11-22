@@ -10,7 +10,12 @@ import {
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import type { ComposerCommandIcon } from "@/lib/composerCommands";
-import { type PopoverPlacement, placePopover, splitPath } from "@/lib/composerMenu";
+import {
+  type PopoverPlacement,
+  phoneSheetLimit,
+  placePopover,
+  splitPath,
+} from "@/lib/composerMenu";
 
 export type ComposerMenuRow =
   | { kind: "file"; id: string; path: string }
@@ -157,6 +162,8 @@ export function ComposerMenu({
   const listRef = useRef<HTMLDivElement | null>(null);
   const measured = useRef<PopoverPlacement | null>(null);
   const [placement, setPlacement] = useState<PopoverPlacement | null>(null);
+  /** The measured space above the composer on a phone, or null before layout. */
+  const [sheetLimit, setSheetLimit] = useState<number | null>(null);
   const rowsView = rows.map((row, index) => (
     <MenuRow
       key={row.id}
@@ -212,13 +219,48 @@ export function ComposerMenu({
     setPlacement(next);
   });
 
+  // Measure the phone sheet before placing it: it grows upwards from the
+  // composer, so its height must fit the visible space between the top of the
+  // viewport and the composer. Without this an expanded composer (or an open
+  // keyboard) pushes the header and Done off screen.
+  useLayoutEffect(() => {
+    if (!isPhone) return;
+    const element = menuRef.current;
+    if (!element) return;
+    const measure = () => {
+      const parent = element.offsetParent;
+      if (!(parent instanceof HTMLElement)) return;
+      const composerTop = parent.getBoundingClientRect().top;
+      const visual = window.visualViewport;
+      const limit = phoneSheetLimit({
+        composerTop,
+        viewportTop: visual?.offsetTop ?? 0,
+        viewportHeight: visual?.height ?? window.innerHeight,
+      });
+      setSheetLimit((current) => (current === limit ? current : limit));
+    };
+    measure();
+    // The keyboard changes the visual viewport without changing the layout.
+    const visual = window.visualViewport;
+    window.addEventListener("resize", measure);
+    visual?.addEventListener("resize", measure);
+    visual?.addEventListener("scroll", measure);
+    return () => {
+      window.removeEventListener("resize", measure);
+      visual?.removeEventListener("resize", measure);
+      visual?.removeEventListener("scroll", measure);
+    };
+  });
+
   if (isPhone) {
     return (
       <div
+        ref={menuRef}
         className="q-ph-sheet q-comp-sheet"
         role="dialog"
         aria-label={label}
         data-placement="above"
+        style={sheetLimit !== null ? { maxHeight: sheetLimit } : undefined}
       >
         <div className="q-grab" />
         <div className="q-comp-sheet-head">
@@ -236,8 +278,8 @@ export function ComposerMenu({
           ref={listRef}
         >
           {rows.length > 0 ? rowsView : <p className="q-comp-menu-empty">{empty}</p>}
-          {note ? <p className="q-comp-menu-note">{note}</p> : null}
         </div>
+        {note ? <p className="q-comp-menu-note">{note}</p> : null}
       </div>
     );
   }
@@ -260,8 +302,8 @@ export function ComposerMenu({
     >
       <div className="q-comp-menu-list" role="listbox" aria-label={label} id={listId} ref={listRef}>
         {rows.length > 0 ? rowsView : <p className="q-comp-menu-empty">{empty}</p>}
-        {note ? <p className="q-comp-menu-note">{note}</p> : null}
       </div>
+      {note ? <p className="q-comp-menu-note">{note}</p> : null}
       <div className="q-comp-menu-foot" aria-hidden>
         <span>↑↓ move</span>
         <span>↵ choose</span>

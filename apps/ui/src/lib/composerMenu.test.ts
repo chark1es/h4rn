@@ -5,6 +5,8 @@ import {
   detectComposerTrigger,
   fileReference,
   fuzzyScore,
+  insertMentionToken,
+  phoneSheetLimit,
   placePopover,
   rankCommands,
   rankFilePaths,
@@ -114,6 +116,28 @@ describe("@ file trigger", () => {
     );
     expect(applied.value).toBe('open @"src/with space.ts" ');
     expect(applied.caret).toBe(applied.value.length);
+  });
+
+  it("never pairs quotes across a newline", () => {
+    // The first line's mention never closes; the second line has a finished
+    // mention. Scanning for the first line's closing quote must stop at the
+    // newline instead of eating the quote that belongs to the second mention.
+    const value = '@"unfinished\n@"done path"';
+    const space = value.indexOf(" path");
+    expect(space).toBeGreaterThan(0);
+    for (const caret of [space, space + 1]) {
+      expect(detectComposerTrigger(value, caret), `caret ${caret}`).toBeNull();
+    }
+  });
+
+  it("still filters an unfinished mention on the first line", () => {
+    const value = '@"src/with\nsecond line';
+    expect(detectComposerTrigger(value, 9)).toEqual({
+      kind: "file",
+      query: "src/wit",
+      start: 0,
+      end: 10,
+    });
   });
 });
 
@@ -248,6 +272,26 @@ describe("insertion", () => {
   });
 });
 
+describe("mention button insertion", () => {
+  it("separates both sides and leaves the caret after the @", () => {
+    const applied = insertMentionToken("Review this part", 7);
+    expect(applied.value).toBe("Review @ this part");
+    expect(applied.caret).toBe(8);
+  });
+
+  it("does not add spaces that are already there", () => {
+    expect(insertMentionToken("ask ", 4)).toEqual({ value: "ask @", caret: 5 });
+    expect(insertMentionToken("", 0)).toEqual({ value: "@", caret: 1 });
+  });
+
+  it("replaces a selection as one mention token", () => {
+    expect(insertMentionToken("keep this text", 5, 9)).toEqual({
+      value: "keep @ text",
+      caret: 6,
+    });
+  });
+});
+
 describe("popover placement", () => {
   const viewport = { width: 1_200, height: 800 };
   const parent = { left: 16, top: 600, width: 500, height: 96 };
@@ -293,6 +337,19 @@ describe("popover placement", () => {
     expect(placement.bottom).toBeNull();
     expect(placement.top).toBeGreaterThan(0);
     expect(placement.flipped).toBe(true);
+  });
+});
+
+describe("phone sheet height", () => {
+  it("fits the visible space above the composer", () => {
+    expect(
+      phoneSheetLimit({ composerTop: 140, viewportTop: 20, viewportHeight: 500, gap: 8 }),
+    ).toBe(112);
+  });
+
+  it("never asks for more than the viewport or less than nothing", () => {
+    expect(phoneSheetLimit({ composerTop: 900, viewportHeight: 400, gap: 8 })).toBe(400);
+    expect(phoneSheetLimit({ composerTop: 4, viewportHeight: 400, gap: 8 })).toBe(0);
   });
 });
 

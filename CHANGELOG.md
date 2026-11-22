@@ -118,28 +118,42 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **The composer's menus trust the caret and the query in front of them.** `↵` and `Tab` accept
+  only rows ranked for the text on screen, so pressing Enter inside the old 120 ms debounce cannot
+  insert the row for the previous query. The `@` button separates a new mention from the words on
+  both sides of the caret (`Review this part` → `Review @README.md this part`) and completion never
+  glues a path to the following word. A quoted mention no longer pairs its opening quote with one
+  on another line, so a finished `@"…"` on the next line stays inert. The popover anchors to the
+  actual selection (not the end of the token) and copies the textarea's computed styles under CSS
+  property names, so its mirror measures the caret correctly in Chromium. The file walk spends its
+  250-listing budget on failed folders too, limits each batch to what remains, and stops adding
+  files the moment the 3,000 cap is hit; the partial-index note sits beside the footer instead of
+  scrolling away with the list. On a phone the sheet is sized to the visible space above the
+  composer (visual viewport and keyboard included), keeping its header and Done on screen with an
+  expanded composer, and a `/` command that opens a dialog or sheet keeps focus there instead of
+  pulling it back into the textarea.
 - **The composer's `@` picker and `/` menu hold up on a phone and at the edges.** The phone file
   sheet no longer inherits the shared bottom-sheet placement and covers the composer: it sits above
   the input it belongs to. On a phone, `/` → Changes and Subagents open the phone panel sheet on the
   matching segment instead of calling the desktop panel action, like the header button does. `@`
   now opens after any non-identifier character (`(`, `[`, `{`, a quote, a comma), not only after
-  whitespace, and the `@` button inserts a separating space before it when the caret follows a
-  word, so the menu no longer dies on the next keystroke. The caret popover measures itself and
+  whitespace, and the `@` button inserts a separating space on either side of the caret, so the
+  menu no longer dies on the next keystroke. The caret popover measures itself and
   clamps to the viewport, moving left and opening below the caret when there is no room above.
   The file index now reports the caps it hit — a truncated listing, 3,000 files, 250 folders or
   8 levels — and the menu says “Showing the first 3,000 files.” instead of a bare “No files match”.
   Every option has an id, `↑`/`↓` scroll the highlighted row into view and the textarea names it
   with `aria-activedescendant`.
 - **The composer's file list tells the truth when the workspace cannot be fully read.** A folder
-  that fails to list makes the index partial, so the quiet “Showing the first … files.” footer
-  appears instead of claiming no other file exists; if the workspace root itself fails, the picker
-  shows that error rather than “No files in …”. The phone `/` menu no longer offers “Open the IDE”
-  (the phone shell has no IDE view to open), the phone sheet's Done button dismisses it exactly
-  like `Esc`, and `⇧↵` inserts a newline even while the `@` list is open. A quoted mention
-  (`@"path with space"`) is scanned as one token: the picker keeps filtering while its closing
-  quote is missing, does nothing inside a finished mention, and completes it without doubling or
-  dropping the quotes. The caret popover also follows the caret line when the textarea has
-  scrolled.
+  that fails to list makes the index partial, so the quiet “Showing the first … files.” note beside
+  the footer appears instead of claiming no other file exists; if the workspace root itself fails,
+  the picker shows that error rather than “No files in …”. The phone `/` menu no longer offers
+  “Open the IDE” (the phone shell has no IDE view to open), the phone sheet's Done button dismisses
+  it exactly like `Esc`, and `⇧↵` inserts a newline even while the `@` list is open. A quoted
+  mention (`@"path with space"`) is scanned as one token on one line: the picker keeps filtering
+  while its closing quote is missing, does nothing inside a finished mention, and completes it
+  without doubling or dropping the quotes. The caret popover also follows the caret line when the
+  textarea has scrolled.
 - **Large Azure DevOps pull requests load within the page deadline.** Azure needs file contents to
   build a diff, so a 30-file page could not finish inside the UI's ten-second budget once the
   account's local request allowance ran out. A diff page now holds at most eight files (eighteen

@@ -79,15 +79,22 @@ export async function walkWorkspace(
 ): Promise<WorkspaceIndex> {
   const files: string[] = [];
   const queue: Array<{ path: string; depth: number }> = [{ path: "", depth: 0 }];
-  let directories = 0;
+  // Every listing the walk attempts spends the directory budget, whether it
+  // answers or fails: a workspace full of unreadable folders must not turn
+  // into an unbounded number of requests.
+  let attempted = 0;
   let truncated = false;
 
-  while (queue.length > 0 && directories < MAX_DIRECTORIES && files.length < MAX_INDEXED_FILES) {
-    const batch = queue.splice(0, CONCURRENCY);
+  while (queue.length > 0 && attempted < MAX_DIRECTORIES && files.length < MAX_INDEXED_FILES) {
+    // Never start more listings than the budget still allows.
+    const remaining = MAX_DIRECTORIES - attempted;
+    const batch = queue.splice(0, Math.min(CONCURRENCY, remaining));
+    attempted += batch.length;
     const listings = await Promise.allSettled(
       batch.map((directory) => lister({ ...target, path: directory.path })),
     );
 
+    let full = false;
     for (let index = 0; index < listings.length; index += 1) {
       const result = listings[index];
       const directory = batch[index];
@@ -104,7 +111,6 @@ export async function walkWorkspace(
         truncated = true;
         continue;
       }
-      directories += 1;
       const depth = directory?.depth ?? 0;
       if (result.value.truncated) truncated = true;
       for (const entry of result.value.entries) {
@@ -120,12 +126,22 @@ export async function walkWorkspace(
         // Symlinks are left out: following them can leave the workspace or
         // loop, and the daemon reports them without resolving the target.
         if (entry.kind !== "file") continue;
-        files.push(entry.path);
         if (files.length >= MAX_INDEXED_FILES) {
-          truncated = true;
+          full = true;
           break;
         }
+        files.push(entry.path);
       }
+      // The rest of the batch answered, but its entries no longer fit: stop
+      // adding to the index instead of letting each sibling add one more.
+      if (files.length >= MAX_INDEXED_FILES) {
+        full = true;
+        break;
+      }
+    }
+    if (full) {
+      truncated = true;
+      break;
     }
   }
 

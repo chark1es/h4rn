@@ -30,6 +30,8 @@ export type ComposerCommandIcon =
 export type ComposerCommand = CommandSearchItem & {
   id: string;
   icon: ComposerCommandIcon;
+  /** The command opens a dialog or sheet, so the composer must not steal focus back. */
+  opensDialogOrSheet?: boolean;
   run: () => void;
 };
 
@@ -71,6 +73,8 @@ export function composerCommands(
       hint: "Diff the files this thread touched",
       keywords: "diff files review",
       icon: "changes",
+      // On a phone this opens the panel sheet; on desktop it is just a tab.
+      opensDialogOrSheet: options.phone === true,
       run: () => openPanel("changes"),
     },
     {
@@ -79,6 +83,7 @@ export function composerCommands(
       hint: "See delegated work and its budget",
       keywords: "agents delegate tree",
       icon: "subagents",
+      opensDialogOrSheet: options.phone === true,
       run: () => openPanel("subagents"),
     },
     {
@@ -95,6 +100,7 @@ export function composerCommands(
       hint: `Start one in ${projectName(summary.workspace_path)}`,
       keywords: "start create compose",
       icon: "new-thread",
+      opensDialogOrSheet: true,
       run: () => openNewThread({ host: summary.host, workspace: summary.workspace_path }),
     },
   );

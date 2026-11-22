@@ -55,7 +55,9 @@ function lineEnd(value: string, index: number): number {
  * A quoted mention is one token even though it contains spaces. While its
  * closing quote has not been typed the picker filters on the text inside the
  * quotes; once the quote is closed the text is a finished mention, so no
- * trigger fires anywhere inside it.
+ * trigger fires anywhere inside it. Quotes never pair across a newline: an
+ * unfinished `@"` on one line must not swallow the opening quote of a finished
+ * mention on the next.
  */
 function quotedTrigger(value: string, caret: number): ComposerTrigger | null | "complete" {
   let index = 0;
@@ -64,24 +66,27 @@ function quotedTrigger(value: string, caret: number): ComposerTrigger | null | "
       index += 1;
       continue;
     }
+    const end = lineEnd(value, index + 2);
     let close = -1;
-    for (let cursor = index + 2; cursor < value.length; cursor += 1) {
+    for (let cursor = index + 2; cursor < end; cursor += 1) {
       if (value[cursor] === '"' && !isEscaped(value, cursor)) {
         close = cursor;
         break;
       }
     }
     if (close >= 0) {
-      // A closed mention is inert, even when the caret sits inside it.
-      if (caret > index && caret <= close) return "complete";
+      // A closed mention is inert, even when the caret sits inside it or
+      // directly after its closing quote.
+      if (caret > index && caret <= close + 1) return "complete";
       index = close + 1;
       continue;
     }
-    const end = lineEnd(value, index + 2);
     if (caret > index + 1 && caret <= end) {
       return { kind: "file", query: value.slice(index + 2, caret), start: index, end };
     }
-    return null;
+    // This mention ends with the line. Keep scanning the lines that follow
+    // rather than treating the rest of the prompt as part of it.
+    index = end;
   }
   return null;
 }
@@ -182,6 +187,30 @@ export function triggerKey(trigger: ComposerTrigger): string {
 }
 
 /**
+ * How tall the phone sheet may be so it fits between the top of the visible
+ * viewport and the composer it sits above.
+ *
+ * The sheet grows upwards from the composer, so its header and Done button
+ * stay on screen as long as its height never exceeds the space above the
+ * composer. `visualViewport` is what the person can actually see: when the
+ * keyboard is open its height and offset differ from the window's.
+ */
+export function phoneSheetLimit({
+  composerTop,
+  viewportTop = 0,
+  viewportHeight,
+  gap = 8,
+}: {
+  composerTop: number;
+  viewportTop?: number;
+  viewportHeight: number;
+  gap?: number;
+}): number {
+  const available = composerTop - viewportTop - gap;
+  return Math.max(0, Math.min(available, viewportHeight));
+}
+
+/**
  * Path-aware fuzzy score, or `null` when the query does not match in order.
  *
  * Exact substrings score highest, then characters that start a path segment,
@@ -255,6 +284,29 @@ export function rankFilePaths(paths: readonly string[], query: string, limit = 5
 /** The `@` reference for a path, quoting paths that contain spaces. */
 export function fileReference(path: string): string {
   return /\s/.test(path) ? `@"${path.replace(/"/g, '\\"')}"` : `@${path}`;
+}
+
+/**
+ * Insert the `@` the button adds, separated from the words on either side.
+ *
+ * A mention glued to the text before it never opens (it looks like an email
+ * address), and one glued to the word after it leaves the following word
+ * inside the query. Both sides get a space when they need one; the caret
+ * stays directly after the `@` so the menu opens on an empty token.
+ */
+export function insertMentionToken(
+  value: string,
+  startInput: number,
+  endInput: number = startInput,
+): { value: string; caret: number } {
+  const start = Math.max(0, Math.min(startInput, value.length));
+  const end = Math.max(start, Math.min(endInput, value.length));
+  const lead = start > 0 && !isWhitespace(value[start - 1]) ? " " : "";
+  const trail = end < value.length && !isWhitespace(value[end]) ? " " : "";
+  return {
+    value: `${value.slice(0, start)}${lead}@${trail}${value.slice(end)}`,
+    caret: start + lead.length + 1,
+  };
 }
 
 /**

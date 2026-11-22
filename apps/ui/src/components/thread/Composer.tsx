@@ -12,7 +12,6 @@ import {
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts, useAttachShortcut } from "@/features/attachments/use-attachments";
-import { useDebouncedValue } from "@/features/composer/useDebouncedValue";
 import { useWorkspaceFiles } from "@/features/composer/workspaceFiles";
 import {
   proxyModelsFor,
@@ -29,6 +28,7 @@ import {
   type ComposerTrigger,
   detectComposerTrigger,
   fileReference,
+  insertMentionToken,
   rankCommands,
   rankFilePaths,
   stepSelection,
@@ -64,23 +64,28 @@ function caretAnchor(
   }
   const computed = window.getComputedStyle(element);
   const mirror = document.createElement("div");
+  // `getPropertyValue` only accepts CSS property names (kebab-case); camelCase
+  // names silently return "" in Chromium.
   for (const property of [
-    "fontFamily",
-    "fontSize",
-    "fontStyle",
-    "fontWeight",
-    "letterSpacing",
-    "lineHeight",
-    "paddingTop",
-    "paddingRight",
-    "paddingBottom",
-    "paddingLeft",
-    "borderTopWidth",
-    "borderRightWidth",
-    "borderBottomWidth",
-    "borderLeftWidth",
-    "borderStyle",
-    "boxSizing",
+    "font-family",
+    "font-size",
+    "font-style",
+    "font-variant",
+    "font-weight",
+    "letter-spacing",
+    "line-height",
+    "text-transform",
+    "word-spacing",
+    "padding-top",
+    "padding-right",
+    "padding-bottom",
+    "padding-left",
+    "border-top-width",
+    "border-right-width",
+    "border-bottom-width",
+    "border-left-width",
+    "border-style",
+    "box-sizing",
   ]) {
     mirror.style.setProperty(property, computed.getPropertyValue(property));
   }
@@ -163,12 +168,13 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     [summary.host, summary.workspace_path],
   );
   const fileIndex = useWorkspaceFiles(workspaceTarget, menu?.trigger.kind === "file");
+  // Rank the latest token synchronously. Debouncing the query left the menu
+  // showing (and accepting) rows from the previous query for ~120 ms.
   const menuQuery = menu?.trigger.query ?? "";
-  const settledQuery = useDebouncedValue(menuQuery, 120);
   const commandQuery = menu?.trigger.kind === "command" ? menu.trigger.query : "";
   const fileResults = useMemo(
-    () => rankFilePaths(fileIndex.files, settledQuery, 50),
-    [fileIndex.files, settledQuery],
+    () => rankFilePaths(fileIndex.files, menuQuery, 50),
+    [fileIndex.files, menuQuery],
   );
   const commandResults = useMemo(
     () => rankCommands(commands, commandQuery),
@@ -220,11 +226,13 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
   }, [summary.host, summary.thread_id]);
 
   // The popover points at the caret line. Its position follows edits, not the
-  // highlighted row, so moving with arrows never makes it jump.
+  // highlighted row, so moving with arrows never makes it jump. Measure the
+  // real selection: the token may extend past the caret when it sits mid-word.
   useLayoutEffect(() => {
     const element = ref.current;
     if (!menu || !element || isPhone) return;
-    setAnchor(caretAnchor(element, menu.trigger.end));
+    const caret = Math.min(element.selectionStart ?? element.value.length, element.value.length);
+    setAnchor(caretAnchor(element, caret));
   }, [menu, isPhone]);
 
   useEffect(() => {
@@ -386,7 +394,12 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     const row = rows[index];
     if (!menu || !row) return;
     if (row.kind === "file") {
-      const applied = applyCompletion(text, menu.trigger, fileReference(row.path));
+      // Rank again for the query on screen right now. A key that lands before
+      // the render that would have refreshed `rows` must never accept a row
+      // from the previous query.
+      const path = rankFilePaths(fileIndex.files, menu.trigger.query, 50)[index];
+      if (!path) return;
+      const applied = applyCompletion(text, menu.trigger, fileReference(path));
       update(applied.value);
       dismissed.current = null;
       setMenu(null);
@@ -399,7 +412,9 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     dismissed.current = null;
     setMenu(null);
     command?.run();
-    focusCaret(applied.caret);
+    // A command that opened a dialog or sheet now owns focus; pulling the
+    // caret back into the textarea would fight it.
+    if (!command?.opensDialogOrSheet) focusCaret(applied.caret);
   };
 
   const insertMention = () => {
@@ -407,17 +422,13 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     if (!element || !writable) return;
     const start = element.selectionStart ?? text.length;
     const end = element.selectionEnd ?? start;
-    const before = text.slice(0, start);
-    // Never glue the @ to the word before it: `(`/`"` and friends are
-    // boundaries anyway, but a letter is not, so separate with a space first.
-    const prefix = before.length > 0 && !/\s$/.test(before) ? " @" : "@";
-    const next = `${before}${prefix}${text.slice(end)}`;
-    update(next);
+    const next = insertMentionToken(text, start, end);
+    update(next.value);
     dismissed.current = null;
     // Run the same trigger detection the keyboard uses, so the menu opens for
     // exactly the token the next keystroke will keep filtering.
-    syncMenu(next, before.length + prefix.length);
-    focusCaret(before.length + prefix.length);
+    syncMenu(next.value, next.caret);
+    focusCaret(next.caret);
   };
 
   const input = (
@@ -542,7 +553,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
           loading={fileIndex.loading}
           error={fileIndex.error}
           workspaceName={workspaceName}
-          query={menu.trigger.kind === "file" ? settledQuery : menu.trigger.query}
+          query={menuQuery}
           isPhone={false}
           indexedCount={fileIndex.files.length}
           truncated={fileIndex.truncated}
@@ -633,7 +644,7 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
             loading={fileIndex.loading}
             error={fileIndex.error}
             workspaceName={workspaceName}
-            query={menu.trigger.kind === "file" ? settledQuery : menu.trigger.query}
+            query={menuQuery}
             isPhone
             indexedCount={fileIndex.files.length}
             truncated={fileIndex.truncated}

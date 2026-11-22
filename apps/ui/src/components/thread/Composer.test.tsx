@@ -631,6 +631,39 @@ describe("Composer @ file picker", () => {
     expect(await screen.findByRole("option", { name: /README\.md/ })).toBeTruthy();
   });
 
+  it("keeps the word after the caret out of the mention", async () => {
+    renderComposer();
+    const input = textarea();
+    // The caret sits inside "Review this part", just before "this".
+    typeInto(input, "Review this part", 7);
+
+    fireEvent.click(screen.getByRole("button", { name: "Mention a file" }));
+    runAnimationFrames();
+    expect(input.value).toBe("Review @ this part");
+    expect(input.selectionStart).toBe(8);
+    await waitFor(() => expect(option(/README\.md/)).not.toBeNull());
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    runAnimationFrames();
+    expect(input.value).toBe("Review @README.md this part");
+  });
+
+  it("accepts only rows computed for the query on screen", async () => {
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "@");
+    await waitFor(() => expect(option(/README\.md/)).not.toBeNull());
+
+    // Change the query and press Enter in the same turn, before any debounce
+    // or index refresh could catch up. The highlighted row must be README's
+    // replacement, not the row that was highlighted for the old query.
+    typeInto(input, "@doc");
+    fireEvent.keyDown(input, { key: "Enter" });
+    runAnimationFrames();
+
+    expect(input.value).toBe("@docs/ux.md ");
+  });
+
   it("offers a quiet footer when the index hit a cap", async () => {
     stubWorkspaceFiles(WORKSPACE_FILES, true);
     renderComposer();
@@ -718,6 +751,52 @@ describe("Composer @ file picker", () => {
     await waitFor(() => expect((menu as HTMLElement).style.bottom).toBe("126px"));
   });
 
+  it("anchors to the real caret inside a scrolled, wrapped token", async () => {
+    // The marker's distance from the mirror's top follows the text after it.
+    // Looking at the token end instead of the selection would measure less
+    // text and put the popover on the wrong line.
+    vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      return this.tagName === "SPAN" ? (this.textContent?.length ?? 0) * 10 : 0;
+    });
+    vi.spyOn(Element.prototype, "clientHeight", "get").mockImplementation(function (this: Element) {
+      return this.classList.contains("q-comp-in") ? 400 : 0;
+    });
+
+    renderComposer();
+    const input = textarea();
+    input.scrollTop = 30;
+    // The caret is after "do" in "@docs"; the token runs to "next".
+    typeInto(input, "a @docs next", 4);
+
+    const menu = (await screen.findByRole("listbox", { name: "Files" })).parentElement;
+    // "ocs next" is 80 px down; 30 px is scrolled away; 400 - 50 + 6 = 356.
+    await waitFor(() => expect((menu as HTMLElement).style.bottom).toBe("356px"));
+  });
+
+  it("copies computed styles to the mirror under CSS property names", async () => {
+    renderComposer();
+    const getPropertyValue = vi.fn((property: string) =>
+      property === "line-height" ? "21px" : property === "font-size" ? "13px" : "",
+    );
+    vi.spyOn(window, "getComputedStyle").mockReturnValue({
+      getPropertyValue,
+      lineHeight: "21px",
+    } as unknown as CSSStyleDeclaration);
+
+    typeInto(textarea(), "@read");
+    await waitFor(() => expect(option(/README\.md/)).not.toBeNull());
+
+    // Chromium's getPropertyValue ignores camelCase names, so the mirror must
+    // ask for the CSS spelling of every property it copies.
+    expect(getPropertyValue).toHaveBeenCalledWith("font-family");
+    expect(getPropertyValue).toHaveBeenCalledWith("font-size");
+    expect(getPropertyValue).toHaveBeenCalledWith("line-height");
+    expect(getPropertyValue).toHaveBeenCalledWith("padding-left");
+    expect(getPropertyValue).not.toHaveBeenCalledWith("fontFamily");
+  });
+
   it("shows the read error instead of claiming an empty workspace", async () => {
     setWorkspaceFileListerForTests(async () => {
       throw new Error("The workspace could not be read.");
@@ -799,6 +878,20 @@ describe("Composer / command menu", () => {
     expect(input.value).toBe("");
   });
 
+  it("does not pull focus back after a command that opens a dialog", async () => {
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "/new");
+    await waitFor(() => expect(option(/New thread/)).not.toBeNull());
+    const focus = vi.spyOn(input, "focus");
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    runAnimationFrames();
+
+    expect(mock.openNewThread).toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+  });
+
   it("shows an empty command state and keeps Enter from sending", async () => {
     renderComposer();
     const input = textarea();
@@ -841,6 +934,20 @@ describe("Composer / command menu", () => {
     await waitFor(() => expect(option(/Open changes/)).not.toBeNull());
     fireEvent.keyDown(input, { key: "Enter" });
     expect(mock.setPanelTab).toHaveBeenCalledWith("changes");
+  });
+
+  it("does not pull focus back after a phone command opens the sheet", async () => {
+    mock.state.ui.phone = true;
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "/chan");
+    await waitFor(() => expect(option(/Open changes/)).not.toBeNull());
+    const focus = vi.spyOn(input, "focus");
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    runAnimationFrames();
+
+    expect(focus).not.toHaveBeenCalled();
   });
 
   it("does not offer the IDE from the phone / menu", async () => {

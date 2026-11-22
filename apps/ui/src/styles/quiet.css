@@ -4178,6 +4178,7 @@ fieldset.q-seg-fs {
 }
 .q-comp-sheet-head {
   display: flex;
+  flex: none;
   align-items: center;
   gap: 8px;
   padding: 0 16px 6px;
@@ -4192,8 +4193,13 @@ fieldset.q-seg-fs {
   font-weight: 500;
 }
 .q-comp-sheet-list {
+  flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
+}
+.q-comp-sheet > .q-comp-menu-note {
+  flex: none;
+  padding: 6px 16px 2px;
 }
 .q-comp-sheet .q-comp-menu-item {
   min-height: 44px;

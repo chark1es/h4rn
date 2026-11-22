@@ -141,6 +141,37 @@ describe("workspace file walk", () => {
     const index = await walkWorkspace(target, lister);
     expect(index.truncated).toBe(true);
   });
+
+  it("counts failed listings against the directory budget", async () => {
+    const directories = Array.from({ length: 300 }, (_, index) => directory(`dir-${index}`));
+    const lister = vi.fn(async ({ path }: { path: string }) => {
+      if (path === "") return listing("", directories);
+      throw new Error("permission denied");
+    });
+
+    const index = await walkWorkspace(target, lister);
+
+    expect(index).toEqual({ files: [], truncated: true });
+    // The root plus 249 children: failures spend the budget too, and no batch
+    // may start more listings than the budget still allows.
+    expect(lister).toHaveBeenCalledTimes(250);
+  });
+
+  it("never grows past the file cap across one batch", async () => {
+    const siblings = Array.from({ length: 6 }, (_, index) => directory(`dir-${index}`));
+    const lister = async ({ path }: { path: string }) => {
+      if (path === "") return listing("", siblings);
+      const files = Array.from({ length: 1_000 }, (_, index) => file(`${path}/file-${index}.ts`));
+      return listing(path, files);
+    };
+
+    const index = await walkWorkspace(target, lister);
+
+    // Six siblings of 1,000 files fit in one batch; the remaining siblings
+    // must not add one file each after the cap was reached.
+    expect(index.files).toHaveLength(MAX_INDEXED_FILES);
+    expect(index.truncated).toBe(true);
+  });
 });
 
 describe("workspace file cache", () => {
