@@ -32,6 +32,10 @@ jobs:
   rust-windows-terminal:
     name: Windows terminal close
     runs-on: windows-latest
+    env:
+      # Keep the Windows-only close path warning-free; a warning here would
+      # otherwise only surface as a failure on this job.
+      RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1

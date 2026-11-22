@@ -718,14 +718,253 @@ describe("terminal query replies", () => {
       term.dispose();
     }
   });
+
+  it("names a C1 opener split inside its UTF-8 bytes by the chunk with the lead", async () => {
+    // U+009B is C2 9B. xterm holds the lead byte and decodes the code point
+    // only when the 9B arrives, but the query's first byte arrived in chunk 5.
+    // Every viewer gets the same identity, so the shell's one answer is one.
+    const csi: ViewerChunk[] = [
+      { seq: 5, bytes: Uint8Array.of(0xc2) },
+      { seq: 6, bytes: concat(Uint8Array.of(0x9b), bytes("6n\x1b[c")) },
+    ];
+    const csiFirst = await runViewer(csi);
+    const csiSecond = await runViewer(csi);
+    expect(csiFirst).toEqual([
+      { position: 5, ordinal: 0 },
+      { position: 6, ordinal: 0 },
+    ]);
+    expect(csiSecond).toEqual(csiFirst);
+
+    // U+0090 is C2 90; the DCS ends at `ESC \`, then a DA1 query follows.
+    const dcs: ViewerChunk[] = [
+      { seq: 5, bytes: Uint8Array.of(0xc2) },
+      { seq: 6, bytes: concat(Uint8Array.of(0x90), bytes("$qm\x1b\\\x1b[c")) },
+    ];
+    const dcsFirst = await runViewer(dcs);
+    expect(dcsFirst).toEqual([
+      { position: 5, ordinal: 0 },
+      { position: 6, ordinal: 0 },
+    ]);
+    expect(await runViewer(dcs)).toEqual(dcsFirst);
+  });
+
+  it("keeps an open colour query across a snapshot the way xterm does", async () => {
+    // Chunk 5 ends inside `OSC 10;?`. The early viewer gets the real BEL in
+    // chunk 6; the late viewer's chunk 6 is a resync snapshot whose leading
+    // ESC completes the same query. Both name it (5, 0), so the daemon writes
+    // one answer.
+    const open: ViewerChunk[] = [{ seq: 5, bytes: bytes("\x1b]10;?") }];
+    const early = await runViewer([...open, { seq: 6, bytes: bytes("\x07") }]);
+    const late = await runViewer([
+      ...open,
+      { seq: 6, bytes: bytes("\x1b[0m\x1b[H"), resync: true },
+    ]);
+    expect(early).toEqual([{ position: 5, ordinal: 0 }]);
+    expect(late).toEqual(early);
+  });
+
+  it("keeps a split DECRQSS across a snapshot the way xterm does", async () => {
+    // Chunk 5 ends inside `DCS $ q m`. xterm reports DECRQSS when the DCS is
+    // ended, by the real ST for the early viewer or by the snapshot's leading
+    // ESC for the late one; both name the chunk that carried `ESC P`.
+    const open: ViewerChunk[] = [{ seq: 5, bytes: bytes("\x1bP$qm") }];
+    const early = await runViewer([...open, { seq: 6, bytes: bytes("\x1b\\") }]);
+    const late = await runViewer([
+      ...open,
+      { seq: 6, bytes: bytes("\x1b[0m\x1b[H"), resync: true },
+    ]);
+    expect(early).toEqual([{ position: 5, ordinal: 0 }]);
+    expect(late).toEqual(early);
+  });
+
+  it("keeps a split UTF-8 character across a snapshot the way xterm does", async () => {
+    // Chunk 5 carries only the lead byte of U+009B. The early viewer completes
+    // it with chunk 6; the late viewer's snapshot starts with the continuation
+    // byte, and xterm's decoder is not reset by `term.reset()`, so it sees the
+    // same C1 CSI. A tracker that flushed its decoder at the snapshot would
+    // drop the lead and never name the query.
+    const early = await runViewer([
+      { seq: 5, bytes: Uint8Array.of(0xc2) },
+      { seq: 6, bytes: concat(Uint8Array.of(0x9b), bytes("6n")) },
+    ]);
+    const late = await runViewer([
+      { seq: 5, bytes: Uint8Array.of(0xc2) },
+      { seq: 6, bytes: concat(Uint8Array.of(0x9b), bytes("6n")), resync: true },
+    ]);
+    expect(early).toEqual([{ position: 5, ordinal: 0 }]);
+    expect(late).toEqual(early);
+
+    // A snapshot that leads with a real ESC is not a continuation: xterm
+    // discards the dangling lead and no query exists in it.
+    expect(
+      await runViewer([
+        { seq: 5, bytes: Uint8Array.of(0xc2) },
+        { seq: 6, bytes: bytes("\x1b[0m\x1b[H"), resync: true },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("aborts an OSC identifier at the first non-digit like xterm", async () => {
+    // xterm's OscParser accepts only ASCII digits before the first `;`; it
+    // aborts `10x`, ` 10` and `+10`. The abandoned OSC must not match the real
+    // query in chunk 6, or the early viewer would name the answer (5, 0) while
+    // the late viewer names it (6, 0) and the shell would get two reports.
+    for (const bad of ["10x", " 10", "+10", "10 "]) {
+      const early = await runViewer([
+        { seq: 5, bytes: bytes(`\x1b]${bad};?`) },
+        { seq: 6, bytes: bytes("\x07\x1b]10;?\x07") },
+      ]);
+      const late = await runViewer([{ seq: 6, bytes: bytes("\x07\x1b]10;?\x07") }]);
+      expect(early, JSON.stringify(bad)).toEqual([{ position: 6, ordinal: 0 }]);
+      expect(late, JSON.stringify(bad)).toEqual(early);
+    }
+  });
+
+  it("gives every late viewer the same identities at every byte split", async () => {
+    // Cut encoded bytes, never JS strings, so a multi-byte character or a C1
+    // opener can be split inside. A fixed seed list keeps CI deterministic;
+    // the pool carries C1 fragments and OSC/DCS queries as well as the CSI
+    // queries xterm answers through `onData`.
+    for (const seed of FUZZ_SEEDS) {
+      const random = seededRandom(seed);
+      const fragments: Uint8Array[] = [];
+      const count = 2 + Math.floor(random() * 3);
+      for (let index = 0; index < count; index += 1) {
+        fragments.push(
+          FUZZ_FRAGMENTS[Math.floor(random() * FUZZ_FRAGMENTS.length)] ?? new Uint8Array(),
+        );
+      }
+      const stream = concat(...fragments);
+      const chunks: ViewerChunk[] = [];
+      let offset = 0;
+      let seq = 1;
+      while (offset < stream.length) {
+        const size = 2 + Math.floor(random() * 7);
+        chunks.push({ seq, bytes: stream.slice(offset, offset + size) });
+        offset += size;
+        seq += 1;
+      }
+
+      const early = await runViewer(chunks);
+      for (let attach = 1; attach < chunks.length; attach += 1) {
+        const snapshotSeq = chunks[attach - 1]?.seq ?? 0;
+        const late = await runViewer(chunks.slice(attach));
+        const expected = early.filter((reply) => reply.position > snapshotSeq);
+        expect(late, `seed ${seed} attach after chunk ${snapshotSeq}`).toEqual(expected);
+      }
+    }
+  }, 300_000);
 });
+
+/** One chunk handed to a test viewer; `resync` marks a snapshot frame. */
+type ViewerChunk = { seq: number; bytes: Uint8Array; resync?: boolean };
+
+/** The reports xterm's renderer would send for colour queries. */
+const COLOUR_REPORTS = [
+  "\x1b]10;rgb:cccc/cccc/cccc\x1b\\",
+  "\x1b]11;rgb:0000/0000/0000\x1b\\",
+  "\x1b]12;rgb:cccc/cccc/cccc\x1b\\",
+  "\x1b]4;1;rgb:cccc/0000/0000\x1b\\",
+] as const;
+
+/**
+ * Feeds one viewer's chunks to a real xterm parser and returns the identities
+ * of every answer it sends, in order, exactly as the controller reports them.
+ *
+ * Bytes go in as bytes the way `frame.payload` does, so a character split
+ * across chunks is decoded by xterm's own streaming decoder. A `resync` chunk
+ * is applied like `applyFrame` does: `term.reset()`, then the snapshot's
+ * bytes, with the tracker's deferred clear.
+ */
+async function runViewer(
+  chunks: ViewerChunk[],
+): Promise<Array<{ position: number; ordinal: number }>> {
+  const term = new Terminal({ cols: 80, rows: 24 });
+  const tracker = new TerminalQueryTracker();
+  const hooks = registerTerminalQueryHooks(term.parser, tracker);
+  const replies: Array<{ position: number; ordinal: number }> = [];
+  const take = (data: string) => {
+    const reply = tracker.takeReply(data);
+    if (reply) replies.push(reply);
+  };
+  const onData = term.onData(take);
+  try {
+    for (const chunk of chunks) {
+      const mark = tracker.mark();
+      if (chunk.resync) {
+        term.reset();
+        tracker.resetAt(chunk.seq);
+      }
+      tracker.beginChunk(chunk.seq, chunk.bytes);
+      await parse(term, chunk.bytes);
+      // xterm answers colour queries through its renderer, not `onData`; this
+      // stands in for it, before the chunk settles like the controller.
+      for (const report of COLOUR_REPORTS) take(report);
+      tracker.settle(mark);
+      tracker.endChunk();
+    }
+    return replies;
+  } finally {
+    onData.dispose();
+    for (const hook of hooks) hook.dispose();
+    term.dispose();
+  }
+}
+
+/** A byte pool mixing queries, C1 fragments, multi-byte text and controls. */
+const FUZZ_FRAGMENTS: Uint8Array[] = [
+  bytes("\x1b[?25$p"),
+  bytes("\x1b[6n"),
+  bytes("\x1b[c"),
+  bytes("\x1b[>c"),
+  bytes("\x1bP$qm\x1b\\"),
+  bytes("\x1b]10;?\x07"),
+  bytes("\x1b]11;?\x1b\\"),
+  bytes("\x1b]4;1;?\x07"),
+  bytes("\u009b6n"),
+  bytes("\u009b?25$p"),
+  bytes("\u0090$qm\u009c"),
+  bytes("\u009d10;?\u009c"),
+  bytes("Ü"),
+  bytes("日"),
+  bytes("😀"),
+  bytes("\x1b[2J"),
+  bytes("\x7f"),
+  bytes("\x00\x19"),
+  bytes("\x18"),
+  bytes("\x1a"),
+  bytes("\x1b]10;?"),
+  bytes("\x1bP$q"),
+  bytes("\x1b["),
+  bytes("\x1b"),
+  Uint8Array.of(0x9b),
+  Uint8Array.of(0xc2),
+  bytes("text"),
+];
+
+/** Fixed seeds, so the byte-cut fuzz is the same on every run. */
+const FUZZ_SEEDS = Array.from({ length: 2000 }, (_, index) => index);
+
+/** A small deterministic PRNG (mulberry32). */
+function seededRandom(seed: number): () => number {
+  let state = (seed + 0x6d2b79f5) >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let value = state;
+    value = Math.imul(value ^ (value >>> 15), value | 1);
+    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
+    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
 /** Resolves once xterm has parsed `data`, as its write callback does. */
 function parse(term: Terminal, data: string | Uint8Array): Promise<void> {
   return new Promise((resolve) => term.write(data, resolve));
 }
 
-const bytes = (text: string) => new TextEncoder().encode(text);
+function bytes(text: string): Uint8Array {
+  return new TextEncoder().encode(text);
+}
 
 /** Joins byte chunks so a UTF-8 character can be cut between them. */
 function concat(...parts: Uint8Array[]): Uint8Array {

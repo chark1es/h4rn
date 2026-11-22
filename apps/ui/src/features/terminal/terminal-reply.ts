@@ -164,35 +164,46 @@ export class TerminalQueryTracker {
   private nextMark = 0;
   /** Snapshot chunk whose clear is waiting for its parse to begin. */
   private resetAtSeq: number | null = null;
-  /** Decodes output the way xterm does, keeping a multi-byte character whole. */
-  private readonly decoder = new TextDecoder();
+  /**
+   * The UTF-8 sequence still open at the end of the last chunk handed in:
+   * its bytes and the chunk that carried the first of them.
+   *
+   * xterm decodes a character only when its last byte arrives but names the
+   * sequence by the chunk that carried the first, so a C1 opener split as
+   * `C2` | `9B` belongs to the chunk that carried `C2`. The bytes are kept so
+   * a chunk of continuations that finishes the character is told apart from
+   * one that only extends it across another boundary, and so a wrong
+   * continuation discards the sequence exactly as xterm's decoder does.
+   */
+  private utf8: Utf8Open | null = null;
 
   /**
    * Records that output chunk `seq` is about to be parsed by xterm.
    *
    * `data` is the chunk's raw bytes, which lets the tracker tell an answer to
    * a query that started in an earlier chunk from an answer to a query that
-   * started in this one. A snapshot's bytes pass through the same parser, so
-   * they are scanned the same way; [`TerminalQueryTracker.resetAt`] clears what
-   * came before it when its parse really begins.
+   * started in this one.
+   *
+   * A snapshot's bytes are parsed by the same xterm parser and decoder, and
+   * neither is reset by `term.reset()`. So the snapshot continues an escape or
+   * a multi-byte character that was open before it: whatever xterm reports
+   * while parsing the snapshot is named by the chunk that carried the first
+   * byte, exactly as the viewer that saw that chunk raw names it.
+   * [`TerminalQueryTracker.resetAt`] only clears what came before the snapshot,
+   * and only when its parse really begins.
    */
   beginChunk(seq: number, data?: Uint8Array): void {
     const snapshot = this.resetAtSeq === seq;
     if (snapshot) this.resetAtSeq = null;
     let carried: ParsingChunk["carried"] = null;
     if (data) {
-      // A snapshot is a fresh rendering of the screen, not the continuation of
-      // the stream before it, so it is decoded and scanned from ground.
-      if (snapshot) this.decoder.decode();
-      const scan = scanOutput(
-        seq,
-        this.decoder.decode(data, { stream: true }),
-        snapshot ? null : this.pending,
-      );
+      // The sequence that was open before this chunk takes its start from the
+      // chunk that carried its first byte; this chunk only completes it.
+      const decoded = decodeUtf8(data, this.utf8, seq);
+      this.utf8 = decoded.open;
+      const scan = scanOutput(seq, decoded.text, this.pending, decoded.firstStart);
       this.pending = scan.pending;
       carried = scan.carried;
-    } else if (snapshot) {
-      this.pending = null;
     }
     this.chunks.push({ seq, carried, hookPosition: null, resets: snapshot });
     this.applyDeferredReset();
@@ -222,21 +233,6 @@ export class TerminalQueryTracker {
    */
   resetAt(seq: number): void {
     this.resetAtSeq = seq;
-  }
-
-  /**
-   * Forgets every pending sequence, query and ordinal immediately.
-   *
-   * Snapshots use [`TerminalQueryTracker.resetAt`] instead, so a chunk that is
-   * still waiting for its parse keeps its name.
-   */
-  reset(): void {
-    this.expected.length = 0;
-    this.chunks.length = 0;
-    this.ordinals.clear();
-    this.pending = null;
-    this.resetAtSeq = null;
-    this.decoder.decode();
   }
 
   /**
@@ -271,13 +267,18 @@ export class TerminalQueryTracker {
    *
    * The earlier chunks are left alone: they are parsed first, and their
    * answers keep the positions their own output carried.
+   *
+   * Ordinals survive the snapshot on purpose. They count queries that started
+   * in a chunk, and a snapshot does not unsee the ones this viewer already
+   * parsed in that chunk: a query whose terminator only arrives in the
+   * snapshot keeps its place after them, so its `(position, ordinal)` is the
+   * same identity another viewer gives it.
    */
   private applyDeferredReset(): void {
     const chunk = this.chunks[0];
     if (!chunk?.resets) return;
     chunk.resets = false;
     this.expected.length = 0;
-    this.ordinals.clear();
   }
 
   /** The position to settle from once xterm finishes the chunk being written. */
@@ -353,22 +354,30 @@ export type TerminalQueryReply = {
  * controls return to ground. C0 controls execute where xterm executes them
  * and are ignored elsewhere inside a sequence; DEL is ignored inside a
  * sequence (it is data in an OSC).
+ *
+ * `firstStart` is the chunk that carried the first byte of a UTF-8 sequence
+ * the previous chunk left incomplete. The first code point decoded here
+ * completes that sequence, so any sequence it starts is named by that earlier
+ * chunk even though xterm only delivers it now.
  */
 function scanOutput(
   seq: number,
   data: string,
   carriedIn: PendingEscape | null,
+  firstStart: number | null,
 ): { carried: ParsingChunk["carried"]; pending: PendingEscape | null } {
   let kind: PendingEscape["kind"] | "ground" = carriedIn?.kind ?? "ground";
   let text = carriedIn?.text ?? "";
   let startPosition = carriedIn?.startPosition ?? seq;
   let truncated = false;
   let carried: ParsingChunk["carried"] = null;
+  /** The chunk that began the code point currently being scanned. */
+  let codePointStart = firstStart ?? seq;
 
-  const begin = (next: PendingEscape["kind"], initial = "\x1b") => {
+  const begin = (next: PendingEscape["kind"], initial = "\x1b", at = seq) => {
     kind = next;
     text = initial;
-    startPosition = seq;
+    startPosition = at;
     truncated = false;
   };
   const append = (char: string) => {
@@ -396,6 +405,11 @@ function scanOutput(
   };
 
   for (const char of data) {
+    // A code point decoded here may be the one the previous chunk's bytes
+    // began; its sequence is named by that earlier chunk. Every later code
+    // point in this chunk starts here.
+    const startedIn = codePointStart;
+    codePointStart = seq;
     const code = char.codePointAt(0) ?? 0;
 
     // CAN, SUB and the C1 controls xterm executes return to ground from every
@@ -416,21 +430,22 @@ function scanOutput(
       continue;
     }
     if (code === 0x9b) {
-      begin("csi", "\x1b[");
+      begin("csi", "\x1b[", startedIn);
       continue;
     }
     if (code === 0x90) {
-      begin("dcs", "\x1bP");
+      begin("dcs", "\x1bP", startedIn);
       continue;
     }
     if (code === 0x9d) {
-      begin("osc", "\x1b]");
+      begin("osc", "\x1b]", startedIn);
       continue;
     }
     if (code === 0x98 || code === 0x9e || code === 0x9f) {
       begin(
         "string",
         `\x1b${String.fromCharCode(code === 0x98 ? 0x58 : code === 0x9e ? 0x5e : 0x5f)}`,
+        startedIn,
       );
       continue;
     }
@@ -574,9 +589,139 @@ function dcsSignature(body: string): QuerySignature | null {
 
 function oscSignature(body: string): QuerySignature | null {
   const separator = body.indexOf(";");
-  const ident = Number.parseInt(separator === -1 ? body : body.slice(0, separator), 10);
-  if (Number.isNaN(ident)) return null;
+  const identText = separator === -1 ? body : body.slice(0, separator);
+  // xterm's OscParser collects the identifier in its ID state and aborts the
+  // whole OSC on the first non-digit: `10x`, ` 10` and `+10` are not `10`.
+  // At least one digit is required; an empty identifier is no handler's.
+  if (identText.length === 0 || !/^[0-9]+$/.test(identText)) return null;
+  const ident = Number(identText);
   return { kind: "osc", ident, data: separator === -1 ? "" : body.slice(separator + 1) };
+}
+
+/**
+ * A UTF-8 sequence begun in one chunk and not finished yet.
+ */
+type Utf8Open = {
+  /** Bytes received so far, starting with the lead byte. */
+  bytes: number[];
+  /** Chunk that carried the lead byte. */
+  start: number;
+};
+
+/**
+ * Decodes one chunk the way xterm's `Utf8ToUtf32` does.
+ *
+ * Returns the text xterm's parser would receive, the sequence still open at
+ * the end (if any), and the chunk that began the **first** code point decoded
+ * here when its lead byte arrived in an earlier chunk. That last value is what
+ * names a C1 opener split inside its UTF-8 bytes by the chunk that carried the
+ * lead, even though xterm only delivers the code point now.
+ *
+ * Invalid bytes are discarded exactly as xterm discards them: a wrong
+ * continuation drops the sequence and reprocesses the byte from ground, and an
+ * overlong, surrogate, BOM or out-of-range code point produces nothing at all.
+ * A replacement character here would corrupt an OSC/DCS payload and stop the
+ * carried sequence from matching the hook.
+ */
+function decodeUtf8(
+  data: Uint8Array,
+  open: Utf8Open | null,
+  seq: number,
+): { text: string; firstStart: number | null; open: Utf8Open | null } {
+  let text = "";
+  let firstStart: number | null = null;
+  let firstDecoded = false;
+  let bytes = open ? [...open.bytes] : [];
+  let start = open?.start ?? seq;
+  let index = 0;
+
+  const emit = (codepoint: number) => {
+    const beganIn = start;
+    bytes = [];
+    start = seq;
+    text += String.fromCodePoint(codepoint);
+    if (!firstDecoded) {
+      firstDecoded = true;
+      if (beganIn !== seq) firstStart = beganIn;
+    }
+  };
+
+  while (index < data.length) {
+    const byte = data[index];
+    if (byte === undefined) break;
+    if (bytes.length > 0) {
+      if ((byte & 0xc0) !== 0x80) {
+        // A wrong continuation discards the sequence; the byte is reprocessed
+        // from ground on the next pass, as xterm does.
+        bytes = [];
+        start = seq;
+        continue;
+      }
+      bytes.push(byte);
+      index += 1;
+      const codepoint = decodeCodePoint(bytes);
+      if (codepoint !== null) {
+        emit(codepoint);
+      } else if (bytes.length >= utf8Length(bytes[0] ?? 0)) {
+        // The sequence is complete but illegal; xterm produces no code point.
+        bytes = [];
+        start = seq;
+      }
+      continue;
+    }
+    if (byte < 0x80) {
+      index += 1;
+      emit(byte);
+      continue;
+    }
+    if (utf8Length(byte) === 0) {
+      // Illegal byte; xterm skips it.
+      index += 1;
+      continue;
+    }
+    bytes = [byte];
+    start = seq;
+    index += 1;
+  }
+
+  return {
+    text,
+    firstStart,
+    open: bytes.length > 0 ? { bytes, start } : null,
+  };
+}
+
+/** The length of the UTF-8 sequence a lead byte starts, or 0 for a stray byte. */
+function utf8Length(lead: number): number {
+  if (lead >= 0xc2 && lead <= 0xdf) return 2;
+  if (lead >= 0xe0 && lead <= 0xef) return 3;
+  if (lead >= 0xf0 && lead <= 0xf4) return 4;
+  return 0;
+}
+
+/**
+ * The code point of a complete sequence, or null while it is incomplete or
+ * when it is one xterm rejects (overlong, surrogate, BOM, out of range).
+ */
+function decodeCodePoint(bytes: number[]): number | null {
+  const lead = bytes[0];
+  if (lead === undefined) return null;
+  const length = utf8Length(lead);
+  if (length === 0 || bytes.length < length) return null;
+  let codepoint = lead & (length === 2 ? 0x1f : length === 3 ? 0x0f : 0x07);
+  for (let index = 1; index < length; index += 1) {
+    const byte = bytes[index];
+    if (byte === undefined) return null;
+    codepoint = (codepoint << 6) | (byte & 0x3f);
+  }
+  if (length === 2) return codepoint >= 0x80 ? codepoint : null;
+  if (length === 3) {
+    if (codepoint < 0x800 || (codepoint >= 0xd800 && codepoint <= 0xdfff) || codepoint === 0xfeff) {
+      return null;
+    }
+    return codepoint;
+  }
+  return codepoint >= 0x10000 && codepoint <= 0x10ffff ? codepoint : null;
 }
 
 /** Index of the first byte of `body` outside `[from, to]`, starting at `start`. */

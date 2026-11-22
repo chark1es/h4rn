@@ -153,6 +153,18 @@ impl Viewer {
         lock(&self.credit).sent_through
     }
 
+    /// The last output position folded into a snapshot this viewer was handed.
+    ///
+    /// It may claim a query that started here only when it is the only viewer
+    /// attached: xterm may complete such a query with the snapshot's own
+    /// bytes, and no other parser can answer it, so the shell still gets its
+    /// one answer. With another viewer attached, that viewer has the raw
+    /// chunk and answers it; the snapshot viewer's claim is dropped so it can
+    /// never suppress the real answer.
+    pub fn snapshot_through(&self) -> u64 {
+        lock(&self.credit).snapshot_through
+    }
+
     /// Frees credit acknowledged by `up_to`.
     pub fn ack(&self, up_to: u64) {
         let mut credit = lock(&self.credit);
@@ -207,6 +219,12 @@ pub struct Credit {
     bytes: usize,
     /// Latest output position sent to this viewer.
     sent_through: u64,
+    /// Last output position folded into a snapshot this viewer was handed.
+    ///
+    /// Positions at or below this were never parsed raw by this viewer, so a
+    /// claim naming one cannot be trusted from a viewer there is any other
+    /// parser for; see [`Viewer::snapshot_through`].
+    snapshot_through: u64,
     /// Highest position the viewer acknowledged.
     ///
     /// An ack can overtake the send that records the same chunk, so this also
@@ -219,6 +237,7 @@ impl Credit {
     /// parser restarts at the next raw chunk.
     fn snapshot_at(&mut self, seq: u64) {
         self.sent_through = self.sent_through.max(seq);
+        self.snapshot_through = self.snapshot_through.max(seq);
     }
 }
 
@@ -651,7 +670,11 @@ impl Session {
     /// forgotten, is dropped. The identity is a property of the output stream,
     /// so a viewer that stalled for a while names answers exactly as one that
     /// kept up. A position the daemon never sent to that viewer is ignored, so
-    /// a bogus claim cannot suppress a real answer.
+    /// a bogus claim cannot suppress a real answer. So is a position at or
+    /// below the viewer's snapshot (a chunk it never parsed raw) while another
+    /// viewer has output; a viewer with no other parser to fall back on may
+    /// still answer it, because xterm can complete the query with the
+    /// snapshot's own bytes.
     ///
     /// The acceptance decision, the PTY write and the record update happen
     /// under the same writer lock: two connections cannot be accepted in one
@@ -869,7 +892,17 @@ fn accepts_reply(
     reply: QueryReply,
 ) -> Option<AcceptedReply> {
     let latest = viewer.sent_through();
+    let snapshot = viewer.snapshot_through();
     let viewers = lock(viewers);
+    // Only a viewer with no other parser to fall back on may answer a query
+    // that started inside its own snapshot. xterm can complete such a query
+    // with the snapshot's leading bytes, but the chunk was never parsed raw
+    // here, so with anyone else able to answer that other viewer names it and
+    // must be the one written. A viewer still attaching has received nothing
+    // (no snapshot, no output) and therefore cannot answer either.
+    let sole_viewer = viewers
+        .iter()
+        .all(|(id, entry)| *id == viewer_id || entry.viewer.sent_through() == 0);
     // Mixed versions are decided when each client attaches, not by whichever
     // reply happens to arrive first. While any attached viewer cannot name a
     // position, every reply follows the legacy single-owner rule: the first
@@ -889,7 +922,7 @@ fn accepts_reply(
         let answer = match reply {
             QueryReply::No | QueryReply::Unpositioned => None,
             QueryReply::At { position, ordinal } => {
-                if !accept_position(answers, position, ordinal, latest) {
+                if !accept_position(answers, position, ordinal, latest, snapshot, sole_viewer) {
                     return None;
                 }
                 Some((position, ordinal))
@@ -912,7 +945,7 @@ fn accepts_reply(
         // a query another viewer already answered.
         QueryReply::Unpositioned => None,
         QueryReply::At { position, ordinal } => {
-            if !accept_position(answers, position, ordinal, latest) {
+            if !accept_position(answers, position, ordinal, latest, snapshot, sole_viewer) {
                 return None;
             }
             Some(AcceptedReply {
@@ -931,24 +964,32 @@ fn clear_legacy_owners(viewers: &mut HashMap<ViewerId, ViewerEntry>) {
     }
 }
 
-/// Records an answer for `(position, ordinal)` if it is new.
+/// Records an answer for `(position, ordinal)` if this viewer may name it.
 ///
 /// The identity comes from the output stream, not from the viewer: `position`
 /// is the chunk that carried the query's first byte and `ordinal` counts
 /// queries that start in that chunk, so every viewer that parsed that chunk
-/// names the same answer the same way. A viewer that attached with the
-/// query's first byte already folded into its snapshot never saw the query
-/// and cannot answer it. A reply naming output this viewer was never sent is
-/// still ignored, so a bogus claim cannot suppress a real answer. A rejected
-/// reply is dropped without advancing the record, so it cannot suppress the
-/// answer of a viewer that really saw the query.
+/// names the same answer the same way. A reply naming output this viewer was
+/// never sent is ignored, so a bogus claim cannot suppress a real answer. So is
+/// a reply naming a chunk that only arrived inside the viewer's snapshot
+/// (`position <= snapshot`): this viewer never parsed those bytes raw, so with
+/// another viewer attached that viewer is the one that saw the query. `sole`
+/// lifts that rule when no other parser is attached, because xterm can complete
+/// a query with the snapshot's bytes and the shell must still get one answer.
+/// A rejected reply is dropped without advancing the record, so it cannot
+/// suppress the answer of a viewer that really saw the query.
 fn accept_position(
     answers: &Mutex<AnsweredQueries>,
     position: u64,
     ordinal: u64,
     latest: u64,
+    snapshot: u64,
+    sole: bool,
 ) -> bool {
     if position == 0 || position > latest {
+        return false;
+    }
+    if position <= snapshot && !sole {
         return false;
     }
     // Checked here and recorded after the write (`commit_reply`); the writer
@@ -1449,21 +1490,32 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_advances_the_sent_bound_but_not_a_floor() {
+    fn a_snapshot_advances_the_sent_bound_and_the_snapshot_bound() {
         let (viewer, _rx) = viewer();
         viewer.reset_credit(0);
         assert_eq!(viewer.sent_through(), 0);
+        assert_eq!(viewer.snapshot_through(), 0);
         viewer.reset_credit(5);
         assert_eq!(
             viewer.sent_through(),
             5,
             "a snapshot at 5 is the latest position the viewer received"
         );
+        assert_eq!(
+            viewer.snapshot_through(),
+            5,
+            "chunks at or below 5 arrived only inside the snapshot"
+        );
         viewer.record_sent(6, 1);
         assert_eq!(
             viewer.sent_through(),
             6,
             "the first raw chunk after the snapshot is sendable and answerable"
+        );
+        assert_eq!(
+            viewer.snapshot_through(),
+            5,
+            "a raw chunk after the snapshot does not move the snapshot bound"
         );
     }
 

@@ -405,20 +405,21 @@ describe("terminal controller query replies", () => {
     controller.dispose();
   });
 
-  it("forgets a sequence the chunk before a resync snapshot left open", async () => {
+  it("cancels an open sequence with the snapshot's leading escape", async () => {
     const sent: BinaryFrame[] = [];
     const { controller, term, binary } = await startController(sent, 0);
 
-    // Chunk 4 ends in the middle of a mode query. The resync snapshot
-    // replaces the screen and restarts the parser, so that tail is gone.
+    // Chunk 4 ends in the middle of a mode query. xterm's `reset()` keeps its
+    // parser, so it is still inside that CSI when the snapshot is written; the
+    // snapshot's real leading `ESC[0m` starts a new escape and cancels it.
     pushOutput(binary, 4, "\x1b[?25");
     term.finishWrite();
-    pushSnapshot(binary, 5);
+    pushSnapshot(binary, 5, "\x1b[0m\x1b[H");
     term.finishWrite();
 
     // Chunk 6 begins with bytes that would have completed the stale query,
     // then asks a real one. The answer names chunk 6, where the live query
-    // starts, not chunk 4, whose query no longer exists.
+    // starts, not chunk 4, whose query xterm abandoned at the snapshot.
     pushOutput(binary, 6, "$p\x1b[?25$p");
     expect(term.query({ prefix: "?", intermediates: "$", final: "p" }, [25])).toBe(false);
     term.input("\x1b[?25;2$y");

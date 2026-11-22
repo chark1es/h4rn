@@ -795,21 +795,39 @@ All notable changes to h4rn are recorded here. The format follows
   runs on decoded code points with one streaming UTF-8 decoder, so the C1 controls work as they do
   in xterm (U+009B CSI, U+0090 DCS, U+009D OSC, U+0098/9E/9F strings, U+009C ST, and the rest back to
   ground) and a 0x9c byte inside a multi-byte character is never mistaken for ST, even when the
-  character spans two chunks. A resync snapshot clears the scanner with the screen only when the
+  character spans two chunks. A code point split inside its UTF-8 bytes is named by the chunk that
+  carried its lead byte, so a C1 opener sent as `C2` | `9B` belongs to the chunk with `C2` even
+  though xterm only decodes it when `9B` arrives, and invalid bytes are discarded exactly as xterm
+  discards them (a wrong continuation drops the sequence; no replacement character is invented), so
+  a malformed payload cannot stop a carried query from matching its hook. An OSC identifier counts
+  only when every character before the first `;` is an ASCII digit, as xterm's `OscParser` aborts
+  `10x`, ` 10` and `+10` at the first non-digit. `term.reset()` keeps xterm's escape parser and
+  UTF-8 decoder, so a resync snapshot continues a sequence or character that was open before it: a
+  chunk that ends inside `OSC 10;?` or `DCS $ q m` is completed by the snapshot's leading bytes and
+  keeps the chunk that carried its first byte, the same identity the viewer that saw that chunk raw
+  gives it. Only the record of queries from before the snapshot is cleared, and only when the
   snapshot chunk really starts parsing: xterm's write buffer parses later, so an output chunk applied
-  just before the snapshot still names its answers by its own chunk. A viewer that stalled before a
+  just before the snapshot still names its answers by its own chunk, and ordinals for a chunk this
+  viewer already parsed survive so a query completed by the snapshot keeps its place. A viewer that
+  stalled before a
   chunk and caught up
   later therefore cannot write a second answer for a query another viewer answered in the meantime.
   Only exact duplicates and positions at or below the evicted high-water mark are dropped; a reply
   for an older position that has not been answered yet is accepted, because it can only rescue a
   pending query. A reply naming output the daemon never sent to that viewer is ignored, so a bogus
   position cannot suppress a real answer, and acceptance and the PTY write happen under one lock so
-  accepted replies cannot reach the shell out of order. The old per-viewer attach floor is gone,
-  because there is no chunk-local numbering left for it to protect: a sole or resynced viewer
-  answers its first raw chunk, and so does a positioned viewer in mixed-version mode after a
-  resync. The sent bound advances only when a frame is really handed to the outbound channel, so a
-  blocked send cannot let a reply name unseen output, and an ack past that bound is clamped, so a
-  stale or bogus acknowledgement cannot mark later chunks free. Clients declare reply-position
+  accepted replies cannot reach the shell out of order. A viewer may claim only a chunk it parsed as
+  raw output, above the last chunk folded into a snapshot it was handed; a claim on the snapshot
+  chunk itself is dropped while another viewer has output, because that viewer has the raw bytes
+  and answers the query. A viewer with no other parser to fall back on may still answer such a
+  query (xterm completes it with the snapshot's bytes), so the shell is never left without an
+  answer. The old per-viewer
+  attach floor is gone, because there is no chunk-local numbering left for it to protect: a sole or
+  resynced viewer answers its first raw chunk, and so does a positioned viewer in mixed-version mode
+  after a resync. The sent bound advances only when a frame is really handed to the outbound
+  channel, so a blocked send cannot let a reply name unseen output, and an ack past that bound is
+  clamped, so a stale or bogus acknowledgement cannot mark later chunks free. Clients declare
+  reply-position
   support when they attach with `reply_positions_v2`; the new field exists because the numbering
   changed from the ending chunk to the starting chunk, so a client that only sends the old flag is
   treated as legacy rather than having its numbers trusted. While any attached viewer does not

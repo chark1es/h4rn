@@ -1229,6 +1229,109 @@ async fn a_sole_viewer_that_attached_at_a_snapshot_answers_its_first_chunk() {
     drop(cwd);
 }
 
+/// A viewer never parsed the chunk its snapshot replaced raw. xterm can still
+/// report a query that the snapshot's leading escape completed, so the viewer
+/// may name that chunk; but with another viewer attached holding the raw
+/// chunk, only that viewer's answer is real. The snapshot claim is dropped and
+/// never suppresses it.
+#[tokio::test]
+async fn a_snapshot_chunk_claim_is_dropped_when_another_viewer_can_answer() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (raw_id, mut raw_rx, raw) = attach_viewer(&manager, &terminal, true);
+    // The raw viewer saw chunk 5 as output.
+    mark_sent(&raw, 5);
+    let (snapshot_id, _snapshot_rx, snapshot) = attach_viewer(&manager, &terminal, false);
+    // This viewer attached with chunk 5 already folded into its snapshot.
+    snapshot.viewer.reset_credit(5);
+    mark_sent(&snapshot, 5);
+
+    manager
+        .input_by_stream(terminal.stream_id, snapshot_id, b"iSNAPSHOT", at(5, 0))
+        .expect("a snapshot-chunk claim is dropped without failing the connection");
+    manager
+        .input_by_stream(terminal.stream_id, raw_id, b"iRAW", at(5, 0))
+        .expect("the viewer that parsed the chunk raw answers it");
+    manager
+        .input_by_stream(terminal.stream_id, raw_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut raw_rx,
+        &manager,
+        &terminal.terminal_id,
+        raw_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches("iRAW").count(),
+        1,
+        "the raw viewer's answer is written exactly once: {output:?}"
+    );
+    assert!(
+        !output.contains("iSNAPSHOT"),
+        "a claim for a chunk the snapshot replaced cannot suppress the real answer: {output:?}"
+    );
+
+    drop(raw);
+    drop(snapshot);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
+}
+
+/// With no other parser attached, the snapshot viewer is the only one that can
+/// answer a query whose start the snapshot replaced, so its claim on the
+/// snapshot chunk itself is written. The shell is never left unanswered.
+#[tokio::test]
+async fn a_sole_viewer_answers_a_query_the_snapshot_completed() {
+    let (manager, terminal, cwd) = raw_cat_terminal().await;
+    let (viewer_id, mut rx, attached) = attach_viewer(&manager, &terminal, true);
+    // The snapshot covers chunk 5. xterm completes a query that started in
+    // that chunk with the snapshot's leading bytes, naming it (5, 0).
+    attached.viewer.reset_credit(5);
+    mark_sent(&attached, 5);
+
+    // A second viewer is registered but still taking its attach snapshot: it
+    // has no output and cannot answer, so it must not make the ready viewer a
+    // non-sole one and leave the query unanswered.
+    let attaching_id = manager.next_viewer_id();
+    let (attaching_tx, _attaching_rx) = mpsc::channel::<Outbound>(4);
+    attached.session.add_viewer(
+        attaching_id,
+        80,
+        24,
+        true,
+        Arc::new(Viewer::new(attaching_tx)),
+    );
+
+    manager
+        .input_by_stream(terminal.stream_id, viewer_id, b"iSNAPSHOT", at(5, 0))
+        .expect("the sole viewer answers the query its snapshot completed");
+    manager
+        .input_by_stream(terminal.stream_id, viewer_id, b"iHELLO", QueryReply::No)
+        .expect("typed input");
+
+    let output = read_until(
+        &mut rx,
+        &manager,
+        &terminal.terminal_id,
+        viewer_id,
+        |output| output.contains("iHELLO"),
+    )
+    .await;
+    assert_eq!(
+        output.matches("iSNAPSHOT").count(),
+        1,
+        "a sole viewer's snapshot answer reaches the shell once: {output:?}"
+    );
+
+    drop(attached);
+    manager.close(&terminal.terminal_id).await.expect("close");
+    manager.shutdown().await;
+    drop(cwd);
+}
+
 /// A viewer that is registered but has not been handed its attach snapshot
 /// yet has received nothing, so it cannot answer and must not hold back the
 /// viewer that can.

@@ -427,13 +427,17 @@ export class TerminalController {
       if (frame.seq <= this.tracker.position) return;
       term.reset();
       this.tracker.reset(frame.seq);
-      // The snapshot replaces the screen, so a sequence left open before it can
-      // never complete. The clear waits for the snapshot chunk to start
-      // parsing: xterm parses queued writes later, and an output chunk applied
-      // just before this snapshot must still name its answers by its own seq.
+      // xterm's reset keeps its parser state and its UTF-8 decoder, so the
+      // snapshot's bytes continue an escape or a split character that was
+      // open before it; the tracker keeps the same state. The clear waits for
+      // the snapshot chunk to start parsing: xterm parses queued writes later,
+      // and an output chunk applied just before this snapshot must still name
+      // its answers by its own seq.
       this.queryTracker.resetAt(frame.seq);
       this.queryTracker.beginChunk(frame.seq, frame.payload);
-      term.write(new TextDecoder().decode(frame.payload), () => {
+      // Snapshot bytes go to xterm as bytes, not through a fresh decoder, so a
+      // character split across the boundary reaches the parser whole.
+      term.write(frame.payload, () => {
         this.queryTracker.endChunk();
         this.scheduleAck();
       });

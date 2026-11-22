@@ -181,27 +181,49 @@ and CAN and SUB cancel back to ground. The C0 controls that xterm executes (0x00
 0x1c–0x1f) execute in place inside escape, CSI and DCS entry/parameter states: they are not
 appended to the parameters and do not change state, so a `CR`, `LF` or `BEL` between a query's
 bytes cannot corrupt its signature. DEL is ignored inside those sequences. The scan runs on decoded
-code points, not raw bytes, and keeps one streaming UTF-8 decoder across chunks: U+009B starts a
-CSI, U+0090 a DCS, U+009D an OSC, U+0098/U+009E/U+009F a string, U+009C is ST, and the other C1
-controls return to ground. A 0x9c byte inside a multi-byte character is therefore data, never a
-string terminator, even when its lead byte arrived in the previous chunk. A sequence xterm threw
-away is never matched against a later hook. A resync snapshot clears the scanner together with
-the screen, but not until the snapshot chunk is actually parsed: xterm's `WriteBuffer` schedules
-writes, so an output chunk applied just before the snapshot may still be waiting. Its query keeps
-the chunk that carried it, and only when the snapshot starts parsing are the earlier queries,
-ordinals and open sequence forgotten. The
+code points, not raw bytes, and keeps one streaming UTF-8 decoder across chunks, following xterm's
+decoder byte for byte: a wrong continuation discards the sequence and reprocesses the byte from
+ground, and an overlong, surrogate, BOM or out-of-range code point produces no code point at all
+(never a replacement character, which would corrupt an OSC/DCS payload). U+009B starts a CSI,
+U+0090 a DCS, U+009D an OSC, U+0098/U+009E/U+009F a string, U+009C is ST, and the other C1 controls
+return to ground. A 0x9c byte inside a multi-byte character is therefore data, never a string
+terminator, even when its lead byte arrived in the previous chunk. A split character is named by the
+chunk that carried its **first** byte, so a C1 opener sent as `C2` | `9B` belongs to the chunk with
+`C2` even though xterm only decodes the code point when `9B` arrives. A sequence xterm threw away is
+never matched against a later hook. An OSC identifier is accepted only when every character before
+the first `;` is an ASCII digit and there is at least one: xterm's `OscParser` aborts the whole
+command at the first non-digit, so `10x`, ` 10` and `+10` are not `10` and cannot capture a later
+query.
+
+`term.reset()` resets the screen but not xterm's escape parser or its UTF-8 decoder, so the tracker
+keeps both across a snapshot. A chunk that ends inside an OSC or DCS query is completed by the
+snapshot's leading bytes (`ESC[0m` ends the OSC, an `ESC` ends the DCS) and keeps the chunk that
+carried its first byte, exactly as the viewer that saw that chunk raw names it; a character split
+across the boundary stays whole. Only the record of queries from before the snapshot is cleared, and
+only when the snapshot chunk actually starts parsing: xterm's `WriteBuffer` schedules writes, so an
+output chunk applied just before the snapshot may still be waiting. Its query keeps the chunk that
+carried it. Ordinals for a chunk this viewer already parsed survive the snapshot, because the
+snapshot does not unsee those queries; a query whose terminator only arrives in the snapshot keeps
+its place after them, so it names the same `(position, ordinal)` pair as another viewer's. The
 daemon writes the first reply naming a `(position, ordinal)` pair, from any viewer; only exact
 duplicates and positions at or below the evicted high-water mark are dropped. A reply for an older
 position that has not been answered yet is accepted, because it can only rescue a pending query. A
 reply naming a position the daemon never sent to that viewer is ignored and leaves the record
 untouched, so a bogus claim cannot suppress a real answer.
 
-Because the identity comes from the stream, there is no attach floor and no sole-viewer exception:
-a viewer may answer any chunk it was sent, and a query whose first byte was already folded into its
-attach snapshot never reaches its parser, so that viewer has nothing to name. A viewer that stalled
-before a chunk and catches up later therefore names the answers exactly as a viewer that kept up
-does: the query it missed stays unseen, and the queries it saw are written once between them, in
-arrival order. The old per-viewer floor guarded chunk-local numbering, and that numbering is gone.
+The identity comes from the output stream, so the position a viewer may claim is the output it
+parsed as raw bytes: anything above the last chunk folded into a snapshot it was handed. Positions
+at or below that snapshot (`snapshot_through`) reached it only as rendered state, never as that
+chunk's bytes, so its claim is dropped whenever any other viewer has received output: that viewer has
+the raw chunk and answers the query, while one still taking its attach snapshot has received nothing
+and cannot answer. A viewer that stalled before a chunk and catches up later therefore
+names the answers exactly as a viewer that kept up does: the query it missed stays unseen, and the
+queries it saw are written once between them, in arrival order. The one exception is a viewer with
+no other parser to fall back on: xterm can complete a query with the snapshot's leading bytes, and
+with nobody else able to answer it its claim on the snapshot chunk itself is written and the shell
+is never left without an answer. The old per-viewer attach floor guarded chunk-local
+numbering, and that numbering is gone; this snapshot bound is about which bytes the viewer actually
+parsed.
 
 Clients declare reply-position support in the attach request with `reply_positions_v2` (default
 false). The field is new rather than the first `reply_positions` flag because the numbering changed
