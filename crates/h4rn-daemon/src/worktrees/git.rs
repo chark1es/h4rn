@@ -1718,16 +1718,25 @@ fn mode_support(admin: &Path) -> (bool, bool) {
     {
         return *found;
     }
-    let found = probe_mode_support(admin);
-    cache
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(admin.to_path_buf(), found);
+    let (exec, symlinks) = probe_mode_support(admin);
+    // Only a probe that established both answers is cached. An inconclusive
+    // one (a read-only admin dir, a full disk) is answered as "supported" so
+    // the comparison is forced, and is asked again next time: a transient
+    // failure must never become a lasting "unsupported".
+    let found = (exec.unwrap_or(true), symlinks.unwrap_or(true));
+    if exec.is_some() && symlinks.is_some() {
+        cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(admin.to_path_buf(), found);
+    }
     found
 }
 
+/// Probes executable bits and symlinks in `admin`. `None` means the probe
+/// could not establish the answer.
 #[cfg(unix)]
-fn probe_mode_support(admin: &Path) -> (bool, bool) {
+fn probe_mode_support(admin: &Path) -> (Option<bool>, Option<bool>) {
     use std::os::unix::fs::PermissionsExt;
     let stamp = format!(
         "{}-{}",
@@ -1738,22 +1747,27 @@ fn probe_mode_support(admin: &Path) -> (bool, bool) {
             .unwrap_or_default()
     );
     let file = admin.join(format!("h4rn-mode-probe-{stamp}"));
-    let exec = (|| -> std::io::Result<bool> {
-        std::fs::write(&file, b"")?;
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644))?;
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))?;
-        let mode = std::fs::metadata(&file)?.permissions().mode();
-        Ok(mode & 0o111 != 0)
-    })()
-    .unwrap_or(true);
+    let wrote_file = std::fs::write(&file, b"").is_ok();
+    let exec = wrote_file
+        .then(|| -> std::io::Result<bool> {
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644))?;
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755))?;
+            let mode = std::fs::metadata(&file)?.permissions().mode();
+            Ok(mode & 0o111 != 0)
+        })
+        .and_then(Result::ok);
     let _ = std::fs::remove_file(&file);
     let link = admin.join(format!("h4rn-link-probe-{stamp}"));
-    let symlinks = std::os::unix::fs::symlink("h4rn-probe-target", &link).is_ok()
-        && link
-            .symlink_metadata()
-            .is_ok_and(|meta| meta.file_type().is_symlink());
-    // A probe that could not even create its file proves nothing either way.
-    let symlinks = symlinks || !admin.is_dir();
+    let symlinks = match std::os::unix::fs::symlink("h4rn-probe-target", &link) {
+        Ok(()) => Some(
+            link.symlink_metadata()
+                .is_ok_and(|meta| meta.file_type().is_symlink()),
+        ),
+        // The filesystem demonstrably takes files here but not symlinks.
+        Err(_) if wrote_file => Some(false),
+        // Could not even write a file: proves nothing about symlinks.
+        Err(_) => None,
+    };
     let _ = std::fs::remove_file(&link);
     (exec, symlinks)
 }

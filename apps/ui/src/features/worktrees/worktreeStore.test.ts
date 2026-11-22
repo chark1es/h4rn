@@ -578,6 +578,11 @@ describe("splitMiddlePath", () => {
 
   it("does not cut into a UNC prefix or a short path", () => {
     expect(splitMiddlePath("\\\\server\\share")).toEqual(["\\\\server\\share", ""]);
+    expect(splitMiddlePath("\\\\server\\share\\worktree")).toEqual([
+      "\\\\server\\share\\worktree",
+      "",
+    ]);
+    expect(splitMiddlePath("\\\\server\\share\\a\\b")).toEqual(["\\\\server\\share", "\\a\\b"]);
     expect(splitMiddlePath("wt")).toEqual(["wt", ""]);
   });
 });

@@ -439,8 +439,9 @@ export function splitMiddlePath(shown: string): [string, string] {
   for (let index = 0; index < shown.length; index += 1) {
     if (shown[index] === "/" || shown[index] === "\\") separators.push(index);
   }
-  // A UNC path's two leading separators belong to its prefix.
-  const floor = shown.startsWith("\\\\") ? 2 : 1;
+  // A UNC path's `\\server\share` prefix is never cut: the earliest cut is
+  // the separator that ends the share name.
+  const floor = shown.startsWith("\\\\") ? (separators[3] ?? Number.POSITIVE_INFINITY) : 1;
   const cut = separators.length >= 2 ? (separators.at(-2) ?? -1) : -1;
   if (cut < floor) return [shown, ""];
   return [shown.slice(0, cut), shown.slice(cut)];

@@ -522,8 +522,11 @@ selection does no filesystem work at all.
   forced; otherwise h4rn probes like `git init` does — a scratch file and a
   scratch symlink in the admin dir (git's own directory on the same
   filesystem, never the working tree), cached per admin dir — and forces each
-  setting the filesystem supports. A probe that cannot run forces both (over-
-  reporting skips). A filesystem that genuinely lacks the feature keeps git's
+  setting the filesystem supports. Symlinks count as unsupported only when the
+  scratch file could be written but the symlink could not; anything
+  inconclusive (a read-only admin dir, a full disk) forces the comparison and
+  is not cached, so a transient failure never becomes a lasting
+  "unsupported" (over-reporting skips). A filesystem that genuinely lacks the feature keeps git's
   `false`, so ordinary clears still work there. On Windows there is no stable
   volume id, so `core.symlinks=true` is always forced and `core.fileMode` keeps
   git's probe (Windows filesystems have no executable bits).
@@ -539,7 +542,8 @@ selection does no filesystem work at all.
   hiding every untracked file). The subagent result card's `git status` uses the
   same overrides, including the mode checks above, with `-z
   --untracked-files=normal --ignore-submodules=none` (paths exactly as stored,
-  a non-UTF-8 name shown with `\xNN` escapes;
+  a non-UTF-8 name shown with `\xNN` escapes and a literal backslash in a
+  valid name doubled, so the two can never collide;
   an untracked directory is one row, so a child's build output cannot flood the
   card), bounded at 30 seconds and off the async runtime. The subagent
   worktree's own cleanup (`worktree remove`, `prune`, `branch -D`) has the same

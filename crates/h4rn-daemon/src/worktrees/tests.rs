@@ -5884,3 +5884,58 @@ fn a_separate_upper_case_git_dir_at_the_root_is_another_checkout() {
     );
     assert!(host.join(".GIT").is_dir());
 }
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_replaced_by_a_file_is_kept_where_the_filesystem_supports_it() {
+    // Same filesystem, `core.symlinks=false` set by hand: the probe finds
+    // symlinks supported, so the type change counts.
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-own-symlinks", "own-symlinks-branch");
+    std::os::unix::fs::symlink("README.md", linked.join("link")).expect("symlink");
+    run(&linked, &["add", "link"]);
+    run(&linked, &["commit", "-q", "-m", "a symlink"]);
+    run(&linked, &["config", "core.symlinks", "false"]);
+    std::fs::remove_file(linked.join("link")).expect("remove symlink");
+    std::fs::write(linked.join("link"), "README.md").expect("plain file");
+    let target = entry(&linked, &fixture.repo, Some("own-symlinks-branch"), false);
+    assert_eq!(
+        clear_one(&target, false, &fixture.data_dir())
+            .err()
+            .as_deref(),
+        Some("has uncommitted changes")
+    );
+    assert!(linked.join("link").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn an_inconclusive_mode_probe_forces_both_comparisons_and_is_not_cached() {
+    use std::os::unix::fs::PermissionsExt;
+    let fixture = Fixture::new();
+    let linked = fixture.add_worktree("wt-readonly-admin", "readonly-admin-branch");
+    let admin =
+        PathBuf::from(git::run(&linked, ["rev-parse", "--absolute-git-dir"]).expect("admin dir"));
+    let original = std::fs::metadata(&admin).expect("admin").permissions();
+    std::fs::set_permissions(&admin, std::fs::Permissions::from_mode(0o555)).expect("read-only");
+    // Root can write anyway; then the probe is conclusive and this premise
+    // does not hold.
+    let writable = std::fs::write(admin.join("h4rn-write-check"), b"").is_ok();
+    let _ = std::fs::remove_file(admin.join("h4rn-write-check"));
+    let read_only = git::mode_config(&linked).to_vec();
+    std::fs::set_permissions(&admin, original).expect("restore");
+    if writable {
+        return;
+    }
+    assert_eq!(
+        read_only,
+        ["-c", "core.fileMode=true", "-c", "core.symlinks=true"],
+        "an inconclusive probe forces both"
+    );
+    // Not cached as "unsupported": once writable, the real answer is found
+    // (this filesystem supports both).
+    assert_eq!(
+        git::mode_config(&linked),
+        ["-c", "core.fileMode=true", "-c", "core.symlinks=true"]
+    );
+}

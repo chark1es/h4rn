@@ -129,10 +129,11 @@ fn parse_porcelain_z(output: &[u8]) -> Vec<SubagentFileChange> {
             continue;
         }
         let status = String::from_utf8_lossy(&field[..2]).trim().to_owned();
-        // Valid UTF-8 verbatim; anything else escaped (`\xNN`) rather than
-        // replaced, so two distinct non-UTF-8 names stay distinct.
+        // Valid UTF-8 kept readable with only `\` escaped (as `\\`); invalid
+        // bytes escaped as `\xNN`. Backslash is escaped on both sides, so a
+        // literal `\xff` in a valid name and a raw 0xFF byte stay distinct.
         let path = match std::str::from_utf8(&field[3..]) {
-            Ok(path) => path.to_owned(),
+            Ok(path) => path.replace('\\', "\\\\"),
             Err(_) => field[3..].escape_ascii().to_string(),
         };
         if status.starts_with('R') || status.starts_with('C') {
@@ -187,6 +188,10 @@ mod tests {
         assert_eq!(distinct.len(), 2);
         assert_ne!(distinct[0].path, distinct[1].path);
         assert_eq!(distinct[0].path, "note-\\xff");
+        // A valid name containing the literal text `\xff` does not collide.
+        let literal = parse_porcelain_z(b"?? note-\\xff\0");
+        assert_eq!(literal[0].path, "note-\\\\xff");
+        assert_ne!(literal[0].path, distinct[0].path);
     }
 
     #[test]
