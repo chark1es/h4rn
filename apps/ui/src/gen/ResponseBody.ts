@@ -81,6 +81,15 @@ server_version: string,
  */
 device_id: DeviceId, 
 /**
+ * Connect machine id this daemon owns, when it is signed in.
+ *
+ * It comes from the daemon's own stored connect session, never from
+ * the connecting device's claim, so a client can treat it as the
+ * machine a direct socket actually reached. Absent for a signed-out
+ * daemon and for an older daemon that does not report it.
+ */
+daemon_machine_id: string | null, 
+/**
  * Host id of the machine this daemon runs on.
  *
  * Every daemon-scoped request that names a host (skills, the
