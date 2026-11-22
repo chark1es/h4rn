@@ -240,8 +240,12 @@ impl FsService {
     }
 
     /// Reads one file with size, binary and encoding detection.
+    ///
+    /// This is the editor's read on the plain loopback connection, which has
+    /// no transport frame limit: the documented 2 MiB editor limit is the only
+    /// bound.
     pub fn read(&self, workspace: &str, rel: &str) -> Result<FsFileContent, FsError> {
-        self.read_with(workspace, rel, false, None)
+        self.read_with(workspace, rel, false, None, None)
     }
 
     /// Reads one file, optionally including the raw bytes as base64.
@@ -249,22 +253,31 @@ impl FsService {
     /// The HTML preview asks for the bytes so it can inline a relative image
     /// or font as a `data:` URL. Text reads keep the previous shape, with
     /// `max_bytes` as an optional preview-sized cap instead of the editor's
-    /// full read limit; either way one response stays inside the secure
-    /// transport's frame.
+    /// full read limit.
+    ///
+    /// `frame_limit` is the transport frame bound for this session, when the
+    /// transport has one (the Noise link does; the plain loopback WebSocket
+    /// does not). A payload whose serialized size would exceed it comes back
+    /// typed instead of closing the session. A preview read (`max_bytes` set)
+    /// keeps the same check even on loopback: its cap is chosen for a secure
+    /// frame, and the response shape should not depend on which transport
+    /// happened to answer.
     pub fn read_with(
         &self,
         workspace: &str,
         rel: &str,
         bytes_base64: bool,
         max_bytes: Option<u64>,
+        frame_limit: Option<usize>,
     ) -> Result<FsFileContent, FsError> {
+        let enforce_frame = frame_limit.is_some() || max_bytes.is_some();
+        let frame_limit = frame_limit.unwrap_or(MAX_RESPONSE_BYTES);
         let root = self.workspace(workspace)?;
         let path = resolve_inside(&root, rel, ResolveMode::Existing)?;
         if !path.is_file() {
             return Err(FsError::Invalid(format!("{rel:?} is not a file")));
         }
         let metadata = fs::metadata(&path).map_err(|error| FsError::Io(error.to_string()))?;
-        let size = metadata.len();
         let modified_at = metadata.modified().ok().map(to_utc);
         let rel_path = relative_of(&root, &path);
 
@@ -283,16 +296,20 @@ impl FsService {
             text_cap
         };
         let bytes = read_bounded(&path, cap)?;
-        let read_size = bytes.len() as u64;
-        let reported_size = size.max(read_size);
+        // The size the response reports is the number of bytes the read
+        // actually delivered, not the metadata sampled before it: a file that
+        // shrank in between must not be described by its stale size.
+        let delivered_size = bytes.len() as u64;
+        // `read_bounded` always stops at `cap + 1`, so an omitted payload can
+        // only promise "at least this many bytes".
 
-        if bytes_base64 && read_size > cap {
+        if bytes_base64 && delivered_size > cap {
             return Ok(FsFileContent {
                 path: rel_path,
                 content: None,
                 etag: None,
                 encoding: "unknown".into(),
-                size_bytes: reported_size,
+                size_bytes: delivered_size,
                 binary: false,
                 truncated: false,
                 bytes_base64: None,
@@ -300,20 +317,20 @@ impl FsService {
                 content_omitted: None,
                 modified_at,
                 hint: Some(format!(
-                    "This asset is {}; the preview embeds assets up to {}, so it was skipped.",
-                    kibibytes(reported_size),
+                    "This asset is at least {}; the preview embeds assets up to {}, so it was skipped.",
+                    kibibytes(delivered_size),
                     kibibytes(MAX_INLINE_BYTES)
                 )),
             });
         }
 
-        if !bytes_base64 && read_size > cap {
+        if !bytes_base64 && delivered_size > cap {
             return Ok(FsFileContent {
                 path: rel_path,
                 content: None,
                 etag: None,
                 encoding: "unknown".into(),
-                size_bytes: reported_size,
+                size_bytes: delivered_size,
                 binary: false,
                 truncated: !preview_read,
                 bytes_base64: None,
@@ -322,14 +339,14 @@ impl FsService {
                 modified_at,
                 hint: Some(if preview_read {
                     format!(
-                        "This file is {}; a preview reads at most {} of text so one response fits a transport frame.",
-                        kibibytes(reported_size),
+                        "This file is at least {}; a preview reads at most {} of text so one response fits a transport frame.",
+                        kibibytes(delivered_size),
                         kibibytes(text_cap)
                     )
                 } else {
                     format!(
-                        "This file is {}; the editor refuses files over {}. Open it in a terminal instead.",
-                        kibibytes(reported_size),
+                        "This file is at least {}; the editor refuses files over {}. Open it in a terminal instead.",
+                        kibibytes(delivered_size),
                         kibibytes(MAX_READ_BYTES)
                     )
                 }),
@@ -350,13 +367,15 @@ impl FsService {
         if bytes_base64 {
             // The preview asked for the raw bytes. It does not also need the
             // decoded text, and sending both could push a text asset such as
-            // an SVG past one secure-transport frame.
-            return Ok(without_oversized_payload(FsFileContent {
+            // an SVG past one secure-transport frame. The per-response cap
+            // already keeps an ordinary asset inside one frame; the measured
+            // check only runs where a frame limit exists.
+            let file = FsFileContent {
                 path: rel_path,
                 content: None,
                 etag: Some(etag),
                 encoding,
-                size_bytes: read_size,
+                size_bytes: delivered_size,
                 binary: !has_text,
                 truncated: false,
                 bytes_base64: raw,
@@ -364,7 +383,12 @@ impl FsService {
                 content_omitted: None,
                 modified_at,
                 hint: None,
-            }));
+            };
+            return Ok(if !enforce_frame || file_fits_frame(&file, frame_limit) {
+                file
+            } else {
+                omit_file_payload(file)
+            });
         }
         match decoded {
             Some(decoded) => {
@@ -373,7 +397,7 @@ impl FsService {
                     content: Some(decoded.text),
                     etag: Some(etag),
                     encoding: decoded.encoding.into(),
-                    size_bytes: read_size,
+                    size_bytes: delivered_size,
                     binary: false,
                     truncated: false,
                     bytes_base64: None,
@@ -384,10 +408,12 @@ impl FsService {
                 };
                 // JSON escaping of quotes, backslashes, newlines and control
                 // characters can make the serialized response much larger than
-                // the file on disk. The transport closes the whole session on
-                // an oversized frame, so a payload that would not fit comes
-                // back typed instead.
-                Ok(if file_fits_one_frame(&file) {
+                // the file on disk. A secure transport closes the whole
+                // session on an oversized frame, so a payload that would not
+                // fit comes back typed instead. Editor reads on the plain
+                // loopback connection have no frame limit and keep the whole
+                // 2 MiB the editor documents.
+                Ok(if !enforce_frame || file_fits_frame(&file, frame_limit) {
                     file
                 } else {
                     FsFileContent {
@@ -404,7 +430,7 @@ impl FsService {
                 content: None,
                 etag: Some(etag),
                 encoding: "binary".into(),
-                size_bytes: read_size,
+                size_bytes: delivered_size,
                 binary: true,
                 truncated: false,
                 bytes_base64: None,
@@ -868,33 +894,60 @@ fn read_bounded(path: &Path, cap: u64) -> Result<Vec<u8>, FsError> {
 }
 
 /// Bytes the response envelope around one file payload adds at most.
-const FILE_RESPONSE_ENVELOPE_BYTES: usize = 256;
-
-/// Whether one file read fits inside one secure-transport frame.
 ///
-/// Measures the **serialized** payload, escaping included: a text read can be
-/// much larger on the wire than on disk when it is full of quotes, backslashes,
-/// newlines or control characters.
-pub fn file_fits_one_frame(file: &FsFileContent) -> bool {
-    // Escaping never shrinks a payload, so one that is already too large needs
-    // no serialization to know it cannot fit.
-    let raw = file.content.as_ref().map_or(0, String::len)
-        + file.bytes_base64.as_ref().map_or(0, String::len);
-    if raw + FILE_RESPONSE_ENVELOPE_BYTES > MAX_RESPONSE_BYTES {
-        return false;
-    }
-    serde_json::to_vec(file)
-        .map(|payload| payload.len() + FILE_RESPONSE_ENVELOPE_BYTES <= MAX_RESPONSE_BYTES)
-        .unwrap_or(false)
+/// This covers the field names, punctuation, flags and numbers of
+/// [`FsFileContent`] plus the `ResponseBody::FsFile` wrapper and the response
+/// frame around it (ids, the tag and its braces), with room to spare. Every
+/// string field is measured exactly; the reserved part never carries payload.
+const FILE_RESPONSE_ENVELOPE_BYTES: usize = 1024;
+
+/// Exact byte length of a string as `serde_json` writes it inside quotes.
+///
+/// serde_json escapes `"`, `\`, the five short control escapes and every other
+/// control character as `\u00XX`; it leaves `/`, DEL and non-ASCII text in
+/// their UTF-8 form. Measuring this way avoids serializing the whole response
+/// twice, once to decide whether it fits and once to send it.
+fn json_string_len(text: &str) -> usize {
+    text.chars()
+        .map(|ch| match ch {
+            '"' | '\\' | '\u{8}' | '\u{c}' | '\n' | '\r' | '\t' => 2,
+            ch if (ch as u32) < 0x20 => 6,
+            ch => ch.len_utf8(),
+        })
+        .sum()
 }
 
-/// Keeps a payload that fits one frame, or replaces it with the typed omission.
-fn without_oversized_payload(file: FsFileContent) -> FsFileContent {
-    if file_fits_one_frame(&file) {
-        file
-    } else {
-        omit_file_payload(file)
+/// Upper bound on the serialized size of one file payload.
+fn file_wire_len(file: &FsFileContent) -> usize {
+    let mut len = FILE_RESPONSE_ENVELOPE_BYTES + json_string_len(&file.path);
+    len += json_string_len(&file.encoding);
+    for text in [
+        file.etag.as_deref(),
+        file.content.as_deref(),
+        file.hint.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        len += json_string_len(text);
     }
+    len += file.bytes_base64.as_ref().map_or(0, String::len);
+    len
+}
+
+/// Whether one file read fits inside `limit` bytes of one transport frame.
+///
+/// Measures the payload's serialized size, escaping included: a text read can
+/// be much larger on the wire than on disk when it is full of quotes,
+/// backslashes, newlines or control characters. No serialization is needed, so
+/// a response is only ever serialized once, when it is sent.
+pub fn file_fits_frame(file: &FsFileContent, limit: usize) -> bool {
+    file_wire_len(file) <= limit
+}
+
+/// Whether one file read fits inside one secure-transport frame.
+pub fn file_fits_one_frame(file: &FsFileContent) -> bool {
+    file_fits_frame(file, MAX_RESPONSE_BYTES)
 }
 
 /// The typed result for a payload the transport could not carry in one frame.
@@ -909,7 +962,7 @@ pub fn omit_file_payload(file: FsFileContent) -> FsFileContent {
             bytes_base64: None,
             bytes_omitted: Some(FsOmitted::TooLarge),
             hint: Some(format!(
-                "This asset is {}; the preview embeds assets up to {}.",
+                "This asset is at least {}; the preview embeds assets up to {}.",
                 kibibytes(file.size_bytes),
                 kibibytes(MAX_INLINE_BYTES)
             )),

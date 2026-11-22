@@ -43,7 +43,7 @@ use tokio::task::JoinHandle;
 use crate::auth::{TokenStore, authorize};
 use crate::blobs::{BlobError, BlobStore, UploadOwner};
 use crate::forge::ForgeService;
-use crate::fs::{FsError, FsService, MAX_RESPONSE_BYTES, file_fits_one_frame, omit_file_payload};
+use crate::fs::{FsError, FsService, MAX_RESPONSE_BYTES, file_fits_frame, omit_file_payload};
 use crate::hosts::HostInventory;
 use crate::mcp::McpService;
 use crate::remote::{RemoteAudit, SessionOrigin};
@@ -478,6 +478,16 @@ impl Connection {
                     "Pair the device again",
                 )
             })
+    }
+
+    /// The transport frame bound for this session, when it has one.
+    ///
+    /// The plain WebSocket is loopback-only and has no frame bound of its own,
+    /// so a large listing or editor read is delivered whole. The Noise
+    /// transport closes a session whose frame is over its limit, so fs
+    /// responses on a secure session are kept inside one frame.
+    fn frame_limit(&self) -> Option<usize> {
+        self.origin.is_remote().then_some(MAX_RESPONSE_BYTES)
     }
 
     /// Records one remote action, if this session came from another device.
@@ -1058,8 +1068,9 @@ impl Connection {
                         return Some(error_frame(id, error));
                     }
                     let fs = Arc::clone(&self.state.fs);
+                    let frame_limit = self.frame_limit();
                     fs_block(fs, move |fs| {
-                        fs.read_with(&workspace, &path, bytes_base64, max_bytes)
+                        fs.read_with(&workspace, &path, bytes_base64, max_bytes, frame_limit)
                     })
                     .await
                     .map(|file| ResponseBody::FsFile { file })
@@ -1389,6 +1400,7 @@ impl Connection {
                             ResponseBody::Blob {
                                 download: download.clone(),
                             },
+                            self.frame_limit(),
                         );
                         if self.send(Outbound::Text(reply)).await.is_err() {
                             return None;
@@ -1416,7 +1428,7 @@ impl Connection {
         };
 
         Some(match result {
-            Ok(body) => response_frame(id, body),
+            Ok(body) => response_frame(id, body, self.frame_limit()),
             Err(error) => error_frame(id, error),
         })
     }
@@ -1628,33 +1640,26 @@ where
         .map_err(FsError::into_proto)
 }
 
-fn response_frame(id: u64, body: ResponseBody) -> String {
-    // No fs response may exceed one secure-transport frame: the transport
-    // answers an oversized frame with `FrameTooLarge` and closes the whole
-    // paired session. The read path already omits a payload it knows will not
-    // fit; this is the last guard for any response that still grew past it.
-    let body = match body {
-        ResponseBody::FsFile { file } if !file_fits_one_frame(&file) => ResponseBody::FsFile {
-            file: omit_file_payload(file),
-        },
-        body => body,
+fn response_frame(id: u64, body: ResponseBody, frame_limit: Option<usize>) -> String {
+    // Only a secure session has a frame limit, and only an fs response can
+    // carry a payload large enough to hit it. The read path already omits a
+    // payload it knows will not fit; this is the last guard for a body built
+    // or grown past that bound. A plain loopback WebSocket enforces nothing:
+    // its thread listings and 2 MiB editor reads are delivered whole.
+    let body = match (frame_limit, body) {
+        (Some(limit), ResponseBody::FsFile { file }) if !file_fits_frame(&file, limit) => {
+            ResponseBody::FsFile {
+                file: omit_file_payload(file),
+            }
+        }
+        (_, body) => body,
     };
-    let encoded = serde_json::to_string(&ServerFrame::Response {
+    // The response is serialized exactly once, when it is sent.
+    serde_json::to_string(&ServerFrame::Response {
         id,
         result: Ok(body),
     })
-    .unwrap_or_default();
-    if encoded.len() <= MAX_RESPONSE_BYTES {
-        return encoded;
-    }
-    error_frame(
-        id,
-        ProtoError::new(
-            ProtoErrorCode::InvalidRequest,
-            "this response is larger than one transport frame",
-            "Narrow the request: list a smaller folder, open a smaller file, or ask for one diff",
-        ),
-    )
+    .unwrap_or_default()
 }
 
 fn error_frame(id: u64, error: ProtoError) -> String {
@@ -1797,12 +1802,70 @@ mod tests {
         assert!(error.hint.unwrap().contains("mcp_list"));
     }
 
+    fn thread_summary_with_title(title: String) -> h4rn_protocol::ThreadSummary {
+        use h4rn_protocol::{AgentState, HarnessKind, HostId, ThreadId, ThreadSummary, ThreadTab};
+
+        ThreadSummary {
+            thread_id: ThreadId::new("th_large"),
+            parent_thread_id: None,
+            host: HostId::new("host_test"),
+            harness: HarnessKind::ClaudeCode,
+            title,
+            workspace_path: "/tmp/work".into(),
+            branch: None,
+            model: "test-model".into(),
+            tab: ThreadTab::Working,
+            placed_by_user: false,
+            pinned: false,
+            snoozed_until: None,
+            last_activity: chrono::Utc::now(),
+            agent_state: AgentState::Done,
+            usage: h4rn_protocol::Usage::default(),
+            ttft_ms: None,
+            context_window: None,
+            context_fill_percent: None,
+            needs_attention: false,
+            unread: false,
+            resume_at: None,
+            limit: None,
+        }
+    }
+
     #[test]
-    fn an_oversized_file_response_is_omitted_before_it_is_sent() {
+    fn a_large_thread_listing_is_delivered_whole_on_the_plain_path() {
+        use h4rn_protocol::ResponseBody;
+
+        // The plain WebSocket is loopback-only and has no frame bound, so a
+        // listing over the secure frame size must not be refused or truncated.
+        let summary = thread_summary_with_title("t".repeat(600 * 1024));
+        let frame = response_frame(
+            7,
+            ResponseBody::Threads {
+                threads: vec![summary],
+            },
+            None,
+        );
+        assert!(
+            frame.len() > h4rn_transport::DEFAULT_MAX_FRAME_BYTES,
+            "the listing is meant to exceed one secure frame"
+        );
+        let decoded: ServerFrame = serde_json::from_str(&frame).expect("valid frame");
+        match decoded {
+            ServerFrame::Response {
+                id: 7,
+                result: Ok(ResponseBody::Threads { threads }),
+            } => assert_eq!(threads[0].title.len(), 600 * 1024),
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_oversized_file_response_is_omitted_on_a_secure_session() {
         use h4rn_protocol::{FsFileContent, FsOmitted, ResponseBody};
 
         // A response built outside the read path (or one that escaped the
-        // service's own bound) must still never reach the transport oversized.
+        // service's own bound) must still never reach the secure transport
+        // oversized: `FrameTooLarge` closes the whole paired session.
         let file = FsFileContent {
             path: "report.html".into(),
             content: Some("\"".repeat(400 * 1024)),
@@ -1817,7 +1880,7 @@ mod tests {
             modified_at: None,
             hint: None,
         };
-        let frame = response_frame(7, ResponseBody::FsFile { file });
+        let frame = response_frame(7, ResponseBody::FsFile { file }, Some(MAX_RESPONSE_BYTES));
         assert!(
             frame.len() <= MAX_RESPONSE_BYTES,
             "{} bytes is over the {} byte response bound",
@@ -1833,6 +1896,42 @@ mod tests {
                 assert_eq!(file.content_omitted, Some(FsOmitted::TooLarge));
                 assert!(file.content.is_none());
                 assert!(file.truncated);
+            }
+            other => panic!("unexpected frame: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_large_file_response_is_not_omitted_on_the_plain_path() {
+        use h4rn_protocol::{FsFileContent, ResponseBody};
+
+        // A 1 MiB editor read is inside the documented 2 MiB limit. With no
+        // transport frame bound there is nothing to omit it for.
+        let content = "a".repeat(1024 * 1024);
+        let file = FsFileContent {
+            path: "notes.txt".into(),
+            content: Some(content.clone()),
+            etag: Some("etag".into()),
+            encoding: "utf-8".into(),
+            size_bytes: content.len() as u64,
+            binary: false,
+            truncated: false,
+            bytes_base64: None,
+            bytes_omitted: None,
+            content_omitted: None,
+            modified_at: None,
+            hint: None,
+        };
+        let frame = response_frame(7, ResponseBody::FsFile { file }, None);
+        assert!(frame.len() > h4rn_transport::DEFAULT_MAX_FRAME_BYTES);
+        let decoded: ServerFrame = serde_json::from_str(&frame).expect("valid frame");
+        match decoded {
+            ServerFrame::Response {
+                id: 7,
+                result: Ok(ResponseBody::FsFile { file }),
+            } => {
+                assert!(file.content_omitted.is_none());
+                assert_eq!(file.content.as_deref(), Some(content.as_str()));
             }
             other => panic!("unexpected frame: {other:?}"),
         }

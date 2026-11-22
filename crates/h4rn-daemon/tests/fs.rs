@@ -125,7 +125,7 @@ fn read_returns_raw_bytes_only_when_asked() {
 
     let raw = fixture
         .service
-        .read_with(fixture.workspace(), "pixel.png", true, None)
+        .read_with(fixture.workspace(), "pixel.png", true, None, None)
         .expect("read as bytes");
     assert_eq!(raw.bytes_base64.as_deref(), Some("iVBORwD/"));
     assert!(raw.binary);
@@ -136,7 +136,7 @@ fn read_returns_raw_bytes_only_when_asked() {
     fixture.write("style.css", ".panel { color: red }");
     let css = fixture
         .service
-        .read_with(fixture.workspace(), "style.css", true, None)
+        .read_with(fixture.workspace(), "style.css", true, None, None)
         .expect("read css as bytes");
     assert!(css.content.is_none());
     assert!(!css.binary);
@@ -155,7 +155,13 @@ fn an_embedded_asset_fits_one_secure_frame() {
     fs::write(fixture.workspace.join("big.bin"), &bytes).expect("write asset");
     let read = fixture
         .service
-        .read_with(fixture.workspace(), "big.bin", true, None)
+        .read_with(
+            fixture.workspace(),
+            "big.bin",
+            true,
+            None,
+            Some(h4rn_daemon::fs::MAX_RESPONSE_BYTES),
+        )
         .expect("read as bytes");
     let base64 = read.bytes_base64.as_deref().expect("base64 present");
     assert_eq!(base64.len(), (MAX_INLINE_BYTES as usize).div_ceil(3) * 4);
@@ -177,7 +183,13 @@ fn an_embedded_asset_fits_one_secure_frame() {
     fs::write(fixture.workspace.join("too-big.bin"), &too_big).expect("write large asset");
     let skipped = fixture
         .service
-        .read_with(fixture.workspace(), "too-big.bin", true, None)
+        .read_with(
+            fixture.workspace(),
+            "too-big.bin",
+            true,
+            None,
+            Some(h4rn_daemon::fs::MAX_RESPONSE_BYTES),
+        )
         .expect("large assets are a result, not an error");
     assert_eq!(skipped.bytes_omitted, Some(FsOmitted::TooLarge));
     assert!(skipped.bytes_base64.is_none());
@@ -203,6 +215,7 @@ fn a_preview_text_read_fits_one_secure_frame() {
             "report.html",
             false,
             Some(PREVIEW_TEXT_BYTES),
+            Some(h4rn_daemon::fs::MAX_RESPONSE_BYTES),
         )
         .expect("read a bounded document");
     assert_eq!(read.content.as_deref(), Some(text.as_str()));
@@ -231,6 +244,7 @@ fn a_preview_text_read_fits_one_secure_frame() {
             "larger.html",
             false,
             Some(PREVIEW_TEXT_BYTES),
+            Some(h4rn_daemon::fs::MAX_RESPONSE_BYTES),
         )
         .expect("over-cap text is a result, not an error");
     assert_eq!(omitted.content_omitted, Some(FsOmitted::TooLarge));
@@ -263,7 +277,13 @@ fn a_preview_text_read_fits_one_secure_frame() {
         fixture.write(&file, &dense);
         let read = fixture
             .service
-            .read_with(fixture.workspace(), &file, false, Some(PREVIEW_TEXT_BYTES))
+            .read_with(
+                fixture.workspace(),
+                &file,
+                false,
+                Some(PREVIEW_TEXT_BYTES),
+                Some(h4rn_daemon::fs::MAX_RESPONSE_BYTES),
+            )
             .expect("escape-dense text is a result, not an error");
         assert_eq!(read.content_omitted, Some(FsOmitted::TooLarge), "{name}");
         assert!(read.content.is_none(), "{name}");
@@ -290,18 +310,41 @@ fn a_preview_text_read_fits_one_secure_frame() {
 }
 
 #[test]
-fn an_editor_text_read_that_cannot_fit_one_frame_is_typed() {
-    use h4rn_protocol::FsOmitted;
-
-    // Plain text under the editor's 2 MiB limit is still larger than one
-    // transport frame; the editor shows its "too large" notice instead of the
-    // session closing mid-response.
+fn an_editor_text_read_of_one_mebibyte_succeeds_on_loopback() {
+    // The plain loopback WebSocket has no transport frame bound: the editor's
+    // documented 2 MiB read limit is the only limit here.
     let fixture = Fixture::new();
     let text = "a".repeat(1024 * 1024);
     fixture.write("notes.txt", &text);
     let read = fixture
         .service
         .read(fixture.workspace(), "notes.txt")
+        .expect("a 1 MiB read on loopback");
+    assert_eq!(read.content.as_deref(), Some(text.as_str()));
+    assert!(read.content_omitted.is_none());
+    assert!(!read.truncated);
+    assert_eq!(read.size_bytes, 1024 * 1024);
+}
+
+#[test]
+fn an_editor_text_read_that_cannot_fit_one_frame_is_typed_on_a_secure_session() {
+    use h4rn_protocol::FsOmitted;
+
+    // Plain text under the editor's 2 MiB limit is still larger than one
+    // Noise frame; on a secure session the editor shows its "too large" notice
+    // instead of the session closing mid-response.
+    let fixture = Fixture::new();
+    let text = "a".repeat(1024 * 1024);
+    fixture.write("notes.txt", &text);
+    let read = fixture
+        .service
+        .read_with(
+            fixture.workspace(),
+            "notes.txt",
+            false,
+            None,
+            Some(h4rn_daemon::fs::MAX_RESPONSE_BYTES),
+        )
         .expect("an oversized response is a result, not an error");
     assert_eq!(read.content_omitted, Some(FsOmitted::TooLarge));
     assert!(read.content.is_none());
@@ -311,6 +354,35 @@ fn an_editor_text_read_that_cannot_fit_one_frame_is_typed() {
     assert!(hint.contains("1024 KiB"), "{hint}");
     assert!(hint.contains("512 KiB"), "{hint}");
     assert!(!hint.contains("MiB"), "one unit for size and limit: {hint}");
+}
+
+#[test]
+fn an_omitted_read_reports_the_bytes_it_actually_saw() {
+    // The pre-read metadata can be stale. A file that is larger than the read
+    // bound is described by the bytes the bounded read delivered, never by an
+    // older, larger size from before the read.
+    let fixture = Fixture::new();
+    let path = fixture.workspace.join("huge.txt");
+    let file = std::fs::File::create(&path).expect("create");
+    file.set_len(10 * 1024 * 1024).expect("sparse file");
+
+    const CAP: u64 = 400 * 1024;
+    let read = fixture
+        .service
+        .read_with(fixture.workspace(), "huge.txt", false, Some(CAP), None)
+        .expect("over-cap text is a result, not an error");
+    assert_eq!(
+        read.content_omitted,
+        Some(h4rn_protocol::FsOmitted::TooLarge)
+    );
+    assert_eq!(
+        read.size_bytes,
+        CAP + 1,
+        "the delivered bytes, not the 10 MiB metadata size"
+    );
+    let hint = read.hint.unwrap_or_default();
+    assert!(hint.contains("at least 401 KiB"), "{hint}");
+    assert!(!hint.contains("10240 KiB"), "{hint}");
 }
 
 #[cfg(unix)]
