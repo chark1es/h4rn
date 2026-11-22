@@ -318,6 +318,16 @@ impl ThreadState {
                     };
                 }
             }
+            ThreadEvent::LimitResumeReleased { at } => {
+                // The pause's turn was already recorded and counted; it starts
+                // running now, so only the phase and the limit clear.
+                self.phase = Phase::Running;
+                self.agent_state = AgentState::Thinking;
+                self.usage_limit = None;
+                self.pending_failure = false;
+                self.acknowledged = false;
+                self.last_activity = *at;
+            }
             ThreadEvent::HostLost { at } => {
                 self.host_unreachable = true;
                 self.agent_state = AgentState::Unreachable;
@@ -652,6 +662,16 @@ pub enum ThreadEvent {
         /// Event time.
         at: DateTime<Utc>,
     },
+    /// A prompt the pause was holding was released to run.
+    ///
+    /// This is not a new turn: the turn it belongs to was recorded when the
+    /// person sent it, before the limit paused it, so the turn count and the
+    /// turn's own rows stay as they are. The thread leaves `RateLimited` for
+    /// `Running` only.
+    LimitResumeReleased {
+        /// Event time.
+        at: DateTime<Utc>,
+    },
     /// The host became unreachable.
     HostLost {
         /// Event time.
@@ -741,6 +761,7 @@ impl ThreadEvent {
             | Self::TurnCompleted { at, .. }
             | Self::UsageLimitHit { at, .. }
             | Self::LimitAutoResumeSet { at, .. }
+            | Self::LimitResumeReleased { at }
             | Self::HostLost { at }
             | Self::HostRestored { at }
             | Self::FailureRaised { at }
@@ -1188,6 +1209,30 @@ mod tests {
         assert!(!restored.host_unreachable);
         assert_eq!(restored.agent_state, AgentState::Thinking);
         assert_eq!(tab(&restored, at(5)), ThreadTab::Working);
+    }
+
+    #[test]
+    fn releasing_a_parked_turn_runs_it_without_counting_a_new_turn() {
+        let parked = state_after(&[
+            ThreadEvent::TurnQueued { at: at(1) },
+            ThreadEvent::TurnStarted { at: at(2) },
+            ThreadEvent::UsageLimitHit {
+                reset_at: Some(at(100)),
+                auto_resume: true,
+                at: at(3),
+            },
+        ]);
+        assert_eq!(parked.turn_count, 1);
+
+        let released = parked.apply(&ThreadEvent::LimitResumeReleased { at: at(4) });
+        assert_eq!(released.phase, Phase::Running);
+        assert_eq!(released.agent_state, AgentState::Thinking);
+        assert_eq!(released.usage_limit, None);
+        assert_eq!(
+            released.turn_count, 1,
+            "the released prompt is the turn already recorded, not a new one"
+        );
+        assert_eq!(tab(&released, at(4)), ThreadTab::Working);
     }
 
     #[test]

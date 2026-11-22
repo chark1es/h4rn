@@ -125,12 +125,11 @@ describe("account matching", () => {
 
 describe("labels", () => {
   test("names every forge", () => {
-    expect((["github", "gitlab", "gitea", "forgejo"] as const).map(forgeLabel)).toEqual([
-      "GitHub",
-      "GitLab",
-      "Gitea",
-      "Forgejo",
-    ]);
+    expect(
+      (["github", "gitlab", "gitea", "forgejo", "bitbucket", "azure_devops"] as const).map(
+        forgeLabel,
+      ),
+    ).toEqual(["GitHub", "GitLab", "Gitea", "Forgejo", "Bitbucket Cloud", "Azure DevOps"]);
   });
 
   test("maps state to a tone", () => {
@@ -367,6 +366,43 @@ describe("ForgeApi commits and re-run", () => {
       number: 7,
     });
     expect(result.state).toBe("pending");
+  });
+
+  test("adds an account with the detected repository hint", async () => {
+    const bitbucketRepo: ForgeRepoRef = {
+      forge: "bitbucket",
+      base_url: "https://bitbucket.org",
+      owner: "acme",
+      repo: "widget",
+    };
+    const saved: ForgeAccount = {
+      ...account,
+      account_id: "a2",
+      forge: "bitbucket",
+      base_url: "https://bitbucket.org",
+      username: null,
+      display_name: null,
+      scopes: [],
+      source: "bitbucket_access_token",
+    };
+    const request = vi.fn().mockResolvedValue({ type: "forge_account", account: saved });
+    const result = await new ForgeApi(request).addAccount(
+      "bitbucket",
+      "https://bitbucket.org",
+      "ATBB-token",
+      null,
+      bitbucketRepo,
+    );
+    expect(request).toHaveBeenCalledWith({
+      type: "forge_add_account",
+      forge: "bitbucket",
+      base_url: "https://bitbucket.org",
+      token: "ATBB-token",
+      username: null,
+      source: "pat",
+      repository: bitbucketRepo,
+    });
+    expect(result.account_id).toBe("a2");
   });
 
   test("rejects an unexpected response instead of guessing", async () => {
