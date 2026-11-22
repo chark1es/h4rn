@@ -199,4 +199,54 @@ impl Default for TitleModelSetting {
 pub struct TextGenerationSettings {
     /// Which model writes thread titles.
     pub title: TitleModelSetting,
+    /// Which model writes commit messages and pull request text.
+    ///
+    /// Older daemons wrote only `title`; a file without this field reads as
+    /// [`SourceControlModelSetting::off`], so nothing starts generating until
+    /// the person picks a mode.
+    #[serde(default)]
+    pub source_control: SourceControlModelSetting,
+}
+
+/// Longest custom instruction string the daemon accepts.
+pub const MAX_SOURCE_CONTROL_INSTRUCTIONS: usize = 2_000;
+
+/// Which model writes commit messages and pull request text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceControlModelMode {
+    /// Leave the fields empty; Generate does nothing and no model runs.
+    #[default]
+    Off,
+    /// Run an installed coding-agent CLI once.
+    CodingAgent,
+    /// Call a configured text generator.
+    TextGenerator,
+}
+
+/// The source-control model and the settings each mode needs.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct SourceControlModelSetting {
+    /// Which backend writes the text.
+    pub mode: SourceControlModelMode,
+    /// Coding agent to run. `None` follows the thread's own harness; picking
+    /// one hands every thread's commit and PR text to that agent.
+    #[serde(default)]
+    pub harness: Option<HarnessKind>,
+    /// Text generator to call in [`SourceControlModelMode::TextGenerator`].
+    #[serde(default)]
+    pub generator_id: Option<TextGeneratorId>,
+    /// Model override for the generator; `None` uses its stored model.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Extra instruction appended to the trusted prompt (style, tone, rules).
+    #[serde(default)]
+    pub instructions: Option<String>,
+}
+
+impl SourceControlModelSetting {
+    /// Commit and PR text stay empty until the person asks for a model.
+    pub fn off() -> Self {
+        Self::default()
+    }
 }

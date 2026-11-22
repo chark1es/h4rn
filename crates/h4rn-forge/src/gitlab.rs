@@ -454,6 +454,13 @@ impl Forge for GitLabClient {
             ));
         }
         let url = format!("{}/merge_requests", self.project_url(repo));
+        let title = if request.draft {
+            // GitLab marks a draft by the title prefix; its create endpoint
+            // has no separate boolean field.
+            format!("Draft: {}", request.title)
+        } else {
+            request.title.clone()
+        };
         let value = self
             .http
             .post_json(
@@ -461,7 +468,7 @@ impl Forge for GitLabClient {
                 &json!({
                     "source_branch": request.head,
                     "target_branch": request.base,
-                    "title": request.title,
+                    "title": title,
                     "description": request.body,
                 }),
             )

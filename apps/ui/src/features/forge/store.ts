@@ -173,9 +173,10 @@ export class ForgeApi {
     title: string,
     body: string,
     base: string,
+    draft = false,
   ): Promise<ForgePullRequest> {
     const response = await this.call(
-      { type: "forge_open_pr", thread_id: threadId, repo, title, body, base },
+      { type: "forge_open_pr", thread_id: threadId, repo, title, body, base, draft },
       "forge_pr_opened",
     );
     return response.pr;

@@ -36,6 +36,7 @@ mod common;
 pub mod connect;
 pub mod forge;
 mod fs;
+mod git_actions;
 mod harness;
 mod ids;
 pub mod mcp;
@@ -73,6 +74,9 @@ pub use fs::{
     FsFileContent, FsListing, FsOmitted, FsSearchBatch, FsSearchMatch, FsTurnChanges, FsTurnFile,
     FsWriteConflict, FsWriteResult, GitFileStatus,
 };
+pub use git_actions::{
+    GitChangeSet, GitCommitResult, GitOperation, GitPushResult, GitThreadStatus, MAX_GIT_PATHS,
+};
 pub use harness::{
     HarnessOutputStream, HarnessUpdateEvent, HarnessUpdateMethod, HarnessVersionInfo,
 };
@@ -107,6 +111,7 @@ pub use terminal::{
     CREDIT_MAX_BYTES, CREDIT_MAX_CHUNKS, TerminalExit, TerminalExitNotice, TerminalInfo,
 };
 pub use text_generation::{
+    MAX_SOURCE_CONTROL_INSTRUCTIONS, SourceControlModelMode, SourceControlModelSetting,
     TextGenerationSettings, TextGenerator, TextGeneratorDraft, TextGeneratorId, TextGeneratorKind,
     TextGeneratorPatch, TextGeneratorTestReport, TitleModelMode, TitleModelSetting,
 };

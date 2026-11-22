@@ -469,6 +469,7 @@ impl Forge for GiteaClient {
                     "body": request.body,
                     "head": request.head,
                     "base": request.base,
+                    "draft": request.draft,
                 }),
             )
             .await?;

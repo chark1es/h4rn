@@ -697,6 +697,9 @@ pub struct ForgeNewPr {
     pub head: String,
     /// Target branch.
     pub base: String,
+    /// Open as a draft where the forge has a draft state.
+    #[serde(default)]
+    pub draft: bool,
 }
 
 /// Where a PR handoff should create a thread when none is linked.

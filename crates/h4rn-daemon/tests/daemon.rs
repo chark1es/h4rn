@@ -2929,6 +2929,7 @@ async fn a_fixture_coding_agent_writes_the_generated_thread_title() {
                 generator_id: None,
                 model: None,
             },
+            source_control: Default::default(),
         })
         .await
         .expect("select the coding agent");
@@ -3072,6 +3073,7 @@ async fn a_codex_thread_keeps_its_first_line_and_never_starts_codex() {
     service
         .set_settings(TextGenerationSettings {
             title: TitleModelSetting::default(),
+            source_control: Default::default(),
         })
         .await
         .expect("coding agent mode");

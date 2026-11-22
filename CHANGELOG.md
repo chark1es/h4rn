@@ -7,6 +7,20 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Threads can commit, push and open a pull request.** The thread menu's **Commit, push and
+  PR…** panel shows the workspace's real branch, upstream, ahead/behind counts and its staged,
+  unstaged and untracked paths, and whether a rebase, merge or cherry-pick is in progress. Commit
+  records the index, or stages tracked and new files first when **Include unstaged changes** is on;
+  it refuses a detached `HEAD`, an in-progress operation or an empty index, runs hooks (never
+  `--no-verify`) and reports a hook's output. Push creates an upstream on `origin` when asked and
+  is never forced: a non-fast-forward rejection or a bad credential is reported as exactly that.
+  **Create pull request…** offers title, body, base branch (the default branch is preselected) and
+  a draft flag; the daemon pushes first when the branch needs it and then opens the request.
+  **Generate** can fill the commit message or the pull request text from a model chosen under
+  Settings → Source control (Off by default, coding agent, or text generator, plus custom
+  instructions); it fills the field only and never commits, pushes or opens anything. Only the
+  staged diff (capped, binary files named), recent subjects, or the branch's commits and diff stat
+  are sent, wrapped as untrusted input. See [docs/git-actions.md](docs/git-actions.md).
 - **Thread titles are written by a model.** A new thread still appears immediately with the first
   line of your first prompt, then a title of at most 60 characters replaces it through the normal
   thread update. Settings → Threads → Title model picks Off, Claude Code (run once in an empty

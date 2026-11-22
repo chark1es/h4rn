@@ -25,14 +25,32 @@ The setting lives on the daemon, not in the app, so every device sees the same c
 are written even when no app is open. Removing the generator a title setting points at turns the
 setting **Off**; it never falls back to a coding agent the person did not choose.
 
-## What is sent
+## Commit and pull request messages
+
+A separate setting, **Settings → Source control → Commit & PR messages**, writes commit messages
+and pull request text: **Off** (the default), **Coding agent** or **Text generator**, with optional
+custom instructions. It uses the same backends, the same isolation flags and the same generator
+list as titles. Off starts nothing: **Generate** leaves the field empty and no job runs.
+
+Only the request's own data is sent:
+
+- **Commit message**: the diff that would be committed (12,000-character cap) and up to 20 recent
+  commit subjects. Binary files are named by git, never read. With *Include unstaged* on, the diff
+  is against `HEAD` and untracked files are listed by name; their contents are not sent.
+- **Pull request**: the commit subjects and bodies against the base branch (8,000-character cap)
+  and `git diff --stat` for the same range (4,000-character cap).
+
+Both are wrapped once in `<untrusted_request>` tags with the closing tag escaped, exactly as a
+title prompt is. Custom instructions are trusted text appended to the instruction, never spliced
+into the repository data. A failure is shown in the panel and leaves the field as it was; nothing
+is committed, pushed or opened by generation. See [git-actions.md](git-actions.md).
+
+## What a title request sends
 
 Only two things:
 
 1. the text of the thread's **first prompt**, and
-2. the **name of the workspace folder** (the last path component).
-
-The prompt is capped at 4,000 characters. h4rn sends no files, diffs, paths, environment variables
+2. the **name of the workspace folder** (the last path component).The prompt is capped at 4,000 characters. h4rn sends no files, diffs, paths, environment variables
 or thread history. The Claude Code CLI adds its own short environment note to each request (its
 working directory, which is the empty temp directory, plus platform, shell and OS version).
 
