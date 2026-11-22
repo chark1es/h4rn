@@ -9,17 +9,16 @@ All notable changes to h4rn are recorded here. The format follows
 
 - **Closing a terminal ends its background jobs.** With job control, `sleep 1000 &` runs in its own
   process group, so the old group-only signal left it running after the shell was gone. Closing a
-  terminal now sends SIGHUP to the shell, waits for it to forward the hangup, keeps the grace period
-  after SIGTERM so cleanup handlers can run, and only then sends SIGKILL to the shell's process group
-  after `child.kill()`. A `nohup` job and one that moved itself into another session with `setsid`
-  are left alone.
+  terminal now sends SIGHUP to the shell's own process id, waits for it to forward the hangup, keeps
+  the grace period after SIGTERM so cleanup handlers can run, and only then sends SIGKILL to the
+  shell's process group after `child.kill()`. The hangup uses the spawned child's pid, not the
+  foreground group cached from `tcgetpgrp`, which a job started during shell startup can own. A
+  `nohup` job and one that moved itself into another session with `setsid` are left alone.
 - **Only one attached viewer answers terminal queries.** Two xterm instances each answered device,
   cursor and colour queries, so a shell with a desktop and a phone attached received duplicate
   replies. The UI now marks xterm's own answers to just-asked queries, and the daemon writes the
   reply owner's answer only; every other answer is dropped, while keystrokes and paste go through
-  from every viewer. The first viewer to answer owns the role until it detaches or stops receiving
-  output; a viewer whose credit window is full has not seen the query, so another viewer's answer is
-  accepted and takes over.
+  from every viewer. The first viewer to answer owns the role until it detaches.
 - **A batched colour query marks every answer it earns.** The query tracker kept at most 32 pending
   answers, so an `OSC 4` palette query with more entries left its tail looking like typed input. It
   now tracks the whole batch.

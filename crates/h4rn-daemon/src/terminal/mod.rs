@@ -279,8 +279,7 @@ impl TerminalManager {
     ///
     /// A marked `reply` is xterm's answer to a terminal query. At most one
     /// attached viewer may answer, so replies from the others are dropped; the
-    /// role passes to another viewer when the owner detaches or stops
-    /// receiving output.
+    /// role passes to another viewer when the owner detaches.
     pub fn input_by_stream(
         &self,
         stream_id: u32,
