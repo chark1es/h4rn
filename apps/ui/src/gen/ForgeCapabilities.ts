@@ -45,6 +45,7 @@ diff_pagination: boolean,
 graphql: boolean, 
 /**
  * Failed checks can be re-run through the API (GitHub check suites, GitLab
- * pipelines). Gitea and Forgejo CI posts plain commit statuses.
+ * pipelines). Gitea, Forgejo, Bitbucket Cloud and Azure DevOps expose no
+ * equivalent for the PR surface.
  */
 rerun_checks: boolean, };

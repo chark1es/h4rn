@@ -764,6 +764,55 @@ closed-transport completion applies to a `Failed` report only: when ACP already 
 `Completed`, a Stop that arrives while the exit report is still on its way leaves it completed — the
 work was done, and the person's Stop never reached the agent.
 
+**Addendum: a cancelled resume survives an exit-only death, and the newest pause wins.** The
+bridge can report `LimitHit` and then `Exit` with the same reset with no EOF or read error in
+between. The session is still live when the limit arms, so the slot itself now remembers the reset
+that generation applied and hands it to the dying entry when the death is noticed; an exit-only
+report that repeats it cannot re-arm the resume the person cancelled. When several dead generations
+are waiting for their exit reports, a schedule records which generation armed it. An older
+generation's later report, and a typed limit on its stream, keeps its own diagnostic row but never
+replaces a schedule a newer generation armed, so the thread waits for the newest provider reset.
+Finally, a failed write that lost its session and puts its prompt back still honors the adapter's
+typed limit: it arms the schedule under the same lock, holds the requeued turn behind it, and the
+schedule's firing delivers that turn (not the policy's resume prompt) on a fresh session. The
+two-death test now holds the mocked clock until both exit reports have been delivered.
+
+**Addendum: a paused requeued prompt is released by the person's action, and only its own session
+owns the pause.** Clearing the schedule is a decision, not a state to leave a turn in: when the
+person cancels the resume, or a Send supersedes the pause while the active turn's prompt is still
+Pending, the parked turn is released for delivery (a Send's own message queues behind it and runs
+second). Applied resets are recorded only on the session generation that reported them, so an older
+generation's delayed exit cannot consume the live replacement's own reset; a requeued write's pause
+names the generation that claimed the write rather than an empty slot. A newer generation that
+confirms the same reset takes ownership of the existing pause without changing its attempt or jitter,
+so an older generation's delayed earlier reset cannot replace it. A fire re-checks the schedule's
+identity on the record under the record lock before it clears the pause or hands off delivery; if a
+newer limit replaced it while the attempt was claimed, the old fire does nothing. Finally, a typed
+limit without a reset time on the requeued-write path waits the meter's unknown-reset backoff like
+any other reset-less limit instead of retrying at once.
+
+**Addendum: a release never waits on storage, and a pause parks only its own prompt.** Releasing a
+parked prompt is a state decision the person made, so it cannot depend on a write landing: the
+schedule's firing claims its attempt (which is what makes it unfireable again) and then delivers the
+pending turn whether or not the ledger records the outcome, and `Send` and `CancelResume` deliver the
+turn they release whatever the journal says, logging the failure. The thread is projected as running
+on release by its own lifecycle event, which clears the paused phase and the limit without counting a
+turn: a cancelled or superseded pause shows the thread Working, not Rate limited with a resume time.
+A fire acts only when the record names the schedule it claimed (the ledger id restored from the
+ledger for a schedule the daemon inherited), because a missing pause proves nothing about the attempt
+that was claimed; the failover model change and its session detach happen after that check. A pause
+records the dispatch it parks, so only that requeued prompt waits: an old generation's exit report
+arming a pause while a Send starts a replacement leaves the replacement to start exactly as it does
+on main. Applied resets carry their session generation on the turn and the live slot, and a live
+session that adopts an equal reset (ownership transfer) records it for its own generation, so a
+cancelled resume is not re-armed by that generation's exit-only repeat. The parked prompt itself is
+stored on the thread row: the journal is restored before the ledger is attached, so a restarted
+daemon rebuilds the dispatch and its pause (naming the restored turn), and the schedule's firing
+delivers the person's prompt rather than the policy's resume prompt. If the schedule did not survive,
+the restoration releases the turn instead of leaving it pending. The tests that cover these paths use
+the fake harness's session/send notifications, a start gate and a held clock, and the storage-failure
+and restart paths run on a journal and ledger that are deliberately broken or reopened.
+
 ## ADR-027: Push notifications are metadata-only wake signals
 
 **Status:** Proposed

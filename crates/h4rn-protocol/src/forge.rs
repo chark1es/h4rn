@@ -1,12 +1,12 @@
 //! Forge (pull request) types shared by the daemon, the UI and the agent.
 //!
-//! The daemon speaks one normalised model for GitHub, GitLab, Gitea and
-//! Forgejo so the PR view never branches on the provider (ADR-001,
-//! ADR-002). Provider-specific shapes — GitHub check runs, GitLab pipelines,
-//! Gitea commit statuses — are flattened into [`ForgeCheck`] and
-//! [`ForgeChecks`] here. Review comments keep their inline anchor
-//! (path/line/side) and their thread so the UI can render a real conversation
-//! and hand it to an agent.
+//! The daemon speaks one normalised model for every supported forge so the PR
+//! view never branches on the provider (ADR-001, ADR-002). Provider-specific
+//! shapes — GitHub check runs, GitLab pipelines, Gitea commit statuses,
+//! Bitbucket build statuses, Azure DevOps policy evaluations — are flattened
+//! into [`ForgeCheck`] and [`ForgeChecks`] here. Review comments keep their
+//! inline anchor (path/line/side) and their thread so the UI can render a real
+//! conversation and hand it to an agent.
 //!
 //! Credentials never cross this contract. [`ForgeAccount`] carries only public
 //! metadata; the token lives in the daemon's secret store (ADR-016).
@@ -30,6 +30,14 @@ pub enum ForgeKind {
     /// codeberg.org or a self-hosted Forgejo instance.
     #[serde(rename = "forgejo")]
     Forgejo,
+    /// bitbucket.org (Bitbucket Cloud). Bitbucket Server and Data Center are
+    /// not supported.
+    #[serde(rename = "bitbucket")]
+    Bitbucket,
+    /// dev.azure.com or a legacy `*.visualstudio.com` organization (Azure
+    /// DevOps Services). Azure DevOps Server is not supported.
+    #[serde(rename = "azure_devops")]
+    AzureDevOps,
 }
 
 impl ForgeKind {
@@ -41,6 +49,8 @@ impl ForgeKind {
             Self::GitLab => "gitlab",
             Self::Gitea => "gitea",
             Self::Forgejo => "forgejo",
+            Self::Bitbucket => "bitbucket",
+            Self::AzureDevOps => "azure_devops",
         }
     }
 
@@ -51,6 +61,8 @@ impl ForgeKind {
             Self::GitLab => "GitLab",
             Self::Gitea => "Gitea",
             Self::Forgejo => "Forgejo",
+            Self::Bitbucket => "Bitbucket Cloud",
+            Self::AzureDevOps => "Azure DevOps",
         }
     }
 
@@ -61,15 +73,21 @@ impl ForgeKind {
             "gitlab" | "gl" => Some(Self::GitLab),
             "gitea" => Some(Self::Gitea),
             "forgejo" | "codeberg" => Some(Self::Forgejo),
+            "bitbucket" | "bitbucket_cloud" | "bitbucket-cloud" | "bitbucket cloud" => {
+                Some(Self::Bitbucket)
+            }
+            "azure_devops" | "azure-devops" | "azuredevops" | "azure" | "azure devops" => {
+                Some(Self::AzureDevOps)
+            }
             _ => None,
         }
     }
 
     /// Whether the forge supports RFC 8628 device authorization.
     ///
-    /// GitHub does. GitLab, Gitea and Forgejo do not expose a device grant, so
-    /// they use a personal access token (or an OAuth application the user
-    /// already runs).
+    /// GitHub does. GitLab, Gitea, Forgejo, Bitbucket Cloud and Azure DevOps
+    /// do not expose a device grant for this use case, so they use a personal
+    /// access token or OAuth access token the user creates.
     pub fn supports_device_flow(self) -> bool {
         matches!(self, Self::GitHub)
     }
@@ -87,6 +105,14 @@ pub enum ForgeCredentialSource {
     GhCli,
     /// Imported from `glab auth status --show-token` after the user asked.
     GlabCli,
+    /// A Bitbucket Cloud API token, sent as HTTP Basic with the Atlassian
+    /// account email as the username. (App passwords were retired in July
+    /// 2026 and are no longer offered.)
+    #[serde(rename = "bitbucket_api_token")]
+    BitbucketApiToken,
+    /// A Bitbucket Cloud OAuth or workspace access token, sent as Bearer.
+    #[serde(rename = "bitbucket_access_token")]
+    BitbucketAccessToken,
 }
 
 impl ForgeCredentialSource {
@@ -97,6 +123,8 @@ impl ForgeCredentialSource {
             Self::OAuthDevice => "OAuth device flow",
             Self::GhCli => "gh CLI",
             Self::GlabCli => "glab CLI",
+            Self::BitbucketApiToken => "Bitbucket API token (email + token)",
+            Self::BitbucketAccessToken => "Bitbucket access token",
         }
     }
 }
@@ -126,7 +154,8 @@ pub struct ForgeCapabilities {
     /// GraphQL is used for review threads.
     pub graphql: bool,
     /// Failed checks can be re-run through the API (GitHub check suites, GitLab
-    /// pipelines). Gitea and Forgejo CI posts plain commit statuses.
+    /// pipelines). Gitea, Forgejo, Bitbucket Cloud and Azure DevOps expose no
+    /// equivalent for the PR surface.
     pub rerun_checks: bool,
 }
 
@@ -156,16 +185,18 @@ pub struct ForgeAccount {
 
 /// A repository address independent of any one remote.
 ///
-/// `owner` may contain `/` on GitLab (nested groups); on GitHub, Gitea and
-/// Forgejo it is a single path segment. `base_url` is the public web URL; the
-/// client derives the API URL from the forge kind.
+/// `owner` may contain `/` on GitLab (nested groups); on every other forge it
+/// is a single path segment. `base_url` is the public web URL; the client
+/// derives the API URL from the forge kind. Azure DevOps keeps the
+/// organization in `base_url` (`https://dev.azure.com/acme`) and uses `owner`
+/// for the project, so [`ForgeRepoRef::web_url`] inserts the `/_git/` segment.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, TS)]
 pub struct ForgeRepoRef {
     /// Forge implementation.
     pub forge: ForgeKind,
     /// Public web base URL, no trailing slash.
     pub base_url: String,
-    /// Owner or GitLab namespace.
+    /// Owner, GitLab namespace, or Azure DevOps project.
     pub owner: String,
     /// Repository name without `.git`.
     pub repo: String,
@@ -179,12 +210,12 @@ impl ForgeRepoRef {
 
     /// Browser URL for the repository.
     pub fn web_url(&self) -> String {
-        format!(
-            "{}/{}/{}",
-            self.base_url.trim_end_matches('/'),
-            self.owner,
-            self.repo
-        )
+        let base = self.base_url.trim_end_matches('/');
+        if self.forge == ForgeKind::AzureDevOps {
+            format!("{base}/{}/_git/{}", self.owner, self.repo)
+        } else {
+            format!("{base}/{}/{}", self.owner, self.repo)
+        }
     }
 }
 
@@ -331,6 +362,17 @@ pub struct ForgePullRequest {
     pub deletions: u32,
     /// Files changed.
     pub changed_files: u32,
+    /// Whether the forge could count the changed files.
+    ///
+    /// `false` means the count is unknown (a diffstat page failed or hit its
+    /// cap), not that the PR changes no files; clients show it as unknown.
+    pub changed_files_known: bool,
+    /// Whether the forge reported the line counts.
+    ///
+    /// `false` means additions and deletions are unknown rather than zero;
+    /// clients show them as unknown instead of `+0 −0` (Azure DevOps does not
+    /// report totals without downloading every file).
+    pub line_counts_known: bool,
     /// Commits in the PR.
     pub commits: u32,
     /// When it was opened.
@@ -753,11 +795,32 @@ mod tests {
             ForgeKind::GitLab,
             ForgeKind::Gitea,
             ForgeKind::Forgejo,
+            ForgeKind::Bitbucket,
+            ForgeKind::AzureDevOps,
         ] {
             assert_eq!(ForgeKind::parse(kind.slug()), Some(kind));
             let json = serde_json::to_string(&kind).unwrap();
             assert_eq!(json, format!("\"{}\"", kind.slug()));
         }
+        assert_eq!(
+            ForgeKind::parse("Bitbucket Cloud"),
+            Some(ForgeKind::Bitbucket)
+        );
+        assert_eq!(ForgeKind::parse("azure"), Some(ForgeKind::AzureDevOps));
+    }
+
+    #[test]
+    fn azure_repo_urls_keep_the_git_segment() {
+        let repo = ForgeRepoRef {
+            forge: ForgeKind::AzureDevOps,
+            base_url: "https://dev.azure.com/acme".into(),
+            owner: "platform".into(),
+            repo: "widget".into(),
+        };
+        assert_eq!(
+            repo.web_url(),
+            "https://dev.azure.com/acme/platform/_git/widget"
+        );
     }
 
     #[test]
