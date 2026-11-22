@@ -12,6 +12,12 @@
  * query xterm is about to answer, and the next data chunk that matches that
  * answer is marked as a reply. A sequence that looks like an answer with no
  * query pending stays input.
+ *
+ * Every answer is named by the output chunk that carried the query's **first**
+ * byte and the query's index among the queries that start in that chunk. Both
+ * parts are properties of the output stream, so two viewers agree even when
+ * one attached with the query's tail already folded into its snapshot: that
+ * viewer never sees the query, and the answers it does see keep their names.
  */
 
 // Patterns are strings because Biome rejects control characters in regex
@@ -53,31 +59,68 @@ export type TerminalQueryParser = {
   registerOscHandler(ident: number, callback: (data: string) => boolean): { dispose(): void };
   registerDcsHandler(
     id: { final: string; prefix?: string; intermediates?: string },
-    callback: (data: string) => boolean,
+    callback: (data: string, params: (number | number[])[]) => boolean,
   ): { dispose(): void };
 };
+
+/** A CSI, DCS or OSC sequence reduced to what identifies it. */
+type QuerySignature =
+  | {
+      kind: "csi";
+      prefix: string;
+      intermediates: string;
+      final: string;
+      params: (number | number[])[];
+    }
+  | {
+      kind: "dcs";
+      intermediates: string;
+      final: string;
+      params: (number | number[])[];
+      data: string;
+    }
+  | { kind: "osc"; ident: number; data: string };
 
 type Expectation = {
   /** Monotonic position, so a finished chunk can settle only its own queries. */
   mark: number;
   pattern: RegExp;
-  /** Output chunk whose bytes were being parsed when the query was seen. */
+  /** First output chunk whose bytes carried the query. */
   position: number;
-  /** The answer's index among the answers expected for that chunk. */
+  /** The answer's index among the queries that start in that chunk. */
   ordinal: number;
 };
 
-/** One answer xterm owes: the chunk that carried the query and its ordinal. */
-export type TerminalQueryReply = {
-  position: number;
-  ordinal: number;
-};
-
-/** Output chunks waiting to be parsed, with their next answer ordinal. */
+/** One output chunk waiting to be parsed. */
 type ParsingChunk = {
   seq: number;
-  nextOrdinal: number;
+  /**
+   * The sequence carried in from an earlier chunk that completed while this
+   * chunk was parsed, with the chunk that carried its first byte. Only the
+   * first hook of the chunk can be it.
+   */
+  carried: { signature: QuerySignature; position: number } | null;
+  /** Position of the hook currently running, or null for the chunk. */
+  hookPosition: number | null;
 };
+
+/** A sequence whose first byte arrived but whose end is still to come. */
+type PendingEscape = {
+  kind: "escape" | "csi" | "osc" | "dcs" | "string" | "oscEscape" | "dcsEscape" | "stringEscape";
+  /** Bytes since the ESC that began it, without the terminator. */
+  text: string;
+  /** The output chunk that carried that ESC. */
+  startPosition: number;
+};
+
+/**
+ * Longest sequence kept for a boundary comparison.
+ *
+ * A batched palette query is a few hundred bytes; one this long is not a
+ * query xterm answers, and the cap keeps a program that opens an OSC and never
+ * closes it from growing the tracker without bound.
+ */
+const MAX_SEQUENCE_BYTES = 8192;
 
 /**
  * Notes the answer shapes xterm owes the program since the last chunk.
@@ -98,31 +141,66 @@ export class TerminalQueryTracker {
   private readonly expected: Expectation[] = [];
   /** Output chunks waiting to be parsed, oldest first. */
   private readonly chunks: ParsingChunk[] = [];
+  /** Next ordinal for each chunk that has started a query. */
+  private readonly ordinals = new Map<number, number>();
+  /** The sequence still open at the end of the last chunk handed in. */
+  private pending: PendingEscape | null = null;
   private nextMark = 0;
 
-  /** Records that output chunk `seq` is about to be parsed by xterm. */
-  beginChunk(seq: number): void {
-    this.chunks.push({ seq, nextOrdinal: 0 });
+  /**
+   * Records that output chunk `seq` is about to be parsed by xterm.
+   *
+   * `data` is the chunk's raw bytes, which lets the tracker tell an answer to
+   * a query that started in an earlier chunk from an answer to a query that
+   * started in this one. A snapshot's bytes pass through the same parser, so
+   * they are scanned the same way and continue a sequence the parser still
+   * holds.
+   */
+  beginChunk(seq: number, data?: Uint8Array): void {
+    let carried: ParsingChunk["carried"] = null;
+    if (data) {
+      const scan = scanOutput(seq, data, this.pending);
+      this.pending = scan.pending;
+      carried = scan.carried;
+    }
+    this.chunks.push({ seq, carried, hookPosition: null });
   }
 
   /** Records that xterm finished parsing the oldest outstanding chunk. */
   endChunk(): void {
     this.chunks.shift();
+    if (this.ordinals.size > 16) {
+      const keep = this.pending?.startPosition;
+      for (const position of this.ordinals.keys()) {
+        if (this.ordinals.size <= 16) break;
+        if (position !== keep) this.ordinals.delete(position);
+      }
+    }
+  }
+
+  /**
+   * Records that xterm's parser is delivering `signature`.
+   *
+   * The first hook of a chunk may be the sequence carried in from the
+   * previous one; every later hook started in the chunk itself. An OSC query
+   * can owe several answers, so the position is fixed once per hook rather
+   * than once per expectation.
+   */
+  noteHook(signature: QuerySignature): void {
+    const chunk = this.chunks[0];
+    if (!chunk) return;
+    const matches = chunk.carried !== null && sameSignature(chunk.carried.signature, signature);
+    chunk.hookPosition = matches && chunk.carried ? chunk.carried.position : chunk.seq;
+    chunk.carried = null;
   }
 
   /** Records that xterm is about to send one `pattern`-shaped answer. */
   expect(pattern: RegExp): void {
     const chunk = this.chunks[0];
-    this.expected.push({
-      mark: ++this.nextMark,
-      pattern,
-      position: chunk?.seq ?? 0,
-      // The ordinal counts answers within the chunk, not the expectations
-      // still pending: an answer already consumed must not renumber the next
-      // query in the same chunk.
-      ordinal: chunk?.nextOrdinal ?? 0,
-    });
-    if (chunk) chunk.nextOrdinal += 1;
+    const position = chunk?.hookPosition ?? chunk?.seq ?? 0;
+    const ordinal = this.ordinals.get(position) ?? 0;
+    this.ordinals.set(position, ordinal + 1);
+    this.expected.push({ mark: ++this.nextMark, pattern, position, ordinal });
   }
 
   /** The position to settle from once xterm finishes the chunk being written. */
@@ -170,6 +248,259 @@ export class TerminalQueryTracker {
   }
 }
 
+/** One answer xterm owes: the chunk that started its query and its ordinal. */
+export type TerminalQueryReply = {
+  position: number;
+  ordinal: number;
+};
+
+/**
+ * Scans one output chunk for the escape sequences in it.
+ *
+ * Only a sequence that started before this chunk can make the chunk's first
+ * hook below its own position, so that is all the scan reports. The rest of
+ * the scan finds whether the chunk ends inside a sequence, which the next
+ * chunk continues.
+ */
+function scanOutput(
+  seq: number,
+  data: Uint8Array,
+  carriedIn: PendingEscape | null,
+): { carried: ParsingChunk["carried"]; pending: PendingEscape | null } {
+  let kind: PendingEscape["kind"] | "ground" = carriedIn?.kind ?? "ground";
+  let text = carriedIn?.text ?? "";
+  let startPosition = carriedIn?.startPosition ?? seq;
+  let truncated = false;
+  let carried: ParsingChunk["carried"] = null;
+
+  const begin = (next: PendingEscape["kind"]) => {
+    kind = next;
+    text = "\x1b";
+    startPosition = seq;
+    truncated = false;
+  };
+  const append = (byte: number) => {
+    if (truncated) return;
+    if (text.length >= MAX_SEQUENCE_BYTES) {
+      truncated = true;
+      return;
+    }
+    text += String.fromCharCode(byte);
+  };
+  const finish = () => {
+    if (startPosition !== seq && !truncated && !carried) {
+      const signature = signatureOf(text);
+      if (signature) carried = { signature, position: startPosition };
+    }
+    kind = "ground";
+    text = "";
+    truncated = false;
+  };
+
+  for (const byte of data) {
+    switch (kind) {
+      case "ground":
+        if (byte === 0x1b) begin("escape");
+        break;
+      case "escape":
+        if (byte === 0x5b) {
+          append(byte);
+          kind = "csi";
+        } else if (byte === 0x5d) {
+          append(byte);
+          kind = "osc";
+        } else if (byte === 0x50) {
+          append(byte);
+          kind = "dcs";
+        } else if (byte === 0x58 || byte === 0x5e || byte === 0x5f) {
+          append(byte);
+          kind = "string";
+        } else {
+          append(byte);
+          finish();
+        }
+        break;
+      case "csi":
+        if (byte >= 0x40 && byte <= 0x7e) {
+          append(byte);
+          finish();
+        } else {
+          append(byte);
+        }
+        break;
+      case "osc":
+        if (byte === 0x07 || byte === 0x9c) {
+          finish();
+        } else if (byte === 0x1b) {
+          kind = "oscEscape";
+        } else {
+          append(byte);
+        }
+        break;
+      case "dcs":
+        if (byte === 0x9c) {
+          finish();
+        } else if (byte === 0x1b) {
+          kind = "dcsEscape";
+        } else {
+          append(byte);
+        }
+        break;
+      case "string":
+        if (byte === 0x9c) {
+          finish();
+        } else if (byte === 0x1b) {
+          kind = "stringEscape";
+        } else {
+          append(byte);
+        }
+        break;
+      case "oscEscape":
+      case "dcsEscape":
+      case "stringEscape": {
+        const open = kind === "oscEscape" ? "osc" : kind === "dcsEscape" ? "dcs" : "string";
+        if (byte === 0x5c) {
+          // ST ends the sequence and is not part of its data.
+          finish();
+        } else {
+          // The ESC was not a terminator after all; keep it as data.
+          append(0x1b);
+          append(byte);
+          kind = open;
+        }
+        break;
+      }
+    }
+  }
+
+  if (kind === "ground") return { carried, pending: null };
+  return { carried, pending: { kind, text, startPosition } };
+}
+
+/** The signature of a completed escape sequence, or null for other escapes. */
+function signatureOf(text: string): QuerySignature | null {
+  if (!text.startsWith("\x1b")) return null;
+  const body = text.slice(1);
+  if (body.startsWith("[")) return csiSignature(body.slice(1));
+  if (body.startsWith("]")) return oscSignature(body.slice(1));
+  if (body.startsWith("P")) return dcsSignature(body.slice(1));
+  return null;
+}
+
+function csiSignature(body: string): QuerySignature | null {
+  let index = 0;
+  let prefix = "";
+  const first = body[0];
+  if (first && "<=>?".includes(first)) {
+    prefix = first;
+    index = 1;
+  }
+  const paramsEnd = scanWhile(body, index, 0x30, 0x3f);
+  const intermediatesEnd = scanWhile(body, paramsEnd, 0x20, 0x2f);
+  const final = body[intermediatesEnd];
+  const finalCode = body.charCodeAt(intermediatesEnd);
+  if (!final || finalCode < 0x40 || finalCode > 0x7e) return null;
+  return {
+    kind: "csi",
+    prefix,
+    intermediates: body.slice(paramsEnd, intermediatesEnd),
+    final,
+    params: parseParams(body.slice(index, paramsEnd)),
+  };
+}
+
+function dcsSignature(body: string): QuerySignature | null {
+  const paramsEnd = scanWhile(body, 0, 0x30, 0x3f);
+  const intermediatesEnd = scanWhile(body, paramsEnd, 0x20, 0x2f);
+  const finalCode = body.charCodeAt(intermediatesEnd);
+  if (Number.isNaN(finalCode) || finalCode < 0x40 || finalCode > 0x7e) return null;
+  return {
+    kind: "dcs",
+    intermediates: body.slice(paramsEnd, intermediatesEnd),
+    final: body[intermediatesEnd] ?? "",
+    params: parseParams(body.slice(0, paramsEnd)),
+    data: body.slice(intermediatesEnd + 1),
+  };
+}
+
+function oscSignature(body: string): QuerySignature | null {
+  const separator = body.indexOf(";");
+  const ident = Number.parseInt(separator === -1 ? body : body.slice(0, separator), 10);
+  if (Number.isNaN(ident)) return null;
+  return { kind: "osc", ident, data: separator === -1 ? "" : body.slice(separator + 1) };
+}
+
+/** Index of the first byte of `body` outside `[from, to]`, starting at `start`. */
+function scanWhile(body: string, start: number, from: number, to: number): number {
+  let index = start;
+  while (index < body.length) {
+    const code = body.charCodeAt(index);
+    if (code < from || code > to) break;
+    index += 1;
+  }
+  return index;
+}
+
+/**
+ * Parses a CSI parameter string the way xterm reports it.
+ *
+ * Missing parameters read as zero and sub-parameters stay arrays, so a
+ * boundary signature matches the parameters xterm hands to a hook.
+ */
+function parseParams(text: string): (number | number[])[] {
+  if (text === "") return [];
+  const params: (number | number[])[] = [];
+  for (const part of text.split(";")) {
+    if (params.length >= 32) break;
+    const values = part.split(":").map((value) => {
+      if (value === "") return 0;
+      const parsed = Number.parseInt(value, 10);
+      return Number.isNaN(parsed) ? 0 : Math.min(parsed, 65535);
+    });
+    params.push(values.length === 1 ? (values[0] ?? 0) : values);
+  }
+  return params;
+}
+
+/** Whether two sequences are the same query. */
+function sameSignature(left: QuerySignature, right: QuerySignature): boolean {
+  if (left.kind === "csi") {
+    return (
+      right.kind === "csi" &&
+      left.prefix === right.prefix &&
+      left.intermediates === right.intermediates &&
+      left.final === right.final &&
+      sameParams(left.params, right.params)
+    );
+  }
+  if (left.kind === "dcs") {
+    return (
+      right.kind === "dcs" &&
+      left.intermediates === right.intermediates &&
+      left.final === right.final &&
+      left.data === right.data &&
+      sameParams(left.params, right.params)
+    );
+  }
+  return right.kind === "osc" && left.ident === right.ident && left.data === right.data;
+}
+
+function sameParams(left: (number | number[])[], right: (number | number[])[]): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((value, index) => {
+    const other = right[index];
+    if (Array.isArray(value) || Array.isArray(other)) {
+      return (
+        Array.isArray(value) &&
+        Array.isArray(other) &&
+        value.length === other.length &&
+        value.every((part, partIndex) => part === other[partIndex])
+      );
+    }
+    return value === other;
+  });
+}
+
 /**
  * Registers parser hooks for every query xterm answers.
  *
@@ -190,7 +521,16 @@ export function registerTerminalQueryHooks(
     disposables.push(
       parser.registerCsiHandler(id, (params) => {
         const pattern = expect(params);
-        if (pattern) tracker.expect(pattern);
+        if (pattern) {
+          tracker.noteHook({
+            kind: "csi",
+            prefix: id.prefix ?? "",
+            intermediates: id.intermediates ?? "",
+            final: id.final,
+            params,
+          });
+          tracker.expect(pattern);
+        }
         return false;
       }),
     );
@@ -219,7 +559,8 @@ export function registerTerminalQueryHooks(
 
   // DECRQSS: DCS $ q <setting> ST; xterm answers with a status string.
   disposables.push(
-    parser.registerDcsHandler({ intermediates: "$", final: "q" }, () => {
+    parser.registerDcsHandler({ intermediates: "$", final: "q" }, (data, params) => {
+      tracker.noteHook({ kind: "dcs", intermediates: "$", final: "q", params, data });
       tracker.expect(STATUS_STRING);
       return false;
     }),
@@ -229,8 +570,10 @@ export function registerTerminalQueryHooks(
   disposables.push(
     parser.registerOscHandler(4, (data) => {
       // One report per queried index, each arriving as its own data event.
-      for (const part of data.split(";")) {
-        if (part === "?") tracker.expect(INDEXED_COLOR);
+      const count = data.split(";").filter((part) => part === "?").length;
+      if (count > 0) {
+        tracker.noteHook({ kind: "osc", ident: 4, data });
+        for (let slot = 0; slot < count; slot += 1) tracker.expect(INDEXED_COLOR);
       }
       return false;
     }),
@@ -241,8 +584,10 @@ export function registerTerminalQueryHooks(
   for (const resource of [10, 11, 12]) {
     disposables.push(
       parser.registerOscHandler(resource, (data) => {
-        for (const part of data.split(";")) {
-          if (part === "?") tracker.expect(SPECIAL_COLOR);
+        const count = data.split(";").filter((part) => part === "?").length;
+        if (count > 0) {
+          tracker.noteHook({ kind: "osc", ident: resource, data });
+          for (let slot = 0; slot < count; slot += 1) tracker.expect(SPECIAL_COLOR);
         }
         return false;
       }),

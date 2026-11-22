@@ -189,12 +189,11 @@ export class TerminalController {
   /**
    * Sends raw text as PTY input (used by the phone key row and tests).
    *
-   * `reply` names the output position that carried the query xterm is
-   * answering and the answer's ordinal within that chunk, or null for typed
+   * `reply` names the output chunk that carried the query's first byte and
+   * the query's index among the queries that start there, or null for typed
    * input. The daemon writes one answer per `(position, ordinal)` and decides
    * whether this viewer may answer it: a reply is never dropped here, because
-   * a sole viewer that attached at a snapshot has no other parser to collide
-   * with and may answer its first raw chunk.
+   * the identity is the same for every viewer that parsed the starting chunk.
    */
   send(data: string, reply: TerminalQueryReply | null = null): void {
     if (!this.client || this.streamId === 0) return;
@@ -414,7 +413,7 @@ export class TerminalController {
       // remembers which chunk is being parsed, so an answer names the output
       // position the daemon uses to keep one answer per query.
       const mark = this.queryTracker.mark();
-      this.queryTracker.beginChunk(frame.seq);
+      this.queryTracker.beginChunk(frame.seq, frame.payload);
       term.write(frame.payload, () => {
         this.queryTracker.settle(mark);
         this.queryTracker.endChunk();
@@ -428,7 +427,7 @@ export class TerminalController {
       if (frame.seq <= this.tracker.position) return;
       term.reset();
       this.tracker.reset(frame.seq);
-      this.queryTracker.beginChunk(frame.seq);
+      this.queryTracker.beginChunk(frame.seq, frame.payload);
       term.write(new TextDecoder().decode(frame.payload), () => {
         this.queryTracker.endChunk();
         this.scheduleAck();

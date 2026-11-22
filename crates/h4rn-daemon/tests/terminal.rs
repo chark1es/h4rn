@@ -1131,32 +1131,33 @@ async fn a_reply_for_output_never_sent_is_ignored() {
 }
 
 /// A viewer that attached after a chunk was produced never parsed that chunk,
-/// so its answer ordinals for the next chunk differ from an earlier viewer's.
-/// Its reply is dropped and the earlier viewer's answer is the one written.
+/// so it has no answer for a query that started there. The queries it does
+/// see keep the same identity as an earlier viewer's, so both name the next
+/// chunk's query alike and it is written once.
 #[tokio::test]
-async fn a_viewer_that_attached_mid_query_cannot_answer_that_chunk() {
+async fn a_viewer_that_attached_mid_query_names_the_next_query_the_same_way() {
     let (manager, terminal, cwd) = raw_cat_terminal().await;
     let (early_id, _early_rx, early) = attach_viewer(&manager, &terminal, false);
     mark_sent(&early, 10);
     let (late_id, mut late_rx, late) = attach_viewer(&manager, &terminal, true);
     // The late viewer attaches with chunk 1 already folded into its snapshot:
     // it parses chunks 2 onward, so a query that started in chunk 1 is not in
-    // its numbering.
+    // its numbering at all.
     late.viewer.reset_credit(1);
     mark_sent(&late, 10);
 
-    // An earlier viewer answers the split query (ordinal 0) and a second query
-    // in the same chunk (ordinal 1). The late viewer's parser sees only the
-    // second query, so it calls it ordinal 0.
+    // Both viewers answered the query that starts in chunk 2 the same way, so
+    // the first reply is the one written and the other is a duplicate. The
+    // early viewer also answers the query that started in chunk 1.
     manager
-        .input_by_stream(terminal.stream_id, late_id, b"iLATE0", at(2, 0))
-        .expect("late viewer's misnumbered answer is dropped");
+        .input_by_stream(terminal.stream_id, late_id, b"iLATE", at(2, 0))
+        .expect("the late viewer's answer to the chunk-2 query is written");
     manager
-        .input_by_stream(terminal.stream_id, early_id, b"iEARLY0", at(2, 0))
-        .expect("the split query's answer is written");
+        .input_by_stream(terminal.stream_id, early_id, b"iEARLY", at(2, 0))
+        .expect("the early viewer's duplicate is dropped");
     manager
-        .input_by_stream(terminal.stream_id, early_id, b"iEARLY1", at(2, 1))
-        .expect("the second query's answer is written");
+        .input_by_stream(terminal.stream_id, early_id, b"iSPLIT", at(1, 0))
+        .expect("the early viewer answers the query that started in chunk 1");
     manager
         .input_by_stream(terminal.stream_id, late_id, b"iHELLO", QueryReply::No)
         .expect("typed input");
@@ -1170,18 +1171,18 @@ async fn a_viewer_that_attached_mid_query_cannot_answer_that_chunk() {
     )
     .await;
     assert_eq!(
-        output.matches("iEARLY0").count(),
+        output.matches("iSPLIT").count(),
         1,
-        "the earlier viewer answers the split query: {output:?}"
+        "the query that started before the late snapshot is answered once: {output:?}"
     );
     assert_eq!(
-        output.matches("iEARLY1").count(),
+        output.matches("iLATE").count(),
         1,
-        "the earlier viewer answers the later query: {output:?}"
+        "the late viewer's answer to the chunk-2 query is the one written: {output:?}"
     );
     assert!(
-        !output.contains("iLATE0"),
-        "a viewer that attached mid-query must not answer that chunk: {output:?}"
+        !output.contains("iEARLY"),
+        "both viewers name the chunk-2 query alike, so the second answer is dropped: {output:?}"
     );
 
     drop(early);
@@ -1284,7 +1285,7 @@ async fn a_stalled_viewer_below_the_chunk_does_not_block_the_answer() {
     mark_sent(&early, 3);
     let (late_id, mut late_rx, late) = attach_viewer(&manager, &terminal, true);
     // The late viewer attached with chunk 6 in its snapshot: chunk 7 is its
-    // first raw chunk and lies below its answer floor.
+    // first raw chunk, and it is the only viewer that received it.
     late.viewer.reset_credit(6);
     mark_sent(&late, 7);
 
@@ -1354,23 +1355,23 @@ async fn a_sole_viewer_answers_after_a_resync_snapshot() {
     drop(cwd);
 }
 
-/// A viewer that never received chunk 3 cannot claim its first answer and
+/// A viewer that never received chunk 5 cannot claim its first answer and
 /// suppress the viewer that did receive it.
 #[tokio::test]
 async fn a_bogus_position_cannot_claim_a_real_answer() {
     let (manager, terminal, cwd) = raw_cat_terminal().await;
     let (bogus_id, _bogus_rx, bogus) = attach_viewer(&manager, &terminal, false);
-    // It attached after chunk 3 (its snapshot holds it), then received 4 and 5.
+    // It attached after chunk 3 (its snapshot holds it), then received 4.
     bogus.viewer.reset_credit(3);
-    mark_sent(&bogus, 5);
+    mark_sent(&bogus, 4);
     let (real_id, mut real_rx, real) = attach_viewer(&manager, &terminal, true);
     mark_sent(&real, 5);
 
     manager
-        .input_by_stream(terminal.stream_id, bogus_id, b"iBOGUS", at(3, 0))
+        .input_by_stream(terminal.stream_id, bogus_id, b"iBOGUS", at(5, 0))
         .expect("a position it was never sent is ignored");
     manager
-        .input_by_stream(terminal.stream_id, real_id, b"iREAL", at(3, 0))
+        .input_by_stream(terminal.stream_id, real_id, b"iREAL", at(5, 0))
         .expect("the legitimate answer is written");
     manager
         .input_by_stream(terminal.stream_id, real_id, b"iHELLO", QueryReply::No)

@@ -294,57 +294,56 @@ describe("terminal controller query replies", () => {
     controller.dispose();
   });
 
-  it("names the chunk where a query split across frames ends", async () => {
+  it("names the chunk where a query split across frames starts", async () => {
     const sent: BinaryFrame[] = [];
     const { controller, term, binary } = await startController(sent);
 
     // The query starts in chunk 7 and its final byte arrives in chunk 8.
     pushOutput(binary, 7, "\x1b[?12");
     term.finishWrite();
-    pushOutput(binary, 8, ";2$y");
-    expect(term.query({ prefix: "?", intermediates: "$", final: "p" }, [12])).toBe(false);
+    pushOutput(binary, 8, ";2$p");
+    expect(term.query({ prefix: "?", intermediates: "$", final: "p" }, [12, 2])).toBe(false);
     term.input("\x1b[?12;2$y");
     term.finishWrite();
 
-    expect(sent.map((frame) => frame.seq)).toEqual([ptyInputReplySeq(8)]);
+    expect(sent.map((frame) => frame.seq)).toEqual([ptyInputReplySeq(7, 0)]);
     controller.dispose();
   });
 
-  it("lets the daemon drop a late viewer's answer when another viewer saw the query", async () => {
-    // The early viewer parses chunks 7 and 8. The late one attaches with
-    // chunk 7 already folded into its snapshot, so it parses only chunk 8 and
-    // numbers its answers differently.
+  it("gives the same answer the same name for a viewer that attached mid-query", async () => {
+    // The early viewer parses chunks 5 and 6; the late one attached with chunk
+    // 5 already folded into its snapshot, so it parses chunk 6 alone.
     const earlySent: BinaryFrame[] = [];
     const early = await startController(earlySent, 0);
     const lateSent: BinaryFrame[] = [];
-    const late = await startController(lateSent, 7);
+    const late = await startController(lateSent, 5);
 
-    pushOutput(early.binary, 7, "\x1b[?12");
+    pushOutput(early.binary, 5, "\x1b[?12");
     early.term.finishWrite();
-    pushOutput(early.binary, 8, ";2$y");
-    expect(early.term.query({ prefix: "?", intermediates: "$", final: "p" }, [12])).toBe(false);
+    pushOutput(early.binary, 6, ";2$p\x1b[?25$p");
+    expect(early.term.query({ prefix: "?", intermediates: "$", final: "p" }, [12, 2])).toBe(false);
     early.term.input("\x1b[?12;2$y");
     expect(early.term.query({ prefix: "?", intermediates: "$", final: "p" }, [25])).toBe(false);
     early.term.input("\x1b[?25;2$y");
     early.term.finishWrite();
 
-    // The late viewer sees only the tail of the split query and the second
-    // query, which it numbers as ordinal 0.
-    pushOutput(late.binary, 8, ";2$y");
+    // The late viewer never saw the query that started in chunk 5; the query
+    // it does answer started in chunk 6, and it names it the way the early
+    // viewer does.
+    pushOutput(late.binary, 6, ";2$p\x1b[?25$p");
     expect(late.term.query({ prefix: "?", intermediates: "$", final: "p" }, [25])).toBe(false);
     late.term.input("\x1b[?25;2$y");
     late.term.finishWrite();
     late.term.input("ls\r");
 
     expect(earlySent.map((frame) => [frame.seq, payload(frame)])).toEqual([
-      [ptyInputReplySeq(8, 0), "\x1b[?12;2$y"],
-      [ptyInputReplySeq(8, 1), "\x1b[?25;2$y"],
+      [ptyInputReplySeq(5, 0), "\x1b[?12;2$y"],
+      [ptyInputReplySeq(6, 0), "\x1b[?25;2$y"],
     ]);
-    // The client always sends its answer and lets the daemon decide: here the
-    // early viewer has the position, so the late one's frame is dropped
-    // daemon-side, not silently in the client.
+    // Both viewers send the shared answer with one identity, so the daemon
+    // writes it once whichever arrived first; the client never drops it.
     expect(lateSent.map((frame) => [frame.seq, payload(frame)])).toEqual([
-      [ptyInputReplySeq(8, 0), "\x1b[?25;2$y"],
+      [ptyInputReplySeq(6, 0), "\x1b[?25;2$y"],
       [0, "ls\r"],
     ]);
 

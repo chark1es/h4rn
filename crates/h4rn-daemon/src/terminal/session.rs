@@ -20,7 +20,7 @@ use h4rn_protocol::{
     TerminalExitNotice, TerminalId, TerminalInfo, ThreadId,
 };
 use h4rn_vt::{AlacrittyVt, TerminalModel};
-use portable_pty::{Child, MasterPty, PtySize};
+use portable_pty::{Child, ChildKiller, MasterPty, PtySize};
 use tokio::sync::{Notify, broadcast, mpsc};
 
 use crate::server::Outbound;
@@ -101,9 +101,10 @@ impl Viewer {
     ///
     /// The snapshot replaces all output, so it becomes the latest position
     /// this viewer has, and the viewer starts parsing raw output at the next
-    /// chunk. A reply may name a later chunk only once `seq`'s successor has
-    /// also arrived, because a query that started in `seq` is invisible to a
-    /// parser that only renders the snapshot.
+    /// chunk. A query that started in a chunk the snapshot already folded in
+    /// is invisible to this parser, so it never asks for that query's answer;
+    /// its own answers name the chunk where their query started, which every
+    /// other viewer that parsed that chunk also names.
     pub fn reset_credit(&self, seq: u64) {
         let mut credit = lock(&self.credit);
         credit.outstanding.clear();
@@ -144,33 +145,12 @@ impl Viewer {
         credit.bytes += bytes;
     }
 
-    /// The earliest output position whose answer this viewer may name.
-    ///
-    /// The viewer must have parsed the raw bytes of the chunk before the one
-    /// it answers, so a query that started in the previous chunk is part of
-    /// its numbering. A viewer that attached at position zero is the
-    /// exception: no earlier chunk exists, so its first chunk is answerable.
-    pub fn answer_from(&self) -> u64 {
-        lock(&self.credit).answer_from
-    }
-
     /// The latest output position actually sent to this viewer.
     ///
     /// Replies are validated against this exact value, not against credit: a
     /// viewer may only answer a query from output it was sent.
     pub fn sent_through(&self) -> u64 {
         lock(&self.credit).sent_through
-    }
-
-    /// Whether this viewer received the chunk at `position` and can number
-    /// its answers the way an earlier viewer does.
-    ///
-    /// A viewer that is registered but has not had its attach snapshot yet
-    /// has received nothing, and one stalled below `position` never saw the
-    /// query; neither can answer it, so neither may block a viewer that can.
-    pub fn could_answer(&self, position: u64) -> bool {
-        let credit = lock(&self.credit);
-        credit.answer_from <= position && credit.sent_through >= position
     }
 
     /// Frees credit acknowledged by `up_to`.
@@ -221,15 +201,12 @@ impl Viewer {
 }
 
 /// Outstanding chunk credit for one viewer.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Credit {
     outstanding: VecDeque<(u64, usize)>,
     bytes: usize,
     /// Latest output position sent to this viewer.
     sent_through: u64,
-    /// Earliest output position this viewer may answer (see
-    /// [`Viewer::answer_from`]).
-    answer_from: u64,
     /// Highest position the viewer acknowledged.
     ///
     /// An ack can overtake the send that records the same chunk, so this also
@@ -237,27 +214,11 @@ pub struct Credit {
     acked_through: u64,
 }
 
-impl Default for Credit {
-    fn default() -> Self {
-        Self {
-            outstanding: VecDeque::new(),
-            bytes: 0,
-            sent_through: 0,
-            answer_from: 1,
-            acked_through: 0,
-        }
-    }
-}
-
 impl Credit {
     /// Applies a snapshot at `seq`: it becomes the latest position, and the
     /// parser restarts at the next raw chunk.
     fn snapshot_at(&mut self, seq: u64) {
         self.sent_through = self.sent_through.max(seq);
-        // The snapshot carries position `seq` as rendered state, not as raw
-        // bytes. To number answers the way an earlier viewer does, this one
-        // needs both `seq + 1` and the chunk before the one it answers.
-        self.answer_from = if seq == 0 { 1 } else { seq + 2 };
     }
 }
 
@@ -298,6 +259,13 @@ pub struct Session {
     answers: Mutex<AnsweredQueries>,
     writer: Mutex<Option<Box<dyn Write + Send>>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
+    /// An independent killer for the shell.
+    ///
+    /// `finish` can hold the child lock inside `wait()` until the shell
+    /// exits; the close path must still end the shell. The cloned killer owns
+    /// its own process handle (on Windows) or pid, so it works while that lock
+    /// is busy.
+    killer: Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>,
     pty: Mutex<Box<dyn MasterPty + Send>>,
     /// The spawned shell's own pid, for the initial hangup.
     ///
@@ -344,6 +312,9 @@ impl Session {
         // The child is the shell itself when it is spawned; `tcgetpgrp` above
         // can already point at a startup job in the foreground.
         let shell_pid = child.process_id().map(|pid| pid as i32);
+        // Keep a handle that can end the shell without taking the child lock,
+        // which the reader thread may hold in `wait()` until the shell exits.
+        let killer = child.clone_killer();
         let (output, _) = broadcast::channel(OUTPUT_RING_CAPACITY);
         Self {
             id,
@@ -361,6 +332,7 @@ impl Session {
             answers: Mutex::new(AnsweredQueries::default()),
             writer: Mutex::new(Some(writer)),
             child: Mutex::new(child),
+            killer: Mutex::new(Some(killer)),
             pty: Mutex::new(master),
             shell_pid,
             process_group,
@@ -661,11 +633,12 @@ impl Session {
     /// Writes one attached viewer's input to the PTY.
     ///
     /// Viewers share one PTY, so a query must be answered once. A marked reply
-    /// that names the output position (and the answer's ordinal within it) is
-    /// written by the first viewer to send it, from any viewer; an exact
-    /// duplicate, or an answer for a chunk the record has forgotten, is
-    /// dropped. A stalled viewer therefore never blocks another viewer's
-    /// answer. A position the daemon never sent to that viewer is ignored, so
+    /// that names the output chunk where its query started (and the query's
+    /// index in that chunk) is written by the first viewer to send it, from
+    /// any viewer; an exact duplicate, or an answer for a chunk the record has
+    /// forgotten, is dropped. The identity is a property of the output stream,
+    /// so a viewer that stalled for a while names answers exactly as one that
+    /// kept up. A position the daemon never sent to that viewer is ignored, so
     /// a bogus claim cannot suppress a real answer.
     ///
     /// The acceptance decision, the PTY write and the record update happen
@@ -733,12 +706,20 @@ impl Session {
         tokio::time::sleep(TERM_GRACE).await;
         // The reader thread may be holding the child in `wait()` after a PTY
         // EOF; waiting for that lock here would outlast the close deadline.
-        // Fall back to signals that address the process, which need no handle.
+        // The cloned killer owns its own process handle, so it still ends the
+        // shell (the only way on Windows), and the pid signals below need no
+        // handle at all.
         match try_lock(&self.child) {
             Some(mut child) => {
                 let _ = child.kill();
             }
-            None => signal_pid(self.shell_pid, Signal::Kill),
+            None => {
+                // On Unix this is a hangup on an uncatchable-at-this-point
+                // shell; the SIGKILL by pid below is the hard stop there. On
+                // Windows the cloned handle is the TerminateProcess call.
+                kill_through_handle(&self.killer);
+                signal_pid(self.shell_pid, Signal::Kill);
+            }
         }
         if let Some(pgid) = self.process_group {
             signal_group(pgid, Signal::Kill);
@@ -860,7 +841,6 @@ fn accepts_reply(
     reply: QueryReply,
 ) -> Option<AcceptedReply> {
     let latest = viewer.sent_through();
-    let answer_from = viewer.answer_from();
     let viewers = lock(viewers);
     // Mixed versions are decided when each client attaches, not by whichever
     // reply happens to arrive first. While any attached viewer cannot name a
@@ -881,15 +861,7 @@ fn accepts_reply(
         let answer = match reply {
             QueryReply::No | QueryReply::Unpositioned => None,
             QueryReply::At { position, ordinal } => {
-                if !accept_position(
-                    &viewers,
-                    viewer_id,
-                    answers,
-                    position,
-                    ordinal,
-                    latest,
-                    answer_from,
-                ) {
+                if !accept_position(answers, position, ordinal, latest) {
                     return None;
                 }
                 Some((position, ordinal))
@@ -912,15 +884,7 @@ fn accepts_reply(
         // a query another viewer already answered.
         QueryReply::Unpositioned => None,
         QueryReply::At { position, ordinal } => {
-            if !accept_position(
-                &viewers,
-                viewer_id,
-                answers,
-                position,
-                ordinal,
-                latest,
-                answer_from,
-            ) {
+            if !accept_position(answers, position, ordinal, latest) {
                 return None;
             }
             Some(AcceptedReply {
@@ -939,35 +903,24 @@ fn clear_legacy_owners(viewers: &mut HashMap<ViewerId, ViewerEntry>) {
     }
 }
 
-/// Records an answer for `(position, ordinal)` if it is new to this viewer.
+/// Records an answer for `(position, ordinal)` if it is new.
 ///
-/// A viewer cannot answer a query from output it was never sent, nor from a
-/// chunk whose predecessor it never parsed: an answer's ordinal is counted
-/// from the start of the chunk, so a viewer that attached mid-query would
-/// number the same answers differently. That last rule protects the other
-/// viewers' numbering, so it only applies while another attached viewer
-/// received `position` and could answer it. A viewer that is still attaching,
-/// one stalled below `position`, and a sole viewer have nothing to collide
-/// with and may answer their first raw chunk after a snapshot. A rejected
+/// The identity comes from the output stream, not from the viewer: `position`
+/// is the chunk that carried the query's first byte and `ordinal` counts
+/// queries that start in that chunk, so every viewer that parsed that chunk
+/// names the same answer the same way. A viewer that attached with the
+/// query's first byte already folded into its snapshot never saw the query
+/// and cannot answer it. A reply naming output this viewer was never sent is
+/// still ignored, so a bogus claim cannot suppress a real answer. A rejected
 /// reply is dropped without advancing the record, so it cannot suppress the
 /// answer of a viewer that really saw the query.
 fn accept_position(
-    viewers: &HashMap<ViewerId, ViewerEntry>,
-    viewer_id: ViewerId,
     answers: &Mutex<AnsweredQueries>,
     position: u64,
     ordinal: u64,
     latest: u64,
-    answer_from: u64,
 ) -> bool {
     if position == 0 || position > latest {
-        return false;
-    }
-    if position < answer_from
-        && viewers
-            .iter()
-            .any(|(id, entry)| *id != viewer_id && entry.viewer.could_answer(position))
-    {
         return false;
     }
     // Checked here and recorded after the write (`commit_reply`); the writer
@@ -982,11 +935,11 @@ pub enum QueryReply {
     No,
     /// A reply from a client that does not name the output position.
     Unpositioned,
-    /// A reply to one answer of the queries in an output chunk.
+    /// A reply to one query in an output chunk.
     At {
-        /// Output chunk that contained the query (its end, if split).
+        /// Output chunk that carried the query's first byte.
         position: u64,
-        /// The answer's index among the answers expected for that chunk.
+        /// The query's index among the queries that start in that chunk.
         ordinal: u64,
     },
 }
@@ -1171,6 +1124,19 @@ fn signal_pid(pid: Option<i32>, signal: Signal) {
     #[cfg(windows)]
     {
         let _ = (pid, signal);
+    }
+}
+
+/// Kills the shell through the cloned killer, without the child lock.
+///
+/// On Windows the cloned killer holds a duplicated process handle and calls
+/// `TerminateProcess`, which is what ends a ConPTY shell when `finish` holds
+/// the child in `wait()`. It never waits for the child lock, so a busy reader
+/// thread cannot delay it. Returns whether a killer was available.
+fn kill_through_handle(killer: &Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>) -> bool {
+    match lock(killer).as_mut() {
+        Some(killer) => killer.kill().is_ok(),
+        None => false,
     }
 }
 
@@ -1455,15 +1421,21 @@ mod tests {
     }
 
     #[test]
-    fn a_viewer_that_attached_late_cannot_number_its_first_chunk() {
+    fn a_snapshot_advances_the_sent_bound_but_not_a_floor() {
         let (viewer, _rx) = viewer();
         viewer.reset_credit(0);
-        assert_eq!(viewer.answer_from(), 1, "a fresh viewer may answer chunk 1");
+        assert_eq!(viewer.sent_through(), 0);
         viewer.reset_credit(5);
         assert_eq!(
-            viewer.answer_from(),
-            7,
-            "a viewer that attached at position 5 first needs chunk 6"
+            viewer.sent_through(),
+            5,
+            "a snapshot at 5 is the latest position the viewer received"
+        );
+        viewer.record_sent(6, 1);
+        assert_eq!(
+            viewer.sent_through(),
+            6,
+            "the first raw chunk after the snapshot is sendable and answerable"
         );
     }
 
@@ -1632,7 +1604,7 @@ mod tests {
     /// still send TERM and then KILL on schedule instead of waiting for a lock
     /// that the ignored hangup can never release.
     #[cfg(unix)]
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn close_does_not_wait_for_a_shell_that_holds_the_child_lock() {
         use std::time::Instant;
 
@@ -1679,19 +1651,91 @@ mod tests {
         }
 
         // The hangup is ignored, so the wait lasts its whole bound; the TERM
-        // grace follows. The child lock must add nothing on top.
-        tokio::time::timeout(
-            HANGUP_GRACE + TERM_GRACE + Duration::from_secs(1),
-            session.kill_with_grace(),
-        )
-        .await
-        .expect("close must not wait for the lock the reader thread holds");
+        // grace follows. The child lock must add nothing on top. A blocking
+        // lock would never be released here, because only this path kills the
+        // shell, so a watchdog ends it shortly after the deadline and the
+        // wall-clock assertion below fails instead of hanging the test.
+        let bound = HANGUP_GRACE + TERM_GRACE + Duration::from_millis(500);
+        let watchdog = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                std::thread::sleep(bound + Duration::from_millis(500));
+                if let Some(pid) = session.shell_pid {
+                    // SAFETY: signalling the shell this test spawned; ESRCH
+                    // after a clean exit is ignored.
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                }
+            })
+        };
+
+        let started = Instant::now();
+        session.kill_with_grace().await;
+        let elapsed = started.elapsed();
+        watchdog.join().expect("watchdog joins");
+        assert!(
+            elapsed < bound,
+            "close must not wait for the child lock the reader thread holds (took {elapsed:?})"
+        );
 
         // The pid/group signals reached the shell, so the reader thread's
         // `wait` returns and the exit report is written.
         let deadline = Instant::now() + Duration::from_secs(5);
         while session.info().exit.is_none() {
             assert!(Instant::now() < deadline, "the shell must be killed");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Closing a console on Windows ends it even when the shell outlives its
+    /// stdio, where the reader thread's `finish` holds the child in `wait()`.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_ends_a_windows_console() {
+        use std::time::Instant;
+
+        let pty = portable_pty::native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open pty");
+        let mut command = portable_pty::CommandBuilder::new("ping.exe");
+        command.args(["-n", "60", "127.0.0.1"]);
+        let child = pty.slave.spawn_command(command).expect("spawn child");
+        drop(pty.slave);
+        let reader = pty.master.try_clone_reader().expect("pty reader");
+        let writer = pty.master.take_writer().expect("pty writer");
+        let session = Arc::new(Session::new(
+            TerminalId::new("term_windows_close"),
+            1,
+            None,
+            HostId::new("host_test"),
+            "C:\\".into(),
+            "cmd.exe".into(),
+            80,
+            24,
+            pty.master,
+            child,
+            writer,
+        ));
+        session.start_reader(reader);
+
+        // The close path has no hangup wait on Windows; it ends the process
+        // through its handle and must report the exit soon after.
+        let started = Instant::now();
+        tokio::time::timeout(Duration::from_secs(5), session.kill_with_grace())
+            .await
+            .expect("close must not wait for the child handle");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "closing the console must not block"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while session.info().exit.is_none() {
+            assert!(Instant::now() < deadline, "the console must be terminated");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
@@ -1846,9 +1890,10 @@ mod tests {
                     },
                 )
             });
-            started_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("the first write must start");
+            // Every step whose failure would leave a writer parked on the gate
+            // is recorded, not asserted yet: the gate is released and both
+            // writers are joined before anything is checked.
+            let started = started_rx.recv_timeout(Duration::from_secs(5));
 
             let second = scope.spawn(|| {
                 let _ = second_started_tx.send(());
@@ -1864,18 +1909,23 @@ mod tests {
                     },
                 )
             });
-            second_started_rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("the second write must start");
-            std::thread::sleep(Duration::from_millis(100));
+            let second_started = second_started_rx.recv_timeout(Duration::from_secs(5));
+            if started.is_ok() && second_started.is_ok() {
+                std::thread::sleep(Duration::from_millis(100));
+            }
             // Observe only; the writers are released and joined before any of
             // this is asserted, so a failure cannot leave a thread parked.
             let second_wrote = !lock(&written).is_empty();
             let waiting_recorded = lock(&answers).is_answered(4, 0);
 
-            release_tx.send(()).expect("release the first write");
-            first.join().expect("first thread").expect("first write");
-            second.join().expect("second thread").expect("second write");
+            let _ = release_tx.send(());
+            let first = first.join();
+            let second = second.join();
+
+            started.expect("the first write must start");
+            second_started.expect("the second write must start");
+            first.expect("first thread").expect("first write");
+            second.expect("second thread").expect("second write");
 
             assert!(!second_wrote, "the second write must wait for the first");
             assert!(
@@ -2006,5 +2056,283 @@ mod tests {
         .expect("the positioned viewer's answer is written");
         assert_eq!(&*lock(&written), b"iNEW");
         assert!(lock(&viewers).get(&2).expect("the new viewer").legacy_owner);
+    }
+
+    /// A writer that records every byte written to it.
+    struct RecordingWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            lock(&self.0).extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn recording_writer(written: &Arc<Mutex<Vec<u8>>>) -> Mutex<Option<Box<dyn Write + Send>>> {
+        Mutex::new(Some(Box::new(RecordingWriter(Arc::clone(written)))))
+    }
+
+    /// A viewer entry that attached at `snapshot` and was then sent `sent`.
+    fn viewer_since_snapshot(snapshot: u64, sent: u64) -> (Arc<Viewer>, mpsc::Receiver<Outbound>) {
+        let (viewer, rx) = viewer();
+        viewer.reset_credit(snapshot);
+        for seq in snapshot + 1..=sent {
+            viewer.record_sent(seq, 1);
+        }
+        (viewer, rx)
+    }
+
+    /// A reply naming the chunk where its query started.
+    fn at(position: u64, ordinal: u64) -> QueryReply {
+        QueryReply::At { position, ordinal }
+    }
+
+    #[test]
+    fn one_query_is_written_once_whatever_order_two_viewers_answer_in() {
+        // Chunk 5 ends inside a query; chunk 6 finishes it and asks a second.
+        // One viewer saw chunk 5 raw and the other attached with it folded
+        // into its snapshot, so only the early viewer can name the first query.
+        // The second query keeps the same identity for both.
+        let replies: [(ViewerId, &[u8], QueryReply); 3] = [
+            (2, b"Y", at(6, 0)),
+            (1, b"X", at(5, 0)),
+            (1, b"Y", at(6, 0)),
+        ];
+        for late_first in [false, true] {
+            let written = Arc::new(Mutex::new(Vec::new()));
+            let writer = recording_writer(&written);
+            // The early viewer saw chunk 5 raw; the late one attached with it
+            // in its snapshot. Both have chunk 6 by the time they answer, so
+            // only the identities decide what is a duplicate.
+            let (early, _early_rx) = attached_viewer(6);
+            let (late, _late_rx) = viewer_since_snapshot(5, 6);
+            let (viewers, answers) = input_state(&[(1, early), (2, late)]);
+
+            // The late viewer's answer arrives either before the early
+            // viewer's or after it; both orders must write each query once.
+            let order: [usize; 3] = if late_first { [0, 1, 2] } else { [1, 2, 0] };
+            for index in order {
+                let (viewer, bytes, reply) = replies[index];
+                write_input_locked(&writer, &viewers, &answers, viewer, bytes, reply)
+                    .expect("the input is written");
+            }
+
+            let written = lock(&written);
+            assert_eq!(
+                written.len(),
+                2,
+                "one write per query; two viewers cannot duplicate an answer"
+            );
+            let text = std::str::from_utf8(&written).expect("ascii");
+            assert_eq!(
+                text,
+                if late_first { "YX" } else { "XY" },
+                "the first accepted answer to each query is the one written"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stalled_viewer_catching_up_cannot_answer_a_query_twice() {
+        // The reproduction: chunk 5 ends with `ESC[?12`, chunk 6 is
+        // `;2$p ESC[?25$p`. A stalls at 5; B attaches with 5 in its snapshot
+        // and answers the chunk-6 query as `(6, 0)`. When A catches up it
+        // answers the chunk-5 query as `(5, 0)` and the same chunk-6 query as
+        // `(6, 0)` again, which the record must drop.
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let writer = recording_writer(&written);
+        let (stalled, _stalled_rx) = attached_viewer(5);
+        let (attached, _attached_rx) = viewer_since_snapshot(5, 6);
+        let (viewers, answers) = input_state(&[(1, stalled), (2, attached)]);
+
+        write_input_locked(&writer, &viewers, &answers, 2, b"Y", at(6, 0))
+            .expect("the attached viewer's answer is written");
+        assert_eq!(&*lock(&written), b"Y");
+
+        // A catches up with chunk 6 before answering.
+        lock(&viewers)
+            .get(&1)
+            .expect("the stalled viewer")
+            .viewer
+            .record_sent(6, 1);
+        write_input_locked(&writer, &viewers, &answers, 1, b"X", at(5, 0))
+            .expect("the earlier query is still answered");
+        write_input_locked(&writer, &viewers, &answers, 1, b"Y", at(6, 0))
+            .expect("a duplicate is dropped without failing the connection");
+
+        assert_eq!(
+            &*lock(&written),
+            b"YX",
+            "every query is answered exactly once, in arrival order"
+        );
+    }
+
+    #[test]
+    fn a_resynced_owner_answers_its_first_chunk_in_mixed_mode() {
+        // A legacy client cannot name positions, so the positioned viewer owns
+        // replies while it is attached. After a resync its first raw chunk is
+        // answerable: the answer's position is the chunk where its query
+        // started, which the legacy viewer would not name at all.
+        let written = Arc::new(Mutex::new(Vec::new()));
+        let writer = recording_writer(&written);
+        let (owner, _owner_rx) = viewer_since_snapshot(7, 8);
+        let (legacy, _legacy_rx) = attached_viewer(8);
+        let (viewers, answers) = input_state(&[(1, owner), (2, legacy)]);
+        {
+            let mut viewers = lock(&viewers);
+            viewers
+                .get_mut(&1)
+                .expect("the positioned owner")
+                .legacy_owner = true;
+            viewers
+                .get_mut(&2)
+                .expect("the legacy viewer")
+                .reply_positions = false;
+        }
+
+        write_input_locked(&writer, &viewers, &answers, 1, b"iOWN", at(8, 0))
+            .expect("the positioned owner's first chunk after a resync is answerable");
+
+        assert_eq!(&*lock(&written), b"iOWN");
+        assert!(lock(&answers).is_answered(8, 0));
+        assert!(
+            lock(&viewers)
+                .get(&1)
+                .expect("the positioned owner")
+                .legacy_owner,
+            "the role stays with the viewer that wrote the answer"
+        );
+    }
+
+    /// A killer that counts how often it was asked to end the shell.
+    #[derive(Debug)]
+    struct CountingKiller {
+        kills: Arc<AtomicU64>,
+    }
+
+    impl portable_pty::ChildKiller for CountingKiller {
+        fn kill(&mut self) -> std::io::Result<()> {
+            self.kills.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(Self {
+                kills: Arc::clone(&self.kills),
+            })
+        }
+    }
+
+    /// A child that never exits on its own and never reports a pid.
+    #[derive(Debug)]
+    struct IdleChild {
+        kills: Arc<AtomicU64>,
+    }
+
+    impl portable_pty::ChildKiller for IdleChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(CountingKiller {
+                kills: Arc::clone(&self.kills),
+            })
+        }
+    }
+
+    impl portable_pty::Child for IdleChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(None)
+        }
+
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            Err(std::io::Error::other("the test child never exits"))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+    }
+
+    #[test]
+    fn the_independent_killer_ends_the_shell_without_the_child_lock() {
+        let kills = Arc::new(AtomicU64::new(0));
+        let killer: Mutex<Option<Box<dyn ChildKiller + Send + Sync>>> =
+            Mutex::new(Some(Box::new(CountingKiller {
+                kills: Arc::clone(&kills),
+            })));
+
+        assert!(kill_through_handle(&killer));
+        assert_eq!(kills.load(Ordering::SeqCst), 1);
+        let empty: Mutex<Option<Box<dyn ChildKiller + Send + Sync>>> = Mutex::new(None);
+        assert!(!kill_through_handle(&empty));
+    }
+
+    #[tokio::test]
+    async fn close_kills_the_shell_while_the_child_lock_is_busy() {
+        use std::time::Instant;
+
+        let pty = portable_pty::native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open pty");
+        let writer = pty.master.take_writer().expect("pty writer");
+        let kills = Arc::new(AtomicU64::new(0));
+        let session = Arc::new(Session::new(
+            TerminalId::new("term_busy_child"),
+            1,
+            None,
+            HostId::new("host_test"),
+            "/tmp".into(),
+            "/bin/sh".into(),
+            80,
+            24,
+            pty.master,
+            Box::new(IdleChild {
+                kills: Arc::clone(&kills),
+            }),
+            writer,
+        ));
+
+        // Stand in for the reader thread: hold the child lock until released,
+        // as `finish` does inside `wait()`.
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let _held = lock(&session.child);
+                let _ = release_rx.recv_timeout(Duration::from_secs(5));
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while session.child.try_lock().is_ok() {
+            assert!(Instant::now() < deadline, "the child lock must be held");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let started = Instant::now();
+        session.kill_with_grace().await;
+        let elapsed = started.elapsed();
+        let _ = release_tx.send(());
+        holder.join().expect("the lock holder joins");
+
+        assert_eq!(
+            kills.load(Ordering::SeqCst),
+            1,
+            "the cloned killer ends the shell while `finish` holds the child"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "close must not wait for the child lock (took {elapsed:?})"
+        );
     }
 }

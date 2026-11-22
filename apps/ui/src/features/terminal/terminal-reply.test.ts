@@ -28,9 +28,12 @@ function fakeParser() {
         osc.set(ident, cb);
         return { dispose: () => osc.delete(ident) };
       },
-      registerDcsHandler(id: { final: string; intermediates?: string }, cb: Handler) {
+      registerDcsHandler(
+        id: { final: string; intermediates?: string },
+        cb: (data: string, params: (number | number[])[]) => boolean,
+      ) {
         const dcsKey = `${id.intermediates ?? ""}|${id.final}`;
-        dcs.set(dcsKey, cb);
+        dcs.set(dcsKey, cb as unknown as Handler);
         return { dispose: () => dcs.delete(dcsKey) };
       },
     },
@@ -209,7 +212,7 @@ describe("terminal query replies", () => {
     expect(tracker.takeReply("third")).toEqual({ position: 9, ordinal: 2 });
   });
 
-  it("answers a mode query split across frames from the ending chunk", async () => {
+  it("names the chunk where a query split across frames starts", async () => {
     const term = new Terminal({ cols: 80, rows: 24 });
     const tracker = new TerminalQueryTracker();
     const hooks = registerTerminalQueryHooks(term.parser, tracker);
@@ -217,17 +220,18 @@ describe("terminal query replies", () => {
     const onData = term.onData((data) => answers.push(data));
     try {
       // A real xterm parses DECRQM (`CSI ? Ps $ p`) and answers through
-      // onData. The query starts in chunk 7 and ends in chunk 8.
-      tracker.beginChunk(7);
+      // onData. The query starts in chunk 7 and ends in chunk 8, so every
+      // viewer that saw it names it by chunk 7.
+      tracker.beginChunk(7, bytes("\x1b[?12"));
       await parse(term, "\x1b[?12");
       tracker.endChunk();
 
-      tracker.beginChunk(8);
+      tracker.beginChunk(8, bytes("$p"));
       await parse(term, "$p");
       tracker.endChunk();
 
       expect(answers).toHaveLength(1);
-      expect(tracker.takeReply(answers[0] ?? "")).toEqual({ position: 8, ordinal: 0 });
+      expect(tracker.takeReply(answers[0] ?? "")).toEqual({ position: 7, ordinal: 0 });
     } finally {
       onData.dispose();
       for (const hook of hooks) hook.dispose();
@@ -235,69 +239,101 @@ describe("terminal query replies", () => {
     }
   });
 
-  it("gives a viewer that attached mid-query no answer for that chunk", async () => {
-    const earlyTerm = new Terminal({ cols: 80, rows: 24 });
-    const lateTerm = new Terminal({ cols: 80, rows: 24 });
-    const earlyTracker = new TerminalQueryTracker();
-    const lateTracker = new TerminalQueryTracker();
-    const earlyHooks = registerTerminalQueryHooks(earlyTerm.parser, earlyTracker);
-    const lateHooks = registerTerminalQueryHooks(lateTerm.parser, lateTracker);
-    const earlyAnswers: string[] = [];
-    const lateAnswers: string[] = [];
-    const earlyData = earlyTerm.onData((data) => earlyAnswers.push(data));
-    const lateData = lateTerm.onData((data) => lateAnswers.push(data));
+  it("names the shared query the same way for a viewer that missed the split", async () => {
+    // Chunk 5 ends inside a DECRQM query; chunk 6 finishes it and asks a
+    // second one. This is the reproduction from the PR: the early viewer
+    // parses both chunks, the late one attached with chunk 5 in its snapshot.
+    const chunk5 = "\x1b[?12";
+    const chunk6 = ";2$p\x1b[?25$p";
+
+    const early = await repliesFor([
+      [5, chunk5],
+      [6, chunk6],
+    ]);
+    const late = await repliesFor([[6, chunk6]]);
+
+    // Both viewers name the second query by chunk 6, its first byte. The
+    // query that starts in chunk 5 is only ever seen by the early viewer.
+    expect(early).toEqual([
+      { position: 5, ordinal: 0 },
+      { position: 6, ordinal: 0 },
+    ]);
+    expect(late).toEqual([{ position: 6, ordinal: 0 }]);
+    expect(late[0]).toEqual(early[1]);
+
+    // Delivering the chunks in the other order (a viewer whose snapshot
+    // contains chunk 6 instead) cannot make the late viewer's answer collide
+    // with the early one either.
+    const other = await repliesFor([
+      [5, "\x1b[?12;2$p\x1b[?25"],
+      [6, "$p"],
+    ]);
+    const fresh = await repliesFor([[6, "$p"]]);
+    expect(other).toEqual([
+      { position: 5, ordinal: 0 },
+      { position: 5, ordinal: 1 },
+    ]);
+    expect(fresh).toEqual([]);
+  });
+
+  it("does not attribute a later query to an unrelated split escape", async () => {
+    // Chunk 5 ends inside a screen-clear sequence, not a query. The mode query
+    // in chunk 6 starts there and must not inherit chunk 5's position.
+    expect(
+      await repliesFor([
+        [5, "\x1b[2"],
+        [6, "J\x1b[?25$p"],
+      ]),
+    ).toEqual([{ position: 6, ordinal: 0 }]);
+
+    // A query that really is split still names the chunk it started in.
+    expect(
+      await repliesFor([
+        [5, "\x1b[?25"],
+        [6, "$p"],
+      ]),
+    ).toEqual([{ position: 5, ordinal: 0 }]);
+  });
+
+  it("names a colour query split across frames by its starting chunk", async () => {
+    const term = new Terminal({ cols: 80, rows: 24 });
+    const tracker = new TerminalQueryTracker();
+    const hooks = registerTerminalQueryHooks(term.parser, tracker);
+    const answers: string[] = [];
+    const onData = term.onData((data) => answers.push(data));
     try {
-      // Chunk 7 starts a mode query; chunk 8 ends it and asks another.
-      earlyTracker.beginChunk(7);
-      await parse(earlyTerm, "\x1b[?12");
-      earlyTracker.endChunk();
-      earlyTracker.beginChunk(8);
-      await parse(earlyTerm, ";2$p");
-      await parse(earlyTerm, "\x1b[?25$p");
-      earlyTracker.endChunk();
+      // xterm's parser reports an OSC colour query when its terminator
+      // arrives, so the query spans chunks 9 and 10. It does not answer this
+      // query through onData, so the report shape is supplied here.
+      tracker.beginChunk(9, bytes("\x1b]10;?"));
+      await parse(term, "\x1b]10;?");
+      tracker.endChunk();
+      tracker.beginChunk(10, bytes("\x1b\\"));
+      await parse(term, "\x1b\\");
+      tracker.endChunk();
 
-      // The second viewer attached with chunk 7 folded into its snapshot, so
-      // it parses only chunk 8 and numbers the second query as ordinal 0.
-      lateTracker.beginChunk(8);
-      await parse(lateTerm, ";2$p");
-      await parse(lateTerm, "\x1b[?25$p");
-      lateTracker.endChunk();
-
-      const earlyReplies = earlyAnswers
-        .map((answer) => earlyTracker.takeReply(answer))
-        .filter((reply) => reply !== null);
-      const lateReplies = lateAnswers
-        .map((answer) => lateTracker.takeReply(answer))
-        .filter((reply) => reply !== null);
-
-      expect(earlyReplies).toEqual([
-        { position: 8, ordinal: 0 },
-        { position: 8, ordinal: 1 },
-      ]);
-      // The late viewer's single answer is the early viewer's second query,
-      // renumbered as the first answer of its own chunk.
-      expect(lateReplies).toEqual([{ position: 8, ordinal: 0 }]);
-      expect(lateAnswers).toEqual([earlyAnswers[1]]);
-
-      // The attach-boundary rule drops the late viewer's reply, so each query
-      // is answered exactly once by the viewer that saw the whole query.
-      const attachFloor = 9;
-      const written = [
-        ...earlyReplies,
-        ...lateReplies.filter((reply) => reply.position >= attachFloor),
-      ];
-      expect(written).toEqual([
-        { position: 8, ordinal: 0 },
-        { position: 8, ordinal: 1 },
-      ]);
+      expect(answers).toHaveLength(0);
+      expect(tracker.takeReply("\x1b]10;rgb:cccc/cccc/cccc\x1b\\")).toEqual({
+        position: 9,
+        ordinal: 0,
+      });
     } finally {
-      earlyData.dispose();
-      lateData.dispose();
-      for (const hook of earlyHooks) hook.dispose();
-      for (const hook of lateHooks) hook.dispose();
-      earlyTerm.dispose();
-      lateTerm.dispose();
+      onData.dispose();
+      for (const hook of hooks) hook.dispose();
+      term.dispose();
     }
+  });
+
+  it("does not carry an incomplete escape past a chunk without a query", async () => {
+    // The chunk before the query ends mid-escape, so the pending sequence
+    // completes while the next chunk is parsed. It is not the query, so the
+    // query that follows starts in that next chunk.
+    expect(
+      await repliesFor([
+        [5, "\x1b[2"],
+        [6, "J\x1b[?25$p"],
+      ]),
+    ).toEqual([{ position: 6, ordinal: 0 }]);
   });
 
   it("forgets a query xterm did not answer when its chunk is done", async () => {
@@ -329,4 +365,34 @@ describe("terminal query replies", () => {
 /** Resolves once xterm has parsed `data`, as its write callback does. */
 function parse(term: Terminal, data: string): Promise<void> {
   return new Promise((resolve) => term.write(data, resolve));
+}
+
+const bytes = (text: string) => new TextEncoder().encode(text);
+
+/**
+ * Feeds one viewer's chunks to a real xterm parser and returns the identities
+ * of the answers it sent, in order.
+ */
+async function repliesFor(
+  chunks: Array<[seq: number, text: string]>,
+): Promise<Array<{ position: number; ordinal: number }>> {
+  const term = new Terminal({ cols: 80, rows: 24 });
+  const tracker = new TerminalQueryTracker();
+  const hooks = registerTerminalQueryHooks(term.parser, tracker);
+  const answers: string[] = [];
+  const onData = term.onData((data) => answers.push(data));
+  try {
+    for (const [seq, text] of chunks) {
+      tracker.beginChunk(seq, bytes(text));
+      await parse(term, text);
+      tracker.endChunk();
+    }
+    return answers
+      .map((answer) => tracker.takeReply(answer))
+      .filter((reply): reply is { position: number; ordinal: number } => reply !== null);
+  } finally {
+    onData.dispose();
+    for (const hook of hooks) hook.dispose();
+    term.dispose();
+  }
 }

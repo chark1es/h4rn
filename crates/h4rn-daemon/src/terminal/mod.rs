@@ -280,10 +280,11 @@ impl TerminalManager {
     /// the same error as an unknown stream.
     ///
     /// A marked reply is xterm's answer to a terminal query. When it names the
-    /// output position and the answer's ordinal within that chunk, the first
-    /// viewer to answer that pair is written and exact duplicates are dropped.
-    /// A position the viewer was never sent is ignored. A reply from an older
-    /// client names no position and keeps the previous single-owner rule.
+    /// output chunk that carried the query's first byte and the query's index
+    /// among the queries that start there, the first viewer to answer that
+    /// pair is written and exact duplicates are dropped. A position the viewer
+    /// was never sent is ignored. A reply from an older client names no
+    /// position and keeps the previous single-owner rule.
     pub fn input_by_stream(
         &self,
         stream_id: u32,

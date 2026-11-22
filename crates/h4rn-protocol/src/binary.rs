@@ -19,10 +19,11 @@
 //! carries the sequence it replaces in `seq`, so a reconnecting client can
 //! discard replayed history and resume from the snapshot. A PTY input frame
 //! has no sequence and uses `seq` for flags instead (see [`PTY_INPUT_REPLY`]):
-//! bit 0 marks a query reply, bits 1-32 name the output position that carried
-//! the query and bits 33-52 name the answer's ordinal within that chunk (see
-//! [`pty_input_reply_seq`]). Payload length is implied by the WebSocket message
-//! length; there is no separate length field.
+//! bit 0 marks a query reply, bits 1-32 name the output chunk that carried the
+//! query's first byte and bits 33-52 name the answer's ordinal among the
+//! queries that start in that chunk (see [`pty_input_reply_seq`]). Payload
+//! length is implied by the WebSocket message length; there is no separate
+//! length field.
 
 use thiserror::Error;
 
@@ -64,8 +65,8 @@ pub const PTY_INPUT_POSITION_MAX: u64 = u32::MAX as u64;
 ///
 /// One output chunk can carry several queries (two DSR/OSC queries, a batched
 /// `OSC 4` palette query) and xterm answers each separately. The ordinal is the
-/// answer's index among the answers the client expected for that chunk, so two
-/// answers naming the same position stay distinct.
+/// query's index among the queries that start in that chunk, so two answers
+/// naming the same position stay distinct and every viewer numbers them alike.
 pub const PTY_INPUT_ORDINAL_SHIFT: u32 = PTY_INPUT_POSITION_SHIFT + PTY_INPUT_POSITION_BITS;
 
 /// Number of bits the answer ordinal occupies in a reply's flag word.
@@ -80,10 +81,11 @@ pub const PTY_INPUT_ORDINAL_MAX: u64 = (1 << PTY_INPUT_ORDINAL_BITS) - 1;
 /// Packs a marked reply's output position and answer ordinal into an input
 /// frame's `seq` field.
 ///
-/// `position` is the sequence of the output chunk whose bytes xterm was
-/// parsing when it saw the query; a query split across chunks uses the chunk
-/// that contained its end. `ordinal` is the answer's index among the answers
-/// expected for that chunk, starting at zero.
+/// `position` is the sequence of the output chunk that carried the query's
+/// first byte; a query split across chunks names the chunk where it started,
+/// which every viewer that parsed that chunk computes the same way. `ordinal`
+/// is the answer's index among the queries that start in that chunk, starting
+/// at zero.
 ///
 /// Both values must fit their fields; a const context fails to compile and a
 /// call with a larger value panics rather than silently wrapping into the
