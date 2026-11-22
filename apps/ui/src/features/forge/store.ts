@@ -284,14 +284,41 @@ export function mergeDiffPages(existing: ForgeFileDiff[], page: ForgeDiffPage): 
   return [...existing, ...page.files.filter((file) => !seen.has(file.path))];
 }
 
+/**
+ * Whether two account base URLs name the same forge account.
+ *
+ * Mirrors the daemon's `base_urls_match`: trailing slashes and host case are
+ * ignored, and an Azure DevOps legacy organization is the same account with or
+ * without the historical `DefaultCollection` segment
+ * (`https://acme.visualstudio.com` ≡
+ * `https://acme.visualstudio.com/DefaultCollection`). Without this, a checkout
+ * using the alias would not find its account and Open PR stays disabled.
+ */
+export function baseUrlsMatch(forge: ForgeKind, a: string, b: string): boolean {
+  return normalizeBaseUrl(forge, a).toLowerCase() === normalizeBaseUrl(forge, b).toLowerCase();
+}
+
+function normalizeBaseUrl(forge: ForgeKind, value: string): string {
+  const trimmed = value.trim().replace(/\/+$/, "");
+  if (forge !== "azure_devops") return trimmed;
+  const suffix = "/defaultcollection";
+  if (!trimmed.toLowerCase().endsWith(suffix)) return trimmed;
+  const base = trimmed.slice(0, -suffix.length);
+  try {
+    if (new URL(base).hostname.toLowerCase().endsWith(".visualstudio.com")) return base;
+  } catch {
+    // Not a URL: compare it exactly rather than guessing at an alias.
+  }
+  return trimmed;
+}
+
 export function accountForRepo(
   accounts: ForgeAccount[],
   repo: ForgeRepoRef,
 ): ForgeAccount | undefined {
   return accounts.find(
     (account) =>
-      account.forge === repo.forge &&
-      account.base_url.replace(/\/$/, "") === repo.base_url.replace(/\/$/, ""),
+      account.forge === repo.forge && baseUrlsMatch(account.forge, account.base_url, repo.base_url),
   );
 }
 

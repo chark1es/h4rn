@@ -131,9 +131,9 @@ The command palette (`⌘K`) is an overlay, not a route. Every route above is de
   or a page. The `Thread | IDE` toggle (⌘E) sits in the same place in both views, next to the
   terminal and right-panel buttons.
 - **One right panel, scoped to the selected thread.** Tabs: **Changes** (agent diff by turn or
-  vs HEAD), **Files** (the thread's workspace tree), **Subagents** (tree and details). Closed by
-  default; open/closed state, width and last tab are remembered in `localStorage`. It never
-  holds a second thread, app navigation, or the terminal.
+  vs HEAD), **Files** (the thread's workspace tree), **Preview** (one HTML file, sandboxed), and
+  **Subagents** (tree and details). Closed by default; open/closed state, width and last tab are
+  remembered in `localStorage`. It never holds a second thread, app navigation, or the terminal.
 - **Terminal** stays a bottom drawer under the composer (`T`), not a panel tab.
 - **IDE.** ⌘E switches the main area to the IDE for the selected thread's project: tabs, the
   `Edit | vs HEAD | vs agent` strip, the "Changes by <agent> in <thread> since …" scope strip,
@@ -156,12 +156,82 @@ The command palette (`⌘K`) is an overlay, not a route. Every route above is de
 - A thread is a full-screen push: back chevron, title, state word, overflow. Bottom navigation is
   hidden; the composer sits above the safe area and standby is a sticky card above it.
 - The right panel becomes **one** large-detent sheet over the thread with a `Changes | Subagents`
-  segment (blue dot when a child needs you) and Done. Changes shows the file list and the first
-  file's diff; Subagents shows the tree and details. **Files and the IDE are desktop-only**, and
-  the sheet says so.
+  segment (blue dot when a child needs you) and Done, plus **Preview** while an HTML file is open.
+  Changes shows the file list and the first file's diff; Subagents shows the tree and details;
+  Preview renders the page sandboxed. **Files and the IDE are desktop-only**, and the sheet says
+  so.
 - Terminal is a full-screen sheet with the key bar.
 - **Touch**: 44×44 px minimum; no hover-only affordances; long-press opens the same context menu as right-click; swipe-back is supported but every screen also has a visible back button.
 - **Pull to refresh** on Inbox, Hosts, Usage and PR list. It is the only gesture that mutates data by itself.
+
+### HTML preview
+
+Agents write HTML reports, charts and mockups. The right panel's **Preview** tab renders one
+without leaving h4rn.
+
+- Open it from the action on an `.html`/`.htm` row in **Files**, or from a relative `.html` link in
+  an agent message. The tab names the file, has a reload button, and reloads itself when the file
+  or one of its assets changes on disk.
+- The file is read through the daemon's fs read request and drawn in an
+  `<iframe sandbox="allow-scripts">` (never `allow-same-origin`) with a CSP of
+  `default-src 'none'; img-src data: https:; media-src data: https:; object-src data:; style-src
+  'unsafe-inline' https:; script-src 'unsafe-inline' https:; font-src data: https:; connect-src
+  `https:`. The prepared document always starts with a trusted `<!doctype html>` and that policy
+  meta; the workspace document follows, with its own leading doctype dropped and any leading
+  comments now after the policy. Nothing scans the untrusted file for a doctype or a comment
+  terminator, so a malformed prefix (`<!-->`, `<!--->`, `<!-- x --!>`) cannot put workspace bytes
+  ahead of the policy. Page scripts run; the page cannot read h4rn, its cookies, its storage or its
+  origin.
+- The desktop and mobile shells serve the prepared document from their own `h4rn-preview` origin
+  with that policy as a response header. A `srcdoc` frame would inherit the window's
+  `script-src 'self'`, so page scripts would never run in a packaged build. The browser build has
+  no such origin (and no CSP that blocks inline scripts), so it keeps `srcdoc`.
+- Relative CSS, JS, images, fonts and media from the same folder or elsewhere inside the workspace
+  are inlined as `<style>`, `<script>` or `data:` URLs. That covers `srcset` candidates, `<img>`,
+  `<source>`, `<video>/<audio>/<track>`, `<object data>`, `<embed src>`, SVG `href`/`xlink:href` and
+  `url()` in styles. A workspace stylesheet reached through CSS `@import` is inlined as CSS text,
+  keeping its media condition. The HTML file is read at most 400 KiB, which leaves room for the
+  response envelope inside the secure transport's 512 KiB frame. Escaping counts against that
+  frame, so a smaller file whose quotes, newlines or control characters need more than 512 KiB
+  once serialized is refused as too large instead of being sent. That bound applies to the secure
+  (Noise) transport, which closes a session on an oversized frame; the plain loopback WebSocket has
+  no frame bound of its own, so a large thread listing or the editor's full 2 MiB read is delivered
+  whole there. Each binary asset may be up to 360 KiB; all embedded copies together may be up to
+  10 MB. The budget is charged for every copy at the moment it is inserted, including a file
+  reached again through an imported stylesheet, and the page is never built past the cap: an
+  insertion that would not fit is left out and reported as skipped. Assets are fetched until the
+  budget is spent. A `srcset` keeps its `data:` and `https:` candidates as written and inlines (or
+  removes and reports) each workspace candidate. Anything missing, outside the workspace root, or
+  over a size limit is removed from the page (it is never left as a relative URL that would hit the
+  preview origin) and the tab says how many files were skipped. Absolute `https:` assets load from
+  their CDN.
+- A link clicked in the page never opens by itself. The tab shows an inline bar — "Open
+  example.com in your browser?" with **Open** and **Cancel** — and only that click hands an
+  `http:`/`https:` URL to the system browser. The page controls everything inside the frame,
+  including its bridge token, so the app never trusts a message alone.
+- A relative `.html` link in a thread message opens the preview. Modifier-clicks are left alone,
+  and PR bodies and comments keep their normal links.
+- **Expand** opens the preview full-width in the main area; **Back to thread** returns it to the
+  panel. On a phone it opens in the existing panel sheet, which gains a Preview segment while a
+  file is open.
+- A missing file, a file that is not UTF-8, or one the daemon cannot fit in one transport frame
+  (over 400 KiB of text, or under it but too large once escaped) gets a plain inline message with
+  Reload. The selected file stays watched on every outcome, so recreating it (or fixing its
+  encoding) reloads the preview without closing the tab; after a reconnect, a sign-in or a machine
+  switch the workspace watch is re-sent on the new connection.
+- **Android WebViews without document-start scripts.** Wry 0.57 injects the shell's
+  initialization scripts into HTML served from a custom protocol when the WebView lacks
+  `DOCUMENT_START_SCRIPT`, and prepends their hashes to `script-src`; a CSP with hashes ignores
+  `'unsafe-inline'`, so the page's scripts and the link bridge never run. The preview cannot opt
+  out of that fallback from the shell side, so it detects it: the bridge posts
+  `h4rn:preview-ready` when it runs, and if the frame loads without that message the preview is
+  turned off with a plain notice asking for an updated Android System WebView. This was verified by
+  reading Wry 0.57.2's Android `inject_scripts_into_html` path, by the shell's unit test that the
+  served policy is the documented `script-src 'unsafe-inline' https:` header with no hashes (all
+  desktop and current Android WebViews keep the frame), and by the panel test that a frame without
+  a ready message is replaced by the notice. It cannot be verified on an old WebView in CI.
+- Not supported yet: MCP Apps rendering, a headless browser, and proxying a page's own development
+  server. A page that needs a dev server must use absolute `https:` URLs for its assets.
 
 ### Pane behaviour
 
@@ -172,7 +242,7 @@ The command palette (`⌘K`) is an overlay, not a route. Every route above is de
 | New thread | 640 px dialog | 480 px sheet | Full-screen sheet |
 | Delete/revoke | Alert dialog | Alert dialog | Confirmation sheet |
 | Command palette | Centered 560 px | Centered 560 px | Full-height search sheet |
-| Right panel | Third column or hidden | Overlay | `Changes \| Subagents` sheet |
+| Right panel | Third column or hidden | Overlay | `Changes \| Subagents \| Preview` sheet |
 | Settings | Takes over the sidebar | Takes over the sidebar | Pushed page |
 | Multi-select rows | `X`, shift-click | Long-press | Long-press → Select mode |
 
@@ -344,7 +414,7 @@ mobile build does not send notifications yet and says so.
 | Show subagents | `⌘J` | `Ctrl+J` | Panels |
 | Find a file | `⌘P` | `Ctrl+P` | Panels |
 
-Keys that edit text rather than run commands: `↵` sends, `⇧↵` adds a line, `↑` on the first line recalls an earlier prompt (`↓` walks forward and restores what you were typing), `@` mentions a file or host, `Esc` closes an overlay or leaves Settings. In the IDE, `⌘S` saves and `⌘⇧F` searches files.
+Keys that edit text rather than run commands: `↵` sends, `⇧↵` adds a line, `↑` on the first line recalls an earlier prompt (`↓` walks forward and restores what you were typing), `@` opens the file picker, `/` at the start of the box opens the command menu, `↑`/`↓` move inside either menu, `↵` or `Tab` inserts the highlighted file or runs the highlighted command, and `Esc` closes a menu or overlay (or leaves Settings). In the IDE, `⌘S` saves and `⌘⇧F` searches files.
 
 ### Command palette
 
@@ -1203,7 +1273,10 @@ Wireframes are structural. Every screen uses the same pane grammar, the same row
 - **Cue gutter** numbers user and assistant turns; the current cue has a 2 px amber bar; clicking jumps. `[`/`]` move cue to cue. Struck/settled cues dim; they are never removed.
 - **Turns**: user turns are compact (no avatar, right-aligned label “You”, timestamp). Assistant turns start with orb + harness + host + time; the state line is one line (`thinking · reading file`, `running · 61 TPS`, `waiting for approval`). Tool calls collapse to one line (icon, name, target, duration, status); expanding shows args and a bounded result. Diffs inline show file + hunk + `Open in IDE`; full diff lives in the context panel.
 - **Approvals** render as a standby bar and an inline card at the cue that raised them. Go/Hold are the only primary actions; “Always allow this command” is an overflow choice with a scope (“for this thread” / “for this harness on atlas”).
-- **Composer** auto-grows 1–6 lines, keeps drafts per thread on this device (they survive a reload, an app restart or Android killing the webview; each draft is its own key, so one tab never erases another thread's draft, and for the same thread the most recent edit wins; drafts untouched for 30 days are dropped, and attachments are not persisted), supports `@` files/hosts and `/` commands, shows attachments as removable chips, and states the target (“Reply to Claude Code on atlas”). With the caret on the first line, `↑` recalls an earlier prompt sent in this thread and `↓` walks forward to the text you were typing; recalling never replaces the stored draft, so a reload keeps what you were writing. Send is disabled only with a reason (“atlas is offline”).
+- **Composer** auto-grows 1–6 lines, keeps drafts per thread on this device (they survive a reload, an app restart or Android killing the webview; each draft is its own key, so one tab never erases another thread's draft, and for the same thread the most recent edit wins; drafts untouched for 30 days are dropped, and attachments are not persisted), shows attachments as removable chips, and states the target (“Reply to Claude Code on atlas”). With the caret on the first line, `↑` recalls an earlier prompt sent in this thread and `↓` walks forward to the text you were typing; recalling never replaces the stored draft, so a reload keeps what you were writing. Send is disabled only with a reason (“atlas is offline”).
+  - **`@` files.** Typing `@` after any non-identifier character — a space, `(`, `[`, `{`, a quote, a comma — or pressing the `@` button opens a list of files in the thread's workspace, anchored at the caret. Inside a word (`me@example.com`, `café@src`) it stays plain text. The button separates itself with a space from the text on either side of the caret, so a mention never glues to the word before it or swallows the word after it. Typing filters the list by a path-aware fuzzy match, so `src/comp` finds `apps/ui/src/components/…`; dependency, build and metadata folders are skipped and the daemon already applies the repository's ignore rules. The list always ranks the query on screen, so `↵` or `Tab` during a fast edit accepts the row for what was typed, never a row left over from the previous keystroke. A quoted mention is one token: while `@"src/with space…` is still open the picker keeps filtering on the text inside the quotes, and once the closing quote is typed the mention is finished and no picker opens anywhere inside it. Quotes never pair across a newline, so an unfinished `@"` on one line does not hide a finished mention on the next. The popover measures itself before placing: it stays inside the viewport, moving left and, when there is no room above the caret, opening below it; it follows the caret's actual line, including when the textarea is wrapped and scrolled. `↑`/`↓` move and scroll the highlighted row into view, `↵` or `Tab` inserts, `⇧↵` inserts a newline even with the list open, `Esc` closes and leaves the typed text, and a click inserts. The token becomes the workspace-relative path followed by a space; paths with spaces are quoted (`@"src/with space.ts"`). The prompt is sent as typed: the harness reads the path as a mention. The index is capped at 3,000 files, 250 folder listings and 8 levels deep; failed listings spend the same folder budget, and a batch stops adding files the moment the file cap is reached, so the index never grows past it. A workspace with exactly 3,000 files is a complete index: the quiet note beside the footer (“Showing the first 3,000 files.”) appears only when an entry or folder was actually skipped, or a folder could not be listed, instead of claiming no file matches. If the workspace root itself cannot be read, the list shows that error instead of “No files in …”.
+  - **`/` commands.** Typing `/` as the first character opens the commands h4rn itself has for this thread: stop the turn (while it is working), open changes or subagents, show or hide the terminal, switch between the thread and the IDE, and start a new thread in the same workspace. Choosing one runs it and removes the `/…` text. On a phone, Changes and Subagents open the phone panel sheet on their segment, as the header button does, and the IDE command is not offered because the phone shell never shows the IDE. A command that opens a dialog or sheet keeps focus there instead of pulling the caret back into the composer; the panel sheet focuses its own container when it opens, so typing no longer edits the draft behind it. There is no invented command list: harness-native slash commands and skills appear only when the harness publishes them through h4rn, which it does not today.
+  - While either menu is open its arrows and accept keys belong to it; prompt history and send wait until it closes, and the textarea names the highlighted row (`aria-activedescendant`). IME composition never opens or drives a menu. On a phone the same list is a sheet above the composer, not a bottom sheet over it, sized to the visible viewport (keyboard included) so its header and Done stay on screen even with an expanded composer. Its bottom edge stops at the composer, or at the visible viewport's bottom when the keyboard covers the composer, and when the header plus one row cannot fit above it covers the composer inside the visible viewport instead of collapsing. Its Done button dismisses it like `Esc` (the same `@…` token does not reopen it on the next keystroke).
 - **Context panel** tabs are `Diff`, `Files`, `Terminal`, `Subagents`; the last tab is remembered per thread. On tablet it becomes a tab in the detail header; on phone a sheet.
 - **Status bar** carries connection, host latency, cue position, token count and cost. Cost is estimated and labeled; it never pretends to be billing truth.
 - **Empty thread** (just created, no tokens): static skeleton of one assistant turn + “Waiting for Claude Code on atlas…” and a `Cancel` action. No spinner.

@@ -27,7 +27,7 @@ import { createThreadLog, foldEvent, type ThreadLog } from "./projection";
 export type Theme = "light" | "dark" | "system";
 
 export type UiView = "thread" | "ide";
-export type PanelTab = "changes" | "files" | "subagents";
+export type PanelTab = "changes" | "files" | "subagents" | "preview";
 
 export type ThreadFilterState = {
   host: HostId | null;
@@ -74,6 +74,10 @@ export type UiState = {
   pendingIdePath: string | null;
   /** The file the IDE editor currently shows, for the panel tree's selection. */
   ideActivePath: string | null;
+  /** The HTML file the Preview tab shows, scoped to its thread. */
+  preview: { threadId: ThreadId; path: string } | null;
+  /** The preview is open full-width in the main area instead of the panel. */
+  previewExpanded: boolean;
   pendingRouteFocus: boolean;
   layout: LayoutState;
 };
@@ -96,8 +100,15 @@ function readLayout(): LayoutState {
     const raw = window.localStorage.getItem(LAYOUT_KEY);
     if (!raw) return { ...DEFAULT_LAYOUT, closedProjects: { ...DEFAULT_LAYOUT.closedProjects } };
     const parsed = JSON.parse(raw) as Partial<LayoutState>;
+    const stored = parsed.panelTab;
+    // A preview is scoped to a file and a live thread; after a reload there is
+    // nothing to show, so return to the file tree instead.
     const panelTab: PanelTab =
-      parsed.panelTab === "files" || parsed.panelTab === "subagents" ? parsed.panelTab : "changes";
+      stored === "files" || stored === "subagents"
+        ? stored
+        : stored === "preview"
+          ? "files"
+          : "changes";
     return {
       ...DEFAULT_LAYOUT,
       ...parsed,
@@ -218,6 +229,8 @@ function createInitialState(): AppState {
       focusFilesNonce: 0,
       pendingIdePath: null,
       ideActivePath: null,
+      preview: null,
+      previewExpanded: false,
       pendingRouteFocus: true,
       layout: {
         ...readLayout(),
@@ -343,12 +356,19 @@ export function navigate(route: Route): void {
     route.kind === "ide" ? "ide" : route.kind === "thread" ? state.ui.layout.view : "thread";
   const layout: LayoutState = { ...state.ui.layout, view };
   if (layout.view !== state.ui.layout.view) writeLayout(layout);
+  const threadId = route.kind === "thread" ? route.threadId : (state.ui.selectedThreadId ?? null);
+  const keepPreview =
+    (route.kind === "thread" || route.kind === "ide") &&
+    state.ui.preview !== null &&
+    state.ui.preview.threadId === threadId;
   setState({
     ...state,
     ui: {
       ...state.ui,
       route,
       selectedThreadId: route.kind === "thread" ? route.threadId : state.ui.selectedThreadId,
+      preview: keepPreview ? state.ui.preview : null,
+      previewExpanded: keepPreview ? state.ui.previewExpanded : false,
       pendingRouteFocus: true,
       paletteOpen: false,
       layout,
@@ -373,7 +393,16 @@ export function setQuery(query: string): void {
 
 export function setSelectedThread(threadId: ThreadId | null): void {
   const state = getState();
-  setState({ ...state, ui: { ...state.ui, selectedThreadId: threadId } });
+  const keepPreview = state.ui.preview !== null && state.ui.preview.threadId === threadId;
+  setState({
+    ...state,
+    ui: {
+      ...state.ui,
+      selectedThreadId: threadId,
+      preview: keepPreview ? state.ui.preview : null,
+      previewExpanded: keepPreview ? state.ui.previewExpanded : false,
+    },
+  });
 }
 
 export function setUi(patch: Partial<UiState>): void {
@@ -507,6 +536,81 @@ export function setPanelTab(panelTab: PanelTab): void {
   setLayout({ panelOpen: true, panelTab });
 }
 
+/** The custom event a phone listens for to open the preview sheet. */
+export const PREVIEW_EVENT = "h4rn:preview";
+
+/**
+ * Opens one HTML file in the Preview tab.
+ *
+ * The Files action and an `.html` link in an agent message both come here. A
+ * phone hears the event and opens its panel sheet instead.
+ */
+export function openPreview(path: string, threadId?: ThreadId): void {
+  const state = getState();
+  // A link in a PR body or another page is not about the selected thread.
+  if (!threadId && state.ui.route.kind !== "thread") return;
+  const target =
+    threadId ??
+    (state.ui.route.kind === "thread" ? state.ui.route.threadId : null) ??
+    state.ui.selectedThreadId;
+  if (!target) return;
+  const layout = claimPanelRoom({ ...state.ui.layout, panelOpen: true, panelTab: "preview" });
+  writeLayout(layout);
+  setState({
+    ...state,
+    ui: {
+      ...state.ui,
+      preview: { threadId: target, path },
+      previewExpanded: false,
+      layout,
+    },
+  });
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(PREVIEW_EVENT, { detail: { threadId: target, path } }));
+  }
+}
+
+/** Closes the preview and returns the panel to Files. */
+export function closePreview(): void {
+  const state = getState();
+  const layout: LayoutState =
+    state.ui.layout.panelTab === "preview"
+      ? { ...state.ui.layout, panelTab: "files" }
+      : state.ui.layout;
+  writeLayout(layout);
+  setState({
+    ...state,
+    ui: { ...state.ui, preview: null, previewExpanded: false, layout },
+  });
+}
+
+export function expandPreview(): void {
+  const state = getState();
+  if (!state.ui.preview) return;
+  // The main area is the full-width view; the panel would only repeat it.
+  const layout: LayoutState = { ...state.ui.layout, panelOpen: false };
+  writeLayout(layout);
+  setState({
+    ...state,
+    ui: { ...state.ui, previewExpanded: true, layout },
+  });
+}
+
+export function collapsePreview(): void {
+  const state = getState();
+  if (!state.ui.previewExpanded) return;
+  const layout = claimPanelRoom({
+    ...state.ui.layout,
+    panelOpen: true,
+    panelTab: "preview",
+  });
+  writeLayout(layout);
+  setState({
+    ...state,
+    ui: { ...state.ui, previewExpanded: false, layout },
+  });
+}
+
 export function setPanelWidth(width: number): void {
   setLayout({ panelWidth: Math.max(320, Math.min(640, Math.round(width))) });
 }
@@ -572,9 +676,25 @@ export function takePendingIdePath(): string | null {
 let client: H4rnClient | null = null;
 let started = false;
 let windowHooked = false;
+const clientListeners = new Set<(client: H4rnClient) => void>();
+
+/**
+ * Notifies whenever the transport client is created or replaced.
+ *
+ * A sign-in, pairing or host switch rebuilds the whole client, so anything
+ * bound to the previous connection (such as the workspace watch) has to move
+ * to the new one. Listeners run before the new client starts.
+ */
+export function onClientChange(listener: (client: H4rnClient) => void): () => void {
+  clientListeners.add(listener);
+  return () => clientListeners.delete(listener);
+}
 
 export function getClient(): H4rnClient {
-  client ??= createClientFromEnv();
+  if (!client) {
+    client = createClientFromEnv();
+    for (const listener of [...clientListeners]) listener(client);
+  }
   return client;
 }
 
