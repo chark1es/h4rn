@@ -102,14 +102,23 @@ type ParsingChunk = {
   carried: { signature: QuerySignature; position: number } | null;
   /** Position of the hook currently running, or null for the chunk. */
   hookPosition: number | null;
+  /**
+   * A snapshot starts here: forget the output before it once its parse begins.
+   *
+   * xterm parses writes later than they are applied (`WriteBuffer` schedules
+   * `_innerWrite`), so a chunk applied before a snapshot may still be waiting
+   * to be parsed. Clearing at apply time would delete that chunk and name its
+   * query by the snapshot instead.
+   */
+  resets: boolean;
 };
 
 /** A sequence whose first byte arrived but whose end is still to come. */
 type PendingEscape = {
-  kind: "escape" | "csi" | "osc" | "dcs" | "string";
-  /** Bytes since the ESC that began it, without the terminator. */
+  kind: "escape" | "csi" | "osc" | "dcs" | "dcs-data" | "string";
+  /** The sequence since its start, in its ESC-prefixed form. */
   text: string;
-  /** The output chunk that carried that ESC. */
+  /** The output chunk that carried its start. */
   startPosition: number;
 };
 
@@ -153,6 +162,10 @@ export class TerminalQueryTracker {
   /** The sequence still open at the end of the last chunk handed in. */
   private pending: PendingEscape | null = null;
   private nextMark = 0;
+  /** Snapshot chunk whose clear is waiting for its parse to begin. */
+  private resetAtSeq: number | null = null;
+  /** Decodes output the way xterm does, keeping a multi-byte character whole. */
+  private readonly decoder = new TextDecoder();
 
   /**
    * Records that output chunk `seq` is about to be parsed by xterm.
@@ -160,22 +173,35 @@ export class TerminalQueryTracker {
    * `data` is the chunk's raw bytes, which lets the tracker tell an answer to
    * a query that started in an earlier chunk from an answer to a query that
    * started in this one. A snapshot's bytes pass through the same parser, so
-   * they are scanned the same way; [`TerminalQueryTracker.reset`] clears what
-   * came before it first.
+   * they are scanned the same way; [`TerminalQueryTracker.resetAt`] clears what
+   * came before it when its parse really begins.
    */
   beginChunk(seq: number, data?: Uint8Array): void {
+    const snapshot = this.resetAtSeq === seq;
+    if (snapshot) this.resetAtSeq = null;
     let carried: ParsingChunk["carried"] = null;
     if (data) {
-      const scan = scanOutput(seq, data, this.pending);
+      // A snapshot is a fresh rendering of the screen, not the continuation of
+      // the stream before it, so it is decoded and scanned from ground.
+      if (snapshot) this.decoder.decode();
+      const scan = scanOutput(
+        seq,
+        this.decoder.decode(data, { stream: true }),
+        snapshot ? null : this.pending,
+      );
       this.pending = scan.pending;
       carried = scan.carried;
+    } else if (snapshot) {
+      this.pending = null;
     }
-    this.chunks.push({ seq, carried, hookPosition: null });
+    this.chunks.push({ seq, carried, hookPosition: null, resets: snapshot });
+    this.applyDeferredReset();
   }
 
   /** Records that xterm finished parsing the oldest outstanding chunk. */
   endChunk(): void {
     this.chunks.shift();
+    this.applyDeferredReset();
     if (this.ordinals.size > 16) {
       const keep = this.pending?.startPosition;
       for (const position of this.ordinals.keys()) {
@@ -186,19 +212,31 @@ export class TerminalQueryTracker {
   }
 
   /**
-   * Forgets every pending sequence, query and ordinal.
+   * Forgets everything before `seq` when that chunk starts being parsed.
    *
-   * A resync snapshot replaces the screen and xterm's parser (`term.reset()`),
-   * so a sequence that was mid-flight before it can never complete: its tail is
-   * gone from the screen, and the parser starts at ground. Keeping it would let
-   * the next chunk finish a query that no longer exists and name its answer by
-   * a chunk the shell already forgot.
+   * A resync snapshot replaces the screen, so a sequence that was mid-flight
+   * before it can never complete: its tail is gone from the screen. Clearing
+   * now would also delete a chunk that was applied before the snapshot but
+   * that xterm has not parsed yet, and that chunk's query must keep the
+   * position that carried it.
+   */
+  resetAt(seq: number): void {
+    this.resetAtSeq = seq;
+  }
+
+  /**
+   * Forgets every pending sequence, query and ordinal immediately.
+   *
+   * Snapshots use [`TerminalQueryTracker.resetAt`] instead, so a chunk that is
+   * still waiting for its parse keeps its name.
    */
   reset(): void {
     this.expected.length = 0;
     this.chunks.length = 0;
     this.ordinals.clear();
     this.pending = null;
+    this.resetAtSeq = null;
+    this.decoder.decode();
   }
 
   /**
@@ -210,6 +248,7 @@ export class TerminalQueryTracker {
    * than once per expectation.
    */
   noteHook(signature: QuerySignature): void {
+    this.applyDeferredReset();
     const chunk = this.chunks[0];
     if (!chunk) return;
     const matches = chunk.carried !== null && sameSignature(chunk.carried.signature, signature);
@@ -219,11 +258,26 @@ export class TerminalQueryTracker {
 
   /** Records that xterm is about to send one `pattern`-shaped answer. */
   expect(pattern: RegExp): void {
+    this.applyDeferredReset();
     const chunk = this.chunks[0];
     const position = chunk?.hookPosition ?? chunk?.seq ?? 0;
     const ordinal = this.ordinals.get(position) ?? 0;
     this.ordinals.set(position, ordinal + 1);
     this.expected.push({ mark: ++this.nextMark, pattern, position, ordinal });
+  }
+
+  /**
+   * Applies a deferred snapshot reset once its chunk is the one being parsed.
+   *
+   * The earlier chunks are left alone: they are parsed first, and their
+   * answers keep the positions their own output carried.
+   */
+  private applyDeferredReset(): void {
+    const chunk = this.chunks[0];
+    if (!chunk?.resets) return;
+    chunk.resets = false;
+    this.expected.length = 0;
+    this.ordinals.clear();
   }
 
   /** The position to settle from once xterm finishes the chunk being written. */
@@ -252,6 +306,7 @@ export class TerminalQueryTracker {
    * answer-shaped sequences the person typed or pasted.
    */
   takeReply(data: string): TerminalQueryReply | null {
+    this.applyDeferredReset();
     if (this.expected.length === 0) return null;
     const index = this.expected.findIndex((entry) => entry.pattern.test(data));
     if (index === -1) return null;
@@ -285,14 +340,23 @@ export type TerminalQueryReply = {
  * the scan finds whether the chunk ends inside a sequence, which the next
  * chunk continues.
  *
+ * `data` is decoded text, not raw bytes: xterm parses UTF-8 code points, so
+ * U+009C is a string terminator only when it really is that code point. A
+ * 0x9c byte inside a multi-byte character (or split from its lead byte) is
+ * data, and scanning the bytes would end the sequence early.
+ *
  * The transitions mirror xterm's parser rather than a permissive reading of
- * the bytes, because a sequence xterm abandoned must not be matched against a
+ * the text, because a sequence xterm abandoned must not be matched against a
  * later hook: ESC starts a new escape from every state (cancelling a CSI,
- * ending an OSC, DCS or string first), and CAN or SUB return to ground.
+ * ending an OSC, DCS or string first), CAN and SUB return to ground, the C1
+ * controls that start sequences do so in every state, and the other C1
+ * controls return to ground. C0 controls execute where xterm executes them
+ * and are ignored elsewhere inside a sequence; DEL is ignored inside a
+ * sequence (it is data in an OSC).
  */
 function scanOutput(
   seq: number,
-  data: Uint8Array,
+  data: string,
   carriedIn: PendingEscape | null,
 ): { carried: ParsingChunk["carried"]; pending: PendingEscape | null } {
   let kind: PendingEscape["kind"] | "ground" = carriedIn?.kind ?? "ground";
@@ -301,19 +365,19 @@ function scanOutput(
   let truncated = false;
   let carried: ParsingChunk["carried"] = null;
 
-  const begin = (next: PendingEscape["kind"]) => {
+  const begin = (next: PendingEscape["kind"], initial = "\x1b") => {
     kind = next;
-    text = "\x1b";
+    text = initial;
     startPosition = seq;
     truncated = false;
   };
-  const append = (byte: number) => {
+  const append = (char: string) => {
     if (truncated) return;
     if (text.length >= MAX_SEQUENCE_BYTES) {
       truncated = true;
       return;
     }
-    text += String.fromCharCode(byte);
+    text += char;
   };
   const finish = () => {
     if (startPosition !== seq && !truncated && !carried) {
@@ -331,26 +395,80 @@ function scanOutput(
     truncated = false;
   };
 
-  for (const byte of data) {
-    // CAN and SUB abort the open sequence from any state (xterm's global
-    // EXECUTE-to-ground rule), so nothing in it is a query or its tail.
-    if (byte === 0x18 || byte === 0x1a) {
+  for (const char of data) {
+    const code = char.codePointAt(0) ?? 0;
+
+    // CAN, SUB and the C1 controls xterm executes return to ground from every
+    // state, so nothing in the abandoned sequence is a query or its tail.
+    if (code === 0x18 || code === 0x1a || code === 0x99 || code === 0x9a) {
+      cancel();
+      continue;
+    }
+    // The C1 controls xterm handles in every state. ST ends an OSC, DCS or
+    // string (and does nothing elsewhere); the sequence openers clear the old
+    // sequence, and any other C1 control returns to ground.
+    if (code === 0x9c) {
+      if (kind === "osc" || kind === "dcs" || kind === "dcs-data" || kind === "string") {
+        finish();
+      } else {
+        cancel();
+      }
+      continue;
+    }
+    if (code === 0x9b) {
+      begin("csi", "\x1b[");
+      continue;
+    }
+    if (code === 0x90) {
+      begin("dcs", "\x1bP");
+      continue;
+    }
+    if (code === 0x9d) {
+      begin("osc", "\x1b]");
+      continue;
+    }
+    if (code === 0x98 || code === 0x9e || code === 0x9f) {
+      begin(
+        "string",
+        `\x1b${String.fromCharCode(code === 0x98 ? 0x58 : code === 0x9e ? 0x5e : 0x5f)}`,
+      );
+      continue;
+    }
+    if (code >= 0x80 && code <= 0x9f) {
       cancel();
       continue;
     }
     // ESC starts a new escape from any state. Inside an OSC, DCS or string it
     // also ends that sequence first, which is where xterm reports the query;
     // inside a CSI it simply abandons the unfinished sequence.
-    if (byte === 0x1b && kind !== "ground") {
-      if (kind === "osc" || kind === "dcs" || kind === "string") finish();
+    if (code === 0x1b) {
+      if (kind === "osc" || kind === "dcs" || kind === "dcs-data" || kind === "string") finish();
       begin("escape");
       continue;
     }
-    // A bare ST ends a string; anywhere else it is ignored (xterm returns to
-    // ground without dispatching).
-    if (byte === 0x9c) {
-      if (kind === "osc" || kind === "dcs" || kind === "string") {
-        finish();
+    // A bare BEL ends an OSC (and is ignored in the other states).
+    if (code === 0x07 && kind === "osc") {
+      finish();
+      continue;
+    }
+    // xterm's executables execute in place: they never become part of a CSI or
+    // DCS parameter string and never end the sequence. Only a DCS payload
+    // keeps them as data.
+    if (code < 0x18 || code === 0x19 || (code >= 0x1c && code <= 0x1f)) {
+      if (kind === "dcs-data") append(char);
+      continue;
+    }
+    // DEL is data inside an OSC and ignored in every other sequence state.
+    if (code === 0x7f) {
+      if (kind === "osc") append(char);
+      continue;
+    }
+    // A non-ASCII printable character is printed in ground and kept in OSC
+    // and DCS payloads; xterm aborts the other sequence states on it.
+    if (code >= 0xa0) {
+      if (kind === "ground") continue;
+      if (kind === "osc" || kind === "dcs-data") {
+        append(char);
       } else {
         cancel();
       }
@@ -358,44 +476,44 @@ function scanOutput(
     }
     switch (kind) {
       case "ground":
-        if (byte === 0x1b) begin("escape");
         break;
       case "escape":
-        if (byte === 0x5b) {
-          append(byte);
+        if (code === 0x5b) {
+          append(char);
           kind = "csi";
-        } else if (byte === 0x5d) {
-          append(byte);
+        } else if (code === 0x5d) {
+          append(char);
           kind = "osc";
-        } else if (byte === 0x50) {
-          append(byte);
+        } else if (code === 0x50) {
+          append(char);
           kind = "dcs";
-        } else if (byte === 0x58 || byte === 0x5e || byte === 0x5f) {
-          append(byte);
+        } else if (code === 0x58 || code === 0x5e || code === 0x5f) {
+          append(char);
           kind = "string";
         } else {
-          append(byte);
+          append(char);
           finish();
         }
         break;
       case "csi":
-        if (byte >= 0x40 && byte <= 0x7e) {
-          append(byte);
+        if (code >= 0x40 && code <= 0x7e) {
+          append(char);
           finish();
         } else {
-          append(byte);
+          append(char);
         }
         break;
       case "osc":
-        if (byte === 0x07) {
-          finish();
-        } else {
-          append(byte);
-        }
+        append(char);
         break;
       case "dcs":
+        append(char);
+        // The final byte dispatches the sequence; what follows is its data.
+        if (code >= 0x40 && code <= 0x7e) kind = "dcs-data";
+        break;
+      case "dcs-data":
       case "string":
-        append(byte);
+        append(char);
         break;
     }
   }
