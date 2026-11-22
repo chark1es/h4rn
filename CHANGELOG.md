@@ -282,11 +282,19 @@ All notable changes to h4rn are recorded here. The format follows
   of always opening on `~/code` and ignoring them. The automatic first-project choice is not
   remembered as the last folder; it shows that folder's draft, and text typed while it is on
   screen is saved with that folder, so a reload brings back the same folder and text. It is
-  skipped while the box holds unsent text. The box is blanked only when the draft it sent was
-  actually cleared, and it re-reads the slot when the New thread dialog closes or another tab
-  writes it, so the dialog's text appears in the inbox. In the composer, `↵` in the `/` menu runs the command ranked for the query on screen
-  (and keeps the text when nothing matches), and a recall made while a recalled prompt is sending
-  stays on screen instead of the draft recall had preserved.
+  skipped while the box holds unsent text, and a typed folder that already has its own saved
+  draft keeps it: the keystroke stays with the slot it was typed in rather than replacing text
+  nobody is looking at. When Start loses focus without being pressed and focus leaves the
+  composer, the folder field's skipped commit runs then, so the box shows that folder's draft
+  before the next keystroke can land anywhere. The box is blanked only when the draft it sent was
+  actually cleared and it is still on the slot it sent, so a Start that finishes after the person
+  switched folders leaves that folder's draft in the box and in storage; it re-reads the slot when
+  the New thread dialog closes or another tab writes it, so the dialog's text appears in the inbox.
+  In the composer, `↵` in the `/` menu runs the command ranked for the query on screen
+  (and keeps the text when nothing matches), never a row left from a menu whose trigger the same
+  keystroke replaced, and a recall made while a recalled prompt is sending
+  stays on screen instead of the draft recall had preserved. A thread whose create fails no longer
+  leaves the text typed into its optimistic box behind under the temporary id.
 - **Preview follow-ups from the HTML preview review.** A descriptorless `srcset` candidate followed
   by a comma (`data:image/png;base64,AAAA, local.png 2x`) no longer swallows the candidate after
   it: the trailing comma ends the candidate, so the workspace image is inlined or removed and

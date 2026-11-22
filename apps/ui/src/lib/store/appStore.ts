@@ -20,7 +20,7 @@ import type { H4rnClient } from "@/lib/client/client";
 import { createClientFromEnv, readBootConfig } from "@/lib/client/config";
 import { toProtoError } from "@/lib/client/errors";
 import type { ConnectionSnapshot, EventEnvelope } from "@/lib/client/types";
-import { moveLocalThreadDraft } from "@/lib/drafts";
+import { drafts, moveLocalThreadDraft } from "@/lib/drafts";
 import { pushRoute, type Route, readRoute, replaceRoute, routePath } from "@/lib/router";
 import { applyTerminalTheme } from "@/lib/terminalTheme";
 import { createThreadLog, foldEvent, type ThreadLog } from "./projection";
@@ -1488,6 +1488,10 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
       logs: omitKey(current.logs, tempId),
       pendingCreates: current.pendingCreates.filter((pending) => pending.tempId !== tempId),
     });
+    // The optimistic thread never existed, so nothing will ever ask for its
+    // draft again. Drop the memory-only text typed into it rather than leaving
+    // it under a temporary id that another session could reuse.
+    drafts.clearThreadDraft(input.host, tempId);
     navigate({ kind: "inbox" });
     pushToast({
       variant: "error",

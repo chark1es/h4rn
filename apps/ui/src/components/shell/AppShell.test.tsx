@@ -94,9 +94,12 @@ function folderField(): HTMLInputElement {
 
 describe("inbox start composer drafts", () => {
   beforeEach(() => {
-    window.localStorage.clear();
+    // Flush what the previous test left queued before clearing storage, or a
+    // pending write lands in the next test's storage and leaks into its box.
     flushDrafts();
-    mock.createThread.mockClear();
+    window.localStorage.clear();
+    mock.createThread.mockReset();
+    mock.createThread.mockResolvedValue(true);
     mock.state.connection.status = "online";
     mock.state.ui.newThreadOpen = false;
     mock.state.projects = [];
@@ -321,6 +324,86 @@ describe("inbox start composer drafts", () => {
     });
   });
 
+  it("never writes a keystroke into the typed folder's saved draft", async () => {
+    writeNewThreadDraft("host_ui", "~/code/api", "saved api draft");
+    flushDrafts();
+    render(<InboxDetailEmpty />);
+    await waitFor(() => expect(taskBox().disabled).toBe(false));
+
+    fireEvent.change(taskBox(), { target: { value: "visible task" } });
+    fireEvent.change(folderField(), { target: { value: "~/code/api" } });
+
+    const start = screen.getByRole("button", { name: "Start thread" });
+    // Tab skips the folder field's blur so Start sends the folder as typed.
+    fireEvent.blur(folderField(), { relatedTarget: start });
+    fireEvent.focus(start);
+    // Going back to the box is not a Start press either: the person is still
+    // writing here, so the box keeps the text they see.
+    fireEvent.blur(start, { relatedTarget: taskBox() });
+    expect(taskBox().value).toBe("visible task");
+
+    fireEvent.change(taskBox(), { target: { value: "visible task!" } });
+    flushDrafts();
+
+    // The api slot is not on screen and was never typed over.
+    expect(readNewThreadDraft("host_ui", "~/code/api")).toBe("saved api draft");
+    expect(readNewThreadDraft("host_ui", "~/code")).toBe("visible task!");
+  });
+
+  it("commits the typed folder when Start loses focus outside the composer", async () => {
+    writeNewThreadDraft("host_ui", "~/code/api", "saved api draft");
+    flushDrafts();
+    render(<InboxDetailEmpty />);
+    await waitFor(() => expect(taskBox().disabled).toBe(false));
+
+    fireEvent.change(taskBox(), { target: { value: "visible task" } });
+    fireEvent.change(folderField(), { target: { value: "~/code/api" } });
+
+    const start = screen.getByRole("button", { name: "Start thread" });
+    fireEvent.blur(folderField(), { relatedTarget: start });
+    fireEvent.focus(start);
+    fireEvent.blur(start, {
+      relatedTarget: screen.getByRole("button", { name: "Host: atlas" }),
+    });
+
+    // Start was not pressed, so the skipped commit happens now, exactly like
+    // the folder field's own blur: the box shows that folder's draft and the
+    // session is on the folder the next Start would use.
+    expect(taskBox().value).toBe("saved api draft");
+    expect(drafts.readLastWorkspace("host_ui")).toBe("~/code/api");
+  });
+
+  it("does not blank a folder's draft when a late Start finishes", async () => {
+    let finish: (ok: boolean) => void = () => undefined;
+    mock.createThread.mockReturnValue(
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    writeNewThreadDraft("host_ui", "~/code/api", "other folder draft");
+    flushDrafts();
+    render(<InboxDetailEmpty />);
+    await waitFor(() => expect(taskBox().disabled).toBe(false));
+
+    fireEvent.change(taskBox(), { target: { value: "start me" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start thread" }));
+    await waitFor(() => expect(mock.createThread).toHaveBeenCalledTimes(1));
+
+    // The person commits another folder, with its own draft, while Start waits.
+    fireEvent.change(folderField(), { target: { value: "~/code/api" } });
+    fireEvent.blur(folderField(), { relatedTarget: null });
+    expect(taskBox().value).toBe("other folder draft");
+
+    await act(async () => {
+      finish(true);
+    });
+
+    // That draft is neither blanked nor cleared: this send never saw it.
+    expect(taskBox().value).toBe("other folder draft");
+    expect(readNewThreadDraft("host_ui", "~/code/api")).toBe("other folder draft");
+    expect(readNewThreadDraft("host_ui", "~/code")).toBe("");
+  });
+
   it("writes text typed under a typed folder to that folder's slot", async () => {
     render(<InboxDetailEmpty />);
     await waitFor(() => expect(taskBox().disabled).toBe(false));
@@ -334,6 +417,24 @@ describe("inbox start composer drafts", () => {
     expect(readNewThreadDraft("host_ui", "~/code/api")).toBe("api task");
     expect(readNewThreadDraft("host_ui", "~/code")).toBe("");
     expect(drafts.readLastWorkspace("host_ui")).toBe("");
+  });
+
+  it("keeps a typed folder's saved draft when the box already holds text", async () => {
+    writeNewThreadDraft("host_ui", "~/code/api", "saved api draft");
+    flushDrafts();
+    render(<InboxDetailEmpty />);
+    await waitFor(() => expect(taskBox().disabled).toBe(false));
+
+    fireEvent.change(taskBox(), { target: { value: "visible task" } });
+    fireEvent.change(folderField(), { target: { value: "~/code/api" } });
+    fireEvent.change(taskBox(), { target: { value: "visible task!" } });
+    flushDrafts();
+
+    // The typed folder has its own unsent text, so the edit stays with the
+    // slot it was typed in rather than replacing that draft unseen.
+    expect(readNewThreadDraft("host_ui", "~/code/api")).toBe("saved api draft");
+    expect(readNewThreadDraft("host_ui", "~/code")).toBe("visible task!");
+    expect(taskBox().value).toBe("visible task!");
   });
 
   it("shows the first project without remembering it", async () => {

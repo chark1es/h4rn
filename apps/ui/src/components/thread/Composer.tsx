@@ -419,10 +419,13 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     // re-rendered the rows. Ranking the old query then inserts the wrong row.
     const element = ref.current;
     const visibleText = element?.value ?? text;
-    const liveTrigger = element
+    // The live trigger is the only one an accept may use. A key can land in the
+    // same batch as text that replaced the trigger (`/` → `@`), before the rows
+    // follow; accepting a row from the old menu then runs the wrong thing.
+    const trigger = element
       ? detectComposerTrigger(element.value, element.selectionStart ?? element.value.length)
-      : null;
-    const trigger = liveTrigger?.kind === row.kind ? liveTrigger : menu.trigger;
+      : menu.trigger;
+    if (!trigger || trigger.kind !== row.kind) return;
     if (row.kind === "file") {
       // Rank again for the query on screen right now. A key that lands before
       // the render that would have refreshed `rows` must never accept a row

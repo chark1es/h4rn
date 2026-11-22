@@ -143,6 +143,28 @@ describe("createThread draft handoff", () => {
     expect(readThreadDraft("handoff_host", tempId)).toBe("");
     expect(readThreadDraft("handoff_host", realId)).toBe("typed while starting");
   });
+
+  it("drops the temporary thread's draft when the create fails", async () => {
+    fake.request.mockRejectedValueOnce(new Error("the host is unreachable"));
+
+    const created = createThread({
+      host: "handoff_host",
+      harness: "claude_code",
+      workspacePath: "~/code",
+      model: "claude-sonnet-4-5",
+      prompt: "start this",
+    });
+    const tempId = getState().pendingCreates[0]?.tempId ?? "";
+    expect(tempId.startsWith("local-thread-")).toBe(true);
+
+    // The optimistic thread is on screen, so the box can be typed in.
+    drafts.writeThreadDraft("handoff_host", tempId, "typed while starting");
+    expect(await created).toBe(false);
+
+    // Nothing will ever reconcile this id, and another session could reuse it:
+    // its memory-only draft must not outlive the failed create.
+    expect(readThreadDraft("handoff_host", tempId)).toBe("");
+  });
 });
 
 describe("manual placements", () => {

@@ -297,6 +297,24 @@ describe("draft store", () => {
     expect(second?.nonce).toBe("tab-a");
   });
 
+  it("lets the later flush land when two tabs write in the same millisecond", () => {
+    const storage = memoryStorage();
+    // Same clock reading, distinct tabs: neither write is known to be newer,
+    // so the flush that runs later wins and the other tab re-reads it. A loss
+    // here would mean both tabs think their own text is saved.
+    const tabA = createDraftStore(storage, { now: () => 50, nonce: "tab-a" });
+    const tabB = createDraftStore(storage, { now: () => 50, nonce: "tab-b" });
+
+    tabA.writeThreadDraft("host_a", "thread_1", "from A");
+    tabB.writeThreadDraft("host_a", "thread_1", "from B");
+    tabA.flush();
+    tabB.flush();
+
+    expect(storedText(storage, threadKey("host_a", "thread_1"))).toBe("from B");
+    expect(tabB.readThreadDraft("host_a", "thread_1")).toBe("from B");
+    expect(tabA.readThreadDraft("host_a", "thread_1")).toBe("from B");
+  });
+
   it("compares both halves of a revision before clearing", () => {
     const store = createDraftStore(memoryStorage(), { now: () => 10, nonce: "tab-a" });
     store.writeThreadDraft("host_a", "thread_1", "one");

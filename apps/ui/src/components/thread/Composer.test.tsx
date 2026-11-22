@@ -1140,6 +1140,29 @@ describe("Composer / command menu", () => {
     expect(readThreadDraft(HOST, THREAD)).toBe("/zzz");
   });
 
+  it("does not run a command once the live text is no longer one", async () => {
+    renderComposer();
+    const input = textarea();
+    typeInto(input, "/");
+    await waitFor(() => expect(option(/Stop the turn/)).not.toBeNull());
+
+    // `/` becomes `@` and Enter lands before React re-renders the rows. The
+    // command menu's row must not accept text that is now a file query.
+    act(() => {
+      typeAndPressInOneBatch(input, "@", "Enter");
+    });
+    runAnimationFrames();
+
+    expect(mock.interruptThread).not.toHaveBeenCalled();
+    expect(mock.toggleTerminal).not.toHaveBeenCalled();
+    expect(mock.openNewThread).not.toHaveBeenCalled();
+    expect(mock.setPanelTab).not.toHaveBeenCalled();
+    expect(mock.toggleView).not.toHaveBeenCalled();
+    expect(mock.sendMessage).not.toHaveBeenCalled();
+    expect(input.value).toBe("@");
+    expect(readThreadDraft(HOST, THREAD)).toBe("@");
+  });
+
   it("offers Stop the turn only while the thread is working", async () => {
     const view = renderComposer();
     const input = textarea();

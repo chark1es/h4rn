@@ -14,7 +14,9 @@ import {
  * can change the host or the folder at any time. This session keeps the box in
  * step with one slot: the host and folder whose draft it currently shows. The
  * box cannot be typed in until a host is bound, so there is no provisional
- * text to move around; a host change simply shows that host's slot.
+ * text to move around; a host change simply shows that host's slot. Typing may
+ * move the slot to the folder on screen, but only while that folder has no
+ * saved draft of its own: a keystroke never replaces another folder's draft.
  */
 
 export type NewThreadDraftSnapshot = {
@@ -125,6 +127,17 @@ export class NewThreadDraftSession {
       this.loadSlot();
     }
     return this.snapshot();
+  }
+
+  /**
+   * Whether a folder's slot has no saved text. A keystroke may move the
+   * session to a folder whose slot is empty (there is nothing to replace), but
+   * never into a slot that already holds a draft the person is not looking at.
+   */
+  slotIsEmpty(workspace: string): boolean {
+    if (!this.host) return true;
+    const next = normalizeWorkspace(workspace) || DEFAULT_NEW_THREAD_WORKSPACE;
+    return this.store.readNewThreadDraftEntry(this.host, next).text.length === 0;
   }
 
   /** The user typed in the prompt box. */

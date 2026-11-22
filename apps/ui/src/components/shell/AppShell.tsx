@@ -51,7 +51,12 @@ import { UsagePage } from "@/features/usage/UsagePage";
 import type { HarnessKind } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { useViewportWidth } from "@/hooks/use-viewport-width";
-import { DEFAULT_NEW_THREAD_WORKSPACE, drafts, subscribeDraftChanges } from "@/lib/drafts";
+import {
+  DEFAULT_NEW_THREAD_WORKSPACE,
+  drafts,
+  normalizeWorkspace,
+  subscribeDraftChanges,
+} from "@/lib/drafts";
 import { HARNESS_LABELS, harnessLabel, harnessSeed, machineSeed } from "@/lib/entities";
 import { projectName } from "@/lib/grouping";
 import { titleWithShortcut } from "@/lib/keybindings";
@@ -95,6 +100,8 @@ export function InboxDetailEmpty() {
   const [prompt, setPrompt] = useState("");
   const [starting, setStarting] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  /** The Start composer: focus that stays inside it is still the person's. */
+  const composerRef = useRef<HTMLFieldSetElement | null>(null);
   /**
    * The inbox box remembers text per host and folder, exactly like the New
    * thread dialog: it is the same start-a-thread slot, just always on screen.
@@ -211,8 +218,14 @@ export function InboxDetailEmpty() {
     // The shown folder can be one the session has not committed yet: the
     // automatic first project, or a path typed in the field. Text typed while
     // that folder is on screen belongs to it, so the slot moves with the first
-    // keystroke. That is still not a folder choice to remember.
-    if (workspace !== session.snapshot().workspace) session.showWorkspace(workspace);
+    // keystroke — but only while that folder's slot is empty. A typed folder
+    // that already holds a saved draft is somebody else's unsent text: the
+    // keystroke stays with the slot on screen instead of replacing it. That is
+    // still not a folder choice to remember.
+    const target = normalizeWorkspace(workspace) || DEFAULT_NEW_THREAD_WORKSPACE;
+    if (target !== session.snapshot().workspace && session.slotIsEmpty(target)) {
+      session.showWorkspace(target);
+    }
     session.setText(value);
     setPrompt(value);
   };
@@ -237,11 +250,15 @@ export function InboxDetailEmpty() {
     setStarting(false);
     if (ok) {
       // Clear only the slot whose revision was sent; newer text from another
-      // tab survives, like a thread composer's draft. Blank the box only when
-      // its draft really went away; otherwise show what the slot holds now.
+      // tab survives, like a thread composer's draft.
       const cleared = draftSession().clearSubmitted(draft);
       drafts.writeLastWorkspace(draft.host, draft.workspace);
-      setPrompt(cleared ? "" : draftSession().reloadSlot().text);
+      // The folder can change while Start waits, and the box then shows that
+      // folder's draft. Blanking it would lose text this send never saw; show
+      // what the slot on screen holds now.
+      const shown = draftSession().snapshot();
+      const stillOnSentSlot = shown.host === draft.host && shown.workspace === draft.slotWorkspace;
+      setPrompt(cleared && stillOnSentSlot ? "" : draftSession().reloadSlot().text);
       attachments.clear();
     }
   };
@@ -464,6 +481,7 @@ export function InboxDetailEmpty() {
           </div>
 
           <fieldset
+            ref={composerRef}
             aria-label="Start a thread composer"
             className="q-composer"
             style={{ margin: 0, minWidth: 0, width: "100%", position: "relative" }}
@@ -587,8 +605,25 @@ export function InboxDetailEmpty() {
                 onKeyUp={() => {
                   startPressed.current = false;
                 }}
-                onBlur={() => {
+                onBlur={(event) => {
+                  const pressed = startPressed.current;
                   startPressed.current = false;
+                  if (pressed) return;
+                  // Tabbing from the folder field to Start skips that field's
+                  // blur commit so Start sends the folder as typed. That skip
+                  // lasts only while the press is happening: when Start loses
+                  // focus without being pressed, the typed folder is committed
+                  // here, so the session and the box agree again and a later
+                  // keystroke cannot land in the wrong folder's slot.
+                  const next = event.relatedTarget as Node | null;
+                  // Focus that stays inside the composer is still the person
+                  // writing here (the box, an attach button, the model menu):
+                  // swapping the box under their next keystroke is the loss
+                  // this commit exists to prevent.
+                  if (next && composerRef.current?.contains(next)) return;
+                  if (workspace !== draftSession().snapshot().workspace) {
+                    commitWorkspace(workspace);
+                  }
                 }}
                 onClick={() => void submit()}
                 title={
