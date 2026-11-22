@@ -1,5 +1,5 @@
 import { CircleCheckIcon, KeyRoundIcon, PlusIcon, TriangleAlertIcon } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ChipSelect } from "@/components/common/ChipSelect";
 import { useHarnesses, useHarnessVersions } from "@/features/harnesses/harnessStore";
@@ -311,7 +311,11 @@ function AddGenerator() {
   );
 }
 
-/** Settings → Providers → Text generators. */
+/**
+ * Settings → Providers → Text generators.
+ *
+ * The Providers page owns its one page title, so this renders as a group.
+ */
 export function TextGeneratorsSettings() {
   const connection = useApp((state) => state.connection.status);
   const generators = useTextGeneration((state) => state.generators);
@@ -325,16 +329,12 @@ export function TextGeneratorsSettings() {
   }, [connection]);
 
   return (
-    <div className="q-form">
-      <div className="q-form-head">
-        <div style={{ flex: 1 }}>
-          <h1>Text generators</h1>
-          <p className="lead">
-            A model API that only writes text. h4rn can use one for thread titles instead of
-            starting a coding agent. Keys stay on {host}; this app only sees whether one exists.
-          </p>
-        </div>
-      </div>
+    <div className="q-group">
+      <h2>Text generators</h2>
+      <p className="desc">
+        A model API that only writes text. h4rn can use one for thread titles instead of starting a
+        coding agent. Keys stay on {host}; this app only sees whether one exists.
+      </p>
 
       {loading && generators.length === 0 ? (
         <div className="q-skel" style={{ height: 60 }} />
@@ -353,43 +353,75 @@ export function TextGeneratorsSettings() {
           </button>
         </div>
       ) : generators.length === 0 ? (
-        <div className="q-group">
-          <h2>No generator yet</h2>
+        <>
           <p className="desc">
-            Titles can still be written by an installed coding agent; add a generator for a faster,
-            cheaper model.
+            None yet. Titles can still be written by an installed coding agent; add a generator for
+            a faster, cheaper model.
           </p>
           {loaded ? <AddGenerator /> : null}
-        </div>
+        </>
       ) : (
-        <div className="q-group">
-          <h2>Configured</h2>
+        <>
           {generators.map((generator) => (
             <GeneratorRow key={generator.id} id={generator.id} />
           ))}
           <AddGenerator />
-        </div>
+        </>
       )}
     </div>
   );
 }
 
-function ModeSegment({
+/**
+ * One choice out of three: a radio group, not a tab strip.
+ *
+ * Arrow keys move the choice and the focus together, Home and End jump to the
+ * ends, and on a phone each target is thumb-sized.
+ */
+function ModePicker({
   value,
   onChange,
 }: {
   value: TitleModelMode;
   onChange: (next: TitleModelMode) => void;
 }) {
+  const buttons = useRef<Array<HTMLButtonElement | null>>([]);
+  const select = (index: number) => {
+    const next = (index + MODES.length) % MODES.length;
+    const mode = MODES[next];
+    if (!mode) return;
+    onChange(mode.value);
+    buttons.current[next]?.focus();
+  };
   return (
-    <div className="q-seg inline" role="tablist" aria-label="Title model">
-      {MODES.map((mode) => (
+    <div className="q-seg inline q-seg-choice" role="radiogroup" aria-label="Title model">
+      {MODES.map((mode, index) => (
+        // biome-ignore lint/a11y/useSemanticElements: a segmented radio group, not a form radio
         <button
           key={mode.value}
+          ref={(element) => {
+            buttons.current[index] = element;
+          }}
           type="button"
-          role="tab"
-          aria-selected={value === mode.value}
+          role="radio"
+          aria-checked={value === mode.value}
+          tabIndex={value === mode.value ? 0 : -1}
           onClick={() => onChange(mode.value)}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+              event.preventDefault();
+              select(index + 1);
+            } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+              event.preventDefault();
+              select(index - 1);
+            } else if (event.key === "Home") {
+              event.preventDefault();
+              select(0);
+            } else if (event.key === "End") {
+              event.preventDefault();
+              select(MODES.length - 1);
+            }
+          }}
         >
           {mode.label}
         </button>
@@ -456,7 +488,7 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
           <div className="s">{titleModelSummary({ title: draft })}</div>
         </div>
         <div className="ctl">
-          <ModeSegment value={draft.mode} onChange={chooseMode} />
+          <ModePicker value={draft.mode} onChange={chooseMode} />
         </div>
       </div>
 

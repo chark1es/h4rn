@@ -526,10 +526,14 @@ const FORMS: Record<string, () => React.ReactNode> = {
   hosts: () => <LiveHostsForm />,
   devices: () => <LiveHostsForm pairing />,
   threads: ThreadSettings,
+  // One page title (the proxy form owns it) and one column: text generators
+  // render as a group under the same page padding.
   providers: () => (
     <>
-      <TextGeneratorsSettings />
       <ProxySettings />
+      <div className="q-form" style={{ paddingTop: 0 }}>
+        <TextGeneratorsSettings />
+      </div>
     </>
   ),
   harnesses: HarnessSettings,

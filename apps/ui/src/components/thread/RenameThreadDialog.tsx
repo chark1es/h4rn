@@ -28,17 +28,33 @@ export function RenameThreadDialog({
 }) {
   const [value, setValue] = useState(initial);
   const [saving, setSaving] = useState(false);
+  // The name the dialog opened with, and the thread it was opened for.
+  const seeded = useRef(initial);
+  const openedFor = useRef<ThreadId | null>(null);
   const input = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      openedFor.current = null;
+      return;
+    }
+    // Seed once per open, or when the dialog switches threads. A generated
+    // title arriving while the dialog is open is not the person's draft and
+    // must never replace what they are typing.
+    if (openedFor.current === threadId) return;
+    openedFor.current = threadId;
+    seeded.current = initial;
     setValue(initial);
     setSaving(false);
-  }, [open, initial]);
+  }, [open, threadId, initial]);
 
   const submit = async () => {
     const title = value.trim();
-    if (!title || title === initial) {
+    if (!title) return;
+    // An untouched draft still records a rename when the live title changed
+    // underneath: the person is confirming the name the dialog opened with,
+    // and a generated title must not quietly win.
+    if (title === seeded.current && initial === seeded.current) {
       onOpenChange(false);
       return;
     }

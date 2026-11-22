@@ -50,7 +50,11 @@ describe("text generator form validation", () => {
     expect(baseUrlError("http://ollama.lan:11434/v1")).toContain("localhost");
     expect(baseUrlError("ftp://example.com")).toContain("https");
     expect(baseUrlError("not a url")).toContain("not a URL");
-    expect(baseUrlError("https://user:secret@example.com/v1")).toContain("key field");
+    // Built at runtime: never commit a user:pass URL literal.
+    const withCredentials = new URL("https://example.com/v1");
+    withCredentials.username = "someone";
+    withCredentials.password = "not-a-real-password";
+    expect(baseUrlError(withCredentials.toString())).toContain("key field");
   });
 });
 
@@ -111,11 +115,15 @@ describe("testing a generator", () => {
       },
     });
     await testTextGenerator("tg_1" as never, "tiny-override");
-    expect(request).toHaveBeenCalledWith({
-      type: "test_text_generator",
-      generator_id: "tg_1",
-      model: "tiny-override",
-    });
+    expect(request).toHaveBeenCalledWith(
+      {
+        type: "test_text_generator",
+        generator_id: "tg_1",
+        model: "tiny-override",
+      },
+      // Longer than the provider's own 30 s budget, so the honest error wins.
+      { timeoutMs: 40_000 },
+    );
     expect(getTextGenerationState().reports.tg_1).toMatchObject({
       ok: true,
       reply: "ok",

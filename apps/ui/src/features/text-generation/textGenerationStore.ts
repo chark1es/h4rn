@@ -183,11 +183,16 @@ export async function testTextGenerator(
     testErrors: { ...state.testErrors, [generatorId]: null },
   });
   try {
-    const response = await getClient().request({
-      type: "test_text_generator",
-      generator_id: generatorId,
-      model: model?.trim() || null,
-    });
+    // A provider may spend its whole HTTP timeout answering; the default
+    // request budget is shorter than that.
+    const response = await getClient().request(
+      {
+        type: "test_text_generator",
+        generator_id: generatorId,
+        model: model?.trim() || null,
+      },
+      { timeoutMs: 40_000 },
+    );
     if (response.type !== "text_generator_tested") return;
     patch({
       reports: { ...state.reports, [generatorId]: response.report },
