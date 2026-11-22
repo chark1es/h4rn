@@ -69,20 +69,28 @@ protocol gets:
 - cancel, which asks the agent to stop the current turn without killing the process;
 - `session/load` resume when the agent advertises it; without it a restart starts a fresh session
   and replaces the stored id rather than failing the thread;
-- plans, forwarded as plan events so a step's status stays visible;
+- plans, forwarded as plan events so the thread shows every step and its status;
 - the models and modes the agent advertises, whether in `session/new`'s legacy `models`/`modes`
   objects or in the ACP v1 `configOptions` (selections use `session/set_config_option` for the
   latter).
 
 Antigravity keeps its exact catalogue of models, its case-sensitive default aliases and its own
-wording ("Antigravity stopped the turn: …", "Antigravity is requesting permission").
+wording ("Antigravity stopped the turn: …", "Antigravity is requesting permission", "the account
+offers: …").
 
-Editing an agent's command line clears the session ids of threads that used the old command, so a
-later resume never replays a conversation the new command never saw.
+Editing an agent's command line or working directory clears the session ids of threads that used the
+old configuration, so a later resume never replays a conversation the new command never saw. The id
+is cleared in the stored thread too, not just for the attempt: a start that fails before the agent
+opens a session cannot leave the old id behind to be replayed by the next try.
 
 Model choices are read from the last successful `Check` result, which is stored in the list, so a
 `view`-scoped device can offer them without starting a process. A probe is admin-only; when one is
-refused, the picker shows the error and lets you type a model id instead of retrying the probe.
+refused, the picker shows the error and lets you type a model id instead of retrying the probe. A
+failed `Check` keeps the previous models and version; a probe whose configuration was edited while
+it ran stores nothing, because its answer describes the command that no longer exists.
+
+A plan an agent publishes is shown in the turn as a quiet checklist: each step with a mark for
+pending, in progress or done. The newest plan replaces the previous one for that turn.
 
 What h4rn cannot normalize stays the agent's own business: its sign-in flow, sandbox, model names,
 configuration files and any vendor-specific extensions. Antigravity keeps its own fallback
@@ -94,14 +102,16 @@ Writes need the `admin` pairing scope; listing is available to `view`.
 
 | Request | Answer |
 |---|---|
-| `ListAcpAgents` | Configured agents with installed state, executable path, last reported version and the models/modes from the last successful probe. Environment values are masked. |
-| `GetAcpAgent` | One configuration with its real environment values, for the edit form. Admin only. |
+| `ListAcpAgents` | Configured agents with installed state, executable path, last reported version and the models/modes from the last successful probe. Environment values are masked and the literal argument list is omitted. |
+| `GetAcpAgent` | One configuration with its real argument list and environment values, for the edit form. Admin only. |
 | `AddAcpAgent` | Stores one configuration; the id must be unique. |
-| `UpdateAcpAgent` | Replaces one configuration. The id cannot change; a new command line clears the old version, models and modes. |
+| `UpdateAcpAgent` | Replaces one configuration. The id cannot change; any edit clears the old version, models and modes. |
 | `RemoveAcpAgent` | Removes the configuration. Threads and their history are kept. |
 | `ProbeAcpAgent` | Runs the ACP handshake and one session, and reports version, models and modes. Admin only. |
 
-The list lives in `acp-agents.json` in the daemon's data directory.
+The list lives in `acp-agents.json` in the daemon's data directory. Entries are validated on load as
+well as on save: a hand-edited entry the form would reject (a NUL in an argument, an empty command)
+is dropped with one log line instead of failing a thread at spawn time.
 
 ## Security
 
@@ -112,11 +122,17 @@ terminal as the daemon user:
 - prefer an absolute path or a binary you installed and control;
 - environment overrides and the agent's own credential store are the only secret paths — h4rn never
   puts a secret in argv;
-- `ListAcpAgents` masks environment values; only an admin-scoped `GetAcpAgent` returns them for the
-  edit form, and `acp-agents.json` is readable by the daemon user alone;
+- `ListAcpAgents` masks environment values and omits the argument list; only an admin-scoped
+  `GetAcpAgent` returns them for the edit form, and `acp-agents.json` is readable by the daemon user
+  alone;
 - removing an agent from Settings does not uninstall it, revoke its credentials or erase its files.
 
 h4rn validates the form (id shape, non-empty name and command, environment names, absolute fixed
 working directory) and the executable's existence, but cannot verify that a command is trustworthy
 or that it implements ACP correctly. A command that is not an ACP agent fails its `Check` with the
 daemon's ACP error.
+
+The form accepts either platform's absolute path form (`/dir`, `C:\dir`, or a UNC share) because the
+daemon that validates it may run on a different platform than the browser or phone you configured
+it from; the daemon has the final say. The display-name cap counts characters, not bytes, on both
+sides.

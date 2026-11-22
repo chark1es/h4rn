@@ -3061,20 +3061,27 @@ impl Inner {
             // A configured ACP command is editable. Its fingerprint is stored
             // beside the resume id, so a thread that outlives a command-line
             // change starts fresh instead of replaying an id the new command
-            // never issued.
-            let mut resume_id = record.meta.resume_id.clone();
+            // never issued. The recorded id is cleared too, not just the local
+            // copy: a start that fails before SessionStarted must not leave the
+            // stale id behind for the next attempt.
+            let workspace = std::path::PathBuf::from(&record.meta.workspace_path);
             if harness_kind == HarnessKind::Acp
                 && let Some(agent_id) = record.meta.agent_id.as_deref()
             {
-                let fingerprint = harness.instance_fingerprint(agent_id);
-                resume_id = resume_after_fingerprint_change(
-                    &mut record.meta.agent_fingerprint,
+                let fingerprint = harness.instance_fingerprint(agent_id, &workspace);
+                let mut stored = record.meta.agent_fingerprint.clone();
+                let mut resume_id = record.meta.resume_id.clone();
+                resume_after_fingerprint_change(
+                    &mut stored,
                     fingerprint.as_deref(),
-                    resume_id,
+                    &mut resume_id,
                 );
+                record.meta.agent_fingerprint = stored;
+                record.meta.resume_id = resume_id;
             }
+            let resume_id = record.meta.resume_id.clone();
             let spec = SessionSpec {
-                workspace: std::path::PathBuf::from(&record.meta.workspace_path),
+                workspace,
                 model: record.meta.model.clone(),
                 runtime_mode: record.meta.runtime_mode,
                 resume_id,
@@ -5212,21 +5219,26 @@ impl Inner {
 
 /// Keeps a stored session id only while the ACP command line is unchanged.
 ///
-/// `stored` is the fingerprint the id belongs to. A first observation (an old
-/// thread written before fingerprints existed) keeps the id and records the
-/// fingerprint; a later mismatch clears the id, so the adapter opens a fresh
-/// session and reports its new id.
+/// `stored` is the fingerprint the id belongs to and `resume_id` is the record's
+/// own field, so a cleared id stays cleared in the record. A first observation
+/// (an old thread written before fingerprints existed) keeps the id and records
+/// the fingerprint; a later mismatch clears the id, so the adapter opens a fresh
+/// session and reports its new id. Clearing before the start is what makes a
+/// failed start safe: the next attempt must not replay the old id merely because
+/// the fingerprint now matches.
 fn resume_after_fingerprint_change(
     stored: &mut Option<String>,
     current: Option<&str>,
-    resume_id: Option<String>,
-) -> Option<String> {
+    resume_id: &mut Option<String>,
+) {
     let Some(current) = current else {
-        return resume_id;
+        return;
     };
     let changed = stored.as_deref().is_some_and(|known| known != current);
     *stored = Some(current.to_owned());
-    if changed { None } else { resume_id }
+    if changed {
+        *resume_id = None;
+    }
 }
 
 fn user_item_id(turn_id: &TurnId) -> String {
@@ -5567,25 +5579,30 @@ mod tests {
     #[test]
     fn an_acp_resume_id_is_kept_only_for_the_same_command_line() {
         let mut stored = None;
+        let mut resume_id = Some("s-1".to_string());
+        resume_after_fingerprint_change(&mut stored, Some("a"), &mut resume_id);
         assert_eq!(
-            resume_after_fingerprint_change(&mut stored, Some("a"), Some("s-1".into())),
-            Some("s-1".into()),
+            resume_id.as_deref(),
+            Some("s-1"),
             "a first observation keeps an old thread's id"
         );
         assert_eq!(stored.as_deref(), Some("a"));
+
+        resume_after_fingerprint_change(&mut stored, Some("a"), &mut resume_id);
+        assert_eq!(resume_id.as_deref(), Some("s-1"));
+
+        resume_after_fingerprint_change(&mut stored, Some("b"), &mut resume_id);
         assert_eq!(
-            resume_after_fingerprint_change(&mut stored, Some("a"), Some("s-1".into())),
-            Some("s-1".into())
-        );
-        assert_eq!(
-            resume_after_fingerprint_change(&mut stored, Some("b"), Some("s-1".into())),
-            None,
-            "an edited command line cannot resume the old session"
+            resume_id, None,
+            "an edited command line cannot resume the old session, and the record forgets the id"
         );
         assert_eq!(stored.as_deref(), Some("b"));
+
+        resume_id = Some("s-1".to_string());
+        resume_after_fingerprint_change(&mut stored, None, &mut resume_id);
         assert_eq!(
-            resume_after_fingerprint_change(&mut stored, None, Some("s-1".into())),
-            Some("s-1".into()),
+            resume_id.as_deref(),
+            Some("s-1"),
             "an adapter without a fingerprint leaves the id alone"
         );
     }

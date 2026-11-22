@@ -92,10 +92,12 @@ fn build_fixture() -> Option<PathBuf> {
     None
 }
 
-async fn manager() -> Option<ThreadManager> {
+/// A manager and the agent service behind it. The data directory is returned
+/// too: editing a configuration later writes `acp-agents.json`.
+async fn manager_with_agents() -> Option<(ThreadManager, Arc<AcpAgentService>, tempfile::TempDir)> {
     let binary = fixture_binary()?;
     let data = tempfile::tempdir().expect("data dir");
-    let agents = AcpAgentService::open(data.path()).expect("agent service");
+    let agents = Arc::new(AcpAgentService::open(data.path()).expect("agent service"));
     agents
         .add(AcpAgentSpec {
             id: "fixture".into(),
@@ -106,7 +108,7 @@ async fn manager() -> Option<ThreadManager> {
             working_dir: AcpWorkingDir::ThreadWorkspace,
         })
         .expect("configure the fixture");
-    let catalog = StaticHarnessCatalog::with(Arc::new(GenericAcpHarness::new(Arc::new(agents))));
+    let catalog = StaticHarnessCatalog::with(Arc::new(GenericAcpHarness::new(agents.clone())));
     let manager = ThreadManager::open(
         Arc::new(SqliteJournal::in_memory().await.expect("journal")),
         Arc::new(catalog),
@@ -119,7 +121,13 @@ async fn manager() -> Option<ThreadManager> {
     )
     .await
     .expect("manager");
-    Some(manager)
+    Some((manager, agents, data))
+}
+
+async fn manager() -> Option<ThreadManager> {
+    manager_with_agents()
+        .await
+        .map(|(manager, _agents, _data)| manager)
 }
 
 async fn create(manager: &ThreadManager, workspace: &std::path::Path) -> ThreadId {
@@ -216,6 +224,120 @@ async fn a_configured_agent_can_be_probed_for_its_version_and_models() {
             .map(|model| model.id.as_str())
             .collect::<Vec<_>>(),
         vec!["fixture-model"]
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stale_resume_id_does_not_survive_a_failed_start() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let Some((manager, agents, _data)) = manager_with_agents().await else {
+        return skip_without_fixture();
+    };
+    let mut events = manager.subscribe();
+    let thread = create(&manager, workspace.path()).await;
+    let (status, text, _) = next_turn(&mut events, |_| {}).await;
+    assert_eq!(status, TurnStatus::Completed);
+    assert!(text.contains("echo: hello"), "got {text:?}");
+
+    // The live session is dropped so the next prompt starts one from the
+    // stored id, as a daemon restart or a proxy switch would.
+    manager.restart_sessions(&[HarnessKind::Acp]).await;
+
+    // The command line is edited, and the first start under it fails before
+    // the handshake: the fingerprint matches from now on, so only clearing the
+    // recorded id keeps the retry honest.
+    let gate = workspace.path().join(".agy-fixture-fail-initialize");
+    std::fs::write(&gate, b"").expect("gate");
+    let mut edited = agents.spec("fixture").expect("spec");
+    edited.args = vec!["--edited".into()];
+    agents.update("fixture", edited).expect("update");
+    manager
+        .send_message(&thread, "after the edit".into(), Vec::new())
+        .await
+        .expect("send");
+    let (status, _, _) = next_turn(&mut events, |_| {}).await;
+    assert_eq!(
+        status,
+        TurnStatus::Failed,
+        "the edited command could not start"
+    );
+
+    std::fs::remove_file(&gate).expect("remove gate");
+    manager
+        .send_message(&thread, "after the retry".into(), Vec::new())
+        .await
+        .expect("send");
+    let (status, text, _) = next_turn(&mut events, |_| {}).await;
+    assert_eq!(status, TurnStatus::Completed);
+    assert!(text.contains("echo: after the retry"), "got {text:?}");
+
+    let starts = std::fs::read_to_string(workspace.path().join(".agy-fixture-sessions"))
+        .expect("the fixture recorded its sessions");
+    assert!(
+        !starts.contains("load"),
+        "a failed start must not leave the old session id to be replayed: {starts:?}"
+    );
+
+    manager.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_probe_for_a_configuration_that_changed_is_discarded() {
+    let Some(binary) = fixture_binary() else {
+        return skip_without_fixture();
+    };
+    let data = tempfile::tempdir().expect("data dir");
+    let agents = Arc::new(AcpAgentService::open(data.path()).expect("agent service"));
+    let gate = data.path().join("probe-gate");
+    let mut spec = AcpAgentSpec {
+        id: "fixture".into(),
+        name: "ACP fixture".into(),
+        command: binary.display().to_string(),
+        args: Vec::new(),
+        env: std::collections::BTreeMap::new(),
+        working_dir: AcpWorkingDir::ThreadWorkspace,
+    };
+    spec.env.insert(
+        "H4RN_FIXTURE_INITIALIZE_GATE".into(),
+        gate.display().to_string(),
+    );
+    agents.add(spec).expect("configure");
+
+    let probing = {
+        let agents = Arc::clone(&agents);
+        tokio::spawn(async move { agents.probe("fixture").await })
+    };
+    // The fixture parks before the handshake and says so; edit the entry while
+    // the probe is in flight.
+    let waiting = gate.with_extension("waiting");
+    for _ in 0..200 {
+        if waiting.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(waiting.exists(), "the fixture never reached its gate");
+    let mut renamed = agents.spec("fixture").expect("spec");
+    renamed.name = "Renamed while probing".into();
+    agents.update("fixture", renamed).expect("update");
+    std::fs::write(&gate, b"").expect("release the fixture");
+
+    let probe = tokio::time::timeout(TURN_TIMEOUT, probing)
+        .await
+        .expect("the probe finished")
+        .expect("probe task")
+        .expect("probe");
+    assert!(
+        probe.error.is_none(),
+        "the probe itself succeeded: {probe:?}"
+    );
+    assert!(probe.version.is_some());
+    let listed = agents.list();
+    assert!(
+        listed[0].version.is_none() && listed[0].models.is_empty(),
+        "a result for the old configuration must not be stored: {listed:?}"
     );
 }
 

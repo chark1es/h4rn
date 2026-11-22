@@ -4776,10 +4776,13 @@ function mockWorktrees(): TrackedWorktree[] {
 
 function mockAcpAgent(spec: AcpAgentSpec): AcpAgent {
   return {
-    ...spec,
-    // The daemon masks values in the list; the edit form asks for the
-    // admin-scoped configuration.
+    id: spec.id,
+    name: spec.name,
+    command: spec.command,
+    // The view-scoped shape masks environment values and omits the literal
+    // argument list; the edit form asks for the admin-scoped configuration.
     env: Object.fromEntries(Object.keys(spec.env).map((key) => [key, "•••"])),
+    working_dir: spec.working_dir,
     installed: false,
     models: [],
     modes: [],

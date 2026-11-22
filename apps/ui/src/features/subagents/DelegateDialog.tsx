@@ -13,12 +13,28 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import type { HarnessKind, HostId, SubagentIsolation, ThreadSummary } from "@/gen";
 import { HARNESS_LABELS, HARNESS_SLUGS } from "@/lib/entities";
+import { HARNESS_MODELS } from "@/lib/models";
 import { useApp } from "@/lib/store/appStore";
 import { localOnlyHostOptions } from "@/lib/thread-hosts";
 
 import { closeDelegate, spawnSubagent, useSubagentStore } from "./subagentStore";
 
 const HARNESSES: HarnessKind[] = ["claude_code", "codex", "opencode", "antigravity"];
+
+/**
+ * The model a delegated child starts with.
+ *
+ * A child inherits its parent's model only while it keeps the parent's
+ * harness: an ACP thread's model (`default`, or an id only that configured
+ * agent knows) means nothing to Claude Code, so a fallback starts on that
+ * harness's own default.
+ */
+export function delegateModel(
+  parent: { harness: HarnessKind; model: string },
+  harness: HarnessKind,
+): string {
+  return parent.harness === harness ? parent.model : HARNESS_MODELS[harness].default;
+}
 
 function parseCount(value: string): number | null {
   const trimmed = value.trim();
@@ -45,7 +61,9 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
     thread.harness === "acp" ? "claude_code" : thread.harness,
   );
   const [host, setHost] = useState<HostId>(thread.host);
-  const [model, setModel] = useState(thread.model);
+  const [model, setModel] = useState(() =>
+    delegateModel(thread, thread.harness === "acp" ? "claude_code" : thread.harness),
+  );
   const [isolation, setIsolation] = useState<SubagentIsolation>("worktree");
   const [maxTurns, setMaxTurns] = useState("");
   const [maxMinutes, setMaxMinutes] = useState("");
@@ -62,16 +80,17 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
 
   useEffect(() => {
     if (!open) return;
+    const nextHarness: HarnessKind = thread.harness === "acp" ? "claude_code" : thread.harness;
     setTask("");
-    setHarness(thread.harness === "acp" ? "claude_code" : thread.harness);
+    setHarness(nextHarness);
     setHost(thread.host);
-    setModel(thread.model);
+    setModel(delegateModel(thread, nextHarness));
     setIsolation("worktree");
     setMaxTurns("");
     setMaxMinutes("");
     setMaxTokens("");
     setSummary("");
-  }, [open, thread.harness, thread.host, thread.model]);
+  }, [open, thread.harness, thread.host, thread.model, thread]);
 
   const submit = async () => {
     if (!task.trim() || spawning) return;
@@ -146,6 +165,7 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
                 const fallback = options?.[0];
                 if (fallback && !options?.includes(harness as Exclude<HarnessKind, "acp">)) {
                   setHarness(fallback);
+                  setModel(delegateModel(thread, fallback));
                 }
               }}
             />
@@ -163,7 +183,13 @@ export function DelegateDialog({ thread }: { thread: ThreadSummary }) {
                 value: option,
                 label: HARNESS_LABELS[option],
               }))}
-              onChange={setHarness}
+              onChange={(next) => {
+                setHarness(next);
+                // A model belongs to one harness; switching starts from the
+                // new harness's own default rather than sending its CLI an id
+                // it never issued.
+                setModel(HARNESS_MODELS[next].default);
+              }}
             />
           </div>
           <div className="flex flex-col gap-1">

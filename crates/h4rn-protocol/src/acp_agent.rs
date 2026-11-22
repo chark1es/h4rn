@@ -51,9 +51,10 @@ pub struct AcpAgentSpec {
 
 /// A configured agent and the installation facts this host knows.
 ///
-/// This is the view-scoped shape: environment values are masked, because a
-/// value can be a credential. The real values are only returned by the
-/// admin-scoped [`crate::ClientRequest::GetAcpAgent`] request.
+/// This is the view-scoped shape: environment values are masked and the
+/// literal argument list is omitted, because either can carry a credential.
+/// The real configuration is only returned by the admin-scoped
+/// [`crate::ClientRequest::GetAcpAgent`] request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct AcpAgent {
     /// Stable instance id.
@@ -62,8 +63,6 @@ pub struct AcpAgent {
     pub name: String,
     /// Configured executable.
     pub command: String,
-    /// Literal arguments.
-    pub args: Vec<String>,
     /// Environment overrides, with each value masked.
     pub env: BTreeMap<String, String>,
     /// Working-directory policy.

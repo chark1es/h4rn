@@ -93,9 +93,9 @@ impl Harness for GenericAcpHarness {
         self.config(instance).is_some()
     }
 
-    fn instance_fingerprint(&self, instance: &str) -> Option<String> {
+    fn instance_fingerprint(&self, instance: &str, workspace: &Path) -> Option<String> {
         self.config(instance)
-            .map(|agent| command_fingerprint(&agent))
+            .map(|agent| command_fingerprint(&agent, workspace))
     }
 
     async fn start_session(
@@ -154,6 +154,7 @@ impl Harness for GenericAcpHarness {
             mode_for: default_mode,
             missing_mode_is_error: |_| false,
             default_models: &["default"],
+            model_list_label: "the agent offers",
             case_sensitive_default_models: false,
             // A stored id the agent can no longer load starts a fresh session
             // instead of failing the thread forever.
@@ -188,12 +189,25 @@ fn agent_workspace(agent: &AcpAgentSpec, spec: &SessionSpec) -> Result<PathBuf, 
     Ok(path)
 }
 
-/// A stable fingerprint of a configured command line.
+/// A stable fingerprint of a configured command line and its working
+/// directory.
 ///
 /// The daemon records it beside a thread's resume id, so a session id from a
-/// command the user has since edited is not replayed at the new command.
-fn command_fingerprint(agent: &AcpAgentSpec) -> String {
-    format!("{}\u{0}{}", agent.command, agent.args.join("\u{0}"))
+/// command the user has since edited is not replayed at the new command. The
+/// effective directory is part of it: a session resumed in another directory
+/// is a different conversation, and a switch between the thread workspace and
+/// a fixed path changes it too.
+fn command_fingerprint(agent: &AcpAgentSpec, workspace: &Path) -> String {
+    let directory = match &agent.working_dir {
+        AcpWorkingDir::ThreadWorkspace => workspace,
+        AcpWorkingDir::FixedPath { path } => Path::new(path),
+    };
+    format!(
+        "{}\u{0}{}\u{0}{}",
+        agent.command,
+        agent.args.join("\u{0}"),
+        directory.display()
+    )
 }
 
 /// Resolves a configured command to an absolute executable path.
@@ -455,19 +469,53 @@ mod tests {
     }
 
     #[test]
-    fn an_instance_fingerprint_follows_the_command_line() {
+    fn an_instance_fingerprint_follows_the_command_line_and_directory() {
+        let workspace = tempfile::tempdir().expect("workspace");
         let harness =
             GenericAcpHarness::new(Arc::new(StaticAcpAgents::new().with(spec("demo", "agent"))));
-        let first = harness.instance_fingerprint("demo").expect("fingerprint");
-        assert!(harness.instance_fingerprint("missing").is_none());
+        let first = harness
+            .instance_fingerprint("demo", workspace.path())
+            .expect("fingerprint");
+        assert!(
+            harness
+                .instance_fingerprint("missing", workspace.path())
+                .is_none()
+        );
 
         let harness = GenericAcpHarness::new(Arc::new(
             StaticAcpAgents::new().with(spec("demo", "other-agent")),
         ));
         assert_ne!(
             first,
-            harness.instance_fingerprint("demo").expect("fingerprint"),
+            harness
+                .instance_fingerprint("demo", workspace.path())
+                .expect("fingerprint"),
             "a different command line must not reuse the old session id"
+        );
+
+        // The effective working directory is part of the fingerprint: a thread
+        // that moves, or an agent switched to a fixed path, starts fresh.
+        let other = tempfile::tempdir().expect("other workspace");
+        let harness =
+            GenericAcpHarness::new(Arc::new(StaticAcpAgents::new().with(spec("demo", "agent"))));
+        assert_ne!(
+            first,
+            harness
+                .instance_fingerprint("demo", other.path())
+                .expect("fingerprint"),
+            "another thread workspace is another conversation"
+        );
+        let mut fixed = spec("demo", "agent");
+        fixed.working_dir = AcpWorkingDir::FixedPath {
+            path: other.path().display().to_string(),
+        };
+        let harness = GenericAcpHarness::new(Arc::new(StaticAcpAgents::new().with(fixed)));
+        assert_ne!(
+            first,
+            harness
+                .instance_fingerprint("demo", workspace.path())
+                .expect("fingerprint"),
+            "a fixed directory replaces the thread workspace"
         );
     }
 

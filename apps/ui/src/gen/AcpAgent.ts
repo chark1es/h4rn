@@ -6,9 +6,10 @@ import type { AcpWorkingDir } from "./AcpWorkingDir";
 /**
  * A configured agent and the installation facts this host knows.
  *
- * This is the view-scoped shape: environment values are masked, because a
- * value can be a credential. The real values are only returned by the
- * admin-scoped [`crate::ClientRequest::GetAcpAgent`] request.
+ * This is the view-scoped shape: environment values are masked and the
+ * literal argument list is omitted, because either can carry a credential.
+ * The real configuration is only returned by the admin-scoped
+ * [`crate::ClientRequest::GetAcpAgent`] request.
  */
 export type AcpAgent = { 
 /**
@@ -23,10 +24,6 @@ name: string,
  * Configured executable.
  */
 command: string, 
-/**
- * Literal arguments.
- */
-args: Array<string>, 
 /**
  * Environment overrides, with each value masked.
  */

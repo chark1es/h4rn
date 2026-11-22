@@ -50,10 +50,7 @@ use async_trait::async_trait;
 use h4rn_protocol::{HarnessKind, RuntimeMode};
 
 use crate::acp::{AcpClient, AcpClientConfig, AcpSessionPolicy, StartedAcpSession, map_acp_error};
-use crate::{
-    ENV_MCP_AUTH_TOKEN, ENV_MCP_BEARER_TOKEN, Harness, HarnessError, HarnessInstall,
-    HarnessSession, SessionSpec, detect_limit,
-};
+use crate::{Harness, HarnessError, HarnessInstall, HarnessSession, SessionSpec, detect_limit};
 
 mod stream;
 
@@ -193,6 +190,8 @@ fn antigravity_policy() -> AcpSessionPolicy {
         mode_for: wanted_mode,
         missing_mode_is_error: |spec| spec.env_overrides.contains_key(ENV_AGY_MODE),
         default_models: DEFAULT_MODELS,
+        // The catalogue is the account's, not the CLI's own list.
+        model_list_label: "the account offers",
         // Antigravity's own aliases are case-sensitive; `auto` is not.
         case_sensitive_default_models: true,
         // Antigravity keeps its explicit unsupported error for an agent that
@@ -345,21 +344,8 @@ fn acp_config(install: &HarnessInstall, spec: &SessionSpec) -> AcpClientConfig {
     config
 }
 
-/// The environment keys the ACP client reads for MCP delivery.
-///
-/// Kept here so a future Antigravity-specific auth flow can use the same
-/// names without reaching into the shared runtime.
-#[allow(dead_code)]
-fn mcp_env(spec: &SessionSpec) -> Option<String> {
-    spec.env_overrides
-        .get(ENV_MCP_AUTH_TOKEN)
-        .or_else(|| spec.env_overrides.get(ENV_MCP_BEARER_TOKEN))
-        .cloned()
-}
-
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::time::Duration;
 
     use futures::stream::StreamExt;
@@ -701,18 +687,6 @@ mod tests {
     }
 
     #[test]
-    fn mcp_env_prefers_the_auth_token() {
-        let workspace = tempfile::tempdir().expect("tempdir");
-        let mut spec = acp_spec(workspace.path());
-        spec.env_overrides
-            .insert(ENV_MCP_BEARER_TOKEN.to_string(), "old".into());
-        spec.env_overrides
-            .insert(ENV_MCP_AUTH_TOKEN.to_string(), "new".into());
-        assert_eq!(mcp_env(&spec).as_deref(), Some("new"));
-        let _ = Arc::new(());
-    }
-
-    #[test]
     fn antigravity_aliases_are_case_sensitive_except_auto() {
         let policy = antigravity_policy();
         assert!(policy.is_default_model("default"));
@@ -739,6 +713,17 @@ mod tests {
         assert_eq!(
             policy.permission_prompt,
             "Antigravity is requesting permission"
+        );
+        assert_eq!(
+            policy.unknown_model(
+                "gemini-1",
+                &crate::acp::AcpSessionInfo::from_value(
+                    &json!({"models": {"availableModels": [{"modelId": "gemini-4", "name": "G"}]}}),
+                    "s-1"
+                )
+            ),
+            "model `gemini-1`; the account offers: gemini-4",
+            "the unknown-model text names the account, as it always has"
         );
         assert!(
             !policy.fresh_without_load,

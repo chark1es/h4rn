@@ -82,6 +82,10 @@ pub(crate) struct AcpSessionPolicy {
     pub missing_mode_is_error: fn(&SessionSpec) -> bool,
     /// Model ids that mean "the agent's own default".
     pub default_models: &'static [&'static str],
+    /// How the unknown-model error names the list it prints ("the account
+    /// offers" for Antigravity's account-scoped catalogue, "the agent offers"
+    /// for a configured command).
+    pub model_list_label: &'static str,
     /// Whether every alias except `auto` is matched exactly. Antigravity's
     /// model picker has always been case-sensitive here; a generic agent's
     /// ids are matched loosely.
@@ -109,6 +113,15 @@ impl AcpSessionPolicy {
 
     pub(crate) fn stop_message(&self, reason: &str) -> String {
         format!("{} stopped the turn: {}", self.failure_label, reason)
+    }
+
+    /// The typed error for a requested model the agent did not offer.
+    pub(crate) fn unknown_model(&self, requested: &str, session: &AcpSessionInfo) -> String {
+        format!(
+            "model `{requested}`; {}: {}",
+            self.model_list_label,
+            available_models(session)
+        )
     }
 }
 
@@ -213,10 +226,7 @@ impl AcpSession {
                 None => {
                     return Err(HarnessError::Unsupported {
                         harness: policy.harness,
-                        feature: format!(
-                            "model `{requested}`; the agent offers: {}",
-                            available_models(&session)
-                        ),
+                        feature: policy.unknown_model(requested, &session),
                     });
                 }
             }
@@ -1514,6 +1524,7 @@ mod tests {
             mode_for: default_mode,
             missing_mode_is_error: |_| false,
             default_models: &["default"],
+            model_list_label: "the agent offers",
             case_sensitive_default_models: false,
             fresh_without_load: true,
         }
@@ -1617,6 +1628,19 @@ mod tests {
         assert_eq!(
             select_permission_option(&options, ApprovalDecision::Cancel, None),
             None
+        );
+    }
+
+    #[test]
+    fn an_unknown_model_error_names_the_agents_own_catalogue() {
+        let policy = policy();
+        let session = AcpSessionInfo::from_value(
+            &json!({"models": {"availableModels": [{"modelId": "m-1", "name": "M"}]}}),
+            "s-1",
+        );
+        assert_eq!(
+            policy.unknown_model("nope", &session),
+            "model `nope`; the agent offers: m-1"
         );
     }
 

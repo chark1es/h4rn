@@ -562,13 +562,17 @@ pub trait Harness: Send + Sync {
     }
 
     /// A stable fingerprint of the command line behind one configured
-    /// instance.
+    /// instance, for a thread whose workspace is `workspace`.
     ///
     /// The daemon stores it beside a thread's resume id: when the command line
-    /// changes, the old session id names a conversation the new command never
-    /// saw, so the next start opens a fresh session. Built-in adapters have one
-    /// command per kind and answer `None`.
-    fn instance_fingerprint(&self, _instance: &str) -> Option<String> {
+    /// or the effective working directory changes, the old session id names a
+    /// conversation the new command never saw, so the next start opens a fresh
+    /// session. Built-in adapters have one command per kind and answer `None`.
+    fn instance_fingerprint(
+        &self,
+        _instance: &str,
+        _workspace: &std::path::Path,
+    ) -> Option<String> {
         None
     }
 

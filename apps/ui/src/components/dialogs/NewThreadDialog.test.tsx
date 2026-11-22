@@ -49,8 +49,20 @@ vi.mock("@/lib/store/appStore", () => ({
 }));
 
 vi.mock("@/features/harnesses/harnessStore", () => ({
-  useHarnesses: () => null,
+  // The real store always carries a full state object; the dialog reads the
+  // agents list and the harness rows from it.
+  useHarnesses: (selector: (value: unknown) => unknown) =>
+    selector({
+      agents: [],
+      probes: {},
+      probeErrors: {},
+      probing: {},
+      rows: [],
+      loaded: false,
+    }),
+  useAcpAgents: () => undefined,
   useHarnessVersions: () => undefined,
+  probeAcpAgent: () => Promise.resolve(null),
 }));
 
 vi.mock("@/features/proxy/proxyStore", () => ({

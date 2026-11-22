@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   ACP_ID_PATTERN,
   acpAgentSpecFromForm,
+  acpModelChoices,
   acpPickerOptions,
   EMPTY_ACP_FORM,
   formFromAcpAgent,
@@ -99,13 +100,33 @@ describe("ACP agent form", () => {
     ).toEqual([]);
   });
 
-  it("matches the daemon's platform-specific absolute path rules", () => {
-    expect(isPlatformAbsolutePath("/home/me/agent", false)).toBe(true);
-    expect(isPlatformAbsolutePath("C:\\agent.exe", false)).toBe(false);
-    expect(isPlatformAbsolutePath("C:\\agent.exe", true)).toBe(true);
-    expect(isPlatformAbsolutePath("\\\\server\\share\\agent.exe", true)).toBe(true);
-    expect(isPlatformAbsolutePath("\\\\server\\share\\agent.exe", false)).toBe(false);
-    expect(isPlatformAbsolutePath("relative/agent", true)).toBe(false);
+  it("accepts either platform's absolute form, because the daemon decides", () => {
+    expect(isPlatformAbsolutePath("/home/me/agent")).toBe(true);
+    // A phone or a browser on one platform may configure a daemon on another.
+    expect(isPlatformAbsolutePath("C:\\agent.exe")).toBe(true);
+    expect(isPlatformAbsolutePath("C:/agent.exe")).toBe(true);
+    expect(isPlatformAbsolutePath("\\\\server\\share\\agent.exe")).toBe(true);
+    expect(isPlatformAbsolutePath("relative/agent")).toBe(false);
+    expect(isPlatformAbsolutePath("agent.exe")).toBe(false);
+    expect(isPlatformAbsolutePath("C:agent.exe")).toBe(false);
+
+    const base = { ...EMPTY_ACP_FORM, id: "demo", name: "Demo", command: "demo" };
+    expect(
+      validateAcpAgentForm({ ...base, workingDir: "fixed_path", path: "C:\\work" }),
+    ).toBeNull();
+    expect(
+      validateAcpAgentForm({ ...base, workingDir: "fixed_path", path: "\\\\server\\share" }),
+    ).toBeNull();
+  });
+
+  it("counts display-name characters the way the daemon does", () => {
+    const base = { ...EMPTY_ACP_FORM, id: "demo", command: "demo" };
+    // 80 characters, even though they are 160 bytes in UTF-8.
+    expect(validateAcpAgentForm({ ...base, name: "é".repeat(80) })).toBeNull();
+    expect(validateAcpAgentForm({ ...base, name: "é".repeat(81) })).toContain("80 characters");
+    // An emoji is one character, not two UTF-16 units.
+    expect(validateAcpAgentForm({ ...base, name: "🦀".repeat(80) })).toBeNull();
+    expect(validateAcpAgentForm({ ...base, name: "🦀".repeat(81) })).toContain("80 characters");
   });
 
   it("round-trips a configured agent into the edit form", () => {
@@ -126,6 +147,23 @@ describe("ACP agent form", () => {
       workingDir: "fixed_path",
       path: "/tmp/work",
     });
+  });
+});
+
+describe("ACP model choices", () => {
+  it("uses a successful probe's models", () => {
+    expect(
+      acpModelChoices({ models: [{ id: "a" }, { id: "b" }] }, false, [{ id: "cached" }]),
+    ).toEqual(["a", "b"]);
+  });
+
+  it("falls back to the daemon's cached models when the probe failed", () => {
+    expect(acpModelChoices(undefined, false, [{ id: "cached" }])).toEqual(["cached"]);
+    // A probe that ran but failed carries no models; the last good result in
+    // the list is still the truth about this agent.
+    expect(acpModelChoices({ models: [] }, true, [{ id: "cached" }])).toEqual(["cached"]);
+    // Nothing known yet is an empty list, not an invented model.
+    expect(acpModelChoices(undefined, true, undefined)).toEqual([]);
   });
 });
 

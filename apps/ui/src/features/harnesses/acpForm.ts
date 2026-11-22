@@ -52,7 +52,9 @@ export function validateAcpAgentForm(
     return "That instance id is already in use.";
   }
   if (!name) return "A display name is required.";
-  if (name.length > 80) return "Keep the display name under 80 characters.";
+  // Count characters the way the daemon does (Rust `chars()`), not UTF-16 code
+  // units, so an emoji or an accent is one character on both sides.
+  if (Array.from(name).length > 80) return "Keep the display name to 80 characters or fewer.";
   if (/[\n\r\0]/.test(name)) return "The display name must be one line.";
   if (!command) return "A command is required.";
   if (/[\n\r\0]/.test(command)) return "The command must be one line.";
@@ -83,23 +85,24 @@ export function validateAcpAgentForm(
   return null;
 }
 
-function isAbsolutePath(path: string, windows = uiRunsOnWindows()): boolean {
-  if (windows) {
-    // `C:\dir`, `C:/dir`, or a UNC share `\\server\share`.
-    return /^[A-Za-z]:[\\/]/.test(path) || /^\\\\[^\\]/.test(path);
-  }
-  return path.startsWith("/");
+function isAbsolutePath(path: string): boolean {
+  // Either platform's form: the daemon is authoritative and its platform can
+  // differ from this browser's (a desktop app talking to a remote host, or a
+  // phone paired to a Windows machine). Rejecting a path the daemon would
+  // accept because this device is not that platform is wrong; a path the
+  // daemon refuses comes back as a validation error from it.
+  return (
+    path.startsWith("/") ||
+    // `C:\dir` or `C:/dir`.
+    /^[A-Za-z]:[\\/]/.test(path) ||
+    // A UNC share `\\server\share`.
+    /^\\\\[^\\]/.test(path)
+  );
 }
 
-/** Whether this UI is running on Windows, where a drive path is absolute. */
-function uiRunsOnWindows(): boolean {
-  if (typeof navigator === "undefined") return false;
-  return /Win/i.test(navigator.platform) || /Windows/i.test(navigator.userAgent);
-}
-
-/** Exported for tests; the form uses the UI's own platform. */
-export function isPlatformAbsolutePath(path: string, windows: boolean): boolean {
-  return isAbsolutePath(path, windows);
+/** Exported for tests: both absolute forms are accepted, on any device. */
+export function isPlatformAbsolutePath(path: string): boolean {
+  return isAbsolutePath(path);
 }
 
 /** Converts the form to the daemon's configuration shape. */
@@ -161,4 +164,21 @@ export function acpPickerOptions(
       label: agent.installed ? agent.name : `${agent.name} · not installed`,
     })),
   ];
+}
+
+/**
+ * The model ids the new-thread picker offers for a configured agent.
+ *
+ * A probe that ran successfully is the fresh answer. A failed probe (or a
+ * device that may not probe at all) falls back to the last successful result
+ * the daemon stored in the list, so the picker is never emptied by a failure
+ * that says nothing about the models the agent advertises.
+ */
+export function acpModelChoices(
+  probe: { models: { id: string }[] } | undefined,
+  probeFailed: boolean,
+  cached: { id: string }[] | undefined,
+): string[] {
+  if (probe && !probeFailed) return probe.models.map((model) => model.id);
+  return (cached ?? []).map((model) => model.id);
 }

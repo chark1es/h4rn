@@ -66,9 +66,28 @@ impl AcpAgentService {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => AgentsFile::default(),
             Err(error) => return Err(error.into()),
         };
+        // A hand-edited file can hold an entry the add/update path would have
+        // refused (a NUL in an argument, an empty command). Validate on load so
+        // that entry is dropped here instead of panicking the spawn later.
+        let agents = file
+            .agents
+            .into_iter()
+            .filter_map(|agent| match validated(agent.spec.clone()) {
+                Ok(spec) => Some(StoredAgent { spec, ..agent }),
+                Err(error) => {
+                    tracing::warn!(
+                        id = %agent.spec.id,
+                        reason = %error.message,
+                        path = %path.display(),
+                        "dropping an invalid configured ACP agent"
+                    );
+                    None
+                }
+            })
+            .collect();
         Ok(Self {
             path,
-            agents: Mutex::new(file.agents),
+            agents: Mutex::new(agents),
         })
     }
 
@@ -123,12 +142,11 @@ impl AcpAgentService {
             return Err(not_found(id));
         };
         let mut next = agents.clone();
-        // A version or model list reported by the old command says nothing
-        // about a new one. Probe results are also dropped on any edit, because
-        // the editor may have changed the environment the agent runs with.
-        if next[index].spec.command != spec.command || next[index].spec.args != spec.args {
-            next[index].version = None;
-        }
+        // Any edit invalidates the version the old configuration reported: the
+        // editor may have changed the command, its arguments, its environment
+        // or its working directory. Probe results go with it, because they
+        // describe the command that ran, not the one now saved.
+        next[index].version = None;
         next[index].models.clear();
         next[index].modes.clear();
         next[index].spec = spec;
@@ -156,6 +174,11 @@ impl AcpAgentService {
         let Some(spec) = self.spec(id) else {
             return Err(not_found(id));
         };
+        // The handshake takes seconds and the agent stays editable meanwhile.
+        // Remember which configuration this probe describes; a result for a
+        // configuration the person has already changed says nothing about the
+        // new one, so it is not stored.
+        let fingerprint = spec_fingerprint(&spec);
         let probe = probe_acp_agent(&spec).await;
         // A failed probe keeps the last successful result: the picker can
         // still offer the models the agent advertised before, and the failure
@@ -164,6 +187,13 @@ impl AcpAgentService {
             let mut agents = lock(&self.agents);
             let mut next = agents.clone();
             if let Some(agent) = next.iter_mut().find(|agent| agent.spec.id == id) {
+                if spec_fingerprint(&agent.spec) != fingerprint {
+                    tracing::debug!(
+                        id,
+                        "discarding an ACP probe whose configuration changed while it ran"
+                    );
+                    return Ok(probe);
+                }
                 agent.version = probe.version.clone();
                 agent.models = probe.models.clone();
                 agent.modes = probe.modes.clone();
@@ -184,13 +214,23 @@ impl AcpAgentConfigSource for AcpAgentService {
     }
 }
 
+/// A fingerprint of everything that describes one configuration.
+///
+/// Used to tell whether a probe still describes the entry it was started for;
+/// the map order is stable and the shape is the same one that is persisted.
+fn spec_fingerprint(spec: &AcpAgentSpec) -> String {
+    serde_json::to_string(spec).unwrap_or_default()
+}
+
 fn view(agent: &StoredAgent) -> AcpAgent {
     let path = resolve_acp_command(&agent.spec.command);
     AcpAgent {
         id: agent.spec.id.clone(),
         name: agent.spec.name.clone(),
         command: agent.spec.command.clone(),
-        args: agent.spec.args.clone(),
+        // The literal argument list is not part of the view-scoped shape: it
+        // can carry paths or secrets, and only the admin-scoped
+        // `GetAcpAgent` returns the real configuration.
         // Environment values can be credentials. A view-scoped device sees
         // which names are set, never their values; the admin-only
         // `GetAcpAgent` returns the real configuration for the edit form.
@@ -251,7 +291,7 @@ fn validated(mut spec: AcpAgentSpec) -> Result<AcpAgentSpec, ProtoError> {
             "This is the name Settings and the new-thread picker show.",
         ));
     }
-    if spec.name.len() > 80 {
+    if spec.name.chars().count() > 80 {
         return Err(invalid(
             "the display name is longer than 80 characters",
             "Shorten the name.",
@@ -527,6 +567,91 @@ mod tests {
     }
 
     #[test]
+    fn the_view_omits_the_argument_list_the_admin_spec_keeps() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let service = AcpAgentService::open(dir.path()).expect("open");
+        let mut with_args = spec("demo");
+        with_args.args = vec!["--token".into(), "super-secret-arg".into()];
+        service.add(with_args).expect("add");
+
+        let listed = serde_json::to_string(&service.list()).expect("encode view");
+        assert!(
+            !listed.contains("super-secret-arg") && !listed.contains("--token"),
+            "a view-scoped list must not carry the literal arguments: {listed}"
+        );
+        assert_eq!(
+            service.spec("demo").expect("admin spec").args,
+            vec!["--token", "super-secret-arg"],
+            "the admin request still carries the configuration the form edits"
+        );
+    }
+
+    #[test]
+    fn an_edit_of_any_field_clears_the_cached_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let service = AcpAgentService::open(dir.path()).expect("open");
+        service.add(spec("demo")).expect("add");
+        {
+            let mut agents = lock(&service.agents);
+            agents[0].version = Some("1.2.3".into());
+            agents[0].models = vec![h4rn_protocol::AcpAgentModel {
+                id: "demo-model".into(),
+                name: "Demo Model".into(),
+            }];
+        }
+
+        // Only the display name changes: the version the old configuration
+        // reported must still go, because Settings would attribute it to the
+        // edited entry.
+        let mut renamed = spec("demo");
+        renamed.name = "Renamed".into();
+        let updated = service.update("demo", renamed).expect("update");
+        assert!(updated.version.is_none());
+        assert!(updated.models.is_empty());
+    }
+
+    #[test]
+    fn invalid_entries_in_the_file_are_dropped_on_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join(FILE);
+        // A hand-edited file: one good entry, one with a NUL in its arguments,
+        // which the add path would refuse and which must never reach a spawn.
+        std::fs::write(
+            &file,
+            r#"{"agents":[
+                {"id":"good","name":"Good agent","command":"demo-agent","args":["acp"],"env":{},"working_dir":{"kind":"thread_workspace"}},
+                {"id":"bad","name":"Bad agent","command":"demo-agent","args":["a\u0000b"],"env":{},"working_dir":{"kind":"thread_workspace"}}
+            ]}"#,
+        )
+        .expect("write");
+
+        let service = AcpAgentService::open(dir.path()).expect("open");
+        assert_eq!(
+            service
+                .list()
+                .iter()
+                .map(|agent| agent.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["good"],
+            "an invalid stored entry is dropped, not spawned"
+        );
+    }
+
+    #[test]
+    fn the_display_name_cap_counts_characters_not_bytes() {
+        let mut multi_byte = spec("demo");
+        multi_byte.name = "é".repeat(80);
+        assert!(
+            validated(multi_byte).is_ok(),
+            "80 characters are 80 characters"
+        );
+
+        let mut too_long = spec("demo");
+        too_long.name = "é".repeat(81);
+        assert!(validated(too_long).is_err());
+    }
+
+    #[test]
     fn a_failed_save_leaves_the_live_list_unchanged() {
         let dir = tempfile::tempdir().expect("tempdir");
         let service = AcpAgentService::open(dir.path()).expect("open");
@@ -580,7 +705,11 @@ mod tests {
         let mut next = spec("demo");
         next.args = vec!["--acp".into()];
         let updated = service.update("demo", next.clone()).expect("update");
-        assert_eq!(updated.args, vec!["--acp"]);
+        assert_eq!(
+            service.spec("demo").expect("admin spec").args,
+            vec!["--acp"],
+            "the argument list is stored, and only the admin spec carries it"
+        );
         assert!(
             updated.version.is_none(),
             "a new command line cannot keep the old command's version"

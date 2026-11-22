@@ -89,6 +89,32 @@ describe("TurnBlock", () => {
     expect(render(userOnlyTurn("running"))).not.toContain("Stopped:");
   });
 
+  it("shows plan steps and their status quietly", () => {
+    const markup = render({
+      ...userOnlyTurn("running"),
+      items: [
+        {
+          kind: "plan",
+          itemId: "plan:turn_1",
+          entries: [
+            { content: "Inspect the workspace", status: "completed", priority: "high" },
+            { content: "Implement the fix", status: "in_progress", priority: "medium" },
+            { content: "Run the tests", status: "pending", priority: "low" },
+          ],
+        },
+      ],
+    });
+    expect(markup).toContain("Plan");
+    expect(markup).toContain("Inspect the workspace");
+    expect(markup).toContain("Implement the fix");
+    expect(markup).toContain("Run the tests");
+    expect(markup).toContain('data-status="completed"');
+    expect(markup).toContain('data-status="in_progress"');
+    expect(markup).toContain('data-status="pending"');
+    expect(markup).toContain("(done)");
+    expect(markup).toContain("(in progress)");
+  });
+
   it("offers Reply, not a resend, after a failed or interrupted turn", () => {
     for (const status of ["failed", "interrupted"] as const) {
       const markup = render({

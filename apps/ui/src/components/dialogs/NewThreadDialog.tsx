@@ -17,7 +17,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { AttachmentTray } from "@/features/attachments/AttachmentTray";
 import { FILE_ACCEPT } from "@/features/attachments/picker";
 import { useAttachmentDrafts, useAttachShortcut } from "@/features/attachments/use-attachments";
-import { acpPickerOptions } from "@/features/harnesses/acpForm";
+import { acpModelChoices, acpPickerOptions } from "@/features/harnesses/acpForm";
 import {
   probeAcpAgent,
   useAcpAgents,
@@ -252,8 +252,9 @@ export function NewThreadDialog() {
   }, [open, agentId, probes, probeErrors]);
 
   // The probe fills from an admin device; every device still sees the last
-  // successful result the daemon stored in the list.
-  const agentModels = (probe?.models ?? selectedAgent?.models ?? []).map((entry) => entry.id);
+  // successful result the daemon stored in the list. A failed probe falls back
+  // to that stored result instead of emptying the picker.
+  const agentModels = acpModelChoices(probe, Boolean(probeError), selectedAgent?.models);
   const firstAgentModel = agentModels[0];
   useEffect(() => {
     if (!open || harness !== "acp" || !firstAgentModel) return;

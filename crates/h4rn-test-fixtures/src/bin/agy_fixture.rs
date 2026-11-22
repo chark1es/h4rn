@@ -27,12 +27,33 @@ use std::process::{Command, Stdio};
 use serde_json::{Value, json};
 
 fn main() {
+    // A file in the working directory fails the process before the handshake,
+    // so a test can watch one session start fail and then retry the very same
+    // configuration without editing it again.
+    if std::path::Path::new(".agy-fixture-fail-initialize").exists() {
+        eprintln!("agy-fixture: failing before initialize");
+        std::process::exit(3);
+    }
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut sessions = 0u64;
     // A turn the fixture is holding open for a permission answer or a cancel.
     let mut pending_prompt: Option<Value> = None;
     let mut pending_permission = false;
+
+    // `H4RN_FIXTURE_INITIALIZE_GATE` holds the handshake until the named file
+    // appears, so a test can edit the configured command while a probe is in
+    // flight. The `<gate>.waiting` marker says the fixture is parked there.
+    if let Ok(gate) = std::env::var("H4RN_FIXTURE_INITIALIZE_GATE") {
+        let gate = std::path::PathBuf::from(gate);
+        let _ = std::fs::write(gate.with_extension("waiting"), b"");
+        for _ in 0..600 {
+            if gate.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
 
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };

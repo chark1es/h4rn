@@ -131,26 +131,36 @@ All notable changes to h4rn are recorded here. The format follows
   down with it. The client now signs `/v1/machines` and still fetches with `?linked=true`; a
   presence failure falls back to an empty linked list instead of aborting the refresh.
 - **Local ACP agents: credentials stay off view-scoped devices.** `ListAcpAgents` now masks every
-  environment value; the edit form reads the real configuration through a new admin-scoped
-  `GetAcpAgent`. The last successful probe's models, modes and version are stored and returned to
-  every device, so the model picker no longer needs to start the agent.
+  environment value and omits the literal argument list, which can also carry a secret; the edit form
+  reads the real configuration through a new admin-scoped `GetAcpAgent`. The last successful probe's
+  models, modes and version are stored and returned to every device, so the model picker no longer
+  needs to start the agent.
 - **Local ACP agents: absolute, same-file resolution and fresh restarts.** A configured command now
   resolves to an absolute executable before the child starts (relative `PATH` entries are ignored;
   Windows `.bat`/`.cmd` are refused), so detection, `Check` and launch name the same file. A stored
   session id is replaced by a fresh session when the agent does not advertise `session/load`, and a
-  thread's stored id is cleared when its agent's command line changes. Plans are forwarded, ACP v1
-  `configOptions` supply model and mode choices, and a view-only model picker shows the last probe
-  or its error instead of spinning.
+  thread's stored id is cleared when its agent's command line or effective working directory changes
+  — in the thread itself, so a start that fails before the agent opens a session cannot leave the old
+  id to be replayed by the next attempt. Plans are forwarded and shown in the turn as a quiet
+  checklist, ACP v1 `configOptions` supply model and mode choices, and a view-only model picker shows
+  the last probe or its error instead of spinning.
 - **Local ACP agents are not a startable harness by themselves.** Host summaries and the new-thread,
   quick-start and delegate pickers no longer offer the bare `acp` kind, so no request can create an
-  ACP thread or subagent without an instance; the daemon rejects both paths explicitly.
+  ACP thread or subagent without an instance; the daemon rejects both paths explicitly. Delegating
+  from an ACP thread starts the child on the fallback harness's own default model instead of sending
+  it a model id only the ACP agent knew.
 - **Antigravity is unchanged by the shared ACP runtime.** Its non-`auto` default-model aliases are
   case-sensitive again, its "Antigravity stopped the turn" / "Antigravity is requesting permission"
-  wording is back, and the UTF-16 attachment test covers the shared prompt builder.
+  wording is back, its unknown-model error still says "the account offers", and the UTF-16 attachment
+  test covers the shared prompt builder.
 - **ACP agent form saves and checks line up with the daemon.** Instance ids are capped at 64
-  characters, absolute paths follow the platform (including Windows UNC, never `C:\` on Unix),
-  explicitly added empty arguments are kept, and `Check` stays available and refreshes the list after
-  the binary is installed.
+  characters, the form accepts either platform's absolute path form (`/dir`, `C:\dir`, UNC) because
+  the daemon's platform decides, and the display-name cap counts characters rather than bytes on both
+  sides. Explicitly added empty arguments are kept, and `Check` stays available and refreshes the
+  list after the binary is installed. Any edit clears the cached version, a probe whose configuration
+  changed while it ran stores nothing, a failed probe leaves the last good models in place, and an
+  invalid entry loaded from `acp-agents.json` is dropped with one log line instead of failing at
+  spawn.
 - **Closing a terminal ends its background jobs.** With job control, `sleep 1000 &` runs in its own
   process group, so the old group-only signal left it running after the shell was gone. Closing a
   terminal now sends SIGHUP to the shell's own process id, waits for it to forward the hangup, keeps
