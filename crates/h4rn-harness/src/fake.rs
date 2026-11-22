@@ -81,7 +81,7 @@ enum SendFailure {
 /// then the exit status with the stderr it drained) pushes it through this
 /// handle instead of ending the stream.
 #[derive(Clone, Debug, Default)]
-pub struct EventInjector(Arc<Mutex<Option<EventSink>>>);
+pub struct EventInjector(Arc<Mutex<Vec<EventSink>>>);
 
 impl EventInjector {
     /// Queues one event on the most recently started session's stream.
@@ -90,7 +90,25 @@ impl EventInjector {
             .0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
+            .last()
+            .cloned();
+        if let Some(sender) = sender {
+            sender.try_send(event);
+        }
+    }
+
+    /// Queues one event on the stream of the session started at `session`
+    /// (oldest first).
+    ///
+    /// A test uses this to report the exit of a session whose replacement has
+    /// already been started: [`Self::emit`] would target the new one.
+    pub fn emit_to(&self, session: usize, event: HarnessEvent) {
+        let sender = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(session)
+            .cloned();
         if let Some(sender) = sender {
             sender.try_send(event);
         }
@@ -779,10 +797,11 @@ impl Harness for FakeHarness {
             .send(HarnessEvent::SessionStarted { session_id })
             .await;
         if let Some(injector) = &self.event_injector {
-            *injector
+            injector
                 .0
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(sender.clone());
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(sender.clone());
         }
 
         let session_scripts = self.session_scripts.clone();

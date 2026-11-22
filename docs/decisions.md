@@ -671,6 +671,19 @@ that arrives behind the Stop is dropped instead of becoming an error row: the pe
 the turn, and a limit the report carried was applied on its own event. The generic stdout-close
 notice also keeps the kind the reader observed, so a failed read is not reported as an EOF.
 
+**Addendum: a dead reader leaves the slot, and a stopped turn's failed completion stays quiet.** An
+idle session whose reader fails (a stdout read error or EOF) is detached from the thread's slot as
+soon as that failure is known, not when the exit report finally arrives. The pump keeps the session
+and its stream, because the exit report can still sharpen the one diagnostic row and carry the
+provider's reset, but delivery no longer sees it: a message sent in that bounded window starts a
+fresh agent instead of claiming a transport that can never take the prompt. The held report survives
+the new turn that message starts, because it belongs to the dead generation rather than to that
+turn. The exit report's reset is armed once, without replacing a schedule the adapter's typed limit
+already armed for it. Separately, a turn the person stopped and whose ACP session then dies ends
+interrupted, not failed, even when the adapter reports its `TurnCompleted{Failed}` after the cancel
+closed the transport: the same rule the stream end already followed, with the death's report dropped
+so it takes no error row.
+
 ## ADR-027: Push notifications are metadata-only wake signals
 
 **Status:** Proposed

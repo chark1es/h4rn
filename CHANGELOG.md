@@ -7,6 +7,17 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A Send during an idle agent's death starts a fresh agent.** When a stdout read failed or EOF
+  arrived between turns, the session stayed in the slot for the bounded wait for the exit report, and
+  a message sent in that window claimed it and failed on a dead write. The session now leaves the
+  slot the moment its reader is known to be gone, so the message starts a new agent at once, while
+  the pump still reads the old stream: the exit report publishes the death's one diagnostic row and
+  arms the reset it carries.
+- **A stopped turn whose transport dies ends interrupted, not with an error row.** After a cancel,
+  the ACP adapter closes the transport and then reports the turn failed from its prompt task. The
+  completion arm settled that as a failure with an error row even though the person had already
+  stopped the turn. A failed completion on a closed transport now follows the same rule as a stream
+  end on a stopped turn: interrupted, with the death's report dropped instead of published.
 - **One provider limit arms one schedule.** The bridge can report one pause twice: the prompt's
   typed limit before the completion and the same reset on the exit report after it. The
   closed-completion wait now collects those limits and applies one after the wait, preferring the

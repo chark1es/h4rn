@@ -350,6 +350,16 @@ struct ThreadRecord {
     /// stream: a live adapter holds the session, and with it its event sender,
     /// so that stream may never end.
     idle_transport_report: Option<IdleTransportReport>,
+    /// A session detached the moment its transport was known dead between
+    /// turns, kept only for the exit report that follows.
+    ///
+    /// A read failure or EOF says the reader is gone, but the exit report that
+    /// carries the status, stderr and provider reset may still arrive on the
+    /// session's stream. Leaving the session in the slot for that bounded
+    /// window let a Send in it claim a transport that could never take the
+    /// prompt. Detaching here makes delivery start a fresh session at once,
+    /// while the pump keeps the session and its report.
+    dying_session: Option<DyingSession>,
     /// A limit hit whose auto-resume schedule is armed for this thread.
     scheduled_limit: Option<ScheduledLimit>,
     /// Scheduled auto-resume target shown on the thread summary (ADR-024).
@@ -682,6 +692,13 @@ impl IdleTransportReport {
     }
 }
 
+/// A session whose transport died between turns, detached from the slot for
+/// delivery but kept by its pump for the exit report.
+struct DyingSession {
+    generation: u64,
+    session: SharedSession,
+}
+
 impl TurnDispatch {
     fn new(turn_id: TurnId, input: UserInput) -> Self {
         Self {
@@ -935,7 +952,6 @@ impl ThreadRecord {
         self.limit = None;
         self.transport_error_reported = None;
         self.transport_report = None;
-        self.idle_transport_report = None;
         self.branch = crate::fs::git::branch(std::path::Path::new(&self.meta.workspace_path));
         let turn_id = TurnId::new_uuid_v7();
         let item_id = assistant_item_id(&turn_id);
@@ -994,6 +1010,48 @@ impl ThreadRecord {
             SessionSlot::Live { session, .. } => Some(session),
             SessionSlot::None | SessionSlot::Starting(_) => None,
         }
+    }
+
+    /// Detaches the live session for `generation` because its transport is
+    /// known dead between turns.
+    ///
+    /// The slot is emptied under the record lock, so a Send that arrives before
+    /// the exit report starts a fresh session instead of claiming a transport
+    /// whose reader already failed. The pump keeps rendering the exit report:
+    /// it holds the session itself, and the record keeps [`Self::dying_session`]
+    /// to recognise its events and publish the one row.
+    ///
+    /// The pump is this task, so the slot's handle is cleared rather than
+    /// aborted; the pump ends when it publishes the report or its deadline
+    /// expires.
+    fn mark_session_dying(&mut self, generation: u64) {
+        let SessionSlot::Live {
+            generation: current,
+            session,
+        } = std::mem::replace(&mut self.session, SessionSlot::None)
+        else {
+            return;
+        };
+        if current != generation {
+            // Some other session already owns the slot; leave it alone.
+            self.session = SessionSlot::Live {
+                generation: current,
+                session,
+            };
+            return;
+        }
+        self.dying_session = Some(DyingSession {
+            generation,
+            session,
+        });
+        self.pump = None;
+    }
+
+    /// Whether `generation`'s session is the one the pump detached as dying.
+    fn is_dying_session(&self, generation: u64) -> bool {
+        self.dying_session
+            .as_ref()
+            .is_some_and(|dying| dying.generation == generation)
     }
 
     /// Removes the session a restart inspected, unless a turn claimed it since.
@@ -1544,6 +1602,7 @@ impl ThreadManager {
             transport_error_reported: None,
             transport_report: None,
             idle_transport_report: None,
+            dying_session: None,
             scheduled_limit: None,
             resume_at: None,
             limit: None,
@@ -2469,7 +2528,7 @@ impl ThreadManager {
         };
 
         for handle in handles {
-            let (thread_id, session) = {
+            let (thread_id, sessions) = {
                 let mut record = handle.lock().await;
                 record.closed = true;
                 if let Some(turn_id) = record.active.as_ref().map(|active| active.turn_id.clone()) {
@@ -2484,13 +2543,20 @@ impl ThreadManager {
                 }
                 let thread_id = record.meta.thread_id.clone();
                 // `detach_session` is the one place that stops the pump.
-                let session = record
-                    .session
-                    .generation()
-                    .and_then(|generation| record.detach_session(generation));
-                (thread_id, session)
+                let mut sessions = Vec::new();
+                if let Some(generation) = record.session.generation()
+                    && let Some(session) = record.detach_session(generation)
+                {
+                    sessions.push(session);
+                }
+                // A session whose reader already died is out of the slot but
+                // still this pump's; it needs the same teardown.
+                if let Some(dying) = record.dying_session.take() {
+                    sessions.push(dying.session);
+                }
+                (thread_id, sessions)
             };
-            if let Some(session) = session {
+            for session in sessions {
                 // The record lock is released first: a lock order of
                 // record-then-session would deadlock with a Stop.
                 let mut session = session.lock().await;
@@ -2653,6 +2719,7 @@ impl Inner {
                 transport_error_reported: None,
                 transport_report: None,
                 idle_transport_report: None,
+                dying_session: None,
                 scheduled_limit: None,
                 resume_at: None,
                 limit: None,
@@ -3446,6 +3513,12 @@ impl Inner {
         // applied as-is when it reaches the front of `pending` instead of
         // waiting a second window for a report this pump has read.
         let mut completion_waited = false;
+        // Set once an idle read failure or EOF detached this pump's session
+        // from the slot. From then on this pump only reads on for the exit
+        // report that can sharpen the one diagnostic row and carry the
+        // provider's reset; every event that belongs to a turn goes to the
+        // fresh session a Send started in the meantime.
+        let mut dying = false;
         loop {
             // `stream.next()` is cancel-safe (the adapter's stream is a channel
             // receiver), so arming the deadline cannot lose an event that is
@@ -3459,14 +3532,17 @@ impl Inner {
                             IdleWait::Event(event) => event,
                             IdleWait::Deadline => {
                                 // No exit report came in the window: publish what
-                                // the generic close left and end this pump instead
-                                // of waiting for the stream end the session it
-                                // holds keeps from happening.
-                                if self.publish_idle_death(&handle, generation, &session).await {
+                                // the generic close left, drop the session and end
+                                // this pump instead of waiting for the stream end
+                                // the session it holds keeps from happening.
+                                if let Some(dead) =
+                                    self.finish_idle_death(&handle, generation, None).await
+                                {
+                                    let _ = dead.lock().await.shutdown().await;
+                                }
+                                if dying {
                                     return;
                                 }
-                                // The report no longer describes this thread's idle
-                                // death (a turn started since); that turn owns it.
                                 idle_deadline = None;
                                 continue;
                             }
@@ -3481,6 +3557,18 @@ impl Inner {
             if self.closed.load(Ordering::Relaxed) {
                 break;
             }
+            if dying {
+                // The session is out of the slot and no turn owns it any more.
+                // Only the exit report and the limits on the way to it matter;
+                // the helper publishes the row and shuts the dead session down.
+                if self
+                    .apply_dying_event(&handle, generation, event, &mut idle_deadline)
+                    .await
+                {
+                    return;
+                }
+                continue;
+            }
             // The transport's health is read from its lock-free flag, never
             // through the session lock: a `send` may hold that lock for the
             // length of a turn, waiting for a reply this pump's draining is what
@@ -3494,8 +3582,10 @@ impl Inner {
                 // stream. The exit/status report belongs to this turn, and a
                 // limit it carries must arm auto-resume before the completion
                 // detaches the session and promotes the queued work, so both
-                // are applied ahead of the completion; every other event waits
-                // its turn behind it.
+                // are applied ahead of the completion; every other event read
+                // in this window is buffered and runs before the completion
+                // settles the turn, so an update behind it still reaches the
+                // turn it describes.
                 completion_waited = true;
                 let mut reports = Vec::new();
                 let mut later = Vec::new();
@@ -3561,6 +3651,9 @@ impl Inner {
             // close notice).
             let mut idle_death = false;
             let mut idle_fallback = false;
+            // The process-exit report's own reset, when it carried one. It is
+            // applied with the row, before a Send's fresh turn can settle.
+            let mut idle_reset: Option<DateTime<Utc>> = None;
 
             // `SessionStarted` normally carries the native id, but keep the
             // defaulted accessor in sync too so an adapter that only reports
@@ -3758,6 +3851,21 @@ impl Inner {
                         // session instead of writing into a closed client. The
                         // pump is this task, so it must not abort itself.
                         let closed = session_closed;
+                        // The adapter answers a Stop by closing the transport
+                        // and only then reporting the turn failed. The person
+                        // already ended this turn, so it settles interrupted
+                        // with no error row, exactly as a stream end on a
+                        // stopped turn does; the death is the cancel's, not a
+                        // failure the person needs to see.
+                        let stopped = closed
+                            && record.active.as_ref().is_some_and(|active| {
+                                active.dispatch.state() == DispatchState::ClaimedStopped
+                            });
+                        let status = if stopped {
+                            TurnStatus::Interrupted
+                        } else {
+                            status
+                        };
                         if closed && record.session.is_live(&session) {
                             detached = record.clear_session(generation);
                             record.pump = None;
@@ -3791,6 +3899,14 @@ impl Inner {
                                 active.usage.clone(),
                             )
                         };
+                        if stopped {
+                            // The death the transport reported behind the Stop
+                            // is incidental to the cancel: it takes no row, or
+                            // the stopped turn would still show a transport
+                            // failure. A limit it carried was applied on its
+                            // own event and keeps its schedule.
+                            record.take_transport_report(&turn_id);
+                        }
                         let usage = if usage.total_tokens() == 0
                             && usage.cost_micros == 0
                             && usage.duration_ms == 0
@@ -3946,7 +4062,7 @@ impl Inner {
                     message,
                     retryable,
                     kind,
-                    ..
+                    reset_at,
                 } => {
                     // The tagged writer death. A death is reported more than
                     // once (the bridge's generic stdout-close notice first, then
@@ -3971,13 +4087,22 @@ impl Inner {
                         // EOF or a read error only opens the bounded window for
                         // it, because either can precede the exit report that
                         // carries the provider's reset.
+                        //
+                        // The session leaves the slot now, not when the report
+                        // arrives: its reader is already gone, so a Send in the
+                        // window must start a fresh agent instead of claiming
+                        // this one and failing on a dead write. The pump keeps
+                        // reading this session's stream for the exit report.
+                        record.mark_session_dying(generation);
                         record.hold_idle_transport_report(generation, &turn_id, message, retryable);
+                        dying = true;
                         match kind {
                             // The process-exit report is the specific account
                             // of the death, and a writer failure is final: the
                             // client killed the agent with it.
                             TransportCloseKind::Exit | TransportCloseKind::Write => {
                                 idle_death = true;
+                                idle_reset = reset_at;
                             }
                             // The generic stdout close and a read error can be
                             // followed by the exit report inside one window.
@@ -4023,12 +4148,30 @@ impl Inner {
             if idle_fallback {
                 idle_deadline = Some(tokio::time::Instant::now() + IDLE_DEATH_DETAIL_WAIT);
             }
-            if idle_death && self.publish_idle_death(&handle, generation, &session).await {
-                // The row is published and the dead session detached, so the
-                // next Send starts fresh. Nothing else will arrive on this
-                // pump's stream that belongs to it.
+            if idle_death {
+                if let Some(dead) = self
+                    .finish_idle_death(&handle, generation, idle_reset)
+                    .await
+                {
+                    // The row is published and the dead session is out of the
+                    // slot, so the next Send starts fresh. Nothing else will
+                    // arrive on this pump's stream that belongs to it.
+                    let _ = dead.lock().await.shutdown().await;
+                }
                 return;
             }
+        }
+
+        // An idle death whose stream ended before its report arrived: the row
+        // is still this pump's to publish, and its session is already out of
+        // the slot.
+        if dying {
+            if !self.closed.load(Ordering::Relaxed)
+                && let Some(dead) = self.finish_idle_death(&handle, generation, None).await
+            {
+                let _ = dead.lock().await.shutdown().await;
+            }
+            return;
         }
 
         // The stream ended. Only the pump that still owns the attached session
@@ -4379,71 +4522,164 @@ impl Inner {
         }
     }
 
-    /// Publishes the one row for a transport death reported between turns, and
-    /// detaches the dead session.
+    /// Applies one event read on the stream of a session the pump detached as
+    /// dying, and reports whether the death is fully published.
     ///
-    /// The pump calls this as soon as the exit/status report arrives, or after
-    /// [`IDLE_DEATH_DETAIL_WAIT`] when only a generic EOF came. It must not wait
-    /// for the session's stream to end instead: a live adapter keeps its event
-    /// sender alive for as long as the daemon holds the session, so that stream
-    /// only ends when this pump drops the session, and a row that waited for it
-    /// would never be published. The row and the detach share one lock, so a
-    /// Send that arrives after them starts a fresh agent.
-    ///
-    /// `false` when this session is no longer the thread's live one, a turn has
-    /// started since the report was held (that turn's own failure path owns the
-    /// death), or no report is held.
-    async fn publish_idle_death(
-        &self,
+    /// The slot no longer holds this session, so nothing here is allowed to
+    /// touch a turn: the session's death belongs to the generation, not to
+    /// whatever the thread is running now (a Send in the window started a fresh
+    /// session and its own turn). Only the exit report ends the wait; a limit
+    /// notification on the way to it still arms its schedule, exactly as it
+    /// would have before the detach.
+    async fn apply_dying_event(
+        self: &Arc<Self>,
         handle: &ThreadHandle,
         generation: u64,
-        session: &SharedSession,
+        event: HarnessEvent,
+        idle_deadline: &mut Option<tokio::time::Instant>,
     ) -> bool {
-        let detached = {
-            let mut record = handle.lock().await;
-            if !record.session.is_live(session) || record.session.generation() != Some(generation) {
-                return false;
+        match event {
+            HarnessEvent::TransportClosed {
+                message,
+                retryable,
+                kind,
+                reset_at,
+            } => {
+                let mut record = handle.lock().await;
+                if !record.is_dying_session(generation) {
+                    // This death was already published (or the session was
+                    // discarded): nothing left to sharpen.
+                    return true;
+                }
+                let turn_id = record.turn_id_for_event();
+                record.hold_idle_transport_report(generation, &turn_id, message, retryable);
+                drop(record);
+                // Only the process-exit report (and a writer failure, which
+                // kills the agent) is the death's final account; any other
+                // report leaves the exit report its window.
+                if matches!(kind, TransportCloseKind::Exit | TransportCloseKind::Write) {
+                    if let Some(dead) = self.finish_idle_death(handle, generation, reset_at).await {
+                        let _ = dead.lock().await.shutdown().await;
+                    }
+                    return true;
+                }
+                *idle_deadline = Some(tokio::time::Instant::now() + IDLE_DEATH_DETAIL_WAIT);
             }
-            if record.active.is_some() {
-                // A turn started after the report was held, and `begin_turn`
-                // cleared the held report with it. The turn's own failure path
-                // publishes the death as its row if it is still dead.
-                return false;
-            }
-            let Some(report) = record.take_idle_transport_report(generation) else {
-                return false;
-            };
-            let thread_id = record.meta.thread_id.clone();
-            // The pump is this task, so it must not abort itself.
-            let detached = record.clear_session(generation);
-            record.pump = None;
-            // The row is the idle death's diagnostic, not a failed turn. Raising
-            // a failure would flip the thread to Error — a death that came with
-            // a limit has just armed its auto-resume, and the thread must stay
-            // Scheduled instead of asking for attention.
-            if let Err(error) = self
-                .emit(
+            HarnessEvent::LimitHit {
+                reset_at,
+                auto_resume,
+            } => {
+                // The report's own typed signal. A schedule armed for this
+                // reset is left alone, so one pause never arms twice.
+                let mut record = handle.lock().await;
+                if !record.is_dying_session(generation) {
+                    return true;
+                }
+                let now = self.now();
+                let mut domain = Vec::new();
+                let mut wire = Vec::new();
+                self.note_limit_hit(
                     &mut record,
-                    Vec::new(),
-                    vec![Event::Error {
-                        thread_id: Some(thread_id),
-                        message: report.message,
-                        hint: Some("Inspect the thread and retry when ready".into()),
-                        retryable: report.retryable,
-                    }],
+                    reset_at,
+                    auto_resume,
+                    now,
+                    &mut domain,
+                    &mut wire,
                 )
-                .await
-            {
-                tracing::error!(%error, "failed to record a transport failure");
+                .await;
+                if let Err(error) = self.emit(&mut record, domain, wire).await {
+                    tracing::error!(%error, "failed to record a rate limit");
+                }
             }
-            detached
-        };
-        if let Some(detached) = detached {
-            // The record is unlocked: shutting a session down while holding it
-            // would deadlock with a Stop or a delivery.
-            let _ = detached.lock().await.shutdown().await;
+            event => {
+                // Nothing else can belong to a session whose reader is gone:
+                // a completion or an update here describes a turn that ended
+                // before the death, or one that the fresh session now owns.
+                tracing::debug!(
+                    generation,
+                    ?event,
+                    "dropped an event from a session whose transport died between turns"
+                );
+            }
         }
-        true
+        false
+    }
+
+    /// Publishes the one row for an idle death the pump already detached, and
+    /// arms the reset its exit report carried.
+    ///
+    /// The pump calls this as soon as the exit/status report arrives, or after
+    /// [`IDLE_DEATH_DETAIL_WAIT`] when only a generic close came. The session
+    /// left the slot when the death was known, so a Send in the window already
+    /// started a fresh agent: this only takes the report and the session it
+    /// belongs to, and never touches whatever the thread is running now.
+    ///
+    /// `None` when this generation's death was already published; otherwise the
+    /// dead session, which the caller shuts down outside the record lock.
+    async fn finish_idle_death(
+        self: &Arc<Self>,
+        handle: &ThreadHandle,
+        generation: u64,
+        reset_at: Option<DateTime<Utc>>,
+    ) -> Option<SharedSession> {
+        let mut record = handle.lock().await;
+        let dying = match &record.dying_session {
+            Some(dying) if dying.generation == generation => record.dying_session.take(),
+            _ => None,
+        }?;
+        if let Some(reset_at) = reset_at {
+            self.arm_idle_reset(&mut record, reset_at).await;
+        }
+        let Some(report) = record.take_idle_transport_report(generation) else {
+            // Nothing to publish (a report the thread already accounted for),
+            // but the session is still this pump's to drop.
+            return Some(dying.session);
+        };
+        let thread_id = record.meta.thread_id.clone();
+        // The row is the idle death's diagnostic, not a failed turn. Raising a
+        // failure would flip the thread to Error — a death that came with a
+        // limit has just armed its auto-resume, and the thread must stay
+        // Scheduled instead of asking for attention.
+        if let Err(error) = self
+            .emit(
+                &mut record,
+                Vec::new(),
+                vec![Event::Error {
+                    thread_id: Some(thread_id),
+                    message: report.message,
+                    hint: Some("Inspect the thread and retry when ready".into()),
+                    retryable: report.retryable,
+                }],
+            )
+            .await
+        {
+            tracing::error!(%error, "failed to record a transport failure");
+        }
+        Some(dying.session)
+    }
+
+    /// Arms the reset an idle death's exit report carries.
+    ///
+    /// There is no turn to settle, so this is the thread's own limit handling.
+    /// A reset already armed (the adapter's typed limit usually lands first) is
+    /// not replaced, so one provider pause keeps the attempt and jitter it was
+    /// given.
+    async fn arm_idle_reset(&self, record: &mut ThreadRecord, reset_at: DateTime<Utc>) {
+        if record
+            .scheduled_limit
+            .as_ref()
+            .is_some_and(|scheduled| scheduled.auto_resume && scheduled.reset_at == Some(reset_at))
+        {
+            return;
+        }
+        let now = self.now();
+        let mut domain = Vec::new();
+        let mut wire = Vec::new();
+        self.note_limit_hit(record, Some(reset_at), true, now, &mut domain, &mut wire)
+            .await;
+        if let Err(error) = self.emit(record, domain, wire).await {
+            tracing::error!(%error, "failed to record a rate limit");
+        }
     }
 
     /// Gets the active turn onto a session, starting one when needed.
@@ -5351,7 +5587,10 @@ mod tests {
             .await
             .expect("the second Stop retries the cancel");
         assert_eq!(cancels.get(), 2, "the second Stop sent the cancel again");
-        let (turn, status) = next_turn_completion(&mut events).await;
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the turn completed");
         assert_eq!(turn, created.turn_id);
         assert_eq!(
             status,
@@ -6793,7 +7032,12 @@ mod tests {
             .create_thread(new_thread(host, workspace.path(), "first"))
             .await
             .expect("create");
-        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+                .await
+                .expect("the turn completed"),
+            TurnStatus::Completed
+        );
         assert_eq!(sessions.get(), 1);
 
         // Hold the restart between its idle inspection and its detach.
@@ -6836,7 +7080,10 @@ mod tests {
 
         // The turn still runs to completion on the session it claimed.
         completion.release();
-        let (turn, status) = next_turn_completion(&mut events).await;
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the turn completed");
         assert_eq!(turn, second.turn_id);
         assert_eq!(status, TurnStatus::Completed);
         assert_eq!(sessions.get(), 1);
@@ -6859,7 +7106,12 @@ mod tests {
             .create_thread(new_thread(host, workspace.path(), "first"))
             .await
             .expect("create");
-        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+                .await
+                .expect("the turn completed"),
+            TurnStatus::Completed
+        );
 
         // The second prompt is claimed and blocks in the write. While it is on
         // the wire, a restart detaches its session.
@@ -6886,7 +7138,10 @@ mod tests {
         // The write now fails on the dead session. The turn must not be left
         // active with no delivery: it is written again on a fresh session.
         gate.release();
-        let (turn, status) = next_turn_completion(&mut events).await;
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the turn completed");
         assert_eq!(turn, second.turn_id);
         assert_eq!(
             status,
@@ -6921,7 +7176,12 @@ mod tests {
             .create_thread(new_thread(host, workspace.path(), "first"))
             .await
             .expect("create");
-        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+                .await
+                .expect("the turn completed"),
+            TurnStatus::Completed
+        );
 
         // The second prompt is claimed and blocks in its write. Its session
         // detaches under it, so the Stop that follows has no session to cancel.
@@ -6953,7 +7213,10 @@ mod tests {
         // The write now fails on the detached session. The prompt must not be
         // replayed: the stopped turn ends interrupted, on no new session.
         gate.release();
-        let (turn, status) = next_turn_completion(&mut events).await;
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the turn completed");
         assert_eq!(turn, second.turn_id);
         assert_eq!(status, TurnStatus::Interrupted);
         assert_eq!(sends.get(), 2, "the stopped prompt was never written again");
@@ -6989,7 +7252,12 @@ mod tests {
             .create_thread(new_thread(host, workspace.path(), "first"))
             .await
             .expect("create");
-        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+                .await
+                .expect("the turn completed"),
+            TurnStatus::Completed
+        );
 
         // The second prompt is claimed and blocks in its write; its session
         // detaches under it, so the write failure takes the recovery path.
@@ -7029,7 +7297,10 @@ mod tests {
         pause.resume.notify_one();
 
         // The turn must end, not stay active with nobody delivering it.
-        let (turn, status) = next_turn_completion(&mut events).await;
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the turn completed");
         assert_eq!(turn, second.turn_id);
         assert_eq!(status, TurnStatus::Interrupted);
         assert_eq!(sends.get(), 2, "the stopped prompt was never written again");
@@ -7061,7 +7332,12 @@ mod tests {
             .create_thread(new_thread(host, workspace.path(), "first"))
             .await
             .expect("create");
-        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+                .await
+                .expect("the turn completed"),
+            TurnStatus::Completed
+        );
 
         let second = manager
             .send_message(&created.thread_id, "second".into(), Vec::new())
@@ -7089,29 +7365,52 @@ mod tests {
             "the Stop lands on the claimed turn"
         );
 
-        // The session reports its death on the way out, then its stream ends.
-        let stream = futures::stream::iter(vec![HarnessEvent::TransportClosed {
-            message: "the harness transport closed".into(),
-            retryable: true,
-            kind: TransportCloseKind::Eof,
-            reset_at: None,
-        }])
+        // The session reports its death on the way out, and the adapter's
+        // prompt task then reports the turn failed, as ACP does after a
+        // cancel closes the transport.
+        let health = h4rn_harness::TransportHealth::new();
+        health.close_with(TransportCloseKind::Eof);
+        let stream = futures::stream::iter(vec![
+            HarnessEvent::TransportClosed {
+                message: "the harness transport closed".into(),
+                retryable: true,
+                kind: TransportCloseKind::Eof,
+                reset_at: None,
+            },
+            HarnessEvent::TurnCompleted {
+                status: TurnStatus::Failed,
+                usage: Usage::default(),
+            },
+        ])
         .boxed();
-        Arc::clone(&manager.inner)
-            .run_pump(handle.clone(), generation, session, None, stream)
-            .await;
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            Arc::clone(&manager.inner).run_pump(
+                handle.clone(),
+                generation,
+                session,
+                Some(health),
+                stream,
+            ),
+        )
+        .await
+        .expect("the pump ends with the stopped turn");
 
         let mut errors = Vec::new();
-        let (turn, status) = loop {
-            let wire = next_event(&mut events).await;
-            match wire.event {
-                Event::Error { message, .. } => errors.push(message),
-                Event::TurnCompleted {
-                    turn_id, status, ..
-                } => break (turn_id, status),
-                _ => {}
+        let (turn, status) = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let wire = next_event(&mut events).await;
+                match wire.event {
+                    Event::Error { message, .. } => errors.push(message),
+                    Event::TurnCompleted {
+                        turn_id, status, ..
+                    } => break (turn_id, status),
+                    _ => {}
+                }
             }
-        };
+        })
+        .await
+        .expect("the stopped turn settled");
         assert_eq!(turn, second.turn_id);
         assert_eq!(status, TurnStatus::Interrupted);
         assert!(
@@ -7140,7 +7439,12 @@ mod tests {
             .create_thread(new_thread(host, workspace.path(), "first"))
             .await
             .expect("create");
-        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+                .await
+                .expect("the turn completed"),
+            TurnStatus::Completed
+        );
 
         let second = manager
             .send_message(&created.thread_id, "second".into(), Vec::new())
@@ -7196,7 +7500,10 @@ mod tests {
             .await
             .expect("the pump ends with the completion")
             .expect("the pump task did not panic");
-        let (turn, status) = next_turn_completion(&mut events).await;
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the turn completed");
         assert_eq!(turn, second.turn_id);
         assert_eq!(status, TurnStatus::Completed);
 
@@ -7267,7 +7574,12 @@ mod tests {
             .create_thread(new_thread(host, workspace.path(), "first"))
             .await
             .expect("create");
-        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+                .await
+                .expect("the turn completed"),
+            TurnStatus::Completed
+        );
 
         let second = manager
             .send_message(&created.thread_id, "second".into(), Vec::new())
@@ -7320,7 +7632,10 @@ mod tests {
             .await
             .expect("the pump ends with the completion")
             .expect("the pump task did not panic");
-        let (turn, status) = next_turn_completion(&mut events).await;
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the turn completed");
         assert_eq!(turn, second.turn_id);
         assert_eq!(status, TurnStatus::Completed);
 
@@ -7391,7 +7706,12 @@ mod tests {
             .create_thread(new_thread(host, workspace.path(), "first"))
             .await
             .expect("create");
-        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+                .await
+                .expect("the turn completed"),
+            TurnStatus::Completed
+        );
 
         let second = manager
             .send_message(&created.thread_id, "second".into(), Vec::new())
@@ -7445,7 +7765,10 @@ mod tests {
             .await
             .expect("the pump ends with the completion")
             .expect("the pump task did not panic");
-        let (turn, status) = next_turn_completion(&mut events).await;
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the turn completed");
         assert_eq!(turn, second.turn_id);
         assert_eq!(status, TurnStatus::Completed);
 
@@ -7517,7 +7840,12 @@ mod tests {
             .create_thread(new_thread(host, workspace.path(), "first"))
             .await
             .expect("create");
-        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+                .await
+                .expect("the turn completed"),
+            TurnStatus::Completed
+        );
 
         let second = manager
             .send_message(&created.thread_id, "second".into(), Vec::new())
@@ -7556,7 +7884,9 @@ mod tests {
             auto_resume: true,
         });
         loop {
-            let wire = next_event(&mut events).await;
+            let wire = tokio::time::timeout(Duration::from_secs(10), next_event(&mut events))
+                .await
+                .expect("the event arrived");
             if matches!(wire.event, Event::UsageLimitHit { .. }) {
                 break;
             }
@@ -7595,7 +7925,10 @@ mod tests {
             .await
             .expect("the pump ends with the completion")
             .expect("the pump task did not panic");
-        let (turn, status) = next_turn_completion(&mut events).await;
+        let (turn, status) =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the turn completed");
         assert_eq!(turn, second.turn_id);
         assert_eq!(status, TurnStatus::Completed);
         assert!(
@@ -7638,7 +7971,12 @@ mod tests {
             .create_thread(new_thread(host, workspace.path(), "first"))
             .await
             .expect("create");
-        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+                .await
+                .expect("the turn completed"),
+            TurnStatus::Completed
+        );
 
         let second = manager
             .send_message(&created.thread_id, "second".into(), Vec::new())
@@ -7702,7 +8040,9 @@ mod tests {
 
         let mut tool_completed = false;
         let (turn, status) = loop {
-            let wire = next_event(&mut events).await;
+            let wire = tokio::time::timeout(Duration::from_secs(10), next_event(&mut events))
+                .await
+                .expect("the event arrived");
             match wire.event {
                 Event::ToolCall { tool_call, .. }
                     if tool_call.tool_call_id == "tool-1"
@@ -7743,7 +8083,12 @@ mod tests {
             .create_thread(new_thread(host, workspace.path(), "first"))
             .await
             .expect("create");
-        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+                .await
+                .expect("the turn completed"),
+            TurnStatus::Completed
+        );
 
         let second = manager
             .send_message(&created.thread_id, "second".into(), Vec::new())
@@ -7795,7 +8140,9 @@ mod tests {
 
         let mut approval_published = false;
         let (turn, status) = loop {
-            let wire = next_event(&mut events).await;
+            let wire = tokio::time::timeout(Duration::from_secs(10), next_event(&mut events))
+                .await
+                .expect("the event arrived");
             match wire.event {
                 Event::ApprovalRequested { .. } => approval_published = true,
                 Event::TurnCompleted {
@@ -7924,7 +8271,12 @@ mod tests {
             .create_thread(new_thread(host, workspace.path(), "first"))
             .await
             .expect("create");
-        assert_eq!(next_turn_status(&mut events).await, TurnStatus::Completed);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+                .await
+                .expect("the turn completed"),
+            TurnStatus::Completed
+        );
 
         let handle = manager
             .inner
@@ -8765,6 +9117,144 @@ mod tests {
                 .await
                 .is_err(),
             "one idle death is one diagnostic row"
+        );
+    }
+
+    /// A Send that lands while an idle session's death is still waiting for its
+    /// exit report must start a fresh agent instead of claiming the dead one.
+    ///
+    /// The read failure detaches the session from the slot at once, so the
+    /// prompt reaches a new session and completes. The old pump keeps reading
+    /// its own stream: the exit report still publishes the death's one row and
+    /// arms the reset it carries.
+    #[tokio::test]
+    async fn a_send_during_an_idle_read_failure_starts_a_fresh_session() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let reset_at = chrono::Utc::now() + chrono::Duration::minutes(9);
+        let (harness, harness_events) = FakeHarness::new().with_event_injector();
+        let (harness, sessions) = harness.with_session_count();
+        let (harness, sends) = harness.with_send_count();
+        let (harness, shutdowns) = harness.with_shutdown_count();
+        let host = HostId::new("host_test");
+        let manager = open_test_manager(harness, host.clone()).await;
+        let meter = Arc::new(h4rn_meter::MeterHub::in_memory().await.expect("meter"));
+        manager.set_meter(Arc::clone(&meter));
+        let mut events = manager.subscribe();
+        let created = manager
+            .create_thread(new_thread(host, workspace.path(), "first"))
+            .await
+            .expect("create");
+        let status = tokio::time::timeout(Duration::from_secs(10), next_turn_status(&mut events))
+            .await
+            .expect("the first turn completed");
+        assert_eq!(status, TurnStatus::Completed);
+
+        let handle = manager
+            .inner
+            .handle(&created.thread_id)
+            .await
+            .expect("thread handle");
+        // The reader dies between turns. Its session is out of the slot at
+        // once; the pump keeps it for the exit report that can sharpen the row.
+        harness_events.emit(HarnessEvent::TransportClosed {
+            message: "failed to read the ACP agent stdout: broken pipe".into(),
+            retryable: false,
+            kind: TransportCloseKind::Read,
+            reset_at: None,
+        });
+        assert!(
+            wait_until(|| handle.try_lock().is_ok_and(|record| matches!(
+                record.session,
+                SessionSlot::None
+            ) && record
+                .dying_session
+                .is_some()))
+            .await,
+            "the dead session left the slot before its exit report"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), next_error(&mut events))
+                .await
+                .is_err(),
+            "the read failure waits for the exit report before it publishes a row"
+        );
+
+        // A Send in that window must start a fresh agent, not write to the dead
+        // one. Its turn completes on the new session.
+        let second = manager
+            .send_message(&created.thread_id, "second".into(), Vec::new())
+            .await
+            .expect("the send is accepted");
+        sends.wait_for(2).await;
+        assert_eq!(
+            sessions.get(),
+            2,
+            "the Send started a fresh session instead of reusing the dead one"
+        );
+        let completed =
+            tokio::time::timeout(Duration::from_secs(10), next_turn_completion(&mut events))
+                .await
+                .expect("the fresh session ran the turn");
+        assert_eq!(completed.0, second.turn_id);
+        assert_eq!(
+            completed.1,
+            TurnStatus::Completed,
+            "the prompt was written to a live session"
+        );
+
+        // The old session's exit report now arrives on its own stream. It is
+        // still the dead generation's row and reset, not the fresh turn's.
+        harness_events.emit_to(
+            0,
+            HarnessEvent::TransportClosed {
+                message: "agy exited (exit status: 7): agy: the session ended".into(),
+                retryable: false,
+                kind: TransportCloseKind::Exit,
+                reset_at: Some(reset_at),
+            },
+        );
+        let row = tokio::time::timeout(Duration::from_secs(5), next_error(&mut events))
+            .await
+            .expect("the exit report publishes the idle death's row");
+        assert!(
+            row.contains("agy exited (exit status: 7): agy: the session ended"),
+            "the row is the exit report with its stderr: {row:?}"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), next_error(&mut events))
+                .await
+                .is_err(),
+            "the death is one diagnostic row"
+        );
+        assert!(
+            wait_until(|| shutdowns.get() == 1).await,
+            "the dead session was shut down"
+        );
+
+        let schedules = meter.schedules().await.expect("read schedules");
+        assert_eq!(
+            schedules.len(),
+            1,
+            "the exit report armed exactly one reset"
+        );
+        assert!(
+            schedules[0].reason.contains("provider reset at"),
+            "the schedule is armed from the exit report's reset: {:?}",
+            schedules[0].reason
+        );
+        assert!(
+            schedules[0].resume_at >= reset_at,
+            "the schedule waits for the exit report's reset: {:?}",
+            schedules[0].resume_at
+        );
+        let summary = manager
+            .thread_summary(&created.thread_id)
+            .await
+            .expect("summary");
+        assert_eq!(
+            summary.agent_state,
+            AgentState::Scheduled,
+            "the armed reset keeps the thread scheduled"
         );
     }
 
