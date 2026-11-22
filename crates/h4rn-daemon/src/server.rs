@@ -809,6 +809,9 @@ impl Connection {
                             // A thread's workspace becomes an authorised IDE root.
                             // This is the only way a workspace is added at runtime,
                             // so IDE mode cannot reach a path the user never opened.
+                            // Authorise the folder the thread actually uses: an ACP
+                            // agent with a fixed directory replaces the one sent.
+                            let workspace_path = created.summary.workspace_path.clone();
                             if let Err(error) = self.state.fs.allow_root(&workspace_path) {
                                 tracing::warn!(%workspace_path, %error, "IDE root not authorised");
                             }

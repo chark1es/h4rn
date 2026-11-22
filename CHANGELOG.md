@@ -274,8 +274,8 @@ All notable changes to h4rn are recorded here. The format follows
 - **Local ACP agents: one answer for the catalogue, the resume and the process.** `Check` now reads
   the same v1 `configOptions` catalogue a thread start selects from, so the picker no longer offers
   legacy ids the agent would reject, and the model stays `default` until you choose one. The client
-  waits 35 s for a probe, matching the daemon's 30 s bound instead of abandoning it at the default
-  10 s. A `session/resume` or `session/load` reply that names no catalogue keeps the thread's saved
+  waits 45 s for a probe, covering the daemon's 30 s exchange plus its shutdown grace, instead of
+  abandoning it at the default 10 s. A `session/resume` or `session/load` reply that names no catalogue keeps the thread's saved
   model and mode and still sends the prompt. A load's replayed history is consumed before the new
   turn, so a conversation longer than the event queue no longer stalls the load and the old messages
   are not shown twice. A probe edited while it ran reports the same conflict whether it succeeded or

@@ -264,7 +264,7 @@ export async function probeAcpAgent(id: string): Promise<string | null> {
     // timeout is 10 s, which would abandon a slow but healthy probe.
     const response = await getClient().request(
       { type: "probe_acp_agent", id },
-      { timeoutMs: 35_000 },
+      { timeoutMs: 45_000 },
     );
     // The agent was edited or removed while this handshake ran; its answer
     // belongs to no configuration that exists now.
