@@ -7,6 +7,24 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **Bitbucket Cloud and Azure DevOps pull requests.** The forge layer now understands two more
+  providers. Bitbucket Cloud takes an Atlassian API token (account email plus token, HTTP Basic) or
+  a workspace, project or repository access token (Bearer); app passwords were retired in July 2026
+  and are no longer offered. Access tokens cannot read `/user` or `/user/workspaces`, so the add
+  form sends the workspace's detected Bitbucket repository and the daemon validates the token
+  against it. The client lists open pull requests, applies the documented `q=` author, reviewer and
+  source-branch filters so pagination stays server-side and pages never repeat, reads the raw PR
+  diff from `/pullrequests/{id}/diff`, rebuilds comment threads from `parent` chains, and maps build
+  statuses onto checks. Azure DevOps Services takes a personal access token (Basic with an empty
+  username), lists active pull requests, reads commits and iteration changes, builds a unified diff
+  page by page from the iteration's `commonRefCommit` and `sourceRefCommit`, maps thread statuses
+  (`fixed`, `closed`, `wontFix`, `byDesign`) to resolved, and combines PR statuses with blocking
+  policy evaluations as checks. Remote detection understands `bitbucket.org`, `ssh.bitbucket.org`,
+  `dev.azure.com`, `ssh.dev.azure.com`, the legacy `vs-ssh.visualstudio.com` SSH host and legacy
+  `*.visualstudio.com` URLs. Bitbucket Server/Data Center and Azure DevOps Server are explicitly
+  unsupported. Neither provider can re-run checks from this surface, and the UI shows that reason
+  the same way it does for Gitea.
+
 - **Notifications, Open at login and the tray are real settings.** Settings → Notifications now
   controls OS notifications on the desktop app (the Tauri notification plugin) and in the browser
   (the Web Notification API, asked for only when a switch is turned on; there is no separate
@@ -86,6 +104,79 @@ All notable changes to h4rn are recorded here. The format follows
   Typing leaves history mode, and an open menu or IME composition leaves the arrow keys alone.
 
 ### Fixed
+
+- **Large Azure DevOps pull requests load within the page deadline.** Azure needs file contents to
+  build a diff, so a 30-file page could not finish inside the UI's ten-second budget once the
+  account's local request allowance ran out. A diff page now holds at most eight files (eighteen
+  requests in the worst case), a file whose change keeps its bytes (a pure rename, branch or merge)
+  downloads nothing, and the existing per-request cache still avoids a duplicate blob.
+- **Azure DevOps checks no longer flip to passing.** Statuses are filtered to PR-level rows and the
+  current iteration only, so a failure from an earlier push cannot outlive the code it tested.
+  Policy evaluations stay distinct by evaluation and configuration id: an approved optional policy
+  and a rejected blocking policy that share a display name are two rows, and the rejection keeps the
+  PR failing. A policy outcome still wins over a status of the same name.
+- **Azure DevOps no longer reads `undelete` as a deletion.** Change types are matched as exact
+  comma-separated tokens (`rename, edit`, `undelete`, `sourceRename`) instead of by substring.
+- **Azure DevOps diffs keep line endings and empty files.** The local patch builder keeps `\r\n`
+  terminators, emits `\ No newline at end of file` where one side lacks a final newline, and uses
+  `/dev/null` only when the path is absent on that side, so an existing empty file is not shown as
+  new or deleted.
+- **Bitbucket Cloud lists no longer repeat rows.** Author, reviewer and source-branch filters use
+  the documented server-side `q=` language (reviewer rows also request `fields=+values.reviewers`),
+  so page two resumes where page one ended. The GitHub-style `x-oauth-scopes` header is no
+  longer read as a Bitbucket scope list, and a diffstat whose five-page cap is reached reports the size as
+  unknown instead of as a partial total.
+- **Remote detection keeps other forges' URL handling.** Azure DevOps keeps the strict
+  percent-decoded path rules; every other forge still resolves a path with an empty segment the way
+  it always has (`https://gitlab.com/team//repo.git`). Azure base-URL errors never echo the input,
+  which can carry a secret in its path.
+- **Bitbucket Cloud recognises its SSH host.** `git@ssh.bitbucket.org:workspace/repo.git` and
+  `ssh://git@ssh.bitbucket.org/workspace/repo.git` resolve to the `https://bitbucket.org` account,
+  like the web and `bitbucket.org` SSH forms.
+- **Azure DevOps checks fail closed.** If the iteration, status or policy-evaluation request fails,
+  the checks request now fails instead of reporting the green rows as passing; a branch gate that
+  could not be read is never a pass.
+- **Azure DevOps fork pull requests read the source side from the fork.** When a PR names a
+  `forkSource.repository`, the old side comes from the target repository and the new side from the
+  fork, where the source commit lives. A 404 for a side the change says exists is an error rather
+  than a silently invented addition or deletion.
+- **Azure DevOps checks need both collections.** A 200 whose status or policy body lacks its `value`
+  collection is now an error instead of zero rows; a valid `value: []` stays empty. Half an answer
+  can no longer read as a pass.
+- **Bitbucket Cloud follows the cursor it is given.** The PR list carries the same-origin `next` URL
+  forward as the next page instead of rebuilding `page=N`, so an opaque cursor keeps its filters and
+  pages do not repeat. Learned cursors are sparse and bounded (the 64 most recent), and a page with
+  no learned cursor falls back to the documented `page` parameter, so a distant page never
+  allocates memory in proportion to its number.
+- **Bitbucket Cloud Mine and Review requested match the account uuid.** The filters use
+  `author.uuid` and `reviewers.uuid` from `/user`, as Bitbucket documents, instead of a nickname or
+  display name that two people can share (or that a token may not report). Workspace, project and
+  repository access tokens have no user identity, so those two filters say “unsupported” with that
+  reason instead of showing an empty list.
+- **Bitbucket Cloud reads `inline.outdated`.** A line-anchored thread is outdated when its root
+  comment says so; a file-level comment stays not outdated.
+- **Redaction finds tokens wherever they appear.** Atlassian and GitHub/GitLab token values are
+  removed next to quotes, colons, commas and brackets, including inside a quoted JSON error body,
+  instead of only at the start of a whitespace-delimited word.
+- **Azure DevOps pull requests keep a browser URL.** A response without `_links.web` falls back to
+  `<repository.webUrl>/pullrequest/<id>`, or to the base URL, project and repository, instead of an
+  empty link.
+- **Line counts are only shown when the forge reports them.** Azure DevOps (and GitLab) report no
+  PR-wide totals, so `line_counts_known` is `false` and the agent handoff says the counts are
+  unknown instead of “+0 −0”. Bitbucket sets it once the diffstat was read in full.
+- **A legacy `DefaultCollection` remote finds its Azure DevOps account.** An account added as
+  `https://<org>.visualstudio.com` matches a remote that spells
+  `https://<org>.visualstudio.com/DefaultCollection`, and the other way round.
+- **Bitbucket Cloud base-URL errors never repeat the input.** A non-root path is rejected with the
+  same fixed wording Azure DevOps uses, and `ATATT…` Atlassian API tokens are redacted from error
+  messages like `ATBB…` already was.
+- **Honest Bitbucket Cloud counts and anchors.** A failed or capped diffstat leaves the changed-file
+  count and line counts unknown (`changed_files_known` and `line_counts_known` false) so the PR
+  header shows “—” instead of “0”; the comments page reports `has_more` only when the last page it
+  read linked a `next` page.
+- **The Bitbucket token form says Pull requests: read and write**, matching the documented scopes,
+  and with several detected Bitbucket checkouts it lets the person choose which repository proves
+  an access token (the first is used by default).
 
 - **A second launch hands its deep link to the running app.** Launching h4rn while it is already
   running (including from a hidden tray) used to focus the window and drop the `h4rn://` link that

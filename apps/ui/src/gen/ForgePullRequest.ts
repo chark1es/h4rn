@@ -41,6 +41,21 @@ deletions: number,
  */
 changed_files: number, 
 /**
+ * Whether the forge could count the changed files.
+ *
+ * `false` means the count is unknown (a diffstat page failed or hit its
+ * cap), not that the PR changes no files; clients show it as unknown.
+ */
+changed_files_known: boolean, 
+/**
+ * Whether the forge reported the line counts.
+ *
+ * `false` means additions and deletions are unknown rather than zero;
+ * clients show them as unknown instead of `+0 −0` (Azure DevOps does not
+ * report totals without downloading every file).
+ */
+line_counts_known: boolean, 
+/**
  * Commits in the PR.
  */
 commits: number, 
