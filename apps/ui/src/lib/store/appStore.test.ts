@@ -28,14 +28,10 @@ function hostSummary(hostId: string): HostSummary {
   };
 }
 
-function threadSummary(input: {
-  threadId: string;
-  host: string;
-  parent?: string | null;
-}): ThreadSummary {
+function threadSummary(input: { threadId: string; host: string }): ThreadSummary {
   return {
     thread_id: input.threadId,
-    parent_thread_id: input.parent ?? null,
+    parent_thread_id: null,
     host: input.host,
     harness: "claude_code",
     title: input.threadId,
@@ -74,26 +70,19 @@ function seedHosts(hostIds: string[]): void {
   });
 }
 
-function threadsResponse(threads: ThreadSummary[]) {
-  return { type: "threads", threads };
-}
-
-describe("loadThreads draft pruning", () => {
+describe("loadThreads", () => {
   beforeEach(() => {
     fake.response.current = null;
     fake.request.mockClear();
     seedHosts([]);
   });
 
-  it("asks for the full inventory, children included, but lists only root threads", async () => {
-    const parent = threadSummary({ threadId: "prune_parent", host: "prune_host_a" });
-    const child = threadSummary({
-      threadId: "prune_child",
-      host: "prune_host_a",
-      parent: "prune_parent",
-    });
-    seedHosts(["prune_host_a"]);
-    fake.response.current = threadsResponse([parent, child]);
+  it("lists the daemon's root threads and asks for no children", async () => {
+    seedHosts(["load_host_a"]);
+    fake.response.current = {
+      type: "threads",
+      threads: [threadSummary({ threadId: "load_thread", host: "load_host_a" })],
+    };
 
     await loadThreads();
 
@@ -101,42 +90,20 @@ describe("loadThreads draft pruning", () => {
       | { type: string; filter: { include_children: boolean } }
       | undefined;
     expect(request?.type).toBe("list_threads");
-    expect(request?.filter.include_children).toBe(true);
-    expect(Object.keys(getState().threads)).toEqual(["prune_parent"]);
+    expect(request?.filter.include_children).toBe(false);
+    expect(Object.keys(getState().threads)).toEqual(["load_thread"]);
   });
 
-  it("keeps a subagent thread's draft across a restart", async () => {
-    seedHosts(["prune_host_child"]);
-    drafts.writeThreadDraft("prune_host_child", "prune_parent_thread", "root draft");
-    drafts.writeThreadDraft("prune_host_child", "prune_child_thread", "child draft");
+  it("never deletes drafts while loading the thread list", async () => {
+    seedHosts(["load_host_b"]);
+    drafts.writeThreadDraft("load_host_b", "not_in_the_list", "still unsent");
+    drafts.writeThreadDraft("load_host_other", "another_machine", "keep for later");
     flushDrafts();
-    fake.response.current = threadsResponse([
-      threadSummary({ threadId: "prune_parent_thread", host: "prune_host_child" }),
-      threadSummary({
-        threadId: "prune_child_thread",
-        host: "prune_host_child",
-        parent: "prune_parent_thread",
-      }),
-    ]);
+    fake.response.current = { type: "threads", threads: [] };
 
     await loadThreads();
 
-    expect(readThreadDraft("prune_host_child", "prune_parent_thread")).toBe("root draft");
-    expect(readThreadDraft("prune_host_child", "prune_child_thread")).toBe("child draft");
-  });
-
-  it("leaves another machine's drafts alone when a different daemon loads its threads", async () => {
-    seedHosts(["prune_machine_b"]);
-    drafts.writeThreadDraft("prune_machine_a", "gone_on_a", "machine A draft");
-    drafts.writeThreadDraft("prune_machine_b", "gone_on_b", "machine B draft");
-    flushDrafts();
-    fake.response.current = threadsResponse([]);
-
-    await loadThreads();
-
-    expect(readThreadDraft("prune_machine_a", "gone_on_a")).toBe("machine A draft");
-    // The daemon did report machine B, so a thread of its that is gone loses
-    // its draft.
-    expect(readThreadDraft("prune_machine_b", "gone_on_b")).toBe("");
+    expect(readThreadDraft("load_host_b", "not_in_the_list")).toBe("still unsent");
+    expect(readThreadDraft("load_host_other", "another_machine")).toBe("keep for later");
   });
 });

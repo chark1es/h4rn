@@ -120,52 +120,80 @@ describe("draft store", () => {
     expect(storage.data.size).toBe(0);
   });
 
-  it("drops drafts for gone threads, and leaves other hosts and new-thread drafts alone", () => {
-    const storage = memoryStorage();
-    const store = createDraftStore(storage);
+  it("drops drafts older than 30 days at load, and keeps the rest", () => {
+    const day = 24 * 60 * 60 * 1000;
+    const storage = memoryStorage({
+      [threadKey("host_a", "old_thread")]: JSON.stringify({ text: "old", updatedAt: 0 }),
+      [draftStorageKey("new-thread", "host_a", "~/code")]: JSON.stringify({
+        text: "old prompt",
+        updatedAt: 0,
+      }),
+      [threadKey("host_a", "recent_thread")]: JSON.stringify({
+        text: "recent",
+        updatedAt: 29 * day,
+      }),
+    });
+    const store = createDraftStore(storage, { now: () => 31 * day });
 
-    store.writeThreadDraft("host_a", "thread_1", "live");
-    store.writeThreadDraft("host_a", "thread_2", "deleted");
-    store.writeThreadDraft("host_b", "thread_2", "another machine");
-    store.writeNewThreadDraft("host_a", "~/code", "new thread text");
-    store.flush();
-
-    store.pruneThreadDrafts([{ host: "host_a", threadId: "thread_1" }], ["host_a"]);
-
-    expect(store.readThreadDraft("host_a", "thread_1")).toBe("live");
-    expect(store.readThreadDraft("host_a", "thread_2")).toBe("");
-    expect(store.readThreadDraft("host_b", "thread_2")).toBe("another machine");
-    expect(storedText(storage, threadKey("host_b", "thread_2"))).toBe("another machine");
-    expect(store.readNewThreadDraft("host_a", "~/code")).toBe("new thread text");
+    expect(store.readThreadDraft("host_a", "recent_thread")).toBe("recent");
+    expect(store.readThreadDraft("host_a", "old_thread")).toBe("");
+    expect(store.readNewThreadDraft("host_a", "~/code")).toBe("");
+    expect(storage.data.size).toBe(1);
   });
 
-  it("keeps a child thread's draft when the inventory includes it", () => {
-    const storage = memoryStorage();
-    const store = createDraftStore(storage);
-    store.writeThreadDraft("host_a", "parent", "parent draft");
-    store.writeThreadDraft("host_a", "child", "child draft");
-    store.flush();
+  it("expires drafts by age, not by which threads a daemon lists", () => {
+    const day = 24 * 60 * 60 * 1000;
+    const storage = memoryStorage({
+      [threadKey("wsl_host", "child_thread")]: JSON.stringify({
+        text: "child draft",
+        updatedAt: 2 * day,
+      }),
+      [threadKey("same_id_host", "shared_thread")]: JSON.stringify({
+        text: "other machine",
+        updatedAt: 2 * day,
+      }),
+    });
+    const store = createDraftStore(storage, { now: () => 3 * day });
 
-    store.pruneThreadDrafts(
-      [
-        { host: "host_a", threadId: "parent" },
-        { host: "host_a", threadId: "child" },
-      ],
-      ["host_a"],
-    );
-
-    expect(store.readThreadDraft("host_a", "child")).toBe("child draft");
+    expect(store.readThreadDraft("wsl_host", "child_thread")).toBe("child draft");
+    expect(store.readThreadDraft("same_id_host", "shared_thread")).toBe("other machine");
   });
 
-  it("does not prune anything when the daemon reported no hosts", () => {
+  it("clears a draft only while it is still the revision that was submitted", () => {
     const storage = memoryStorage();
-    const store = createDraftStore(storage);
-    store.writeThreadDraft("host_a", "thread_1", "keep me");
+    let time = 100;
+    const store = createDraftStore(storage, { now: () => time });
+    store.writeThreadDraft("host_a", "thread_1", "submitted");
+    store.flush();
+    const submitted = store.readThreadDraftRevision("host_a", "thread_1");
+
+    time = 200;
+    store.writeThreadDraft("host_a", "thread_1", "newer from another tab");
     store.flush();
 
-    store.pruneThreadDrafts([], []);
+    expect(store.clearThreadDraftIfRevision("host_a", "thread_1", submitted)).toBe(false);
+    expect(store.readThreadDraft("host_a", "thread_1")).toBe("newer from another tab");
 
-    expect(store.readThreadDraft("host_a", "thread_1")).toBe("keep me");
+    const newer = store.readThreadDraftRevision("host_a", "thread_1");
+    expect(store.clearThreadDraftIfRevision("host_a", "thread_1", newer)).toBe(true);
+    expect(store.readThreadDraft("host_a", "thread_1")).toBe("");
+  });
+
+  it("clears only the submitted folder's new-thread draft", () => {
+    const storage = memoryStorage();
+    let time = 100;
+    const store = createDraftStore(storage, { now: () => time });
+    store.writeNewThreadDraft("host_a", "~/code/api", "api work");
+    store.flush();
+    const submitted = store.readNewThreadDraftRevision("host_a", "~/code/api");
+
+    time = 200;
+    store.writeNewThreadDraft("host_a", "~/code/web", "web work");
+    store.flush();
+
+    expect(store.clearNewThreadDraftIfRevision("host_a", "~/code/api", submitted)).toBe(true);
+    expect(store.readNewThreadDraft("host_a", "~/code/api")).toBe("");
+    expect(store.readNewThreadDraft("host_a", "~/code/web")).toBe("web work");
   });
 
   it("caps the store by removing the oldest draft keys", () => {
@@ -188,15 +216,16 @@ describe("draft store", () => {
   });
 
   it("trims an over-cap store when it loads", () => {
+    const base = 1_700_000_000_000;
     const initial: Record<string, string> = {};
     for (let index = 0; index < MAX_STORED_DRAFTS + 5; index += 1) {
       initial[threadKey("host_a", `t${index}`)] = JSON.stringify({
         text: `draft ${index}`,
-        updatedAt: index,
+        updatedAt: base + index,
       });
     }
     const storage = memoryStorage(initial);
-    const store = createDraftStore(storage);
+    const store = createDraftStore(storage, { now: () => base + MAX_STORED_DRAFTS + 10 });
 
     expect(store.readThreadDraft("host_a", "t0")).toBe("");
     expect([...storage.data.keys()].filter((key) => key.startsWith(DRAFT_KEY_PREFIX))).toHaveLength(
@@ -262,6 +291,7 @@ describe("draft store", () => {
   });
 
   it("migrates the old single-blob key, then deletes it", () => {
+    const now = Date.now();
     const legacy = JSON.stringify({
       version: 1,
       drafts: [
@@ -270,14 +300,14 @@ describe("draft store", () => {
           host: "host_a",
           target: "thread_1",
           text: "old draft",
-          updatedAt: 5,
+          updatedAt: now - 1000,
         },
         {
           scope: "new-thread",
           host: "host_a",
           target: "~/code",
           text: "old prompt",
-          updatedAt: 6,
+          updatedAt: now - 500,
         },
       ],
     });
@@ -292,14 +322,21 @@ describe("draft store", () => {
 
   it("does not overwrite a newer per-key draft during migration", () => {
     const key = threadKey("host_a", "thread_1");
+    const now = Date.now();
     const storage = memoryStorage({
       [LEGACY_DRAFTS_STORAGE_KEY]: JSON.stringify({
         version: 1,
         drafts: [
-          { scope: "thread", host: "host_a", target: "thread_1", text: "older", updatedAt: 1 },
+          {
+            scope: "thread",
+            host: "host_a",
+            target: "thread_1",
+            text: "older",
+            updatedAt: now - 2000,
+          },
         ],
       }),
-      [key]: JSON.stringify({ text: "newer", updatedAt: 9 }),
+      [key]: JSON.stringify({ text: "newer", updatedAt: now - 1000 }),
     });
     const store = createDraftStore(storage);
 

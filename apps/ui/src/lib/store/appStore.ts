@@ -19,7 +19,6 @@ import type { H4rnClient } from "@/lib/client/client";
 import { createClientFromEnv, readBootConfig } from "@/lib/client/config";
 import { toProtoError } from "@/lib/client/errors";
 import type { ConnectionSnapshot, EventEnvelope } from "@/lib/client/types";
-import { pruneThreadDrafts } from "@/lib/drafts";
 import { pushRoute, type Route, readRoute, replaceRoute, routePath } from "@/lib/router";
 import { applyTerminalTheme } from "@/lib/terminalTheme";
 import { createThreadLog, foldEvent, type ThreadLog } from "./projection";
@@ -735,16 +734,13 @@ export async function loadThreads(): Promise<void> {
         harness: null,
         search: null,
         include_snoozed: true,
-        // The full inventory (child threads included) decides which drafts
-        // survive; only root threads go into the visible list below.
-        include_children: true,
+        include_children: false,
       },
     });
     if (response.type !== "threads") return;
     const current = getState();
     const threads: Record<ThreadId, ThreadSummary> = {
       ...response.threads.reduce<Record<ThreadId, ThreadSummary>>((acc, thread) => {
-        if (thread.parent_thread_id !== null) return acc;
         acc[thread.thread_id] = thread;
         return acc;
       }, {}),
@@ -760,26 +756,6 @@ export async function loadThreads(): Promise<void> {
       threadsError: null,
       lastSyncAt: Date.now(),
     });
-    // A thread that is gone takes its draft with it; this also runs at startup
-    // so drafts left by deleted threads do not accumulate. The inventory is
-    // every thread the daemon reported, child threads included, plus any child
-    // the subagent panel had already opened. Only hosts this daemon knows are
-    // considered, so switching machines or signing out leaves other drafts be.
-    const retained = new Map<string, { host: HostId; threadId: ThreadId }>();
-    for (const thread of response.threads) {
-      retained.set(`${thread.host}\u0000${thread.thread_id}`, {
-        host: thread.host,
-        threadId: thread.thread_id,
-      });
-    }
-    for (const thread of Object.values(current.threads)) {
-      if (thread.parent_thread_id === null) continue;
-      retained.set(`${thread.host}\u0000${thread.thread_id}`, {
-        host: thread.host,
-        threadId: thread.thread_id,
-      });
-    }
-    pruneThreadDrafts([...retained.values()], Object.keys(current.hosts));
   } catch (error) {
     const current = getState();
     setState({

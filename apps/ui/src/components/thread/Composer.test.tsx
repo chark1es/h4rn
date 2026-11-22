@@ -256,6 +256,54 @@ describe("Composer drafts and history", () => {
     expect(readThreadDraft(HOST, THREAD)).toBe("keep me");
   });
 
+  it("leaves history mode when the user types after a recall", () => {
+    mock.state.logs[THREAD] = log(["earlier prompt"]);
+    renderComposer();
+    const input = textarea();
+
+    fireEvent.change(input, { target: { value: "half typed" } });
+    input.setSelectionRange(0, 0);
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    runAnimationFrames();
+    expect(input.value).toBe("earlier prompt");
+
+    fireEvent.change(input, { target: { value: "earlier prompt edited" } });
+    fireEvent.keyDown(input, { key: "ArrowDown" });
+    runAnimationFrames();
+
+    expect(input.value).toBe("earlier prompt edited");
+    expect(readThreadDraft(HOST, THREAD)).toBe("earlier prompt edited");
+  });
+
+  it("keeps a newer draft from another tab when the send finishes", async () => {
+    let finish: (ok: boolean) => void = () => undefined;
+    mock.sendMessage.mockReturnValue(
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    renderComposer();
+    const input = textarea();
+
+    fireEvent.change(input, { target: { value: "being sent" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send reply" }));
+    await waitFor(() => expect(mock.sendMessage).toHaveBeenCalled());
+
+    // The other tab saves newer text for the same thread while the send waits.
+    const key = draftStorageKey("thread", HOST, THREAD);
+    const remote = JSON.stringify({ text: "written elsewhere", updatedAt: Date.now() + 1000 });
+    window.localStorage.setItem(key, remote);
+    window.dispatchEvent(new StorageEvent("storage", { key, newValue: remote }));
+    await waitFor(() => expect(input.value).toBe("written elsewhere"));
+
+    await act(async () => {
+      finish(true);
+    });
+
+    expect(readThreadDraft(HOST, THREAD)).toBe("written elsewhere");
+    expect(input.value).toBe("written elsewhere");
+  });
+
   it("adopts another tab's draft only when it has no unsaved edit", async () => {
     writeThreadDraft(HOST, THREAD, "saved elsewhere");
     flushDrafts();

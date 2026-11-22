@@ -22,8 +22,10 @@ import type { ThreadSummary } from "@/gen";
 import { useIsPhone } from "@/hooks/use-media-query";
 import { caretOnFirstLine, sentPrompts, stepPromptHistory } from "@/lib/composerHistory";
 import {
-  clearThreadDraft,
+  clearThreadDraftIfRevision,
+  flushDrafts,
   readThreadDraft,
+  readThreadDraftRevision,
   subscribeDraftChanges,
   writeThreadDraft,
 } from "@/lib/drafts";
@@ -151,13 +153,19 @@ export function Composer({ summary }: { summary: ThreadSummary }) {
     if (!text.trim() && attachments.attachments.length === 0) return;
     const value = text;
     setSending(true);
+    // Write the text now so the revision captured below is the one storage
+    // holds; a send takes a moment and another tab may write in between.
+    flushDrafts();
+    const revision = readThreadDraftRevision(summary.host, summary.thread_id);
     const ok = await sendMessage(summary.thread_id, value, attachments.attachments);
     setSending(false);
     if (ok) {
-      clearThreadDraft(summary.host, summary.thread_id);
+      // Clear only the draft that was sent. If this tab typed again, or another
+      // tab saved newer text, that text stays in the box and in storage.
+      const cleared = clearThreadDraftIfRevision(summary.host, summary.thread_id, revision);
       historyIndex.current = -1;
       historyDraft.current = "";
-      setText("");
+      if (cleared) setText("");
       attachments.clear();
       requestAnimationFrame(autosize);
     }

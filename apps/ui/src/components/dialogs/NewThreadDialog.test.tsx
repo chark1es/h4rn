@@ -1,0 +1,267 @@
+// @vitest-environment jsdom
+
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { HostSummary } from "@/gen";
+
+const mock = vi.hoisted(() => {
+  const state: {
+    connection: { status: string };
+    hosts: Record<string, HostSummary>;
+    localHostId: string | null;
+    ui: {
+      newThreadOpen: boolean;
+      newThreadPreset: { host: string; workspace: string } | null;
+    };
+  } = {
+    connection: { status: "online" },
+    hosts: {},
+    localHostId: null,
+    ui: { newThreadOpen: true, newThreadPreset: null },
+  };
+  const attachments = {
+    attachments: [] as unknown[],
+    tasks: [] as unknown[],
+    uploading: false,
+    failed: false,
+    blockedReason: null,
+    inputRef: { current: null },
+    addFiles: () => undefined,
+    addPastedText: () => false,
+    openPicker: () => undefined,
+    onInputChange: () => undefined,
+    remove: () => undefined,
+    retry: () => undefined,
+    clear: () => undefined,
+  };
+  return {
+    state,
+    attachments,
+    createThread: vi.fn<(input: Record<string, unknown>) => Promise<boolean>>(),
+    closeNewThread: vi.fn(),
+  };
+});
+
+vi.mock("@/lib/store/appStore", () => ({
+  useApp: (selector: (state: unknown) => unknown) => selector(mock.state),
+  createThread: mock.createThread,
+  closeNewThread: mock.closeNewThread,
+}));
+
+vi.mock("@/features/harnesses/harnessStore", () => ({
+  useHarnesses: () => null,
+  useHarnessVersions: () => undefined,
+}));
+
+vi.mock("@/features/proxy/proxyStore", () => ({
+  useProxyCatalog: () => undefined,
+  useProxy: () => undefined,
+  proxyOverrideFor: () => null,
+  proxyModelsFor: () => [],
+  proxyDefaultModel: () => null,
+}));
+
+vi.mock("@/hooks/use-media-query", () => ({
+  useIsPhone: () => false,
+}));
+
+vi.mock("@/features/attachments/use-attachments", () => ({
+  useAttachmentDrafts: () => mock.attachments,
+  useAttachShortcut: () => undefined,
+}));
+
+import {
+  DEFAULT_NEW_THREAD_WORKSPACE,
+  flushDrafts,
+  readNewThreadDraft,
+  writeNewThreadDraft,
+} from "@/lib/drafts";
+import { NewThreadDialog } from "./NewThreadDialog";
+
+function host(hostId: string, name: string): HostSummary {
+  return {
+    host_id: hostId,
+    name,
+    platform: "linux",
+    online: true,
+    last_seen: "2026-01-01T00:00:00.000Z",
+    harnesses: ["claude_code"],
+    latency_ms: null,
+    path: null,
+  };
+}
+
+function textarea(): HTMLTextAreaElement {
+  return document.getElementById("new-thread-task") as HTMLTextAreaElement;
+}
+
+function folderField(): HTMLInputElement {
+  return document.getElementById("new-thread-workspace") as HTMLInputElement;
+}
+
+function commitFolder(value: string): void {
+  fireEvent.change(folderField(), { target: { value } });
+  fireEvent.blur(folderField());
+}
+
+describe("NewThreadDialog drafts", () => {
+  beforeEach(() => {
+    cleanup();
+    flushDrafts();
+    window.localStorage.clear();
+    mock.state.connection.status = "online";
+    mock.state.hosts = {};
+    mock.state.localHostId = null;
+    mock.state.ui.newThreadOpen = true;
+    mock.state.ui.newThreadPreset = null;
+    mock.createThread.mockReset();
+    mock.closeNewThread.mockReset();
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("adopts the default host and its saved draft when the host resolves", async () => {
+    writeNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE, "saved prompt");
+    flushDrafts();
+
+    const view = render(<NewThreadDialog />);
+    expect(textarea().value).toBe("");
+
+    mock.state.hosts = { host_a: host("host_a", "atlas") };
+    mock.state.localHostId = "host_a";
+    view.rerender(<NewThreadDialog />);
+
+    await waitFor(() => expect(textarea().value).toBe("saved prompt"));
+    expect(folderField().value).toBe(DEFAULT_NEW_THREAD_WORKSPACE);
+  });
+
+  it("switches the prompt to a folder's draft only when the folder is committed", async () => {
+    writeNewThreadDraft("host_a", "~/code/web", "web work");
+    flushDrafts();
+    mock.state.hosts = { host_a: host("host_a", "atlas") };
+    mock.state.localHostId = "host_a";
+
+    render(<NewThreadDialog />);
+    await waitFor(() => expect(folderField().value).toBe(DEFAULT_NEW_THREAD_WORKSPACE));
+
+    fireEvent.change(folderField(), { target: { value: "~/code/web" } });
+    expect(textarea().value).toBe("");
+    expect(readNewThreadDraft("host_a", "~/code/web")).toBe("web work");
+
+    fireEvent.blur(folderField());
+    await waitFor(() => expect(textarea().value).toBe("web work"));
+    expect(folderField().value).toBe("~/code/web");
+  });
+
+  it("commits the folder on Enter", async () => {
+    writeNewThreadDraft("host_a", "~/code/web", "web work");
+    flushDrafts();
+    mock.state.hosts = { host_a: host("host_a", "atlas") };
+    mock.state.localHostId = "host_a";
+
+    render(<NewThreadDialog />);
+    await waitFor(() => expect(folderField().value).toBe(DEFAULT_NEW_THREAD_WORKSPACE));
+
+    fireEvent.change(folderField(), { target: { value: "~/code/web" } });
+    fireEvent.keyDown(folderField(), { key: "Enter" });
+
+    await waitFor(() => expect(textarea().value).toBe("web work"));
+  });
+
+  it("switches host and draft together when the user picks another online host", async () => {
+    writeNewThreadDraft("host_b", DEFAULT_NEW_THREAD_WORKSPACE, "for beta");
+    flushDrafts();
+    mock.state.hosts = { host_a: host("host_a", "alpha"), host_b: host("host_b", "beta") };
+    mock.state.localHostId = null;
+
+    render(<NewThreadDialog />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Host: alpha" })).toBeTruthy());
+
+    fireEvent.pointerDown(screen.getByRole("button", { name: "Host: alpha" }), {
+      button: 0,
+      ctrlKey: false,
+      pointerType: "mouse",
+    });
+    const option = await screen.findByRole("menuitem", { name: /beta/ });
+    fireEvent.click(option);
+
+    await waitFor(() => expect(textarea().value).toBe("for beta"));
+    expect(screen.getByRole("button", { name: "Host: beta" })).toBeTruthy();
+  });
+
+  it("rebinds to the daemon's own host when it arrives before the user picks one", async () => {
+    writeNewThreadDraft("host_local", DEFAULT_NEW_THREAD_WORKSPACE, "local draft");
+    flushDrafts();
+    mock.state.hosts = { host_remote: host("host_remote", "alpha") };
+    mock.state.localHostId = null;
+
+    const view = render(<NewThreadDialog />);
+    await waitFor(() => expect(textarea().value).toBe(""));
+    expect(screen.getByRole("button", { name: "Host: alpha" })).toBeTruthy();
+
+    mock.state.hosts = {
+      host_remote: host("host_remote", "alpha"),
+      host_local: host("host_local", "zulu"),
+    };
+    mock.state.localHostId = "host_local";
+    view.rerender(<NewThreadDialog />);
+
+    await waitFor(() => expect(textarea().value).toBe("local draft"));
+    expect(screen.getByRole("button", { name: "Host: zulu" })).toBeTruthy();
+  });
+
+  it("starts on the visible host and folder and clears the submitted draft", async () => {
+    mock.createThread.mockResolvedValue(true);
+    mock.state.hosts = { host_a: host("host_a", "atlas") };
+    mock.state.localHostId = "host_a";
+
+    render(<NewThreadDialog />);
+    await waitFor(() => expect(folderField().value).toBe(DEFAULT_NEW_THREAD_WORKSPACE));
+
+    fireEvent.change(textarea(), { target: { value: "build it" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+
+    await waitFor(() => expect(mock.createThread).toHaveBeenCalledTimes(1));
+    expect(mock.createThread.mock.calls[0]?.[0]).toMatchObject({
+      host: "host_a",
+      workspacePath: DEFAULT_NEW_THREAD_WORKSPACE,
+      prompt: "build it",
+    });
+    await waitFor(() => expect(mock.closeNewThread).toHaveBeenCalled());
+    expect(readNewThreadDraft("host_a", DEFAULT_NEW_THREAD_WORKSPACE)).toBe("");
+  });
+
+  it("clears only the submitted folder when the folder changes while Start waits", async () => {
+    writeNewThreadDraft("host_a", "~/code/api", "api work");
+    writeNewThreadDraft("host_a", "~/code/web", "web work");
+    flushDrafts();
+    let finish: (ok: boolean) => void = () => undefined;
+    mock.createThread.mockReturnValue(
+      new Promise<boolean>((resolve) => {
+        finish = resolve;
+      }),
+    );
+    mock.state.hosts = { host_a: host("host_a", "atlas") };
+    mock.state.localHostId = "host_a";
+
+    render(<NewThreadDialog />);
+    await waitFor(() => expect(folderField().value).toBe(DEFAULT_NEW_THREAD_WORKSPACE));
+
+    commitFolder("~/code/api");
+    await waitFor(() => expect(textarea().value).toBe("api work"));
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(mock.createThread).toHaveBeenCalledTimes(1));
+
+    commitFolder("~/code/web");
+    await waitFor(() => expect(textarea().value).toBe("web work"));
+
+    await act(async () => {
+      finish(true);
+    });
+
+    expect(readNewThreadDraft("host_a", "~/code/api")).toBe("");
+    expect(readNewThreadDraft("host_a", "~/code/web")).toBe("web work");
+  });
+});
