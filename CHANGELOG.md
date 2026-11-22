@@ -7,6 +7,91 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Added
 
+- **The daemon can run as a per-user service.** `h4rnd service install` writes the
+  shipped systemd user unit (or launch agent, or Windows scheduled task) with the
+  running binary's absolute path and current data directory, then enables and
+  starts it. `status` reports installed/active/enabled, `restart` and `logs` work
+  on every platform, and `uninstall` stops and removes the service without touching
+  the data directory. Installation is idempotent, refuses a binary under
+  `target/debug` or a temp directory unless `--force`, and mentions
+  `loginctl enable-linger` on Linux when lingering is off. Reinstalling an
+  unchanged launch agent that is already running leaves it alone. On Windows the
+  task is named per account (`h4rn-<user>`) and uses an inline launcher that
+  waits up to 30 seconds for the updater's installation lock and repairs a
+  missing `h4rnd.exe` itself before starting the daemon, so it starts after an
+  interrupted update even when the binary there is an older image without
+  `--recover-only`. A task that an older release registered under
+  the machine-wide `h4rn` name is removed by the next install or uninstall. The
+  systemd unit keeps a `$` in the executable path literal (systemd does not
+  expand variables there) while still escaping `$$` in arguments.
+- **`h4rnd update` installs signed daemon releases.** It finds the latest GitHub
+  release for the repository baked in at build time, downloads the archive for
+  this target triple and `SHA256SUMS`, verifies the hash and a minisign signature
+  over `SHA256SUMS` against the compiled `H4RN_UPDATER_PUBKEY`, and replaces the
+  binary atomically. The previous binary is kept for `h4rnd update --rollback`; a
+  running service is restarted, and an active turn stops the update unless
+  `--force`. Builds without a public key refuse to self-update and print manual
+  steps instead. Release builds with the signing key now publish
+  `SHA256SUMS.sig`; an archive signature alone is not accepted.
+- **The updater secrets are a pair.** `H4RN_UPDATER_PUBKEY` gives a build the key
+  it verifies with, and `TAURI_SIGNING_PRIVATE_KEY` produces `SHA256SUMS.sig`. A
+  release with the public key but no private key now fails in the release
+  workflow instead of publishing archives every daemon refuses to install.
+- **Updates are one-at-a-time and interruption-safe.** An advisory lock beside the
+  binary serializes updates, rollbacks and startup recovery, and staging files are
+  created exclusively with unique names. On Unix the replace and the rollback are
+  each a single `rename` over the install path; on Windows the moved-aside binary
+  is restored by the next start (or by the scheduled task's recovery step).
+- **A backup and its checksum are published together.** The rollback copy no
+  longer goes straight to `h4rnd.previous`: it is copied into a unique temp file
+  beside it, and its sidecar is staged the same way. Only after both are ready
+  are they renamed into place, so a failed publication leaves the previous
+  backup and its checksum untouched and still rollbackable. `--rollback` and
+  startup recovery both refuse a backup that is missing, empty, not executable
+  on Unix or does not match that record, so an interrupted copy can never replace
+  the installed binary; recovery leaves the files in place and says what to do.
+  On Windows `h4rnd update` rewrites the registered task's launcher before it
+  renames anything, and the launcher waits for the installation lock and repairs
+  a missing binary itself, so an interrupted update or rollback comes back up
+  even from a task registered by an older release. The update releases the lock
+  before it dispatches the restart, so the launcher never waits for the update
+  that started it.
+- **A turn that starts during the final step is not cut off.** The idle check is
+  repeated after the new binary is in place and immediately before the restart.
+  If a turn started, the binary stays installed, the restart is skipped, and the
+  update says to run `h4rnd service restart` when the turn finishes. Release
+  metadata requests keep a short total timeout; asset downloads use a 30 s
+  idle timeout and no total limit, so a large archive on a slow link can finish.
+  On Windows a failed `/End` when the task is not running is harmless and only
+  the start step must succeed.
+- **`h4rnd update` probes the daemon it will actually restart.** The guard
+  resolves the registered unit, plist or task first and uses that service's own
+  endpoint, in the daemon's order: a `--bind` in the registered command line,
+  then `H4RN_BIND` from its environment (systemd `Environment=`,
+  `EnvironmentFile=` and the user manager; launchd `EnvironmentVariables`; or
+  the account-wide Windows environment), then the compiled default. The
+  updater's own `--bind` is never used, so an idle second daemon on the CLI's
+  port cannot make a busy service look safe. A source that cannot be read (the
+  systemd user manager environment or the account-wide Windows environment)
+  leaves the service unverified, and the update and `--rollback` refuse unless
+  `--force` is passed. The guard is checked again
+  right before the binary is replaced and again just before the restart, and it
+  fails closed: a daemon that is active or listening but does not answer
+  `/healthz` blocks the update, as does a health response without `active_turns`.
+  The update only restarts the service when that unit/plist/task runs the binary
+  being replaced; a failed restart is a warning, not a failed update. The Linux
+  command line comes from `systemctl --user show -p ExecStart --value`, which
+  includes runtime drop-ins, and the unit files (with reset-and-override
+  drop-ins and `%h`) are read only when systemctl cannot answer.
+- **Windows service reporting has two limits.** `h4rnd service status` reports
+  `enabled: unknown` there, because Task Scheduler's states do not map cleanly to
+  "starts at logon", and `h4rnd service logs` prints guidance instead of following
+  a file because the task runs without a console and the daemon writes no log
+  file. Task names are per account, and a task installed by an older release
+  (which started `h4rnd.exe` directly) keeps working and is migrated the next
+  time `h4rnd service install` runs. macOS service status reports
+  `enabled: unknown` unless `launchctl print-disabled` could be read, instead of
+  assuming the agent is enabled.
 - **Preview HTML files in the right panel.** A report, chart or mockup the agent wrote can be
   opened from the Files tab's new action on `.html`/`.htm` rows, or from a relative HTML link in
   an agent message. The Preview tab reads the file through the daemon, inlines its relative CSS,
@@ -61,33 +146,46 @@ All notable changes to h4rn are recorded here. The format follows
   (the Web Notification API, asked for only when a switch is turned on; there is no separate
   Allow button). Approvals and waiting questions, finished and failed turns, and a linked machine
   going offline notify only when the window is not focused or a different thread is open.
-  Replay follows the journal-head boundary named by the subscribe answer, so a live approval that
-  arrives while the handshake is still in flight notifies on a first connect and after a reconnect,
-  while events at or below the boundary stay quiet. A subscribe that outlives its own 6 s request
+  Replay follows the journal-head boundary named by the subscribe answer. On a first connect
+  nothing was replayed, so every frame held during the handshake is live even when its sequence
+  sits at or below the head the answer names; a resumed subscribe treats events at or below its
+  boundary as history. A subscribe that outlives its own 6 s request
   keeps holding the buffer until its answer closes the replay at that boundary (or the socket
   drops it for the next subscribe to replay); an older daemon that accepts a live-edge subscribe
-  without naming a boundary delivers those frames untagged, because nothing was replayed. Finished
-  and failed turns follow the daemon's
-  thread summary and need a live completion for the current turn: a thread moved to Done by another
-  client, or a replayed completion followed by a live tick, says nothing. A live completion is spent
-  on the one daemon transition it caused: a manual tab move by the person discards it, and a
-  re-seeded baseline clears every remembered completion. The list re-seeds the
-  baseline whenever the client becomes ready, so a gap healed by a list cannot announce history. A
+  without naming a boundary delivers those frames untagged, because nothing was replayed. A Done
+  follows the daemon's thread summary and needs a live completion for the current turn: a thread
+  moved to Done by another client, or a replayed completion followed by a live tick, says nothing.
+  A failure is
+  the turn's own outcome, not the tab's reputation, so it alerts even after a manual move to Done;
+  a failure whose thread no summary has named yet waits for that summary, and a subagent child's
+  failure is dropped once the summary names its parent. A live completion is spent
+  on the one daemon transition it caused: a manual tab move by the person discards it once the
+  daemon accepts the move, and a reconnect clears every remembered completion. The notifier keeps
+  the last streamed summary per thread separately from list snapshots: a routine refresh only adds
+  threads the stream has not named, so a list that answers Done before the completion and its
+  upsert cannot swallow the finish. A
   turn that hands off to a queued turn says nothing, an interrupted turn that lands in Done reads
   “Stopped: the turn was interrupted.”, and a token or turn limit reads as “Stopped”, never
   “Finished”. A burst in one thread
   waits for a quiet period (1 s of no new event, capped at 3 s) and announces the latest message.
   Clicking a notification focuses h4rn and opens the thread. Subagent child threads stay quiet (the
-  parent's mirrored approval already covers them); an approval that arrives before the summary
-  names the child is withdrawn when that summary arrives, and an answered approval cancels that
+  parent's mirrored approval covers them and their own failures are dropped); an approval or
+  failure that arrives before the summary names the child is withdrawn when that summary arrives,
+  and an answered approval cancels that
   thread's queued notification unless a newer approval replaced it. The choices persist per device
   (`h4rn.notifications`): approvals and finished turns on, host offline off. In the browser a
   denied OS permission is shown as “Blocked in system settings”, and a still-undecided permission
   renders the switches off without forgetting the stored choice; the desktop notification plugin
   cannot detect a blocked permission, so Settings says nothing about it there rather than claiming
   a state it does not know. Host offline covers only the machines this device is linked to through
-  the relay; the live transport is always online, matched by `hello`'s local host's name even when
-  no machine was picked, and a due alert fetches linked presence once more before delivery and is
+  the relay; the machine the live transport reaches is always online. That machine comes from the
+  peer, not the account's device rows: a relay link names the machine pairing recorded from
+  `machine_devices`, and a direct connection uses the connect machine the daemon reports in `hello`
+  from its own signed-in session. Only when neither exists does `hello`'s local host name stand in,
+  narrowed to the one host it names; a shared name can no longer say which machine the transport
+  reached and matches neither. A verified machine keeps all of its hosts online, including WSL
+  siblings. A
+  due alert fetches linked presence once more before delivery and is
   dropped if the host came back, the fetch failed or the client disconnected. A direct-only session
   hides the row and says why. On Linux the desktop notification plugin passes `replaces_id = 0`, so
   a later message for the same key stacks instead of replacing; coalescing still limits it to one
@@ -146,9 +244,105 @@ All notable changes to h4rn are recorded here. The format follows
   prompts keep stepping with the caret at their first line. The history is read from the thread's
   own user messages, so it needs no separate copy and works on any device that can see the thread.
   Typing leaves history mode, and an open menu or IME composition leaves the arrow keys alone.
+- **Harnesses: run any ACP agent as a local command.** Settings → Harnesses can now store any
+  number of local ACP agents (display name, unique instance id, executable, literal arguments,
+  environment overrides and a thread-workspace or fixed working directory). A new `acp` harness
+  kind reuses the shared ACP session runtime, so prompts, tool calls, plans, permission requests,
+  cancel and `session/load` resume behave exactly as they do for Antigravity; the Antigravity
+  fallback transport and limit parsing stay in its own adapter. The new-thread picker lists
+  configured agents and reads the models each one advertises. Writes need the `admin` scope and are
+  persisted in `acp-agents.json`. Installed state comes from resolving the executable, and a version
+  is shown only when the agent reports one during `initialize`; h4rn does not install or update it.
+  See [docs/acp.md](docs/acp.md).
 
 ### Fixed
 
+- **A first connect no longer calls its own handshake history.** `since_seq: null` makes the daemon
+  send no replay, so every frame held between `hello` and the subscribe answer is live news, even
+  when its sequence already sits at or below the journal head named by the answer. Only a resumed
+  subscribe tags frames at or below its boundary as replay. This is what lets an approval that
+  arrives during a first handshake notify.
+- **A pinned or hand-moved thread still alerts when its turn fails.** `placed_by_user` is also set
+  for the Working pin and a manual move to Working. Those are per-thread overrides, not a finished
+  turn, so only a Done transition is attributed to the placement; a failure that raises its hand
+  while the thread is pinned now notifies as it should.
+- **Refreshing the thread list keeps live completions.** The notifier keeps the last streamed
+  summary per thread apart from list snapshots. A routine refresh only adds threads the stream has
+  not named yet; it never replaces a baseline or forgets a `turn_completed` that arrived live, so a
+  list that answers Done before the completion and its upsert cannot swallow the finish.
+  Remembered completions and baselines are re-seeded only when the stream recovers (a reconnect),
+  because that is when the list may be healing a real gap.
+- **An older relay's ignored `?linked=true` no longer becomes this device's linked presence.** The
+  relay now marks a filtered machine list with `x-h4rn-machine-filter: linked` (and exposes it to
+  browsers). A client that sees no marker treats the list as unsupported, keeps its presence rows
+  off and says the relay is too old, instead of announcing hosts on the whole account.
+- **Presence identifies the connected machine by the peer the transport reached.** A relay link
+  names the machine pairing recorded from `machine_devices`; a direct connection uses the connect
+  machine the daemon reports in `hello` from its own signed-in session. Neither comes from the
+  account's device rows, where a paired client's `machine_id` is empty and a daemon device's row
+  names a different thing. A verified machine keeps all of its hosts online, including WSL
+  siblings, because the transport reached the machine rather than one row of it. The local host's
+  name is only the fallback when there is no id; it matches one host, so working in one WSL
+  distribution does not mark the Windows host or its siblings online. A name shared by two
+  machines matches neither, so a new same-named machine cannot announce the one in use offline.
+- **A failed tab move leaves no placement note.** The notifier hears about a manual move into Done
+  or Settled only after the daemon accepts it, so a rejected move cannot spend a remembered live
+  completion.
+- **Open at login shows the real OS state.** The row draws no switch while the plugin is being read
+  (instead of a make-believe off), and stays hidden when the shell has no autostart plugin rather
+  than offering a switch that cannot work.
+- **A browser `Notification` constructor that throws is reported once.** Permission revoked between
+  the check and the constructor, or a context that forbids notifications, no longer throws again
+  for every message: the channel logs the first failure and then degrades quietly for the page.
+  Settings reads the same page state, so it can say notifications stopped working on this page
+  (reload to try again) without confusing that with an OS permission.
+- **The Host offline row waits for the first account answer.** Settings no longer flashes the "no
+  linked host" explanation before the relay has had a chance to say what is linked.
+- **A failed linked-presence fetch no longer reads as an old relay.** Whether the relay honours
+  `?linked=true` is tri-state: unknown until a successful answer arrives, `false` only when that
+  answer lacks the filter marker. A failed first fetch keeps it unknown, so Settings hides the row
+  instead of telling the person to update a relay that may be current, and a cached sign-in that is
+  `signed_in` before `refresh()` answers waits the same way.
+- **A machine this client is connected to is never announced offline.** The connected machine is
+  the peer the live transport actually reached: the relay link's machine, or the connect machine
+  the daemon reports in `hello` from its own signed-in session on a direct connection. The
+  account's device rows are not consulted, because a paired client has no machine id there and a
+  daemon device's row names a different thing. The local host's name is only the fallback, and a
+  name shared by two machines now leaves those hosts out of presence entirely instead of feeding
+  them the relay's answer. Adding a second same-named machine can no longer raise an offline alert
+  for the first, and every host of a verified machine — including WSL siblings — stays online
+  while the transport is up.
+- **A live frame queued just behind the subscribe reply still notifies.** The journal head named by
+  the reply is kept as an acknowledged cursor for the next reconnect, separate from the position of
+  frames actually delivered. A first-connect approval that reaches the socket after the reply, with
+  a sequence the reply's head already covers, is therefore delivered as live news instead of being
+  deduplicated away.
+- **A failure alerts even when the thread was already moved to Done.** The turn's own live
+  completion is the signal, independently of where the tab sits: a person who moves a running
+  thread to Done still hears that its turn failed, while a manual move with no new failure stays
+  quiet. One failure is announced once per turn, whether it arrives from the outcome or from the
+  summary's raised hand. Token and turn limits stay with the summary, since the daemon may resume
+  from them.
+- **A list refresh that answers Done first no longer swallows a live completion.** The last
+  streamed summary is kept per thread independently of list snapshots. Whether the list replies
+  before or after the completion, its Done placement is never adopted as the baseline for a thread
+  the stream has spoken about, so the live upsert that follows is still the endpoint the finish
+  announces.
+- **A failure waits for its thread to be known.** A live failed turn can arrive before any summary
+  names the thread. The alert now waits for that summary, keeping the failed turn's outcome by turn
+  id: a queued turn that starts in the meantime does not erase it. An ordinary thread still gets
+  its failure, while a subagent child's pending failure is cancelled because the parent mirrors
+  the moment. A first-connect child failure therefore stays quiet instead of alerting on a thread
+  the notifier cannot yet place.
+- **A browser notification failure is one page state.** Settings and delivery share the fact that
+  the `Notification` constructor stopped working on this page. Settings says notifications stopped
+  working there and need a reload, separately from the OS permission, which is still reported as it
+  is; before, only the notifier knew, and Settings could only offer the OS-blocked sentence.
+- **Open at login keeps real read failures visible.** The toggle is hidden only for the confirmed
+  missing-plugin or missing-command answer from the shell. Any other failure — including a
+  capability denial from a plugin that is installed — keeps the row and shows an error line
+  instead of pretending the setting does not exist. The reason belongs to that row, so changing
+  the tray setting or anything else on the page does not erase it.
 - **An oversized filesystem response no longer closes the paired session.** JSON escaping of
   quotes, backslashes, newlines and control characters can push a 400 KiB text read past the
   secure transport's 512 KiB frame, and the transport answers an oversized frame with
@@ -374,12 +568,17 @@ All notable changes to h4rn are recorded here. The format follows
   started the second process. The single-instance plugin now has its `deep-link` feature, so it
   passes the second launch's arguments to the deep-link plugin before the focus callback, and the
   running window opens what the link names.
-- **The "Connected host is online" check matches by name.** The relay mints its own machine and
+- **The machine this client is connected to is always online.** The relay mints its own machine and
   host ids when a machine registers, so its `MachineHost.id` never equals the id `hello` reports
   for the local host. The notifier compared those ids, decided its own working host was offline,
-  and could announce a host the person was actively using. It now resolves `hello`'s local host to
-  its name through the daemon's host list (the same pairing the sidebar uses) and matches the
-  relay's host by name, ignoring case.
+  and could announce a host the person was actively using. It now names the connected machine from
+  the peer the transport actually reached — the relay link's machine, or the connect machine the
+  daemon reports in `hello` from its own signed-in session on a direct connection — and falls back
+  to `hello`'s local host name through the daemon's host list (the same pairing the sidebar uses,
+  case ignored) only when there is no such id and exactly one linked machine owns a host of that
+  name. A verified machine keeps all of its hosts online, including WSL siblings; two machines
+  sharing a name match neither, so neither can mask the other or be announced offline while the
+  transport is talking to it.
 - **A first-connect subscribe is replay-free whatever its success answer looks like.** An older
   daemon may answer a live-edge subscribe with the protocol's plain `{type:"ack"}`, or with
   `subscribed` and no boundary. Both are successful acceptances of `since_seq: null`, so the
@@ -402,6 +601,72 @@ All notable changes to h4rn are recorded here. The format follows
   `/v1/machines?linked=true` was rejected with 401 and took the whole account and machine refresh
   down with it. The client now signs `/v1/machines` and still fetches with `?linked=true`; a
   presence failure falls back to an empty linked list instead of aborting the refresh.
+- **Local ACP agents: credentials stay off view-scoped devices.** `ListAcpAgents` now masks every
+  environment value and omits the literal argument list, which can also carry a secret; the edit form
+  reads the real configuration through a new admin-scoped `GetAcpAgent`. The last successful probe's
+  models, modes and version are stored and returned to every device, so the model picker no longer
+  needs to start the agent.
+- **Local ACP agents: absolute, same-file resolution and fresh restarts.** A configured command now
+  resolves to an absolute executable before the child starts (relative `PATH` entries are ignored;
+  Windows `.bat`/`.cmd` are refused), so detection, `Check` and launch name the same file. A stored
+  session id is replaced by a fresh session when the agent does not advertise `session/load`, and a
+  thread's stored id is cleared when its agent's command line or effective working directory changes
+  — in the thread itself, so a start that fails before the agent opens a session cannot leave the old
+  id to be replayed by the next attempt. Plans are forwarded and shown in the turn as a quiet
+  checklist, ACP v1 `configOptions` supply model and mode choices, and a view-only model picker shows
+  the last probe or its error instead of spinning.
+- **Local ACP agents are not a startable harness by themselves.** Host summaries and the new-thread,
+  quick-start and delegate pickers no longer offer the bare `acp` kind, so no request can create an
+  ACP thread or subagent without an instance; the daemon rejects both paths explicitly. Delegating
+  from an ACP thread starts the child on the fallback harness's own default model instead of sending
+  it a model id only the ACP agent knew.
+- **Antigravity is unchanged by the shared ACP runtime.** Its non-`auto` default-model aliases are
+  case-sensitive again, its "Antigravity stopped the turn" / "Antigravity is requesting permission"
+  wording is back, its unknown-model error still says "the account offers", and the UTF-16 attachment
+  test covers the shared prompt builder.
+- **ACP agent form saves and checks line up with the daemon.** Instance ids are capped at 64
+  characters, the form accepts either platform's absolute path form (`/dir`, `C:\dir`, UNC) because
+  the daemon's platform decides, and the display-name cap counts characters rather than bytes on both
+  sides. Explicitly added empty arguments are kept, and `Check` stays available and refreshes the
+  list after the binary is installed. Any edit clears the cached version, a probe whose configuration
+  changed while it ran stores nothing, a failed probe leaves the last good models in place, and an
+  invalid entry loaded from `acp-agents.json` is dropped with one log line instead of failing at
+  spawn.
+- **Local ACP agents: a probe is one conversation, and editing one never loses work.** A probe whose
+  configuration changed while it ran now reports a conflict instead of success, its answer is
+  discarded by the client even if it arrives after the edit, and the picker never starts a second
+  probe for an agent already handshaking. A probe also answers on its own task, so an agent that is
+  slow to start no longer holds the connection: other requests on the same socket keep answering
+  while the handshake runs. A probe answer that carries the agent's own error falls back to the
+  daemon's cached models instead of emptying the picker. The delegate dialog's erased task, summary
+  and budget survive a parent summary refresh while the dialog is open, and the environment editor
+  stacks its name, value and Remove controls with 44 px targets on a phone. A plan step that is in
+  progress now carries a neutral mark rather than the accent: blue still means the person is needed.
+- **Local ACP agents: the method the agent actually advertises.** `session/resume` is no longer read
+  as `session/load` support: an agent that advertises only resume is continued with
+  `session/resume`, one that advertises load replays with `session/load`, and one that advertises
+  neither starts a fresh session. A generic agent that advertises both a legacy `models`/`modes`
+  catalogue and v1 `configOptions` now uses `configOptions` and selects with
+  `session/set_config_option`; Antigravity keeps its own account catalogue. A command-line
+  fingerprint is structured (JSON), so an edit from no arguments to one empty argument starts a new
+  session instead of replaying the old id. Two entries with the same instance id in
+  `acp-agents.json` keep the first and drop the second with a warning.
+- **Local ACP agents: one answer for the catalogue, the resume and the process.** `Check` now reads
+  the same v1 `configOptions` catalogue a thread start selects from, so the picker no longer offers
+  legacy ids the agent would reject, and the model stays `default` until you choose one. The client
+  waits 45 s for a probe, covering the daemon's 30 s exchange plus its shutdown grace, instead of
+  abandoning it at the default 10 s. A `session/resume` or `session/load` reply that names no catalogue keeps the thread's saved
+  model and mode and still sends the prompt. A load's replayed history is consumed before the new
+  turn, so a conversation longer than the event queue no longer stalls the load and the old messages
+  are not shown twice. A probe edited while it ran reports the same conflict whether it succeeded or
+  failed, and the Check control stays busy until the original probe settles, so an edit cannot start
+  a second one. The resume fingerprint and the launch now come from one resolved configuration, so
+  an edit in between cannot hand the new command the old session id. The new-thread mode picker
+  offers only modes h4rn can map onto the agent's advertised ids and otherwise says
+  **Mode is managed by the agent**; a fixed working directory is shown before Start and becomes the
+  thread's workspace for Files and Changes.
+  presence failure keeps the last known linked list (empty before the first successful fetch)
+  instead of aborting the refresh.
 - **Closing a terminal ends its background jobs.** With job control, `sleep 1000 &` runs in its own
   process group, so the old group-only signal left it running after the shell was gone. Closing a
   terminal now sends SIGHUP to the shell's own process id, waits for it to forward the hangup, keeps

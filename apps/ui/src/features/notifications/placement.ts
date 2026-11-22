@@ -4,8 +4,9 @@
  * A "Finished" notification is only ever the daemon's own lifecycle
  * transition. When a person moves a thread between tabs, that is a placement,
  * not a completion; the notifier must stop attributing a remembered live
- * completion to whatever Done update follows. The store calls this before it
- * sends the move, and the notifier drops what it was holding for that thread.
+ * completion to whatever Done update follows. The store calls this after the
+ * daemon accepts the move, so a rejected move leaves no placement note. The
+ * notifier drops what it was holding for that thread.
  *
  * This tiny module exists so the store does not have to import the notifier
  * (which reads the store) and create a cycle.

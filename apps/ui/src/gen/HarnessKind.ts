@@ -3,4 +3,4 @@
 /**
  * The coding harness driving a thread (ADR-005).
  */
-export type HarnessKind = "claude_code" | "codex" | "opencode" | "antigravity";
+export type HarnessKind = "claude_code" | "codex" | "opencode" | "antigravity" | "acp";

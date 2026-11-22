@@ -14,6 +14,8 @@
  *   switches that would do nothing.
  */
 
+import { useSyncExternalStore } from "react";
+
 import type { ThreadId } from "@/gen";
 import { secretShell } from "@/lib/platform/secrets";
 import { listenOnShell, tauriInternals } from "@/lib/platform/tauri";
@@ -78,6 +80,51 @@ function normalizePermission(value: unknown): NotificationPermissionState {
   return value === null ? "default" : "denied";
 }
 
+/**
+ * Whether this page's notification delivery has stopped working.
+ *
+ * The browser `Notification` constructor can throw even when the OS permission
+ * still reads `granted` (the permission was revoked between the check and the
+ * call, or the context forbids notifications). That is a property of the page,
+ * not of the OS permission: one fact for the whole page, shared by Settings
+ * and the notifier, so Settings can say delivery stopped here without also
+ * claiming the OS blocked it. A reload starts over.
+ */
+let pageUnavailable = false;
+const pageUnavailableListeners = new Set<() => void>();
+
+function markPageUnavailable(): void {
+  if (pageUnavailable) return;
+  pageUnavailable = true;
+  for (const listener of pageUnavailableListeners) listener();
+}
+
+/** Whether the browser channel stopped delivering on this page. */
+export function browserNotificationsUnavailable(): boolean {
+  return pageUnavailable;
+}
+
+/** Subscribes to the page's delivery state; returns the unsubscribe. */
+export function onBrowserNotificationsUnavailable(listener: () => void): () => void {
+  pageUnavailableListeners.add(listener);
+  return () => pageUnavailableListeners.delete(listener);
+}
+
+/** Re-renders a view when delivery on this page stops working. */
+export function useBrowserNotificationsUnavailable(): boolean {
+  return useSyncExternalStore(
+    onBrowserNotificationsUnavailable,
+    browserNotificationsUnavailable,
+    browserNotificationsUnavailable,
+  );
+}
+
+/** Resets the shared page state between tests. */
+export function resetBrowserNotificationsForTests(): void {
+  pageUnavailable = false;
+  pageUnavailableListeners.clear();
+}
+
 function browserChannel(): NotificationChannel | null {
   if (typeof window === "undefined" || !("Notification" in window)) return null;
   const listeners = new Set<(threadId: ThreadId | null) => void>();
@@ -89,9 +136,12 @@ function browserChannel(): NotificationChannel | null {
 
   return {
     kind: "browser",
+    // The OS permission is what it is, even after the constructor started
+    // throwing: the page-level failure is reported separately.
     permission: async () => normalizePermission(Notification.permission),
     requestPermission: async () => normalizePermission(await Notification.requestPermission()),
     show: (message) => {
+      if (pageUnavailable) return;
       try {
         shown.get(message.key)?.close();
         const notification = new Notification(message.title, {
@@ -108,9 +158,13 @@ function browserChannel(): NotificationChannel | null {
         notification.onclose = () => {
           if (shown.get(message.key) === notification) shown.delete(message.key);
         };
-      } catch {
+      } catch (error) {
         // Some browsers throw when permission was revoked between the check
-        // and the constructor; the next flush asks again.
+        // and the constructor, or when the context forbids notifications
+        // outright. Say it once, then degrade quietly: every later message
+        // would hit the same wall. Settings reads the same fact.
+        markPageUnavailable();
+        console.warn("h4rn: the browser notification channel is unavailable.", error);
       }
     },
     onClick: (listener) => {

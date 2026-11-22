@@ -165,6 +165,13 @@ export type AppState = {
   serverVersion: string | null;
   /** Daemon host id of the machine this client is talking to. */
   localHostId: HostId | null;
+  /**
+   * The connect machine the connected daemon owns, from its `hello`.
+   *
+   * A direct socket reaches exactly this daemon, so this is the machine the
+   * notifier must keep online. It is never this UI's own device row.
+   */
+  daemonMachineId: string | null;
   pendingCreates: PendingCreate[];
   pendingActions: Record<ThreadId, string | undefined>;
   toasts: Toast[];
@@ -204,6 +211,7 @@ function createInitialState(): AppState {
     lastSyncAt: null,
     serverVersion: null,
     localHostId: null,
+    daemonMachineId: null,
     pendingCreates: [],
     pendingActions: {},
     toasts: [],
@@ -787,6 +795,7 @@ export function startConnection(): void {
       hosts,
       serverVersion: info.serverVersion,
       localHostId: info.localHostId,
+      daemonMachineId: info.daemonMachineId,
       connection: { ...state.connection, error: null },
     });
     void loadThreads().then(() => {
@@ -1122,11 +1131,7 @@ async function runThreadAction(
   label: string,
   body: Extract<ClientRequest, { type: "set_thread_tab" | "snooze" | "interrupt" }>,
 ): Promise<boolean> {
-  // Moving a thread into Done or Settled is the person's placement, not the
-  // daemon finishing a turn. Tell the notifier before the move so it cannot
-  // pin a remembered live completion on the Done update that follows. A pin
-  // toggle only moves through Working and is not a placement.
-  if (body.type === "set_thread_tab" && isPlacementMove(body.tab)) noteManualPlacement(threadId);
+  const placement = body.type === "set_thread_tab" && isPlacementMove(body.tab);
   const state = getState();
   setState({
     ...state,
@@ -1134,6 +1139,12 @@ async function runThreadAction(
   });
   try {
     await getClient().request(body);
+    // Moving a thread into Done or Settled is the person's placement, not the
+    // daemon finishing a turn: tell the notifier so it cannot pin a remembered
+    // live completion on the Done update that follows. A pin toggle only moves
+    // through Working and is not a placement. The note is written only after
+    // the daemon accepted the move; a failed move changed nothing to explain.
+    if (placement) noteManualPlacement(threadId);
     return true;
   } catch (error) {
     const proto = toProtoError(error);
@@ -1354,6 +1365,8 @@ export async function sendMessage(
 export type CreateThreadInput = {
   host: HostId;
   harness: HarnessKind;
+  /** Configured ACP agent instance, when `harness` is `acp`. */
+  agentId?: string | null;
   workspacePath: string;
   model: string;
   prompt: string;
@@ -1407,6 +1420,7 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
     parent_thread_id: null,
     host: input.host,
     harness: input.harness,
+    ...(input.agentId ? { agent_id: input.agentId } : {}),
     title,
     workspace_path: input.workspacePath,
     model: input.model,
@@ -1447,6 +1461,7 @@ export async function createThread(input: CreateThreadInput): Promise<boolean> {
       type: "create_thread",
       host: input.host,
       harness: input.harness,
+      agent_id: input.agentId ?? null,
       workspace_path: input.workspacePath,
       model: input.model,
       prompt: input.prompt,

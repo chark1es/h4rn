@@ -212,6 +212,8 @@ Point a daemon at this deployment and complete the OIDC device grant:
 ```bash
 h4rnd login --connect https://connect.example.com --provider orbitid --name workstation
 h4rnd serve
+h4rnd service install   # run the same daemon as a per-user service instead
+h4rnd update            # install a signed release and restart the service
 h4rnd pair              # QR for a device, via connect
 h4rnd pair --direct     # QR with a LAN/tailnet endpoint and one-time PSK (view and approve unless --scope is given)
 h4rnd pair --scope approve --scope files   # restrict what the new device may do

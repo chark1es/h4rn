@@ -29,6 +29,7 @@ export const HARNESS_LABELS: Record<HarnessKind, string> = {
   codex: "Codex",
   opencode: "OpenCode",
   antigravity: "Antigravity",
+  acp: "ACP agent",
 };
 
 export const HARNESS_SLUGS: Record<HarnessKind, string> = {
@@ -36,10 +37,20 @@ export const HARNESS_SLUGS: Record<HarnessKind, string> = {
   codex: "codex",
   opencode: "opencode",
   antigravity: "antigravity",
+  acp: "acp",
 };
 
 export function harnessLabel(harness: HarnessKind): string {
   return HARNESS_LABELS[harness];
+}
+
+/**
+ * A thread's harness in provenance lines. A configured ACP instance names the
+ * instance id, because "ACP" alone would hide which command is running.
+ */
+export function threadHarnessLabel(harness: HarnessKind, agentId?: string | null): string {
+  if (harness === "acp") return agentId ? `ACP · ${agentId}` : "ACP agent";
+  return harnessLabel(harness);
 }
 
 export function harnessSlug(harness: HarnessKind): string {

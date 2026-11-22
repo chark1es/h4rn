@@ -44,6 +44,14 @@ export type ReadyInfo = {
   localHostId: HostId;
   serverVersion: string;
   deviceId: string;
+  /**
+   * The connect machine the daemon owns, when it is signed in.
+   *
+   * `hello` reports it from the daemon's own session, so a direct socket can
+   * name the machine it reached without consulting this device's account row.
+   * `null` for a signed-out daemon or an older daemon that omits the field.
+   */
+  daemonMachineId: string | null;
 };
 
 export type EventEnvelope = {

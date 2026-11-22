@@ -39,6 +39,13 @@ export const HARNESS_MODELS: Record<HarnessKind, HarnessModelInfo> = {
     // Antigravity encodes the thinking level in the model id itself.
     thinking: { kind: "Thinking level (part of the model)", levels: ["low", "medium", "high"] },
   },
+  // A local ACP command reports its own models through `initialize` and
+  // `session/new`; the picker fills from that probe, never from this table.
+  acp: {
+    default: "default",
+    models: [],
+    thinking: null,
+  },
 };
 
 /**
