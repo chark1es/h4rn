@@ -157,7 +157,9 @@ holds it in `wait()` after a PTY EOF, TERM and KILL still go out on schedule, wi
 the shell's pid as well as its group. The session also keeps a cloned child killer — on Windows a
 duplicated process handle — so the close path can end the shell through that handle even while the
 reader thread holds the child in `wait()`; on Windows that handle kill is the only termination path
-the console has. The killer is a separate mutex, so a busy reader thread cannot delay it.
+the console has. A handle kill that fails — an already-reaped child, or a console that refused it —
+falls back to the same cloned killer, so the shell still ends without the child lock. The killer is
+a separate mutex, so a busy reader thread cannot delay it.
 
 Attached viewers share one PTY, so the UI marks xterm's answer to a query the program just asked
 (through parser hooks for DA, DSR, DECRQM, XTWINOPS and OSC colour queries) in the input frame's
@@ -167,6 +169,13 @@ one chunk can ask several questions (two DSR/OSC queries, a batched `OSC 4` pale
 xterm answers each separately. A query split across chunks names the chunk where it started, not
 the one where it ended. Both parts are properties of the output stream, so every viewer that parsed
 the starting chunk computes the same identity, whatever else it received or in what order. The
+scanner that recognises a sequence at a chunk boundary copies xterm's parser instead of a permissive
+reading of the bytes: an empty parameter list is `[0]` (the parser's `CLEAR` action resets the list
+and adds a zero), an empty sub-parameter stays `-1`, values clamp to the positive int32 range, ESC
+starts a new escape in every state — abandoning an open CSI, ending an OSC, DCS or string first —
+and CAN and SUB cancel back to ground. A sequence xterm threw away is therefore never matched
+against a later hook, and a resync snapshot clears the scanner together with the screen, because
+the parser restarts at ground and the abandoned tail is gone. The
 daemon writes the first reply naming a `(position, ordinal)` pair, from any viewer; only exact
 duplicates and positions at or below the evicted high-water mark are dropped. A reply for an older
 position that has not been answered yet is accepted, because it can only rescue a pending query. A
@@ -180,8 +189,12 @@ before a chunk and catches up later therefore names the answers exactly as a vie
 does: the query it missed stays unseen, and the queries it saw are written once between them, in
 arrival order. The old per-viewer floor guarded chunk-local numbering, and that numbering is gone.
 
-Clients declare reply-position support in the attach request (default false, so an older build is
-recognised immediately). While any attached viewer has not declared it, every reply follows the
+Clients declare reply-position support in the attach request with `reply_positions_v2` (default
+false). The field is new rather than the first `reply_positions` flag because the numbering changed
+from the chunk where the query ended to the chunk where it starts: a client that only sends the old
+flag is legacy, exactly like one that sends nothing, so its answers are never correlated with a
+position and cannot collide with a positioned viewer's numbering. While any attached viewer has not
+declared it, every reply follows the
 legacy single-owner rule: the first viewer to send a marked reply that is actually written owns
 them all, and its positioned replies are still validated and deduplicated. A rejected claim — a
 position the daemon never sent — does not take the role, so it cannot suppress the old client's

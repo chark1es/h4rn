@@ -165,7 +165,7 @@ export class TerminalController {
         terminal_id: this.terminalId,
         cols: Math.max(term.cols, 2),
         rows: Math.max(term.rows, 1),
-        reply_positions: true,
+        reply_positions_v2: true,
       });
       if (this.disposed) return;
       this.streamId = attached.terminal.stream_id;
@@ -427,6 +427,9 @@ export class TerminalController {
       if (frame.seq <= this.tracker.position) return;
       term.reset();
       this.tracker.reset(frame.seq);
+      // The snapshot replaces the screen and restarts xterm's parser, so a
+      // sequence left open before it can never complete.
+      this.queryTracker.reset();
       this.queryTracker.beginChunk(frame.seq, frame.payload);
       term.write(new TextDecoder().decode(frame.payload), () => {
         this.queryTracker.endChunk();

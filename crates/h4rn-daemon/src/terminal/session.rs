@@ -231,12 +231,14 @@ pub struct ViewerEntry {
     pub cols: u16,
     /// Requested rows.
     pub rows: u16,
-    /// Whether this client names the output position on every marked reply.
+    /// Whether this client names the output position on every marked reply
+    /// with protocol 2 numbering: the chunk where the query **starts**.
     ///
-    /// A client that does not is an older build. While one is attached the
-    /// terminal uses the legacy single-owner rule for every reply; only when
-    /// every attached viewer declares positions is each answer decided by its
-    /// `(position, ordinal)` through [`AnsweredQueries`].
+    /// A client that does not declare it is legacy (an older build, or one
+    /// that still numbers by the chunk where the query ended). While one is
+    /// attached the terminal uses the legacy single-owner rule for every
+    /// reply; only when every attached viewer declares positions is each
+    /// answer decided by its `(position, ordinal)` through [`AnsweredQueries`].
     pub reply_positions: bool,
     /// Whether this viewer owns every reply while a legacy client is attached.
     ///
@@ -711,12 +713,17 @@ impl Session {
         // handle at all.
         match try_lock(&self.child) {
             Some(mut child) => {
-                let _ = child.kill();
+                // A handle kill that fails (the child was already reaped, or
+                // Windows refused it) gets the same fallback as a busy lock.
+                if child.kill().is_err() {
+                    kill_through_handle(&self.killer);
+                    signal_pid(self.shell_pid, Signal::Kill);
+                }
             }
             None => {
-                // On Unix this is a hangup on an uncatchable-at-this-point
-                // shell; the SIGKILL by pid below is the hard stop there. On
-                // Windows the cloned handle is the TerminateProcess call.
+                // On Unix the handle kill is SIGHUP, which a shell may catch
+                // and ignore; the SIGKILL by pid below is the hard stop there.
+                // On Windows the cloned handle is the TerminateProcess call.
                 kill_through_handle(&self.killer);
                 signal_pid(self.shell_pid, Signal::Kill);
             }
@@ -1466,6 +1473,11 @@ mod tests {
         fn process_id(&self) -> Option<u32> {
             None
         }
+
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
     }
 
     #[tokio::test]
@@ -1541,6 +1553,11 @@ mod tests {
         }
 
         fn process_id(&self) -> Option<u32> {
+            None
+        }
+
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
             None
         }
     }
@@ -1686,8 +1703,8 @@ mod tests {
         }
     }
 
-    /// Closing a console on Windows ends it even when the shell outlives its
-    /// stdio, where the reader thread's `finish` holds the child in `wait()`.
+    /// Closing a console on Windows ends it even when the reader thread's
+    /// `finish` holds the child in `wait()` and the handle kill cannot run.
     #[cfg(windows)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn close_ends_a_windows_console() {
@@ -1722,8 +1739,24 @@ mod tests {
         ));
         session.start_reader(reader);
 
+        // Hold the child handle the way `finish` does inside `wait()`, so the
+        // handle kill cannot run: only the cloned killer can end the console.
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = {
+            let session = Arc::clone(&session);
+            std::thread::spawn(move || {
+                let _held = lock(&session.child);
+                let _ = release_rx.recv_timeout(Duration::from_secs(10));
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while session.child.try_lock().is_ok() {
+            assert!(Instant::now() < deadline, "the child lock must be held");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
         // The close path has no hangup wait on Windows; it ends the process
-        // through its handle and must report the exit soon after.
+        // through the cloned handle and must report the exit soon after.
         let started = Instant::now();
         tokio::time::timeout(Duration::from_secs(5), session.kill_with_grace())
             .await
@@ -1732,6 +1765,9 @@ mod tests {
             started.elapsed() < Duration::from_secs(5),
             "closing the console must not block"
         );
+
+        let _ = release_tx.send(());
+        holder.join().expect("the lock holder joins");
 
         let deadline = Instant::now() + Duration::from_secs(10);
         while session.info().exit.is_none() {
@@ -2257,6 +2293,48 @@ mod tests {
         fn process_id(&self) -> Option<u32> {
             None
         }
+
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
+    }
+
+    /// A child whose handle kill fails, as an already reaped one does.
+    #[derive(Debug)]
+    struct UnkillableChild {
+        kills: Arc<AtomicU64>,
+    }
+
+    impl portable_pty::ChildKiller for UnkillableChild {
+        fn kill(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("the child handle refused the kill"))
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(CountingKiller {
+                kills: Arc::clone(&self.kills),
+            })
+        }
+    }
+
+    impl portable_pty::Child for UnkillableChild {
+        fn try_wait(&mut self) -> std::io::Result<Option<portable_pty::ExitStatus>> {
+            Ok(None)
+        }
+
+        fn wait(&mut self) -> std::io::Result<portable_pty::ExitStatus> {
+            Err(std::io::Error::other("the test child never exits"))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+
+        #[cfg(windows)]
+        fn as_raw_handle(&self) -> Option<std::os::windows::io::RawHandle> {
+            None
+        }
     }
 
     #[test]
@@ -2333,6 +2411,43 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(1),
             "close must not wait for the child lock (took {elapsed:?})"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_handle_kill_still_ends_the_shell_through_the_killer() {
+        let pty = portable_pty::native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open pty");
+        let writer = pty.master.take_writer().expect("pty writer");
+        let kills = Arc::new(AtomicU64::new(0));
+        let session = Arc::new(Session::new(
+            TerminalId::new("term_unkillable"),
+            1,
+            None,
+            HostId::new("host_test"),
+            "/tmp".into(),
+            "/bin/sh".into(),
+            80,
+            24,
+            pty.master,
+            Box::new(UnkillableChild {
+                kills: Arc::clone(&kills),
+            }),
+            writer,
+        ));
+
+        session.kill_with_grace().await;
+
+        assert_eq!(
+            kills.load(Ordering::SeqCst),
+            1,
+            "a handle kill that fails falls back to the independent killer"
         );
     }
 }

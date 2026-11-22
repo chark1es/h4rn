@@ -980,7 +980,7 @@ impl Connection {
                     terminal_id,
                     cols,
                     rows,
-                    reply_positions,
+                    reply_positions_v2,
                 } => self
                     .state
                     .terminals
@@ -990,7 +990,7 @@ impl Connection {
                         self.tx.clone(),
                         cols,
                         rows,
-                        reply_positions,
+                        reply_positions_v2,
                     )
                     .map(|attached| {
                         let Attached {

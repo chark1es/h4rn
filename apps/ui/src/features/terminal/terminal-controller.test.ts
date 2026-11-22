@@ -111,13 +111,13 @@ type BinarySink = { handler: ((data: ArrayBuffer) => void) | null };
 function fakeClient(sent: BinaryFrame[], binary: BinarySink, startSeq = 0) {
   return {
     getSnapshot: () => ({ status: "online" }),
-    request: async (body: { type: string; reply_positions?: boolean }) => {
+    request: async (body: { type: string; reply_positions_v2?: boolean }) => {
       if (body.type === "terminal_open") {
         return { type: "terminal_opened", terminal: TERMINAL_INFO };
       }
       if (body.type === "terminal_attach") {
-        if (body.reply_positions !== true) {
-          throw new Error("attach must declare that replies carry positions");
+        if (body.reply_positions_v2 !== true) {
+          throw new Error("attach must declare protocol 2 reply positions");
         }
         return {
           type: "terminal_attached",
@@ -378,6 +378,31 @@ describe("terminal controller query replies", () => {
     term.input("\x1b[?12;2$y");
 
     expect(sent.map((frame) => frame.seq)).toEqual([ptyInputReplySeq(6)]);
+    controller.dispose();
+  });
+
+  it("forgets a sequence the chunk before a resync snapshot left open", async () => {
+    const sent: BinaryFrame[] = [];
+    const { controller, term, binary } = await startController(sent, 0);
+
+    // Chunk 4 ends in the middle of a mode query. The resync snapshot
+    // replaces the screen and restarts the parser, so that tail is gone.
+    pushOutput(binary, 4, "\x1b[?25");
+    term.finishWrite();
+    pushSnapshot(binary, 5);
+    term.finishWrite();
+
+    // Chunk 6 begins with bytes that would have completed the stale query,
+    // then asks a real one. The answer names chunk 6, where the live query
+    // starts, not chunk 4, whose query no longer exists.
+    pushOutput(binary, 6, "$p\x1b[?25$p");
+    expect(term.query({ prefix: "?", intermediates: "$", final: "p" }, [25])).toBe(false);
+    term.input("\x1b[?25;2$y");
+    term.finishWrite();
+
+    expect(sent.map((frame) => [frame.seq, payload(frame)])).toEqual([
+      [ptyInputReplySeq(6), "\x1b[?25;2$y"],
+    ]);
     controller.dispose();
   });
 });

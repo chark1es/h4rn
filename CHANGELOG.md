@@ -419,7 +419,8 @@ All notable changes to h4rn are recorded here. The format follows
   no longer hold the close past its two-second bound; TERM and KILL still go out on schedule, and
   the session keeps a cloned child handle that terminates the shell even while the reader thread
   holds the child in `wait()`, which is the only way a Windows console ends when its handle is
-  busy.
+  busy. A handle kill that fails falls back to the same cloned handle, so a console that refuses
+  the first termination still ends without the child lock.
 - **Only one attached viewer answers terminal queries.** Two xterm instances each answered device,
   cursor and colour queries, so a shell with a desktop and a phone attached received duplicate
   replies. The UI now marks xterm's own answers to just-asked queries with the output chunk that
@@ -428,7 +429,14 @@ All notable changes to h4rn are recorded here. The format follows
   each distinct answer once from any viewer. Numbering by the starting chunk makes the identity a
   property of the output stream: two viewers name the same answer the same way even when their
   chunks arrive in a different order, and a viewer whose attach snapshot already contained the
-  query's first byte simply never saw the query. A viewer that stalled before a chunk and caught up
+  query's first byte simply never saw the query. The scanner that reads a sequence across a chunk
+  boundary now follows xterm's own parser, so a parameterless DA1, DA2 or DECRQSS query keeps the
+  chunk its ESC came in instead of falling back to the chunk that finished it: an empty parameter
+  list is `[0]`, an empty sub-parameter is `-1`, values clamp the way xterm clamps them, ESC starts
+  a new escape in every state (abandoning a CSI, ending an OSC, DCS or string first), and CAN or
+  SUB cancels to ground, so a sequence xterm threw away is never matched against a later hook. A
+  resync snapshot clears the scanner with the screen, because the parser restarts at ground and the
+  abandoned tail is gone. A viewer that stalled before a chunk and caught up
   later therefore cannot write a second answer for a query another viewer answered in the meantime.
   Only exact duplicates and positions at or below the evicted high-water mark are dropped; a reply
   for an older position that has not been answered yet is accepted, because it can only rescue a
@@ -440,7 +448,10 @@ All notable changes to h4rn are recorded here. The format follows
   resync. The sent bound advances only when a frame is really handed to the outbound channel, so a
   blocked send cannot let a reply name unseen output, and an ack past that bound is clamped, so a
   stale or bogus acknowledgement cannot mark later chunks free. Clients declare reply-position
-  support when they attach; while any attached viewer does not, every reply keeps the legacy
+  support when they attach with `reply_positions_v2`; the new field exists because the numbering
+  changed from the ending chunk to the starting chunk, so a client that only sends the old flag is
+  treated as legacy rather than having its numbers trusted. While any attached viewer does not
+  declare it, every reply keeps the legacy
   single-owner rule, whichever client's reply arrives first. The owner role and the
   answered-position record are only committed once the reply's bytes reach the shell, so a failed
   write leaves neither behind, the answer can still be written by another viewer, and a bogus

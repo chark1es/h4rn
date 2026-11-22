@@ -252,14 +252,14 @@ impl Client {
         terminal_id: &TerminalId,
         cols: u16,
         rows: u16,
-        reply_positions: bool,
+        reply_positions_v2: bool,
     ) -> AttachedView {
         match self
             .request(ClientRequest::TerminalAttach {
                 terminal_id: terminal_id.clone(),
                 cols: Some(cols),
                 rows: Some(rows),
-                reply_positions,
+                reply_positions_v2,
             })
             .await
             .expect("attach terminal")
@@ -809,7 +809,7 @@ fn attach_viewer_declaring(
     manager: &Arc<TerminalManager>,
     terminal: &TerminalInfo,
     read: bool,
-    reply_positions: bool,
+    reply_positions_v2: bool,
 ) -> (
     u64,
     mpsc::Receiver<Outbound>,
@@ -824,7 +824,7 @@ fn attach_viewer_declaring(
             tx,
             Some(80),
             Some(24),
-            reply_positions,
+            reply_positions_v2,
         )
         .expect("attach viewer");
     if read {

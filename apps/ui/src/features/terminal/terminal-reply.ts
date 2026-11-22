@@ -106,7 +106,7 @@ type ParsingChunk = {
 
 /** A sequence whose first byte arrived but whose end is still to come. */
 type PendingEscape = {
-  kind: "escape" | "csi" | "osc" | "dcs" | "string" | "oscEscape" | "dcsEscape" | "stringEscape";
+  kind: "escape" | "csi" | "osc" | "dcs" | "string";
   /** Bytes since the ESC that began it, without the terminator. */
   text: string;
   /** The output chunk that carried that ESC. */
@@ -121,6 +121,13 @@ type PendingEscape = {
  * closes it from growing the tracker without bound.
  */
 const MAX_SEQUENCE_BYTES = 8192;
+
+/** xterm's largest single parameter value (clamped to the positive int32 range). */
+const MAX_PARAM_VALUE = 0x7fffffff;
+
+/** xterm's limits on one sequence's parameters and sub-parameters. */
+const MAX_PARAMS = 32;
+const MAX_SUB_PARAMS = 32;
 
 /**
  * Notes the answer shapes xterm owes the program since the last chunk.
@@ -153,8 +160,8 @@ export class TerminalQueryTracker {
    * `data` is the chunk's raw bytes, which lets the tracker tell an answer to
    * a query that started in an earlier chunk from an answer to a query that
    * started in this one. A snapshot's bytes pass through the same parser, so
-   * they are scanned the same way and continue a sequence the parser still
-   * holds.
+   * they are scanned the same way; [`TerminalQueryTracker.reset`] clears what
+   * came before it first.
    */
   beginChunk(seq: number, data?: Uint8Array): void {
     let carried: ParsingChunk["carried"] = null;
@@ -176,6 +183,22 @@ export class TerminalQueryTracker {
         if (position !== keep) this.ordinals.delete(position);
       }
     }
+  }
+
+  /**
+   * Forgets every pending sequence, query and ordinal.
+   *
+   * A resync snapshot replaces the screen and xterm's parser (`term.reset()`),
+   * so a sequence that was mid-flight before it can never complete: its tail is
+   * gone from the screen, and the parser starts at ground. Keeping it would let
+   * the next chunk finish a query that no longer exists and name its answer by
+   * a chunk the shell already forgot.
+   */
+  reset(): void {
+    this.expected.length = 0;
+    this.chunks.length = 0;
+    this.ordinals.clear();
+    this.pending = null;
   }
 
   /**
@@ -261,6 +284,11 @@ export type TerminalQueryReply = {
  * hook below its own position, so that is all the scan reports. The rest of
  * the scan finds whether the chunk ends inside a sequence, which the next
  * chunk continues.
+ *
+ * The transitions mirror xterm's parser rather than a permissive reading of
+ * the bytes, because a sequence xterm abandoned must not be matched against a
+ * later hook: ESC starts a new escape from every state (cancelling a CSI,
+ * ending an OSC, DCS or string first), and CAN or SUB return to ground.
  */
 function scanOutput(
   seq: number,
@@ -296,8 +324,38 @@ function scanOutput(
     text = "";
     truncated = false;
   };
+  /** Abandons whatever is open without letting it match a later hook. */
+  const cancel = () => {
+    kind = "ground";
+    text = "";
+    truncated = false;
+  };
 
   for (const byte of data) {
+    // CAN and SUB abort the open sequence from any state (xterm's global
+    // EXECUTE-to-ground rule), so nothing in it is a query or its tail.
+    if (byte === 0x18 || byte === 0x1a) {
+      cancel();
+      continue;
+    }
+    // ESC starts a new escape from any state. Inside an OSC, DCS or string it
+    // also ends that sequence first, which is where xterm reports the query;
+    // inside a CSI it simply abandons the unfinished sequence.
+    if (byte === 0x1b && kind !== "ground") {
+      if (kind === "osc" || kind === "dcs" || kind === "string") finish();
+      begin("escape");
+      continue;
+    }
+    // A bare ST ends a string; anywhere else it is ignored (xterm returns to
+    // ground without dispatching).
+    if (byte === 0x9c) {
+      if (kind === "osc" || kind === "dcs" || kind === "string") {
+        finish();
+      } else {
+        cancel();
+      }
+      continue;
+    }
     switch (kind) {
       case "ground":
         if (byte === 0x1b) begin("escape");
@@ -329,47 +387,16 @@ function scanOutput(
         }
         break;
       case "osc":
-        if (byte === 0x07 || byte === 0x9c) {
+        if (byte === 0x07) {
           finish();
-        } else if (byte === 0x1b) {
-          kind = "oscEscape";
         } else {
           append(byte);
         }
         break;
       case "dcs":
-        if (byte === 0x9c) {
-          finish();
-        } else if (byte === 0x1b) {
-          kind = "dcsEscape";
-        } else {
-          append(byte);
-        }
-        break;
       case "string":
-        if (byte === 0x9c) {
-          finish();
-        } else if (byte === 0x1b) {
-          kind = "stringEscape";
-        } else {
-          append(byte);
-        }
+        append(byte);
         break;
-      case "oscEscape":
-      case "dcsEscape":
-      case "stringEscape": {
-        const open = kind === "oscEscape" ? "osc" : kind === "dcsEscape" ? "dcs" : "string";
-        if (byte === 0x5c) {
-          // ST ends the sequence and is not part of its data.
-          finish();
-        } else {
-          // The ESC was not a terminator after all; keep it as data.
-          append(0x1b);
-          append(byte);
-          kind = open;
-        }
-        break;
-      }
     }
   }
 
@@ -400,12 +427,14 @@ function csiSignature(body: string): QuerySignature | null {
   const final = body[intermediatesEnd];
   const finalCode = body.charCodeAt(intermediatesEnd);
   if (!final || finalCode < 0x40 || finalCode > 0x7e) return null;
+  const params = parseParams(body.slice(index, paramsEnd));
+  if (!params) return null;
   return {
     kind: "csi",
     prefix,
     intermediates: body.slice(paramsEnd, intermediatesEnd),
     final,
-    params: parseParams(body.slice(index, paramsEnd)),
+    params,
   };
 }
 
@@ -414,11 +443,13 @@ function dcsSignature(body: string): QuerySignature | null {
   const intermediatesEnd = scanWhile(body, paramsEnd, 0x20, 0x2f);
   const finalCode = body.charCodeAt(intermediatesEnd);
   if (Number.isNaN(finalCode) || finalCode < 0x40 || finalCode > 0x7e) return null;
+  const params = parseParams(body.slice(0, paramsEnd));
+  if (!params) return null;
   return {
     kind: "dcs",
     intermediates: body.slice(paramsEnd, intermediatesEnd),
     final: body[intermediatesEnd] ?? "",
-    params: parseParams(body.slice(0, paramsEnd)),
+    params,
     data: body.slice(intermediatesEnd + 1),
   };
 }
@@ -442,24 +473,67 @@ function scanWhile(body: string, start: number, from: number, to: number): numbe
 }
 
 /**
- * Parses a CSI parameter string the way xterm reports it.
+ * Parses a CSI or DCS parameter string the way xterm reports it.
  *
- * Missing parameters read as zero and sub-parameters stay arrays, so a
- * boundary signature matches the parameters xterm hands to a hook.
+ * xterm starts every sequence with one zero parameter: the parser's `CLEAR`
+ * action resets the list and adds zero, so `ESC[` | `c` is `[0]`, not `[]`,
+ * and a signature built from the bytes can only match the list a hook receives
+ * if it does the same. `;` starts another zero parameter, `:` starts a
+ * sub-parameter whose empty form stays `-1`, and values clamp at the positive
+ * int32 range. Sub-parameters follow their parameter in the flat list xterm's
+ * `toArray` hands to a handler.
+ *
+ * Returns null for bytes xterm sends to its ignore state (a second prefix
+ * byte, for instance): no hook can fire for that sequence, so matching one
+ * would name a query that never existed.
  */
-function parseParams(text: string): (number | number[])[] {
-  if (text === "") return [];
-  const params: (number | number[])[] = [];
-  for (const part of text.split(";")) {
-    if (params.length >= 32) break;
-    const values = part.split(":").map((value) => {
-      if (value === "") return 0;
-      const parsed = Number.parseInt(value, 10);
-      return Number.isNaN(parsed) ? 0 : Math.min(parsed, 65535);
-    });
-    params.push(values.length === 1 ? (values[0] ?? 0) : values);
+function parseParams(text: string): (number | number[])[] | null {
+  const params: Array<{ value: number; subs: number[] | null }> = [{ value: 0, subs: null }];
+  let subParamCount = 0;
+  // xterm stops accepting parameters at 32 and sub-parameters at 32, keeping
+  // what it already has; further digits are ignored until the next `;`.
+  let rejectDigits = false;
+  let rejectSubDigits = false;
+  for (const char of text) {
+    const code = char.charCodeAt(0);
+    const current = params[params.length - 1];
+    if (!current) return null;
+    if (code >= 0x30 && code <= 0x39) {
+      if (rejectDigits) continue;
+      const digit = code - 0x30;
+      const subs = current.subs;
+      if (subs) {
+        if (rejectSubDigits) continue;
+        const last = subs.length - 1;
+        const previous = subs[last] ?? -1;
+        subs[last] = previous < 0 ? digit : Math.min(previous * 10 + digit, MAX_PARAM_VALUE);
+      } else {
+        current.value = Math.min(current.value * 10 + digit, MAX_PARAM_VALUE);
+      }
+    } else if (code === 0x3b) {
+      if (params.length >= MAX_PARAMS) {
+        rejectDigits = true;
+      } else {
+        params.push({ value: 0, subs: null });
+      }
+    } else if (code === 0x3a) {
+      if (rejectDigits || subParamCount >= MAX_SUB_PARAMS) {
+        rejectSubDigits = true;
+      } else {
+        current.subs ??= [];
+        current.subs.push(-1);
+        subParamCount += 1;
+      }
+    } else {
+      return null;
+    }
   }
-  return params;
+  const values: (number | number[])[] = [];
+  for (const param of params) {
+    values.push(param.value);
+    if (param.subs) values.push(param.subs);
+  }
+  return values;
 }
 
 /** Whether two sequences are the same query. */
