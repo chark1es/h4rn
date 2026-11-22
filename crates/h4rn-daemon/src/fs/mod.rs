@@ -21,6 +21,7 @@
 //! "look at and lightly edit the file the agent touched".
 
 pub mod git;
+pub mod git_diff;
 pub mod paths;
 pub mod search;
 pub mod snapshots;
@@ -38,9 +39,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use h4rn_protocol::{
-    DiffAgainst, FileEntry, FileEntryKind, FsCreateKind, FsDeleteResult, FsDiff, FsFileContent,
-    FsListing, FsOmitted, FsSearchBatch, FsTurnChanges, FsWriteConflict, FsWriteResult, ProtoError,
-    ProtoErrorCode, ThreadId, TurnId,
+    DiffAgainst, FileEntry, FileEntryKind, FsBranchList, FsCreateKind, FsDeleteResult, FsDiff,
+    FsDiffCommitList, FsDiffFiles, FsFileContent, FsListing, FsOmitted, FsSearchBatch,
+    FsTurnChanges, FsWriteConflict, FsWriteResult, ProtoError, ProtoErrorCode, ThreadId, TurnId,
 };
 use tokio::sync::mpsc;
 
@@ -672,7 +673,7 @@ impl FsService {
     // Git diffs and agent-turn snapshots
     // ------------------------------------------------------------------
 
-    /// Compares one file against `HEAD` or one turn's pre-turn snapshot.
+    /// Compares one file against `HEAD`, one turn, a branch's merge base or one commit.
     pub fn diff(
         &self,
         workspace: &str,
@@ -690,10 +691,21 @@ impl FsService {
         let relative = normalize_relative(rel)?;
         let rel_path = relative_of(&root, &root.join(&relative));
         let path = resolve_for_diff(&root, rel)?;
-        let current = path.and_then(|path| fs::read(path).ok());
+        // The working-tree side is bounded exactly like an editor read: an
+        // oversized file is reported as too large instead of being loaded.
+        let current_too_large = path
+            .as_ref()
+            .and_then(|path| fs::metadata(path).ok())
+            .map(|meta| meta.len() > MAX_READ_BYTES)
+            .unwrap_or(false);
+        let current = if current_too_large {
+            None
+        } else {
+            path.and_then(|path| fs::read(path).ok())
+        };
         let after = current.as_deref().and_then(text::decode);
         let after_text = after.as_ref().map(|decoded| decoded.text.clone());
-        let binary = current
+        let current_binary = current
             .as_deref()
             .map(|bytes| text::decode(bytes).is_none())
             .unwrap_or(false);
@@ -702,7 +714,7 @@ impl FsService {
             DiffAgainst::Head => {
                 let before = git::head_blob(&root, &rel_path)?;
                 let before_text = before.as_deref().and_then(text::decode);
-                let binary = binary
+                let binary = current_binary
                     || before
                         .as_deref()
                         .map(|bytes| text::decode(bytes).is_none())
@@ -714,8 +726,14 @@ impl FsService {
                     before: before_text.map(|decoded| decoded.text),
                     after: after_text,
                     binary,
-                    note: (before.is_none())
-                        .then(|| "No HEAD version: the file is new or not tracked by git.".into()),
+                    too_large: current_too_large,
+                    note: if current_too_large {
+                        Some("This file is too large to diff.".into())
+                    } else if before.is_none() {
+                        Some("No HEAD version: the file is new or not tracked by git.".into())
+                    } else {
+                        None
+                    },
                 })
             }
             DiffAgainst::AgentTurn { thread_id, turn_id } => {
@@ -741,7 +759,7 @@ impl FsService {
                     ),
                 };
                 let before_text = before.as_deref().and_then(text::decode);
-                let binary = binary
+                let binary = current_binary
                     || before
                         .as_deref()
                         .map(|bytes| text::decode(bytes).is_none())
@@ -753,10 +771,171 @@ impl FsService {
                     before: before_text.map(|decoded| decoded.text),
                     after: after_text,
                     binary,
+                    too_large: current_too_large,
+                    note: if current_too_large {
+                        Some("This file is too large to diff.".into())
+                    } else {
+                        note
+                    },
+                })
+            }
+            DiffAgainst::Base { base } => {
+                let repo = git::repository_root(&root).ok_or_else(|| {
+                    FsError::NotFound("This workspace is not a git repository.".into())
+                })?;
+                let info = git_diff::resolve_base(&root, base.as_deref())?;
+                let repo_rel = git_diff::repo_path(&root, &repo, &rel_path);
+                let mut too_large = current_too_large;
+                let before = merge_base_blob(&repo, &info.merge_base, &repo_rel, &mut too_large)?;
+                let before_text = before.as_deref().and_then(text::decode);
+                let binary = current_binary
+                    || before
+                        .as_deref()
+                        .map(|bytes| text::decode(bytes).is_none())
+                        .unwrap_or(false);
+                let note = if too_large {
+                    Some("This file is too large to diff.".into())
+                } else if before.is_none() {
+                    Some("No base version: the file is new since the merge base.".into())
+                } else if current.is_none() {
+                    Some("This file was deleted since the merge base.".into())
+                } else {
+                    None
+                };
+                Ok(FsDiff {
+                    path: rel_path,
+                    against: against.clone(),
+                    label: format!("vs {}", info.name),
+                    before: before_text.map(|decoded| decoded.text),
+                    after: after_text,
+                    binary,
+                    too_large,
+                    note,
+                })
+            }
+            DiffAgainst::Commit { sha } => {
+                let repo = git::repository_root(&root).ok_or_else(|| {
+                    FsError::NotFound("This workspace is not a git repository.".into())
+                })?;
+                let full = git_diff::resolve_commit(&repo, sha)?;
+                let short = git_diff::short_sha(&repo, &full);
+                let repo_rel = git_diff::repo_path(&root, &repo, &rel_path);
+                let parent = git_diff::first_parent(&repo, &full);
+                let mut too_large = current_too_large;
+                let before = match git_diff::blob_at(&repo, &parent, &repo_rel)? {
+                    git_diff::Blob::Bytes(bytes) => Some(bytes),
+                    git_diff::Blob::TooLarge => {
+                        too_large = true;
+                        None
+                    }
+                    git_diff::Blob::Missing => None,
+                };
+                let committed = match git_diff::blob_at(&repo, &full, &repo_rel)? {
+                    git_diff::Blob::Bytes(bytes) => Some(bytes),
+                    git_diff::Blob::TooLarge => {
+                        too_large = true;
+                        None
+                    }
+                    git_diff::Blob::Missing => None,
+                };
+                let before_text = before.as_deref().and_then(text::decode);
+                let after_text = committed.as_deref().and_then(text::decode);
+                let binary = before
+                    .as_deref()
+                    .map(|bytes| text::decode(bytes).is_none())
+                    .unwrap_or(false)
+                    || committed
+                        .as_deref()
+                        .map(|bytes| text::decode(bytes).is_none())
+                        .unwrap_or(false);
+                let root_commit = parent == git_diff::EMPTY_TREE;
+                let note = if too_large {
+                    Some("This file is too large to diff.".into())
+                } else if before.is_none() && committed.is_none() {
+                    Some("This commit does not change this path.".into())
+                } else if before.is_none() && root_commit {
+                    Some("The root commit adds this file.".into())
+                } else if before.is_none() {
+                    Some("Added by this commit.".into())
+                } else if committed.is_none() {
+                    Some("Deleted by this commit.".into())
+                } else {
+                    None
+                };
+                Ok(FsDiff {
+                    path: rel_path,
+                    against: against.clone(),
+                    label: format!("Commit {short}"),
+                    before: before_text.map(|decoded| decoded.text),
+                    after: after_text.map(|decoded| decoded.text),
+                    binary,
+                    too_large,
                     note,
                 })
             }
         }
+    }
+
+    /// Lists the files a branch or commit range changed.
+    pub fn diff_files(
+        &self,
+        workspace: &str,
+        against: &DiffAgainst,
+    ) -> Result<FsDiffFiles, FsError> {
+        let root = self.workspace(workspace)?;
+        match against {
+            DiffAgainst::Base { base } => {
+                let (info, range) = git_diff::branch_files(&root, base.as_deref())?;
+                let note = range
+                    .files
+                    .is_empty()
+                    .then(|| "No changes against this base.".into());
+                Ok(FsDiffFiles {
+                    against: against.clone(),
+                    label: format!("vs {}", info.name),
+                    base: Some(info.name),
+                    merge_base: Some(info.merge_base),
+                    files: range.files,
+                    truncated: range.truncated,
+                    note,
+                })
+            }
+            DiffAgainst::Commit { sha } => {
+                let (short, range) = git_diff::commit_files(&root, sha)?;
+                let note = range
+                    .files
+                    .is_empty()
+                    .then(|| "This commit changed no files.".into());
+                Ok(FsDiffFiles {
+                    against: against.clone(),
+                    label: format!("Commit {short}"),
+                    base: None,
+                    merge_base: None,
+                    files: range.files,
+                    truncated: range.truncated,
+                    note,
+                })
+            }
+            DiffAgainst::Head | DiffAgainst::AgentTurn { .. } => Err(FsError::Unsupported(
+                "A file list is only available for a branch or a commit.".into(),
+            )),
+        }
+    }
+
+    /// Lists the newest commits between a base's merge base and `HEAD`.
+    pub fn diff_commits(
+        &self,
+        workspace: &str,
+        base: Option<&str>,
+    ) -> Result<FsDiffCommitList, FsError> {
+        let root = self.workspace(workspace)?;
+        git_diff::commits(&root, base)
+    }
+
+    /// Lists the branches a diff can be compared against.
+    pub fn branches(&self, workspace: &str) -> Result<FsBranchList, FsError> {
+        let root = self.workspace(workspace)?;
+        git_diff::branches(&root)
     }
 
     /// Lists the files one turn touched with added/removed line counts.
@@ -1037,6 +1216,41 @@ fn short_turn(value: &str) -> String {
 }
 
 /// Counts added/removed lines between two texts.
+///
+/// Reads a path from the merge-base tree, following a detected rename.
+///
+/// A renamed file has no blob under its new name at the merge base, so the
+/// review would otherwise look like the file was newly added. When git reports
+/// the rename, the old path supplies the real base content.
+fn merge_base_blob(
+    repo: &Path,
+    merge_base: &str,
+    repo_rel: &str,
+    too_large: &mut bool,
+) -> Result<Option<Vec<u8>>, FsError> {
+    match git_diff::blob_at(repo, merge_base, repo_rel)? {
+        git_diff::Blob::Bytes(bytes) => Ok(Some(bytes)),
+        git_diff::Blob::TooLarge => {
+            *too_large = true;
+            Ok(None)
+        }
+        git_diff::Blob::Missing => {
+            let Some(old) = git_diff::renamed_from(repo, merge_base, repo_rel) else {
+                return Ok(None);
+            };
+            match git_diff::blob_at(repo, merge_base, &old)? {
+                git_diff::Blob::Bytes(bytes) => Ok(Some(bytes)),
+                git_diff::Blob::TooLarge => {
+                    *too_large = true;
+                    Ok(None)
+                }
+                git_diff::Blob::Missing => Ok(None),
+            }
+        }
+    }
+}
+
+/// Added and removed line counts between two texts.
 ///
 /// Uses an LCS for ordinary files and a multiset comparison for very large
 /// ones, where the quadratic table would cost more than the number is worth.

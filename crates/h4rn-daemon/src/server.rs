@@ -1430,6 +1430,41 @@ impl Connection {
                     .await
                     .map(|changes| ResponseBody::FsTurnChanges { changes })
                 }
+                ClientRequest::FsDiffFiles {
+                    host,
+                    workspace,
+                    against,
+                } => {
+                    if let Some(error) = self.local_host_error(&host) {
+                        return Some(error_frame(id, error));
+                    }
+                    let fs = Arc::clone(&self.state.fs);
+                    fs_block(fs, move |fs| fs.diff_files(&workspace, &against))
+                        .await
+                        .map(|files| ResponseBody::FsDiffFiles { files })
+                }
+                ClientRequest::FsDiffCommits {
+                    host,
+                    workspace,
+                    base,
+                } => {
+                    if let Some(error) = self.local_host_error(&host) {
+                        return Some(error_frame(id, error));
+                    }
+                    let fs = Arc::clone(&self.state.fs);
+                    fs_block(fs, move |fs| fs.diff_commits(&workspace, base.as_deref()))
+                        .await
+                        .map(|commits| ResponseBody::FsDiffCommits { commits })
+                }
+                ClientRequest::FsBranches { host, workspace } => {
+                    if let Some(error) = self.local_host_error(&host) {
+                        return Some(error_frame(id, error));
+                    }
+                    let fs = Arc::clone(&self.state.fs);
+                    fs_block(fs, move |fs| fs.branches(&workspace))
+                        .await
+                        .map(|branches| ResponseBody::FsBranches { branches })
+                }
                 ClientRequest::BeginUpload {
                     name,
                     size,

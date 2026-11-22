@@ -1,7 +1,11 @@
 import type {
   Event,
   FileEntry,
+  FsBranchList,
   FsDiff,
+  FsDiffCommitList,
+  FsDiffFile,
+  FsDiffFiles,
   FsFileContent,
   FsListing,
   FsSearchMatch,
@@ -293,6 +297,42 @@ const WORKTREE_FILES: Record<string, string> = { ...AGENT_FILES, ...TURN_AFTER }
 
 const BINARY = new Set<string>();
 
+/** The one commit the mock's Commits scope shows. */
+const MOCK_COMMIT = {
+  sha: "1a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d",
+  short_sha: "1a2b3c4",
+  subject: "Pin the clock in the auth suite",
+  author: "You",
+  authored_at: "2026-03-04T12:03:00Z",
+};
+
+const MOCK_COMMITS: FsDiffCommitList = {
+  base: "main",
+  merge_base: "9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c",
+  commits: [MOCK_COMMIT],
+  truncated: false,
+};
+
+function lineDelta(
+  before: string | null,
+  after: string | null,
+): { added: number; removed: number } {
+  const left = before === null ? [] : before.split("\n");
+  const right = after === null ? [] : after.split("\n");
+  if (left.at(-1) === "") left.pop();
+  if (right.at(-1) === "") right.pop();
+  const counts = new Map<string, number>();
+  for (const line of left) counts.set(line, (counts.get(line) ?? 0) - 1);
+  for (const line of right) counts.set(line, (counts.get(line) ?? 0) + 1);
+  let added = 0;
+  let removed = 0;
+  for (const delta of counts.values()) {
+    if (delta > 0) added += delta;
+    else removed += -delta;
+  }
+  return { added, removed };
+}
+
 function etag(text: string): string {
   // FNV-1a, stable and short; the real daemon uses BLAKE3.
   let hash = 0x811c9dc5;
@@ -471,6 +511,25 @@ export class MockFs {
           type: "fs_turn_changes",
           changes: this.turnChanges(request.thread_id, request.turn_id),
         });
+        return true;
+      }
+      case "fs_diff_files": {
+        const request = body as Extract<import("@/gen").ClientRequest, { type: "fs_diff_files" }>;
+        hooks.ok({
+          type: "fs_diff_files",
+          files: this.diffFiles(request.against),
+        });
+        return true;
+      }
+      case "fs_diff_commits":
+        hooks.ok({ type: "fs_diff_commits", commits: MOCK_COMMITS });
+        return true;
+      case "fs_branches": {
+        const branches: FsBranchList = {
+          branches: ["main", "feature/auth-clock"],
+          default_base: "main",
+        };
+        hooks.ok({ type: "fs_branches", branches });
         return true;
       }
       default:
@@ -662,7 +721,34 @@ export class MockFs {
         before,
         after,
         binary: BINARY.has(path),
+        too_large: false,
         note: before === null ? "No HEAD version: the file is new or not tracked by git." : null,
+      };
+    }
+    if (against.kind === "base") {
+      const before = HEAD_FILES[path] ?? null;
+      return {
+        path,
+        against,
+        label: "vs main",
+        before,
+        after,
+        binary: BINARY.has(path),
+        too_large: false,
+        note: before === null ? "No base version: the file is new since the merge base." : null,
+      };
+    }
+    if (against.kind === "commit") {
+      const before = AGENT_FILES[path] ?? null;
+      return {
+        path,
+        against,
+        label: "Commit 1a2b3c4",
+        before,
+        after: TURN_AFTER[path] ?? HEAD_FILES[path] ?? null,
+        binary: BINARY.has(path),
+        too_large: false,
+        note: before === null ? "Added by this commit." : null,
       };
     }
     const before = AGENT_FILES[path] ?? null;
@@ -673,7 +759,63 @@ export class MockFs {
       before,
       after,
       binary: BINARY.has(path),
+      too_large: false,
       note: before === null ? "No pre-turn snapshot for this file." : null,
+    };
+  }
+
+  private diffFiles(against: FsDiff["against"]): FsDiffFiles {
+    if (against.kind === "commit") {
+      const files = TURN_CHANGES.flatMap(({ path }): FsDiffFile[] => {
+        const before = AGENT_FILES[path] ?? null;
+        const after = TURN_AFTER[path] ?? HEAD_FILES[path] ?? null;
+        if (before === after) return [];
+        const delta = lineDelta(before, after);
+        return [
+          {
+            path,
+            old_path: null,
+            status: before === null ? "added" : after === null ? "deleted" : "modified",
+            added: delta.added,
+            removed: delta.removed,
+            binary: BINARY.has(path),
+          },
+        ];
+      });
+      return {
+        against,
+        label: "Commit 1a2b3c4",
+        base: null,
+        merge_base: null,
+        files,
+        truncated: false,
+        note: null,
+      };
+    }
+    const files: FsDiffFile[] = [];
+    for (const path of new Set([...Object.keys(HEAD_FILES), ...this.files.keys()])) {
+      const before = HEAD_FILES[path] ?? null;
+      const after = this.files.get(path) ?? null;
+      if (before === after) continue;
+      const delta = lineDelta(before, after);
+      files.push({
+        path,
+        old_path: null,
+        status: before === null ? "untracked" : after === null ? "deleted" : "modified",
+        added: delta.added,
+        removed: delta.removed,
+        binary: BINARY.has(path),
+      });
+    }
+    files.sort((left, right) => left.path.localeCompare(right.path));
+    return {
+      against,
+      label: "vs main",
+      base: "main",
+      merge_base: MOCK_COMMITS.merge_base,
+      files,
+      truncated: false,
+      note: files.length === 0 ? "No changes against this base." : null,
     };
   }
 

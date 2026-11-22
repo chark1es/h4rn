@@ -224,7 +224,7 @@ pub struct FsDeleteResult {
 }
 
 /// Which side of a diff to compare against.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DiffAgainst {
     /// The repository's `HEAD` blob.
@@ -236,6 +236,94 @@ pub enum DiffAgainst {
         /// Turn whose pre-turn snapshot is the base.
         turn_id: TurnId,
     },
+    /// The working tree against the merge base of a branch and `HEAD`.
+    ///
+    /// The merge base is what keeps commits made on the base branch after the
+    /// fork out of the review. `base` is a local branch or remote-tracking
+    /// name such as `main` or `origin/main`; `None` picks the repository's
+    /// default: the upstream's default branch, then `main`, then `master`.
+    Base {
+        /// Branch to compare against, or `None` for the repository default.
+        base: Option<String>,
+    },
+    /// One commit against its first parent (a root commit against an empty tree).
+    Commit {
+        /// Full or abbreviated commit object id, validated by the daemon.
+        sha: String,
+    },
+}
+
+/// One file in a branch or commit range.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct FsDiffFile {
+    /// Workspace-relative path (the new path for a rename).
+    pub path: String,
+    /// The previous path for a rename.
+    pub old_path: Option<String>,
+    /// What happened to the file in the range.
+    pub status: GitFileStatus,
+    /// Lines added, when the side is text.
+    pub added: u32,
+    /// Lines removed, when the side is text.
+    pub removed: u32,
+    /// True when git or the daemon found either side is not text.
+    pub binary: bool,
+}
+
+/// The files a branch or commit range changed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct FsDiffFiles {
+    /// Scope the list was compared against.
+    pub against: DiffAgainst,
+    /// Human label naming the scope ("vs main", "Commit 1a2b3c4").
+    pub label: String,
+    /// The resolved base ref, when the scope is a branch.
+    pub base: Option<String>,
+    /// The merge-base commit the working tree was compared with.
+    pub merge_base: Option<String>,
+    /// Changed files, path-sorted.
+    pub files: Vec<FsDiffFile>,
+    /// True when the daemon stopped at its file cap.
+    pub truncated: bool,
+    /// Why the list may be incomplete, when that is worth saying.
+    pub note: Option<String>,
+}
+
+/// One commit in the branch comparison.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct FsDiffCommit {
+    /// Full object id.
+    pub sha: String,
+    /// Git's short form, for labels.
+    pub short_sha: String,
+    /// The commit subject line.
+    pub subject: String,
+    /// Author name.
+    pub author: String,
+    /// Author time.
+    pub authored_at: DateTime<Utc>,
+}
+
+/// The newest commits in `merge-base..HEAD`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct FsDiffCommitList {
+    /// The resolved base ref.
+    pub base: String,
+    /// The merge-base commit the range starts at.
+    pub merge_base: String,
+    /// Newest first, capped at 100.
+    pub commits: Vec<FsDiffCommit>,
+    /// True when older commits exist beyond the cap.
+    pub truncated: bool,
+}
+
+/// Branch names a person can compare against.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct FsBranchList {
+    /// Local branches first, then remote-tracking names.
+    pub branches: Vec<String>,
+    /// The base a `Base { base: None }` request resolves to, when one exists.
+    pub default_base: Option<String>,
 }
 
 /// Both sides of one file diff.
@@ -253,6 +341,9 @@ pub struct FsDiff {
     pub after: Option<String>,
     /// True when either side could not be decoded.
     pub binary: bool,
+    /// True when a side is over the read limit and was not loaded.
+    #[serde(default)]
+    pub too_large: bool,
     /// Why one side is missing, when that is not self-evident.
     pub note: Option<String>,
 }
@@ -345,6 +436,54 @@ mod tests {
         assert_eq!(turn["kind"], "agent_turn");
         assert_eq!(turn["thread_id"], "th_1");
         assert_eq!(turn["turn_id"], "turn_1");
+
+        let branch = serde_json::to_value(DiffAgainst::Base { base: None }).unwrap();
+        assert_eq!(branch["kind"], "base");
+        assert!(branch["base"].is_null());
+
+        let commit = serde_json::to_value(DiffAgainst::Commit {
+            sha: "1a2b3c4".into(),
+        })
+        .unwrap();
+        assert_eq!(commit["kind"], "commit");
+        assert_eq!(commit["sha"], "1a2b3c4");
+    }
+
+    #[test]
+    fn older_diff_scopes_still_deserialize() {
+        // A client from before branch and commit review only knows these two
+        // shapes; the daemon must keep accepting them byte for byte.
+        let head: DiffAgainst = serde_json::from_str(r#"{"kind":"head"}"#).unwrap();
+        assert_eq!(head, DiffAgainst::Head);
+        let turn: DiffAgainst =
+            serde_json::from_str(r#"{"kind":"agent_turn","thread_id":"th_1","turn_id":"turn_1"}"#)
+                .unwrap();
+        assert_eq!(
+            turn,
+            DiffAgainst::AgentTurn {
+                thread_id: ThreadId::new("th_1"),
+                turn_id: TurnId::new("turn_1"),
+            }
+        );
+    }
+
+    #[test]
+    fn a_diff_without_the_newer_too_large_flag_still_deserializes() {
+        // An older daemon sends no `too_large`; the field defaults to false so
+        // the client never has to special-case the missing key.
+        let diff: FsDiff = serde_json::from_str(
+            r#"{
+                "path": "a.txt",
+                "against": {"kind": "head"},
+                "label": "HEAD",
+                "before": "old",
+                "after": "new",
+                "binary": false,
+                "note": null
+            }"#,
+        )
+        .unwrap();
+        assert!(!diff.too_large);
     }
 
     #[test]

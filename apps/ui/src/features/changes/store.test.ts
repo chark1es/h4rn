@@ -35,6 +35,7 @@ const modified: FsDiff = {
   before: "old\n",
   after: "new\n",
   binary: false,
+  too_large: false,
   note: null,
 };
 

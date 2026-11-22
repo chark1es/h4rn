@@ -47,6 +47,23 @@ All notable changes to h4rn are recorded here. The format follows
   on an unexpected response) and a Test no longer blocks other requests on the same connection, and
   OpenAI-compatible requests send no `max_tokens` (OpenAI's own API gets
   `max_completion_tokens`).
+- **Review a branch or one commit, and send line comments to the agent.** The IDE diff pane's
+  source picker now offers Uncommitted (HEAD), the turn, Branch and Commits. Branch review compares
+  the working tree with the merge base of a base branch, so commits made on the base after the fork
+  stay out of the review; the base is the upstream's default branch, then `main`, then `master`,
+  and can be changed from the repository's branches. The file list carries git status, added and
+  removed line counts, renames and untracked files, and stops at 2,000 entries with a visible
+  truncation note. Commits lists the newest 100 commits in the branch range and shows one commit's
+  files against its first parent (a root commit against the empty tree); commit ids are validated
+  before git sees them. With no base, the pane says why and HEAD is one click away. Every file
+  still shows the existing binary and too-large states.
+- **Line review comments go to the thread's composer as plain context.** Select a line or range in
+  any diff mode (click, Shift-click, or the keyboard) and write a comment. Pending comments sit
+  under their lines, survive switching files and modes for the thread, and can be edited or
+  deleted. **Send to agent** appends one quoted block per comment (path, side, line range, the
+  quoted lines, the comment and the diff source) to the composer draft; nothing is sent until the
+  person presses Send. There is no mock data behind any of it: every list and diff comes from git
+  in the thread's workspace.
 - **The daemon can run as a per-user service.** `h4rnd service install` writes the
   shipped systemd user unit (or launch agent, or Windows scheduled task) with the
   running binary's absolute path and current data directory, then enables and

@@ -2,7 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type {
   DiffAgainst,
+  FsBranchList,
   FsDiff,
+  FsDiffCommitList,
+  FsDiffFiles,
   FsListing,
   FsSearchMatch,
   FsTurnChanges,
@@ -18,6 +21,7 @@ import { toProtoError } from "@/lib/client/errors";
 import { retainWorkspaceWatch } from "@/lib/client/fsWatch";
 import { getClient } from "@/lib/store/appStore";
 import { conflictFromWrite, keepMineBaseEtag } from "./conflict";
+import { againstForScope, chooseCommit, type DiffSource, firstDiffPath } from "./sources";
 import {
   activeTab,
   closeTab,
@@ -82,9 +86,22 @@ export type IdeState = {
   search: SearchState;
   diff: FsDiff | null;
   diffPath: string | null;
-  diffMode: "head" | "agent";
+  diffSource: DiffSource;
+  /** The branch scope's base; null asks the daemon for the repository default. */
+  diffBase: string | null;
+  /** The commit scope's commit. */
+  diffCommit: string | null;
   diffLoading: boolean;
   diffError: ProtoError | null;
+  diffFiles: FsDiffFiles | null;
+  filesLoading: boolean;
+  filesError: ProtoError | null;
+  diffCommits: FsDiffCommitList | null;
+  commitsLoading: boolean;
+  commitsError: ProtoError | null;
+  diffBranches: FsBranchList | null;
+  branchesLoading: boolean;
+  branchesError: ProtoError | null;
   agentChanges: FsTurnChanges | null;
   agentLoading: boolean;
   agentError: ProtoError | null;
@@ -118,9 +135,20 @@ function initialState(): IdeState {
     search: emptySearch,
     diff: null,
     diffPath: null,
-    diffMode: "head",
+    diffSource: "head",
+    diffBase: null,
+    diffCommit: null,
     diffLoading: false,
     diffError: null,
+    diffFiles: null,
+    filesLoading: false,
+    filesError: null,
+    diffCommits: null,
+    commitsLoading: false,
+    commitsError: null,
+    diffBranches: null,
+    branchesLoading: false,
+    branchesError: null,
     agentChanges: null,
     agentLoading: false,
     agentError: null,
@@ -504,36 +532,46 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
   // -------------------------------------------------------------------
 
   const openDiff = useCallback(
-    async (path: string, mode: "head" | "agent") => {
+    async (
+      path: string,
+      source: DiffSource = stateRef.current.diffSource,
+      overrides: { base?: string | null; commit?: string | null } = {},
+    ) => {
       const target = workspaceRef.current;
       if (!target) return;
-      let against: DiffAgainst;
-      if (mode === "head") {
-        against = { kind: "head" };
-      } else if (target.threadId && target.turnId) {
-        against = {
-          kind: "agent_turn",
-          thread_id: target.threadId,
-          turn_id: target.turnId,
-        };
-      } else {
-        setState((current) => ({
-          ...current,
-          diffMode: mode,
+      const current = stateRef.current;
+      const base = overrides.base !== undefined ? overrides.base : current.diffBase;
+      const commit = overrides.commit !== undefined ? overrides.commit : current.diffCommit;
+      const against: DiffAgainst | null = againstForScope({
+        source,
+        threadId: target.threadId,
+        turnId: target.turnId,
+        base,
+        commit,
+      });
+      if (!against) {
+        const missingTurn = source === "agent";
+        setState((state) => ({
+          ...state,
+          diffSource: source,
           diffPath: path,
           diff: null,
           diffLoading: false,
           diffError: {
             code: "invalid_request",
-            message: "This workspace has no agent turn to compare against yet.",
-            hint: "Run a turn first, then open Agent changes.",
+            message: missingTurn
+              ? "This workspace has no agent turn to compare against yet."
+              : "Choose a commit to compare against first.",
+            hint: missingTurn
+              ? "Run a turn first, then open Turn changes."
+              : "Pick a commit from the source picker.",
           },
         }));
         return;
       }
-      setState((current) => ({
-        ...current,
-        diffMode: mode,
+      setState((state) => ({
+        ...state,
+        diffSource: source,
         diffPath: path,
         diffLoading: true,
         diffError: null,
@@ -547,15 +585,15 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
           against,
         });
         if (response.type !== "fs_diff") return;
-        setState((current) => ({
-          ...current,
+        setState((state) => ({
+          ...state,
           diff: response.diff,
           diffLoading: false,
           diffError: null,
         }));
       } catch (error) {
-        setState((current) => ({
-          ...current,
+        setState((state) => ({
+          ...state,
           diff: null,
           diffLoading: false,
           diffError: toProtoError(error),
@@ -563,6 +601,209 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
       }
     },
     [setState],
+  );
+
+  const fetchDiffFiles = useCallback(
+    async (against: DiffAgainst): Promise<FsDiffFiles | null> => {
+      const target = workspaceRef.current;
+      if (!target) return null;
+      setState((current) => ({ ...current, filesLoading: true, filesError: null }));
+      try {
+        const response = await getClient().request({
+          type: "fs_diff_files",
+          host: target.host,
+          workspace: target.path,
+          against,
+        });
+        if (response.type !== "fs_diff_files") return null;
+        const files = response.files;
+        setState((current) => ({
+          ...current,
+          diffFiles: files,
+          filesLoading: false,
+          filesError: null,
+        }));
+        return files;
+      } catch (error) {
+        setState((current) => ({
+          ...current,
+          diffFiles: null,
+          filesLoading: false,
+          filesError: toProtoError(error),
+        }));
+        return null;
+      }
+    },
+    [setState],
+  );
+
+  const fetchDiffCommits = useCallback(
+    async (base: string | null): Promise<FsDiffCommitList | null> => {
+      const target = workspaceRef.current;
+      if (!target) return null;
+      setState((current) => ({ ...current, commitsLoading: true, commitsError: null }));
+      try {
+        const response = await getClient().request({
+          type: "fs_diff_commits",
+          host: target.host,
+          workspace: target.path,
+          base,
+        });
+        if (response.type !== "fs_diff_commits") return null;
+        const commits = response.commits;
+        setState((current) => ({
+          ...current,
+          diffCommits: commits,
+          commitsLoading: false,
+          commitsError: null,
+        }));
+        return commits;
+      } catch (error) {
+        setState((current) => ({
+          ...current,
+          diffCommits: null,
+          commitsLoading: false,
+          commitsError: toProtoError(error),
+        }));
+        return null;
+      }
+    },
+    [setState],
+  );
+
+  const fetchBranches = useCallback(async (): Promise<FsBranchList | null> => {
+    const target = workspaceRef.current;
+    if (!target) return null;
+    setState((current) => ({ ...current, branchesLoading: true, branchesError: null }));
+    try {
+      const response = await getClient().request({
+        type: "fs_branches",
+        host: target.host,
+        workspace: target.path,
+      });
+      if (response.type !== "fs_branches") return null;
+      const branches = response.branches;
+      setState((current) => ({
+        ...current,
+        diffBranches: branches,
+        branchesLoading: false,
+        branchesError: null,
+      }));
+      return branches;
+    } catch (error) {
+      setState((current) => ({
+        ...current,
+        diffBranches: null,
+        branchesLoading: false,
+        branchesError: toProtoError(error),
+      }));
+      return null;
+    }
+  }, [setState]);
+
+  const showDiffForFiles = useCallback(
+    async (
+      files: FsDiffFiles | null,
+      source: DiffSource,
+      preferred: string | null,
+      overrides: { base?: string | null; commit?: string | null } = {},
+    ) => {
+      const path = firstDiffPath(files, preferred);
+      if (!path) {
+        setState((current) => ({
+          ...current,
+          diffSource: source,
+          diffPath: null,
+          diff: null,
+          diffLoading: false,
+          diffError: null,
+        }));
+        return;
+      }
+      await openDiff(path, source, overrides);
+    },
+    [openDiff, setState],
+  );
+
+  /** Switches the pane's scope and loads whatever that scope needs. */
+  const selectDiffSource = useCallback(
+    async (source: DiffSource) => {
+      const current = stateRef.current;
+      const preferred = current.diffPath ?? activeTab(current.tabs)?.path ?? null;
+      if (source === "head" || source === "agent") {
+        if (preferred) {
+          await openDiff(preferred, source);
+        } else {
+          setState((state) => ({
+            ...state,
+            diffSource: source,
+            diffPath: null,
+            diff: null,
+            diffLoading: false,
+            diffError: null,
+          }));
+        }
+        return;
+      }
+      if (source === "branch") {
+        if (!current.diffBranches && !current.branchesLoading) void fetchBranches();
+        const files = await fetchDiffFiles({ kind: "base", base: current.diffBase });
+        await showDiffForFiles(files, "branch", preferred, { base: current.diffBase });
+        return;
+      }
+      const list = current.diffCommits ?? (await fetchDiffCommits(current.diffBase));
+      const sha = chooseCommit(list, current.diffCommit);
+      if (!sha) {
+        setState((state) => ({
+          ...state,
+          diffSource: "commit",
+          diffCommit: null,
+          diffPath: null,
+          diff: null,
+          diffLoading: false,
+          diffError: state.commitsError,
+        }));
+        return;
+      }
+      setState((state) => ({ ...state, diffSource: "commit", diffCommit: sha }));
+      const against: DiffAgainst = { kind: "commit", sha };
+      const files = await fetchDiffFiles(against);
+      if (!files) return;
+      const path = firstDiffPath(files, preferred);
+      if (!path) {
+        await showDiffForFiles(files, "commit", preferred);
+        return;
+      }
+      await openDiff(path, "commit", { commit: sha });
+    },
+    [fetchBranches, fetchDiffCommits, fetchDiffFiles, openDiff, showDiffForFiles, setState],
+  );
+
+  /** Changes the branch the review compares against. */
+  const setDiffBase = useCallback(
+    async (base: string | null) => {
+      setState((current) => ({
+        ...current,
+        diffBase: base,
+        diffCommit: null,
+        diffCommits: null,
+      }));
+      const preferred = stateRef.current.diffPath;
+      const files = await fetchDiffFiles({ kind: "base", base });
+      await showDiffForFiles(files, "branch", preferred, { base });
+    },
+    [fetchDiffFiles, showDiffForFiles, setState],
+  );
+
+  /** Opens one commit's files. */
+  const setDiffCommit = useCallback(
+    async (sha: string) => {
+      setState((current) => ({ ...current, diffCommit: sha }));
+      const preferred = stateRef.current.diffPath;
+      const files = await fetchDiffFiles({ kind: "commit", sha });
+      await showDiffForFiles(files, "commit", preferred, { commit: sha });
+    },
+    [fetchDiffFiles, showDiffForFiles, setState],
   );
 
   // -------------------------------------------------------------------
@@ -828,6 +1069,10 @@ export function useIdeSession(workspace: WorkspaceOption | null) {
     moveTab,
     toggleDirectory,
     openDiff,
+    selectDiffSource,
+    setDiffBase,
+    setDiffCommit,
+    fetchBranches,
     runSearch,
     setSearchQuery,
     setSearchOption,

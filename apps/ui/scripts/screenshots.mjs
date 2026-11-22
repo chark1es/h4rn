@@ -165,7 +165,9 @@ const SHOTS = [
       await page.locator(".q-code .cm-content").first().click();
       await page.keyboard.press("Control+End");
       await page.keyboard.type(" ");
-      await page.getByRole("tab", { name: "vs agent" }).click();
+      await page.getByRole("tab", { name: "Diff" }).click();
+      await page.getByRole("button", { name: /Diff source/ }).click();
+      await page.getByRole("menuitem", { name: /^Turn/ }).click();
       await page.waitForTimeout(700);
     },
   },
