@@ -142,8 +142,8 @@ impl ForgeHosts {
                     entry.host
                 )));
             };
-            let base_url = validate_base_url_for(entry.forge, &base_url)?;
-            validate_cloud_base_url(entry.forge, &base_url)?;
+            let base_url = validate_cloud_base_url(entry.forge, &base_url)
+                .and_then(|()| validate_base_url_for(entry.forge, &base_url))?;
             hosts.insert(&entry.host, entry.forge, &base_url);
         }
         Ok(hosts)
@@ -151,25 +151,47 @@ impl ForgeHosts {
 }
 
 /// Rejects a Bitbucket or Azure DevOps base URL that is not the cloud service.
-/// Their on-premises products use different APIs and are not supported by this
-/// crate.
+///
+/// Both are cloud-only in this crate: their on-premises products use different
+/// APIs and hosts. The URL must also be a plain HTTPS origin (plus, for Azure,
+/// at most one organization segment), without credentials, a query or a
+/// fragment. Errors never echo the input, because it may carry a password.
 pub fn validate_cloud_base_url(kind: ForgeKind, base_url: &str) -> Result<()> {
-    let host = Url::parse(base_url)
-        .ok()
-        .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
-        .unwrap_or_default();
+    if !matches!(kind, ForgeKind::Bitbucket | ForgeKind::AzureDevOps) {
+        return Ok(());
+    }
+    let display = kind.display_name();
+    let parsed = Url::parse(base_url).map_err(|_| {
+        ForgeError::InvalidRequest(format!("{display} base URLs must be a full HTTPS URL"))
+    })?;
+    if parsed.scheme() != "https" {
+        return Err(ForgeError::InvalidRequest(format!(
+            "{display} base URLs must use https://"
+        )));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ForgeError::InvalidRequest(format!(
+            "{display} base URLs must not include a username or password"
+        )));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(ForgeError::InvalidRequest(format!(
+            "{display} base URLs must not include a query or fragment"
+        )));
+    }
+    let host = parsed.host_str().unwrap_or_default().to_ascii_lowercase();
     match kind {
-        ForgeKind::Bitbucket if host != "bitbucket.org" => {
-            Err(ForgeError::InvalidRequest(format!(
-                "Bitbucket Server and Data Center are not supported; use Bitbucket Cloud (bitbucket.org), not {base_url}"
-            )))
-        }
+        ForgeKind::Bitbucket if host != "bitbucket.org" => Err(ForgeError::InvalidRequest(
+            "Bitbucket Server and Data Center are not supported; use Bitbucket Cloud (bitbucket.org)"
+                .into(),
+        )),
         ForgeKind::AzureDevOps
             if host != "dev.azure.com" && !host.ends_with(".visualstudio.com") =>
         {
-            Err(ForgeError::InvalidRequest(format!(
-                "Azure DevOps Server is not supported; use Azure DevOps Services (dev.azure.com), not {base_url}"
-            )))
+            Err(ForgeError::InvalidRequest(
+                "Azure DevOps Server is not supported; use Azure DevOps Services (dev.azure.com)"
+                    .into(),
+            ))
         }
         _ => Ok(()),
     }
@@ -353,11 +375,22 @@ fn detect_azure_remote(
     if segments.iter().any(|part| *part == "." || *part == "..") {
         return None;
     }
+    // The legacy SSH host has no web root of its own: only its `v3` path
+    // names an organization to derive `https://<org>.visualstudio.com` from.
+    if parsed.host == "vs-ssh.visualstudio.com"
+        && (segments.first() != Some(&"v3") || segments.len() != 4)
+    {
+        return None;
+    }
 
     // SSH form: `v3/<org>/<project>/<repo>`.
     let (base_url, project, repo) = if segments.first() == Some(&"v3") && segments.len() == 4 {
         let organization = segments[1];
-        let base = if parsed.host == "dev.azure.com"
+        let base = if parsed.host == "vs-ssh.visualstudio.com" {
+            // The legacy SSH host is not a web host; the organization is the
+            // first path segment, so its browser/API base is the per-org host.
+            format!("https://{organization}.visualstudio.com")
+        } else if parsed.host == "dev.azure.com"
             || parsed.host == "ssh.dev.azure.com"
             || host.base_url == "https://dev.azure.com"
         {
@@ -522,7 +555,47 @@ fn normalise_path(path: &str) -> Option<String> {
     if path.is_empty() {
         return None;
     }
-    Some(path.to_owned())
+    // Path segments arrive percent-encoded from an https/ssh URL. Decode each
+    // one so `My%20Project` becomes the project name, and reject anything that
+    // decodes into a separator or a traversal segment so a crafted remote
+    // cannot address a different path once the client encodes it again.
+    let mut segments = Vec::new();
+    for segment in path.split('/') {
+        let segment = percent_decode(segment)?;
+        if segment.is_empty()
+            || segment == "."
+            || segment == ".."
+            || segment.contains('/')
+            || segment.contains('\\')
+            || segment.contains('?')
+            || segment.contains('#')
+        {
+            return None;
+        }
+        segments.push(segment);
+    }
+    Some(segments.join("/"))
+}
+
+/// Decodes `%XX` escapes in one path segment.
+fn percent_decode(segment: &str) -> Option<String> {
+    if !segment.contains('%') {
+        return Some(segment.to_owned());
+    }
+    let bytes = segment.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = std::str::from_utf8(bytes.get(index + 1..index + 3)?).ok()?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// Removes a username or password from a URL before it is stored or logged.
@@ -620,6 +693,19 @@ mod tests {
     }
 
     #[test]
+    fn remote_path_segments_are_percent_decoded_and_checked() {
+        let decoded = detect("https://dev.azure.com/acme/My%20Project/_git/my%20repo").unwrap();
+        assert_eq!(decoded.repo.owner, "My Project");
+        assert_eq!(decoded.repo.repo, "my repo");
+
+        // Decoded separators and traversal segments are rejected rather than
+        // becoming a different path once the client encodes them again.
+        assert!(detect("https://dev.azure.com/acme/My%2FProject/_git/repo").is_none());
+        assert!(detect("https://dev.azure.com/acme/%2E%2E/_git/repo").is_none());
+        assert!(detect("https://dev.azure.com/acme/My%5CProject/_git/repo").is_none());
+    }
+
+    #[test]
     fn azure_devops_remote_forms() {
         let expected = |detected: Option<ForgeRemote>, base: &str| {
             let detected = detected.expect("azure remote");
@@ -632,6 +718,11 @@ mod tests {
         expected(
             detect("git@ssh.dev.azure.com:v3/acme/platform/widget"),
             "https://dev.azure.com/acme",
+        );
+        // The legacy SSH host derives the per-organization web host.
+        expected(
+            detect("git@vs-ssh.visualstudio.com:v3/acme/platform/widget"),
+            "https://acme.visualstudio.com",
         );
         expected(
             detect("https://acme@dev.azure.com/acme/platform/_git/widget"),
@@ -659,6 +750,8 @@ mod tests {
         assert!(detect("https://dev.azure.com/acme/_git/widget").is_none());
         assert!(detect("https://dev.azure.com/acme/platform/extra/_git/widget").is_none());
         assert!(detect("https://acme.visualstudio.com/widget").is_none());
+        // The legacy SSH host is only meaningful for its v3 path.
+        assert!(detect("https://vs-ssh.visualstudio.com/platform/_git/widget").is_none());
     }
 
     #[test]
@@ -707,6 +800,31 @@ mod tests {
         assert!(validate_cloud_base_url(ForgeKind::Bitbucket, "https://bb.example.com").is_err());
         assert!(
             validate_cloud_base_url(ForgeKind::AzureDevOps, "https://ado.example.com").is_err()
+        );
+        assert!(
+            validate_cloud_base_url(ForgeKind::AzureDevOps, "https://acme.visualstudio.com")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn cloud_base_urls_must_be_plain_https() {
+        for forge in [ForgeKind::Bitbucket, ForgeKind::AzureDevOps] {
+            assert!(validate_cloud_base_url(forge, "http://bitbucket.org").is_err());
+            assert!(validate_cloud_base_url(forge, "https://user:secret@bitbucket.org").is_err());
+            assert!(validate_cloud_base_url(forge, "https://bitbucket.org?x=1").is_err());
+            assert!(validate_cloud_base_url(forge, "https://bitbucket.org#top").is_err());
+        }
+        let error =
+            validate_cloud_base_url(ForgeKind::Bitbucket, "https://alice:s3cret@bitbucket.org")
+                .unwrap_err()
+                .to_string();
+        assert!(!error.contains("s3cret"), "{error}");
+
+        assert!(validate_cloud_base_url(ForgeKind::Bitbucket, "https://bitbucket.org").is_ok());
+        assert!(validate_cloud_base_url(ForgeKind::AzureDevOps, "https://dev.azure.com").is_ok());
+        assert!(
+            validate_cloud_base_url(ForgeKind::AzureDevOps, "https://dev.azure.com/acme").is_ok()
         );
         assert!(
             validate_cloud_base_url(ForgeKind::AzureDevOps, "https://acme.visualstudio.com")

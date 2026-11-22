@@ -8,17 +8,18 @@ All notable changes to h4rn are recorded here. The format follows
 ### Added
 
 - **Bitbucket Cloud and Azure DevOps pull requests.** The forge layer now understands two more
-  providers. Bitbucket Cloud takes an app password (username plus token, HTTP Basic) or a workspace
-  access token (Bearer), lists open, merged and declined pull requests, reads the raw PR diff,
-  rebuilds comment threads from `parent` chains, and maps build statuses onto checks. Azure DevOps
-  Services takes a personal access token (Basic with an empty username), lists active, completed and
-  abandoned pull requests, reads commits and iteration changes, builds a unified diff locally from
-  the base and source file contents, maps thread statuses (`fixed`, `closed`, `wontFix`, `byDesign`)
-  to resolved, and combines PR statuses with blocking policy evaluations as checks. Remote detection
-  understands `bitbucket.org`, `dev.azure.com`, `ssh.dev.azure.com` and legacy
-  `*.visualstudio.com` URLs. Bitbucket Server/Data Center and Azure DevOps Server are explicitly
-  unsupported. Neither provider can re-run checks from this surface, and the UI shows that reason
-  the same way it does for Gitea.
+  providers. Bitbucket Cloud takes an Atlassian API token (account email plus token, HTTP Basic), a
+  legacy app password (username plus password) or a workspace, project or repository access token
+  (Bearer), lists open pull requests, reads the raw PR diff from `/pullrequests/{id}/diff`, rebuilds
+  comment threads from `parent` chains, and maps build statuses onto checks. Azure DevOps Services
+  takes a personal access token (Basic with an empty username), lists active pull requests, reads
+  commits and iteration changes, builds a unified diff page by page from the iteration's
+  `commonRefCommit` and `sourceRefCommit`, maps thread statuses (`fixed`, `closed`, `wontFix`,
+  `byDesign`) to resolved, and combines PR statuses with blocking policy evaluations as checks.
+  Remote detection understands `bitbucket.org`, `dev.azure.com`, `ssh.dev.azure.com`, the legacy
+  `vs-ssh.visualstudio.com` SSH host and legacy `*.visualstudio.com` URLs. Bitbucket Server/Data
+  Center and Azure DevOps Server are explicitly unsupported. Neither provider can re-run checks
+  from this surface, and the UI shows that reason the same way it does for Gitea.
 
 ### Fixed
 

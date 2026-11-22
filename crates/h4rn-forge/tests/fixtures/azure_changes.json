@@ -2,24 +2,56 @@
   "changeEntries": [
     {
       "changeTrackingId": 1,
+      "changeId": 1,
       "changeType": "edit",
-      "item": { "path": "/src/lib.rs", "gitObjectType": "blob" }
+      "item": {
+        "objectId": "1111111111111111111111111111111111111111",
+        "originalObjectId": "2222222222222222222222222222222222222222",
+        "gitObjectType": "blob",
+        "path": "/src/lib.rs"
+      }
     },
     {
       "changeTrackingId": 2,
+      "changeId": 2,
       "changeType": "add",
-      "item": { "path": "/src/new.rs", "gitObjectType": "blob" }
+      "item": {
+        "objectId": "3333333333333333333333333333333333333333",
+        "gitObjectType": "blob",
+        "path": "/src/new.rs"
+      }
     },
     {
       "changeTrackingId": 3,
+      "changeId": 3,
       "changeType": "delete",
-      "item": { "path": "/src/old.rs", "gitObjectType": "blob" }
+      "item": {
+        "objectId": "4444444444444444444444444444444444444444",
+        "gitObjectType": "blob",
+        "path": "/src/old.rs"
+      }
     },
     {
       "changeTrackingId": 4,
+      "changeId": 4,
       "changeType": "rename",
       "originalPath": "/src/old_name.rs",
-      "item": { "path": "/src/new_name.rs", "gitObjectType": "blob" }
+      "item": {
+        "objectId": "5555555555555555555555555555555555555555",
+        "gitObjectType": "blob",
+        "path": "/src/new_name.rs"
+      }
+    },
+    {
+      "changeTrackingId": 5,
+      "changeId": 5,
+      "changeType": "edit",
+      "item": {
+        "objectId": "6666666666666666666666666666666666666666",
+        "originalObjectId": "7777777777777777777777777777777777777777",
+        "gitObjectType": "blob",
+        "path": "/assets/logo.png"
+      }
     }
   ]
 }

@@ -1,19 +1,30 @@
 {
+  "size": 2,
+  "page": 1,
   "pagelen": 100,
   "values": [
     {
       "status": "modified",
-      "old": { "path": "src/lib.rs" },
-      "new": { "path": "src/lib.rs" },
+      "old": {
+        "type": "commit_file",
+        "path": "src/lib.rs"
+      },
+      "new": {
+        "type": "commit_file",
+        "path": "src/lib.rs"
+      },
       "lines_added": 2,
-      "lines_deleted": 1
+      "lines_removed": 1
     },
     {
       "status": "added",
       "old": null,
-      "new": { "path": "src/new.rs" },
+      "new": {
+        "type": "commit_file",
+        "path": "src/new.rs"
+      },
       "lines_added": 3,
-      "lines_deleted": 0
+      "lines_removed": 0
     }
   ]
 }

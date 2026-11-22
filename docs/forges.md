@@ -34,26 +34,51 @@ PR view needs. Two differences are handled explicitly:
 - there is no nested-reply endpoint, so a reply is posted as a general PR
   comment. `capabilities().nested_replies` is `false`, and the UI can say so.
 
-Bitbucket Cloud uses API v2. It accepts an app password (or API token) as HTTP
-Basic with the account username, or a workspace/OAuth access token as Bearer.
-The client lists PRs and their states, reads the PR's raw unified diff, rebuilds
-threads from the comment `parent` chain, and maps the commit's build statuses
-onto checks. A root comment's `resolution` object marks a thread resolved when
-the workspace reports it; otherwise threads are unresolved. There is no
-resolution write API in this surface, so `resolve_threads` is `false`. Diffs are
-paginated locally.
+Bitbucket Cloud uses API v2. It accepts an Atlassian API token as HTTP Basic with
+the account's Atlassian email and the token as the password (the documented API
+token form), a legacy app password as Basic with the account username, or a
+workspace/project/repository access token as Bearer. An API token or app
+password needs the `account` (OAuth) / `read:user:bitbucket` (API token) scope
+to call `/user`, which is how the daemon validates it. Access tokens that
+cannot read `/user` are validated against their repository (passing the
+repository the PR view asks about) or `/user/workspaces`; the workspace slug
+becomes the account login so the Mine filter can match authors. The client
+lists open PRs (`state=OPEN`; the UI has no lifecycle filter, so merged and
+declined PRs are not listed), reads the PR's raw unified diff from
+`/pullrequests/{id}/diff` (the API redirects that to the repository diff),
+rebuilds threads from the comment `parent` chain, and maps the commit's build
+statuses onto checks. A root comment's `resolution` object marks a thread
+resolved when the workspace reports it; otherwise threads are unresolved.
+Bitbucket does have a resolve-comment endpoint
+(`POST .../comments/{id}/resolve`), but this client does not call it yet, so
+`resolve_threads` is `false`. Diffs are paginated locally.
 
 Azure DevOps Services uses REST 7.1. `ForgeRepoRef.base_url` carries the
 organization (`https://dev.azure.com/acme`) and `owner` carries the project.
-Pull requests map `active`/`completed`/`abandoned` onto open/merged/closed.
-Azure returns changed files per iteration rather than a patch, so the diff is
-built by downloading the base and source content of every changed text file and
-running a local unified-diff generator; this is the documented approach and it
-also supplies the detail view's additions/deletions (capped at 100 files for
-detail, 500 for the diff tab). `/pullrequests/{id}/threads` supplies both general
-comments and inline threads; thread statuses `fixed`, `closed`, `wontFix` and
-`byDesign` are resolved. Checks are PR statuses plus policy evaluations, with
-blocking policies marked required.
+Remote path segments are percent-decoded when detected (so `My%20Project`
+becomes the project name) and encoded again as path segments in requests;
+decoded separators and `..` are rejected. The legacy SSH host
+`vs-ssh.visualstudio.com` derives `https://<org>.visualstudio.com` from its
+`v3/<org>/...` path. Pull requests map `active`/`completed`/`abandoned` onto
+open/merged/closed, but listing only asks for active PRs
+(`searchCriteria.status=active`); the UI has no lifecycle filter, so completed
+and abandoned PRs are not listed. Azure returns changed files per iteration
+rather than a patch. The client reads the latest iteration's
+`commonRefCommit` (old) and `sourceRefCommit` (new), pages the change entries,
+and downloads only the files on the requested diff page through
+`items?includeContentMetadata=true`, using `contentMetadata.isBinary` to mark
+binaries. At most six content requests run at once and a per-request cache
+avoids downloading a blob twice. The PR detail only counts changed files from
+the iteration metadata; it never downloads contents. `/pullrequests/{id}/threads`
+supplies both general comments and inline threads; thread statuses `fixed`,
+`closed`, `wontFix` and `byDesign` are resolved. Checks are PR statuses plus
+policy evaluations requested with `api-version=7.1-preview.1`; the project id
+comes from the PR's `repository.project.id`, `configuration.isBlocking` marks
+required rows, and a policy outcome wins over a status with the same name.
+Commit pages follow the server's `x-ms-continuationtoken` through
+`continuationToken`, not `$skip`. Additions/deletions are not shown for Azure
+PRs: the API does not report line counts without downloading every file, and
+the detail request deliberately does not do that.
 
 Bitbucket Server / Data Center and Azure DevOps Server are not supported: they
 use different APIs and hosts, and this build only detects and speaks the cloud
@@ -78,6 +103,7 @@ git://codeberg.org/owner/repo
 git@bitbucket.org:workspace/repo.git
 https://user@bitbucket.org/workspace/repo.git
 git@ssh.dev.azure.com:v3/org/project/repo
+git@vs-ssh.visualstudio.com:v3/org/project/repo
 https://org@dev.azure.com/org/project/_git/repo
 https://org.visualstudio.com/project/_git/repo
 https://org.visualstudio.com/DefaultCollection/project/_git/repo
@@ -142,19 +168,25 @@ the full PR view (list, detail, diff, threads, checks, comment, reply) is:
 | GitHub (public repos only) | `public_repo`, `read:user` |
 | GitLab | `api` (or `read_api` + `read_user` for a read-only account) |
 | Gitea / Forgejo | `read:user`, `read:repository`, `write:repository`, `read:issue`, `write:issue` |
-| Bitbucket Cloud (app password) | Repositories: read, Pull requests: read/write |
-| Bitbucket Cloud (workspace token) | `repository:write`, `pullrequest:write` |
+| Bitbucket Cloud (API token) | Account: read, Repositories: read, Pull requests: read/write |
+| Bitbucket Cloud (legacy app password) | Account: read, Repositories: read, Pull requests: read/write |
+| Bitbucket Cloud (access token) | `read:user:bitbucket` if it can read the account, plus `read:repository:bitbucket`, `read:pullrequest:bitbucket`, `write:pullrequest:bitbucket` |
 | Azure DevOps | Code: read & write (PAT) |
 
 `repo` covers check runs and commit statuses. A read-only account cannot use
 `ForgeReply`, `ForgeComment` or `ForgeOpenPr`; the forge will return 403 and the
 daemon reports it as an auth error instead of retrying.
 
-Bitbucket app passwords are sent as HTTP Basic with the account username; a
-workspace or OAuth access token is sent as Bearer and needs no username. Azure
-DevOps personal access tokens use HTTP Basic with an empty username. Bitbucket
-accounts record which scheme validated (`bitbucket_app_password` or
-`bitbucket_access_token`) so a restart keeps the same credential type.
+Bitbucket API tokens are sent as HTTP Basic with the Atlassian account email as
+the username and the token as the password; legacy app passwords use the
+Bitbucket username instead. A workspace, project or repository access token is
+sent as Bearer and needs no username. Azure DevOps personal access tokens use
+HTTP Basic with an empty username. Bitbucket accounts record which scheme
+validated (`bitbucket_app_password` or `bitbucket_access_token`) so a restart
+keeps the same credential type. Bitbucket Cloud and Azure DevOps base URLs must
+be plain `https://` origins without credentials, a query or a fragment, and
+Bitbucket Cloud and Azure DevOps Server/Data Center hosts are rejected before
+anything is stored.
 
 The daemon compares the scopes the forge reports with the least-privilege set
 and surfaces extras in the account row (`ForgeAccount.scopes`), so an
@@ -226,7 +258,9 @@ Each `ForgeCheck` carries `details_url` (the page that shows the log; the UI's
 - **Bitbucket Cloud:** commit statuses have no required marker, so `required`
   is always `null` (unknown) rather than a guess.
 - **Azure DevOps:** PR statuses are merged with policy evaluations; a blocking
-  policy is `required: true` and a non-blocking one `required: false`.
+  policy (`configuration.isBlocking`) is `required: true` and a non-blocking one
+  `required: false`. When a status and a policy evaluate the same name, the
+  policy result wins because it is the branch gate.
 
 `ForgeRerunChecks` re-runs the failed checks and returns the refreshed checks.
 GitHub re-requests each check suite that has a failed run
@@ -250,7 +284,8 @@ daemon:
 - `ForgeListAccounts`, `ForgeAddAccount`, `ForgeRemoveAccount`
 - `ForgeDetectRepo { workspace }`
 - `ForgeListPrs { repo, filter, page }` — `open`, `mine`,
-  `review_requested` or `by_branch`
+  `review_requested` or `by_branch`; every forge lists open (Bitbucket) or
+  active (Azure DevOps) PRs only, because the filter has no lifecycle selector
 - `ForgeGetPr { repo, number }`
 - `ForgeGetPrDiff { repo, number, page, per_page }`
 - `ForgeListPrComments { repo, number }` — general comments, review threads
@@ -308,10 +343,13 @@ also checks the Commits tab and the disabled re-run reason against Docker Gitea.
 The client tests are wiremock tests with realistic JSON for each API shape:
 GitHub REST + GraphQL, ETag/304, 429 `retry-after`; GitLab MR, changes, diffs,
 discussions and jobs; Gitea/Forgejo PRs, raw diff, comments, reviews, statuses;
-Bitbucket Cloud PRs, diffstat, raw diff, comment `parent` chains, build
-statuses and basic/bearer auth; Azure DevOps PRs, iterations, changed-file
-contents, threads, statuses, policy evaluations and PAT auth. They also cover
-the remote-URL parsing matrix, diff parsing and pagination, the local
+Bitbucket Cloud PRs, diffstat, the `/diff` redirect, comment `parent` chains,
+build statuses, basic/bearer auth, workspace and repository token validation,
+and same-origin `next` handling; Azure DevOps PRs, raw iteration arrays,
+changed-file contents, threads, statuses, policy evaluations, PAT auth, commit
+`continuationToken` pages and per-page diff contents. They also cover the
+remote-URL parsing matrix (including percent-decoded segments and the legacy
+`vs-ssh.visualstudio.com` host), diff parsing and pagination, the local
 unified-diff builder, and the agent-context renderer.
 
 Two live tests are ignored by default:

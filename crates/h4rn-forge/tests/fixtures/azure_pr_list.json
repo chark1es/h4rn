@@ -3,6 +3,7 @@
   "value": [
     {
       "pullRequestId": 7,
+      "codeReviewId": 7,
       "title": "Fix the widget",
       "status": "active",
       "isDraft": false,
@@ -15,11 +16,30 @@
       "sourceRefName": "refs/heads/alice/fix",
       "targetRefName": "refs/heads/main",
       "mergeStatus": "succeeded",
-      "lastMergeSourceCommit": { "commitId": "aaaa1111bbbb2222cccc3333dddd4444eeee5555" },
-      "lastMergeTargetCommit": { "commitId": "bbbb1111cccc2222dddd3333eeee4444ffff5555" },
+      "supportsIterations": true,
+      "repository": {
+        "id": "widget-guid",
+        "name": "widget",
+        "project": {
+          "id": "project-guid",
+          "name": "platform",
+          "state": "wellFormed",
+          "visibility": "private"
+        }
+      },
+      "lastMergeSourceCommit": {
+        "commitId": "aaaa1111bbbb2222cccc3333dddd4444eeee5555"
+      },
+      "lastMergeTargetCommit": {
+        "commitId": "ffff1111aaaa2222bbbb3333cccc4444dddd5555"
+      },
       "lastMergeCommit": {
-        "commitId": "cccc1111dddd2222eeee3333ffff4444aaaa5555",
-        "author": { "date": "2024-05-01T12:00:00.000Z" }
+        "commitId": "eeee1111ffff2222aaaa3333bbbb4444cccc5555",
+        "author": {
+          "name": "Alice Example",
+          "email": "alice@example.test",
+          "date": "2024-05-01T12:00:00.000Z"
+        }
       },
       "_links": {
         "web": {

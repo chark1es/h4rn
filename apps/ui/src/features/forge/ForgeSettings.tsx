@@ -28,7 +28,7 @@ const SCOPES: Record<ForgeKind, string> = {
   gitea: "a token with repo scope on the repositories you want to see",
   forgejo: "a token with repo scope on the repositories you want to see",
   bitbucket:
-    "an app password with Repositories: read and Pull requests: write, or a workspace token",
+    "an Atlassian API token (Account: read, Repositories: read, Pull requests: write) with your Atlassian account email, or a legacy app password with your Bitbucket username",
   azure_devops: "a personal access token with Code: read & write",
 };
 
@@ -51,7 +51,7 @@ function sourceLabel(source: ForgeCredentialSource): string {
     case "glab_cli":
       return "Imported from glab";
     case "bitbucket_app_password":
-      return "App password";
+      return "API token or app password";
     case "bitbucket_access_token":
       return "Access token";
   }
@@ -209,6 +209,12 @@ function AddAccountForm({ onAdded }: { onAdded: () => void }) {
           <span className="q-faint" style={{ fontSize: 12 }}>
             Use {SCOPES[forge]}.
           </span>
+          {forge === "bitbucket" ? (
+            <span className="q-faint" style={{ fontSize: 12, display: "block" }}>
+              Reading the account needs Account: read. A workspace, project or repository access
+              token that cannot read it is validated against the repository instead.
+            </span>
+          ) : null}
         </div>
       </div>
       <div className="q-field">
@@ -236,18 +242,21 @@ function AddAccountForm({ onAdded }: { onAdded: () => void }) {
       {forge === "bitbucket" ? (
         <div className="q-field">
           <div className="lab">
-            <div className="t">Username</div>
-            <div className="s">Needed for an app password; leave empty for a workspace token</div>
+            <div className="t">Atlassian account email</div>
+            <div className="s">
+              Needed for an API token (email + token) or a legacy app password (username +
+              password); leave empty for a workspace, project or repository access token
+            </div>
           </div>
           <div className="ctl">
             <input
               className="q-input q-mono"
               style={{ maxWidth: 300, fontSize: 12 }}
               autoComplete="username"
-              aria-label="Bitbucket username"
+              aria-label="Bitbucket account email or username"
               value={username}
               onChange={(event) => setUsername(event.target.value)}
-              placeholder="Bitbucket account username"
+              placeholder="you@example.com or username"
             />
           </div>
         </div>

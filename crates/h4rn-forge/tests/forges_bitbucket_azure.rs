@@ -1,16 +1,18 @@
 //! Bitbucket Cloud and Azure DevOps against recorded API responses.
 //!
-//! Every fixture is a trimmed response with the provider's own field names;
-//! no test reaches the network beyond the local wiremock server.
+//! Every fixture is a trimmed response with the provider's own field names,
+//! taken from the documented Bitbucket Cloud REST 2.0 and Azure DevOps REST
+//! 7.1 schemas; no test reaches the network beyond the local wiremock server.
 
 use base64::Engine as _;
+use chrono::{DateTime, Utc};
 use h4rn_forge::{AzureDevOpsClient, BitbucketClient, Forge, ForgeError};
 use h4rn_protocol::{
     ForgeChecksState, ForgeDiffSide, ForgeFileStatus, ForgeKind, ForgeMergeable, ForgePrFilter,
     ForgePrState, ForgeRepoRef, ForgeReviewState,
 };
 use serde_json::{Value, json};
-use wiremock::matchers::{header, method, path, query_param};
+use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const BB_PR: &str = include_str!("fixtures/bitbucket_pr_42.json");
@@ -29,7 +31,6 @@ const AZ_THREADS: &str = include_str!("fixtures/azure_threads.json");
 const AZ_STATUSES: &str = include_str!("fixtures/azure_statuses.json");
 const AZ_POLICIES: &str = include_str!("fixtures/azure_policies.json");
 const AZ_COMMITS: &str = include_str!("fixtures/azure_commits.json");
-const AZ_PROJECT: &str = include_str!("fixtures/azure_project.json");
 const AZ_CONNECTION: &str = include_str!("fixtures/azure_connection.json");
 
 const AZ_BASE: &str = "bbbb1111cccc2222dddd3333eeee4444ffff5555";
@@ -72,11 +73,14 @@ async fn bitbucket_server() -> MockServer {
     let api = "/2.0/repositories/acme/widget";
     Mock::given(method("GET"))
         .and(path("/2.0/user"))
-        .respond_with(ok(r#"{"username":"alice","display_name":"Alice Example"}"#))
+        .respond_with(ok(
+            r#"{"type":"user","display_name":"Alice Example","nickname":"alice","uuid":"{alice-uuid}","account_id":"557058:alice"}"#,
+        ))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
         .and(path(format!("{api}/pullrequests")))
+        .and(query_param("state", "OPEN"))
         .respond_with(ok(BB_LIST))
         .mount(&server)
         .await;
@@ -85,8 +89,17 @@ async fn bitbucket_server() -> MockServer {
         .respond_with(ok(BB_PR))
         .mount(&server)
         .await;
+    // The documented diffstat route redirects to the repository diffstat too.
     Mock::given(method("GET"))
         .and(path(format!("{api}/pullrequests/42/diffstat")))
+        .respond_with(ResponseTemplate::new(302).insert_header(
+            "location",
+            format!("{}{api}/diffstat/aaaa1111..bbbb1111", server.uri()),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{api}/diffstat/aaaa1111..bbbb1111")))
         .respond_with(ok(BB_DIFFSTAT))
         .mount(&server)
         .await;
@@ -95,8 +108,17 @@ async fn bitbucket_server() -> MockServer {
         .respond_with(ok(BB_COMMITS))
         .mount(&server)
         .await;
+    // The documented route redirects to the repository diff.
     Mock::given(method("GET"))
-        .and(path(format!("{api}/pullrequests/42.diff")))
+        .and(path(format!("{api}/pullrequests/42/diff")))
+        .respond_with(ResponseTemplate::new(302).insert_header(
+            "location",
+            format!("{}{api}/diff/aaaa1111..bbbb1111", server.uri()),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{api}/diff/aaaa1111..bbbb1111")))
         .respond_with(text_body(BB_DIFF))
         .mount(&server)
         .await;
@@ -123,15 +145,27 @@ async fn bitbucket_reads_pull_requests_threads_and_checks() {
 
     let viewer = client.viewer().await.unwrap();
     assert_eq!(viewer.login, "alice");
+    assert_eq!(viewer.display_name.as_deref(), Some("Alice Example"));
 
     let page = client
         .list_prs(&repo, &ForgePrFilter::Open, 1)
         .await
         .unwrap();
-    assert_eq!(page.prs.len(), 3);
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|request| request
+                .url
+                .query_pairs()
+                .any(|(key, value)| key == "state" && value == "OPEN")),
+        "Bitbucket lists open PRs with state=OPEN"
+    );
+    assert_eq!(page.prs.len(), 2);
     assert_eq!(page.prs[0].state, ForgePrState::Open);
-    assert_eq!(page.prs[1].state, ForgePrState::Merged);
-    assert_eq!(page.prs[2].state, ForgePrState::Closed);
+    assert_eq!(page.prs[1].state, ForgePrState::Draft);
     assert_eq!(page.prs[0].head_branch, "alice/fix");
     assert!(!page.has_more);
 
@@ -195,27 +229,149 @@ async fn bitbucket_reads_pull_requests_threads_and_checks() {
 #[tokio::test]
 async fn bitbucket_sends_basic_or_bearer_auth() {
     let basic = MockServer::start().await;
-    let expected = base64::engine::general_purpose::STANDARD.encode("alice:s3cret");
+    let expected = base64::engine::general_purpose::STANDARD.encode("alice@example.test:s3cret");
     Mock::given(method("GET"))
         .and(path("/2.0/user"))
         .and(header("authorization", format!("Basic {expected}")))
-        .respond_with(ok(r#"{"username":"alice"}"#))
+        .respond_with(ok(
+            r#"{"type":"user","display_name":"Alice Example","nickname":"alice","uuid":"{alice-uuid}"}"#,
+        ))
         .expect(1)
         .mount(&basic)
         .await;
-    let client = BitbucketClient::new(&basic.uri(), "s3cret", Some("alice"), 120).unwrap();
+    let client =
+        BitbucketClient::new(&basic.uri(), "s3cret", Some("alice@example.test"), 120).unwrap();
     assert_eq!(client.viewer().await.unwrap().login, "alice");
 
     let bearer = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/2.0/user"))
         .and(header("authorization", "Bearer ATBB-workspace"))
-        .respond_with(ok(r#"{"username":"workspace"}"#))
+        .respond_with(ok(
+            r#"{"type":"user","display_name":"Alice Example","nickname":"alice","uuid":"{alice-uuid}"}"#,
+        ))
         .expect(1)
         .mount(&bearer)
         .await;
     let client = BitbucketClient::new(&bearer.uri(), "ATBB-workspace", None, 120).unwrap();
-    assert_eq!(client.viewer().await.unwrap().login, "workspace");
+    assert_eq!(client.viewer().await.unwrap().login, "alice");
+}
+
+#[tokio::test]
+async fn bitbucket_validates_tokens_that_cannot_read_user() {
+    // A workspace access token gets a 403 from /user; /user/workspaces names
+    // the workspace, whose slug becomes the account login.
+    let workspace = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/2.0/user"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "type": "error",
+            "error": {"message": "Your credentials lack the account scope"}
+        })))
+        .mount(&workspace)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/2.0/user/workspaces"))
+        .respond_with(ok(
+            r#"{"pagelen":1,"values":[{"type":"workspace_access","administrator":true,"workspace":{"type":"workspace","slug":"acme","name":"Acme","uuid":"{workspace-uuid}"}}]}"#,
+        ))
+        .mount(&workspace)
+        .await;
+    let client = BitbucketClient::new(&workspace.uri(), "ATBB-workspace", None, 120).unwrap();
+    let viewer = client.viewer().await.unwrap();
+    assert_eq!(viewer.login, "acme");
+    assert_eq!(viewer.display_name.as_deref(), Some("Acme"));
+
+    // A repository access token can read neither account endpoint. A
+    // repository request proves it, and the workspace slug is used for Mine.
+    let repository = MockServer::start().await;
+    for endpoint in ["/2.0/user", "/2.0/user/workspaces"] {
+        Mock::given(method("GET"))
+            .and(path(endpoint))
+            .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+                "type": "error",
+                "error": {"message": "Unauthorized"}
+            })))
+            .mount(&repository)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path("/2.0/repositories/acme/widget"))
+        .respond_with(ok(
+            r#"{"type":"repository","name":"widget","full_name":"acme/widget","uuid":"{widget-uuid}","is_private":true}"#,
+        ))
+        .mount(&repository)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/2.0/repositories/acme/widget/pullrequests"))
+        .respond_with(ok(
+            r#"{"size":1,"page":1,"pagelen":1,"values":[{"type":"pullrequest","id":42,"title":"Fix the widget","state":"OPEN","draft":false,"author":{"type":"user","display_name":"Acme","nickname":"acme","uuid":"{acme-uuid}"},"source":{"branch":{"name":"acme/fix"},"commit":{"hash":"aaaa1111"}},"destination":{"branch":{"name":"main"},"commit":{"hash":"bbbb1111"}},"created_on":"2024-05-01T09:00:00+00:00","updated_on":"2024-05-01T12:00:00+00:00","links":{"html":{"href":"https://bitbucket.org/acme/widget/pull-requests/42"}}}]}"#,
+        ))
+        .mount(&repository)
+        .await;
+    let repo = bitbucket_repo(&repository.uri());
+    let client = BitbucketClient::new(&repository.uri(), "ATBB-repo", None, 120).unwrap();
+    assert_eq!(client.viewer_for(Some(&repo)).await.unwrap().login, "acme");
+    let page = client
+        .list_prs(&repo, &ForgePrFilter::Mine, 1)
+        .await
+        .unwrap();
+    assert_eq!(page.prs.len(), 1, "the workspace slug matches the author");
+}
+
+#[tokio::test]
+async fn bitbucket_follows_same_origin_next_but_not_a_cross_origin_one() {
+    let same = MockServer::start().await;
+    let api = "/2.0/repositories/acme/widget/pullrequests/42/commits";
+    let commits = fixture(BB_COMMITS);
+    let commits = commits["values"].as_array().unwrap();
+    Mock::given(method("GET"))
+        .and(path(api))
+        .and(query_param_is_missing("page"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "pagelen": 1,
+            "values": [commits[0].clone()],
+            "next": format!("{}{api}?page=2", same.uri())
+        })))
+        .mount(&same)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(api))
+        .and(query_param("page", "2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "pagelen": 1,
+            "values": [commits[1].clone()]
+        })))
+        .mount(&same)
+        .await;
+    let client = BitbucketClient::new(&same.uri(), "ATBB-token", None, 120).unwrap();
+    let repo = bitbucket_repo(&same.uri());
+    let listed = client.list_commits(&repo, 42).await.unwrap();
+    assert_eq!(listed.commits.len(), 2);
+
+    let first = MockServer::start().await;
+    let other = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(api))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "pagelen": 1,
+            "values": [commits[0].clone()],
+            "next": format!("{}{api}?page=2", other.uri())
+        })))
+        .mount(&first)
+        .await;
+    let client = BitbucketClient::new(&first.uri(), "ATBB-token", None, 120).unwrap();
+    let repo = bitbucket_repo(&first.uri());
+    let listed = client.list_commits(&repo, 42).await.unwrap();
+    assert_eq!(
+        listed.commits.len(),
+        1,
+        "pagination stops at another origin"
+    );
+    assert!(
+        other.received_requests().await.unwrap().is_empty(),
+        "a cross-origin next link must not receive the token"
+    );
 }
 
 async fn azure_server() -> MockServer {
@@ -229,12 +385,8 @@ async fn azure_server() -> MockServer {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/acme/_apis/projects/platform"))
-        .respond_with(ok(AZ_PROJECT))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
         .and(path(format!("{repo}/pullrequests")))
+        .and(query_param("searchCriteria.status", "active"))
         .respond_with(ok(AZ_LIST))
         .mount(&server)
         .await;
@@ -263,71 +415,152 @@ async fn azure_server() -> MockServer {
         .respond_with(ok(AZ_STATUSES))
         .mount(&server)
         .await;
+    let commits = fixture(AZ_COMMITS);
     Mock::given(method("GET"))
         .and(path(format!("{pr}/commits")))
-        .respond_with(ok(AZ_COMMITS))
+        .and(query_param_is_missing("continuationToken"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("x-ms-continuationtoken", "token-2")
+                .set_body_json(json!([commits[0].clone()])),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{pr}/commits")))
+        .and(query_param("continuationToken", "token-2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([commits[1].clone()])))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
         .and(path(format!("{repo}/items")))
+        .and(query_param("includeContentMetadata", "true"))
         .and(query_param("path", "/src/lib.rs"))
         .and(query_param("versionDescriptor.version", AZ_BASE))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "content": "one\ntwo\nthree\n"
+            "path": "/src/lib.rs",
+            "gitObjectType": "blob",
+            "content": "one\ntwo\nthree\n",
+            "contentMetadata": {"isBinary": false, "encoding": 65001, "contentType": "text/plain"}
         })))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
         .and(path(format!("{repo}/items")))
+        .and(query_param("includeContentMetadata", "true"))
         .and(query_param("path", "/src/lib.rs"))
         .and(query_param("versionDescriptor.version", AZ_HEAD))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "content": "one\ntwo\nTHREE\nfour\n"
+            "path": "/src/lib.rs",
+            "gitObjectType": "blob",
+            "content": "one\ntwo\nTHREE\nfour\n",
+            "contentMetadata": {"isBinary": false, "encoding": 65001, "contentType": "text/plain"}
         })))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
         .and(path(format!("{repo}/items")))
+        .and(query_param("includeContentMetadata", "true"))
         .and(query_param("path", "/src/new.rs"))
         .and(query_param("versionDescriptor.version", AZ_HEAD))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "content": "hello\nnew\n"
+            "path": "/src/new.rs",
+            "gitObjectType": "blob",
+            "content": "hello\nnew\n",
+            "contentMetadata": {"isBinary": false, "encoding": 65001, "contentType": "text/plain"}
         })))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
         .and(path(format!("{repo}/items")))
+        .and(query_param("includeContentMetadata", "true"))
         .and(query_param("path", "/src/old.rs"))
         .and(query_param("versionDescriptor.version", AZ_BASE))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "content": "bye\n"
+            "path": "/src/old.rs",
+            "gitObjectType": "blob",
+            "content": "bye\n",
+            "contentMetadata": {"isBinary": false, "encoding": 65001, "contentType": "text/plain"}
         })))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
         .and(path(format!("{repo}/items")))
+        .and(query_param("includeContentMetadata", "true"))
         .and(query_param("path", "/src/old_name.rs"))
         .and(query_param("versionDescriptor.version", AZ_BASE))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "content": "same\n"
+            "path": "/src/old_name.rs",
+            "gitObjectType": "blob",
+            "content": "same\n",
+            "contentMetadata": {"isBinary": false, "encoding": 65001, "contentType": "text/plain"}
         })))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
         .and(path(format!("{repo}/items")))
+        .and(query_param("includeContentMetadata", "true"))
         .and(query_param("path", "/src/new_name.rs"))
         .and(query_param("versionDescriptor.version", AZ_HEAD))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "content": "same\nchanged\n"
+            "path": "/src/new_name.rs",
+            "gitObjectType": "blob",
+            "content": "same\nchanged\n",
+            "contentMetadata": {"isBinary": false, "encoding": 65001, "contentType": "text/plain"}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{repo}/items")))
+        .and(query_param("includeContentMetadata", "true"))
+        .and(query_param("path", "/assets/logo.png"))
+        .and(query_param("versionDescriptor.version", AZ_BASE))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "path": "/assets/logo.png",
+            "gitObjectType": "blob",
+            "content": "PNG old bytes",
+            "contentMetadata": {"isBinary": true, "encoding": 0, "contentType": "image/png"}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("{repo}/items")))
+        .and(query_param("includeContentMetadata", "true"))
+        .and(query_param("path", "/assets/logo.png"))
+        .and(query_param("versionDescriptor.version", AZ_HEAD))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "path": "/assets/logo.png",
+            "gitObjectType": "blob",
+            "content": "PNG new bytes",
+            "contentMetadata": {"isBinary": true, "encoding": 0, "contentType": "image/png"}
         })))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
         .and(path("/acme/platform/_apis/policy/evaluations"))
+        .and(query_param("api-version", "7.1-preview.1"))
+        .and(query_param(
+            "artifactId",
+            "vstfs:///CodeReview/CodeReviewId/project-guid/7",
+        ))
         .respond_with(ok(AZ_POLICIES))
         .mount(&server)
         .await;
     server
+}
+
+fn item_paths(requests: &[wiremock::Request]) -> Vec<String> {
+    requests
+        .iter()
+        .filter(|request| request.url.path().ends_with("/items"))
+        .filter_map(|request| {
+            request
+                .url
+                .query_pairs()
+                .find(|(key, _)| key == "path")
+                .map(|(_, value)| value.into_owned())
+        })
+        .collect()
 }
 
 #[tokio::test]
@@ -343,36 +576,69 @@ async fn azure_reads_pull_requests_diff_threads_and_checks() {
         .list_prs(&repo, &ForgePrFilter::Open, 1)
         .await
         .unwrap();
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|request| request
+                .url
+                .query_pairs()
+                .any(|(key, value)| { key == "searchCriteria.status" && value == "active" })),
+        "Azure DevOps lists active PRs with searchCriteria.status=active"
+    );
     assert_eq!(page.prs.len(), 1);
     assert_eq!(page.prs[0].state, ForgePrState::Open);
     assert_eq!(page.prs[0].head_branch, "alice/fix");
     assert_eq!(page.prs[0].base_branch, "main");
     assert_eq!(page.prs[0].author, "Alice Example");
+    assert_eq!(
+        page.prs[0].updated_at,
+        DateTime::<Utc>::from_timestamp(1714554000, 0).unwrap(),
+        "an active PR keeps its creation date; lastMergeCommit is not an update"
+    );
 
     let pr = client.get_pr(&repo, 7).await.unwrap();
     assert_eq!(pr.body, "Fixes the widget and adds a regression test.");
     assert_eq!(pr.labels.len(), 1);
     assert_eq!(pr.mergeable, ForgeMergeable::Mergeable);
-    assert_eq!(pr.additions, 5);
-    assert_eq!(pr.deletions, 2);
-    assert_eq!(pr.changed_files, 4);
+    // The detail counts changed files from iteration metadata and never
+    // downloads a file's contents.
+    assert_eq!(pr.additions, 0);
+    assert_eq!(pr.deletions, 0);
+    assert_eq!(pr.changed_files, 5);
     assert_eq!(pr.commits, 2);
     assert_eq!(pr.reviewers.len(), 3);
     assert_eq!(pr.summary.review, ForgeReviewState::ChangesRequested);
     assert_eq!(pr.merge_commit_sha, None);
+    assert!(
+        item_paths(&server.received_requests().await.unwrap()).is_empty(),
+        "get_pr must not build the patch"
+    );
 
     let diff = client.get_diff(&repo, 7, 1, 10).await.unwrap();
-    assert_eq!(diff.files.len(), 4);
+    assert_eq!(diff.files.len(), 5);
     let lib = diff.files.iter().find(|f| f.path == "src/lib.rs").unwrap();
     assert_eq!(lib.additions, 2);
     assert_eq!(lib.deletions, 1);
     assert!(lib.patch.as_deref().unwrap().contains("+THREE\n"));
     let added = diff.files.iter().find(|f| f.path == "src/new.rs").unwrap();
     assert_eq!(added.status, ForgeFileStatus::Added);
-    assert!(added.patch.as_deref().unwrap().contains("--- /dev/null"));
+    let added_patch = added.patch.as_deref().unwrap();
+    assert!(added_patch.contains("--- /dev/null"));
+    assert!(
+        added_patch.contains("@@ -0,0 +1,2 @@"),
+        "an added file has no old lines: {added_patch}"
+    );
     let deleted = diff.files.iter().find(|f| f.path == "src/old.rs").unwrap();
     assert_eq!(deleted.status, ForgeFileStatus::Deleted);
-    assert!(deleted.patch.as_deref().unwrap().contains("+++ /dev/null"));
+    let deleted_patch = deleted.patch.as_deref().unwrap();
+    assert!(deleted_patch.contains("+++ /dev/null"));
+    assert!(
+        deleted_patch.contains("@@ -1,1 +0,0 @@"),
+        "a deleted file has no new lines: {deleted_patch}"
+    );
     let renamed = diff
         .files
         .iter()
@@ -380,6 +646,14 @@ async fn azure_reads_pull_requests_diff_threads_and_checks() {
         .unwrap();
     assert_eq!(renamed.status, ForgeFileStatus::Renamed);
     assert_eq!(renamed.previous_path.as_deref(), Some("src/old_name.rs"));
+    let binary = diff
+        .files
+        .iter()
+        .find(|f| f.path == "assets/logo.png")
+        .unwrap();
+    assert!(binary.binary, "contentMetadata.isBinary marks the file");
+    assert!(binary.patch.is_none());
+    assert_eq!(binary.additions, 0);
 
     let comments = client.list_comments(&repo, 7).await.unwrap();
     assert_eq!(comments.comments.len(), 1);
@@ -401,6 +675,12 @@ async fn azure_reads_pull_requests_diff_threads_and_checks() {
     assert_eq!(checks.failed, 2);
     let by_name = |name: &str| checks.checks.iter().find(|c| c.name == name).unwrap();
     assert_eq!(by_name("Build validation").required, Some(true));
+    // The status says succeeded, the blocking policy rejected it: the policy
+    // outcome wins.
+    assert_eq!(
+        by_name("Build validation").status,
+        h4rn_protocol::ForgeCheckStatus::Failure
+    );
     assert_eq!(
         by_name("ci/lint").status,
         h4rn_protocol::ForgeCheckStatus::Failure
@@ -424,6 +704,86 @@ async fn azure_reads_pull_requests_diff_threads_and_checks() {
         commits.commits[1].body.as_deref(),
         Some("Reproduces the panic on empty input.")
     );
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|request| request
+                .url
+                .query_pairs()
+                .any(|(key, value)| key == "continuationToken" && value == "token-2")),
+        "the second commit page uses the server's continuationToken"
+    );
+}
+
+#[tokio::test]
+async fn azure_diff_page_fetches_only_its_files() {
+    let server = azure_server().await;
+    let client = AzureDevOpsClient::new(&format!("{}/acme", server.uri()), "pat", 120).unwrap();
+    let repo = azure_repo(&server.uri());
+
+    let first = client.get_diff(&repo, 7, 1, 2).await.unwrap();
+    assert_eq!(first.files.len(), 2);
+    assert_eq!(
+        first
+            .files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect::<Vec<_>>(),
+        ["src/lib.rs", "src/new.rs"]
+    );
+    assert!(first.has_more);
+    let mut requested = item_paths(&server.received_requests().await.unwrap());
+    requested.sort();
+    assert_eq!(requested, ["/src/lib.rs", "/src/lib.rs", "/src/new.rs"]);
+
+    let second = client.get_diff(&repo, 7, 2, 2).await.unwrap();
+    assert_eq!(
+        second
+            .files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect::<Vec<_>>(),
+        ["src/old.rs", "src/new_name.rs"]
+    );
+    assert!(second.has_more, "the binary file is still on page 3");
+    let mut requested = item_paths(&server.received_requests().await.unwrap());
+    requested.sort();
+    assert_eq!(
+        requested,
+        [
+            "/src/lib.rs",
+            "/src/lib.rs",
+            "/src/new.rs",
+            "/src/new_name.rs",
+            "/src/old.rs",
+            "/src/old_name.rs"
+        ],
+        "the second page fetches only the two files it shows"
+    );
+}
+
+#[tokio::test]
+async fn azure_encodes_project_names_as_path_segments() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/acme/My%20Project/_apis/git/repositories/widget/pullrequests/7",
+        ))
+        .respond_with(ok(AZ_PR))
+        .mount(&server)
+        .await;
+    let client = AzureDevOpsClient::new(&format!("{}/acme", server.uri()), "pat", 120).unwrap();
+    let repo = ForgeRepoRef {
+        forge: ForgeKind::AzureDevOps,
+        base_url: format!("{}/acme", server.uri()),
+        owner: "My Project".into(),
+        repo: "widget".into(),
+    };
+    let pr = client.get_pr(&repo, 7).await.unwrap();
+    assert_eq!(pr.summary.number, 7);
 }
 
 #[tokio::test]
@@ -454,6 +814,18 @@ async fn azure_mine_and_reviewer_filters_use_the_viewer_identity() {
 }
 
 #[tokio::test]
+async fn azure_rejects_a_malformed_comment_id() {
+    let server = azure_server().await;
+    let client = AzureDevOpsClient::new(&format!("{}/acme", server.uri()), "pat", 120).unwrap();
+    let repo = azure_repo(&server.uri());
+    let error = client
+        .reply(&repo, 7, Some("101"), "not-a-number", "Fixed.")
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ForgeError::InvalidRequest(_)), "{error:?}");
+}
+
+#[tokio::test]
 async fn bitbucket_writes_replies_comments_and_pull_requests() {
     let server = bitbucket_server().await;
     let api = "/2.0/repositories/acme/widget";
@@ -463,10 +835,11 @@ async fn bitbucket_writes_replies_comments_and_pull_requests() {
             json!({"parent": {"id": 9100}}),
         ))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "type": "pullrequest_comment",
             "id": 9200,
-            "content": {"raw": "Fixed."},
-            "user": {"display_name": "Alice", "nickname": "alice"},
-            "created_on": "2024-05-01T12:00:00Z",
+            "content": {"raw": "Fixed.", "markup": "markdown", "html": "<p>Fixed.</p>"},
+            "user": {"type": "user", "display_name": "Alice Example", "nickname": "alice", "uuid": "{alice-uuid}"},
+            "created_on": "2024-05-01T12:00:00.123456+00:00",
             "inline": {"path": "src/lib.rs", "from": null, "to": 12}
         })))
         .expect(1)
@@ -475,10 +848,11 @@ async fn bitbucket_writes_replies_comments_and_pull_requests() {
     Mock::given(method("POST"))
         .and(path(format!("{api}/pullrequests/42/comments")))
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "type": "pullrequest_comment",
             "id": 9201,
-            "content": {"raw": "Thanks!"},
-            "user": {"display_name": "Alice", "nickname": "alice"},
-            "created_on": "2024-05-01T12:01:00Z"
+            "content": {"raw": "Thanks!", "markup": "markdown", "html": "<p>Thanks!</p>"},
+            "user": {"type": "user", "display_name": "Alice Example", "nickname": "alice", "uuid": "{alice-uuid}"},
+            "created_on": "2024-05-01T12:01:00.123456+00:00"
         })))
         .expect(1)
         .mount(&server)
@@ -537,7 +911,8 @@ async fn azure_writes_replies_comments_and_pull_requests() {
             "parentCommentId": 1,
             "author": {"displayName": "Alice Example"},
             "content": "Fixed.",
-            "publishedDate": "2024-05-01T12:00:00Z",
+            "publishedDate": "2024-05-01T12:00:00.000Z",
+            "lastUpdatedDate": "2024-05-01T12:00:00.000Z",
             "commentType": "text"
         })))
         .expect(1)
@@ -553,7 +928,8 @@ async fn azure_writes_replies_comments_and_pull_requests() {
                 "parentCommentId": 0,
                 "author": {"displayName": "Alice Example"},
                 "content": "Thanks!",
-                "publishedDate": "2024-05-01T12:01:00Z",
+                "publishedDate": "2024-05-01T12:01:00.000Z",
+                "lastUpdatedDate": "2024-05-01T12:01:00.000Z",
                 "commentType": "text"
             }]
         })))
@@ -628,7 +1004,9 @@ async fn a_stored_bitbucket_account_keeps_its_auth_scheme() {
     Mock::given(method("GET"))
         .and(path("/2.0/user"))
         .and(header("authorization", format!("Basic {expected}")))
-        .respond_with(ok(r#"{"username":"alice"}"#))
+        .respond_with(ok(
+            r#"{"type":"user","display_name":"Alice Example","nickname":"alice","uuid":"{alice-uuid}"}"#,
+        ))
         .mount(&basic)
         .await;
     let account = bitbucket_account(
@@ -644,7 +1022,9 @@ async fn a_stored_bitbucket_account_keeps_its_auth_scheme() {
     Mock::given(method("GET"))
         .and(path("/2.0/user"))
         .and(header("authorization", "Bearer ATBB-workspace"))
-        .respond_with(ok(r#"{"username":"workspace"}"#))
+        .respond_with(ok(
+            r#"{"type":"user","display_name":"Alice Example","nickname":"alice","uuid":"{alice-uuid}"}"#,
+        ))
         .mount(&bearer)
         .await;
     let account = bitbucket_account(
@@ -653,5 +1033,5 @@ async fn a_stored_bitbucket_account_keeps_its_auth_scheme() {
         h4rn_protocol::ForgeCredentialSource::BitbucketAccessToken,
     );
     let client = h4rn_forge::client_for(&account, "ATBB-workspace").unwrap();
-    assert_eq!(client.viewer().await.unwrap().login, "workspace");
+    assert_eq!(client.viewer().await.unwrap().login, "alice");
 }

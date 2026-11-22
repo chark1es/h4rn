@@ -90,6 +90,17 @@ pub trait Forge: Send + Sync {
     /// Fetches the authenticated viewer, which also validates the token.
     async fn viewer(&self) -> Result<ForgeViewer>;
 
+    /// Fetches the authenticated viewer with an optional repository hint.
+    ///
+    /// Forges whose credential is scoped to a repository (Bitbucket access
+    /// tokens) cannot always call the account endpoint; the hint lets the
+    /// client validate against that repository instead. The default ignores
+    /// it.
+    async fn viewer_for(&self, repo: Option<&ForgeRepoRef>) -> Result<ForgeViewer> {
+        let _ = repo;
+        self.viewer().await
+    }
+
     /// Lists PRs with the requested filter.
     async fn list_prs(
         &self,
@@ -273,8 +284,9 @@ pub fn capabilities(kind: ForgeKind) -> ForgeCapabilities {
         ForgeKind::Bitbucket => ForgeCapabilities {
             device_flow: false,
             review_threads: true,
-            // Resolution is read from the comment when the API reports it,
-            // but Bitbucket exposes no write API for it here.
+            // Resolution is read from the comment when the API reports it;
+            // Bitbucket has a resolve-comment endpoint, but this client does
+            // not call it yet.
             resolve_threads: false,
             nested_replies: true,
             inline_review_comments: true,

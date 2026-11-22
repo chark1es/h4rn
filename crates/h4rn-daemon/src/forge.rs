@@ -351,8 +351,8 @@ impl ForgeService {
         if token.is_empty() {
             return Err(ForgeError::InvalidRequest("the token is empty".into()).into());
         }
-        let base_url = validate_base_url_for(forge, base_url)?;
-        validate_cloud_base_url(forge, &base_url)?;
+        let base_url = validate_cloud_base_url(forge, base_url)
+            .and_then(|()| validate_base_url_for(forge, base_url))?;
         let account_id = format!("acct_{}", uuid::Uuid::now_v7().simple());
         let username = username
             .map(|value| value.trim().to_owned())

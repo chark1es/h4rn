@@ -3,67 +3,99 @@
   "value": [
     {
       "id": 101,
-      "status": "active",
-      "threadContext": {
-        "filePath": "/src/lib.rs",
-        "rightFileStart": { "line": 12, "offset": 1 },
-        "rightFileEnd": { "line": 12, "offset": 5 }
-      },
+      "publishedDate": "2024-05-01T11:00:00.000Z",
+      "lastUpdatedDate": "2024-05-01T11:00:00.000Z",
       "comments": [
         {
           "id": 1,
           "parentCommentId": 0,
-          "author": { "displayName": "Bob Reviewer" },
+          "author": {
+            "displayName": "Bob Reviewer",
+            "uniqueName": "bob@example.test",
+            "id": "bob-guid"
+          },
           "content": "This can panic.",
-          "publishedDate": "2024-05-01T11:00:00Z",
-          "lastUpdatedDate": "2024-05-01T11:00:00Z",
+          "publishedDate": "2024-05-01T11:00:00.000Z",
+          "lastUpdatedDate": "2024-05-01T11:00:00.000Z",
           "commentType": "text",
           "isDeleted": false
         },
         {
           "id": 2,
           "parentCommentId": 1,
-          "author": { "displayName": "Alice Example" },
+          "author": {
+            "displayName": "Alice Example",
+            "uniqueName": "alice@example.test",
+            "id": "alice-guid"
+          },
           "content": "Fixed.",
-          "publishedDate": "2024-05-01T11:05:00Z",
-          "lastUpdatedDate": "2024-05-01T11:05:00Z",
+          "publishedDate": "2024-05-01T11:05:00.000Z",
+          "lastUpdatedDate": "2024-05-01T11:05:00.000Z",
           "commentType": "text",
           "isDeleted": false
         }
-      ]
+      ],
+      "status": "active",
+      "threadContext": {
+        "filePath": "/src/lib.rs",
+        "rightFileStart": { "line": 12, "offset": 1 },
+        "rightFileEnd": { "line": 12, "offset": 5 }
+      },
+      "properties": {},
+      "identities": {},
+      "isDeleted": false
     },
     {
       "id": 102,
-      "status": "fixed",
-      "threadContext": null,
+      "publishedDate": "2024-05-01T10:00:00.000Z",
+      "lastUpdatedDate": "2024-05-01T10:00:00.000Z",
       "comments": [
         {
           "id": 3,
           "parentCommentId": 0,
-          "author": { "displayName": "Carole" },
+          "author": {
+            "displayName": "Carole",
+            "uniqueName": "carol@example.test",
+            "id": "carol-guid"
+          },
           "content": "Thanks!",
-          "publishedDate": "2024-05-01T10:00:00Z",
-          "lastUpdatedDate": "2024-05-01T10:00:00Z",
+          "publishedDate": "2024-05-01T10:00:00.000Z",
+          "lastUpdatedDate": "2024-05-01T10:00:00.000Z",
           "commentType": "text",
           "isDeleted": false
         }
-      ]
+      ],
+      "status": "fixed",
+      "threadContext": null,
+      "properties": {},
+      "identities": {},
+      "isDeleted": false
     },
     {
       "id": 103,
-      "status": "active",
-      "threadContext": null,
+      "publishedDate": "2024-05-01T09:30:00.000Z",
+      "lastUpdatedDate": "2024-05-01T09:30:00.000Z",
       "comments": [
         {
           "id": 4,
           "parentCommentId": 0,
-          "author": { "displayName": "Azure DevOps" },
+          "author": {
+            "displayName": "Azure DevOps",
+            "uniqueName": "azure@example.test",
+            "id": "azure-guid"
+          },
           "content": "Alice updated the pull request.",
-          "publishedDate": "2024-05-01T09:30:00Z",
+          "publishedDate": "2024-05-01T09:30:00.000Z",
+          "lastUpdatedDate": "2024-05-01T09:30:00.000Z",
           "commentType": "system",
           "isDeleted": false
         }
-      ]
+      ],
+      "status": "active",
+      "threadContext": null,
+      "properties": {},
+      "identities": {},
+      "isDeleted": false
     }
   ]
 }

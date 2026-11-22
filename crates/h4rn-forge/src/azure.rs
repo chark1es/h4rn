@@ -10,18 +10,25 @@
 //! is `{base}/{project}/_apis/git/repositories/{repo}`.
 //!
 //! Diffs: Azure returns changed-file entries per iteration, not a patch. The
-//! client reads the latest iteration's changes, downloads the old and new
-//! content of each text file from the base and source commits, and builds a
-//! unified diff locally with [`crate::diff::unified_diff`]. Pull request
-//! additions/deletions come from the same construction, capped so a huge PR
-//! cannot make the detail request unbounded.
+//! client reads the latest iteration's changes, pages them, downloads the old
+//! and new content of the files on the requested page (at most six requests at
+//! once, from the iteration's `commonRefCommit` and `sourceRefCommit`), and
+//! builds a unified diff locally with [`crate::diff::unified_diff`]. The PR
+//! detail only counts changed files from the same metadata; it never downloads
+//! file contents.
 //!
 //! Checks combine the PR's commit statuses with its policy evaluations
-//! (blocking policies are `required`). Re-running builds needs the Builds API
-//! and a broader token; this client reports it as unsupported with the reason.
+//! (`api-version=7.1-preview.1`; blocking policies are `required`, and a
+//! policy outcome wins over a status with the same name). The project id comes
+//! from the PR's `repository.project.id`. Re-running builds needs the Builds
+//! API and a broader token; this client reports it as unsupported with the
+//! reason.
+
+use std::collections::HashMap;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use futures::StreamExt;
 use h4rn_protocol::{
     ForgeCapabilities, ForgeCheck, ForgeChecks, ForgeChecksState, ForgeComment, ForgeCommentPage,
     ForgeCommit, ForgeCommits, ForgeDiffPage, ForgeDiffSide, ForgeFileDiff, ForgeFileStatus,
@@ -42,10 +49,38 @@ use crate::{Forge, ForgeViewer, PrPage};
 
 /// API version every request names.
 const API_VERSION: &str = "7.1";
-/// Changed files a PR detail will download to count lines.
-const DETAIL_FILE_CAP: usize = 100;
-/// Changed files a diff page will build.
-const DIFF_FILE_CAP: usize = 500;
+/// Policy evaluations only exist on the preview version.
+const POLICY_API_VERSION: &str = "7.1-preview.1";
+/// File contents fetched at once for one diff page.
+const CONTENT_CONCURRENCY: usize = 6;
+/// Commits requested per page.
+const COMMIT_PAGE_SIZE: u32 = 100;
+
+/// One file content response.
+struct ItemContent {
+    text: Option<String>,
+    binary: bool,
+}
+
+/// One changed file, before its contents are fetched.
+struct ChangedFile {
+    path: String,
+    original: String,
+    status: ForgeFileStatus,
+}
+
+impl ItemContent {
+    fn empty() -> Self {
+        Self {
+            text: None,
+            binary: false,
+        }
+    }
+
+    fn text(&self) -> &str {
+        self.text.as_deref().unwrap_or_default()
+    }
+}
 
 /// Azure DevOps Services REST client.
 pub struct AzureDevOpsClient {
@@ -106,67 +141,35 @@ impl AzureDevOpsClient {
             .ok_or_else(|| ForgeError::Parse("Azure DevOps returned no authenticated user".into()))
     }
 
-    async fn project_id(&self, repo: &ForgeRepoRef) -> Result<String> {
+    /// The latest iteration, whose `commonRefCommit` and `sourceRefCommit`
+    /// describe the two sides of the diff.
+    async fn latest_iteration(&self, repo: &ForgeRepoRef, number: u32) -> Result<Value> {
         let value = self
-            .http
-            .get_json(&versioned(&format!(
-                "{}/_apis/projects/{}",
-                self.api,
-                urlencode(&repo.owner)
-            )))
-            .await?;
-        optional_text(&value, "id")
-            .ok_or_else(|| ForgeError::Parse("Azure DevOps returned no project id".into()))
-    }
-
-    /// Reads every page of a `{count, value}` collection with `$top`/`$skip`.
-    async fn get_all(&self, url: &str, page_size: u32, max_pages: usize) -> Result<Vec<Value>> {
-        let mut values = Vec::new();
-        let mut skip = 0u64;
-        for _ in 0..max_pages {
-            let current = with_query(
-                url,
-                &[
-                    ("$top", page_size.to_string()),
-                    ("$skip", skip.to_string()),
-                    ("api-version", API_VERSION.to_owned()),
-                ],
-            );
-            let value = self.http.get_json(&current).await?;
-            let Some(array) = value["value"].as_array().or_else(|| value.as_array()) else {
-                break;
-            };
-            let count = array.len();
-            values.extend(array.iter().cloned());
-            if count < page_size as usize {
-                break;
-            }
-            skip += count as u64;
-        }
-        Ok(values)
-    }
-
-    /// The latest iteration's change entries, with paging handled.
-    async fn change_entries(&self, repo: &ForgeRepoRef, number: u32) -> Result<Vec<Value>> {
-        let iterations = self
             .http
             .get_json(&versioned(&format!(
                 "{}/iterations",
                 self.pr_api(repo, number)
             )))
             .await?;
-        let iteration = iterations["value"]
+        let iterations = value
             .as_array()
-            .and_then(|values| {
-                values
-                    .iter()
-                    .filter_map(|value| value["id"].as_u64().map(|id| (id, value)))
-                    .max_by_key(|(id, _)| *id)
-                    .map(|(_, value)| value)
-            })
-            .ok_or_else(|| {
-                ForgeError::Parse("the pull request has no iterations to diff".into())
-            })?;
+            .cloned()
+            .or_else(|| value["value"].as_array().cloned())
+            .unwrap_or_default();
+        iterations
+            .into_iter()
+            .filter(|iteration| iteration["id"].as_u64().is_some())
+            .max_by_key(|iteration| iteration["id"].as_u64().unwrap_or(0))
+            .ok_or_else(|| ForgeError::Parse("the pull request has no iterations to diff".into()))
+    }
+
+    /// One iteration's change entries, with `nextSkip`/`nextTop` paging.
+    async fn change_entries(
+        &self,
+        repo: &ForgeRepoRef,
+        number: u32,
+        iteration: &Value,
+    ) -> Result<Vec<Value>> {
         let id = iteration["id"].as_u64().unwrap_or(1);
         let url = versioned(&format!(
             "{}/iterations/{id}/changes?$top=200&$skip=0",
@@ -184,94 +187,115 @@ impl AzureDevOpsClient {
             if let Some(array) = value["changeEntries"].as_array() {
                 entries.extend(array.iter().cloned());
             }
-            next = value["nextSkip"].as_u64().map(|skip| {
-                let top = value["nextTop"].as_u64().unwrap_or(200);
-                versioned(&format!(
-                    "{}/iterations/{id}/changes?$top={top}&$skip={skip}",
-                    self.pr_api(repo, number)
-                ))
-            });
+            next = value["nextSkip"]
+                .as_u64()
+                .filter(|skip| *skip > 0)
+                .map(|skip| {
+                    let top = value["nextTop"].as_u64().unwrap_or(200);
+                    versioned(&format!(
+                        "{}/iterations/{id}/changes?$top={top}&$skip={skip}",
+                        self.pr_api(repo, number)
+                    ))
+                });
         }
         Ok(entries)
     }
 
-    /// File contents at one commit, or `None` when the path does not exist
-    /// there (an added or deleted file's other side).
+    /// File content and metadata at one commit. A 404 means the path does not
+    /// exist there (an added or deleted file's other side).
     async fn item_content(
         &self,
         repo: &ForgeRepoRef,
         path: &str,
         commit: &str,
-    ) -> Result<Option<String>> {
+    ) -> Result<ItemContent> {
         let url = format!(
-            "{}/items?path={}&includeContent=true&versionDescriptor.version={}&versionDescriptor.versionType=commit&api-version={API_VERSION}",
+            "{}/items?path={}&includeContent=true&includeContentMetadata=true&$format=json&versionDescriptor.version={}&versionDescriptor.versionType=commit&api-version={API_VERSION}",
             self.repo_api(repo),
-            urlencode(&format!("/{path}")),
+            urlencode(&format!("/{}", path.trim_start_matches('/'))),
             urlencode(commit)
         );
         match self.http.get_json(&url).await {
-            Ok(value) => Ok(optional_text(&value, "content")),
-            Err(ForgeError::NotFound(_)) | Err(ForgeError::Http { status: 404, .. }) => Ok(None),
+            Ok(value) => Ok(ItemContent {
+                text: optional_text(&value, "content"),
+                binary: value["contentMetadata"]["isBinary"]
+                    .as_bool()
+                    .or_else(|| value["isBinary"].as_bool())
+                    .unwrap_or(false),
+            }),
+            Err(ForgeError::NotFound(_)) | Err(ForgeError::Http { status: 404, .. }) => {
+                Ok(ItemContent::empty())
+            }
             Err(error) => Err(error),
         }
     }
 
-    async fn collect_file_diffs(
+    /// Fetches the old and new contents for one page of files, at most
+    /// [`CONTENT_CONCURRENCY`] requests at a time. A cache keyed by path and
+    /// commit keeps a rename from downloading the same blob twice.
+    async fn page_file_diffs(
         &self,
         repo: &ForgeRepoRef,
-        number: u32,
-        cap: usize,
+        files: &[ChangedFile],
+        old_ref: &str,
+        new_ref: &str,
     ) -> Result<Vec<ForgeFileDiff>> {
-        let pr = self.fetch_pr(repo, number).await?;
-        let base = pr["lastMergeTargetCommit"]["commitId"]
-            .as_str()
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| ForgeError::Parse("the pull request has no base commit".into()))?;
-        let head = pr["lastMergeSourceCommit"]["commitId"]
-            .as_str()
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| ForgeError::Parse("the pull request has no source commit".into()))?;
-        let entries = self.change_entries(repo, number).await?;
-        let mut files = Vec::new();
-        for entry in entries.iter().take(cap) {
-            let item = &entry["item"];
-            if item["isFolder"].as_bool().unwrap_or(false) {
-                continue;
+        let mut requests: Vec<(String, String)> = Vec::new();
+        for file in files {
+            if file.status != ForgeFileStatus::Added {
+                requests.push((file.original.clone(), old_ref.to_owned()));
             }
-            let Some(path) = optional_text(item, "path") else {
-                continue;
-            };
-            let path = path.trim_start_matches('/').to_owned();
-            let change_type = entry["changeType"].as_str().unwrap_or_default();
-            let status = change_status(change_type);
-            let original = optional_text(entry, "originalPath")
-                .or_else(|| optional_text(item, "originalPath"))
-                .map(|path| path.trim_start_matches('/').to_owned())
-                .unwrap_or_else(|| path.clone());
-            let old_content = if status == ForgeFileStatus::Added {
-                None
+            if file.status != ForgeFileStatus::Deleted {
+                requests.push((file.path.clone(), new_ref.to_owned()));
+            }
+        }
+        requests.sort();
+        requests.dedup();
+
+        let fetched =
+            futures::stream::iter(requests.into_iter().map(|(path, commit)| async move {
+                let content = self.item_content(repo, &path, &commit).await;
+                ((path, commit), content)
+            }))
+            .buffer_unordered(CONTENT_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+
+        let mut cache: HashMap<(String, String), ItemContent> = HashMap::new();
+        for (key, content) in fetched {
+            cache.insert(key, content?);
+        }
+
+        let mut diffs = Vec::with_capacity(files.len());
+        let empty = ItemContent::empty();
+        for file in files {
+            let old = if file.status == ForgeFileStatus::Added {
+                &empty
             } else {
-                self.item_content(repo, &original, &base).await?
+                cache
+                    .get(&(file.original.clone(), old_ref.to_owned()))
+                    .unwrap_or(&empty)
             };
-            let new_content = if status == ForgeFileStatus::Deleted {
-                None
+            let new = if file.status == ForgeFileStatus::Deleted {
+                &empty
             } else {
-                self.item_content(repo, &path, &head).await?
+                cache
+                    .get(&(file.path.clone(), new_ref.to_owned()))
+                    .unwrap_or(&empty)
             };
-            let old_text = old_content.unwrap_or_default();
-            let new_text = new_content.unwrap_or_default();
-            let binary = old_text.as_bytes().contains(&0) || new_text.as_bytes().contains(&0);
+            let binary = old.binary || new.binary;
             let patch = if binary {
                 None
             } else {
-                crate::diff::unified_diff(&original, &path, &old_text, &new_text)
+                crate::diff::unified_diff(&file.original, &file.path, old.text(), new.text())
             };
             let (additions, deletions) = patch.as_deref().map(count_patch).unwrap_or((0, 0));
-            files.push(ForgeFileDiff {
-                path: path.clone(),
-                previous_path: (status == ForgeFileStatus::Renamed && original != path)
-                    .then(|| original.clone()),
-                status,
+            diffs.push(ForgeFileDiff {
+                path: file.path.clone(),
+                previous_path: (file.status == ForgeFileStatus::Renamed
+                    && file.original != file.path)
+                    .then(|| file.original.clone()),
+                status: file.status,
                 additions,
                 deletions,
                 patch,
@@ -279,16 +303,57 @@ impl AzureDevOpsClient {
                 truncated: false,
             });
         }
-        Ok(files)
+        Ok(diffs)
     }
 
-    async fn commit_count(&self, repo: &ForgeRepoRef, number: u32) -> Option<u32> {
-        let url = versioned(&format!("{}/commits?$top=1", self.pr_api(repo, number)));
-        let value = self.http.get_json(&url).await.ok()?;
-        value["count"]
-            .as_u64()
-            .map(|count| count as u32)
-            .or_else(|| Some(value["value"].as_array()?.len() as u32))
+    /// One page of commits, plus the server's continuation token.
+    async fn commit_page(
+        &self,
+        repo: &ForgeRepoRef,
+        number: u32,
+        top: u32,
+        token: Option<&str>,
+    ) -> Result<(Vec<Value>, Option<String>)> {
+        let mut query = vec![("$top", top.to_string())];
+        if let Some(token) = token {
+            query.push(("continuationToken", token.to_owned()));
+        }
+        let url = with_version(&format!("{}/commits", self.pr_api(repo, number)), &query);
+        let response = self
+            .http
+            .request(reqwest::Method::GET, &url, None, false)
+            .await?;
+        let next = response
+            .headers
+            .get("x-ms-continuationtoken")
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        let value = self.http.json(response)?;
+        let commits = value
+            .as_array()
+            .cloned()
+            .or_else(|| value["value"].as_array().cloned())
+            .unwrap_or_default();
+        Ok((commits, next))
+    }
+
+    /// Every commit, following `continuationToken` for up to five pages.
+    async fn all_commits(&self, repo: &ForgeRepoRef, number: u32) -> Result<(Vec<Value>, bool)> {
+        let mut all = Vec::new();
+        let mut token: Option<String> = None;
+        for _ in 0..5 {
+            let (commits, next) = self
+                .commit_page(repo, number, COMMIT_PAGE_SIZE, token.as_deref())
+                .await?;
+            all.extend(commits);
+            match next {
+                Some(next) => token = Some(next),
+                None => return Ok((all, false)),
+            }
+        }
+        Ok((all, true))
     }
 }
 
@@ -376,12 +441,19 @@ impl Forge for AzureDevOpsClient {
         validate_repo(repo)?;
         let value = self.fetch_pr(repo, number).await?;
         let mut pr = map_pr_detail(repo, &value)?;
-        if let Ok(files) = self.collect_file_diffs(repo, number, DETAIL_FILE_CAP).await {
-            pr.additions = files.iter().map(|file| file.additions).sum();
-            pr.deletions = files.iter().map(|file| file.deletions).sum();
-            pr.changed_files = files.len() as u32;
+        // Count the changed files from the iteration metadata only. Building
+        // the patch here would download every file and blow the detail
+        // request's budget; the Diff tab builds one page on demand.
+        if let Ok(iteration) = self.latest_iteration(repo, number).await
+            && let Ok(entries) = self.change_entries(repo, number, &iteration).await
+        {
+            pr.changed_files = changed_files(&entries).len() as u32;
         }
-        pr.commits = self.commit_count(repo, number).await.unwrap_or(0);
+        pr.commits = self
+            .all_commits(repo, number)
+            .await
+            .map(|(commits, _)| commits.len() as u32)
+            .unwrap_or(0);
         pr.reviewers = map_reviewers(&value);
         pr.summary.review = aggregate_review(&pr.reviewers);
         Ok(pr)
@@ -397,15 +469,35 @@ impl Forge for AzureDevOpsClient {
         validate_repo(repo)?;
         let per_page = per_page.clamp(1, 100);
         let page = page.max(1);
-        let files = self.collect_file_diffs(repo, number, DIFF_FILE_CAP).await?;
-        let (files, has_more) = crate::diff::paginate(files, page, per_page);
+        let iteration = self.latest_iteration(repo, number).await?;
+        let old_ref = iteration["commonRefCommit"]["commitId"]
+            .as_str()
+            .ok_or_else(|| {
+                ForgeError::Parse("the iteration has no common ref commit to diff".into())
+            })?;
+        let new_ref = iteration["sourceRefCommit"]["commitId"]
+            .as_str()
+            .ok_or_else(|| {
+                ForgeError::Parse("the iteration has no source ref commit to diff".into())
+            })?;
+        let entries = self.change_entries(repo, number, &iteration).await?;
+        let changed = changed_files(&entries);
+        let total = changed.len();
+        let start = ((page - 1) * per_page) as usize;
+        let end = (start + per_page as usize).min(total);
+        let files = if start < total {
+            self.page_file_diffs(repo, &changed[start..end], old_ref, new_ref)
+                .await?
+        } else {
+            Vec::new()
+        };
         Ok(ForgeDiffPage {
             repo: repo.clone(),
             number,
             files,
             page,
             per_page,
-            has_more,
+            has_more: end < total,
         })
     }
 
@@ -514,34 +606,40 @@ impl Forge for AzureDevOpsClient {
             }
         }
         // Blocking policies are what the branch gates on. Statuses often carry
-        // the same context, so a matching row only gains `required`.
-        if let Ok(project_id) = self.project_id(repo).await {
+        // the same context; when a status and a policy share a name, the policy
+        // outcome wins because it is the branch gate.
+        if let Some(project_id) = optional_text(&pr["repository"]["project"], "id") {
             let artifact = urlencode(&format!(
                 "vstfs:///CodeReview/CodeReviewId/{project_id}/{number}"
             ));
             let url = format!(
-                "{}/{}/_apis/policy/evaluations?artifactId={artifact}&api-version={API_VERSION}",
+                "{}/{}/_apis/policy/evaluations?artifactId={artifact}&api-version={POLICY_API_VERSION}",
                 self.api,
                 urlencode(&repo.owner)
             );
             if let Ok(value) = self.http.get_json(&url).await {
                 for evaluation in value["value"].as_array().into_iter().flatten() {
-                    let policy = &evaluation["configuredPolicy"];
+                    let policy = &evaluation["configuration"];
+                    let type_name = optional_text(&policy["type"], "displayName");
                     let name = optional_text(&policy["settings"], "displayName")
-                        .or_else(|| optional_text(&policy["type"], "displayName"))
+                        .or_else(|| type_name.clone())
                         .unwrap_or_else(|| "policy".into());
                     let required = policy["isBlocking"].as_bool();
+                    let status =
+                        azure_policy_status(evaluation["status"].as_str().unwrap_or_default());
                     if let Some(existing) = checks.iter_mut().find(|check| check.name == name) {
                         existing.required = required;
+                        existing.status = status;
+                        if existing.description.is_none() {
+                            existing.description = type_name;
+                        }
                         continue;
                     }
                     checks.push(ForgeCheck {
                         name,
-                        status: azure_policy_status(
-                            evaluation["status"].as_str().unwrap_or_default(),
-                        ),
+                        status,
                         details_url: None,
-                        description: optional_text(&policy["type"], "displayName"),
+                        description: type_name,
                         started_at: None,
                         completed_at: None,
                         duration_ms: None,
@@ -555,8 +653,7 @@ impl Forge for AzureDevOpsClient {
 
     async fn list_commits(&self, repo: &ForgeRepoRef, number: u32) -> Result<ForgeCommits> {
         validate_repo(repo)?;
-        let url = format!("{}/commits", self.pr_api(repo, number));
-        let values = self.get_all(&url, 100, 5).await?;
+        let (values, truncated) = self.all_commits(repo, number).await?;
         let mut commits: Vec<ForgeCommit> = values
             .iter()
             .filter_map(|value| map_commit(repo, value))
@@ -566,7 +663,7 @@ impl Forge for AzureDevOpsClient {
         Ok(ForgeCommits {
             repo: repo.clone(),
             number,
-            truncated: values.len() >= 500,
+            truncated,
             commits,
         })
     }
@@ -585,7 +682,9 @@ impl Forge for AzureDevOpsClient {
                 "Azure DevOps replies need the thread id".into(),
             ));
         };
-        let parent = comment_id.parse::<u64>().unwrap_or(0);
+        let parent = comment_id.parse::<u64>().map_err(|_| {
+            ForgeError::InvalidRequest(format!("invalid comment id {comment_id:?}"))
+        })?;
         let url = versioned(&format!(
             "{}/threads/{thread_id}/comments",
             self.pr_api(repo, number)
@@ -694,7 +793,7 @@ fn with_version(url: &str, query: &[(&str, String)]) -> String {
 }
 
 fn urlencode(value: &str) -> String {
-    url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>()
+    crate::http::encode_path_segment(value)
 }
 
 fn ref_branch(value: &str) -> String {
@@ -716,17 +815,12 @@ fn pr_state(value: &Value) -> ForgePrState {
 
 fn map_pr_summary(repo: &ForgeRepoRef, value: &Value) -> Option<ForgePrSummary> {
     let number = value["pullRequestId"].as_u64()? as u32;
+    // Azure does not update a PR's creation date, so a closed PR uses its
+    // closed date and an active one keeps the creation date. `lastMergeCommit`
+    // is the merge attempt, not a modification time, so it is not a fallback.
     let updated_at = parse_optional_datetime(value.get("closedDate"), "closedDate")
         .ok()
         .flatten()
-        .or_else(|| {
-            parse_optional_datetime(
-                value["lastMergeCommit"]["author"].get("date"),
-                "lastMergeCommit.author.date",
-            )
-            .ok()
-            .flatten()
-        })
         .or_else(|| {
             parse_optional_datetime(value.get("creationDate"), "creationDate")
                 .ok()
@@ -898,6 +992,42 @@ fn map_thread_comments(
         .collect()
 }
 
+fn changed_files(entries: &[Value]) -> Vec<ChangedFile> {
+    let mut files = Vec::new();
+    for entry in entries {
+        let item = &entry["item"];
+        if item["isFolder"].as_bool().unwrap_or(false) {
+            continue;
+        }
+        if let Some(kind) = optional_text(item, "gitObjectType")
+            && !kind.eq_ignore_ascii_case("blob")
+        {
+            continue;
+        }
+        let status = change_status(entry["changeType"].as_str().unwrap_or_default());
+        let source = optional_text(entry, "originalPath")
+            .or_else(|| optional_text(entry, "sourceServerItem"));
+        // A deleted entry may have no `item.path`; the source fields name it.
+        let Some(path) = optional_text(item, "path").or_else(|| {
+            (status == ForgeFileStatus::Deleted)
+                .then(|| source.clone())
+                .flatten()
+        }) else {
+            continue;
+        };
+        let path = path.trim_start_matches('/').to_owned();
+        let original = source
+            .map(|path| path.trim_start_matches('/').to_owned())
+            .unwrap_or_else(|| path.clone());
+        files.push(ChangedFile {
+            path,
+            original,
+            status,
+        });
+    }
+    files
+}
+
 fn change_status(change_type: &str) -> ForgeFileStatus {
     if change_type.contains("add") {
         ForgeFileStatus::Added
@@ -1029,5 +1159,12 @@ mod tests {
         assert!(azure_thread_resolved("byDesign"));
         assert!(!azure_thread_resolved("active"));
         assert!(!azure_thread_resolved("pending"));
+    }
+
+    #[test]
+    fn names_are_encoded_as_single_path_segments() {
+        assert_eq!(urlencode("My Project"), "My%20Project");
+        assert_eq!(urlencode("a/b"), "a%2Fb");
+        assert_eq!(urlencode("widget"), "widget");
     }
 }

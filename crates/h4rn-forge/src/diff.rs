@@ -218,14 +218,6 @@ pub fn unified_diff(old_path: &str, new_path: &str, old: &str, new: &str) -> Opt
         }
     ));
     for (start, end) in hunks {
-        let old_start = 1 + ops[..start]
-            .iter()
-            .filter(|op| op.kind != OpKind::Insert)
-            .count();
-        let new_start = 1 + ops[..start]
-            .iter()
-            .filter(|op| op.kind != OpKind::Delete)
-            .count();
         let old_count = ops[start..end]
             .iter()
             .filter(|op| op.kind != OpKind::Insert)
@@ -234,6 +226,24 @@ pub fn unified_diff(old_path: &str, new_path: &str, old: &str, new: &str) -> Opt
             .iter()
             .filter(|op| op.kind != OpKind::Delete)
             .count();
+        // An added file has no lines on the old side and a deleted one has
+        // none on the new side; git writes `0,0` there, not `1,0`.
+        let old_start = if old_count == 0 {
+            0
+        } else {
+            1 + ops[..start]
+                .iter()
+                .filter(|op| op.kind != OpKind::Insert)
+                .count()
+        };
+        let new_start = if new_count == 0 {
+            0
+        } else {
+            1 + ops[..start]
+                .iter()
+                .filter(|op| op.kind != OpKind::Delete)
+                .count()
+        };
         out.push_str(&format!(
             "@@ -{old_start},{old_count} +{new_start},{new_count} @@\n"
         ));
@@ -466,10 +476,10 @@ Binary files a/logo.png and b/logo.png differ\n";
     fn a_new_or_deleted_file_uses_dev_null() {
         let added = unified_diff("src/new.rs", "src/new.rs", "", "hello\n").unwrap();
         assert!(added.contains("--- /dev/null\n"));
-        assert!(added.contains("@@ -1,0 +1,1 @@\n+hello\n"));
+        assert!(added.contains("@@ -0,0 +1,1 @@\n+hello\n"));
         let deleted = unified_diff("src/old.rs", "src/old.rs", "bye\n", "").unwrap();
         assert!(deleted.contains("+++ /dev/null\n"));
-        assert!(deleted.contains("-bye\n"));
+        assert!(deleted.contains("@@ -1,1 +0,0 @@\n-bye\n"));
     }
 
     #[test]

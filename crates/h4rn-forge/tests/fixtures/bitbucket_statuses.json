@@ -1,23 +1,37 @@
 {
+  "size": 2,
+  "page": 1,
   "pagelen": 100,
   "values": [
     {
+      "type": "commit_status",
       "key": "{pipeline-result}",
       "name": "Pipeline #12",
       "state": "SUCCESSFUL",
       "url": "https://bitbucket.org/acme/widget/addon/pipelines/home#!/results/12",
       "description": "Pipeline succeeded",
-      "created_on": "2024-05-01T10:00:00Z",
-      "updated_on": "2024-05-01T10:05:00Z"
+      "created_on": "2024-05-01T10:00:00.123456+00:00",
+      "updated_on": "2024-05-01T10:05:00.123456+00:00",
+      "links": {
+        "self": {
+          "href": "https://api.bitbucket.org/2.0/repositories/acme/widget/commit/aaaa1111bbbb2222cccc3333dddd4444eeee5555/statuses/build/%7Bpipeline-result%7D"
+        }
+      }
     },
     {
+      "type": "commit_status",
       "key": "ci/lint",
       "name": "ci/lint",
       "state": "FAILED",
       "url": "https://ci.example.test/lint/12",
       "description": "lint failed",
-      "created_on": "2024-05-01T10:00:00Z",
-      "updated_on": "2024-05-01T10:01:00Z"
+      "created_on": "2024-05-01T10:00:00.123456+00:00",
+      "updated_on": "2024-05-01T10:01:00.123456+00:00",
+      "links": {
+        "self": {
+          "href": "https://api.bitbucket.org/2.0/repositories/acme/widget/commit/aaaa1111bbbb2222cccc3333dddd4444eeee5555/statuses/build/ci%2Flint"
+        }
+      }
     }
   ]
 }

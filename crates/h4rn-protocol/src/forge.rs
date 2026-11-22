@@ -122,7 +122,7 @@ impl ForgeCredentialSource {
             Self::OAuthDevice => "OAuth device flow",
             Self::GhCli => "gh CLI",
             Self::GlabCli => "glab CLI",
-            Self::BitbucketAppPassword => "Bitbucket app password",
+            Self::BitbucketAppPassword => "Bitbucket API token or app password",
             Self::BitbucketAccessToken => "Bitbucket access token",
         }
     }

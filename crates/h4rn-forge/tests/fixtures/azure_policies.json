@@ -3,20 +3,55 @@
   "value": [
     {
       "evaluationId": "eval-1",
-      "status": "approved",
-      "configuredPolicy": {
+      "artifactId": "vstfs:///CodeReview/CodeReviewId/project-guid/7",
+      "status": "rejected",
+      "startedDate": "2024-05-01T10:00:00.000Z",
+      "completedDate": "2024-05-01T10:05:00.000Z",
+      "configuration": {
+        "id": 12,
         "isBlocking": true,
-        "type": { "displayName": "Build" },
-        "settings": { "displayName": "Build validation" }
+        "isDeleted": false,
+        "isEnabled": true,
+        "revision": 1,
+        "type": {
+          "displayName": "Build",
+          "id": "0609b952-1397-4640-95ec-e00a01b2f659"
+        },
+        "settings": {
+          "displayName": "Build validation",
+          "buildDefinitionId": 12,
+          "queueOnSourceUpdateOnly": true,
+          "validDuration": 720
+        }
       }
     },
     {
       "evaluationId": "eval-2",
-      "status": "rejected",
-      "configuredPolicy": {
+      "artifactId": "vstfs:///CodeReview/CodeReviewId/project-guid/7",
+      "status": "approved",
+      "startedDate": "2024-05-01T10:00:00.000Z",
+      "completedDate": "2024-05-01T10:01:00.000Z",
+      "configuration": {
+        "id": 13,
         "isBlocking": false,
-        "type": { "displayName": "Reviewers" },
-        "settings": { "displayName": "Minimum reviewers" }
+        "isDeleted": false,
+        "isEnabled": true,
+        "revision": 1,
+        "type": {
+          "displayName": "Reviewers",
+          "id": "fa4e907d-c16b-4a4c-9dfa-4906e5d171dd"
+        },
+        "settings": {
+          "displayName": "Minimum reviewers",
+          "minimumApproverCount": 1,
+          "scope": [
+            {
+              "repositoryId": "widget-guid",
+              "refName": "refs/heads/main",
+              "matchKind": "Exact"
+            }
+          ]
+        }
       }
     }
   ]

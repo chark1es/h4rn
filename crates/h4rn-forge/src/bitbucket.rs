@@ -7,11 +7,13 @@
 //!
 //! Review threads are rebuilt from the comment `parent` chain. Bitbucket's
 //! newer API adds a `resolution` object to a comment; when it is present the
-//! thread is reported resolved, otherwise unresolved. There is no write API
-//! for resolving, so `resolve_threads` stays `false`.
+//! thread is reported resolved, otherwise unresolved. Bitbucket Cloud does
+//! expose a resolve-comment endpoint (`POST .../comments/{id}/resolve`), but
+//! this client does not call it yet, so `resolve_threads` stays `false`.
 //!
-//! Diffs are the PR's raw unified patch (`/pullrequests/{id}/diff`) parsed by
-//! [`crate::diff`]. Pagination is applied locally, like Gitea and Forgejo.
+//! Diffs are the PR's raw unified patch (`/pullrequests/{id}/diff`, which the
+//! API redirects to the repository diff) parsed by [`crate::diff`]. Pagination
+//! is applied locally, like Gitea and Forgejo.
 //!
 //! Bitbucket Server and Data Center are not supported; they use a different
 //! API (`/rest/api/1.0`) and are rejected before this client is built.
@@ -96,7 +98,8 @@ impl BitbucketClient {
     }
 
     /// Reads every page of a Bitbucket collection (it links the next page in
-    /// the body, not a `Link` header).
+    /// the body, not a `Link` header). A `next` link on another origin is not
+    /// followed: the request would carry this account's Authorization header.
     async fn get_pages(&self, url: &str, max_pages: usize) -> Result<Vec<Value>> {
         let mut values = Vec::new();
         let mut next = Some(url.to_owned());
@@ -110,7 +113,8 @@ impl BitbucketClient {
             if let Some(array) = value["values"].as_array() {
                 values.extend(array.iter().cloned());
             }
-            next = optional_text(&value, "next");
+            next = optional_text(&value, "next")
+                .filter(|next| crate::http::same_origin(next, &self.api));
         }
         Ok(values)
     }
@@ -126,7 +130,7 @@ impl BitbucketClient {
         let mut deletions = 0u32;
         for value in &values {
             additions += value["lines_added"].as_u64().unwrap_or(0) as u32;
-            deletions += value["lines_deleted"].as_u64().unwrap_or(0) as u32;
+            deletions += value["lines_removed"].as_u64().unwrap_or(0) as u32;
         }
         Some((additions, deletions, values.len() as u32))
     }
@@ -138,6 +142,84 @@ impl BitbucketClient {
             .as_u64()
             .map(|size| size as u32)
             .or_else(|| Some(value["values"].as_array()?.len() as u32))
+    }
+
+    /// `GET /user`, which needs the account scope.
+    async fn user_viewer(&self) -> Result<ForgeViewer> {
+        let url = format!("{}/user", self.api);
+        let response = self
+            .http
+            .request(reqwest::Method::GET, &url, None, false)
+            .await?;
+        let scopes = response
+            .headers
+            .get("x-oauth-scopes")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|scope| !scope.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let value = self.http.json(response)?;
+        let login = optional_text(&value, "nickname")
+            .or_else(|| optional_text(&value, "username"))
+            .or_else(|| optional_text(&value, "display_name"))
+            .unwrap_or_default();
+        if login.is_empty() {
+            return Err(ForgeError::Parse("Bitbucket returned no username".into()));
+        }
+        Ok(ForgeViewer {
+            login,
+            display_name: optional_text(&value, "display_name"),
+            scopes,
+        })
+    }
+
+    /// Proves a repository-scoped token against the repository it was granted
+    /// for. The workspace slug is the account login, which is what the Mine
+    /// filter compares against.
+    async fn repository_viewer(&self, repo: &ForgeRepoRef) -> Option<ForgeViewer> {
+        self.http.get_json(&self.repo_url(repo)).await.ok()?;
+        Some(ForgeViewer {
+            login: repo.owner.clone(),
+            display_name: None,
+            scopes: Vec::new(),
+        })
+    }
+
+    /// `GET /user/workspaces` for workspace access tokens and OAuth tokens
+    /// that cannot read `/user`. The slug names the account.
+    async fn workspace_viewer(&self) -> Result<ForgeViewer> {
+        let url = format!("{}/user/workspaces?pagelen=1", self.api);
+        let value = self.http.get_json(&url).await?;
+        let workspace = value["values"]
+            .as_array()
+            .and_then(|values| values.first())
+            .map(|value| &value["workspace"])
+            .ok_or_else(|| ForgeError::Unauthorized {
+                forge: ForgeKind::Bitbucket,
+                message:
+                    "the token cannot read an account; add the account scope or use an app password"
+                        .into(),
+            })?;
+        let login = optional_text(workspace, "slug")
+            .or_else(|| optional_text(workspace, "name"))
+            .or_else(|| self.username.clone())
+            .unwrap_or_default();
+        if login.is_empty() {
+            return Err(ForgeError::Parse(
+                "Bitbucket returned no workspace for this token".into(),
+            ));
+        }
+        Ok(ForgeViewer {
+            login,
+            display_name: optional_text(workspace, "name"),
+            scopes: Vec::new(),
+        })
     }
 }
 
@@ -156,54 +238,29 @@ impl Forge for BitbucketClient {
     }
 
     async fn viewer(&self) -> Result<ForgeViewer> {
-        let url = format!("{}/user", self.api);
-        match self
-            .http
-            .request(reqwest::Method::GET, &url, None, false)
-            .await
-        {
-            Ok(response) => {
-                let scopes = response
-                    .headers
-                    .get("x-oauth-scopes")
-                    .and_then(|value| value.to_str().ok())
-                    .map(|value| {
-                        value
-                            .split(',')
-                            .map(str::trim)
-                            .filter(|scope| !scope.is_empty())
-                            .map(ToOwned::to_owned)
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let value = self.http.json(response)?;
-                let login = optional_text(&value, "username")
-                    .or_else(|| optional_text(&value, "nickname"))
-                    .unwrap_or_default();
-                if login.is_empty() {
-                    return Err(ForgeError::Parse("Bitbucket returned no username".into()));
+        self.viewer_for(None).await
+    }
+
+    /// Bitbucket's `/user` needs the `account` (or `read:user:bitbucket`)
+    /// scope, which repository, project and workspace access tokens do not
+    /// always carry. When `/user` rejects the token, a repository-scoped
+    /// request proves the token first (when the caller has a repo), then
+    /// `/user/workspaces` names the workspace for tokens that may read it.
+    async fn viewer_for(&self, repo: Option<&ForgeRepoRef>) -> Result<ForgeViewer> {
+        match self.user_viewer().await {
+            Ok(viewer) => Ok(viewer),
+            Err(error @ (ForgeError::Unauthorized { .. } | ForgeError::Forbidden { .. })) => {
+                if let Some(repo) = repo
+                    && let Some(viewer) = self.repository_viewer(repo).await
+                {
+                    return Ok(viewer);
                 }
-                Ok(ForgeViewer {
-                    login,
-                    display_name: optional_text(&value, "display_name"),
-                    scopes,
-                })
-            }
-            // A workspace access token cannot call `/user`. Reading the
-            // workspace list still proves the token works, and the stored
-            // username (when the user supplied one) names the account.
-            Err(ForgeError::Unauthorized { .. } | ForgeError::Forbidden { .. }) => {
-                let url = format!("{}/workspaces?pagelen=1", self.api);
-                self.http.get_json(&url).await?;
-                let login = self
-                    .username
-                    .clone()
-                    .unwrap_or_else(|| "workspace access token".to_owned());
-                Ok(ForgeViewer {
-                    login,
-                    display_name: None,
-                    scopes: Vec::new(),
-                })
+                match self.workspace_viewer().await {
+                    Ok(viewer) => Ok(viewer),
+                    // Keep the honest auth error from `/user`, with the scan
+                    // the UI shows for tokens that cannot read an account.
+                    Err(_) => Err(error),
+                }
             }
             Err(error) => Err(error),
         }
@@ -239,7 +296,9 @@ impl Forge for BitbucketClient {
         // Bitbucket's list endpoint has no reviewer/author filter that maps
         // exactly onto the UI's filters, so open pages are filtered locally.
         let viewer = match filter {
-            ForgePrFilter::Mine | ForgePrFilter::ReviewRequested => Some(self.viewer().await?),
+            ForgePrFilter::Mine | ForgePrFilter::ReviewRequested => {
+                Some(self.viewer_for(Some(repo)).await?)
+            }
             _ => None,
         };
         let mut matches = Vec::new();
@@ -316,7 +375,7 @@ impl Forge for BitbucketClient {
         validate_repo(repo)?;
         let per_page = per_page.clamp(1, 100);
         let page = page.max(1);
-        let url = format!("{}.diff", self.pr_url(repo, number));
+        let url = format!("{}/diff", self.pr_url(repo, number));
         let (body, content_type) = self.http.get_text(&url).await?;
         // Some proxies negotiate a JSON wrapper around the same patch.
         let patch = if content_type
@@ -463,7 +522,7 @@ impl Forge for BitbucketClient {
 }
 
 fn urlencode(value: &str) -> String {
-    url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>()
+    crate::http::encode_path_segment(value)
 }
 
 fn user_login(value: &Value) -> String {

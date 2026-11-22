@@ -359,12 +359,48 @@ pub fn next_link(headers: &HeaderMap) -> Option<String> {
     None
 }
 
+/// Percent-encodes one URL path segment.
+///
+/// `form_urlencoded` encodes a space as `+`, which is a literal plus in a
+/// path; this keeps the RFC 3986 unreserved characters and percent-encodes
+/// everything else, including `/`.
+pub fn encode_path_segment(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
 /// Extracts a `page` query parameter from a URL.
 pub fn page_of(url: &str) -> Option<u32> {
     let url = url::Url::parse(url).ok()?;
     url.query_pairs()
         .find(|(key, _)| key == "page")
         .and_then(|(_, value)| value.parse().ok())
+}
+
+/// Whether `candidate` is on the same origin (scheme, host and port) as
+/// `base`, and carries no credentials of its own.
+///
+/// Pagination links are followed only when this is true, so a forge (or a
+/// compromised proxy) cannot point the next request at another host and
+/// receive the account's Authorization header.
+pub fn same_origin(candidate: &str, base: &str) -> bool {
+    let (Ok(candidate), Ok(base)) = (url::Url::parse(candidate), url::Url::parse(base)) else {
+        return false;
+    };
+    if !candidate.username().is_empty() || candidate.password().is_some() {
+        return false;
+    }
+    candidate.scheme() == base.scheme()
+        && candidate.host_str() == base.host_str()
+        && candidate.port_or_known_default() == base.port_or_known_default()
 }
 
 fn retry_after(headers: &HeaderMap) -> Option<u64> {
@@ -583,6 +619,37 @@ mod tests {
     fn no_next_link_is_none() {
         let headers = HeaderMap::new();
         assert!(next_link(&headers).is_none());
+    }
+
+    #[test]
+    fn path_segments_encode_spaces_and_separators() {
+        assert_eq!(encode_path_segment("My Project"), "My%20Project");
+        assert_eq!(encode_path_segment("a/b"), "a%2Fb");
+        assert_eq!(encode_path_segment("widget-1.2_~"), "widget-1.2_~");
+    }
+
+    #[test]
+    fn same_origin_ignores_the_path_but_not_the_host() {
+        assert!(same_origin(
+            "https://api.bitbucket.org/2.0/repositories/a/b/pullrequests?page=2",
+            "https://api.bitbucket.org/2.0"
+        ));
+        assert!(!same_origin(
+            "https://evil.example/2.0/repositories?page=2",
+            "https://api.bitbucket.org/2.0"
+        ));
+        assert!(!same_origin(
+            "http://api.bitbucket.org/2.0/repositories?page=2",
+            "https://api.bitbucket.org/2.0"
+        ));
+        assert!(!same_origin(
+            "https://api.bitbucket.org:8443/2.0/repositories?page=2",
+            "https://api.bitbucket.org/2.0"
+        ));
+        assert!(!same_origin(
+            "https://token@api.bitbucket.org/2.0/repositories?page=2",
+            "https://api.bitbucket.org/2.0"
+        ));
     }
 
     #[test]

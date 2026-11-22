@@ -11,6 +11,7 @@ description = "Provider-agnostic forge (GitHub, GitLab, Gitea, Forgejo, Bitbucke
 async-trait.workspace = true
 base64.workspace = true
 chrono.workspace = true
+futures.workspace = true
 h4rn-protocol.workspace = true
 reqwest.workspace = true
 serde.workspace = true

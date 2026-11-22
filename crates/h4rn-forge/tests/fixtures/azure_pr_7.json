@@ -1,5 +1,6 @@
 {
   "pullRequestId": 7,
+  "codeReviewId": 7,
   "title": "Fix the widget",
   "status": "active",
   "isDraft": false,
@@ -12,30 +13,60 @@
   "sourceRefName": "refs/heads/alice/fix",
   "targetRefName": "refs/heads/main",
   "mergeStatus": "succeeded",
-  "lastMergeSourceCommit": { "commitId": "aaaa1111bbbb2222cccc3333dddd4444eeee5555" },
-  "lastMergeTargetCommit": { "commitId": "bbbb1111cccc2222dddd3333eeee4444ffff5555" },
+  "supportsIterations": true,
+  "artifactId": "vstfs:///Git/PullRequestId/project-guid%2Fwidget-guid%2F7",
+  "repository": {
+    "id": "widget-guid",
+    "name": "widget",
+    "url": "https://dev.azure.com/acme/platform/_apis/git/repositories/widget",
+    "project": {
+      "id": "project-guid",
+      "name": "platform",
+      "state": "wellFormed",
+      "visibility": "private"
+    }
+  },
+  "lastMergeSourceCommit": {
+    "commitId": "aaaa1111bbbb2222cccc3333dddd4444eeee5555"
+  },
+  "lastMergeTargetCommit": {
+    "commitId": "ffff1111aaaa2222bbbb3333cccc4444dddd5555"
+  },
   "lastMergeCommit": {
-    "commitId": "cccc1111dddd2222eeee3333ffff4444aaaa5555",
-    "author": { "date": "2024-05-01T12:00:00.000Z" }
+    "commitId": "eeee1111ffff2222aaaa3333bbbb4444cccc5555",
+    "author": {
+      "name": "Alice Example",
+      "email": "alice@example.test",
+      "date": "2024-05-01T12:00:00.000Z"
+    }
   },
   "description": "Fixes the widget and adds a regression test.",
-  "labels": [{ "name": "bug", "id": "label-1" }],
+  "labels": [
+    {
+      "name": "bug",
+      "id": "label-1",
+      "active": true
+    }
+  ],
   "reviewers": [
     {
       "displayName": "Bob Reviewer",
       "uniqueName": "bob@example.test",
+      "id": "bob-guid",
       "vote": 10,
       "isRequired": true
     },
     {
       "displayName": "Carole",
       "uniqueName": "carol@example.test",
+      "id": "carol-guid",
       "vote": -10,
       "isRequired": false
     },
     {
       "displayName": "Dan",
       "uniqueName": "dan@example.test",
+      "id": "dan-guid",
       "vote": 0,
       "isRequired": true
     }
@@ -43,6 +74,9 @@
   "_links": {
     "web": {
       "href": "https://dev.azure.com/acme/platform/_git/widget/pullrequest/7"
+    },
+    "self": {
+      "href": "https://dev.azure.com/acme/platform/_apis/git/repositories/widget/pullrequests/7"
     }
   }
 }
