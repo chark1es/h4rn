@@ -8,12 +8,13 @@ Picked in **Settings → Threads → Title model**:
 
 - **Off** keeps the first-line title. Nothing leaves the machine, and no title job starts: there
   is nothing to attempt and nothing to log per thread.
-- **Coding agent** runs an installed CLI once, non-interactively: Claude Code (`claude -p`) or
-  Codex (`codex exec`). The picker's first choice, **Follow the thread's agent**, is the default:
-  each thread uses **its own harness** when that harness has a one-shot mode, and a thread on any
-  other harness keeps its first-line title. A prompt is never handed to a different provider
-  without being asked. Picking a specific agent instead hands every thread's title to it; the
-  other choices are installed agents that have this one-shot mode.
+- **Coding agent** runs an installed CLI once, non-interactively. Only **Claude Code**
+  (`claude -p`) is used. The picker's first choice, **Follow the thread's agent**, is the default:
+  a Claude Code thread is titled by its own harness, and a thread on any other harness keeps its
+  first-line title (or uses a text generator, if you configure one). A prompt is never handed to a
+  different provider without being asked. Picking Claude Code explicitly gives every thread's title
+  to it. **Codex is not offered as a title agent**: its flags cannot remove the model-visible shell,
+  so Codex threads keep the first-line title or use a text generator.
 - **Text generator** calls a model API that only writes text, configured under
   **Settings → Providers → Text generators**. Two shapes are supported:
   - **OpenAI-compatible** chat completions: OpenAI, OpenRouter, or any server that copies the
@@ -35,36 +36,44 @@ The prompt is capped at 4,000 characters. No files, diffs, paths, environment va
 history are sent.
 
 The trusted instruction ("write one short title…") is kept apart from that text. Claude Code gets
-it as its system prompt (`--system-prompt`); Codex, which has no such flag, gets it once above the
-untrusted text. The prompt itself is wrapped once in `<untrusted_request>` tags and is never
-repeated, so a prompt that looks like an instruction is still only data. Any spelling of
-`</untrusted_request` in the prompt or the folder name is escaped to `&lt;` before the wrap, so the
-block can only end where h4rn ends it; text after a forged closing tag stays inside the block.
+it as its system prompt (`--system-prompt`). The prompt itself is wrapped once in
+`<untrusted_request>` tags and is never repeated, so a prompt that looks like an instruction is
+still only data. Any spelling of `</untrusted_request` in the prompt or the folder name is escaped
+to `&lt;` before the wrap, so the block can only end where h4rn ends it; text after a forged closing
+tag stays inside the block.
 
-## How the coding agents are isolated
+## How Claude Code is isolated
 
-Both CLIs run in an empty temporary directory that is removed afterwards, with a **30-second
-deadline** covering version discovery, the stdin write, the run and the cleanup. A run that
-overruns is killed, and the first-line title stays.
+Claude Code runs once in an empty directory under the **system temp directory** — never inside the
+daemon data directory, so it is not beside `keys/` or the generator files — and the directory is
+removed afterwards. A **30-second deadline** covers version discovery, the stdin write, the run and
+the cleanup. A run that overruns is killed, and the first-line title stays.
 
-- **Claude Code** gets no tools (`--tools ""`), no slash commands, no MCP configuration
-  (`--strict-mcp-config` with no config file) and no user, project or local settings source
-  (`--setting-sources ""`), so hooks and plugins from the host's own configuration never load. It
-  cannot ask a question (`--permission-mode dontAsk`) and uses the `haiku` alias.
-- **Codex** runs `exec` with `--strict-config --ignore-user-config`, `--ephemeral`, a read-only
-  sandbox and no repo check. `--ignore-user-config` leaves the user's `config.toml` unread (its
-  MCP servers, hooks, plugins and apps never load) and `--disable shell_tool --disable apps
-  --disable plugins --disable hooks --disable browser_use --disable computer_use` turns the
-  built-in tools off. `-c mcp_servers={}` is not used: it merges into the user's configuration
-  instead of replacing it, and `include_apply_patch_tool` is not a key this CLI knows. The run
-  asks for `gpt-6-luna`, the fast model the installed CLI accepted in a real one-shot run.
+The flags are exactly:
 
-  Before each Codex run h4rn probes the installed binary with the same flags plus `--help`. A
-  Codex that does not accept them is never run unisolated: the attempt fails, the first-line title
-  stays and one line is logged.
+- `-p --output-format text` — one shot, plain text on stdout.
+- `--tools ""` — no tools, so there is no shell and no file access.
+- `--strict-mcp-config` with no `--mcp-config` — no MCP servers are loaded.
+- `--setting-sources ""` — no user, project or local settings source, so hooks and plugins from the
+  host's own configuration never load.
+- `--disable-slash-commands` — no slash commands.
+- `--permission-mode dontAsk` — it cannot ask a question and wait.
+- `--model haiku` — the cheap model alias.
+- `--system-prompt <instruction>` — the trusted instruction; stdin carries only the delimited data.
 
-The output of either CLI is read up to 64 KiB; anything larger is treated as a model that ignored
-the prompt, not a title. A provider HTTP body is capped the same way.
+That is what the run is: no shell, no MCP servers, no hooks and no plugins, with an empty working
+directory. It is not a claim that the CLI process is sandboxed beyond those flags.
+
+**Why not Codex.** On codex-cli 0.171.0 the `--disable` flags remove nothing model-visible:
+`codex debug prompt-input` renders the same `functions.exec` over `tools.exec_command` with or
+without them, so a prompt injection could read host files inside the read-only sandbox. A `--help`
+probe cannot detect that, because an unknown feature still exits 0. h4rn therefore does not offer
+Codex as a title agent at all: Codex threads keep their first-line title, or you pick a text
+generator.
+
+The output is read up to 64 KiB; anything larger is treated as a model that ignored the prompt, not
+a title. A provider HTTP body is capped the same way. When Claude Code fails, the daemon quotes the
+**last line of its stderr** — usually the actual error — instead of the banner that came before it.
 
 ## Keys
 
@@ -124,10 +133,11 @@ a reply that is not a title; anything shorter is cut to 60 characters. Wrapping 
 ## Storage
 
 The generator list and the title setting are two JSON files under `text-generation/` in the daemon
-data directory. Every read-modify-write holds one lock through the save, the file is written to a
-unique temporary file, fsynced and renamed, and a new configuration is published in memory only
-after that write has landed. A crash therefore leaves the old file or the new one, never half of
-either, and concurrent saves lose nothing.
+data directory. A title run's empty working directory is created in the **system temp directory**
+instead, never beside `keys/`. Every read-modify-write holds one lock through the save, the file is
+written to a unique temporary file, fsynced and renamed, and a new configuration is published in
+memory only after that write has landed. A crash therefore leaves the old file or the new one,
+never half of either, and concurrent saves lose nothing.
 
 Whether a key exists is cached when the service opens and updated by every write, so listing
 generators never calls the keychain. A keychain read or write that a save or a title job needs runs

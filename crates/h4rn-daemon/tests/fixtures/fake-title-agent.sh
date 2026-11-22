@@ -6,5 +6,6 @@
 # directory before running it so the record files do not land in the repo.
 dir=$(dirname "$0")
 printf '%s\n' "$@" > "$dir/argv.txt"
+pwd > "$dir/cwd.txt"
 cat > "$dir/stdin.txt"
 printf 'Fixture title\n'

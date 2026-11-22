@@ -524,13 +524,12 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
           <div className="lab">
             <div className="t">Coding agent</div>
             <div className="s">
-              Each thread's own agent runs once in an empty folder with no tools, then exits. Pick
-              one agent only to hand every thread's title to it.
+              Claude Code runs once in an empty folder with no tools, then exits. Follow the
+              thread's agent uses Claude Code for Claude Code threads; Codex threads keep the
+              first-line title or use a text generator.
             </div>
             {agents.length === 0 ? (
-              <div className="s q-faint">
-                No Claude Code or Codex is installed on this host yet.
-              </div>
+              <div className="s q-faint">No Claude Code is installed on this host yet.</div>
             ) : null}
           </div>
           <div className="ctl">
@@ -542,7 +541,7 @@ function TitleDraftForm({ saved }: { saved: TextGenerationSettings }) {
                 {
                   value: FOLLOW_THREAD,
                   label: "Follow the thread's agent",
-                  hint: "Claude Code and Codex threads use their own",
+                  hint: "Claude Code threads use their own; others keep the first line",
                 },
                 ...agents.map((agent) => ({
                   value: agent.harness,

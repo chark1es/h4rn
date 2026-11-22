@@ -129,7 +129,7 @@ async fn boot_inner_with_text_generation(
     };
 
     let mut builder = DaemonBuilder::new(config)
-        // Titles never spawn the machine's own claude or codex.
+        // Titles never spawn the machine's own Claude Code.
         .without_title_agents()
         .with_harness_registry(Arc::new(OfflineRegistry))
         // No test may run a package manager against the machine's real CLIs.
@@ -1224,7 +1224,7 @@ async fn restored_threads_replay_after_a_daemon_restart() {
     };
 
     let daemon = DaemonBuilder::new(config.clone())
-        // Titles never spawn the machine's own claude or codex.
+        // Titles never spawn the machine's own Claude Code.
         .without_title_agents()
         .with_harness(Arc::new(FakeHarness::new()))
         .with_lifecycle(options.clone())
@@ -1260,7 +1260,7 @@ async fn restored_threads_replay_after_a_daemon_restart() {
 
     // Reboot against the same data directory.
     let rebooted = DaemonBuilder::new(config)
-        // Titles never spawn the machine's own claude or codex.
+        // Titles never spawn the machine's own Claude Code.
         .without_title_agents()
         .with_harness(Arc::new(FakeHarness::new()))
         .with_lifecycle(options)
@@ -1995,7 +1995,7 @@ async fn a_restart_rehydrates_the_summary_resume_target() {
         network_port: 0,
     };
     let rebooted = DaemonBuilder::new(config)
-        // Titles never spawn the machine's own claude or codex.
+        // Titles never spawn the machine's own Claude Code.
         .without_title_agents()
         .with_harness(Arc::new(FakeHarness::new()))
         .with_lifecycle(resume_options())
@@ -3036,6 +3036,64 @@ async fn an_ordinary_thread_never_starts_the_hosts_coding_agent() {
     // immediately; this is ample time for the marker to appear.
     tokio::time::sleep(Duration::from_millis(750)).await;
     assert!(!marker.exists(), "a test daemon started the host's claude");
+    let read_back = thread_summary(&mut client, &summary.thread_id).await;
+    assert_eq!(read_back.title, "Keep this title");
+    daemon.stop().await;
+}
+
+/// A Codex thread in Coding-agent mode keeps its first-line title and never
+/// starts Codex: h4rn does not use Codex as a title backend.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_codex_thread_keeps_its_first_line_and_never_starts_codex() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let support = tempfile::tempdir().expect("support dir");
+    let marker = support.path().join("codex-started");
+    let script = support.path().join("codex");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nprintf 'Codex title\\n'\n",
+            marker.display()
+        ),
+    )
+    .expect("write the fake codex");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+
+    let service = Arc::new(
+        h4rn_daemon::text_generation::TextGenerationService::open(support.path())
+            .expect("open text generation")
+            .with_file_keys()
+            .expect("file keys")
+            // Even an explicit install cannot make Codex a title backend.
+            .with_agent_install(HarnessKind::Codex, &script),
+    );
+    service
+        .set_settings(TextGenerationSettings {
+            title: TitleModelSetting::default(),
+        })
+        .await
+        .expect("coding agent mode");
+    let daemon = boot_inner_with_text_generation(
+        ThreadManagerOptions::default(),
+        FakeHarness::new().with_kind(HarnessKind::Codex),
+        true,
+        Some(service),
+    )
+    .await;
+    let host = host_id_for(&daemon).await;
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    let summary = create_with_host(&mut client, host, "Keep this title", HarnessKind::Codex).await;
+    assert_eq!(summary.title, "Keep this title");
+    // A wrongly used Codex backend would start immediately; this is ample time.
+    tokio::time::sleep(Duration::from_millis(750)).await;
+    assert!(
+        !marker.exists(),
+        "a Codex thread started Codex for its title"
+    );
     let read_back = thread_summary(&mut client, &summary.thread_id).await;
     assert_eq!(read_back.title, "Keep this title");
     daemon.stop().await;

@@ -150,7 +150,7 @@ impl DaemonBuilder {
     /// Keeps title jobs away from the host's own harness CLIs.
     ///
     /// Tests and embedders use this: a generated title may never spawn the
-    /// machine's `claude` or `codex`. The service still runs, so it fails
+    /// machine's `claude`. The service still runs, so it fails
     /// honestly with "not installed" instead of silently doing nothing.
     pub fn without_title_agents(mut self) -> Self {
         self.detect_title_agents = false;

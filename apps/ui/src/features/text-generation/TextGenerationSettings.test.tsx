@@ -114,18 +114,29 @@ describe("the coding-agent choice", () => {
       name: "Coding agent for titles: Follow the thread's agent",
     });
     openChip(trigger);
-    fireEvent.click(await screen.findByRole("menuitem", { name: /^Codex/ }));
+    // Codex is installed on this host but is not offered as a title agent.
+    expect(screen.queryByRole("menuitem", { name: /^Codex/ })).toBeNull();
+    fireEvent.click(await screen.findByRole("menuitem", { name: /^Claude Code/ }));
 
-    expect(screen.getByRole("button", { name: "Coding agent for titles: Codex" })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Coding agent for titles: Claude Code" }),
+    ).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
       expect(mocks.request).toHaveBeenCalledWith({
         type: "set_text_generation_settings",
         settings: {
-          title: { mode: "coding_agent", harness: "codex", generator_id: null, model: null },
+          title: { mode: "coding_agent", harness: "claude_code", generator_id: null, model: null },
         },
       }),
     );
+  });
+
+  it("says Codex threads keep the first line or use a text generator", () => {
+    render(<ThreadSettings />);
+    expect(
+      screen.getByText(/Codex threads keep the first-line title or use a text generator/),
+    ).toBeTruthy();
   });
 });
 

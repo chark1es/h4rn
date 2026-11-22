@@ -201,13 +201,15 @@ export async function testTextGenerator(
     if (response.type !== "text_generator_tested") return;
     patch({
       reports: { ...state.reports, [generatorId]: response.report },
-      testing: { ...state.testing, [generatorId]: false },
     });
   } catch (error) {
     patch({
-      testing: { ...state.testing, [generatorId]: false },
       testErrors: { ...state.testErrors, [generatorId]: toProtoError(error) },
     });
+  } finally {
+    // Every exit clears the spinner, including an early return for a response
+    // this client does not understand.
+    patch({ testing: { ...state.testing, [generatorId]: false } });
   }
 }
 
@@ -260,15 +262,20 @@ export function validateGeneratorDraft(draft: TextGeneratorDraft): GeneratorFiel
   return Object.keys(errors).length > 0 ? errors : null;
 }
 
-/** Installed coding agents that have a one-shot mode h4rn can run. */
+/**
+ * Installed coding agents h4rn runs for titles.
+ *
+ * Only Claude Code is here. Codex is not offered as a title agent: its
+ * `--disable` flags do not remove the model-visible shell, so a Codex thread
+ * keeps its first-line title (or uses a text generator) instead.
+ */
 export function installedTitleAgents<T extends { harness: string; installed: string | null }>(
   rows: T[],
-): Array<{ harness: "claude_code" | "codex"; installed: string }> {
-  const supported = new Set(["claude_code", "codex"]);
+): Array<{ harness: "claude_code"; installed: string }> {
   return rows
     .filter(
-      (row): row is T & { harness: "claude_code" | "codex"; installed: string } =>
-        row.installed !== null && supported.has(row.harness),
+      (row): row is T & { harness: "claude_code"; installed: string } =>
+        row.installed !== null && row.harness === "claude_code",
     )
     .map((row) => ({ harness: row.harness, installed: row.installed }));
 }
@@ -279,9 +286,13 @@ export function titleModelSummary(settings: TextGenerationSettings | null): stri
   const title = settings.title;
   if (title.mode === "off") return "Titles are the first line of the first prompt.";
   if (title.mode === "coding_agent") {
+    if (title.harness === "claude_code") return "Titles are written once by Claude Code.";
+    if (title.harness === "codex") {
+      return "Codex is not used for titles; Codex threads keep the first line or use a text generator.";
+    }
     return title.harness
-      ? `Titles are written once by ${HARNESS_LABELS[title.harness]}.`
-      : "Titles are written once by each thread's own coding agent; other agents keep the first line.";
+      ? `${HARNESS_LABELS[title.harness]} is not used for titles; threads keep the first line.`
+      : "Claude Code threads use their own agent for titles; other threads keep the first line or use a text generator.";
   }
   return title.model
     ? `Titles are written by a text generator with ${title.model}.`

@@ -59,7 +59,7 @@ describe("text generator form validation", () => {
 });
 
 describe("the title-model picker", () => {
-  it("offers only installed coding agents with a one-shot mode", () => {
+  it("offers only installed coding agents h4rn runs for titles", () => {
     expect(
       installedTitleAgents([
         { harness: "claude_code", installed: "2.0.0" },
@@ -67,10 +67,7 @@ describe("the title-model picker", () => {
         { harness: "opencode", installed: "0.8.0" },
         { harness: "codex", installed: "0.51.0" },
       ]),
-    ).toEqual([
-      { harness: "claude_code", installed: "2.0.0" },
-      { harness: "codex", installed: "0.51.0" },
-    ]);
+    ).toEqual([{ harness: "claude_code", installed: "2.0.0" }]);
   });
 
   it("describes each mode in one line", () => {
@@ -81,15 +78,21 @@ describe("the title-model picker", () => {
     ).toContain("first line");
     expect(
       titleModelSummary({
+        title: { mode: "coding_agent", harness: "claude_code", generator_id: null, model: null },
+      }),
+    ).toContain("Claude Code");
+    // A stored Codex choice is honest: Codex is not used for titles.
+    expect(
+      titleModelSummary({
         title: { mode: "coding_agent", harness: "codex", generator_id: null, model: null },
       }),
-    ).toContain("Codex");
-    // No pick means each thread follows its own agent, not the first installed.
+    ).toContain("Codex threads keep the first line");
+    // No pick means Claude Code threads follow their own agent.
     expect(
       titleModelSummary({
         title: { mode: "coding_agent", harness: null, generator_id: null, model: null },
       }),
-    ).toContain("thread's own");
+    ).toContain("Claude Code threads");
     expect(
       titleModelSummary({
         title: {
@@ -141,5 +144,12 @@ describe("testing a generator", () => {
     request.mockRejectedValue(new Error("the provider answered 400 Bad Request"));
     await testTextGenerator("tg_1" as never);
     expect(getTextGenerationState().testErrors.tg_1?.message).toContain("400");
+  });
+
+  it("clears the Testing spinner on an unexpected response type", async () => {
+    request.mockResolvedValue({ type: "something_else" });
+    await testTextGenerator("tg_1" as never);
+    expect(getTextGenerationState().testing.tg_1).toBe(false);
+    expect(getTextGenerationState().reports.tg_1).toBeUndefined();
   });
 });
