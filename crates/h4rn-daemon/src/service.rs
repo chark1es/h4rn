@@ -3075,8 +3075,11 @@ mod tests {
             launcher.find("[IO.File]::Open").unwrap()
                 < launcher.find("Test-Path -LiteralPath $o").unwrap()
         );
+        // The same registered action recovers across an interrupted update
+        // (`.old`) and an interrupted rollback (`.failed`, then `.previous`).
         // A moved-aside binary is renamed back; a rollback copy is copied to a
         // staging file and then renamed, never copied straight over h4rnd.exe.
+        assert!(launcher.contains("(Get-Item -LiteralPath $p).Length -gt 0"));
         assert!(
             WINDOWS_INSTALL_SCRIPT.contains("Move-Item -LiteralPath $o -Destination $b -Force")
         );
