@@ -38,15 +38,13 @@ export function OfflineBanner({ inline = false }: { inline?: boolean }) {
           </>
         )}
       </span>
-      {status === "offline" ? (
-        <button
-          type="button"
-          className="q-btn ghost q-offline-action"
-          onClick={() => getClient().reconnectNow()}
-        >
-          Reconnect
-        </button>
-      ) : null}
+      <button
+        type="button"
+        className="q-btn ghost q-offline-action"
+        onClick={() => getClient().reconnectNow()}
+      >
+        Reconnect
+      </button>
     </div>
   );
 }

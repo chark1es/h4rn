@@ -96,6 +96,7 @@ pub use subagents::{
 };
 pub use terminal::{
     CREDIT_MAX_BYTES, CREDIT_MAX_CHUNKS, TerminalExit, TerminalExitNotice, TerminalInfo,
+    TerminalResponderNotice,
 };
 pub use transport::{
     TransportPathKind, TransportPathState, TransportPathStatus, TransportSessionState,

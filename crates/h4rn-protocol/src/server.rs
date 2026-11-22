@@ -45,6 +45,15 @@ pub enum ServerFrame {
         /// The terminal that changed.
         event: TerminalExitNotice,
     },
+    /// An ephemeral change in which viewer answers terminal queries.
+    ///
+    /// Attached viewers share one PTY, so only one may reply to DA, DSR and
+    /// colour queries. The daemon elects the responder and sends this notice
+    /// when the answer permission moves to another connection.
+    TerminalResponder {
+        /// The terminal and the new permission.
+        event: crate::terminal::TerminalResponderNotice,
+    },
     /// An ephemeral CLIProxyAPI change, outside the durable thread log.
     ///
     /// Proxy profiles are daemon-global rather than thread-scoped, so they do
@@ -174,6 +183,12 @@ pub enum ResponseBody {
         /// Last output sequence already contained in `snapshot`.
         #[ts(type = "number")]
         start_seq: u64,
+        /// Whether this viewer answers terminal queries.
+        ///
+        /// Only one attached viewer may reply to DA, DSR and colour queries.
+        /// A viewer that attaches later becomes the responder and gets a
+        /// `terminal_responder` notice when it loses the role.
+        answers_queries: bool,
     },
     /// Terminals owned by the daemon, oldest first.
     Terminals {
@@ -964,6 +979,7 @@ mod tests {
             },
             snapshot: "hello".into(),
             start_seq: 3,
+            answers_queries: true,
         };
         let value = serde_json::to_value(ServerFrame::Response {
             id: 1,
@@ -972,6 +988,17 @@ mod tests {
         .unwrap();
         assert_eq!(value["result"]["Ok"]["type"], "terminal_attached");
         assert_eq!(value["result"]["Ok"]["start_seq"], 3);
+        assert_eq!(value["result"]["Ok"]["answers_queries"], true);
+
+        let frame = ServerFrame::TerminalResponder {
+            event: crate::terminal::TerminalResponderNotice {
+                terminal_id: crate::TerminalId::new("term_1"),
+                answers_queries: false,
+            },
+        };
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(json.contains("\"kind\":\"terminal_responder\""), "{json}");
+        assert!(json.contains("\"answers_queries\":false"), "{json}");
     }
 
     #[test]

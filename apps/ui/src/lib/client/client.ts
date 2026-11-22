@@ -6,6 +6,7 @@ import type {
   ResponseBody,
   ServerFrame,
   TerminalExitNotice,
+  TerminalResponderNotice,
   TransportStatus,
 } from "@/gen";
 
@@ -294,6 +295,7 @@ export class H4rnClient {
   private readonly eventListeners = new Set<(event: EventEnvelope) => void>();
   private readonly binaryListeners = new Set<(data: ArrayBuffer) => void>();
   private readonly terminalListeners = new Set<(notice: TerminalExitNotice) => void>();
+  private readonly responderListeners = new Set<(notice: TerminalResponderNotice) => void>();
   private readonly readyListeners = new Set<(info: ReadyInfo) => void>();
   private readonly pending = new Map<number, Pending>();
 
@@ -306,6 +308,14 @@ export class H4rnClient {
   private attempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
+  /** Retry as soon as the browser says the network or the app is back. */
+  private wakeListenersInstalled = false;
+  private readonly onWake = (): void => this.retryImmediately();
+  private readonly onVisibilityChange = (): void => {
+    if (typeof document !== "undefined" && document.visibilityState === "visible") {
+      this.retryImmediately();
+    }
+  };
   private stopped = false;
   private fatal = false;
   private socketOpen = false;
@@ -348,6 +358,7 @@ export class H4rnClient {
   start(): void {
     this.stopped = false;
     this.fatal = false;
+    this.installWakeListeners();
     this.setSnapshot({ status: "connecting", attempt: 0, error: null });
     this.openSocket();
   }
@@ -355,6 +366,7 @@ export class H4rnClient {
   stop(): void {
     this.stopped = true;
     this.handshaken = false;
+    this.removeWakeListeners();
     this.clearReconnect();
     this.stopPing();
     const stoppedError = new H4rnRequestError(
@@ -379,6 +391,8 @@ export class H4rnClient {
       void this.performHello();
       return;
     }
+    this.transport?.close();
+    this.transport = null;
     this.openSocket();
   }
 
@@ -411,6 +425,17 @@ export class H4rnClient {
   onTerminalEvent(listener: (notice: TerminalExitNotice) => void): () => void {
     this.terminalListeners.add(listener);
     return () => this.terminalListeners.delete(listener);
+  }
+
+  /**
+   * Subscribes to changes in which viewer answers terminal queries.
+   *
+   * The daemon sends this when another viewer attaches or the responder
+   * detaches, so only the elected viewer forwards xterm's automatic replies.
+   */
+  onTerminalResponder(listener: (notice: TerminalResponderNotice) => void): () => void {
+    this.responderListeners.add(listener);
+    return () => this.responderListeners.delete(listener);
   }
 
   /** Sends one binary frame, such as PTY input or a blob chunk. */
@@ -764,6 +789,11 @@ export class H4rnClient {
       return;
     }
 
+    if (frame.kind === "terminal_responder") {
+      for (const listener of this.responderListeners) listener(frame.event);
+      return;
+    }
+
     // Usage ticks and proxy changes are ephemeral by design: they have no
     // sequence number, so they never advance `lastSeq` or enter the replay.
     if (frame.kind === "usage_event") {
@@ -853,12 +883,58 @@ export class H4rnClient {
     this.scheduleReconnect();
   }
 
+  /** Retries now and resets the backoff after a browser wake signal. */
+  private retryImmediately(): void {
+    if (this.stopped || this.fatal || this.socketOpen) return;
+    // Deterministic offline scenarios opt out of retries entirely.
+    if ((this.options.reconnect?.maxAttempts ?? 12) === 0) return;
+    this.clearReconnect();
+    // Never hold two sockets: this path can fire while an attempt is opening.
+    if (this.transport) {
+      this.transport.close();
+      this.transport = null;
+    }
+    this.attempt = 0;
+    // Stay in the cached `degraded` phase rather than flashing the skeleton.
+    this.setSnapshot({ status: "degraded", attempt: 0, error: null });
+    this.openSocket();
+  }
+
+  private installWakeListeners(): void {
+    if (this.wakeListenersInstalled) return;
+    const hasWindow = typeof window !== "undefined";
+    const hasDocument = typeof document !== "undefined";
+    if (!hasWindow && !hasDocument) return;
+    this.wakeListenersInstalled = true;
+    if (hasWindow) {
+      window.addEventListener("online", this.onWake);
+      window.addEventListener("focus", this.onWake);
+    }
+    if (hasDocument) {
+      document.addEventListener("visibilitychange", this.onVisibilityChange);
+    }
+  }
+
+  private removeWakeListeners(): void {
+    if (!this.wakeListenersInstalled) return;
+    this.wakeListenersInstalled = false;
+    if (typeof window !== "undefined") {
+      window.removeEventListener("online", this.onWake);
+      window.removeEventListener("focus", this.onWake);
+    }
+    if (typeof document !== "undefined") {
+      document.removeEventListener("visibilitychange", this.onVisibilityChange);
+    }
+  }
+
   private scheduleReconnect(): void {
     if (this.stopped || this.fatal || this.reconnectTimer) return;
 
     this.attempt += 1;
     const maxAttempts = this.options.reconnect?.maxAttempts ?? 12;
-    if (this.attempt > maxAttempts) {
+    // An explicit zero is the deterministic "give up" used by the offline
+    // visual scenario; ordinary clients keep retrying at the capped interval.
+    if (maxAttempts === 0) {
       this.setSnapshot({
         status: "offline",
         attempt: this.attempt,
@@ -866,7 +942,7 @@ export class H4rnClient {
           this.snapshot.error ??
           protoError(
             "internal",
-            "The daemon has not answered after repeated attempts.",
+            "The daemon connection is offline.",
             "Start the daemon or check the network, then press Reconnect.",
           ),
       });
@@ -882,7 +958,11 @@ export class H4rnClient {
     const base = this.options.reconnect?.baseMs ?? 500;
     const max = this.options.reconnect?.maxMs ?? 15_000;
     const jitter = this.options.reconnect?.jitter ?? 0.3;
-    const nominal = Math.min(max, base * 2 ** (this.attempt - 1));
+    // Fast exponential attempts, then settle at the cap for as long as it
+    // takes. The client only stops for a fatal close or an explicit stop.
+    const fastAttempts = Math.min(this.attempt, maxAttempts);
+    const nominal =
+      this.attempt > maxAttempts ? max : Math.min(max, base * 2 ** (fastAttempts - 1));
     const delay = Math.round(nominal * (1 + (Math.random() * 2 - 1) * jitter));
 
     this.reconnectTimer = setTimeout(() => {

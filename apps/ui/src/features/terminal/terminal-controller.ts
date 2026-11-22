@@ -15,6 +15,7 @@ import {
 import type { H4rnClient } from "@/lib/client/client";
 import { H4rnRequestError } from "@/lib/client/errors";
 
+import { filterTerminalInput } from "./terminal-reply";
 import { isDarkTheme, terminalTheme } from "./theme";
 
 export type TerminalPhase = "opening" | "attached" | "exited" | "error" | "offline";
@@ -70,6 +71,8 @@ export class TerminalController {
   private onTitle: ((title: string) => void) | undefined;
   private onDimensions: ((dimensions: { cols: number; rows: number }) => void) | undefined;
   private status: TerminalStatus = { phase: "opening" };
+  /** Whether this viewer is the one answering xterm's automatic queries. */
+  private answersQueries = false;
 
   async start(options: TerminalControllerOptions): Promise<void> {
     this.client = options.client;
@@ -163,6 +166,7 @@ export class TerminalController {
       });
       if (this.disposed) return;
       this.streamId = attached.terminal.stream_id;
+      this.answersQueries = attached.answers_queries;
       this.tracker = new AckTracker(attached.start_seq);
       term.write(attached.snapshot);
 
@@ -239,7 +243,14 @@ export class TerminalController {
   }
 
   private bindInput(term: Terminal): void {
-    this.track(term.onData((data) => this.send(data)));
+    this.track(
+      term.onData((data) => {
+        // xterm auto-answers DA/DSR/colour queries on this path too. Only the
+        // elected viewer forwards those; keystrokes and paste always go.
+        const forwarded = filterTerminalInput(data, this.answersQueries);
+        if (forwarded !== null) this.send(forwarded);
+      }),
+    );
     this.track(
       term.onTitleChange((title) => {
         if (title.trim()) this.onTitle?.(title.trim());
@@ -284,6 +295,12 @@ export class TerminalController {
 
   private bindTerminalEvents(): void {
     if (!this.client) return;
+    this.disposers.push(
+      this.client.onTerminalResponder((notice) => {
+        if (notice.terminal_id !== this.terminalId) return;
+        this.answersQueries = notice.answers_queries;
+      }),
+    );
     this.disposers.push(
       this.client.onTerminalEvent((notice) => {
         if (notice.terminal_id !== this.terminalId) return;

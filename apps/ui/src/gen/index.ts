@@ -216,6 +216,7 @@ export type * from "./TerminalExit";
 export type * from "./TerminalExitNotice";
 export type * from "./TerminalId";
 export type * from "./TerminalInfo";
+export type * from "./TerminalResponderNotice";
 export type * from "./ThreadFilter";
 export type * from "./ThreadId";
 export type * from "./ThreadSummary";

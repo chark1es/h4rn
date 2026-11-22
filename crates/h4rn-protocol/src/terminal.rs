@@ -84,6 +84,21 @@ pub struct TerminalExitNotice {
     pub exit: TerminalExit,
 }
 
+/// A change in which attached viewer answers terminal queries.
+///
+/// Every xterm answers device-attribute, cursor-position and colour queries on
+/// its own. With two viewers attached that gives the shell duplicate replies,
+/// so the daemon elects one responder (the most recently attached viewer) and
+/// tells the others to drop their automatic answers. When the responder
+/// detaches, the next viewer is promoted and notified.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct TerminalResponderNotice {
+    /// Terminal whose responder changed.
+    pub terminal_id: TerminalId,
+    /// Whether this viewer should answer queries from now on.
+    pub answers_queries: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

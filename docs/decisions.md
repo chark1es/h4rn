@@ -136,6 +136,14 @@ bound, ack-based backpressure of 8 chunks / 64 KiB per stream, smallest-viewer-w
 client xterm), which can diverge; the snapshot-plus-sequence handshake, and raw replay as a cold
 fallback, keep divergence bounded to one reconnect.
 
+Closing a terminal signals the whole PTY session, not just the shell's process group: SIGHUP first
+so the shell runs its hangup path and background jobs hear it, then SIGTERM, then SIGKILL for what
+ignored both. A job that called `setsid` has left the session and survives. Attached viewers share
+one PTY, so only the most recently attached viewer answers terminal queries; the daemon tells the
+others to drop xterm's automatic DA, DSR and colour replies, and hands the role to the next viewer
+when the responder detaches. The client never gives up reconnecting: after the fast backoff it
+retries at the capped interval, and an online, focus or visibility event retries at once.
+
 ## ADR-008: Attachments are a content-addressed blob store
 
 **Status:** Accepted

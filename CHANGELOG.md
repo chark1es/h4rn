@@ -7,6 +7,19 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Closing a terminal ends its background jobs.** With job control, `sleep 1000 &` runs in its own
+  process group, so the old group-only signal left it running after the shell was gone. Closing a
+  terminal now hangs up the whole PTY session, then terminates it, then kills what ignored both; a
+  job that moved itself into another session with `setsid` is left alone.
+- **Only one attached viewer answers terminal queries.** Two xterm instances each answered device,
+  cursor and colour queries, so a shell with a desktop and a phone attached received duplicate
+  replies. The daemon now elects the most recently attached viewer, tells the others to drop their
+  automatic answers, and hands the role to the next viewer when the responder detaches.
+- **The client keeps reconnecting.** After the fast backoff it used to stop after twelve attempts
+  and stay offline until the user pressed Reconnect. It now keeps retrying at the capped interval
+  and retries immediately when the browser comes back online, the window regains focus or the
+  document becomes visible. Auth failures still stop, and the banner's Reconnect button stays
+  available while it retries.
 - **A Send during an idle agent's death starts a fresh agent.** When a stdout read failed or EOF
   arrived between turns, the session stayed in the slot for the bounded wait for the exit report, and
   a message sent in that window claimed it and failed on a dead write. The session now leaves the

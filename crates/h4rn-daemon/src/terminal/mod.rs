@@ -65,6 +65,8 @@ pub struct Attached {
     pub viewer: Arc<Viewer>,
     /// Session the viewer belongs to.
     pub session: Arc<Session>,
+    /// Whether this viewer is the one answering terminal queries.
+    pub answers_queries: bool,
 }
 
 /// Terminal failures that map onto [`ProtoError`].
@@ -237,7 +239,7 @@ impl TerminalManager {
 
         let output = session.subscribe();
         let viewer = Arc::new(Viewer::new(tx));
-        session.add_viewer(viewer_id, cols, rows, Arc::clone(&viewer));
+        let answers_queries = session.add_viewer(viewer_id, cols, rows, Arc::clone(&viewer));
         let snapshot = session.snapshot();
         // The snapshot replaces everything older, so the window starts empty.
         viewer.reset_credit();
@@ -248,6 +250,7 @@ impl TerminalManager {
             output,
             viewer,
             session,
+            answers_queries,
         })
     }
 

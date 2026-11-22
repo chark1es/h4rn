@@ -193,6 +193,19 @@ impl Client {
         }
     }
 
+    async fn next_responder(&mut self, terminal_id: &TerminalId) -> bool {
+        loop {
+            while let Some(frame) = self.texts.pop_front() {
+                if let ServerFrame::TerminalResponder { event } = frame
+                    && &event.terminal_id == terminal_id
+                {
+                    return event.answers_queries;
+                }
+            }
+            self.pump().await;
+        }
+    }
+
     async fn open(
         &mut self,
         host: HostId,
@@ -234,10 +247,12 @@ impl Client {
                 terminal,
                 snapshot,
                 start_seq,
+                answers_queries,
             } => AttachedView {
                 terminal,
                 snapshot,
                 start_seq,
+                answers_queries,
             },
             other => panic!("unexpected attach response: {other:?}"),
         }
@@ -248,6 +263,7 @@ struct AttachedView {
     terminal: TerminalInfo,
     snapshot: String,
     start_seq: u64,
+    answers_queries: bool,
 }
 
 fn device() -> DeviceInfo {
@@ -590,5 +606,174 @@ async fn pty_input_needs_hello_and_an_attached_viewer() {
         })
         .await
         .expect("close terminal");
+    daemon.stop().await;
+}
+
+/// Only the elected viewer answers queries; the role moves to the newest
+/// attached viewer and back when it detaches.
+#[tokio::test]
+async fn one_viewer_answers_terminal_queries_and_hands_over() {
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let cwd = tempfile::tempdir().unwrap();
+    let cwd = cwd.path().to_string_lossy().to_string();
+
+    let mut desktop = Client::connect(&daemon).await;
+    desktop.hello().await;
+    let terminal = desktop
+        .open(host, &cwd, Some("/bin/sh"), Vec::new(), 80, 24)
+        .await;
+    let first = desktop.attach(&terminal.terminal_id, 80, 24).await;
+    assert!(
+        first.answers_queries,
+        "the first attached viewer answers queries"
+    );
+
+    let mut phone = Client::connect(&daemon).await;
+    phone.hello().await;
+    let second = phone.attach(&terminal.terminal_id, 60, 20).await;
+    assert!(
+        second.answers_queries,
+        "the most recently attached viewer becomes the responder"
+    );
+    assert!(
+        !desktop.next_responder(&terminal.terminal_id).await,
+        "the previous responder must stop answering"
+    );
+
+    // Closing the responder's socket hands the role to the remaining viewer.
+    drop(phone);
+    assert!(
+        desktop.next_responder(&terminal.terminal_id).await,
+        "the remaining viewer must take over"
+    );
+
+    desktop
+        .request(ClientRequest::TerminalClose {
+            terminal_id: terminal.terminal_id,
+        })
+        .await
+        .expect("close terminal");
+    daemon.stop().await;
+}
+
+/// Closing a terminal ends its background jobs, including ones the shell put
+/// in their own process group, while a job in another session survives.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn closing_a_terminal_ends_background_jobs() {
+    use std::path::Path;
+
+    async fn read_pid(path: &Path) -> i32 {
+        for _ in 0..500 {
+            if let Ok(text) = std::fs::read_to_string(path)
+                && let Ok(pid) = text.trim().parse::<i32>()
+            {
+                return pid;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("{} never appeared", path.display());
+    }
+
+    fn process_running(pid: i32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // A zombie is already gone; its parent just has not reaped it.
+            Ok(stat) => {
+                stat.rsplit(')')
+                    .next()
+                    .and_then(|rest| rest.split_whitespace().next())
+                    != Some("Z")
+            }
+            Err(_) => false,
+        }
+    }
+
+    async fn wait_until_gone(pid: i32) {
+        for _ in 0..250 {
+            if !process_running(pid) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("pid {pid} still runs after the terminal closed");
+    }
+
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let work = tempfile::tempdir().unwrap();
+    let cwd_path = work.path().to_path_buf();
+    let cwd = cwd_path.to_string_lossy().to_string();
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    let terminal = client
+        .open(
+            host,
+            &cwd,
+            Some("/bin/bash"),
+            vec!["--noprofile".into(), "--norc".into(), "-i".into()],
+            80,
+            24,
+        )
+        .await;
+    client.attach(&terminal.terminal_id, 80, 24).await;
+    // Let the prompt settle before typing.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // `set -m` gives the job its own process group, the case the old
+    // group-only signal missed. The subshell form leaves the job one level
+    // deeper; both are still in the terminal's session.
+    client
+        .send_input(
+            terminal.stream_id,
+            b"set -m; sleep 1000 & echo $! > bg.pid\n",
+        )
+        .await;
+    client
+        .send_input(terminal.stream_id, b"( sleep 1000 & echo $! > sub.pid )\n")
+        .await;
+    let bg = read_pid(&cwd_path.join("bg.pid")).await;
+    let sub = read_pid(&cwd_path.join("sub.pid")).await;
+    assert!(process_running(bg), "background job did not start");
+    assert!(process_running(sub), "subshell job did not start");
+
+    // A job that moved itself into another session is not the terminal's
+    // anymore and must not be killed.
+    let has_setsid = std::process::Command::new("setsid")
+        .arg("--version")
+        .output()
+        .is_ok();
+    let detached = if has_setsid {
+        client
+            .send_input(
+                terminal.stream_id,
+                b"setsid sh -c 'echo $$ > detached.pid; exec sleep 1000' &\n",
+            )
+            .await;
+        Some(read_pid(&cwd_path.join("detached.pid")).await)
+    } else {
+        None
+    };
+
+    client
+        .request(ClientRequest::TerminalClose {
+            terminal_id: terminal.terminal_id,
+        })
+        .await
+        .expect("close terminal");
+
+    wait_until_gone(bg).await;
+    wait_until_gone(sub).await;
+    if let Some(detached) = detached {
+        assert!(
+            process_running(detached),
+            "a job in its own session must survive the terminal"
+        );
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &detached.to_string()])
+            .status();
+        wait_until_gone(detached).await;
+    }
     daemon.stop().await;
 }

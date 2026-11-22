@@ -959,6 +959,7 @@ impl Connection {
                             output,
                             viewer,
                             session,
+                            answers_queries,
                         } = attached;
                         let start_seq = snapshot.seq;
                         let ansi = snapshot.ansi;
@@ -975,6 +976,7 @@ impl Connection {
                             terminal,
                             snapshot: ansi,
                             start_seq,
+                            answers_queries,
                         }
                     })
                     .map_err(crate::terminal::TerminalError::into_proto),

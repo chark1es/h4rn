@@ -1356,7 +1356,7 @@ Rules that apply to every row below:
 
 | State | Where | Copy | Behaviour |
 |---|---|---|---|
-| Reconnecting | Status bar + thin banner | “Reconnecting to **atlas**… last update 12:04.” | Read-only cached data; retry backoff shown; no modal |
+| Reconnecting | Status bar + thin banner | “Reconnecting to **atlas**… last update 12:04.” | Read-only cached data; keeps retrying at the capped interval, retries at once when the app is focused or the network returns, and Reconnect is always offered; no modal |
 | Direct → relay fallback | Status bar | “Using the relay for **atlas** · 84 ms.” | Automatic only if the user enabled fallback; otherwise a one-click “Use relay” |
 | Stale | Affected panes | “Showing cached data from 12:04.” | Refresh action; stale chip persists until fresh |
 | Permission denied | Inline at action | “You can view this thread but not approve. Ask the owner of **atlas** for approval access.” | Action hidden or disabled with reason; never a generic 403 |
