@@ -14,8 +14,10 @@ import type {
  * `connecting` — first handshake, no projection yet.
  * `online`     — hello completed; events are flowing.
  * `degraded`   — the socket dropped and the client is reconnecting while it
- *                renders the cached projection.
- * `offline`    — retries are exhausted, the device is offline, or auth failed.
+ *                renders the cached projection. It keeps retrying at the
+ *                capped interval until the socket returns.
+ * `offline`    — the connection was stopped, retries were explicitly disabled,
+ *                or auth failed.
  */
 export type ConnectionStatus = "connecting" | "online" | "degraded" | "offline";
 
@@ -88,9 +90,16 @@ export type ClientOptions = {
   transportLabel?: string;
   requestTimeoutMs?: number;
   reconnect?: {
+    /** First retry delay; doubles on each consecutive failure. */
     baseMs?: number;
+    /** Capped retry interval, kept for as long as the socket stays down. */
     maxMs?: number;
+    /** Fraction of the delay added or removed at random. */
     jitter?: number;
+    /**
+     * Fast exponential attempts before settling at `maxMs`; `0` disables
+     * retries entirely for deterministic offline scenarios.
+     */
     maxAttempts?: number;
   };
 };

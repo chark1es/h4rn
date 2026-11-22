@@ -11,10 +11,12 @@ import {
   BinaryKind,
   decodeBinaryFrame,
   encodeBinaryFrame,
+  PTY_INPUT_REPLY,
 } from "@/lib/client/binary";
 import type { H4rnClient } from "@/lib/client/client";
 import { H4rnRequestError } from "@/lib/client/errors";
 
+import { registerTerminalQueryHooks, TerminalQueryTracker } from "./terminal-reply";
 import { isDarkTheme, terminalTheme } from "./theme";
 
 export type TerminalPhase = "opening" | "attached" | "exited" | "error" | "offline";
@@ -70,6 +72,8 @@ export class TerminalController {
   private onTitle: ((title: string) => void) | undefined;
   private onDimensions: ((dimensions: { cols: number; rows: number }) => void) | undefined;
   private status: TerminalStatus = { phase: "opening" };
+  /** Answers xterm owes the program since the last data chunk. */
+  private readonly queryTracker = new TerminalQueryTracker();
 
   async start(options: TerminalControllerOptions): Promise<void> {
     this.client = options.client;
@@ -180,13 +184,23 @@ export class TerminalController {
     }
   }
 
-  /** Sends raw text as PTY input (used by the phone key row and tests). */
-  send(data: string): void {
+  /**
+   * Sends raw text as PTY input (used by the phone key row and tests).
+   *
+   * `reply` marks xterm's own answer to a terminal query; the daemon writes
+   * only one attached viewer's answers.
+   */
+  send(data: string, reply = false): void {
     if (!this.client || this.streamId === 0) return;
     const payload = new TextEncoder().encode(data);
     try {
       this.client.sendBinary(
-        encodeBinaryFrame({ kind: BinaryKind.PtyInput, streamId: this.streamId, seq: 0, payload }),
+        encodeBinaryFrame({
+          kind: BinaryKind.PtyInput,
+          streamId: this.streamId,
+          seq: reply ? PTY_INPUT_REPLY : 0,
+          payload,
+        }),
       );
     } catch {
       // The socket closed between keystrokes; the offline overlay takes over.
@@ -239,7 +253,16 @@ export class TerminalController {
   }
 
   private bindInput(term: Terminal): void {
-    this.track(term.onData((data) => this.send(data)));
+    // Parser hooks note every query xterm is about to answer; the next data
+    // chunk of that shape is the answer, and everything else is user input.
+    for (const disposable of registerTerminalQueryHooks(term.parser, this.queryTracker)) {
+      this.track(disposable);
+    }
+    this.track(
+      term.onData((data) => {
+        this.send(data, this.queryTracker.take(data));
+      }),
+    );
     this.track(
       term.onTitleChange((title) => {
         if (title.trim()) this.onTitle?.(title.trim());
@@ -373,7 +396,12 @@ export class TerminalController {
 
     if (frame.kind === BinaryKind.PtyOutput) {
       if (frame.seq <= this.tracker.position) return;
+      // Queries in this chunk are only answerable while it is being parsed:
+      // once xterm is done, anything it did not answer has missed its chance
+      // and a later answer-shaped paste must stay input.
+      const mark = this.queryTracker.mark();
       term.write(frame.payload, () => {
+        this.queryTracker.settle(mark);
         this.tracker?.applied(frame.seq);
         this.scheduleAck();
       });

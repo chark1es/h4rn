@@ -276,28 +276,27 @@ impl TerminalManager {
     /// id alone is not a capability: ids are sequential and guessable, so a
     /// connection that never attached (or is not allowed to) is refused with
     /// the same error as an unknown stream.
+    ///
+    /// A marked `reply` is xterm's answer to a terminal query. At most one
+    /// attached viewer may answer, so replies from the others are dropped; the
+    /// role passes to another viewer when the owner detaches.
     pub fn input_by_stream(
         &self,
         stream_id: u32,
         viewer_id: ViewerId,
         data: &[u8],
+        reply: bool,
     ) -> Result<(), TerminalError> {
         let terminal_id = lock(&self.stream_ids).get(&stream_id).cloned();
         let not_found = || TerminalError::NotFound(TerminalId::new(format!("stream {stream_id}")));
         let terminal_id = terminal_id.ok_or_else(not_found)?;
         let session = self.session(&terminal_id)?;
-        if !session.has_viewer(viewer_id) {
-            return Err(not_found());
-        }
-        self.input(&terminal_id, data)
-    }
-
-    /// Writes raw input to one terminal.
-    pub fn input(&self, terminal_id: &TerminalId, data: &[u8]) -> Result<(), TerminalError> {
-        let session = self.session(terminal_id)?;
         session
-            .write_input(data)
-            .map_err(|error| TerminalError::Input(error.to_string()))
+            .write_viewer_input(viewer_id, data, reply)
+            .map_err(|error| match error {
+                session::ViewerInputError::NotAttached => not_found(),
+                session::ViewerInputError::Io(error) => TerminalError::Input(error.to_string()),
+            })
     }
 
     /// Frees viewer credit through `up_to_chunk`.
@@ -327,7 +326,11 @@ impl TerminalManager {
         terminals
     }
 
-    /// Closes one terminal and kills its process group.
+    /// Closes one terminal: viewers are closed, then the shell is hung up and
+    /// given time to forward the hangup to its jobs, terminated with a grace
+    /// period, and finally killed with its process group. Windows has no
+    /// POSIX signals; the ConPTY ends when the PTY is dropped, which closes
+    /// the console processes attached to it.
     pub async fn close(&self, terminal_id: &TerminalId) -> Result<(), TerminalError> {
         let session = {
             let mut sessions = lock(&self.sessions);

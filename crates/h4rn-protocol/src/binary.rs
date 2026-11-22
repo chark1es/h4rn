@@ -17,8 +17,10 @@
 //!
 //! `seq` is the stream sequence, not the JSON event sequence. A PTY snapshot
 //! carries the sequence it replaces in `seq`, so a reconnecting client can
-//! discard replayed history and resume from the snapshot. Payload length is
-//! implied by the WebSocket message length; there is no separate length field.
+//! discard replayed history and resume from the snapshot. A PTY input frame
+//! has no sequence and uses `seq` for flags instead (see [`PTY_INPUT_REPLY`]).
+//! Payload length is implied by the WebSocket message length; there is no
+//! separate length field.
 
 use thiserror::Error;
 
@@ -30,6 +32,15 @@ pub const BINARY_MAGIC: [u8; 2] = *b"H4";
 
 /// Binary framing version.
 pub const BINARY_VERSION: u8 = 1;
+
+/// Flag in the `seq` field of a [`BinaryKind::PtyInput`] frame.
+///
+/// Input frames do not need a sequence, so `seq` carries flags instead. Bit 0
+/// marks the payload as xterm's own answer to a terminal query (device
+/// attributes, cursor position, mode or colour report) rather than typed
+/// input. An older daemon ignores `seq` for input and writes the frame as
+/// ordinary input, which is what every viewer did before the flag existed.
+pub const PTY_INPUT_REPLY: u64 = 1;
 
 /// What a binary frame carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

@@ -136,6 +136,25 @@ bound, ack-based backpressure of 8 chunks / 64 KiB per stream, smallest-viewer-w
 client xterm), which can diverge; the snapshot-plus-sequence handshake, and raw replay as a cold
 fallback, keep divergence bounded to one reconnect.
 
+Closing a terminal sends SIGHUP to the shell's own process id, waits for the shell to forward the
+hangup, then does what it always did: SIGTERM to the shell's process group, a grace period for TERM
+handlers, then SIGKILL after `child.kill()`. The hangup uses the spawned child's pid rather than the
+foreground process group from `tcgetpgrp`, because a shell that starts a job while it boots puts that
+job in the foreground and it would receive the hangup instead. An interactive shell forwards SIGHUP
+to its jobs and skips `nohup`'d and `disown`'d ones, so background jobs end without special-casing
+`nohup`, and a job that called `setsid` has left the session and survives. Walking `ps` for session
+members is deliberately not done: `sess` is not portable and signalling every member reaches jobs the
+user detached. Attached viewers share one PTY, so the UI marks xterm's answer to a query the program
+just asked (through parser hooks for DA, DSR, DECRQM, XTWINOPS and OSC colour queries) in the input
+frame's `seq` flag, and the daemon writes only the reply owner's marked answer. The first viewer to
+send a marked answer owns replies until it detaches. Answers from other viewers are dropped, while
+unmarked input is always written. Known limitation: an attached owner that stops receiving output
+(say a phone that lost its network) can leave a query unanswered until it detaches, because the role
+does not hand over while the owner is still attached. The client never gives up reconnecting: after
+the fast backoff it retries at the capped interval, and an online, focus or visibility event retries
+at once, except during the very first connect, which is not yet a retry, and while an attempt that
+started less than a second ago is still opening.
+
 ## ADR-008: Attachments are a content-addressed blob store
 
 **Status:** Accepted

@@ -1352,11 +1352,17 @@ Rules that apply to every row below:
 | **Settings** | — | Section skeleton | “Couldn’t save appearance settings.” Inline + retry | “Some settings need a host. Appearance and shortcuts still work.” |
 | **Command palette** | “No commands match ‘xyz’. Try a thread, host or file name.” + recent commands | “Searching threads on 3 hosts…” for remote search | “Search is partial: **orion** didn’t answer. Results from atlas shown.” | “Local and cached results only. Remote search is unavailable.” |
 
+**Terminals shared by several viewers.** A desktop and a phone attached to one terminal look the
+same on both, and both can type. Only one viewer answers the terminal's automatic device, cursor and
+colour reports, so a shell or TUI receives each answer once instead of one per viewer. Closing a
+terminal ends the shell and the jobs it started; a job the person detached with `nohup` or `setsid`
+keeps running, and the UI does not claim otherwise.
+
 ### Global connection states
 
 | State | Where | Copy | Behaviour |
 |---|---|---|---|
-| Reconnecting | Status bar + thin banner | “Reconnecting to **atlas**… last update 12:04.” | Read-only cached data; retry backoff shown; no modal |
+| Reconnecting | Status bar + thin banner | “Reconnecting to **atlas**… last update 12:04.” | Read-only cached data; keeps retrying at the capped interval, retries at once when the app is focused or the network returns, and Reconnect is always offered; no modal |
 | Direct → relay fallback | Status bar | “Using the relay for **atlas** · 84 ms.” | Automatic only if the user enabled fallback; otherwise a one-click “Use relay” |
 | Stale | Affected panes | “Showing cached data from 12:04.” | Refresh action; stale chip persists until fresh |
 | Permission denied | Inline at action | “You can view this thread but not approve. Ask the owner of **atlas** for approval access.” | Action hidden or disabled with reason; never a generic 403 |

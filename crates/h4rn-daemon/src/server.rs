@@ -1464,10 +1464,15 @@ impl Connection {
                 ) {
                     return Some(Outbound::Text(binary_error_frame(seq, error)));
                 }
+                // `seq` is a flag word for input: bit 0 marks xterm's own
+                // answer to a terminal query. Older daemons ignored `seq` and
+                // wrote the frame as ordinary input, which still works.
+                let reply = frame.seq & h4rn_protocol::PTY_INPUT_REPLY != 0;
                 match self.state.terminals.input_by_stream(
                     frame.stream_id,
                     self.viewer_id,
                     &frame.payload,
+                    reply,
                 ) {
                     Ok(()) => None,
                     Err(error) => Some(Outbound::Text(binary_error_frame(seq, error.into_proto()))),

@@ -158,6 +158,12 @@ pub struct ViewerEntry {
     pub cols: u16,
     /// Requested rows.
     pub rows: u16,
+    /// Whether this viewer has answered a query on this terminal.
+    ///
+    /// At most one attached viewer owns replies at a time. The owner keeps
+    /// the role until it detaches; the next marked reply after that is
+    /// accepted from whichever viewer sends it.
+    pub answers_queries: bool,
 }
 
 /// A PTY session.
@@ -174,6 +180,12 @@ pub struct Session {
     writer: Mutex<Option<Box<dyn Write + Send>>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
     pty: Mutex<Box<dyn MasterPty + Send>>,
+    /// The spawned shell's own pid, for the initial hangup.
+    ///
+    /// `process_group` comes from `tcgetpgrp`, which reports whatever holds
+    /// the terminal in the foreground; during startup that can be a job the
+    /// shell already started, so the hangup must not use it.
+    shell_pid: Option<i32>,
     process_group: Option<i32>,
     exit: Mutex<Option<TerminalExit>>,
     alive: AtomicBool,
@@ -204,6 +216,9 @@ impl Session {
         let process_group = master.process_group_leader();
         #[cfg(not(unix))]
         let process_group = None;
+        // The child is the shell itself when it is spawned; `tcgetpgrp` above
+        // can already point at a startup job in the foreground.
+        let shell_pid = child.process_id().map(|pid| pid as i32);
         let (output, _) = broadcast::channel(OUTPUT_RING_CAPACITY);
         Self {
             id,
@@ -221,6 +236,7 @@ impl Session {
             writer: Mutex::new(Some(writer)),
             child: Mutex::new(child),
             pty: Mutex::new(master),
+            shell_pid,
             process_group,
             exit: Mutex::new(None),
             alive: AtomicBool::new(true),
@@ -358,28 +374,35 @@ impl Session {
     /// Adds a viewer and recomputes the effective size.
     ///
     /// Attaching twice on one connection replaces the old viewer entry; the
-    /// previous task is closed so it cannot outlive its successor.
+    /// previous task is closed so it cannot outlive its successor. The reply
+    /// owner is decided lazily by [`Session::write_viewer_input`], so a new
+    /// attach never has to be told about or granted the role.
     pub fn add_viewer(&self, id: ViewerId, cols: u16, rows: u16, viewer: Arc<Viewer>) {
         let previous = {
             let mut viewers = lock(&self.viewers);
-            viewers.insert(id, ViewerEntry { viewer, cols, rows })
+            viewers.insert(
+                id,
+                ViewerEntry {
+                    viewer,
+                    cols,
+                    rows,
+                    answers_queries: false,
+                },
+            )
         };
         if let Some(previous) = previous {
             previous.viewer.close();
-            if (previous.cols, previous.rows) == (cols, rows) {
-                return;
+            if (previous.cols, previous.rows) != (cols, rows) {
+                self.apply_smallest_size();
             }
+        } else {
+            self.apply_smallest_size();
         }
-        self.apply_smallest_size();
     }
 
     /// Removes one viewer and recomputes the effective size.
     pub fn remove_viewer(&self, id: ViewerId) {
-        let removed = lock(&self.viewers).remove(&id);
-        if let Some(entry) = removed {
-            entry.viewer.close();
-            self.apply_smallest_size();
-        }
+        self.remove_viewer_matching(id, None);
     }
 
     /// Removes `id` only when it still maps to `viewer`.
@@ -387,17 +410,28 @@ impl Session {
     /// A run task that was replaced by a newer attach must not remove its
     /// successor's viewer entry when it eventually exits.
     pub fn remove_viewer_if(&self, id: ViewerId, viewer: &Arc<Viewer>) {
+        self.remove_viewer_matching(id, Some(viewer));
+    }
+
+    fn remove_viewer_matching(&self, id: ViewerId, expected: Option<&Arc<Viewer>>) {
         let removed = {
             let mut viewers = lock(&self.viewers);
-            match viewers.get(&id) {
-                Some(entry) if Arc::ptr_eq(&entry.viewer, viewer) => viewers.remove(&id),
-                _ => None,
+            let matches = match viewers.get(&id) {
+                Some(entry) => expected.is_none_or(|viewer| Arc::ptr_eq(&entry.viewer, viewer)),
+                None => false,
+            };
+            if !matches {
+                return;
             }
+            // Dropping the entry also drops reply ownership, so the next
+            // marked reply from another viewer is accepted.
+            viewers.remove(&id)
         };
-        if let Some(entry) = removed {
-            entry.viewer.close();
-            self.apply_smallest_size();
-        }
+        let Some(removed) = removed else {
+            return;
+        };
+        removed.viewer.close();
+        self.apply_smallest_size();
     }
 
     /// Closes every viewer (daemon shutdown or terminal close).
@@ -459,8 +493,36 @@ impl Session {
         }
     }
 
-    /// Writes user input to the PTY.
-    pub fn write_input(&self, data: &[u8]) -> std::io::Result<()> {
+    /// Writes one attached viewer's input to the PTY.
+    ///
+    /// A marked `reply` is xterm's own answer to a terminal query, not typed
+    /// input. Viewers share one PTY, so only the reply owner's answer is
+    /// written; a marked reply from any other viewer is dropped. The first
+    /// viewer to send a marked reply owns the role until it detaches.
+    /// Membership and ownership are decided under one lock, but the lock is
+    /// released before the PTY write: a reply is accepted when the viewer is
+    /// the owner at that check, even if the viewer detaches while the write
+    /// is in flight.
+    pub fn write_viewer_input(
+        &self,
+        viewer_id: ViewerId,
+        data: &[u8],
+        reply: bool,
+    ) -> Result<(), ViewerInputError> {
+        {
+            let mut viewers = lock(&self.viewers);
+            if !viewers.contains_key(&viewer_id) {
+                return Err(ViewerInputError::NotAttached);
+            }
+            if reply && !accepts_query_reply(&mut viewers, viewer_id) {
+                return Ok(());
+            }
+        }
+        self.write_bytes(data).map_err(ViewerInputError::Io)
+    }
+
+    /// Writes raw bytes to the PTY.
+    fn write_bytes(&self, data: &[u8]) -> std::io::Result<()> {
         let mut writer = lock(&self.writer);
         let Some(writer) = writer.as_mut() else {
             return Err(std::io::Error::other("terminal input is closed"));
@@ -479,27 +541,31 @@ impl Session {
         self.alive.load(Ordering::SeqCst)
     }
 
-    /// Terminates the process group, then the child.
-    pub fn kill(&self) {
-        if let Some(pgid) = self.process_group {
-            signal_group(pgid, Signal::Term);
-        }
-        {
-            let mut child = lock(&self.child);
-            let _ = child.kill();
-        }
-        if let Some(pgid) = self.process_group {
-            signal_group(pgid, Signal::Kill);
-        }
-    }
-
-    /// Terminates with a short grace period so shells can save state.
+    /// Hangs up, waits, then terminates with a grace period so shells and
+    /// their jobs can save state.
+    ///
+    /// The order is: SIGHUP to the shell's own pid, 150 ms for it to forward
+    /// the hangup to its jobs, SIGTERM to the shell's process group, another
+    /// 150 ms for TERM handlers to clean up, then `child.kill()` and SIGKILL
+    /// for the group. The hangup targets the spawned child rather than the
+    /// cached foreground group: a shell that starts a job while it boots puts
+    /// that job in the foreground, and the job would receive the hangup
+    /// instead of the shell. Windows has no POSIX sessions or signals: the
+    /// ConPTY closes when the PTY is dropped, which ends the console processes
+    /// attached to it, and the SIGHUP/SIGTERM steps are no-ops there.
     pub async fn kill_with_grace(&self) {
-        // Term first, then wait, so the shell can run its exit hooks; only
-        // then fall back to SIGKILL for children that ignored SIGTERM.
+        // Hang up first and wait, so the shell can run its hangup path and
+        // its jobs hear SIGHUP; only then fall back to TERM and KILL for the
+        // shell's group.
+        if let Some(pid) = hangup_pid(self.shell_pid, self.process_group) {
+            signal_shell(pid);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         if let Some(pgid) = self.process_group {
             signal_group(pgid, Signal::Term);
         }
+        // Keep the grace period after TERM so a job's cleanup handler can run
+        // before the group is killed.
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         {
             let mut child = lock(&self.child);
@@ -511,12 +577,63 @@ impl Session {
     }
 }
 
+/// Whether `viewer_id` may write this marked reply, claiming the role when it
+/// is free. The caller holds the viewers lock, so claiming is one decision.
+fn accepts_query_reply(viewers: &mut HashMap<ViewerId, ViewerEntry>, viewer_id: ViewerId) -> bool {
+    if let Some((owner_id, _)) = viewers.iter().find(|(_, entry)| entry.answers_queries) {
+        return *owner_id == viewer_id;
+    }
+    match viewers.get_mut(&viewer_id) {
+        Some(entry) => {
+            entry.answers_queries = true;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Why a viewer's input was not written.
+#[derive(Debug)]
+pub enum ViewerInputError {
+    /// The viewer is not attached to this terminal (any more).
+    NotAttached,
+    /// The PTY could not be written.
+    Io(std::io::Error),
+}
+
 #[derive(Clone, Copy)]
 enum Signal {
     Term,
     Kill,
 }
 
+/// Which pid the initial hangup targets.
+///
+/// Always the spawned shell itself. `process_group` is only a fallback for a
+/// platform where the child has no pid to report (where the signal is a no-op
+/// anyway); it is never preferred, because `tcgetpgrp` can name a job the
+/// shell started while it was booting.
+fn hangup_pid(shell_pid: Option<i32>, process_group: Option<i32>) -> Option<i32> {
+    shell_pid.or(process_group)
+}
+
+/// Sends SIGHUP to the shell process itself.
+///
+/// `pid` is the spawned child's pid, not the cached foreground process group:
+/// a shell that starts a job while it boots would otherwise see the hangup go
+/// to that job.
+fn signal_shell(pid: i32) {
+    #[cfg(unix)]
+    {
+        let _ = unsafe { libc::kill(pid, libc::SIGHUP) };
+    }
+    #[cfg(windows)]
+    {
+        let _ = pid;
+    }
+}
+
+/// Signals the shell's whole process group.
 fn signal_group(pgid: i32, signal: Signal) {
     #[cfg(unix)]
     {
@@ -729,5 +846,16 @@ mod tests {
         assert_eq!(next_stream_id(&counter), 1);
         assert_eq!(next_stream_id(&counter), 2);
         assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn the_hangup_targets_the_shell_not_the_cached_foreground_group() {
+        // A booting shell can put a job in the foreground, so the cached group
+        // can differ from the shell's pid; the hangup must still go to the
+        // shell.
+        assert_eq!(hangup_pid(Some(41), Some(42)), Some(41));
+        assert_eq!(hangup_pid(Some(41), None), Some(41));
+        assert_eq!(hangup_pid(None, Some(42)), Some(42));
+        assert_eq!(hangup_pid(None, None), None);
     }
 }
