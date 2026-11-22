@@ -176,9 +176,12 @@ without leaving h4rn.
   `<iframe sandbox="allow-scripts">` (never `allow-same-origin`) with a CSP of
   `default-src 'none'; img-src data: https:; media-src data: https:; object-src data:; style-src
   'unsafe-inline' https:; script-src 'unsafe-inline' https:; font-src data: https:; connect-src
-  https:`. The policy is the
-  document's first bytes, so no markup can move it out of the head. Page scripts run; the page
-  cannot read h4rn, its cookies, its storage or its origin.
+  `https:`. The prepared document always starts with a trusted `<!doctype html>` and that policy
+  meta; the workspace document follows, with its own leading doctype dropped and any leading
+  comments now after the policy. Nothing scans the untrusted file for a doctype or a comment
+  terminator, so a malformed prefix (`<!-->`, `<!--->`, `<!-- x --!>`) cannot put workspace bytes
+  ahead of the policy. Page scripts run; the page cannot read h4rn, its cookies, its storage or its
+  origin.
 - The desktop and mobile shells serve the prepared document from their own `h4rn-preview` origin
   with that policy as a response header. A `srcdoc` frame would inherit the window's
   `script-src 'self'`, so page scripts would never run in a packaged build. The browser build has
@@ -190,14 +193,18 @@ without leaving h4rn.
   keeping its media condition. The HTML file is read at most 400 KiB, which leaves room for the
   response envelope inside the secure transport's 512 KiB frame. Escaping counts against that
   frame, so a smaller file whose quotes, newlines or control characters need more than 512 KiB
-  once serialized is refused as too large instead of being sent, and the daemon applies the same
-  bound to every response so one oversized answer can never close the paired session. Each binary
-  asset may be up to 360 KiB; all embedded copies together may be up to 10 MB. The budget is
-  charged as each asset arrives, so once it is spent the preview stops fetching and reports the
-  rest as skipped. A repeated image counts every time it is embedded. Anything missing, outside
-  the workspace root, or over a size limit is removed from the page (it is never left as a relative
-  URL that would hit the preview origin) and the tab says how many files were skipped. Absolute
-  `https:` assets load from their CDN.
+  once serialized is refused as too large instead of being sent. That bound applies to the secure
+  (Noise) transport, which closes a session on an oversized frame; the plain loopback WebSocket has
+  no frame bound of its own, so a large thread listing or the editor's full 2 MiB read is delivered
+  whole there. Each binary asset may be up to 360 KiB; all embedded copies together may be up to
+  10 MB. The budget is charged for every copy at the moment it is inserted, including a file
+  reached again through an imported stylesheet, and the page is never built past the cap: an
+  insertion that would not fit is left out and reported as skipped. Assets are fetched until the
+  budget is spent. A `srcset` keeps its `data:` and `https:` candidates as written and inlines (or
+  removes and reports) each workspace candidate. Anything missing, outside the workspace root, or
+  over a size limit is removed from the page (it is never left as a relative URL that would hit the
+  preview origin) and the tab says how many files were skipped. Absolute `https:` assets load from
+  their CDN.
 - A link clicked in the page never opens by itself. The tab shows an inline bar — "Open
   example.com in your browser?" with **Open** and **Cancel** — and only that click hands an
   `http:`/`https:` URL to the system browser. The page controls everything inside the frame,
