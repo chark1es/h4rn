@@ -20,6 +20,8 @@ use h4rn_protocol::{
 use serde::{Deserialize, Serialize};
 
 const FILE: &str = "acp-agents.json";
+/// What a view-scoped reader sees instead of an environment value.
+const MASKED_VALUE: &str = "•••";
 
 #[derive(Default, Serialize, Deserialize)]
 struct AgentsFile {
@@ -34,6 +36,12 @@ struct StoredAgent {
     /// Version the agent last reported in `initialize`, when it did.
     #[serde(default)]
     version: Option<String>,
+    /// Models from the last successful probe, for view-scoped readers.
+    #[serde(default)]
+    models: Vec<h4rn_protocol::AcpAgentModel>,
+    /// Modes from the last successful probe.
+    #[serde(default)]
+    modes: Vec<h4rn_protocol::AcpAgentMode>,
 }
 
 /// Owns `acp-agents.json` for this daemon.
@@ -87,12 +95,18 @@ impl AcpAgentService {
                 "Choose another instance id, or edit the existing agent.",
             ));
         }
-        agents.push(StoredAgent {
-            spec: spec.clone(),
+        let mut next = agents.clone();
+        next.push(StoredAgent {
+            spec,
             version: None,
+            models: Vec::new(),
+            modes: Vec::new(),
         });
-        save(&self.path, &agents)?;
-        Ok(view(agents.last().expect("the agent was just pushed")))
+        // Persist first: a failed save must leave the live list unchanged.
+        save(&self.path, &next)?;
+        let added = view(next.last().expect("the agent was just pushed"));
+        *agents = next;
+        Ok(added)
     }
 
     /// Replaces one agent's configuration.
@@ -108,24 +122,33 @@ impl AcpAgentService {
         let Some(index) = agents.iter().position(|agent| agent.spec.id == id) else {
             return Err(not_found(id));
         };
-        // A version reported by the old command says nothing about a new one.
-        if agents[index].spec.command != spec.command || agents[index].spec.args != spec.args {
-            agents[index].version = None;
+        let mut next = agents.clone();
+        // A version or model list reported by the old command says nothing
+        // about a new one. Probe results are also dropped on any edit, because
+        // the editor may have changed the environment the agent runs with.
+        if next[index].spec.command != spec.command || next[index].spec.args != spec.args {
+            next[index].version = None;
         }
-        agents[index].spec = spec;
-        save(&self.path, &agents)?;
-        Ok(view(&agents[index]))
+        next[index].models.clear();
+        next[index].modes.clear();
+        next[index].spec = spec;
+        save(&self.path, &next)?;
+        let updated = view(&next[index]);
+        *agents = next;
+        Ok(updated)
     }
 
     /// Removes one agent. Threads keep their history and their stored events.
     pub fn remove(&self, id: &str) -> Result<(), ProtoError> {
         let mut agents = lock(&self.agents);
-        let before = agents.len();
-        agents.retain(|agent| agent.spec.id != id);
-        if agents.len() == before {
+        let mut next = agents.clone();
+        next.retain(|agent| agent.spec.id != id);
+        if next.len() == agents.len() {
             return Err(not_found(id));
         }
-        save(&self.path, &agents)
+        save(&self.path, &next)?;
+        *agents = next;
+        Ok(())
     }
 
     /// Starts one agent, reports what it advertises, and stops it.
@@ -134,12 +157,20 @@ impl AcpAgentService {
             return Err(not_found(id));
         };
         let probe = probe_acp_agent(&spec).await;
-        if let Some(version) = probe.version.as_deref() {
+        // A failed probe keeps the last successful result: the picker can
+        // still offer the models the agent advertised before, and the failure
+        // itself is returned to the admin device that asked.
+        if probe.error.is_none() {
             let mut agents = lock(&self.agents);
-            if let Some(agent) = agents.iter_mut().find(|agent| agent.spec.id == id) {
-                agent.version = Some(version.to_string());
-                if let Err(error) = save(&self.path, &agents) {
-                    tracing::warn!(error = %error.message, "could not persist an ACP agent's reported version");
+            let mut next = agents.clone();
+            if let Some(agent) = next.iter_mut().find(|agent| agent.spec.id == id) {
+                agent.version = probe.version.clone();
+                agent.models = probe.models.clone();
+                agent.modes = probe.modes.clone();
+                if let Err(error) = save(&self.path, &next) {
+                    tracing::warn!(error = %error.message, "could not persist an ACP agent's probe result");
+                } else {
+                    *agents = next;
                 }
             }
         }
@@ -160,11 +191,21 @@ fn view(agent: &StoredAgent) -> AcpAgent {
         name: agent.spec.name.clone(),
         command: agent.spec.command.clone(),
         args: agent.spec.args.clone(),
-        env: agent.spec.env.clone(),
+        // Environment values can be credentials. A view-scoped device sees
+        // which names are set, never their values; the admin-only
+        // `GetAcpAgent` returns the real configuration for the edit form.
+        env: agent
+            .spec
+            .env
+            .keys()
+            .map(|key| (key.clone(), MASKED_VALUE.to_owned()))
+            .collect(),
         working_dir: agent.spec.working_dir.clone(),
         installed: path.is_some(),
         path: path.map(|path| path.display().to_string()),
         version: agent.version.clone(),
+        models: agent.models.clone(),
+        modes: agent.modes.clone(),
     }
 }
 
@@ -428,6 +469,93 @@ mod tests {
         // The command is not on this host.
         assert!(!agents[0].installed);
         assert!(agents[0].path.is_none());
+    }
+
+    #[test]
+    fn the_view_masks_environment_values_but_the_admin_spec_keeps_them() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let service = AcpAgentService::open(dir.path()).expect("open");
+        let mut with_secret = spec("demo");
+        with_secret
+            .env
+            .insert("DEMO_TOKEN".into(), "super-secret".into());
+        service.add(with_secret).expect("add");
+
+        let listed = service.list();
+        assert_eq!(listed[0].env["DEMO_TOKEN"], MASKED_VALUE);
+        assert!(
+            !format!("{listed:?}").contains("super-secret"),
+            "a view-scoped list must not carry the value"
+        );
+        assert_eq!(
+            service.spec("demo").expect("admin spec").env["DEMO_TOKEN"],
+            "super-secret"
+        );
+    }
+
+    #[test]
+    fn a_view_reader_sees_the_last_successful_probe_models() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let service = AcpAgentService::open(dir.path()).expect("open");
+        service.add(spec("demo")).expect("add");
+        {
+            let mut agents = lock(&service.agents);
+            agents[0].version = Some("1.2.3".into());
+            agents[0].models = vec![h4rn_protocol::AcpAgentModel {
+                id: "demo-model".into(),
+                name: "Demo Model".into(),
+            }];
+            agents[0].modes = vec![h4rn_protocol::AcpAgentMode {
+                id: "default".into(),
+                name: "Default".into(),
+                description: None,
+            }];
+        }
+
+        let listed = service.list();
+        assert_eq!(listed[0].version.as_deref(), Some("1.2.3"));
+        assert_eq!(listed[0].models[0].id, "demo-model");
+        assert_eq!(listed[0].modes[0].id, "default");
+
+        // A command-line edit invalidates what the old command advertised.
+        let mut next = spec("demo");
+        next.command = "another-agent".into();
+        let updated = service.update("demo", next).expect("update");
+        assert!(updated.version.is_none());
+        assert!(updated.models.is_empty());
+        assert!(updated.modes.is_empty());
+    }
+
+    #[test]
+    fn a_failed_save_leaves_the_live_list_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let service = AcpAgentService::open(dir.path()).expect("open");
+        service.add(spec("keep")).expect("add");
+        // A directory where the file belongs makes the final rename fail.
+        std::fs::remove_file(dir.path().join(FILE)).expect("remove file");
+        std::fs::create_dir(dir.path().join(FILE)).expect("blocking directory");
+
+        assert!(service.add(spec("second")).is_err());
+        assert!(
+            service.spec("second").is_none(),
+            "a failed save must not publish the new agent"
+        );
+        assert_eq!(
+            service
+                .list()
+                .iter()
+                .map(|agent| agent.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["keep"]
+        );
+
+        let mut renamed = spec("keep");
+        renamed.name = "Renamed".into();
+        assert!(service.update("keep", renamed).is_err());
+        assert_eq!(service.spec("keep").expect("unchanged").name, "Demo agent");
+
+        assert!(service.remove("keep").is_err());
+        assert!(service.spec("keep").is_some());
     }
 
     #[test]

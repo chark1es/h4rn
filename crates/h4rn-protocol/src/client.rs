@@ -912,7 +912,17 @@ pub enum ClientRequest {
     // User-configured ACP agents.
     // ------------------------------------------------------------------
     /// List the local ACP agents configured on this daemon.
+    ///
+    /// Environment values are masked. Needs only the `view` scope.
     ListAcpAgents,
+    /// Read one configuration with its real environment values.
+    ///
+    /// Admin-only: a value can be a credential, and the edit form is the only
+    /// surface that needs it.
+    GetAcpAgent {
+        /// Instance id to read.
+        id: String,
+    },
     /// Add a local ACP agent.
     ///
     /// The daemon validates the id, command, arguments and environment and
@@ -1111,6 +1121,7 @@ impl ClientRequest {
             | Self::ApplyProxyOverrides { .. }
             | Self::PickProxyFailover { .. }
             | Self::SetAutoResumePolicy { .. }
+            | Self::GetAcpAgent { .. }
             | Self::AddAcpAgent { .. }
             | Self::UpdateAcpAgent { .. }
             | Self::RemoveAcpAgent { .. }
@@ -1289,6 +1300,7 @@ mod tests {
             // Version reads are harmless; running a package manager is not.
             (ClientRequest::ListHarnessVersions, View),
             (ClientRequest::ListAcpAgents, View),
+            (ClientRequest::GetAcpAgent { id: "demo".into() }, Admin),
             (
                 ClientRequest::AddAcpAgent {
                     agent: crate::acp_agent::AcpAgentSpec {

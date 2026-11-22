@@ -208,6 +208,49 @@ async fn a_configured_agent_can_be_probed_for_its_version_and_models() {
         agents.list()[0].version.as_deref(),
         probe.version.as_deref()
     );
+    // The list carries the models for view-scoped devices, without a probe.
+    assert_eq!(
+        agents.list()[0]
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["fixture-model"]
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_generic_agent_forwards_plan_updates() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let Some(manager) = manager().await else {
+        return skip_without_fixture();
+    };
+    let mut events = manager.subscribe();
+    let thread = create(&manager, workspace.path()).await;
+    let _ = next_turn(&mut events, |_| {}).await;
+
+    manager
+        .send_message(&thread, "show H4RN_FIXTURE_PLAN".into(), Vec::new())
+        .await
+        .expect("send");
+    let mut plans = Vec::new();
+    let (status, text, _) = next_turn(&mut events, |event| {
+        if let Event::Plan { entries, .. } = event {
+            plans.push(entries.clone());
+        }
+    })
+    .await;
+    assert_eq!(status, TurnStatus::Completed);
+    assert!(text.contains("plan: done"), "got {text:?}");
+    let entries = plans.first().expect("a plan event reached the thread");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].content, "Inspect the workspace");
+    assert_eq!(entries[0].status, "completed");
+    assert_eq!(entries[1].status, "in_progress");
+    assert_eq!(entries[1].priority, "medium");
+
+    manager.shutdown().await;
 }
 
 #[cfg(unix)]

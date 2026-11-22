@@ -14,6 +14,7 @@ pub(super) fn matches(request: &ClientRequest) -> bool {
     matches!(
         request,
         ClientRequest::ListAcpAgents
+            | ClientRequest::GetAcpAgent { .. }
             | ClientRequest::AddAcpAgent { .. }
             | ClientRequest::UpdateAcpAgent { .. }
             | ClientRequest::RemoveAcpAgent { .. }
@@ -30,6 +31,17 @@ pub(super) async fn handle(
         ClientRequest::ListAcpAgents => Ok(ResponseBody::AcpAgents {
             agents: conn.state.acp_agents.list(),
         }),
+        ClientRequest::GetAcpAgent { id } => conn
+            .state
+            .acp_agents
+            .spec(&id)
+            .map(|agent| ResponseBody::AcpAgentSpec { agent })
+            .ok_or_else(|| {
+                ProtoError::plain(
+                    h4rn_protocol::ProtoErrorCode::NotFound,
+                    format!("no ACP agent `{id}` is configured on this host"),
+                )
+            }),
         ClientRequest::AddAcpAgent { agent } => conn
             .state
             .acp_agents

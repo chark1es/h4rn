@@ -50,6 +50,10 @@ pub struct AcpAgentSpec {
 }
 
 /// A configured agent and the installation facts this host knows.
+///
+/// This is the view-scoped shape: environment values are masked, because a
+/// value can be a credential. The real values are only returned by the
+/// admin-scoped [`crate::ClientRequest::GetAcpAgent`] request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct AcpAgent {
     /// Stable instance id.
@@ -60,7 +64,7 @@ pub struct AcpAgent {
     pub command: String,
     /// Literal arguments.
     pub args: Vec<String>,
-    /// Environment overrides.
+    /// Environment overrides, with each value masked.
     pub env: BTreeMap<String, String>,
     /// Working-directory policy.
     pub working_dir: AcpWorkingDir,
@@ -74,6 +78,13 @@ pub struct AcpAgent {
     #[serde(default)]
     #[ts(optional)]
     pub version: Option<String>,
+    /// Models from the last successful probe, so a view-scoped device can
+    /// offer them without starting the agent.
+    #[serde(default)]
+    pub models: Vec<AcpAgentModel>,
+    /// Modes from the last successful probe.
+    #[serde(default)]
+    pub modes: Vec<AcpAgentMode>,
 }
 
 /// One model an agent advertised over ACP.

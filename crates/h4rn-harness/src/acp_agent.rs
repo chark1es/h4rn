@@ -93,6 +93,11 @@ impl Harness for GenericAcpHarness {
         self.config(instance).is_some()
     }
 
+    fn instance_fingerprint(&self, instance: &str) -> Option<String> {
+        self.config(instance)
+            .map(|agent| command_fingerprint(&agent))
+    }
+
     async fn start_session(
         &self,
         spec: SessionSpec,
@@ -141,12 +146,18 @@ impl Harness for GenericAcpHarness {
         let policy = AcpSessionPolicy {
             harness: HarnessKind::Acp,
             label: agent.name.clone(),
+            failure_label: agent.name.clone(),
+            permission_prompt: "The agent is requesting permission",
             // A generic agent's limit wording is unknown; only Antigravity's
             // adapter parses provider limits.
             detect_limit: |_, _| None,
             mode_for: default_mode,
             missing_mode_is_error: |_| false,
             default_models: &["default"],
+            case_sensitive_default_models: false,
+            // A stored id the agent can no longer load starts a fresh session
+            // instead of failing the thread forever.
+            fresh_without_load: true,
         };
         match crate::acp::session_start(&client, &spec, policy, &workspace).await {
             Ok(session) => Ok(session.into_session()),
@@ -177,35 +188,88 @@ fn agent_workspace(agent: &AcpAgentSpec, spec: &SessionSpec) -> Result<PathBuf, 
     Ok(path)
 }
 
-/// Resolves a configured command to an executable path.
+/// A stable fingerprint of a configured command line.
 ///
-/// An absolute or relative path that is an executable file wins; otherwise the
-/// name is searched on `PATH` (with `.exe` on Windows). No shell is involved
-/// and no glob or variable is expanded.
+/// The daemon records it beside a thread's resume id, so a session id from a
+/// command the user has since edited is not replayed at the new command.
+fn command_fingerprint(agent: &AcpAgentSpec) -> String {
+    format!("{}\u{0}{}", agent.command, agent.args.join("\u{0}"))
+}
+
+/// Resolves a configured command to an absolute executable path.
+///
+/// An absolute path that is an executable file wins; otherwise the name is
+/// searched on `PATH` (with `.exe` on Windows). Relative `PATH` entries are
+/// ignored: the child's working directory is the thread workspace, so a
+/// relative entry would resolve against the wrong directory. No shell is
+/// involved and no glob or variable is expanded.
+///
+/// On Windows `.bat` and `.cmd` are refused: they are scripts that only run
+/// through `cmd.exe`, and h4rn launches the executable directly.
 pub fn resolve_acp_command(command: &str) -> Option<PathBuf> {
+    resolve_acp_command_in(command, std::env::var_os("PATH").as_deref())
+}
+
+pub(crate) fn resolve_acp_command_in(
+    command: &str,
+    path_var: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
     let command = command.trim();
-    if command.is_empty() {
+    if command.is_empty() || is_windows_script(command) {
         return None;
     }
     let candidate = Path::new(command);
-    if candidate.is_absolute() || command.contains(std::path::MAIN_SEPARATOR) {
-        return is_executable(candidate).then(|| candidate.to_path_buf());
+    if candidate.is_absolute() || command.contains('/') || command.contains('\\') {
+        return executable_path(candidate);
     }
-    let path_var = std::env::var_os("PATH")?;
+    let path_var = path_var?;
     let names: &[&str] = if cfg!(windows) {
         &[command, &format!("{command}.exe")]
     } else {
         &[command]
     };
-    for directory in std::env::split_paths(&path_var) {
+    for directory in std::env::split_paths(path_var) {
+        if !directory.is_absolute() {
+            continue;
+        }
         for name in names {
-            let path = directory.join(name);
-            if is_executable(&path) {
+            if let Some(path) = executable_path(&directory.join(name)) {
                 return Some(path);
             }
         }
     }
     None
+}
+
+/// Whether this is a Windows command script rather than an executable.
+#[cfg(windows)]
+fn is_windows_script(command: &str) -> bool {
+    let path = Path::new(command);
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("bat") || extension.eq_ignore_ascii_case("cmd")
+        })
+}
+
+#[cfg(not(windows))]
+fn is_windows_script(_command: &str) -> bool {
+    false
+}
+
+/// The absolute path of an existing executable file.
+fn executable_path(path: &Path) -> Option<PathBuf> {
+    if is_windows_script(&path.display().to_string()) || !is_executable(path) {
+        return None;
+    }
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    // Symlinks are resolved so the child starts from the absolute target and
+    // detection, probing and launch all name the same file.
+    Some(std::fs::canonicalize(&absolute).unwrap_or(absolute))
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -347,6 +411,77 @@ mod tests {
     fn a_missing_command_does_not_resolve() {
         assert!(resolve_acp_command("h4rn-no-such-agent-command").is_none());
         assert!(resolve_acp_command("").is_none());
+    }
+
+    #[cfg(unix)]
+    fn executable_file(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, "#!/bin/sh\n").expect("write");
+        let mut permissions = std::fs::metadata(path).expect("metadata").permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("chmod");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_path_entry_is_ignored() {
+        let current = std::env::current_dir().expect("cwd");
+        let temp = tempfile::Builder::new()
+            .prefix("h4rn-rel-path-")
+            .tempdir_in(&current)
+            .expect("tempdir");
+        executable_file(&temp.path().join("demo-agent"));
+        let relative = temp
+            .path()
+            .strip_prefix(&current)
+            .expect("relative")
+            .display()
+            .to_string();
+        let relative_var = std::ffi::OsString::from(relative);
+
+        assert!(
+            resolve_acp_command_in("demo-agent", Some(relative_var.as_os_str())).is_none(),
+            "a relative PATH entry must not resolve against the child's working directory"
+        );
+        let absolute_var = temp.path().display().to_string();
+        let resolved =
+            resolve_acp_command_in("demo-agent", Some(std::ffi::OsStr::new(&absolute_var)))
+                .expect("absolute PATH entry resolves");
+        assert!(resolved.is_absolute());
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(temp.path().join("demo-agent")).expect("canonical")
+        );
+    }
+
+    #[test]
+    fn an_instance_fingerprint_follows_the_command_line() {
+        let harness =
+            GenericAcpHarness::new(Arc::new(StaticAcpAgents::new().with(spec("demo", "agent"))));
+        let first = harness.instance_fingerprint("demo").expect("fingerprint");
+        assert!(harness.instance_fingerprint("missing").is_none());
+
+        let harness = GenericAcpHarness::new(Arc::new(
+            StaticAcpAgents::new().with(spec("demo", "other-agent")),
+        ));
+        assert_ne!(
+            first,
+            harness.instance_fingerprint("demo").expect("fingerprint"),
+            "a different command line must not reuse the old session id"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_command_script_is_refused() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("agent.cmd");
+        std::fs::write(&path, "@echo off\n").expect("write");
+        assert_eq!(
+            resolve_acp_command(&path.display().to_string()),
+            None,
+            ".cmd only runs through cmd.exe, and h4rn launches directly"
+        );
     }
 
     #[test]

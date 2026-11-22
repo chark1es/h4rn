@@ -949,7 +949,11 @@ request: SubagentRequest, } | { "type": "list_harness_versions" } | { "type": "u
 /**
  * Harness to update.
  */
-harness: HarnessKind, } | { "type": "list_acp_agents" } | { "type": "add_acp_agent", 
+harness: HarnessKind, } | { "type": "list_acp_agents" } | { "type": "get_acp_agent", 
+/**
+ * Instance id to read.
+ */
+id: string, } | { "type": "add_acp_agent", 
 /**
  * Configuration to persist.
  */

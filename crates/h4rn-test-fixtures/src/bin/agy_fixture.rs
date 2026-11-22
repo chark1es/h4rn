@@ -242,6 +242,53 @@ fn main() {
                     );
                     continue;
                 }
+                if text.contains("H4RN_FIXTURE_PLAN") {
+                    let session_id = params
+                        .get("sessionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("fixture-session");
+                    write_frame(
+                        &mut stdout,
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": {
+                                "sessionId": session_id,
+                                "update": {
+                                    "sessionUpdate": "plan",
+                                    "entries": [
+                                        {
+                                            "content": "Inspect the workspace",
+                                            "priority": "high",
+                                            "status": "completed"
+                                        },
+                                        {
+                                            "content": "Change the fixture",
+                                            "priority": "medium",
+                                            "status": "in_progress"
+                                        }
+                                    ]
+                                }
+                            }
+                        }),
+                    );
+                    write_frame(
+                        &mut stdout,
+                        &json!({
+                            "jsonrpc": "2.0",
+                            "method": "session/update",
+                            "params": {
+                                "sessionId": session_id,
+                                "update": {
+                                    "sessionUpdate": "agent_message_chunk",
+                                    "content": {"type": "text", "text": "plan: done"}
+                                }
+                            }
+                        }),
+                    );
+                    reply(&mut stdout, id, json!({"stopReason": "end_turn"}));
+                    continue;
+                }
                 if text.contains("H4RN_FIXTURE_CANCEL") {
                     // Hold the turn open until `session/cancel` arrives.
                     pending_prompt = id;

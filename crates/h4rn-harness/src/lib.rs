@@ -151,6 +151,11 @@ pub enum HarnessEvent {
         /// Normalized tool-call state.
         tool_call: ToolCall,
     },
+    /// The agent published a plan, replacing any earlier one.
+    Plan {
+        /// Every step, in the agent's order.
+        entries: Vec<h4rn_protocol::PlanStep>,
+    },
     /// The harness is waiting for a decision.
     ApprovalRequested {
         /// Opaque approval id.
@@ -554,6 +559,17 @@ pub trait Harness: Send + Sync {
     /// built-in adapters answer `false` and are selected by kind alone.
     fn has_instance(&self, _instance: &str) -> bool {
         false
+    }
+
+    /// A stable fingerprint of the command line behind one configured
+    /// instance.
+    ///
+    /// The daemon stores it beside a thread's resume id: when the command line
+    /// changes, the old session id names a conversation the new command never
+    /// saw, so the next start opens a fresh session. Built-in adapters have one
+    /// command per kind and answer `None`.
+    fn instance_fingerprint(&self, _instance: &str) -> Option<String> {
+        None
     }
 
     /// Starts (or resumes) a session.

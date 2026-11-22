@@ -51,6 +51,11 @@ pub struct ThreadMeta {
     pub usage: Usage,
     /// Harness-native session id for resume.
     pub resume_id: Option<String>,
+    /// Fingerprint of the configured ACP command line `resume_id` belongs to.
+    ///
+    /// A different value means the stored session id describes a command the
+    /// thread no longer runs, so the next start opens a fresh session.
+    pub agent_fingerprint: Option<String>,
 }
 
 /// One ordered, projected event as stored.
@@ -174,7 +179,8 @@ impl SqliteJournal {
                 worktree_json  TEXT,
                 parent_thread_id TEXT,
                 subagent_id    TEXT,
-                agent_id       TEXT
+                agent_id       TEXT,
+                agent_fingerprint TEXT
             )",
         )
         .execute(&self.pool)
@@ -195,6 +201,8 @@ impl SqliteJournal {
         self.ensure_column("daemon_threads", "subagent_id", "TEXT")
             .await?;
         self.ensure_column("daemon_threads", "agent_id", "TEXT")
+            .await?;
+        self.ensure_column("daemon_threads", "agent_fingerprint", "TEXT")
             .await?;
 
         sqlx::query(
@@ -255,8 +263,8 @@ async fn upsert_thread_on(
     let worktree_json = serde_json::to_string(&meta.worktree)?;
     sqlx::query(
         "INSERT INTO daemon_threads
-            (thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json, parent_thread_id, subagent_id, agent_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(thread_id) DO UPDATE SET
             host = excluded.host,
             harness = excluded.harness,
@@ -269,7 +277,8 @@ async fn upsert_thread_on(
             worktree_json = excluded.worktree_json,
             parent_thread_id = excluded.parent_thread_id,
             subagent_id = excluded.subagent_id,
-            agent_id = excluded.agent_id",
+            agent_id = excluded.agent_id,
+            agent_fingerprint = excluded.agent_fingerprint",
     )
     .bind(meta.thread_id.as_str())
     .bind(meta.host.as_str())
@@ -285,6 +294,7 @@ async fn upsert_thread_on(
     .bind(meta.parent_thread_id.as_ref().map(ThreadId::as_str))
     .bind(meta.subagent_id.as_ref().map(SubagentId::as_str))
     .bind(meta.agent_id.as_deref())
+    .bind(meta.agent_fingerprint.as_deref())
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -322,7 +332,7 @@ impl Journal for SqliteJournal {
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json, parent_thread_id, subagent_id, agent_id
+            "SELECT thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json, parent_thread_id, subagent_id, agent_id, agent_fingerprint
              FROM daemon_threads ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -363,6 +373,7 @@ impl Journal for SqliteJournal {
                 created_at,
                 usage: serde_json::from_str(&usage_json).unwrap_or_default(),
                 resume_id: row.try_get("resume_id")?,
+                agent_fingerprint: row.try_get("agent_fingerprint")?,
             });
         }
         Ok(metas)
@@ -481,6 +492,7 @@ pub fn thread_meta_json(meta: &ThreadMeta) -> serde_json::Value {
         "worktree": meta.worktree,
         "usage": meta.usage,
         "resume_id": meta.resume_id,
+        "agent_fingerprint": meta.agent_fingerprint,
     })
 }
 
@@ -505,6 +517,7 @@ mod tests {
             created_at: Utc::now(),
             usage: Usage::default(),
             resume_id: None,
+            agent_fingerprint: None,
         }
     }
 

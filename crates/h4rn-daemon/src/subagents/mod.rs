@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use h4rn_protocol::{
     AgentState, DEFAULT_MAX_DEPTH, DEFAULT_MAX_TOKENS, DEFAULT_MAX_TURNS,
-    DEFAULT_MAX_WALL_TIME_SECS, Event, Item, MessageRole, ProtoError, ProtoErrorCode,
+    DEFAULT_MAX_WALL_TIME_SECS, Event, HarnessKind, Item, MessageRole, ProtoError, ProtoErrorCode,
     SubagentBudget, SubagentContext, SubagentCredential, SubagentId, SubagentIsolation,
     SubagentProgress, SubagentResult, SubagentState, SubagentView, ThreadId, TurnId, TurnStatus,
 };
@@ -626,6 +626,10 @@ impl Inner {
         }
 
         let harness = request.harness.unwrap_or(parent.harness);
+        // A subagent has no configured agent instance to run, and the bare
+        // `acp` kind is not startable. Reject before a thread row or worktree
+        // exists instead of failing later in `create_thread`.
+        reject_bare_acp(harness)?;
         if self.catalog.get(harness).is_none() {
             let available: Vec<&str> = self
                 .catalog
@@ -1323,6 +1327,19 @@ fn depth_allowed(depth: u32, max_depth: u32) -> bool {
     depth <= max_depth
 }
 
+/// Refuses a delegation onto the bare `acp` kind.
+///
+/// The request has no agent instance, and `acp` alone is not startable, so the
+/// daemon says why instead of creating a child that cannot start.
+fn reject_bare_acp(harness: HarnessKind) -> Result<(), SubagentError> {
+    if harness == HarnessKind::Acp {
+        return Err(SubagentError::Invalid(
+            "a subagent cannot run on a local ACP agent; choose a built-in harness".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Fills omitted budget fields from the daemon defaults.
 fn resolve_budget(request: &SubagentBudget, defaults: &SubagentBudget) -> SubagentBudget {
     SubagentBudget {
@@ -1472,6 +1489,12 @@ mod tests {
         assert!(depth_allowed(2, options.max_depth));
         assert!(!depth_allowed(3, options.max_depth));
         assert!(!depth_allowed(1, 0));
+    }
+
+    #[test]
+    fn a_delegation_never_starts_the_bare_acp_kind() {
+        assert!(reject_bare_acp(HarnessKind::Acp).is_err());
+        assert!(reject_bare_acp(HarnessKind::ClaudeCode).is_ok());
     }
 
     #[test]

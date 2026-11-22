@@ -187,10 +187,17 @@ fn antigravity_policy() -> AcpSessionPolicy {
     AcpSessionPolicy {
         harness: HarnessKind::Antigravity,
         label: "agy".into(),
+        failure_label: "Antigravity".into(),
+        permission_prompt: "Antigravity is requesting permission",
         detect_limit,
         mode_for: wanted_mode,
         missing_mode_is_error: |spec| spec.env_overrides.contains_key(ENV_AGY_MODE),
         default_models: DEFAULT_MODELS,
+        // Antigravity's own aliases are case-sensitive; `auto` is not.
+        case_sensitive_default_models: true,
+        // Antigravity keeps its explicit unsupported error for an agent that
+        // cannot load a stored session.
+        fresh_without_load: false,
     }
 }
 
@@ -703,5 +710,39 @@ mod tests {
             .insert(ENV_MCP_AUTH_TOKEN.to_string(), "new".into());
         assert_eq!(mcp_env(&spec).as_deref(), Some("new"));
         let _ = Arc::new(());
+    }
+
+    #[test]
+    fn antigravity_aliases_are_case_sensitive_except_auto() {
+        let policy = antigravity_policy();
+        assert!(policy.is_default_model("default"));
+        assert!(policy.is_default_model("antigravity-default"));
+        assert!(
+            !policy.is_default_model("Default"),
+            "Antigravity's own aliases are exact"
+        );
+        assert!(
+            !policy.is_default_model("ANTIGRAVITY-DEFAULT"),
+            "Antigravity's own aliases are exact"
+        );
+        assert!(policy.is_default_model("AUTO"));
+        assert!(!policy.is_default_model("gemini-4-argon-medium"));
+    }
+
+    #[test]
+    fn antigravity_keeps_its_own_wording() {
+        let policy = antigravity_policy();
+        assert_eq!(
+            policy.stop_message("max_output_tokens"),
+            "Antigravity stopped the turn: max_output_tokens"
+        );
+        assert_eq!(
+            policy.permission_prompt,
+            "Antigravity is requesting permission"
+        );
+        assert!(
+            !policy.fresh_without_load,
+            "Antigravity keeps its explicit unsupported error"
+        );
     }
 }

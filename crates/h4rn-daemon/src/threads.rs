@@ -1659,6 +1659,7 @@ impl ThreadManager {
             created_at: now,
             usage: Usage::default(),
             resume_id: None,
+            agent_fingerprint: None,
         };
 
         let mut record = ThreadRecord {
@@ -3037,11 +3038,26 @@ impl Inner {
             if let Some(session) = injection {
                 env_overrides.insert(h4rn_harness::ENV_MCP_AUTH_TOKEN.to_owned(), session.token);
             }
+            // A configured ACP command is editable. Its fingerprint is stored
+            // beside the resume id, so a thread that outlives a command-line
+            // change starts fresh instead of replaying an id the new command
+            // never issued.
+            let mut resume_id = record.meta.resume_id.clone();
+            if harness_kind == HarnessKind::Acp
+                && let Some(agent_id) = record.meta.agent_id.as_deref()
+            {
+                let fingerprint = harness.instance_fingerprint(agent_id);
+                resume_id = resume_after_fingerprint_change(
+                    &mut record.meta.agent_fingerprint,
+                    fingerprint.as_deref(),
+                    resume_id,
+                );
+            }
             let spec = SessionSpec {
                 workspace: std::path::PathBuf::from(&record.meta.workspace_path),
                 model: record.meta.model.clone(),
                 runtime_mode: record.meta.runtime_mode,
-                resume_id: record.meta.resume_id.clone(),
+                resume_id,
                 mcp_endpoint,
                 env_overrides,
                 attachments: Vec::new(),
@@ -3843,6 +3859,14 @@ impl Inner {
                             at: now,
                         });
                     }
+                }
+                HarnessEvent::Plan { entries } => {
+                    let turn_id = record.turn_id_for_event();
+                    wire.push(Event::Plan {
+                        thread_id: thread_id.clone(),
+                        turn_id,
+                        entries,
+                    });
                 }
                 HarnessEvent::ApprovalRequested {
                     approval_id,
@@ -5166,6 +5190,25 @@ impl Inner {
     }
 }
 
+/// Keeps a stored session id only while the ACP command line is unchanged.
+///
+/// `stored` is the fingerprint the id belongs to. A first observation (an old
+/// thread written before fingerprints existed) keeps the id and records the
+/// fingerprint; a later mismatch clears the id, so the adapter opens a fresh
+/// session and reports its new id.
+fn resume_after_fingerprint_change(
+    stored: &mut Option<String>,
+    current: Option<&str>,
+    resume_id: Option<String>,
+) -> Option<String> {
+    let Some(current) = current else {
+        return resume_id;
+    };
+    let changed = stored.as_deref().is_some_and(|known| known != current);
+    *stored = Some(current.to_owned());
+    if changed { None } else { resume_id }
+}
+
 fn user_item_id(turn_id: &TurnId) -> String {
     format!("item_user_{}", turn_suffix(turn_id))
 }
@@ -5452,6 +5495,79 @@ mod tests {
             runtime_mode: RuntimeMode::ApprovalRequired,
             worktree: None,
         }
+    }
+
+    #[tokio::test]
+    async fn an_acp_thread_must_name_a_configured_agent() {
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let host = HostId::new("host_test");
+        let spec = h4rn_protocol::AcpAgentSpec {
+            id: "demo".into(),
+            name: "Demo".into(),
+            command: "demo-agent".into(),
+            args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            working_dir: h4rn_protocol::AcpWorkingDir::ThreadWorkspace,
+        };
+        let catalog = StaticHarnessCatalog::with(Arc::new(h4rn_harness::GenericAcpHarness::new(
+            Arc::new(h4rn_harness::StaticAcpAgents::new().with(spec)),
+        )));
+        let manager = ThreadManager::open(
+            Arc::new(SqliteJournal::in_memory().await.expect("journal")),
+            Arc::new(catalog),
+            host.clone(),
+            ThreadManagerOptions {
+                tick_interval: Duration::from_secs(3600),
+                ..ThreadManagerOptions::default()
+            },
+            None,
+        )
+        .await
+        .expect("manager");
+
+        let mut missing = new_thread(host.clone(), workspace.path(), "hi");
+        missing.harness = HarnessKind::Acp;
+        missing.agent_id = None;
+        let error = manager.create_thread(missing).await.expect_err("rejected");
+        assert!(
+            matches!(error, ManagerError::InvalidRequest(ref message) if message.contains("configured agent")),
+            "a bare acp thread names no instance: {error:?}"
+        );
+
+        let mut unknown = new_thread(host, workspace.path(), "hi");
+        unknown.harness = HarnessKind::Acp;
+        unknown.agent_id = Some("missing".into());
+        let error = manager.create_thread(unknown).await.expect_err("rejected");
+        assert!(
+            matches!(error, ManagerError::InvalidRequest(ref message) if message.contains("missing")),
+            "an unknown instance is refused: {error:?}"
+        );
+    }
+
+    #[test]
+    fn an_acp_resume_id_is_kept_only_for_the_same_command_line() {
+        let mut stored = None;
+        assert_eq!(
+            resume_after_fingerprint_change(&mut stored, Some("a"), Some("s-1".into())),
+            Some("s-1".into()),
+            "a first observation keeps an old thread's id"
+        );
+        assert_eq!(stored.as_deref(), Some("a"));
+        assert_eq!(
+            resume_after_fingerprint_change(&mut stored, Some("a"), Some("s-1".into())),
+            Some("s-1".into())
+        );
+        assert_eq!(
+            resume_after_fingerprint_change(&mut stored, Some("b"), Some("s-1".into())),
+            None,
+            "an edited command line cannot resume the old session"
+        );
+        assert_eq!(stored.as_deref(), Some("b"));
+        assert_eq!(
+            resume_after_fingerprint_change(&mut stored, None, Some("s-1".into())),
+            Some("s-1".into()),
+            "an adapter without a fingerprint leaves the id alone"
+        );
     }
 
     #[tokio::test]

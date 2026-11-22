@@ -671,6 +671,26 @@ impl AcpClient {
         .map(|_| ())
     }
 
+    /// Selects one ACP v1 session config option (`session/set_config_option`).
+    ///
+    /// Agents that advertise models or modes through `configOptions` expect
+    /// this method instead of the legacy `session/set_model` and
+    /// `session/set_mode`.
+    pub async fn set_config_option(
+        &self,
+        session_id: &str,
+        config_id: &str,
+        value: &str,
+    ) -> Result<(), AcpError> {
+        self.call(
+            "session/set_config_option",
+            json!({"sessionId": session_id, "configId": config_id, "value": value}),
+            Some(SESSION_TIMEOUT),
+        )
+        .await
+        .map(|_| ())
+    }
+
     /// Closes the session (`session/close`).
     pub async fn close_session(&self, session_id: &str) -> Result<(), AcpError> {
         self.call(

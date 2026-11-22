@@ -465,6 +465,22 @@ pub enum MessageRole {
     System,
 }
 
+/// One step in an agent-authored plan.
+///
+/// ACP agents publish plans as a whole list on every `plan` update. The
+/// status and priority stay strings so a vendor value this build does not know
+/// is passed through instead of dropped.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
+pub struct PlanStep {
+    /// Step text as the agent wrote it.
+    pub content: String,
+    /// `pending`, `in_progress` or `completed`; other values pass through.
+    pub status: String,
+    /// `high`, `medium` or `low`; other values pass through.
+    #[serde(default)]
+    pub priority: String,
+}
+
 /// A tool call rendered as one collapsible row.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub struct ToolCall {

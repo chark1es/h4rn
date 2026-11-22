@@ -140,6 +140,7 @@ export type * from "./PairingCreateResponse";
 export type * from "./PairingInfo";
 export type * from "./PairingPayload";
 export type * from "./PairingState";
+export type * from "./PlanStep";
 export type * from "./PresenceUpdate";
 export type * from "./Project";
 export type * from "./ProjectSource";
