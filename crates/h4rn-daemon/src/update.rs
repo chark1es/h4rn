@@ -846,11 +846,13 @@ fn stage_checksum(path: &Path, staging_base: &Path, contents: &str) -> Result<Pa
 ///
 /// The backup is never written straight to `h4rnd.previous`: an interrupted
 /// copy leaves the previous backup (or no backup) in place, never a truncated
-/// file that `--rollback` could install. The new backup and its checksum sidecar
-/// are both staged first, so a failure while writing either one leaves the
-/// previous backup and its sidecar exactly as they were; only then are the two
-/// renamed into place. A sidecar failure fails the update before the installed
-/// binary is touched or the old backup is replaced.
+/// file that `--rollback` could install. The checksum sidecar is an optional
+/// extra check, not a second commit point: the old sidecar is removed before
+/// the backup is renamed, so every crash window from then on leaves either the
+/// old pair intact or a backup without a sidecar that `--rollback` still
+/// accepts after its size and executable checks. If publishing the new sidecar
+/// fails, the update stops before the installed binary is touched and the new
+/// backup remains installable without one.
 fn write_backup<P: ChecksumPublisher>(from: &Path, to: &Path, publisher: &P) -> Result<()> {
     let parent = from
         .parent()
@@ -906,8 +908,7 @@ fn write_backup<P: ChecksumPublisher>(from: &Path, to: &Path, publisher: &P) -> 
         let checksum_path = previous_checksum_path(to);
         let checksum = format!("{} {}\n", hex::encode(hasher.finalize()), metadata.len());
         // Stage the sidecar first: if this fails, the old backup and its
-        // sidecar are still the valid pair. Only then replace the backup, and
-        // commit the staged sidecar last.
+        // sidecar are still the valid pair.
         let staged_checksum = match publisher.stage(&checksum_path, from, &checksum) {
             Ok(path) => path,
             Err(error) => {
@@ -915,12 +916,30 @@ fn write_backup<P: ChecksumPublisher>(from: &Path, to: &Path, publisher: &P) -> 
                 return Err(error);
             }
         };
+        // Retire the old sidecar before the backup rename. From here on no
+        // crash can leave a stale checksum next to a different backup, which
+        // would make `--rollback` refuse the only installable copy. A backup
+        // without a sidecar is accepted after its size and executable checks.
+        match std::fs::remove_file(&checksum_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                let _ = std::fs::remove_file(&temp);
+                let _ = std::fs::remove_file(&staged_checksum);
+                return Err(error).with_context(|| {
+                    format!("remove the old backup checksum {}", checksum_path.display())
+                });
+            }
+        }
+        // This rename is the single commit point for the backup.
         if let Err(error) = std::fs::rename(&temp, to) {
             let _ = std::fs::remove_file(&temp);
             let _ = std::fs::remove_file(&staged_checksum);
             return Err(error).with_context(|| format!("move the backup into {}", to.display()));
         }
         fsync_dir(parent);
+        // The staged sidecar describes the backup that is now committed. If it
+        // cannot be published, the backup stays installable without it.
         return publisher.commit(&staged_checksum, &checksum_path);
     }
     Err(last_error.map(anyhow::Error::from).unwrap_or_else(|| {
@@ -1619,6 +1638,9 @@ fn unverified_refusal(reason: &str) -> String {
 pub(crate) const ROLLBACK_RESTART_SKIP: &str =
     "binary restored; restart h4rnd when the turn finishes (`h4rnd service restart`)";
 
+/// Replaces the installed binary; injectable so a test can fail the rename.
+pub(crate) type ReplaceBinary = dyn Fn(&Path, &[u8]) -> Result<()>;
+
 /// Everything one update run needs, so the whole flow can be tested without
 /// reaching GitHub or touching the real service manager.
 pub(crate) struct UpdateDeps {
@@ -1637,6 +1659,11 @@ pub(crate) struct UpdateDeps {
     /// Prepares the installation before the replace (Windows migrates the
     /// scheduled task's launcher so it can recover a missing binary).
     pub prepare_replace: Box<dyn Fn() -> Result<()>>,
+    /// Whether [`Self::prepare_replace`] would stop a legacy scheduled task,
+    /// which also stops the daemon that task is running.
+    pub prepare_stops_legacy: Box<dyn Fn() -> bool>,
+    /// Replaces the installed binary.
+    pub replace: Box<ReplaceBinary>,
 }
 
 /// Runs one `h4rnd update`.
@@ -1671,6 +1698,8 @@ pub async fn run(config: &Config, options: UpdateOptions) -> Result<()> {
             restart: Box::new(crate::service::restart_after_update),
             service_active: Box::new(crate::service::is_active),
             prepare_replace: Box::new(move || crate::service::prepare_replace(&prepare_current)),
+            prepare_stops_legacy: Box::new(crate::service::prepare_stops_legacy),
+            replace: Box::new(replace_binary),
         },
     )
     .await
@@ -1695,6 +1724,8 @@ pub(crate) async fn run_with(options: UpdateOptions, deps: UpdateDeps) -> Result
         restart,
         service_active,
         prepare_replace,
+        prepare_stops_legacy,
+        replace,
     } = deps;
 
     if options.rollback {
@@ -1702,10 +1733,27 @@ pub(crate) async fn run_with(options: UpdateOptions, deps: UpdateDeps) -> Result
         // rolling back while a turn runs would interrupt it just as badly.
         let lock = acquire_lock(&current, false)?;
         check_target_idle(&target, options.force, service_active.as_ref()).await?;
+        // The Windows migration stops a legacy task, which also stops the
+        // daemon it runs. Probe once more right before that happens, so a turn
+        // that started during the first check is not cut off.
+        let stops_legacy = prepare_stops_legacy();
+        if stops_legacy {
+            check_target_idle(&target, options.force, service_active.as_ref()).await?;
+        }
         // A Windows rollback also moves the install path aside, so the task must
         // be able to recover it first.
-        prepare_replace()?;
-        rollback_binary(&current)?;
+        if let Err(error) = prepare_for_replace(prepare_replace.as_ref(), options.force) {
+            if stops_legacy {
+                restart_after_stopped_legacy(&current, restart.as_ref());
+            }
+            return Err(error);
+        }
+        if let Err(error) = rollback_binary(&current) {
+            if stops_legacy {
+                restart_after_stopped_legacy(&current, restart.as_ref());
+            }
+            return Err(error);
+        }
         println!("Restored the previous h4rn binary.");
         // A turn can start between the guard and the restart; the restored
         // binary is already in place, so leave the daemon alone.
@@ -1782,10 +1830,27 @@ pub(crate) async fn run_with(options: UpdateOptions, deps: UpdateDeps) -> Result
     // restart below.
     check_target_idle(&target, options.force, service_active.as_ref()).await?;
 
+    // The Windows migration stops a legacy task, which also stops the daemon it
+    // runs. Probe once more right before that happens, so a turn that started
+    // during the first check is not cut off.
+    let stops_legacy = prepare_stops_legacy();
+    if stops_legacy {
+        check_target_idle(&target, options.force, service_active.as_ref()).await?;
+    }
     // On Windows the registered task must be able to recover a missing install
     // path before the running binary is moved aside.
-    prepare_replace()?;
-    replace_binary(&current, &binary)?;
+    if let Err(error) = prepare_for_replace(prepare_replace.as_ref(), options.force) {
+        if stops_legacy {
+            restart_after_stopped_legacy(&current, restart.as_ref());
+        }
+        return Err(error);
+    }
+    if let Err(error) = replace(&current, &binary) {
+        if stops_legacy {
+            restart_after_stopped_legacy(&current, restart.as_ref());
+        }
+        return Err(error);
+    }
     println!(
         "Installed h4rnd {} at {}.",
         release.version,
@@ -1807,6 +1872,37 @@ pub(crate) async fn run_with(options: UpdateOptions, deps: UpdateDeps) -> Result
     drop(lock);
     restart_or_explain(&current, &restart);
     Ok(())
+}
+
+/// Runs the platform prepare step, or explains it and continues with `--force`.
+///
+/// A scheduled task whose action cannot be read is a Windows preparation
+/// failure: continuing without the recovery launcher would make a crash during
+/// the replace unrecoverable, so the update refuses before any rename.
+fn prepare_for_replace(prepare_replace: &dyn Fn() -> Result<()>, force: bool) -> Result<()> {
+    match prepare_replace() {
+        Ok(()) => Ok(()),
+        Err(error) if force => {
+            println!("warning: {error}");
+            println!("continuing because --force was passed; if the update fails, start the task");
+            println!("again with `h4rnd service restart` (or repair the install by hand).");
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Puts the service back after a failed replace that followed a legacy-task
+/// migration (which stopped the daemon).
+fn restart_after_stopped_legacy(
+    current: &Path,
+    restart: &dyn Fn(&Path) -> crate::service::RestartOutcome,
+) {
+    eprintln!(
+        "The legacy scheduled task was stopped for this update and the binary was not replaced."
+    );
+    eprintln!("Starting the h4rnd service again.");
+    restart_or_explain(current, restart);
 }
 
 fn report_versions(release: &ReleaseInfo) {
@@ -2071,6 +2167,21 @@ mod tests {
 
         fn commit(&self, _staged: &Path, _path: &Path) -> Result<()> {
             unreachable!("the checksum is never staged when staging fails")
+        }
+    }
+
+    /// Stages a real sidecar but fails to publish it, as a crash or rename
+    /// failure after the backup commit would.
+    struct FailingCommit;
+
+    impl ChecksumPublisher for FailingCommit {
+        fn stage(&self, path: &Path, base: &Path, contents: &str) -> Result<PathBuf> {
+            stage_checksum(path, base, contents)
+        }
+
+        fn commit(&self, staged: &Path, _path: &Path) -> Result<()> {
+            let _ = std::fs::remove_file(staged);
+            Err(anyhow::anyhow!("injected checksum commit failure"))
         }
     }
 
@@ -2413,7 +2524,10 @@ mod tests {
         );
         assert!(UpdateLock::try_acquire(&current).unwrap().is_none());
         drop(held);
-        assert!(UpdateLock::try_acquire(&current).unwrap().is_some());
+        assert!(
+            lock_is_free(&current),
+            "the released lock is reacquired after the brief WSL2 retry"
+        );
     }
 
     #[test]
@@ -2769,6 +2883,42 @@ mod tests {
         assert_eq!(remove_staging_files(&current), 0);
     }
 
+    #[test]
+    fn a_failed_sidecar_commit_leaves_the_new_backup_rollbackable() {
+        let (_dir, current) = install_dir();
+        replace_binary(&current, b"first").unwrap();
+        let previous = previous_binary_path(&current);
+        assert_eq!(std::fs::read(&previous).unwrap(), b"old");
+
+        // The backup rename is the commit point; the sidecar is published
+        // after it. A failed sidecar publication must not leave the old
+        // checksum next to the new backup, which `--rollback` would refuse.
+        let error = replace_binary_with(&current, b"second", &FailingCommit).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("injected checksum commit failure"),
+            "{error}"
+        );
+        assert_eq!(
+            std::fs::read(&current).unwrap(),
+            b"first",
+            "a failed update leaves the installed binary in place"
+        );
+        assert_eq!(
+            std::fs::read(&previous).unwrap(),
+            b"first",
+            "the committed backup describes the binary that is installed"
+        );
+        assert!(
+            !previous_checksum_path(&previous).exists(),
+            "no stale checksum may describe a different backup"
+        );
+        check_previous_binary(&previous).expect("a backup without a sidecar is still installable");
+        rollback_binary(&current).unwrap();
+        assert_eq!(std::fs::read(&current).unwrap(), b"first");
+    }
+
     #[tokio::test]
     async fn a_download_can_outlast_the_idle_timeout_when_bytes_keep_arriving() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2844,6 +2994,8 @@ mod tests {
                 restart: counting_restart(restarts.clone()),
                 service_active: Box::new(|| false),
                 prepare_replace: Box::new(|| Ok(())),
+                prepare_stops_legacy: Box::new(|| false),
+                replace: Box::new(replace_binary),
             },
         )
         .await
@@ -2886,6 +3038,8 @@ mod tests {
                 restart: counting_restart(restarts.clone()),
                 service_active: Box::new(|| false),
                 prepare_replace: Box::new(|| Ok(())),
+                prepare_stops_legacy: Box::new(|| false),
+                replace: Box::new(replace_binary),
             },
         )
         .await
@@ -2923,6 +3077,8 @@ mod tests {
                 restart: counting_restart(restarts.clone()),
                 service_active: Box::new(|| false),
                 prepare_replace: Box::new(|| Ok(())),
+                prepare_stops_legacy: Box::new(|| false),
+                replace: Box::new(replace_binary),
             },
         )
         .await
@@ -2970,6 +3126,8 @@ mod tests {
                 restart: counting_restart(restarts.clone()),
                 service_active: Box::new(|| false),
                 prepare_replace: Box::new(|| Ok(())),
+                prepare_stops_legacy: Box::new(|| false),
+                replace: Box::new(replace_binary),
             },
         )
         .await
@@ -3004,6 +3162,8 @@ mod tests {
                 restart: counting_restart(restarts.clone()),
                 service_active: Box::new(|| false),
                 prepare_replace: Box::new(|| Ok(())),
+                prepare_stops_legacy: Box::new(|| false),
+                replace: Box::new(replace_binary),
             },
         )
         .await
@@ -3016,6 +3176,178 @@ mod tests {
         assert!(error.to_string().contains("--force"), "{error}");
         assert_eq!(restarts.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert_eq!(std::fs::read(&current).unwrap(), b"old");
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_windows_prepare_refuses_before_any_rename() {
+        let service = health_stub(vec![0]).await;
+        let (_dir, current) = install_dir();
+        let (_server, client, public_key) =
+            mock_release(b"new binary", "9.9.9", &test_key().0).await;
+
+        let error = run_with(
+            UpdateOptions::default(),
+            UpdateDeps {
+                current: current.clone(),
+                target: target_for(
+                    crate::service::RegisteredTarget::Runs {
+                        binary: current.clone(),
+                        health: service.addr,
+                    },
+                    service.addr,
+                ),
+                client: Some(client),
+                public_key: Some(public_key),
+                restart: Box::new(|_| crate::service::RestartOutcome::NotInstalled),
+                service_active: Box::new(|| false),
+                prepare_replace: Box::new(|| {
+                    Err(anyhow::anyhow!(
+                        "the action of scheduled task h4rn-alice could not be read; update by \
+                         hand or run `h4rnd service install`"
+                    ))
+                }),
+                prepare_stops_legacy: Box::new(|| false),
+                replace: Box::new(|_, _| panic!("the binary must not be replaced")),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.to_string().contains("could not be read"), "{error}");
+        assert!(
+            error.to_string().contains("h4rnd service install"),
+            "the manual recovery path is printed: {error}"
+        );
+        assert_eq!(
+            std::fs::read(&current).unwrap(),
+            b"old",
+            "a prepare failure must refuse the update before any rename"
+        );
+    }
+
+    #[tokio::test]
+    async fn force_continues_past_an_unreadable_windows_prepare() {
+        let service = health_stub(vec![0]).await;
+        let (_dir, current) = install_dir();
+        let (_server, client, public_key) =
+            mock_release(b"new binary", "9.9.9", &test_key().0).await;
+
+        run_with(
+            UpdateOptions {
+                force: true,
+                ..UpdateOptions::default()
+            },
+            UpdateDeps {
+                current: current.clone(),
+                target: target_for(
+                    crate::service::RegisteredTarget::Runs {
+                        binary: current.clone(),
+                        health: service.addr,
+                    },
+                    service.addr,
+                ),
+                client: Some(client),
+                public_key: Some(public_key),
+                restart: Box::new(|_| crate::service::RestartOutcome::Restarted),
+                service_active: Box::new(|| false),
+                prepare_replace: Box::new(|| Err(anyhow::anyhow!("action could not be read"))),
+                prepare_stops_legacy: Box::new(|| false),
+                replace: Box::new(replace_binary),
+            },
+        )
+        .await
+        .expect("--force continues");
+
+        assert_eq!(std::fs::read(&current).unwrap(), b"new binary");
+    }
+
+    #[tokio::test]
+    async fn a_legacy_migration_is_preceded_by_another_idle_probe() {
+        let service = health_stub(vec![0]).await;
+        let (_dir, current) = install_dir();
+        let (_server, client, public_key) =
+            mock_release(b"new binary", "9.9.9", &test_key().0).await;
+        let hits_at_prepare = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recorded = hits_at_prepare.clone();
+        let probe_hits = service.hits.clone();
+
+        run_with(
+            UpdateOptions::default(),
+            UpdateDeps {
+                current: current.clone(),
+                target: target_for(
+                    crate::service::RegisteredTarget::Runs {
+                        binary: current.clone(),
+                        health: service.addr,
+                    },
+                    service.addr,
+                ),
+                client: Some(client),
+                public_key: Some(public_key),
+                restart: Box::new(|_| crate::service::RestartOutcome::Restarted),
+                service_active: Box::new(|| false),
+                prepare_replace: Box::new(move || {
+                    recorded.store(
+                        probe_hits.load(std::sync::atomic::Ordering::SeqCst),
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
+                    Ok(())
+                }),
+                prepare_stops_legacy: Box::new(|| true),
+                replace: Box::new(replace_binary),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            hits_at_prepare.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "the busy guard probes before the download, before the replace and again \
+             immediately before the migration stops the daemon"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_replace_after_a_legacy_migration_starts_the_service_again() {
+        let service = health_stub(vec![0]).await;
+        let (_dir, current) = install_dir();
+        let (_server, client, public_key) =
+            mock_release(b"new binary", "9.9.9", &test_key().0).await;
+        let restarts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let error = run_with(
+            UpdateOptions::default(),
+            UpdateDeps {
+                current: current.clone(),
+                target: target_for(
+                    crate::service::RegisteredTarget::Runs {
+                        binary: current.clone(),
+                        health: service.addr,
+                    },
+                    service.addr,
+                ),
+                client: Some(client),
+                public_key: Some(public_key),
+                restart: counting_restart(restarts.clone()),
+                service_active: Box::new(|| false),
+                prepare_replace: Box::new(|| Ok(())),
+                prepare_stops_legacy: Box::new(|| true),
+                replace: Box::new(|_, _| Err(anyhow::anyhow!("injected replace failure"))),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("injected replace failure"),
+            "{error}"
+        );
+        assert_eq!(
+            restarts.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "a failed replace after the migration stopped the daemon must start it again"
+        );
     }
 
     #[test]
@@ -3063,7 +3395,9 @@ mod tests {
         assert!(staging.exists());
         drop(held);
 
-        let report = recover_only_for(&old).unwrap();
+        // `flock()` can briefly report a just-released lock as held on some
+        // kernels (WSL2 in particular), so retry like `lock_is_free` does.
+        let report = recover_only_retrying(&old).unwrap();
         assert!(report.restored);
         assert_eq!(std::fs::read(&current).unwrap(), b"old");
         assert!(!old.exists());
@@ -3142,6 +3476,24 @@ mod tests {
         }
     }
 
+    /// Runs recovery, retrying while a just-released lock still looks held.
+    fn recover_only_retrying(executable: &Path) -> Result<RecoveryReport> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match recover_only_for(executable) {
+                Err(error)
+                    if error
+                        .to_string()
+                        .contains("another h4rnd update, rollback or recovery is running")
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                other => return other,
+            }
+        }
+    }
+
     #[tokio::test]
     async fn the_update_releases_the_lock_before_dispatching_the_restart() {
         let service = health_stub(vec![0]).await;
@@ -3185,6 +3537,8 @@ mod tests {
                     );
                     Ok(())
                 }),
+                prepare_stops_legacy: Box::new(|| false),
+                replace: Box::new(replace_binary),
             },
         )
         .await
@@ -3247,6 +3601,8 @@ mod tests {
                     );
                     Ok(())
                 }),
+                prepare_stops_legacy: Box::new(|| false),
+                replace: Box::new(replace_binary),
             },
         )
         .await

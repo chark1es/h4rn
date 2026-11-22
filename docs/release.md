@@ -166,16 +166,19 @@ renamed over the install path in one step, and `--rollback` is also a single
 rename. A crash therefore leaves a runnable binary at the install path.
 
 The rollback copy is never written straight to `h4rnd.previous`: the old binary
-is copied into a unique temp file beside it, fsynced, and staged. Its size and
-SHA-256 record is staged the same way, and only after both are ready are they
-renamed over `h4rnd.previous` and `h4rnd.previous.sha256`. A failure while
-writing either one therefore leaves the previous backup and its sidecar exactly
-as they were, so the last good release stays rollbackable. `--rollback` refuses a
-backup that is missing, empty, not executable (on Unix) or does not match that
-record, so a copy interrupted by a crash or power loss can never replace the
-installed binary. If the final sidecar rename fails, the new backup is refused by
-the old record rather than installed. On Windows a running executable cannot be
-replaced in place. The update keeps that
+is copied into a unique temp file beside it, fsynced, and its size and SHA-256
+record is staged the same way. The old `h4rnd.previous.sha256` is then removed
+and the backup is renamed into place; that rename is the single commit point
+for the backup. The new sidecar is published afterwards as an optional extra
+check. A crash or failure before the backup rename leaves the previous pair (or
+the previous backup alone) untouched, and a crash or failure after it leaves a
+backup without a sidecar, which `--rollback` still accepts after its size and
+executable checks. There is no window in which the new backup sits next to the
+old backup's checksum, so the last good release always stays rollbackable.
+`--rollback` refuses a backup that is missing, empty, not executable (on Unix)
+or, when its record is present, does not match it, so a copy interrupted by a
+crash or power loss can never replace the installed binary. On Windows a
+running executable cannot be replaced in place. The update keeps that
 copy at `h4rnd.previous.exe`, renames the running `h4rnd.exe` to
 `h4rnd.old.exe`, and moves the new binary in; if that is interrupted, the next
 start restores `h4rnd.old.exe` (or `h4rnd.previous.exe`) before doing anything
@@ -195,7 +198,16 @@ an older image that predates that flag. Before a Windows update or rollback
 renames anything, `h4rnd` rewrites the registered task's launcher with this
 version (the install script's `-NoStart` mode), so a legacy task that launched
 `h4rnd.exe` directly becomes recoverable too; a task that runs a different
-installation is left alone. The update releases the installation lock
+installation is left alone. If the registered task exists but its action cannot
+be read (PowerShell is missing, the query fails or returns a non-zero status,
+or the output cannot be parsed), the update refuses before any rename instead of
+assuming there is nothing to prepare; `--force` overrides that and prints the
+manual recovery steps. An older task that passed no `--data-dir` is migrated
+with the daemon's default data directory, which is what it was already using.
+Migrating a legacy task stops it, so the update probes the daemon for active
+turns once more immediately before the migration; if the replace then fails, it
+starts the service again (or tells you to run `h4rnd service restart` after
+printing why). The update releases the installation lock
 before it triggers the restart, so the launcher never has to wait for the process
 that started it. Tasks registered by older releases under the machine-wide
 `h4rn` name are removed by the next install or uninstall. Without a service, run
@@ -210,6 +222,12 @@ the next step. On Windows the restart's stop step (`schtasks /End`, or
 `Stop-ScheduledTask`) is best-effort because it fails when the task is not
 running; only the start step must succeed.
 
+`h4rnd service install` follows the launchd rule on Linux: when it wrote a
+changed unit and the unit is active, it runs `systemctl --user restart` after
+`daemon-reload` so the new `ExecStart=` and environment take effect now; when
+the unit was unchanged or is stopped, it runs `enable --now` as before. An
+unchanged active unit is not bounced.
+
 A running daemon that reports an active turn stops the update with an
 explanation unless `--force` is passed. The guard probes the daemon the
 registered unit, plist or task actually starts. It resolves that service's
@@ -219,11 +237,13 @@ command line, then `H4RN_BIND` from the service's environment (systemd
 `EnvironmentVariables`, or the account-wide Windows environment), then the
 compiled default. h4rnd has no config file, so there is no config-file step. A
 source the service may use that cannot be read (the systemd user manager
-environment, or the account-wide Windows environment) leaves the target
-unverified, so the update refuses unless `--force` is passed. On Linux the
-command line comes from `systemctl --user show -p ExecStart --value`, which
-includes runtime drop-ins; the unit files (with reset-and-override drop-ins and
-`%h`) are read only when systemctl cannot answer. The updater's own `--bind` is
+environment, an `EnvironmentFile` the manager names, or the account-wide Windows
+environment) leaves the target unverified, so the update refuses unless
+`--force` is passed. On Linux the command line comes from `systemctl --user show
+-p ExecStart --value`, and the environment from `systemctl --user show -p
+Environment -p EnvironmentFiles --value`, which both include runtime drop-ins;
+the unit files (with reset-and-override drop-ins and `%h`) are read only when
+systemctl cannot answer. The updater's own `--bind` is
 never used, so an idle daemon elsewhere on the machine cannot make a busy service
 look safe. If the registered service's executable or endpoint cannot be read,
 the update refuses unless `--force` is passed. The guard fails closed and is
