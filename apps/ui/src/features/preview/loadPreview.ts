@@ -72,9 +72,10 @@ function pageTooLarge(size: number): PreviewFailure {
  * it opens: JSON escaping of quotes, newlines and control characters can push
  * the serialized response past the frame, and the daemon then answers with
  * `content_omitted: too_large`. The 10 MB budget stops the fetching once it is
- * spent, and the document builder charges every copy again as it is inserted
- * (including a file reached through an imported stylesheet), leaving out an
- * insertion that would not fit rather than building an oversized page. One
+ * spent, and the document builder reserves the trusted prefix and bridge and
+ * then charges every copy as it is inserted (including a file reached through
+ * an imported stylesheet and the markup each insertion generates), leaving out
+ * an insertion that would not fit rather than building an oversized page. One
  * asset over the per-response cap, missing, non-UTF-8 or outside the workspace
  * is skipped; the page still renders and reports the skipped count.
  */

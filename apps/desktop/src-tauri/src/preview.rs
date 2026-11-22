@@ -47,9 +47,10 @@ pub struct PreviewStore(Mutex<Documents>);
 #[derive(Debug, Serialize)]
 pub struct PreparedPreview {
     /// The URL to put in the iframe's `src`.
+    ///
+    /// The document already carries the bridge's own token; the shell does not
+    /// mint a second one for the frame.
     pub url: String,
-    /// The token the frame's bridge reports with.
-    pub token: String,
 }
 
 impl PreviewStore {
@@ -75,7 +76,6 @@ impl PreviewStore {
         documents.order.push_back(token.clone());
         Ok(PreparedPreview {
             url: preview_url(&token),
-            token,
         })
     }
 
@@ -122,6 +122,28 @@ fn new_token() -> Result<String, String> {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).map_err(|error| format!("no random source: {error}"))?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// What the preview's WebView can do, for the panel's honest notices.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewCapabilities {
+    /// The shell platform: `android`, `ios` or `desktop`.
+    pub platform: &'static str,
+    /// Whether the WebView runs the shell's scripts at document start.
+    pub document_start_scripts: bool,
+}
+
+/// Reports the preview's WebView capabilities before a page is framed.
+///
+/// Desktop WebViews inject their scripts at document start, so a preview's own
+/// scripts, and its link bridge, always run.
+#[tauri::command]
+pub fn preview_capabilities() -> PreviewCapabilities {
+    PreviewCapabilities {
+        platform: "desktop",
+        document_start_scripts: true,
+    }
 }
 
 /// Stores one prepared document; answers with the URL to frame it.
@@ -171,6 +193,12 @@ fn not_found() -> Response<Vec<u8>> {
 mod tests {
     use super::*;
 
+    fn token_of(prepared: &PreparedPreview) -> String {
+        token_from_url(&prepared.url)
+            .expect("a prepared URL carries its token")
+            .to_owned()
+    }
+
     fn request(path: &str) -> tauri::http::Request<Vec<u8>> {
         tauri::http::Request::builder()
             .uri(format!("{PREVIEW_SCHEME}://localhost{path}"))
@@ -179,10 +207,20 @@ mod tests {
     }
 
     #[test]
+    fn the_desktop_shell_reports_document_start_scripts() {
+        let capabilities = preview_capabilities();
+        assert_eq!(capabilities.platform, "desktop");
+        assert!(capabilities.document_start_scripts);
+        // The UI reads camelCase; a snake_case field would silently default.
+        let json = serde_json::to_value(capabilities).expect("capabilities json");
+        assert_eq!(json["documentStartScripts"], true);
+    }
+
+    #[test]
     fn a_prepared_document_is_served_with_its_own_policy() {
         let store = PreviewStore::default();
         let prepared = store.insert("<p>hi</p>".into()).expect("store");
-        let response = respond(&store, &request(&format!("/{}", prepared.token)));
+        let response = respond(&store, &request(&format!("/{}", token_of(&prepared))));
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers().get(header::CONTENT_SECURITY_POLICY),
@@ -201,9 +239,9 @@ mod tests {
         let prepared = store.insert("<p>hi</p>".into()).expect("store");
         assert!(token_from_url(&prepared.url).is_some());
 
-        store.remove(&prepared.token);
+        store.remove(&token_of(&prepared));
         assert_eq!(
-            respond(&store, &request(&format!("/{}", prepared.token))).status(),
+            respond(&store, &request(&format!("/{}", token_of(&prepared)))).status(),
             StatusCode::NOT_FOUND
         );
         assert_eq!(
@@ -219,7 +257,7 @@ mod tests {
         for index in 0..MAX_DOCUMENTS {
             store.insert(format!("doc {index}")).expect("store");
         }
-        assert!(store.get(&first.token).is_none());
+        assert!(store.get(&token_of(&first)).is_none());
         assert!(store.get(&new_token().expect("random source")).is_none());
     }
 

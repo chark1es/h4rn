@@ -275,6 +275,33 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **Preview follow-ups from the HTML preview review.** A descriptorless `srcset` candidate followed
+  by a comma (`data:image/png;base64,AAAA, local.png 2x`) no longer swallows the candidate after
+  it: the trailing comma ends the candidate, so the workspace image is inlined or removed and
+  reported like any other. The 10 MB budget now covers the whole serialized document — the trusted
+  doctype and CSP prefix, the bridge script and the markup generated for each insertion are
+  reserved — so a near-cap page renders with its excess asset skipped instead of failing as too
+  large. The "update Android System WebView" notice appears only when the shell reports an Android
+  WebView without document-start script support; on desktop, or on Android where that feature
+  exists, a missing bridge message (for example an unterminated comment that swallowed the bridge)
+  shows a plain "preview scripts didn’t start" note with Reload. The ready-message deadline scales
+  with the prepared document instead of a fixed 800 ms, so a big page is not mistaken for blocked
+  scripts. Every held workspace watch is re-sent on a replacement connection by workspace, so
+  retaining a second workspace before the new client is ready no longer leaves the first
+  unwatched. The frame-limit choice is covered by end-to-end reads over a plain and a secure
+  connection, and the shell now returns only the frame URL so one preview token — the one already
+  written into the document — is used everywhere.
+- **Preview: the budget, Reload and the Android capability check are honest.** The 10 MB budget
+  now charges the bytes the builder itself adds: the `target`/`rel` an anchor rewrite appends, the
+  quotes and escaping that a rewritten `img`, `source`, `video`, `svg` or style-bearing tag grows
+  by, and the backslash that escaping `</script` or `</style` adds to inlined text. A near-cap page
+  with many rewritten links renders with its excess image skipped instead of failing as too large;
+  an anchor that cannot pay for its rewrite keeps its original tag. Reload re-asks the shell for the
+  preview WebView's capabilities — including from the Android notice, which now has its own Reload
+  — so updating System WebView clears the notice without closing the tab. The capability command
+  runs off the main thread, and a failed or unparseable WebView version is reported as unknown and
+  treated as unsupported, showing the generic "preview scripts didn’t start" note with Reload
+  instead of defaulting to supported. See [docs/ux.md](docs/ux.md).
 - **A first connect no longer calls its own handshake history.** `since_seq: null` makes the daemon
   send no replay, so every frame held between `hello` and the subscribe answer is live news, even
   when its sequence already sits at or below the journal head named by the answer. Only a resumed
