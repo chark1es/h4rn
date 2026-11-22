@@ -4775,6 +4775,162 @@ fieldset.q-seg-fs {
   line-height: 18px;
 }
 
+/* Preview: an HTML file in a sandboxed frame, never a second app window */
+.q-frow {
+  position: relative;
+  margin: 0 6px;
+}
+.q-frow > .q-fnode {
+  margin: 0;
+  width: 100%;
+  padding-right: 32px;
+}
+.q-fopen {
+  position: absolute;
+  right: 4px;
+  top: 2px;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  color: var(--fg-3);
+  opacity: 0.55;
+  transition:
+    opacity var(--dur-1),
+    background var(--dur-1),
+    color var(--dur-1);
+}
+.q-frow:hover .q-fopen,
+.q-fopen:focus-visible {
+  opacity: 1;
+}
+.q-fopen:hover {
+  background: var(--fill);
+  color: var(--fg);
+}
+@media (hover: none) {
+  .q-fopen {
+    opacity: 1;
+  }
+}
+.q-pv {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+.q-pv-bar {
+  gap: 8px;
+}
+.q-pv .q-pv-bar .grow {
+  flex: 1;
+}
+.q-pv-name {
+  min-width: 0;
+  font-size: 12px;
+  color: var(--fg-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.q-pv-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+.q-pv-note {
+  flex: none;
+  margin: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-sunk);
+  font-size: 11.5px;
+  line-height: 16px;
+  color: var(--fg-3);
+}
+.q-pv-frame {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  background: #fff;
+}
+/* A link clicked in the page asks first; the frame can forge anything inside. */
+.q-pv-link {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-sunk);
+}
+.q-pv-link-t {
+  min-width: 0;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--fg-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.q-pv .q-pv-link .q-btn {
+  flex: none;
+  height: 24px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+@media (hover: none) {
+  .q-pv-link {
+    min-height: 48px;
+  }
+  .q-pv .q-pv-link .q-btn {
+    height: 36px;
+    padding: 0 12px;
+  }
+}
+.q-pv-state {
+  padding: 20px 16px;
+}
+.q-pv-state-t {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg);
+}
+.q-pv .q-pv-state p {
+  margin: 0 0 12px;
+  max-width: 46ch;
+}
+.q-pv-full-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 60px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+}
+.q-pv-phone-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--line);
+}
+.q-ph-sheet .q-pv-body {
+  overflow: hidden;
+}
+
 /* IDE: the header chip, per-project tabs, and the changes strip */
 .q-etabs-note {
   font-size: 12px;

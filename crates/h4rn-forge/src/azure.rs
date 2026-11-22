@@ -248,9 +248,8 @@ impl AzureDevOpsClient {
                 break;
             }
             let value = self.http.get_json(&current).await?;
-            if let Some(array) = value["changeEntries"].as_array() {
-                entries.extend(array.iter().cloned());
-            }
+            let entries_page = named_collection(&value, "changeEntries", "change entries")?;
+            entries.extend(entries_page.iter().cloned());
             next = value["nextSkip"]
                 .as_u64()
                 .filter(|skip| *skip > 0)
@@ -618,10 +617,10 @@ impl Forge for AzureDevOpsClient {
             .await?;
         let pr = self.fetch_pr(repo, number).await.unwrap_or(Value::Null);
         let pr_url = (!pr.is_null()).then(|| pr_web_url(repo, &pr, number));
-        let threads = value["value"].as_array().cloned().unwrap_or_default();
+        let threads = collection(&value, "threads")?;
         let mut comments = Vec::new();
         let mut review_threads = Vec::new();
-        for thread in &threads {
+        for thread in threads {
             let context = &thread["threadContext"];
             let path = optional_text(context, "filePath")
                 .unwrap_or_default()
@@ -824,11 +823,25 @@ impl Forge for AzureDevOpsClient {
                 "Azure DevOps replies need the thread id".into(),
             ));
         };
-        let parent = comment_id.parse::<u64>().map_err(|_| {
-            ForgeError::InvalidRequest(format!("invalid comment id {comment_id:?}"))
-        })?;
+        // The id goes into the request path, so it is parsed before the URL is
+        // built: an arbitrary string must never become a path segment. Azure
+        // thread and comment ids are positive 32-bit integers.
+        let thread = thread_id
+            .parse::<i32>()
+            .ok()
+            .filter(|id| *id > 0)
+            .ok_or_else(|| {
+                ForgeError::InvalidRequest(format!("invalid thread id {thread_id:?}"))
+            })?;
+        let parent = comment_id
+            .parse::<i32>()
+            .ok()
+            .filter(|id| *id > 0)
+            .ok_or_else(|| {
+                ForgeError::InvalidRequest(format!("invalid comment id {comment_id:?}"))
+            })?;
         let url = versioned(&format!(
-            "{}/threads/{thread_id}/comments",
+            "{}/threads/{thread}/comments",
             self.pr_api(repo, number)
         ));
         let value = self
@@ -925,7 +938,13 @@ fn versioned(url: &str) -> String {
 /// collection, and an empty one is `[]`, so a missing array must never look
 /// like "no rows".
 fn collection<'a>(value: &'a Value, what: &str) -> Result<&'a Vec<Value>> {
-    value["value"]
+    named_collection(value, "value", what)
+}
+
+/// A named array inside an Azure answer. Endpoints such as the iterations
+/// `changes` route name their collection (`changeEntries`) instead of `value`.
+fn named_collection<'a>(value: &'a Value, field: &str, what: &str) -> Result<&'a Vec<Value>> {
+    value[field]
         .as_array()
         .ok_or_else(|| ForgeError::Parse(format!("Azure DevOps returned no {what} collection")))
 }
@@ -970,8 +989,22 @@ fn pr_web_url(repo: &ForgeRepoRef, value: &Value, number: u32) -> String {
     }
     let git_web = optional_text(&value["repository"], "webUrl")
         .filter(|url| !url.trim().is_empty())
-        .unwrap_or_else(|| repo.web_url());
+        .unwrap_or_else(|| repo_web_url(repo));
     format!("{}/pullrequest/{number}", git_web.trim_end_matches('/'))
+}
+
+/// The repository's browser URL, from the base URL, project and repository.
+///
+/// The project and repository are names, not URL text: a repository literally
+/// named `release%20notes` must appear as `release%2520notes` so the browser
+/// reads `%20` as part of the name instead of decoding it into a space.
+fn repo_web_url(repo: &ForgeRepoRef) -> String {
+    format!(
+        "{}/{}/_git/{}",
+        repo.base_url.trim_end_matches('/'),
+        urlencode(&repo.owner),
+        urlencode(&repo.repo)
+    )
 }
 
 fn pr_state(value: &Value) -> ForgePrState {
@@ -1263,9 +1296,14 @@ fn count_patch(patch: &str) -> (u32, u32) {
         if !in_hunk {
             continue;
         }
-        if line.starts_with('+') && !line.starts_with("+++") {
+        // Inside a hunk every line starting with `+` is an added line and
+        // every line starting with `-` a removed one, even when the content
+        // itself begins `+++` or `---`. Only the file header before the first
+        // hunk is a marker rather than content, which `in_hunk` already
+        // excludes.
+        if line.starts_with('+') {
             additions += 1;
-        } else if line.starts_with('-') && !line.starts_with("---") {
+        } else if line.starts_with('-') {
             deletions += 1;
         }
     }
@@ -1276,7 +1314,7 @@ fn count_patch(patch: &str) -> (u32, u32) {
 fn map_commit(repo: &ForgeRepoRef, value: &Value) -> Option<ForgeCommit> {
     let sha = optional_text(value, "commitId")?;
     let (title, body) = split_message(&text(value, "comment"));
-    let web_url = format!("{}/commit/{sha}", repo.web_url());
+    let web_url = format!("{}/commit/{sha}", repo_web_url(repo));
     Some(ForgeCommit {
         sha,
         title,
@@ -1433,5 +1471,49 @@ mod tests {
         assert_eq!(urlencode("My Project"), "My%20Project");
         assert_eq!(urlencode("a/b"), "a%2Fb");
         assert_eq!(urlencode("widget"), "widget");
+    }
+
+    #[test]
+    fn fallback_pr_url_encodes_the_project_and_repository_names() {
+        let repo = ForgeRepoRef {
+            forge: ForgeKind::AzureDevOps,
+            base_url: "https://dev.azure.com/acme".into(),
+            owner: "My Project".into(),
+            repo: "release%20notes".into(),
+        };
+        let value = json!({
+            "pullRequestId": 7,
+            "title": "Fix",
+            "status": "active",
+            "createdBy": {"displayName": "Alice"},
+            "creationDate": "2024-05-01T09:00:00Z",
+            "sourceRefName": "refs/heads/fix",
+            "targetRefName": "refs/heads/main",
+            "lastMergeSourceCommit": {"commitId": "abc"}
+        });
+        assert_eq!(
+            map_pr_summary(&repo, &value).unwrap().web_url,
+            "https://dev.azure.com/acme/My%20Project/_git/release%2520notes/pullrequest/7",
+            "a literal %20 in the name must not decode into a space"
+        );
+    }
+
+    #[test]
+    fn diff_totals_count_content_lines_that_look_like_headers() {
+        // The file header is before the first hunk; inside the hunk, lines
+        // whose content starts `+++` or `---` are ordinary added/removed lines.
+        let patch = "--- a/src/lib.rs\n\
+                     +++ b/src/lib.rs\n\
+                     @@ -1,2 +1,3 @@\n\
+                     --- old text\n\
+                     +++ new text\n\
+                     +another added\n\
+                     -removed\n";
+        assert_eq!(count_patch(patch), (2, 2));
+        assert_eq!(
+            count_patch("--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"),
+            (1, 1),
+            "the file header itself is not content"
+        );
     }
 }
