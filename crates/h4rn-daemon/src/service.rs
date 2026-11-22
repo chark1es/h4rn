@@ -3099,7 +3099,11 @@ mod tests {
         // (`.old`) and an interrupted rollback (`.failed`, then `.previous`).
         // A moved-aside binary is renamed back; a rollback copy is copied to a
         // staging file and then renamed, never copied straight over h4rnd.exe.
+        // The rollback copy is only published when it is non-empty and (when a
+        // sidecar exists) matches its recorded checksum.
         assert!(launcher.contains("(Get-Item -LiteralPath $p).Length -gt 0"));
+        assert!(launcher.contains("Get-FileHash -LiteralPath $p -Algorithm SHA256"));
+        assert!(launcher.contains("failed its checksum; leaving it in place"));
         assert!(
             WINDOWS_INSTALL_SCRIPT.contains("Move-Item -LiteralPath $o -Destination $b -Force")
         );

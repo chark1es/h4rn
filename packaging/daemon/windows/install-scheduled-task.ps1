@@ -74,7 +74,8 @@ $quote = { param($value) "'" + $value.Replace("'", "''") + "'" }
 # `--recover-only`. It waits (bounded) for the updater's lock, then repairs the
 # install path under that lock, in the same order as startup recovery: a
 # moved-aside `.old` (interrupted update) or `.failed` (interrupted rollback) is
-# renamed back, and a `.previous` copy is published through a staging file and a
+# renamed back, and a `.previous` copy is validated (non-empty, and its recorded
+# SHA-256 when a sidecar exists) and published through a staging file and a
 # rename so a crash cannot leave a truncated h4rnd.exe.
 $format = '$b = {0}; $p = {1}; $o = {2}; $x = {3}; $d = {4}; $l = {5}; $f = {6}; ' +
   '$deadline = (Get-Date).AddSeconds(30); $lock = $null; ' +
@@ -91,7 +92,13 @@ $format = '$b = {0}; $p = {1}; $o = {2}; $x = {3}; $d = {4}; $l = {5}; $f = {6};
   'Move-Item -LiteralPath $o -Destination $b -Force ' +
   '}} elseif (Test-Path -LiteralPath $x) {{ ' +
   'Move-Item -LiteralPath $x -Destination $b -Force ' +
-  '}} elseif ((Test-Path -LiteralPath $p) -and ((Get-Item -LiteralPath $p).Length -gt 0)) {{ ' +
+  '}} elseif (Test-Path -LiteralPath $p) {{ ' +
+  '$ok = ((Get-Item -LiteralPath $p).Length -gt 0); ' +
+  'if ($ok -and (Test-Path -LiteralPath ($p + ".sha256"))) {{ ' +
+  '$parts = ((Get-Content -LiteralPath ($p + ".sha256") -Raw).Trim() -split "\s+"); ' +
+  '$ok = (($parts[0] -eq (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLower()) -and ([int64]$parts[1] -eq (Get-Item -LiteralPath $p).Length)) ' +
+  '}}; ' +
+  'if (-not $ok) {{ throw "the backup at $p is empty or failed its checksum; leaving it in place. Run h4rnd update or reinstall h4rn." }}; ' +
   '$t = Join-Path (Split-Path -Parent $b) ($f + ".update-" + $PID + "-0-" + ({{0:x8}} -f (Get-Random -Maximum 2147483647))); ' +
   'Copy-Item -LiteralPath $p -Destination $t -Force; ' +
   'Move-Item -LiteralPath $t -Destination $b -Force ' +

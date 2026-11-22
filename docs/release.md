@@ -187,7 +187,8 @@ non-executable or truncated `.previous` is left in place with an explanation
 instead of being published. The scheduled task installed by
 `h4rnd service install` uses an inline launcher that waits up to 30 seconds for
 the installation lock, then repairs a missing `h4rnd.exe` itself (from `.old`, a
-moved-aside `.failed`, or `.previous` through a staging file and rename) before
+moved-aside `.failed`, or `.previous` through a staging file and rename, after
+checking that copy is non-empty and matches its recorded checksum) before
 starting the daemon. Because the launcher does that work rather than calling
 `--recover-only`, it also starts correctly when the binary at the install path is
 an older image that predates that flag. Before a Windows update or rollback
