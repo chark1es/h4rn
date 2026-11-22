@@ -49,6 +49,35 @@ pub struct ThreadMeta {
     pub usage: Usage,
     /// Harness-native session id for resume.
     pub resume_id: Option<String>,
+    /// A prompt a paused thread still has to deliver.
+    ///
+    /// A failed write puts its prompt back and the typed limit pauses the
+    /// thread; the schedule is what delivers it. Without this record a daemon
+    /// restart would forget the prompt and fire the policy's resume prompt
+    /// instead, so the person's message would silently turn into "continue".
+    pub parked: Option<ParkedPrompt>,
+}
+
+/// A prompt a paused thread still has to deliver, persisted with the thread.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ParkedPrompt {
+    /// The turn the prompt belongs to, already recorded in the journal.
+    pub turn_id: h4rn_protocol::TurnId,
+    /// Prompt text exactly as the person sent it.
+    pub text: String,
+    /// Attachments to deliver with it.
+    pub attachments: Vec<ParkedAttachment>,
+}
+
+/// One attachment of a [`ParkedPrompt`].
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ParkedAttachment {
+    /// Content-addressed blob id.
+    pub id: h4rn_protocol::AttachmentId,
+    /// Absolute path of the blob on the daemon host.
+    pub path: String,
+    /// Media type, when known.
+    pub media_type: String,
 }
 
 /// One ordered, projected event as stored.
@@ -171,7 +200,8 @@ impl SqliteJournal {
                 runtime_mode   TEXT NOT NULL DEFAULT 'approval_required',
                 worktree_json  TEXT,
                 parent_thread_id TEXT,
-                subagent_id    TEXT
+                subagent_id    TEXT,
+                parked_json    TEXT
             )",
         )
         .execute(&self.pool)
@@ -190,6 +220,8 @@ impl SqliteJournal {
         self.ensure_column("daemon_threads", "parent_thread_id", "TEXT")
             .await?;
         self.ensure_column("daemon_threads", "subagent_id", "TEXT")
+            .await?;
+        self.ensure_column("daemon_threads", "parked_json", "TEXT")
             .await?;
 
         sqlx::query(
@@ -248,10 +280,11 @@ async fn upsert_thread_on(
     let runtime_mode = serde_json::to_string(&meta.runtime_mode)?;
     let runtime_mode = runtime_mode.trim_matches('"').to_owned();
     let worktree_json = serde_json::to_string(&meta.worktree)?;
+    let parked_json = serde_json::to_string(&meta.parked)?;
     sqlx::query(
         "INSERT INTO daemon_threads
-            (thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json, parent_thread_id, subagent_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json, parent_thread_id, subagent_id, parked_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(thread_id) DO UPDATE SET
             host = excluded.host,
             harness = excluded.harness,
@@ -263,7 +296,8 @@ async fn upsert_thread_on(
             runtime_mode = excluded.runtime_mode,
             worktree_json = excluded.worktree_json,
             parent_thread_id = excluded.parent_thread_id,
-            subagent_id = excluded.subagent_id",
+            subagent_id = excluded.subagent_id,
+            parked_json = excluded.parked_json",
     )
     .bind(meta.thread_id.as_str())
     .bind(meta.host.as_str())
@@ -278,6 +312,7 @@ async fn upsert_thread_on(
     .bind(worktree_json)
     .bind(meta.parent_thread_id.as_ref().map(ThreadId::as_str))
     .bind(meta.subagent_id.as_ref().map(SubagentId::as_str))
+    .bind(parked_json)
     .execute(&mut *conn)
     .await?;
     Ok(())
@@ -315,7 +350,7 @@ impl Journal for SqliteJournal {
 
     async fn list_threads(&self) -> Result<Vec<ThreadMeta>, JournalError> {
         let rows = sqlx::query(
-            "SELECT thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json, parent_thread_id, subagent_id
+            "SELECT thread_id, host, harness, title, workspace_path, model, created_at, usage_json, resume_id, runtime_mode, worktree_json, parent_thread_id, subagent_id, parked_json
              FROM daemon_threads ORDER BY created_at ASC",
         )
         .fetch_all(&self.pool)
@@ -355,6 +390,9 @@ impl Journal for SqliteJournal {
                 created_at,
                 usage: serde_json::from_str(&usage_json).unwrap_or_default(),
                 resume_id: row.try_get("resume_id")?,
+                parked: row
+                    .try_get::<Option<String>, _>("parked_json")?
+                    .and_then(|json| serde_json::from_str(&json).ok()),
             });
         }
         Ok(metas)
@@ -472,6 +510,7 @@ pub fn thread_meta_json(meta: &ThreadMeta) -> serde_json::Value {
         "worktree": meta.worktree,
         "usage": meta.usage,
         "resume_id": meta.resume_id,
+        "parked": meta.parked,
     })
 }
 
@@ -495,6 +534,7 @@ mod tests {
             created_at: Utc::now(),
             usage: Usage::default(),
             resume_id: None,
+            parked: None,
         }
     }
 

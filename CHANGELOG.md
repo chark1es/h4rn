@@ -66,6 +66,19 @@ All notable changes to h4rn are recorded here. The format follows
   longer replace it. A firing schedule re-checks under the record lock that the pause is still its
   own before it clears anything or hands off delivery. Finally, a typed limit without a reset time
   on a requeued write waits the meter's unknown-reset backoff instead of retrying immediately.
+- **A parked resume survives storage errors, restarts and unrelated pauses.** Releasing a parked
+  prompt never waits on a storage write now: the fire's ledger outcome and the Send/cancel state
+  write are logged if they fail, and the prompt is delivered either way, so a failed write can no
+  longer leave a Pending turn with no delivery owner. A released turn is projected as running
+  rather than left Rate limited: the thread leaves the paused phase and drops its limit without
+  counting a second turn, so a cancelled or superseded pause shows Working and no resume time. A
+  fire only acts when the record still names the schedule it claimed; a missing or different
+  identity is not a match, and the failover model change now happens after that check. A pause parks
+  only the prompt it was armed for, so an old agent's exit report no longer holds a replacement turn
+  a Send started. Applied resets are recorded per session generation, including when a live session
+  adopts an equal reset, so a cancelled resume stays cancelled through that generation's exit-only
+  repeat. Finally, the parked prompt is stored with the thread row: a daemon restart restores the
+  dispatch and its schedule delivers the person's message instead of the policy's "continue".
 - **One provider limit arms one schedule.** The bridge can report one pause twice: the prompt's
   typed limit before the completion and the same reset on the exit report after it. The
   closed-completion wait now collects those limits and applies one after the wait, preferring the

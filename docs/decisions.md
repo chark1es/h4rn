@@ -741,6 +741,28 @@ newer limit replaced it while the attempt was claimed, the old fire does nothing
 limit without a reset time on the requeued-write path waits the meter's unknown-reset backoff like
 any other reset-less limit instead of retrying at once.
 
+**Addendum: a release never waits on storage, and a pause parks only its own prompt.** Releasing a
+parked prompt is a state decision the person made, so it cannot depend on a write landing: the
+schedule's firing claims its attempt (which is what makes it unfireable again) and then delivers the
+pending turn whether or not the ledger records the outcome, and `Send` and `CancelResume` deliver the
+turn they release whatever the journal says, logging the failure. The thread is projected as running
+on release by its own lifecycle event, which clears the paused phase and the limit without counting a
+turn: a cancelled or superseded pause shows the thread Working, not Rate limited with a resume time.
+A fire acts only when the record names the schedule it claimed (the ledger id restored from the
+ledger for a schedule the daemon inherited), because a missing pause proves nothing about the attempt
+that was claimed; the failover model change and its session detach happen after that check. A pause
+records the dispatch it parks, so only that requeued prompt waits: an old generation's exit report
+arming a pause while a Send starts a replacement leaves the replacement to start exactly as it does
+on main. Applied resets carry their session generation on the turn and the live slot, and a live
+session that adopts an equal reset (ownership transfer) records it for its own generation, so a
+cancelled resume is not re-armed by that generation's exit-only repeat. The parked prompt itself is
+stored on the thread row: the journal is restored before the ledger is attached, so a restarted
+daemon rebuilds the dispatch and its pause (naming the restored turn), and the schedule's firing
+delivers the person's prompt rather than the policy's resume prompt. If the schedule did not survive,
+the restoration releases the turn instead of leaving it pending. The tests that cover these paths use
+the fake harness's session/send notifications, a start gate and a held clock, and the storage-failure
+and restart paths run on a journal and ledger that are deliberately broken or reopened.
+
 ## ADR-027: Push notifications are metadata-only wake signals
 
 **Status:** Proposed

@@ -161,6 +161,10 @@ pub struct UsageFilter {
 #[derive(Clone, Debug)]
 pub struct MeterStore {
     pool: SqlitePool,
+    /// Test-only: makes [`Self::finish_schedule`] fail, so a test can prove a
+    /// delivery path survives a storage error instead of stranding the turn it
+    /// was releasing.
+    fail_schedule_finish: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl MeterStore {
@@ -192,9 +196,24 @@ impl MeterStore {
     }
 
     async fn from_pool(pool: SqlitePool) -> Result<Self, StoreError> {
-        let store = Self { pool };
+        let store = Self {
+            pool,
+            fail_schedule_finish: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
         store.ensure_schema().await?;
         Ok(store)
+    }
+
+    /// Makes every later [`Self::finish_schedule`] fail.
+    ///
+    /// Test hook: a release path that gives up when the ledger cannot record
+    /// the outcome would leave a prompt with no delivery owner, so the failure
+    /// path itself needs a deterministic test. Nothing in production calls
+    /// this.
+    #[doc(hidden)]
+    pub fn fail_schedule_finish_for_tests(&self) {
+        self.fail_schedule_finish
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Adds a column to an existing database created before it existed.
@@ -606,6 +625,14 @@ impl MeterStore {
         state: ResumeState,
         error: Option<&str>,
     ) -> Result<Option<ResumeSchedule>, StoreError> {
+        if self
+            .fail_schedule_finish
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(StoreError::Data(
+                "injected schedule write failure".to_owned(),
+            ));
+        }
         let failover = schedule
             .failover
             .as_ref()

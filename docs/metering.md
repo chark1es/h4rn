@@ -134,16 +134,28 @@ schedule is armed the thread stays in Working, queued input is held, and the
 schedule can be cancelled (`CancelResume`) or fired immediately (`ResumeNow`).
 Cancelling the pause, or sending a message while a requeued turn is parked
 behind it, releases that turn instead of leaving it pending with nothing to
-deliver it; a Send's own message queues behind the parked turn.
+deliver it; a Send's own message queues behind the parked turn. A release never
+waits on a storage write: if the ledger or the journal cannot record it, the
+error is logged and the prompt is still delivered, because the schedule it was
+waiting for is already gone. A released thread is projected as running, not as
+rate limited: it leaves the paused phase, drops the limit that explained it and
+shows no resume time, without counting a second turn. A pause records the one
+dispatch it parks, so a pause armed by an old agent's exit report does not hold a
+replacement prompt that a Send has just started. The parked prompt is stored on
+the thread row, so a restart restores it and the schedule delivers the person's
+message rather than the policy's prompt; a schedule that did not survive the
+restart releases the prompt instead.
 
 When a schedule fires, the daemon starts a new turn with the policy prompt and
 marks the schedule `Fired`. If a failed write had put its prompt back for a
 retry when the limit armed, that requeued turn is what the schedule delivers,
 instead of the policy prompt, so the person's message is not replaced. The fire
 re-checks under the record lock that the pause on the thread is the schedule it
-claimed: a newer limit that replaced it while the attempt was being claimed
-leaves the newer pause alone and starts nothing. An unknown reset on that
-requeued-write path waits the backoff above rather than retrying immediately. With
+claimed, by its ledger id: a missing pause, a different pause, or a newer limit
+that replaced it while the attempt was being claimed leaves the newer pause
+alone and starts nothing (and does not change the model for a failover). An
+unknown reset on that requeued-write path waits the backoff above rather than
+retrying immediately. With
 `failover = true` and an active proxy profile, it asks the proxy for another
 model/account that is not cooling down, records
 that choice on the schedule (and emits it in `ScheduleChanged`), and uses the
