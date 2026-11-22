@@ -2877,6 +2877,58 @@ async fn a_message_appended_to_an_active_turn_replaces_the_stale_schedule() {
     daemon.stop().await;
 }
 
+#[tokio::test]
+async fn a_large_editor_read_is_delivered_whole_on_the_plain_path() {
+    // The plain loopback WebSocket has no transport frame bound. The session
+    // limit is chosen by the request handler from the connection's origin, so
+    // a read whose escaped JSON is over one secure frame must still arrive
+    // whole here; only a regression that always applies the secure bound would
+    // omit it.
+    let daemon = boot().await;
+    let host = host_id_for(&daemon).await;
+    let workspace = tempfile::tempdir().expect("workspace");
+    let content = "\"".repeat(400 * 1024);
+    std::fs::write(workspace.path().join("big.txt"), &content).expect("write");
+    let workspace_path = workspace
+        .path()
+        .to_str()
+        .expect("utf-8 workspace")
+        .to_owned();
+
+    let mut client = Client::connect(&daemon).await;
+    client.hello().await;
+    client
+        .request(ClientRequest::AddProject {
+            host: host.clone(),
+            source: h4rn_protocol::ProjectSource::Existing {
+                path: workspace_path.clone(),
+            },
+            name: None,
+        })
+        .await
+        .expect("authorise the workspace");
+
+    let response = client
+        .request(ClientRequest::FsRead {
+            host,
+            workspace: workspace_path,
+            path: "big.txt".into(),
+            bytes_base64: false,
+            max_bytes: None,
+        })
+        .await
+        .expect("read");
+    match response {
+        ResponseBody::FsFile { file } => {
+            assert!(file.content_omitted.is_none());
+            assert_eq!(file.content.as_deref(), Some(content.as_str()));
+        }
+        other => panic!("unexpected read response: {other:?}"),
+    }
+
+    daemon.stop().await;
+}
+
 /// A probe starts a third-party process and can take seconds. Another request
 /// on the same connection must be answered while it is in flight.
 #[cfg(unix)]
