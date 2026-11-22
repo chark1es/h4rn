@@ -173,9 +173,19 @@ scanner that recognises a sequence at a chunk boundary copies xterm's parser ins
 reading of the bytes: an empty parameter list is `[0]` (the parser's `CLEAR` action resets the list
 and adds a zero), an empty sub-parameter stays `-1`, values clamp to the positive int32 range, ESC
 starts a new escape in every state — abandoning an open CSI, ending an OSC, DCS or string first —
-and CAN and SUB cancel back to ground. A sequence xterm threw away is therefore never matched
-against a later hook, and a resync snapshot clears the scanner together with the screen, because
-the parser restarts at ground and the abandoned tail is gone. The
+and CAN and SUB cancel back to ground. The C0 controls that xterm executes (0x00–0x17, 0x19 and
+0x1c–0x1f) execute in place inside escape, CSI and DCS entry/parameter states: they are not
+appended to the parameters and do not change state, so a `CR`, `LF` or `BEL` between a query's
+bytes cannot corrupt its signature. DEL is ignored inside those sequences. The scan runs on decoded
+code points, not raw bytes, and keeps one streaming UTF-8 decoder across chunks: U+009B starts a
+CSI, U+0090 a DCS, U+009D an OSC, U+0098/U+009E/U+009F a string, U+009C is ST, and the other C1
+controls return to ground. A 0x9c byte inside a multi-byte character is therefore data, never a
+string terminator, even when its lead byte arrived in the previous chunk. A sequence xterm threw
+away is never matched against a later hook. A resync snapshot clears the scanner together with
+the screen, but not until the snapshot chunk is actually parsed: xterm's `WriteBuffer` schedules
+writes, so an output chunk applied just before the snapshot may still be waiting. Its query keeps
+the chunk that carried it, and only when the snapshot starts parsing are the earlier queries,
+ordinals and open sequence forgotten. The
 daemon writes the first reply naming a `(position, ordinal)` pair, from any viewer; only exact
 duplicates and positions at or below the evicted high-water mark are dropped. A reply for an older
 position that has not been answered yet is accepted, because it can only rescue a pending query. A

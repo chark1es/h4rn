@@ -699,9 +699,16 @@ All notable changes to h4rn are recorded here. The format follows
   chunk its ESC came in instead of falling back to the chunk that finished it: an empty parameter
   list is `[0]`, an empty sub-parameter is `-1`, values clamp the way xterm clamps them, ESC starts
   a new escape in every state (abandoning a CSI, ending an OSC, DCS or string first), and CAN or
-  SUB cancels to ground, so a sequence xterm threw away is never matched against a later hook. A
-  resync snapshot clears the scanner with the screen, because the parser restarts at ground and the
-  abandoned tail is gone. A viewer that stalled before a chunk and caught up
+  SUB cancels to ground, so a sequence xterm threw away is never matched against a later hook. The
+  C0 controls xterm executes inside escape, CSI and DCS entry/parameter states (0x00–0x17, 0x19 and
+  0x1c–0x1f) execute in place rather than becoming parameters, and DEL is ignored there. The scan
+  runs on decoded code points with one streaming UTF-8 decoder, so the C1 controls work as they do
+  in xterm (U+009B CSI, U+0090 DCS, U+009D OSC, U+0098/9E/9F strings, U+009C ST, and the rest back to
+  ground) and a 0x9c byte inside a multi-byte character is never mistaken for ST, even when the
+  character spans two chunks. A resync snapshot clears the scanner with the screen only when the
+  snapshot chunk really starts parsing: xterm's write buffer parses later, so an output chunk applied
+  just before the snapshot still names its answers by its own chunk. A viewer that stalled before a
+  chunk and caught up
   later therefore cannot write a second answer for a query another viewer answered in the meantime.
   Only exact duplicates and positions at or below the evicted high-water mark are dropped; a reply
   for an older position that has not been answered yet is accepted, because it can only rescue a
