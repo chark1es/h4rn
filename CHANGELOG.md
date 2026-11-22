@@ -118,6 +118,36 @@ All notable changes to h4rn are recorded here. The format follows
 
 ### Fixed
 
+- **A parked prompt survives a shutdown while the ledger cannot be read.** If the startup ledger
+  read failed after a parked prompt was restored, a shutdown used to settle that turn and erase the
+  saved prompt while the resume schedule stayed armed; the next launch then ran the policy's
+  "continue" instead of the person's message. The parked turn is now left alone until the schedule
+  is resolved.
+- **A resume retry no longer undoes a newer schedule.** A retry that reads the ledger can race a
+  newer limit that arms another schedule, and it used to write the older reset and schedule id back
+  onto the thread. The retry now keeps the newer pause (and the prompt it holds) and only fills in
+  details for the schedule the thread already names.
+- **A ledger that stays unreadable no longer rewrites the inbox every tick.** Retries now wait from
+  one second up to a minute, and only threads whose restored state actually changed are
+  re-published, instead of clearing every thread's cached summary on every tick.
+- **A prompt is no longer left waiting behind a resume the person cancelled.** If the startup
+  ledger read failed and its retry had already read a resume schedule when the person cancelled it,
+  the retry used to attach that cancelled schedule to the restored prompt; nothing could ever fire
+  it. The retry now re-reads that one schedule before attaching it, and releases the prompt to run
+  instead when it is gone.
+- **A system clock change no longer delays a resume retry.** Retry waits are measured on a
+  monotonic clock, so moving the clock backwards cannot stretch the wait past its cap.
+- **A resume check that cannot re-read one schedule is retried.** The startup pass could read the
+  schedule list and the limit history, fail on the per-schedule re-check that confirms a restored
+  row, and then never retry: the thread's pause stayed unnamed and a restored prompt could wait
+  forever. Any partial failure now leaves the resync unresolved, so the ticker runs the pass again
+  and the due schedule fires.
+- **A cancelled pause no longer releases a prompt it never held.** Cancelling an idle thread's
+  schedule after a retry had snapshotted it — or sending while an older pause is armed that does not
+  hold the pending turn — used to record a release and flip the thread to Thinking even though
+  nothing was parked. Now only a prompt that is really parked (a pending turn whose prompt is saved
+  on the thread row) is released; a stale pause is dropped without a release or a phase change, and
+  a cancel that already released the prompt is not released twice.
 - **Forge errors never repeat the account's own credential.** Every client now
   redacts the configured token verbatim before an error leaves it or reaches a
   log, including a token quoted in a JSON error body, a percent-encoded copy
@@ -437,10 +467,10 @@ All notable changes to h4rn are recorded here. The format follows
   closed-completion wait now collects those limits and applies one after the wait, preferring the
   exit report's reset, and does not replace a schedule the turn already armed for that reset. The
   attempt counter keeps its first value and the jitter is no longer silently changed.
-- **Auto-resume round 3: a schedule is only fired, held and released by the record that owns it.**
-  A fire now checks that the thread's record names the schedule before it claims the attempt in the
-  ledger, and the daemon resyncs that record before it starts the ticker, so a restarted daemon
-  cannot consume a due attempt it never knew about. A delayed report from an older session
+- **A paused resume is only fired, held and released by the record that owns it.** A fire now checks
+  that the thread's record names the schedule before it claims the attempt in the ledger, and the
+  daemon resyncs that record before it starts the ticker, so a restarted daemon cannot consume a due
+  attempt it never knew about. A delayed report from an older session
   generation no longer overwrites a newer turn's applied-reset marker (the marker is only written by
   the generation that owns the turn), so that turn's own completion cannot re-arm a pause the person
   cancelled. The failed-write retry decides whether a pause holds it with the same
@@ -450,7 +480,7 @@ All notable changes to h4rn are recorded here. The format follows
   Finally, a parked prompt whose ledger schedule did not survive a restart is released exactly as a
   cancel releases it — recorded as `LimitResumeReleased` with the limit cleared — instead of running
   while the thread still claims to be rate limited.
-- **Auto-resume round 4: shutdown, restart and firing keep the parked prompt and its own turn.** A
+- **Shutdown, restart and firing keep the parked prompt and its own turn.** A
   graceful daemon shutdown now leaves a prompt parked behind an armed schedule exactly as it is, so
   reopening restores the dispatch and the schedule delivers the person's message instead of the
   policy's "continue". The restart resync restores schedule ids from the ledger even when the limit
